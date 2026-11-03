@@ -336,6 +336,35 @@ func shiftPlaceholdersDownOne(where string) string {
 
 var placeholderPattern = regexp.MustCompile(`\$\d+`)
 
+// listingOrderByPG renders the browse list's ORDER BY for f's sort. The key
+// picks one expression from a closed set — the request's text is never
+// interpolated — and the direction is ascending only when asked for.
+//
+// A count with no rows behind it is zero, not absent: a listing nobody has
+// installed, voted for, or run (no marketplace_listing_stats row yet) sorts as
+// a 0, so it comes first ascending and last descending, among the other zeros.
+// Equal counts then order by the most recently updated, and every order ends
+// in l.id, so offset paging over counts that tie freely neither drops nor
+// repeats a row.
+func listingOrderByPG(f domain.ListingFilter) string {
+	dir := " DESC"
+	if f.SortDir == db.SortAsc {
+		dir = " ASC"
+	}
+	var key string
+	switch f.SortKey {
+	case domain.ListingSortInstalls:
+		key = "COALESCE(i.install_count, 0)"
+	case domain.ListingSortVotes:
+		key = "COALESCE(v.vote_count, 0)"
+	case domain.ListingSortMostUsed:
+		key = "COALESCE(ms.total_runs, 0)"
+	default:
+		return ` ORDER BY l.updated_at` + dir + `, l.id`
+	}
+	return ` ORDER BY ` + key + dir + `, l.updated_at DESC, l.id`
+}
+
 func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter, opts db.ListOpts) ([]domain.ListingSummary, int, error) {
 	// $1 is the viewer, referenced only by listingSummaryQueryPG's own joins;
 	// the filters start at $2.
@@ -345,9 +374,9 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 		args = append(args, f.Kind)
 		where += fmt.Sprintf(" AND l.kind = $%d", len(args))
 	}
-	if f.Query != "" {
-		args = append(args, "%"+f.Query+"%")
-		where += fmt.Sprintf(" AND (l.name ILIKE $%d OR l.description ILIKE $%d)", len(args), len(args))
+	var search string
+	if search, args = db.PostgresSearch(f.Search, args, "l.name", "l.description"); search != "" {
+		where += " AND " + search
 	}
 	if f.EventType != "" {
 		args = append(args, f.EventType)
@@ -368,20 +397,7 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 		return []domain.ListingSummary{}, total, nil
 	}
 
-	// Every sort ends in l.id so the order is total: installs, votes and
-	// total_runs all tie freely, and offset paging over a partial order drops
-	// and repeats rows.
-	q := listingSummaryQueryPG + where
-	switch f.Sort {
-	case domain.ListingSortInstalls:
-		q += ` ORDER BY COALESCE(i.install_count, 0) DESC, l.updated_at DESC, l.id`
-	case domain.ListingSortVotes:
-		q += ` ORDER BY COALESCE(v.vote_count, 0) DESC, l.updated_at DESC, l.id`
-	case domain.ListingSortMostUsed:
-		q += ` ORDER BY COALESCE(ms.total_runs, 0) DESC, l.updated_at DESC, l.id`
-	default:
-		q += ` ORDER BY l.updated_at DESC, l.id`
-	}
+	q := listingSummaryQueryPG + where + listingOrderByPG(f)
 	pageArgs := args
 	if opts.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)

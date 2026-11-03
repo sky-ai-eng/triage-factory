@@ -52,17 +52,17 @@ export const REPO_PAGE_SIZE = 100
 /** listReachableRepos reads one page of the repositories this org's
  *  GitHub credentials can reach.
  *
- *  `q` is matched server-side against the slug, the description and the
- *  language, which is what lets this surface stop holding the whole set in
- *  memory to search it. `pageToken` continues a previous page and is only ever
- *  the token the server minted — it is valid solely for the `q` it was issued
+ *  `search` is matched server-side against the slug, the description and the
+ *  language, which is what lets a surface stop holding the whole set in memory
+ *  to search it. `pageToken` continues a previous page and is only ever the
+ *  token the server minted — it is valid solely for the `search` it was issued
  *  under, so it must not cross a search change. */
-export async function listReachableRepos(q: string, pageToken = ''): Promise<RepoListPage> {
+export async function listReachableRepos(search: string, pageToken = ''): Promise<RepoListPage> {
   const page = await apiJSON<Partial<RepoListPage>>('/api/github/repos/list', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      q,
+      search,
       page_size: REPO_PAGE_SIZE,
       ...(pageToken ? { page_token: pageToken } : {}),
     }),

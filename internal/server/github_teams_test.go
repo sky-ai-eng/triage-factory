@@ -32,7 +32,7 @@ const acmeTeamsGraphQL = `{"data":{"organization":{"databaseId":9,"teams":{
 		{"databaseId":12,"slug":"security","name":"Security","members":{"totalCount":40}}
 	]}}}}`
 
-// TestGitHubGroupCandidates_MembershipAndCounts: ?include_membership=true lists
+// TestGitHubGroupCandidates_MembershipAndCounts: include_membership lists
 // every team of the tracked owners with member counts (GraphQL) and flags the
 // caller's own (REST /user/teams, matched by id) so the wizard can pre-check them.
 func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
@@ -70,19 +70,25 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}
 	seedConfiguredRepo(t, srv, "acme", "api")
 
-	resp := getGitHubGroups(t, srv, "?include_membership=true")
-	byKey := map[string]gitHubGroupCandidateJSON{}
-	for _, c := range resp.Candidates {
+	resp := listGitHubGroups(t, srv, map[string]any{"include_membership": true})
+	byKey := map[string]gitHubGroupListItemJSON{}
+	for _, c := range resp.Items {
 		byKey[c.OrgLogin+"/"+c.TeamSlug] = c
 	}
-	if len(byKey) != 2 {
-		t.Fatalf("got %d candidates, want 2: %+v", len(byKey), resp.Candidates)
+	if len(byKey) != 2 || resp.TotalCount != 2 {
+		t.Fatalf("got %d items (total %d), want 2: %+v", len(byKey), resp.TotalCount, resp.Items)
 	}
-	if p := byKey["acme/platform"]; !p.Mine || p.MemberCount != 8 || p.GitHubTeamID != "11" || p.GitHubOrgID != "9" {
-		t.Errorf("platform = %+v; want ids 11/9, Mine=true, MemberCount=8", p)
+	if p := byKey["acme/platform"]; !p.Mine || !p.Listed || p.MemberCount != 8 || p.GitHubTeamID != "11" || p.GitHubOrgID != "9" {
+		t.Errorf("platform = %+v; want ids 11/9, listed, Mine=true, MemberCount=8", p)
 	}
 	if s := byKey["acme/security"]; s.Mine || s.MemberCount != 40 || s.GitHubTeamID != "12" {
 		t.Errorf("security = %+v; want id 12, Mine=false, MemberCount=40", s)
+	}
+
+	// only_mine narrows to the caller's own teams before the page is cut.
+	mine := listGitHubGroups(t, srv, map[string]any{"only_mine": true})
+	if len(mine.Items) != 1 || mine.TotalCount != 1 || mine.Items[0].GitHubTeamID != "11" || !mine.Items[0].Mine {
+		t.Errorf("only_mine = %+v (total %d); want acme/platform alone, marked mine", mine.Items, mine.TotalCount)
 	}
 }
 
@@ -94,18 +100,23 @@ func TestGitHubGroupCandidates_CredentialsMissing(t *testing.T) {
 	srv := newTestServer(t)
 
 	// No tracked repos: no owner to resolve, so nothing is missing.
-	if resp := getGitHubGroups(t, srv, ""); resp.CredentialsMissing {
+	if resp := listGitHubGroups(t, srv, nil); resp.CredentialsMissing {
 		t.Errorf("credentials_missing=true with no tracked repos; want false")
 	}
 
 	// A tracked repo gives an owner, and no credential is seeded for it.
 	seedConfiguredRepo(t, srv, "acme", "api")
-	resp := getGitHubGroups(t, srv, "")
+	resp := listGitHubGroups(t, srv, nil)
 	if !resp.CredentialsMissing {
 		t.Errorf("credentials_missing=false with a tracked repo and no creds; want true")
 	}
-	if len(resp.Candidates) != 0 {
-		t.Errorf("got %d candidates, want 0: %+v", len(resp.Candidates), resp.Candidates)
+	if len(resp.Items) != 0 {
+		t.Errorf("got %d items, want 0: %+v", len(resp.Items), resp.Items)
+	}
+	// It describes the candidate set, not the page: a search that matches
+	// nothing reports the same credential state.
+	if resp := listGitHubGroups(t, srv, map[string]any{"search": "nothing-matches"}); !resp.CredentialsMissing {
+		t.Errorf("credentials_missing=false under a search; want true")
 	}
 }
 
@@ -147,12 +158,12 @@ func TestGitHubGroupCandidates_OwnersFromTrackedReposOnly(t *testing.T) {
 	seedConfiguredRepo(t, srv, "acme", "api")
 	seedUntrackedRepo(t, srv, "other", "thing")
 
-	resp := getGitHubGroups(t, srv, "")
+	resp := listGitHubGroups(t, srv, nil)
 	if len(askedOrgs) != 1 || askedOrgs[0] != "acme" {
 		t.Errorf("teams asked for owners %v; want [acme] — an untracked repository's owner is not one the org works with", askedOrgs)
 	}
-	if len(resp.Candidates) != 1 || resp.Candidates[0].OrgLogin != "acme" {
-		t.Errorf("candidates = %+v; want acme/platform alone", resp.Candidates)
+	if len(resp.Items) != 1 || resp.Items[0].OrgLogin != "acme" {
+		t.Errorf("items = %+v; want acme/platform alone", resp.Items)
 	}
 }
 
@@ -284,14 +295,14 @@ func putGitHubGroups(t *testing.T, srv *Server, ids ...string) []gitHubGroupJSON
 	return out.Groups
 }
 
-// getGitHubGroups reads the default team's github-groups, query appended to
-// the path, failing unless it is a 200.
-func getGitHubGroups(t *testing.T, srv *Server, query string) teamGitHubGroupsResponse {
+// getGitHubGroups reads the default team's stored github-groups, failing
+// unless it is a 200.
+func getGitHubGroups(t *testing.T, srv *Server) teamGitHubGroupsResponse {
 	t.Helper()
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups"+query, nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	var resp teamGitHubGroupsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
-		t.Fatalf("github-groups GET%s = %d, want 200; body=%s", query, rec.Code, rec.Body.String())
+		t.Fatalf("github-groups GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	return resp
 }
@@ -299,7 +310,22 @@ func getGitHubGroups(t *testing.T, srv *Server, query string) teamGitHubGroupsRe
 // readGitHubGroups reads the default team's stored GitHub groups.
 func readGitHubGroups(t *testing.T, srv *Server) []gitHubGroupJSON {
 	t.Helper()
-	return getGitHubGroups(t, srv, "").Groups
+	return getGitHubGroups(t, srv).Groups
+}
+
+// listGitHubGroups pages the default team's mappable GitHub teams with body
+// (nil is the empty body), failing unless it is a 200.
+func listGitHubGroups(t *testing.T, srv *Server, body map[string]any) teamGitHubGroupsListResponse {
+	t.Helper()
+	if body == nil {
+		body = map[string]any{}
+	}
+	rec := doJSON(t, srv, http.MethodPost, "/api/teams/default/github-groups/list", body)
+	var resp teamGitHubGroupsListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("github-groups list %v = %d, want 200; body=%s", body, rec.Code, rec.Body.String())
+	}
+	return resp
 }
 
 // TestUserTeams_WizardWriteReadBack: the wizard writes the checked teams by
@@ -438,8 +464,8 @@ func TestTeamGitHubGroupsPut_UnlistedOwnerIsAnUpstreamFault(t *testing.T) {
 	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": []string{"11", "99"}})
 	assertGitHubGroupsUnconfirmed(t, srv, rec)
 
-	if resp := getGitHubGroups(t, srv, ""); len(resp.Candidates) != 2 || resp.CredentialsMissing {
-		t.Errorf("GET candidates = %+v, credentials_missing=%v; want acme's two teams, false", resp.Candidates, resp.CredentialsMissing)
+	if resp := listGitHubGroups(t, srv, nil); len(resp.Items) != 2 || resp.CredentialsMissing {
+		t.Errorf("list items = %+v, credentials_missing=%v; want acme's two teams, false", resp.Items, resp.CredentialsMissing)
 	}
 }
 

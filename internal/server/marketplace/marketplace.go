@@ -556,23 +556,50 @@ func marketplaceListingIDOr404(w http.ResponseWriter, r *http.Request) (string, 
 }
 
 // handleMarketplaceList serves the browse page: search + event-type/kind
-// facets, sorted by installs (default) | votes | recent | used (TFAC-540's
-// total_runs). Any org member may read — RLS on marketplace_listings
-// (published OR own-team-write) scopes what List sees without any
-// additional filtering here; a non-publisher simply never sees another
-// team's delisted listing.
+// facets, ordered by sort_key installs (default) | votes | recent | used (the
+// run-derived total_runs), each descending unless sort_dir says asc. Any org
+// member may read — RLS on marketplace_listings (published OR own-team-write)
+// scopes what List sees without any additional filtering here; a
+// non-publisher simply never sees another team's delisted listing.
 //
-// marketplaceListRequest is the body of POST /api/marketplace/listings/list —
-// the browse page's search + facets, unchanged in meaning from the query
-// params they replaced.
+// marketplaceListRequest is the body of POST /api/marketplace/listings/list.
 type marketplaceListRequest struct {
-	Query     string `json:"query"`
+	// Search is a case-insensitive literal substring of the listing's name or
+	// description (httpx.Search: trimmed, empty is absent, at most 200
+	// characters).
+	Search    string `json:"search"`
 	EventType string `json:"event_type"`
 	Kind      string `json:"kind"`
-	Sort      string `json:"sort"`
+	// SortKey is one of domain.ListingSortKeys; absent is installs. SortDir is
+	// asc or desc, desc when absent, and refused without a SortKey.
+	SortKey string `json:"sort_key"`
+	SortDir string `json:"sort_dir"`
 
 	httpx.PageRequest
 }
+
+// marketplaceListFilterKey is the resolved filter set the page token is
+// fingerprinted against: the needle through httpx.SearchKey, and the sort as
+// resolved, so a caller that omits sort_key and one that sends installs share
+// a page token — they are the same query.
+type marketplaceListFilterKey struct {
+	Search    string `json:"search"`
+	EventType string `json:"event_type"`
+	Kind      string `json:"kind"`
+	SortKey   string `json:"sort_key"`
+	SortDir   string `json:"sort_dir"`
+}
+
+// marketplaceListSortKeys is domain.ListingSortKeys as the list route's sort
+// vocabulary. Every key reads highest first unless asked otherwise: the most
+// installed, the most recommended, the most recently updated, the most used.
+var marketplaceListSortKeys = func() []httpx.SortKey {
+	keys := make([]httpx.SortKey, len(domain.ListingSortKeys))
+	for i, k := range domain.ListingSortKeys {
+		keys[i] = httpx.SortKey{Name: k, Default: db.SortDesc}
+	}
+	return keys
+}()
 
 // POST /api/marketplace/listings/list
 func (mh *Handler) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
@@ -585,35 +612,31 @@ func (mh *Handler) handleMarketplaceList(w http.ResponseWriter, r *http.Request)
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var v httpx.Validation
 	f := domain.ListingFilter{
-		Query:     strings.TrimSpace(req.Query),
+		Search:    httpx.Search(&v, req.Search),
 		EventType: strings.TrimSpace(req.EventType),
 		Kind:      strings.TrimSpace(req.Kind),
-		Sort:      strings.TrimSpace(req.Sort),
 	}
-	var v httpx.Validation
 	if f.Kind != "" && f.Kind != domain.ListingKindPrompt && f.Kind != domain.ListingKindBlueprint {
 		v.Invalid("kind", "kind must be 'prompt' or 'blueprint'")
 	}
-	if f.Sort != "" && f.Sort != domain.ListingSortInstalls && f.Sort != domain.ListingSortVotes &&
-		f.Sort != domain.ListingSortRecent && f.Sort != domain.ListingSortMostUsed {
-		v.Invalid("sort", "sort must be 'installs', 'votes', 'recent', or 'used'")
+	order := httpx.Sort(&v, req.SortKey, req.SortDir, marketplaceListSortKeys)
+	if order.Key == "" {
+		// The browse page's default is the most installed first. It is pinned
+		// here rather than left to MarketplaceStore.List's own default
+		// (recent, for callers that don't care), so the route's answer does
+		// not move if the store's does.
+		order = db.Sort{Key: domain.ListingSortInstalls, Dir: db.SortDesc}
 	}
-	if f.Sort == "" {
-		// The HTTP contract (this handler's doc comment, the API description
-		// in the ticket) says installs is the default — pin it here rather
-		// than leaving f.Sort empty and letting MarketplaceStore.List's own
-		// internal default (currently "recent", documented on
-		// domain.ListingFilter for callers that don't care) decide. Two
-		// different defaults for two different reasons: the store's is a
-		// safe fallback for any caller; this one is the browse page's
-		// product default.
-		f.Sort = domain.ListingSortInstalls
-	}
-	// The fingerprint is taken over the RESOLVED filter, so a caller that
-	// omits sort and one that sends "installs" share a page token — they are
-	// the same query.
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(f), 0)
+	f.SortKey, f.SortDir = order.Key, order.Dir
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(marketplaceListFilterKey{
+		Search:    httpx.SearchKey(f.Search),
+		EventType: f.EventType,
+		Kind:      f.Kind,
+		SortKey:   f.SortKey,
+		SortDir:   f.SortDir,
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}

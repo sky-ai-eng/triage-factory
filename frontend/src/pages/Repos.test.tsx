@@ -136,6 +136,43 @@ describe('Repos page addressing', () => {
     expect(await screen.findByText('only the response carries this')).toBeInTheDocument()
   })
 
+  // The branch picker's search is the list route's: the query travels as
+  // `search`, and every branch the server answers is offered, including one
+  // that does not contain the query — the page never narrows what it holds.
+  it('searches branches on the server and offers what it answers', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith('/api/repos/list')) return { ok: true, ...listBody([repoRow()]) }
+      if (url.includes('/branches/list')) {
+        return { ok: true, ...listBody([{ name: 'develop' }, { name: 'release/1.0' }]) }
+      }
+      if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
+        return { ok: true, ...jsonBody({ repos: [TRACKED], role: 'admin' }) }
+      }
+      if (url.startsWith('/api/settings/org')) {
+        return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
+      }
+      return { ok: true, ...jsonBody({}) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderRepos()
+    await screen.findByText('acme/api')
+
+    fireEvent.click(screen.getByRole('button', { name: /main/ }))
+    fireEvent.change(await screen.findByPlaceholderText('main'), { target: { value: 'rel' } })
+
+    const branchBodies = () =>
+      (fetchMock.mock.calls as unknown as [string, RequestInit][])
+        .filter(([input]) => input.includes('/branches/list'))
+        .map(([, init]) => JSON.parse(String(init.body)))
+    await waitFor(() => expect(branchBodies()).toContainEqual({ search: 'rel', page_size: 30 }))
+    // `develop` does not contain the query, and is offered anyway: what the
+    // server answered for the search is the list.
+    expect(await screen.findByRole('button', { name: 'develop' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'release/1.0' })).toBeInTheDocument()
+    expect(branchBodies().every((b) => !('q' in b))).toBe(true)
+  })
+
   // The mirror of the above: an event for a repository this page has no row
   // for must not conjure one, and must not land on a different card because
   // some other field happened to match.

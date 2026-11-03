@@ -212,10 +212,9 @@ type ReachableReposStore interface {
 	// ListReachableSystem is the picker's read: one page of the org's reachable
 	// set for class, ordered by folded slug, with the filtered total.
 	//
-	// q is a case-insensitive substring matched against the slug, the description
-	// and the language — the three fields the picker used to filter on in the
-	// browser, moved server-side so the surface stops needing the whole set in
-	// memory to search it. An empty q matches everything.
+	// search is a case-insensitive literal substring matched against the slug,
+	// the description and the language, so a surface never needs the whole set
+	// in memory to search it. An empty search matches everything.
 	//
 	// The order is the folded slug and nothing else, which is a total order (the
 	// per-class unique index proves no two rows tie on it) — so offset paging
@@ -223,7 +222,7 @@ type ReachableReposStore interface {
 	// which is what the PAT proxy inherited from GET /user/repos: that order ties
 	// freely, needs a tiebreaker anyway, and is the wrong affordance for a list
 	// with a search box over it.
-	ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, q string, opts ListOpts) ([]domain.ReachableRepository, int, error)
+	ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, search string, opts ListOpts) ([]domain.ReachableRepository, int, error)
 
 	// ReachableStateSystem reports whether the org's cache for class has ever been
 	// refreshed, how many entries it holds, and how old its stalest scope is —

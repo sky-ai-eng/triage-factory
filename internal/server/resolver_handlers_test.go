@@ -209,6 +209,66 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
+// TestRepoBranches_SearchesEachUpstreamPage: GitHub's branches endpoint cannot
+// search, so the needle is matched over each upstream page as it arrives — as
+// a literal, case-insensitively — and "is there more" follows the upstream
+// page, not how much of it matched. A token is bound to the search it was
+// minted under, the search is capped, and the field it replaced is refused.
+func TestRepoBranches_SearchesEachUpstreamPage(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/branches", func(w http.ResponseWriter, r *http.Request) {
+		pages := map[string][]map[string]any{
+			"1": {{"name": "main"}, {"name": "Release/100%"}},
+			"2": {{"name": "1000-fix"}},
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(pages[r.URL.Query().Get("page")])
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+	repoID := seedConfiguredRepo(t, srv, "acme", "api")
+	path := "/api/repos/" + repoID + "/branches/list"
+	names := func(page httpxtest.ListEnvelope[branchJSON]) string {
+		out := make([]string, len(page.Items))
+		for i, b := range page.Items {
+			out[i] = b.Name
+		}
+		return strings.Join(out, ",")
+	}
+
+	first := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{"search": "release/100%", "page_size": 2}))
+	if names(first) != "Release/100%" || first.NextPageToken == "" {
+		t.Fatalf("page 1 = %q (next %q); want Release/100%% and a token — the upstream page was full", names(first), first.NextPageToken)
+	}
+	second := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{
+		"search": "RELEASE/100%", "page_size": 2, "page_token": first.NextPageToken,
+	}))
+	if names(second) != "" || second.NextPageToken != "" {
+		t.Errorf("page 2 = %q (next %q); want nothing — 1000-fix does not hold a literal 100%%, and the short page ends the walk", names(second), second.NextPageToken)
+	}
+
+	for _, tc := range []struct {
+		name          string
+		body          map[string]any
+		reason, field string
+	}{
+		{"token under another search", map[string]any{"search": "main", "page_size": 2, "page_token": first.NextPageToken}, httpx.ReasonInvalidParam, "page_token"},
+		{"search over the cap", map[string]any{"search": strings.Repeat("b", httpx.MaxSearchRunes+1)}, httpx.ReasonInvalidField, "search"},
+		{"the q field", map[string]any{"q": "main"}, httpx.ReasonUnknownField, "q"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, srv, http.MethodPost, path, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			httpxtest.AssertFirstError(t, rec, tc.reason, tc.field)
+		})
+	}
+}
+
 func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

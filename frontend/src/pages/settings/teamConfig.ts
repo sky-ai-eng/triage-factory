@@ -14,7 +14,7 @@
 
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
-import type { GitHubTeamCandidate, GitHubTeamRef } from '../../lib/githubTeams'
+import type { GitHubTeamRef } from '../../lib/githubTeams'
 import type { JiraProjectCandidate } from '../../lib/jiraProjects'
 import { registerRepository } from '../../lib/githubRepos'
 import type { RepoRef } from '../../lib/githubRepos'
@@ -151,19 +151,12 @@ export interface TeamReposData {
   role: string
 }
 
-// TeamGitHubGroupsData mirrors GET /api/teams/{id}/github-groups —
-// the saved mappings plus the live org-wide candidate list the checklist
-// renders.
+// TeamGitHubGroupsData mirrors GET /api/teams/{id}/github-groups — the saved
+// mappings, the set the PUT replaces. The GitHub teams they are chosen from
+// are a list route of their own (listGitHubTeams).
 export interface TeamGitHubGroupsData {
   groups: GitHubGroup[]
-  candidates: GitHubTeamCandidate[]
   role: string
-  // True when the team tracks repos but no owner had a resolvable GitHub
-  // credential — an empty `candidates` then means "reconnect GitHub", not
-  // "these orgs have no teams." Omitted (false) in the healthy case. The
-  // GitHub-teams step surfaces it as a reconnect prompt rather than a silent
-  // empty checklist.
-  credentials_missing?: boolean
 }
 
 /** watchedProject is a catalog candidate just added to the tracked set: named
@@ -538,11 +531,11 @@ export async function fetchTeamRepos(teamId: string): Promise<RepoRef[] | null> 
     .catch(() => null)
 }
 
-// fetchTeamGitHubGroups returns just the team's saved GitHub-team mappings (no
-// candidate list), or null on failure — for a container that needs the saved
-// set up front (e.g. a collapsed section's count + change-detection baseline)
-// without mounting the full GitHubTeamGroup checklist. Same null-vs-[] contract
-// as fetchTeamRepos: a failed load must not read as "maps nothing."
+// fetchTeamGitHubGroups returns the team's saved GitHub-team mappings, or null
+// on failure — the seed GitHubTeamGroup's checklist starts from, and what a
+// container reads up front for a collapsed section's count and its
+// change-detection baseline. Same null-vs-[] contract as fetchTeamRepos: a
+// failed load must not read as "maps nothing."
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
   return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
     .then((data) => data.groups ?? [])

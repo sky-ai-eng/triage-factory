@@ -347,21 +347,16 @@ type Branch struct {
 	Name string `json:"name"`
 }
 
-// ListBranches returns branches for a repo, optionally filtered by prefix.
-// The GitHub REST branches endpoint doesn't support server-side search,
-// so we fetch up to 100 branches and filter client-side.
-// ListBranchesPage fetches ONE upstream page of a repo's branches and applies
-// the caller's substring filter to it.
+// ListBranchesPage fetches ONE upstream page of a repo's branches, as GitHub
+// answered it.
 //
-// It returns the filtered rows and the size of the raw upstream page. Both
-// halves matter: GitHub has no branch-search parameter, so the filter is
-// applied here, and a filtered page can be short — or empty — while further
-// upstream pages remain. Deciding "is there more" from the filtered length
-// would end the walk at the first page whose branches happened not to match.
-// The raw count is the honest signal: it equals perPage until GitHub runs out.
+// GitHub's branches endpoint has no search parameter, so a caller searching
+// branch names matches them over this page itself. The page's own length is
+// what says whether GitHub has more: it equals perPage until GitHub runs out,
+// however few of its rows a search kept.
 //
 // page is 1-based, matching GitHub's own ?page=.
-func (c *Client) ListBranchesPage(ctx context.Context, owner, repo, query string, perPage, page int) (filtered []Branch, rawCount int, err error) {
+func (c *Client) ListBranchesPage(ctx context.Context, owner, repo string, perPage, page int) ([]Branch, error) {
 	if perPage <= 0 {
 		perPage = 30
 	}
@@ -371,22 +366,13 @@ func (c *Client) ListBranchesPage(ctx context.Context, owner, repo, query string
 	path := fmt.Sprintf("/repos/%s/%s/branches?per_page=%d&page=%d", owner, repo, perPage, page)
 	data, err := c.Get(ctx, path)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	var all []Branch
 	if err := json.Unmarshal(data, &all); err != nil {
-		return nil, 0, fmt.Errorf("parse branches: %w", err)
+		return nil, fmt.Errorf("parse branches: %w", err)
 	}
-	if query == "" {
-		return all, len(all), nil
-	}
-	q := strings.ToLower(query)
-	for _, b := range all {
-		if strings.Contains(strings.ToLower(b.Name), q) {
-			filtered = append(filtered, b)
-		}
-	}
-	return filtered, len(all), nil
+	return all, nil
 }
 
 // fileContent is the GitHub API response for a repository file.
