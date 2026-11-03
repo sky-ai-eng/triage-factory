@@ -70,15 +70,18 @@ func (h *Handler) gateBlueprintWrite(w http.ResponseWriter, r *http.Request, org
 
 // blueprintListRequest is the body of POST /api/blueprints/list. TeamID
 // narrows to one team's blueprints on the multi-team page; empty returns
-// everything visible.
+// everything visible. Search narrows to blueprints whose name carries it,
+// case-insensitively and literally (httpx.Search).
 type blueprintListRequest struct {
 	TeamID string `json:"team_id"`
+	Search string `json:"search"`
 
 	httpx.PageRequest
 }
 
 type blueprintListFilterKey struct {
 	TeamID string `json:"team_id"`
+	Search string `json:"search"`
 }
 
 // POST /api/blueprints/list
@@ -95,7 +98,10 @@ func (h *Handler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 	}
 	var v httpx.Validation
 	httpx.TeamIDFilterField(&v, req.TeamID)
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintListFilterKey{TeamID: req.TeamID}), 0)
+	search := httpx.Search(&v, req.Search)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintListFilterKey{
+		TeamID: req.TeamID, Search: httpx.SearchKey(search),
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -105,7 +111,7 @@ func (h *Handler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 	// into the query as a filter rather than trimming the page afterwards:
 	// a post-window trim makes the page short and total_count a lie about
 	// rows the caller cannot see.
-	filter := db.BlueprintListFilter{TeamID: req.TeamID, GatedEventTypes: entitlements.GatedEventTypes(orgID)}
+	filter := db.BlueprintListFilter{TeamID: req.TeamID, GatedEventTypes: entitlements.GatedEventTypes(orgID), Search: search}
 
 	var (
 		blueprints []domain.Blueprint
@@ -439,6 +445,9 @@ type blueprintStepListRequest struct {
 	// BlueprintIDs narrows to specific blueprints. Empty is the canvas's
 	// bulk read; a single id is the old per-blueprint read.
 	BlueprintIDs []string `json:"blueprint_ids"`
+	// Search narrows to steps whose name carries it, case-insensitively and
+	// literally (httpx.Search). A step is named by the prompt it runs.
+	Search string `json:"search"`
 
 	httpx.PageRequest
 }
@@ -446,6 +455,7 @@ type blueprintStepListRequest struct {
 type blueprintStepListFilterKey struct {
 	TeamID       string   `json:"team_id"`
 	BlueprintIDs []string `json:"blueprint_ids"`
+	Search       string   `json:"search"`
 }
 
 // maxBlueprintStepIDs bounds the id set one request may name. A canvas asks
@@ -481,8 +491,9 @@ func (h *Handler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request
 			v.Invalid("blueprint_ids", fmt.Sprintf("blueprint id %q is not a valid blueprint id", id))
 		}
 	}
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintStepListFilterKey{
-		TeamID: req.TeamID, BlueprintIDs: blueprintIDs,
+		TeamID: req.TeamID, BlueprintIDs: blueprintIDs, Search: httpx.SearchKey(search),
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -495,7 +506,7 @@ func (h *Handler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		steps, total, e = tx.Blueprints.ListAllSteps(r.Context(), orgID,
-			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs},
+			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs, Search: search},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {

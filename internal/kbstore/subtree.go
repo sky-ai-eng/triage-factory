@@ -2,7 +2,6 @@ package kbstore
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -16,23 +15,6 @@ func underPrefix(path, prefix string) bool {
 		return true
 	}
 	return path == prefix || strings.HasPrefix(path, prefix+"/")
-}
-
-// sortEntries puts a listing in the one order every backend answers with:
-// root first (private before shared, the order Roots() declares), then path.
-// Two backends that sorted differently would make a page's rows depend on the
-// deployment mode.
-func sortEntries(entries []FileInfo) {
-	rank := map[Root]int{}
-	for i, r := range Roots() {
-		rank[r] = i
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Root != entries[j].Root {
-			return rank[entries[i].Root] < rank[entries[j].Root]
-		}
-		return entries[i].Path < entries[j].Path
-	})
 }
 
 // movePlanRoots validates both sides of a move and returns the source root.

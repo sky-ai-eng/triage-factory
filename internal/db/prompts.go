@@ -16,6 +16,18 @@ import (
 // then acted on something that is not there.
 var ErrNoSuchPrompt = errors.New("no prompt with that id")
 
+// PromptListFilter is the prompt list's filter set.
+type PromptListFilter struct {
+	// TeamID narrows to one team's prompts (the multi-team prompts page
+	// scoped to a team). Every prompt is team-scoped, so there is no
+	// org-visible tier to union in. Empty means every prompt the caller may
+	// see. The SQLite impl ignores it — local mode is single-team.
+	TeamID string
+	// Search narrows to prompts whose name carries it as a case-insensitive
+	// literal substring. Empty matches every prompt.
+	Search string
+}
+
 // PromptStore owns the prompts table. Three audiences:
 //
 //   - HTTP handlers (server/prompts, server/blueprints) — full CRUD.
@@ -54,16 +66,10 @@ var ErrNoSuchPrompt = errors.New("no prompt with that id")
 // every request-facing read) and IncrementUsage / IncrementUsageSystem
 // (fire-and-forget bookkeeping on a sort heuristic).
 type PromptStore interface {
-	// List returns one page of non-hidden prompts plus the unpaged total,
-	// ordered by updated_at DESC with an id tiebreaker so the order is total
-	// and the pages partition it. When
-	// teamID is non-empty — the multi-team prompts page narrowed to one
-	// team — the result is scoped to that team's prompts (team_id=teamID).
-	// Every prompt is team-scoped, so there is no org-visible
-	// tier to union in. Empty teamID returns everything visible (solo/local,
-	// or an unfiltered view). The SQLite impl ignores teamID (local mode is
-	// single-team).
-	List(ctx context.Context, orgID string, teamID string, opts ListOpts) ([]domain.Prompt, int, error)
+	// List returns one page of non-hidden prompts plus the unpaged total
+	// under f, ordered by updated_at DESC with an id tiebreaker so the order
+	// is total and the pages partition it.
+	List(ctx context.Context, orgID string, f PromptListFilter, opts ListOpts) ([]domain.Prompt, int, error)
 
 	// Get returns one prompt by id (regardless of hidden state) or
 	// (nil, nil) if not found. Request-facing, so it filters

@@ -3,6 +3,8 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -207,7 +209,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if _, err := store.Hide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("hide: %v", err)
 		}
-		list, total, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
+		list, total, err := store.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -228,11 +230,11 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-second", Name: "S", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create second visible: %v", err)
 		}
-		firstPage, total, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 1})
+		firstPage, total, err := store.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 1})
 		if err != nil {
 			t.Fatalf("list page 1: %v", err)
 		}
-		secondPage, total2, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 1, Offset: 1})
+		secondPage, total2, err := store.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 1, Offset: 1})
 		if err != nil {
 			t.Fatalf("list page 2: %v", err)
 		}
@@ -252,6 +254,57 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		got, _ := store.Get(ctx, orgID, "u-hidden")
 		if got == nil {
 			t.Fatalf("Get should still return hidden rows by ID")
+		}
+	})
+
+	t.Run("List_SearchMatchesName", func(t *testing.T) {
+		// Search is a case-insensitive literal substring of the name, applied
+		// inside the query: the total counts the matches and the window cuts
+		// them, never the other way round.
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		for id, name := range map[string]string{
+			"s-full":  "Ship 100% of it",
+			"s-many":  "Ship 1000 widgets",
+			"s-other": "Review the diff",
+			"s-body":  "Unrelated",
+		} {
+			p := domain.Prompt{ID: id, Name: name, Body: "x", Source: "user"}
+			if id == "s-body" {
+				// A match in the body is not a match: search is over the name.
+				p.Body = "ship it"
+			}
+			if _, err := store.Create(ctx, orgID, teamID, p); err != nil {
+				t.Fatalf("create %s: %v", id, err)
+			}
+		}
+		for _, tc := range []struct {
+			search string
+			want   []string
+		}{
+			{"SHIP", []string{"s-full", "s-many"}},
+			// A % is a literal percent sign, not a LIKE wildcard: "100%"
+			// would otherwise also match "1000".
+			{"100%", []string{"s-full"}},
+			{"", []string{"s-body", "s-full", "s-many", "s-other"}},
+			{"nothing like it", nil},
+		} {
+			list, total, err := store.List(ctx, orgID, db.PromptListFilter{TeamID: teamID, Search: tc.search}, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatalf("List(search=%q): %v", tc.search, err)
+			}
+			got := promptIDs(list)
+			sort.Strings(got)
+			if !slices.Equal(got, tc.want) || total != len(tc.want) {
+				t.Errorf("List(search=%q) = %v (total %d), want %v", tc.search, got, total, tc.want)
+			}
+		}
+		page, total, err := store.List(ctx, orgID, db.PromptListFilter{TeamID: teamID, Search: "ship"}, db.ListOpts{Limit: 1})
+		if err != nil {
+			t.Fatalf("List(search, window): %v", err)
+		}
+		if len(page) != 1 || total != 2 {
+			t.Errorf("windowed search = %d rows / total %d, want 1 / 2", len(page), total)
 		}
 	})
 
@@ -403,7 +456,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if got, err := store.Get(ctx, orgID, "sd-1"); err != nil || got != nil {
 			t.Fatalf("Get after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
-		if list, _, _ := store.List(ctx, orgID, "", db.ListOpts{Limit: 50}); containsPromptID(list, "sd-1") {
+		if list, _, _ := store.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 50}); containsPromptID(list, "sd-1") {
 			t.Fatalf("soft-deleted prompt leaked into List")
 		}
 		// ...System still resolves it so historical runs render the name/body.

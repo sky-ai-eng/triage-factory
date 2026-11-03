@@ -357,21 +357,21 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts
-			a, _, e := store.List(ctx, orgID, teamA, db.ListOpts{Limit: 50})
+			a, _, e := store.List(ctx, orgID, db.PromptListFilter{TeamID: teamA}, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
 			if ga := promptIDs(a); !ga[pA] || ga[pB] {
 				t.Errorf("List(teamA): want {A} without B; got A=%v B=%v", ga[pA], ga[pB])
 			}
-			b, _, e := store.List(ctx, orgID, teamB, db.ListOpts{Limit: 50})
+			b, _, e := store.List(ctx, orgID, db.PromptListFilter{TeamID: teamB}, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
 			if gb := promptIDs(b); !gb[pB] || gb[pA] {
 				t.Errorf("List(teamB): want {B} without A; got B=%v A=%v", gb[pB], gb[pA])
 			}
-			all, _, e := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
+			all, _, e := store.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}

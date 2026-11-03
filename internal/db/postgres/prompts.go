@@ -59,15 +59,19 @@ var _ db.PromptStore = (*promptStore)(nil)
 // columns are added.
 const pgPromptColumns = `id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at`
 
-func (s *promptStore) List(ctx context.Context, orgID string, teamID string, opts db.ListOpts) ([]domain.Prompt, int, error) {
+func (s *promptStore) List(ctx context.Context, orgID string, f db.PromptListFilter, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	args := []any{orgID}
 	where := ` WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
-	if teamID != "" {
+	if f.TeamID != "" {
 		// Prompts page narrowed to one team: that team's prompts. Every
 		// prompt is team-scoped (no org-visible tier), so this
 		// is a plain team filter. RLS still gates what the caller may see.
-		args = append(args, teamID)
+		args = append(args, f.TeamID)
 		where += fmt.Sprintf(" AND team_id = $%d", len(args))
+	}
+	var clause string
+	if clause, args = db.PostgresSearch(f.Search, args, "name"); clause != "" {
+		where += " AND " + clause
 	}
 
 	var total int

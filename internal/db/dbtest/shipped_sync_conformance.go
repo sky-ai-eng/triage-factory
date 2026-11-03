@@ -74,7 +74,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 
 	promptBySlug := func(t *testing.T, stores db.Stores, orgID, teamID, slug string) *domain.Prompt {
 		t.Helper()
-		rows, _, err := stores.Prompts.List(ctx, orgID, teamID, db.Unwindowed)
+		rows, _, err := stores.Prompts.List(ctx, orgID, db.PromptListFilter{TeamID: teamID}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("Prompts.List for prompt %q: %v", slug, err)
 		}

@@ -219,14 +219,11 @@ func ValidatePrefix(prefix string) error {
 // org member reading another team passes shared alone) and this layer never
 // second-guesses that with an identity it does not have.
 type KB interface {
-	// List returns every entry under the given roots whose path is at or
-	// beneath pathPrefix, sorted by (root, path) so two calls agree. An empty
-	// pathPrefix lists the whole root. A root with nothing in it contributes
+	// List returns every entry q selects, in q's order (ListQuery says which
+	// entries and in what order). A root with nothing in it contributes
 	// nothing — a KB that has never been written is an empty slice, not an
-	// error. An empty roots slice is an empty result, not "everything":
-	// widening a read whose scope resolved to nothing is how a visibility gate
-	// fails open.
-	List(ctx context.Context, orgID, teamID string, roots []Root, pathPrefix string) ([]FileInfo, error)
+	// error.
+	List(ctx context.Context, orgID, teamID string, q ListQuery) ([]FileInfo, error)
 
 	// Stat returns one entry's size and mod time without opening it, or
 	// ErrNotFound. It is a single point read — never a prefix scan — because

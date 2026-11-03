@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'motion/react'
 import { Layers, RotateCw } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt } from '../types'
 import { useFocusTrap } from '../hooks/useFocusTrap'
-import { apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, apiList, apiListAll, HttpError, httpErrorMessage } from '../lib/apiClient'
+import type { ListRequest } from '../lib/apiClient'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -26,10 +27,11 @@ interface Props {
    *  the row auto-selected on open. The delegation-strategy callers leave this
    *  undefined because their picker fires once per task with no prior selection. */
   selectedId?: string
-  /** Optional client-side filter applied after the list is fetched. Use this to
-   *  hide items that aren't valid in the calling context — e.g. the chain step
-   *  editor passes a filter that hides the chain itself. Operates on the Prompt
-   *  shape; picker items extend it, so id/name/source filters work unchanged. */
+  /** Hides a row that isn't valid in the calling context — the chain step
+   *  editor hides the chain it is editing. It is not a search: the list is
+   *  read from the server a page at a time, already narrowed by what the
+   *  reader typed, so a filter that hid more than the odd row would leave
+   *  pages short. Operates on the Prompt shape; picker items extend it. */
   filter?: (p: Prompt) => boolean
   /** When the picker drives a *create* delegate (the factory
    *  drag-to-station flow synthesizes a task), wiring onTeamChange renders
@@ -54,29 +56,125 @@ interface Props {
   selectionDisabled?: boolean
 }
 
-// One resolved step of a blueprint, for the detail pane. step_prompt_id is
-// joined against the prompts list (fetched alongside) to recover the prompt's
-// name + model; brief rides on the step row itself (often empty — the shipped
-// pr-review blueprint ships no briefs, so the pane reads on the name alone).
+/** One page of the list. The rail scrolls a page and offers the next, so a
+ *  team with hundreds of prompts opens on one read rather than on all of them.
+ *  Small enough that a page of blueprints and every step they hold stays one
+ *  bounded read (at most 50 steps each). */
+const PAGE_SIZE = 25
+
+/** How long the search field settles before the list is read again. Clearing
+ *  the field reads at once. */
+const SEARCH_DEBOUNCE_MS = 250
+
+// One step of a blueprint, as its step row carries it: the prompt it runs and
+// the brief beside it (often empty — the shipped pr-review blueprint ships no
+// briefs, so the pane reads on the name alone). The prompt's name, model and
+// body are read when the blueprint is previewed (stepPrompts below), not with
+// the list: the pane shows one blueprint at a time.
 interface PickerStep {
   index: number
-  name: string
-  model?: string
+  promptId: string
   brief?: string
 }
 
 // PickerItem is the unified row/detail model. It extends Prompt so the caller's
 // `filter: (p: Prompt) => boolean` keeps working, and adds the blueprint step
 // composition. `steps` is undefined for a leaf prompt; for a blueprint it is the
-// ordered step list (length ≥ 1). The pane shows the step composition when there
-// are ≥2 steps, otherwise the body (a leaf prompt's own, or a 1-step
-// blueprint's sole step body).
+// ordered step list. The pane shows the step composition when there are ≥2
+// steps, otherwise the body (a leaf prompt's own, or a 1-step blueprint's sole
+// step's).
 interface PickerItem extends Prompt {
   steps?: PickerStep[]
 }
 
+/** A step's prompt as the preview resolved it: the row, or why there is none. */
+type StepPrompt = Prompt | 'missing' | 'failed'
+
+/** The rows the picker holds and the read they answer: the needle they were
+ *  searched with and the token that continues them. They move together, so a
+ *  token is only ever sent with the needle it was minted under. */
+interface Held {
+  items: PickerItem[]
+  search: string
+  next: string
+}
+
+const EMPTY: Held = { items: [], search: '', next: '' }
+
 function isMultiStep(it: PickerItem): boolean {
   return !!it.steps && it.steps.length > 1
+}
+
+/** How the pane names a step: its prompt's name once read, or why not. */
+function stepView(
+  s: PickerStep,
+  prompts: Record<string, StepPrompt>,
+): { name: string; model?: string } {
+  const p = prompts[s.promptId]
+  if (p === undefined) return { name: 'Loading…' }
+  if (p === 'missing') return { name: '(missing prompt)' }
+  if (p === 'failed') return { name: '(could not read this prompt)' }
+  return { name: p.name, model: p.model }
+}
+
+/** The body the pane shows for a row that is not a multi-step blueprint: a
+ *  leaf prompt's own, a 1-step blueprint's sole step's, or null while that
+ *  step's prompt is still being read. */
+function paneBody(it: PickerItem, prompts: Record<string, StepPrompt>): string | null {
+  if (!it.steps) return it.body
+  if (it.steps.length !== 1) return ''
+  const p = prompts[it.steps[0].promptId]
+  if (p === undefined) return null
+  return typeof p === 'object' ? p.body : ''
+}
+
+/** readPage reads one page of the source's list. For blueprints it also reads
+ *  the steps of the blueprints on that page — a read bounded by the page, so
+ *  it is taken whole — which is what the row's step count and the preview's
+ *  composition come from. A failed steps read degrades to empty compositions
+ *  rather than failing the picker. */
+async function readPage(
+  source: 'prompts' | 'blueprints',
+  teamFilter: ListRequest,
+  body: ListRequest,
+): Promise<{ items: PickerItem[]; next: string }> {
+  if (source !== 'blueprints') {
+    const page = await apiList<Prompt>('/api/prompts/list', body)
+    return { items: page.items, next: page.next_page_token }
+  }
+  const page = await apiList<Blueprint>('/api/blueprints/list', body)
+  const ids = page.items.map((b) => b.id)
+  const steps =
+    ids.length === 0
+      ? []
+      : await apiListAll<BlueprintStep>('/api/blueprint-steps/list', {
+          ...teamFilter,
+          blueprint_ids: ids,
+        }).catch(() => [] as BlueprintStep[])
+  const byBlueprint = new Map<string, BlueprintStep[]>()
+  for (const st of steps) {
+    const arr = byBlueprint.get(st.blueprint_id)
+    if (arr) arr.push(st)
+    else byBlueprint.set(st.blueprint_id, [st])
+  }
+  const items = page.items.map(
+    (b): PickerItem => ({
+      id: b.id,
+      name: b.name,
+      body: '',
+      source: b.source ?? 'user',
+      usage_count: b.usage_count ?? 0,
+      created_at: b.created_at,
+      updated_at: b.updated_at,
+      // The steps read answers in (blueprint, step_index) order.
+      steps: (byBlueprint.get(b.id) ?? []).map((s, i) => ({
+        index: i + 1,
+        promptId: s.step_prompt_id,
+        brief: s.brief,
+      })),
+    }),
+  )
+  return { items, next: page.next_page_token }
 }
 
 // metaLine is the detail pane's mono readout under the name — step count (for a
@@ -104,7 +202,11 @@ export default function PromptPicker({
   source = 'prompts',
   selectionDisabled,
 }: Props) {
-  const [items, setItems] = useState<PickerItem[]>([])
+  const [held, setHeld] = useState<Held>(EMPTY)
+  const items = held.items
+  // held.search, for the read effect to compare against without depending on
+  // the rows it is about to replace.
+  const heldSearch = useRef('')
   // Why the last load failed, or null when it hasn't. A failed fetch and an
   // empty account both leave the picker with no rows, and only one of them
   // means the user should go make something — so the failure carries its
@@ -116,7 +218,21 @@ export default function PromptPicker({
   const [loaded, setLoaded] = useState(false)
   // Bumped by retry() below to re-fire the fetch effect.
   const [retryKey, setRetryKey] = useState(0)
+  // What the field holds, and the needle the list is read with once it
+  // settles. The search is the list route's: the picker holds one page, and
+  // matching names inside it would miss every row on a page it has not read.
   const [query, setQuery] = useState('')
+  const [search, setSearch] = useState('')
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [moreError, setMoreError] = useState(false)
+  // Bumped by every first-page read, so a next page that lands after the
+  // query moved on is dropped rather than appended to another query's rows.
+  const generation = useRef(0)
+  // The previewed blueprints' step prompts, by id, and the ids already asked
+  // for. A prompt read by id answers the same whatever the list is showing,
+  // so a read that lands late is still worth keeping.
+  const [stepPrompts, setStepPrompts] = useState<Record<string, StepPrompt>>({})
+  const requested = useRef(new Set<string>())
   // The highlighted row. The picker is browse-first: this is the previewed
   // item, NOT a commit — onSelect fires only from the Run button / Enter /
   // double-click. null when nothing is selectable yet.
@@ -147,116 +263,114 @@ export default function PromptPicker({
   // The word the empty and error copy uses for whatever this picker lists.
   const noun = source === 'blueprints' ? 'blueprints' : 'prompts'
 
-  // Reset the type-to-filter query each time the picker opens so a stale filter
-  // from a prior open doesn't hide everything on reopen.
+  // Scope the list to the acting team when the caller drives one. Empty/absent
+  // teamValue → unscoped (a solo user's sole team, or the swipe / chain
+  // callers that don't scope). Refetching on teamValue keeps rows matched to
+  // the header's team so a user can't preview another team's item.
+  const teamFilter = useMemo<ListRequest>(
+    () => (teamValue ? { team_id: teamValue } : {}),
+    [teamValue],
+  )
+
+  // Leave the search behind on close, so a reopen reads the whole list rather
+  // than a needle from last time, and forget the previewed prompts so a
+  // reopen previews what they say now.
   useEffect(() => {
+    if (open) return
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (open) setQuery('')
+    setQuery('')
+    setSearch('')
+    setStepPrompts({})
+    requested.current.clear()
   }, [open])
+
+  // The field settles into the needle the list is read with.
+  useEffect(() => {
+    const needle = query.trim()
+    const timer = setTimeout(() => setSearch(needle), needle ? SEARCH_DEBOUNCE_MS : 0)
+    return () => clearTimeout(timer)
+  }, [query])
+
+  // A new scope — an open, a team switch, a Retry — drops a team-scoped
+  // picker's rows, so the skeleton shows during the read and a stale
+  // cross-team item can't be committed. Unscoped callers keep their
+  // across-opens cache. A new needle is not a new scope: the rows stand until
+  // its answer replaces them.
+  useEffect(() => {
+    if (!open || teamValue === undefined) return
+    heldSearch.current = ''
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHeld(EMPTY)
+    setLoaded(false)
+  }, [open, teamValue, source, retryKey])
 
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    // Scope the list to the acting team when the caller drives one. Empty/absent
-    // teamValue → unscoped (a solo user's sole team, or the swipe / chain
-    // callers that don't scope). Refetching on teamValue keeps rows matched
-    // to the header's team so a user can't preview another team's item.
-    const teamFilter = teamValue ? { team_id: teamValue } : {}
+    const gen = ++generation.current
     // Clear the prior failure so this attempt (first open, reopen, team switch,
-    // Retry) shows the loading skeleton again rather than getting stuck on the
-    // error message while the refetch is in flight; the .catch below re-raises
-    // it if this attempt also fails.
+    // Retry, a new needle) is not shown as failed while it is in flight; the
+    // .catch below re-raises it if this attempt also fails.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadError(null)
-    // On a team switch, drop the prior team's rows so the skeleton shows during
-    // the refetch and a stale cross-team item can't be committed. Only when
-    // team-scoped — unscoped callers keep their across-opens cache.
-    if (teamValue !== undefined) {
-      setItems([])
-      setLoaded(false)
-    }
-
-    const load = async (): Promise<PickerItem[]> => {
-      // The 'prompts' source is already a flat list carrying bodies + models.
-      if (source !== 'blueprints') {
-        const data = await apiListAll<Prompt>('/api/prompts/list', teamFilter)
-        return data.map((p) => ({ ...p }))
-      }
-
-      // A blueprint has no body of its own. Pull the blueprint list, the prompt
-      // list (for step names + bodies + models), and ALL steps for the scope in
-      // ONE bulk read (grouped client-side by blueprint_id) — replacing the
-      // former per-blueprint N+1. A failed steps fetch degrades to empty
-      // compositions rather than breaking the picker.
-      const [blueprints, promptList, allSteps] = await Promise.all([
-        apiListAll<Blueprint>('/api/blueprints/list', teamFilter),
-        apiListAll<Prompt>('/api/prompts/list', teamFilter),
-        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter).catch(
-          () => [] as BlueprintStep[],
-        ),
-      ])
-      const promptById = new Map(promptList.map((p): [string, Prompt] => [p.id, p]))
-      const stepsByBlueprint = new Map<string, BlueprintStep[]>()
-      for (const st of allSteps) {
-        const arr = stepsByBlueprint.get(st.blueprint_id)
-        if (arr) arr.push(st)
-        else stepsByBlueprint.set(st.blueprint_id, [st])
-      }
-
-      const normalized: PickerItem[] = blueprints.map((b) => {
-        const ordered = [...(stepsByBlueprint.get(b.id) ?? [])].sort(
-          (x, y) => x.step_index - y.step_index,
-        )
-        const steps: PickerStep[] = ordered.map((s, i) => {
-          const p = promptById.get(s.step_prompt_id)
-          return {
-            index: i + 1,
-            name: p?.name ?? '(missing prompt)',
-            model: p?.model,
-            brief: s.brief,
-          }
-        })
-        // A 1-step blueprint borrows its sole step's prompt body for the pane,
-        // so it reads like that one prompt (its pre-blueprint behavior).
-        const sole = ordered.length === 1 ? promptById.get(ordered[0].step_prompt_id) : undefined
-        return {
-          id: b.id,
-          name: b.name,
-          body: sole?.body ?? '',
-          source: b.source ?? 'user',
-          model: sole?.model,
-          usage_count: b.usage_count ?? 0,
-          created_at: b.created_at,
-          updated_at: b.updated_at,
-          steps,
-        }
-      })
-      return normalized
-    }
-
-    load()
-      .then((rows) => {
-        if (cancelled) return
-        setItems(rows)
+    setMoreError(false)
+    readPage(source, teamFilter, {
+      ...teamFilter,
+      ...(search ? { search } : {}),
+      page_size: PAGE_SIZE,
+    })
+      .then((page) => {
+        if (cancelled || gen !== generation.current) return
+        heldSearch.current = search
+        setHeld({ items: page.items, search, next: page.next })
         setLoaded(true)
       })
       .catch((e) => {
-        if (!cancelled) setLoadError(httpErrorMessage(e, 'The request failed.'))
+        if (cancelled || gen !== generation.current) return
+        // Rows read for another needle are not an answer to this one, so a
+        // failure drops them rather than leave them standing under it, and
+        // the needle has no answer yet — the next attempt shows the skeleton.
+        if (heldSearch.current !== search) {
+          heldSearch.current = search
+          setHeld({ ...EMPTY, search })
+          setLoaded(false)
+        }
+        setLoadError(httpErrorMessage(e, 'The request failed.'))
       })
 
     return () => {
       cancelled = true
     }
-  }, [open, teamValue, source, retryKey])
+  }, [open, teamFilter, source, retryKey, search])
 
-  // The visible rows: caller filter (e.g. hide the chain itself), then the
-  // type-to-filter query against the name.
-  const visible = useMemo(() => {
-    let list = filter ? items.filter(filter) : items
-    const q = query.trim().toLowerCase()
-    if (q) list = list.filter((it) => it.name.toLowerCase().includes(q))
-    return list
-  }, [items, filter, query])
+  // The next page of the same read: the same team and needle, and the token
+  // the server minted for them.
+  const loadMore = useCallback(() => {
+    if (!held.next || loadingMore) return
+    const gen = generation.current
+    setLoadingMore(true)
+    setMoreError(false)
+    readPage(source, teamFilter, {
+      ...teamFilter,
+      ...(held.search ? { search: held.search } : {}),
+      page_size: PAGE_SIZE,
+      page_token: held.next,
+    }).then(
+      (page) => {
+        setLoadingMore(false)
+        if (gen !== generation.current) return
+        setHeld((h) => ({ ...h, items: [...h.items, ...page.items], next: page.next }))
+      },
+      () => {
+        setLoadingMore(false)
+        if (gen === generation.current) setMoreError(true)
+      },
+    )
+  }, [held, loadingMore, source, teamFilter])
+
+  // The visible rows: the server's answer, less the row the caller hides
+  // (e.g. the chain being edited).
+  const visible = useMemo(() => (filter ? items.filter(filter) : items), [items, filter])
 
   // Keep a valid selection: hold the current row if it's still visible;
   // otherwise prefer the caller's selectedId (settings-style "currently in
@@ -284,6 +398,31 @@ export default function PromptPicker({
   }, [selId])
 
   const selected = useMemo(() => visible.find((it) => it.id === selId) ?? null, [visible, selId])
+
+  // Read the previewed blueprint's step prompts — its steps' names and models,
+  // and a 1-step blueprint's body — by id, once each. A failed read is
+  // forgotten, so previewing the blueprint again asks again.
+  useEffect(() => {
+    const want = (selected?.steps ?? [])
+      .map((s) => s.promptId)
+      .filter((id) => !requested.current.has(id))
+    if (want.length === 0) return
+    for (const id of want) requested.current.add(id)
+    void Promise.all(
+      want.map((id) =>
+        apiJSON<Prompt>(`/api/prompts/${encodeURIComponent(id)}`).then(
+          (p): [string, StepPrompt] => [id, p],
+          (e: unknown): [string, StepPrompt] => {
+            if (e instanceof HttpError && e.status === 404) return [id, 'missing']
+            requested.current.delete(id)
+            return [id, 'failed']
+          },
+        ),
+      ),
+    ).then((pairs) => setStepPrompts((prev) => ({ ...prev, ...Object.fromEntries(pairs) })))
+  }, [selected])
+
+  const selectedBody = selected && !isMultiStep(selected) ? paneBody(selected, stepPrompts) : ''
 
   // Retry drops the prior answer along with the failure. Clearing only the
   // failure would leave a stale one standing — after a read that legitimately
@@ -423,7 +562,7 @@ export default function PromptPicker({
                       <p className="px-2 py-6 text-center text-ui text-ink-3">
                         {failedEmpty
                           ? 'Failed to load.'
-                          : query
+                          : held.search
                             ? 'No matches.'
                             : 'Nothing here yet.'}
                       </p>
@@ -469,6 +608,24 @@ export default function PromptPicker({
                       ))
                     )}
                   </div>
+                  {/* The next page of the same read. Outside the listbox,
+                      which holds options and nothing else. */}
+                  {!loading && held.next ? (
+                    <div className="shrink-0 border-t border-line-1 px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={loadMore}
+                        disabled={loadingMore}
+                        className="w-full rounded-lg px-2.5 py-1.5 text-ui font-medium text-ink-2 hover:bg-tint-2 hover:text-ink-1 transition-colors disabled:opacity-50"
+                      >
+                        {loadingMore
+                          ? 'Loading…'
+                          : moreError
+                            ? 'Couldn’t load more — try again'
+                            : 'Load more'}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Detail pane */}
@@ -508,35 +665,40 @@ export default function PromptPicker({
                             ))}
                           </div>
                           <ol className="mt-4 space-y-3">
-                            {selected.steps!.map((s) => (
-                              <li key={s.index} className="flex gap-3">
-                                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-tint-3 font-mono text-label font-semibold tabular-nums text-ink-3">
-                                  {s.index}
-                                </span>
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-2">
-                                    <span className="truncate text-card-title font-medium text-ink-1">
-                                      {s.name}
-                                    </span>
-                                    {s.model && (
-                                      <span className="shrink-0 rounded bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm uppercase tracking-wider text-ink-3">
-                                        {s.model}
+                            {selected.steps!.map((s) => {
+                              const view = stepView(s, stepPrompts)
+                              return (
+                                <li key={s.index} className="flex gap-3">
+                                  <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-tint-3 font-mono text-label font-semibold tabular-nums text-ink-3">
+                                    {s.index}
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <span className="truncate text-card-title font-medium text-ink-1">
+                                        {view.name}
                                       </span>
+                                      {view.model && (
+                                        <span className="shrink-0 rounded bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm uppercase tracking-wider text-ink-3">
+                                          {view.model}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {s.brief && (
+                                      <p className="mt-0.5 text-reported leading-snug text-ink-3">
+                                        {s.brief}
+                                      </p>
                                     )}
                                   </div>
-                                  {s.brief && (
-                                    <p className="mt-0.5 text-reported leading-snug text-ink-3">
-                                      {s.brief}
-                                    </p>
-                                  )}
-                                </div>
-                              </li>
-                            ))}
+                                </li>
+                              )
+                            })}
                           </ol>
                         </>
-                      ) : selected.body.trim() ? (
+                      ) : selectedBody === null ? (
+                        <div className="mt-3 h-24 rounded-lg bg-tint-2 animate-pulse" />
+                      ) : selectedBody.trim() ? (
                         <p className="mt-3 whitespace-pre-wrap font-mono text-secondary leading-relaxed text-ink-2">
-                          {selected.body}
+                          {selectedBody}
                         </p>
                       ) : (
                         <p className="mt-3 text-ui italic text-ink-3">No description.</p>
@@ -565,7 +727,7 @@ export default function PromptPicker({
                   ) : (
                     <div className="flex flex-1 items-center justify-center px-5">
                       <p className="text-ui text-ink-3">
-                        {query ? `No ${noun} match "${query}".` : `No ${noun} yet.`}
+                        {held.search ? `No ${noun} match "${held.search}".` : `No ${noun} yet.`}
                       </p>
                     </div>
                   )}
