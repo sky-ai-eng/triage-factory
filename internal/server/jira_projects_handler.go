@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -55,23 +54,24 @@ import (
 // jiraProjectListRequest is the body: the picker's search box plus the
 // standard paging pair.
 type jiraProjectListRequest struct {
-	// Q is matched against the project key and the project name, case
-	// insensitively. Empty matches everything. Cloud applies it upstream;
-	// Data Center, whose catalog endpoint takes no filter, applies it to the
-	// catalog in hand — one contract, two implementations (jira.ListProjects).
-	Q string `json:"q"`
+	// Search is matched against the project key and the project name as a
+	// case-insensitive literal substring (httpx.Search). Absent matches every
+	// project. Cloud applies it upstream as /project/search's `query`, which
+	// Jira matches as a literal string, so a % or _ in it is a character and
+	// not a wildcard; Data Center, whose catalog endpoint takes no filter,
+	// applies it to the catalog in hand before the window — one contract, two
+	// implementations (jira.ListProjects).
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
 // jiraProjectListFilterKey is the canonicalized filter set the page token is
 // fingerprinted against, so a token minted for one search cannot address
 // another's results. The org is in it because the token is an offset into one
-// instance's catalog. Q is lowercased and trimmed because the match itself is
-// case-insensitive on both deployments: two spellings of one query are one
-// query, and a token minted under either addresses the same page.
+// instance's catalog.
 type jiraProjectListFilterKey struct {
-	OrgID string `json:"org_id"`
-	Q     string `json:"q"`
+	OrgID  string `json:"org_id"`
+	Search string `json:"search"`
 }
 
 // jiraProjectJSON is one project: Jira's id for it, which is what a client
@@ -96,10 +96,10 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	q := strings.TrimSpace(req.Q)
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(jiraProjectListFilterKey{OrgID: orgID, Q: strings.ToLower(q)}), 0)
+		httpx.FilterFingerprint(jiraProjectListFilterKey{OrgID: orgID, Search: httpx.SearchKey(search)}), 0)
 	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseJiraCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -110,7 +110,7 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	upstream, err := client.ListProjects(r.Context(), q, startAt, page.Limit)
+	upstream, err := client.ListProjects(r.Context(), search, startAt, page.Limit)
 	if err != nil {
 		writeJiraUpstream(w, orgID, "the organization's Jira projects", err)
 		return
@@ -152,17 +152,24 @@ func (s *Server) handleJiraProjectGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jiraProjectJSON{JiraID: project.ID, Key: project.Key, Name: project.Name})
 }
 
-// jiraStatusListRequest is the statuses list's body: the paging pair alone,
-// since a project's workflow is short enough that nothing narrows it.
+// jiraStatusListRequest is the statuses list's body: a search over the status
+// name plus the paging pair.
 type jiraStatusListRequest struct {
+	// Search is matched against the status name as a case-insensitive literal
+	// substring (httpx.Search). Jira's statuses read takes no filter, so it is
+	// applied to the workflow in hand, before the window. Absent matches every
+	// status.
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
-// jiraStatusListFilterKey fingerprints a statuses page token to the org and
-// the project, whose statuses the wrapped offset points into.
+// jiraStatusListFilterKey fingerprints a statuses page token to the org, the
+// project, whose statuses the wrapped offset points into, and the search,
+// which decides which of them the offset counts.
 type jiraStatusListFilterKey struct {
 	OrgID  string `json:"org_id"`
 	JiraID string `json:"jira_id"`
+	Search string `json:"search"`
 }
 
 // jiraStatusJSON is one workflow status. The id is what the team write takes
@@ -175,9 +182,9 @@ type jiraStatusJSON struct {
 // POST /api/orgs/{org_id}/jira/projects/{jira_id}/statuses/list
 //
 // Jira serves a project's statuses in one unpaged response, grouped by issue
-// type, which the client unions (jira.ProjectStatuses). The window is applied
-// here to that list, ordered by name and then id so an offset addresses the
-// same rows on every read.
+// type, which the client unions (jira.ProjectStatuses). The search and then
+// the window are applied here to that list, ordered by name and then id so an
+// offset addresses the same rows on every read.
 func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
@@ -193,8 +200,9 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(jiraStatusListFilterKey{OrgID: orgID, JiraID: jiraID}), 0)
+		httpx.FilterFingerprint(jiraStatusListFilterKey{OrgID: orgID, JiraID: jiraID, Search: httpx.SearchKey(search)}), 0)
 	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseJiraCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -214,19 +222,13 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 		writeJiraUpstream(w, orgID, "the workflow statuses of Jira project "+jiraID, err)
 		return
 	}
+	statuses = slices.DeleteFunc(statuses, func(st jira.Status) bool { return !httpx.SearchMatches(search, st.Name) })
 	slices.SortFunc(statuses, func(a, b jira.Status) int {
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
 	})
-	start := min(startAt, len(statuses))
-	end := min(start+page.Limit, len(statuses))
-	items := make([]jiraStatusJSON, 0, end-start)
-	for _, st := range statuses[start:end] {
-		items = append(items, jiraStatusJSON{ID: st.ID, Name: st.Name})
-	}
-	next := ""
-	if end < len(statuses) {
-		next = strconv.Itoa(end)
-	}
+	items, next := jiraWindow(statuses, startAt, page.Limit, func(st jira.Status) jiraStatusJSON {
+		return jiraStatusJSON{ID: st.ID, Name: st.Name}
+	})
 	httpx.WriteProxyList(w, page, items, next)
 }
 

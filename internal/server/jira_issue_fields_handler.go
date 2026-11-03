@@ -22,8 +22,8 @@ import (
 //
 // Proxied live like the rest of the catalog (jira_projects_handler.go), under
 // the org's Jira service credential, member-gated. Each list arrives from Jira
-// in one unpaged response, which the window is applied to here; both are proxy
-// lists, so total_count is null.
+// in one unpaged response, which the search and then the window are applied to
+// here; both are proxy lists, so total_count is null.
 //
 // Priorities are the instance's: Jira serves one list (/priority) on both
 // deployments. Issue types are read per project (/project/{id}), which both
@@ -33,23 +33,31 @@ import (
 // written for the projects a team tracks.
 // --------------------------------------------------------------------
 
-// jiraIssueFieldListRequest is the body of both lists: the paging pair alone,
-// since either list is short enough that nothing narrows it.
+// jiraIssueFieldListRequest is the body of both lists: a search over the name
+// plus the paging pair.
 type jiraIssueFieldListRequest struct {
+	// Search is matched against the priority or issue type name as a
+	// case-insensitive literal substring (httpx.Search). Neither Jira read
+	// takes a filter, so it is applied to the list in hand, before the window.
+	// Absent matches every row.
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
 // jiraPriorityListFilterKey fingerprints a priorities page token to the org,
-// whose list the wrapped offset points into.
+// whose list the wrapped offset points into, and to the search, which decides
+// which rows of it the offset counts.
 type jiraPriorityListFilterKey struct {
-	OrgID string `json:"org_id"`
+	OrgID  string `json:"org_id"`
+	Search string `json:"search"`
 }
 
-// jiraIssueTypeListFilterKey fingerprints an issue types page token to the org
-// and the project.
+// jiraIssueTypeListFilterKey fingerprints an issue types page token to the
+// org, the project and the search.
 type jiraIssueTypeListFilterKey struct {
 	OrgID  string `json:"org_id"`
 	JiraID string `json:"jira_id"`
+	Search string `json:"search"`
 }
 
 // jiraPriorityJSON is one priority. The id is what a predicate names it by;
@@ -85,7 +93,9 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(jiraPriorityListFilterKey{OrgID: orgID}), 0)
+	search := httpx.Search(&v, req.Search)
+	page := httpx.ResolvePage(&v, req.PageRequest,
+		httpx.FilterFingerprint(jiraPriorityListFilterKey{OrgID: orgID, Search: httpx.SearchKey(search)}), 0)
 	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseJiraCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -100,6 +110,7 @@ func (s *Server) handleJiraPrioritiesList(w http.ResponseWriter, r *http.Request
 		writeJiraUpstream(w, orgID, "the organization's Jira priorities", err)
 		return
 	}
+	priorities = slices.DeleteFunc(priorities, func(p jira.Priority) bool { return !httpx.SearchMatches(search, p.Name) })
 	items, next := jiraWindow(priorities, startAt, page.Limit, func(p jira.Priority) jiraPriorityJSON {
 		return jiraPriorityJSON{ID: p.ID, Name: p.Name}
 	})
@@ -155,8 +166,9 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(jiraIssueTypeListFilterKey{OrgID: orgID, JiraID: jiraID}), 0)
+		httpx.FilterFingerprint(jiraIssueTypeListFilterKey{OrgID: orgID, JiraID: jiraID, Search: httpx.SearchKey(search)}), 0)
 	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseJiraCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -175,6 +187,7 @@ func (s *Server) handleJiraIssueTypesList(w http.ResponseWriter, r *http.Request
 		writeJiraUpstream(w, orgID, "the issue types of Jira project "+jiraID, err)
 		return
 	}
+	types = slices.DeleteFunc(types, func(it jira.IssueType) bool { return !httpx.SearchMatches(search, it.Name) })
 	slices.SortFunc(types, func(a, b jira.IssueType) int {
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
 	})

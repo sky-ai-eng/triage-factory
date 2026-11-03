@@ -1,9 +1,11 @@
 package linear
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -186,21 +188,12 @@ func (c *Client) GetTeams(ctx context.Context, ids []string) ([]Team, error) {
 	return data.Teams.Nodes, nil
 }
 
-// ListTeamStates returns one page of a team's workflow states, at most first
-// of them; after is the previous page's EndCursor, or "" for the first page.
-// The page is in Linear's order, not the board's: Position orders the states,
-// and only a caller holding all of them can sort by it. A team that does not
-// exist, or that the credential cannot see, is an error matching ErrNotFound.
-func (c *Client) ListTeamStates(ctx context.Context, teamID, after string, first int) (WorkflowStatePage, error) {
-	if first < 1 || first > maxPageSize {
-		return WorkflowStatePage{}, fmt.Errorf("linear: state page size %d out of range 1-%d", first, maxPageSize)
-	}
-	return c.teamStatesPage(ctx, teamID, after, first)
-}
-
-// ListWorkflowStates returns every workflow state of a team, ordered by
-// position. A team the credential cannot see is an error matching
-// ErrNotFound, as it is for ListTeamStates.
+// ListWorkflowStates returns every workflow state of a team in board order: by
+// position, then by id, so two states at one position come back in the same
+// order on every read. Linear pages the states in its own order, never by
+// position, so only the whole set can be put in board order. A team that does
+// not exist, or that the credential cannot see, is an error matching
+// ErrNotFound.
 func (c *Client) ListWorkflowStates(ctx context.Context, teamID string) ([]WorkflowState, error) {
 	states, err := collect(func(after string) ([]WorkflowState, pageInfo, error) {
 		page, err := c.teamStatesPage(ctx, teamID, after, listPageSize)
@@ -212,7 +205,9 @@ func (c *Client) ListWorkflowStates(ctx context.Context, teamID string) ([]Workf
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(states, func(i, j int) bool { return states[i].Position < states[j].Position })
+	slices.SortFunc(states, func(a, b WorkflowState) int {
+		return cmp.Or(cmp.Compare(a.Position, b.Position), cmp.Compare(a.ID, b.ID))
+	})
 	return states, nil
 }
 

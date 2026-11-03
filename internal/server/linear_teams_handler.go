@@ -3,8 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
-	"strings"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -24,9 +25,10 @@ import (
 //
 // Proxied live: a workspace's teams are a short list behind one org
 // credential, and the write gate asks Linear live too (linear_team_gate.go),
-// so a mirror would have nothing to earn. Both lists are proxy lists — the
-// page token wraps Linear's cursor, total_count is null, and a page may come
-// back shorter than page_size with a next_page_token.
+// so a mirror would have nothing to earn. Both lists are proxy lists, so
+// total_count is null. The teams list's page token wraps Linear's cursor, and
+// a page may come back shorter than page_size with a next_page_token; the
+// states list's wraps an offset into the team's whole workflow.
 //
 // Every route is addressed at the org and gated on live membership of it.
 // The reads run under the org's service credential, resolved on the admin
@@ -46,20 +48,65 @@ const linearPageMax = 50
 // linearTeamListRequest is the body: the picker's search box plus the standard
 // paging pair.
 type linearTeamListRequest struct {
-	// Q is matched case-insensitively against the team key and name. Empty
-	// matches every team the credential can see.
-	Q string `json:"q"`
+	// Search is matched against the team key and name as a case-insensitive
+	// literal substring (httpx.Search). Absent matches every team the
+	// credential can see. Linear applies it upstream, and each page it serves
+	// is re-checked here (readLinearSearchedPage).
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
 // linearTeamListFilterKey is the canonical filter set a page token is
 // fingerprinted against. The org is in it because the token wraps a cursor
-// into one workspace's listing. Q is lowercased and trimmed because the match
-// itself is case-insensitive: two spellings of one query address the same
-// pages.
+// into one workspace's listing.
 type linearTeamListFilterKey struct {
-	OrgID string `json:"org_id"`
-	Q     string `json:"q"`
+	OrgID  string `json:"org_id"`
+	Search string `json:"search"`
+}
+
+// linearSearchedPageReads bounds how many of Linear's pages one request reads
+// past pages the re-check left empty.
+const linearSearchedPageReads = 10
+
+// readLinearSearchedPage reads one page of a Linear listing searched for
+// needle, starting at the cursor after, and returns the rows whose fields carry
+// needle as a literal substring and the cursor the next page resumes from, ""
+// for none.
+//
+// Linear applies the search upstream (containsIgnoreCase) and documents it as a
+// case-insensitive contains, but not how it reads a % or an _, which a
+// LIKE-backed filter takes as wildcards. Re-checking each page with the literal
+// predicate holds the route to the literal match whichever way Linear reads
+// them, and loses no row: a literal match is a match under either reading, so
+// Linear served it, and the cursor resumes after the last row Linear served
+// rather than after the last row kept. The page can come back shorter than
+// Linear's, which a proxy list's page already may. A page the re-check leaves
+// empty cannot carry a page token (httpx.WriteProxyList), so while Linear has
+// more the next page is read in its place, at most linearSearchedPageReads in
+// all; past that the read fails rather than end the listing early.
+//
+// read is one upstream page from a cursor: its rows, whether Linear has more,
+// and the cursor after them.
+func readLinearSearchedPage[T any](needle, after string, fields func(T) []string,
+	read func(after string) (rows []T, hasNext bool, endCursor string, err error)) ([]T, string, error) {
+	for range linearSearchedPageReads {
+		rows, hasNext, end, err := read(after)
+		if err != nil {
+			return nil, "", err
+		}
+		rows = slices.DeleteFunc(rows, func(row T) bool { return !httpx.SearchMatches(needle, fields(row)...) })
+		if !hasNext {
+			return rows, "", nil
+		}
+		if len(rows) > 0 {
+			return rows, end, nil
+		}
+		if end == "" || end == after {
+			return nil, "", errors.New("linear: listing cursor did not advance")
+		}
+		after = end
+	}
+	return nil, "", fmt.Errorf("linear: %d pages in a row held no literal match for the search", linearSearchedPageReads)
 }
 
 // linearTeamJSON is one Linear team. The id is what the team write takes; key
@@ -87,10 +134,10 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	q := strings.TrimSpace(req.Q)
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(linearTeamListFilterKey{OrgID: orgID, Q: strings.ToLower(q)}), 0)
+		httpx.FilterFingerprint(linearTeamListFilterKey{OrgID: orgID, Search: httpx.SearchKey(search)}), 0)
 	refuseLinearCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -100,18 +147,19 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	upstream, err := client.ListTeams(r.Context(), q, page.Cursor, min(page.Limit, linearPageMax))
+	teams, next, err := readLinearSearchedPage(search, page.Cursor,
+		func(t linear.Team) []string { return []string{t.Key, t.Name} },
+		func(after string) ([]linear.Team, bool, string, error) {
+			p, err := client.ListTeams(r.Context(), search, after, min(page.Limit, linearPageMax))
+			return p.Items, p.HasNextPage, p.EndCursor, err
+		})
 	if err != nil {
 		writeLinearUpstream(w, orgID, "the workspace's Linear teams", err)
 		return
 	}
-	items := make([]linearTeamJSON, 0, len(upstream.Items))
-	for _, t := range upstream.Items {
+	items := make([]linearTeamJSON, 0, len(teams))
+	for _, t := range teams {
 		items = append(items, toLinearTeamJSON(t))
-	}
-	next := ""
-	if upstream.HasNextPage {
-		next = upstream.EndCursor
 	}
 	httpx.WriteProxyList(w, page, items, next)
 }
@@ -142,24 +190,29 @@ func (s *Server) handleLinearTeamGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toLinearTeamJSON(team))
 }
 
-// linearStateListRequest is the states list's body: the paging pair alone,
-// since a team's workflow is short enough that nothing narrows it.
+// linearStateListRequest is the states list's body: a search over the state
+// name plus the paging pair.
 type linearStateListRequest struct {
+	// Search is matched against the state name as a case-insensitive literal
+	// substring (httpx.Search), applied to the team's workflow in hand before
+	// the window. Absent matches every state.
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
-// linearStateListFilterKey fingerprints a states page token to the org and
-// the team, whose listing the wrapped cursor points into.
+// linearStateListFilterKey fingerprints a states page token to the org, the
+// team, whose workflow the wrapped offset points into, and the search, which
+// decides which of its states the offset counts.
 type linearStateListFilterKey struct {
 	OrgID        string `json:"org_id"`
 	LinearTeamID string `json:"linear_team_id"`
+	Search       string `json:"search"`
 }
 
 // linearStateJSON is one workflow state. Type is Linear's own vocabulary
 // (triage, backlog, unstarted, started, completed, canceled), which is what
-// the settings editor pre-fills a team's rules from. Position is the board
-// order; the list is in Linear's order, so a caller that wants board order
-// sorts on it.
+// the settings editor pre-fills a team's rules from. Position is the state's
+// place on the team's board, which is the order the list serves.
 type linearStateJSON struct {
 	ID       string  `json:"id"`
 	Name     string  `json:"name"`
@@ -172,6 +225,12 @@ func toLinearStateJSON(st linear.WorkflowState) linearStateJSON {
 }
 
 // POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list
+//
+// In board order: by position, then id. Linear orders a listing by when its
+// rows were created or updated and never by position, so one upstream page is
+// not a page of the board. The team's whole workflow is read instead
+// (linear.ListWorkflowStates, a handful of states behind a bounded walk),
+// searched, and windowed in that order, under a page token wrapping an offset.
 func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
@@ -187,8 +246,10 @@ func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(linearStateListFilterKey{OrgID: orgID, LinearTeamID: teamID}), 0)
+		httpx.FilterFingerprint(linearStateListFilterKey{OrgID: orgID, LinearTeamID: teamID, Search: httpx.SearchKey(search)}), 0)
+	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseLinearCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -198,7 +259,7 @@ func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	upstream, err := client.ListTeamStates(r.Context(), teamID, page.Cursor, min(page.Limit, linearPageMax))
+	states, err := client.ListWorkflowStates(r.Context(), teamID)
 	if errors.Is(err, linear.ErrNotFound) {
 		httpx.NotFound(w, "linear team")
 		return
@@ -207,14 +268,8 @@ func (s *Server) handleLinearStatesList(w http.ResponseWriter, r *http.Request) 
 		writeLinearUpstream(w, orgID, "the workflow states of Linear team "+teamID, err)
 		return
 	}
-	items := make([]linearStateJSON, 0, len(upstream.Items))
-	for _, st := range upstream.Items {
-		items = append(items, toLinearStateJSON(st))
-	}
-	next := ""
-	if upstream.HasNextPage {
-		next = upstream.EndCursor
-	}
+	states = slices.DeleteFunc(states, func(st linear.WorkflowState) bool { return !httpx.SearchMatches(search, st.Name) })
+	items, next := jiraWindow(states, startAt, page.Limit, toLinearStateJSON)
 	httpx.WriteProxyList(w, page, items, next)
 }
 

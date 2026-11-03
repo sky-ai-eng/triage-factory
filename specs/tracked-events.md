@@ -518,8 +518,10 @@ the change. Predicates can filter on `assignee_in` and `jira_project_id_in`
   "Medium". A group is itself a label: `label_group_id` is its id and
   `label_group` its name, both empty for a label in none, and predicates filter
   on `label_group_id_in`, the ids of groups (labels the labels list marks
-  `is_group`). Switching a single-select group from one value to another emits
-  a `label_removed` and a `label_added` in the same cycle.
+  `is_group`, and serves alone when its body sends `"is_group": true`;
+  `"is_group": false` serves the labels an issue can carry, which `label_id_in`
+  and `has_label_id_in` name). Switching a single-select group from one value
+  to another emits a `label_removed` and a `label_added` in the same cycle.
   The group is read from the team's label list, once per cycle and only when one
   of the team's issues has a label change, because selecting it on every issue
   would add to the batch read's complexity. When that read fails, the snapshot

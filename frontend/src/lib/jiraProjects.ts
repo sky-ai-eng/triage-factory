@@ -46,26 +46,27 @@ export interface JiraProjectPage {
 /** listJiraProjects reads one page of the projects the org's Jira credential
  *  can see.
  *
- *  `q` is matched server-side against the project key and name. Nothing is
- *  cached or mirrored: the catalog is fetched from Jira on each read, which is
- *  what a list of dozens behind a single org credential is worth. */
+ *  `search` is matched server-side against the project key and name. Nothing
+ *  is cached or mirrored: the catalog is fetched from Jira on each read, which
+ *  is what a list of dozens behind a single org credential is worth. */
 export async function listJiraProjects(
   orgId: string,
-  q: string,
+  search: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<JiraProjectPage> {
   const page = await apiList<JiraProjectCandidate>(
     `/api/orgs/${encodeURIComponent(orgId)}/jira/projects/list`,
-    { q, page_size: JIRA_PROJECT_PAGE_SIZE },
+    { search, page_size: JIRA_PROJECT_PAGE_SIZE },
     options,
   )
   return { items: page.items, hasMore: page.next_page_token !== '' }
 }
 
 /** listJiraStatuses reads one project's whole workflow, ordered by name, for
- *  the project Jira's id `jiraId` names. A project's workflow is a handful of
- *  statuses and the rules board needs all of them, so the list is walked to
- *  the end. */
+ *  the project Jira's id `jiraId` names. It is walked to the end because each
+ *  caller reasons over the whole set: the rules board finds the statuses no
+ *  rule maps, and the predicate field finds the stored ids the workflow no
+ *  longer offers. */
 export async function listJiraStatuses(
   orgId: string,
   jiraId: string,
@@ -86,7 +87,8 @@ export interface JiraCatalogValue {
 }
 
 /** listJiraPriorities reads the Jira instance's priorities, in Jira's order
- *  (highest first). The list is short and a picker offers all of it. */
+ *  (highest first). It is walked to the end because the predicate field
+ *  reasons over the whole set, finding the stored ids Jira no longer offers. */
 export async function listJiraPriorities(
   orgId: string,
   options: { signal?: AbortSignal } = {},
@@ -99,7 +101,8 @@ export async function listJiraPriorities(
 }
 
 /** listJiraIssueTypes reads the issue types of the project Jira's id `jiraId`
- *  names, ordered by name. */
+ *  names, ordered by name, walked to the end for the same reason as
+ *  `listJiraPriorities`. */
 export async function listJiraIssueTypes(
   orgId: string,
   jiraId: string,

@@ -118,13 +118,11 @@ async function linearOptions(
     const states = await listLinearStates(orgId, linearTeamId)
     return states.map(({ id, name }) => ({ id, name }))
   }
-  const labels = await listLinearLabels(orgId, linearTeamId)
-  // A group is not a label an issue can carry, and a label is not a group. A
-  // label in a group is shown under its group's name, since two groups can
-  // each hold a label of the same name.
-  return labels
-    .filter((l) => l.is_group === (kind === 'linear_label_group'))
-    .map((l) => ({ id: l.id, name: l.group ? `${l.group.name} / ${l.name}` : l.name }))
+  // A group is not a label an issue can carry, and a label is not a group, so
+  // each kind reads only its own. A label in a group is shown under its
+  // group's name, since two groups can each hold a label of the same name.
+  const labels = await listLinearLabels(orgId, linearTeamId, kind === 'linear_label_group')
+  return labels.map((l) => ({ id: l.id, name: l.group ? `${l.group.name} / ${l.name}` : l.name }))
 }
 
 /** CATALOG_NOUNS is how the field speaks of one value of each catalog, and of

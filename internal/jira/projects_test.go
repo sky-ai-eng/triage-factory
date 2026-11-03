@@ -246,6 +246,38 @@ func TestListProjects_DataCenterFiltersInHand(t *testing.T) {
 	}
 }
 
+// TestListProjects_FilterIsLiteral: a % or an _ in the filter is the character
+// itself on both arms. Cloud is handed the filter as /project/search's
+// literal-string query exactly as it was typed, encoded so the server decodes
+// it back unchanged; Data Center matches it as a plain substring.
+func TestListProjects_FilterIsLiteral(t *testing.T) {
+	t.Run("cloud", func(t *testing.T) {
+		srv, requests := projectServer(t, `{"values": [], "isLast": true}`)
+		const needle = "50%_a&b+c"
+		if _, err := cloudClient(srv.URL).ListProjects(t.Context(), needle, 0, 50); err != nil {
+			t.Fatalf("ListProjects: %v", err)
+		}
+		if got := requests()[0].Query().Get("query"); got != needle {
+			t.Errorf("query = %q, want %q passed through unchanged", got, needle)
+		}
+	})
+	t.Run("data center", func(t *testing.T) {
+		srv, _ := projectServer(t, `[
+			{"key": "PCT", "name": "100% Uptime"},
+			{"key": "ZERO", "name": "1000 Uptime"},
+			{"key": "UND", "name": "on_call"},
+			{"key": "DASH", "name": "on-call"}
+		]`)
+		for query, want := range map[string]string{"100%": "PCT", "on_call": "UND", "%": "PCT", "_": "UND"} {
+			page, err := dcClient(srv.URL).ListProjects(t.Context(), query, 0, 50)
+			if err != nil {
+				t.Fatalf("ListProjects: %v", err)
+			}
+			wantProjectKeys(t, page.Projects, want)
+		}
+	})
+}
+
 // TestListProjects_DataCenterWindowsTheFilteredSet: the window is applied
 // after the filter, so paging a filtered read doesn't skip matches.
 func TestListProjects_DataCenterWindowsTheFilteredSet(t *testing.T) {

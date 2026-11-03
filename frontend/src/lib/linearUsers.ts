@@ -27,16 +27,17 @@ export type LinearUserLookup = { ok: true; user: LinearUser } | { ok: false; err
 const usersPath = (orgId: string) => `/api/orgs/${encodeURIComponent(orgId)}/linear/users`
 
 /** searchLinearUsers lists the workspace's active users whose name, display
- *  name or email contains q. An empty list is an answer, not a failure. */
-export async function searchLinearUsers(orgId: string, q: string): Promise<LinearUserSearch> {
+ *  name or email contains `search`, matched server-side. An empty list is an
+ *  answer, not a failure. */
+export async function searchLinearUsers(orgId: string, search: string): Promise<LinearUserSearch> {
   try {
     const page = await apiList<LinearUser>(`${usersPath(orgId)}/list`, {
-      q,
+      search,
       page_size: LINEAR_USER_SEARCH_SIZE,
     })
     return { ok: true, users: page.items }
   } catch (err) {
-    return { ok: false, error: httpErrorMessage(err, `Could not search Linear for ${q}.`) }
+    return { ok: false, error: httpErrorMessage(err, `Could not search Linear for ${search}.`) }
   }
 }
 

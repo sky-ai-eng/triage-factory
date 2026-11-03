@@ -39,15 +39,15 @@ export interface LinearTeamPage {
 }
 
 /** listLinearTeams reads one page of the teams the org's Linear credential can
- *  see, `q` matched server-side against key and name. */
+ *  see, `search` matched server-side against key and name. */
 export async function listLinearTeams(
   orgId: string,
-  q: string,
+  search: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<LinearTeamPage> {
   const page = await apiList<LinearTeamCandidate>(
     `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/list`,
-    { q, page_size: LINEAR_TEAM_PAGE_SIZE },
+    { search, page_size: LINEAR_TEAM_PAGE_SIZE },
     options,
   )
   return { items: page.items, hasMore: page.next_page_token !== '' }
@@ -82,21 +82,20 @@ export async function lookupLinearTeam(
   }
 }
 
-/** listLinearStates reads one team's whole workflow, in board order. The list
- *  pages in Linear's order, so it is walked to the end and sorted here: a
- *  team's workflow is a handful of states, and the board needs all of them. */
+/** listLinearStates reads one team's whole workflow, in the board order the
+ *  server serves it in. It is walked to the end because each caller reasons
+ *  over the whole set: the rules board finds the states no rule maps, and the
+ *  predicate field finds the stored ids the workflow no longer offers. */
 export async function listLinearStates(
   orgId: string,
   teamId: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<LinearStateOption[]> {
-  const states = await apiListAll<LinearStateOption>(
+  return apiListAll<LinearStateOption>(
     `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/${encodeURIComponent(teamId)}/states/list`,
     {},
     options,
-    LINEAR_TEAM_PAGE_SIZE,
   )
-  return states.sort((a, b) => a.position - b.position)
 }
 
 /** One label an issue in a Linear team can carry, as the labels read serves
@@ -110,16 +109,21 @@ export interface LinearLabelOption {
   is_group: boolean
 }
 
-/** listLinearLabels reads every label an issue in one team can carry — the
- *  team's own and the workspace's — ordered by name. */
+/** listLinearLabels reads the labels of one team — the team's own and the
+ *  workspace's — ordered by name: the groups when `isGroup` is true, else the
+ *  labels an issue can carry. The server applies the narrowing, since whether
+ *  a label is a group is known only from the whole list. It is walked to the
+ *  end because the predicate field finds the stored ids the team no longer
+ *  offers. */
 export async function listLinearLabels(
   orgId: string,
   teamId: string,
+  isGroup: boolean,
   options: { signal?: AbortSignal } = {},
 ): Promise<LinearLabelOption[]> {
   return apiListAll<LinearLabelOption>(
     `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/${encodeURIComponent(teamId)}/labels/list`,
-    {},
+    { is_group: isGroup },
     options,
   )
 }

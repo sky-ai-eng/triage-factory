@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { cleanup, render, screen, fireEvent, within } from '@testing-library/react'
 import PredicateEditor from './PredicateEditor'
 import { jsonBody, listBody } from '../test/apiResponse'
 import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
@@ -28,6 +28,8 @@ const settings = {
   linear_teams: [{ id: 'lt-eng', key: 'ENG', name: 'Engineering' }],
 }
 
+const labelsPath = `${org}/linear/teams/lt-eng/labels/list`
+
 const lists: Record<string, unknown[]> = {
   [`${org}/jira/projects/100/statuses/list`]: [
     { id: '10000', name: 'To Do' },
@@ -44,30 +46,43 @@ const lists: Record<string, unknown[]> = {
     { id: '2', name: 'High' },
   ],
   [`${org}/linear/teams/lt-eng/states/list`]: [
-    { id: 'st-review', name: 'In Review', type: 'started', position: 2 },
     { id: 'st-todo', name: 'Todo', type: 'unstarted', position: 1 },
+    { id: 'st-review', name: 'In Review', type: 'started', position: 2 },
   ],
-  [`${org}/linear/teams/lt-eng/labels/list`]: [
+  // The labels list answers the narrowing its body names, as the server does;
+  // a read that names none has no answer here.
+  [`${labelsPath}#is_group=false`]: [
     { id: 'lb-bug', name: 'Bug', group: null, is_group: false },
-    { id: 'lb-diff', name: 'Difficulty', group: null, is_group: true },
     { id: 'lb-hard', name: 'Hard', group: { id: 'lb-diff', name: 'Difficulty' }, is_group: false },
+  ],
+  [`${labelsPath}#is_group=true`]: [
+    { id: 'lb-diff', name: 'Difficulty', group: null, is_group: true },
   ],
 }
 
 // renderField mounts the editor on one string_list field, with every catalog
-// list answering its rows except failing, which answers 500.
+// list answering its rows (or its rows in opts.lists) except failing, which
+// answers 500.
 function renderField(
   field: string,
   eventType: string,
-  opts: { teamId?: string; value?: Record<string, string[]>; failing?: string } = {},
+  opts: {
+    teamId?: string
+    value?: Record<string, string[]>
+    failing?: string
+    lists?: Record<string, unknown[]>
+  } = {},
 ) {
-  const fetchMock = vi.fn((url: string) => {
+  const answers = { ...lists, ...opts.lists }
+  const fetchMock = vi.fn((url: string, init?: { body?: string }) => {
+    const key =
+      url === labelsPath ? `${url}#is_group=${JSON.parse(init?.body ?? '{}').is_group}` : url
     const body = url.startsWith('/api/event-schemas/')
       ? jsonBody({ fields: [{ name: field, type: 'string_list' }] })
       : url.startsWith('/api/teams/')
         ? jsonBody(settings)
-        : url in lists && url !== opts.failing
-          ? listBody(lists[url])
+        : key in answers && url !== opts.failing
+          ? listBody(answers[key])
           : null
     if (body) return Promise.resolve({ ok: true, status: 200, ...body })
     return Promise.resolve({ ok: false, status: 500, ...jsonBody({ errors: [] }) })
@@ -106,6 +121,46 @@ describe('PredicateEditor catalog fields', () => {
       expect(offered()).toEqual(names)
     },
   )
+
+  it.each([
+    ['label_id_in', false],
+    ['label_group_id_in', true],
+  ])('%s asks the server for is_group %s', async (field, isGroup) => {
+    const { fetchMock } = renderField(field, 'linear:issue:label_added')
+
+    await screen.findAllByRole('checkbox')
+    expect(fetchMock).toHaveBeenCalledWith(
+      labelsPath,
+      expect.objectContaining({ body: JSON.stringify({ is_group: isGroup, page_size: 200 }) }),
+    )
+  })
+
+  it('offers the server’s answer as served, re-filtering and re-sorting nothing', async () => {
+    // A group among the groups' answer that says it is none, and states out
+    // of position order: the server decides both, so the field shows them.
+    renderField('label_group_id_in', 'linear:issue:label_added', {
+      lists: {
+        [`${labelsPath}#is_group=true`]: [
+          { id: 'lb-diff', name: 'Difficulty', group: null, is_group: true },
+          { id: 'lb-size', name: 'Size', group: null, is_group: false },
+        ],
+      },
+    })
+    await screen.findByRole('checkbox', { name: 'Size' })
+    expect(offered()).toEqual(['Difficulty', 'Size'])
+    cleanup()
+
+    renderField('status_id_in', 'linear:issue:assigned', {
+      lists: {
+        [`${org}/linear/teams/lt-eng/states/list`]: [
+          { id: 'st-review', name: 'In Review', type: 'started', position: 2 },
+          { id: 'st-todo', name: 'Todo', type: 'unstarted', position: 1 },
+        ],
+      },
+    })
+    await screen.findByRole('checkbox', { name: 'Todo' })
+    expect(offered()).toEqual(['In Review', 'Todo'])
+  })
 
   it('groups statuses by tracked project and treats a shared one as one id', async () => {
     const { fetchMock, onChange } = renderField('new_status_id_in', 'jira:issue:status_changed', {
