@@ -230,7 +230,8 @@ describe('ActivityFeed', () => {
     expect(screen.getAllByText('org/repo')).toHaveLength(1)
     expect(screen.getByText('3 runs')).toBeInTheDocument()
     expect(screen.queryByText('2 runs')).not.toBeInTheDocument()
-    expect(screen.getByText('2 objects')).toBeInTheDocument()
+    // The header is the list's own total, not a count of the rows held.
+    expect(screen.getByText('3 objects')).toBeInTheDocument()
   })
 
   it("folds an object's teams past three into one +N chip naming them", async () => {

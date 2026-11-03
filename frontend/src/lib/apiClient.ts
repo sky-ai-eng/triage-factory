@@ -238,11 +238,11 @@ const MAX_ROWS_TO_WALK = 2000
  *    it — which statuses no rule maps yet, whether any handler still covers an
  *    event type, which selected entries a team no longer tracks, which
  *    deliverables an artifact already names, whether every edge a graph draws
- *    lands on a node it read. A partial load answers "none" about a row on page
- *    three.
+ *    lands on a node it read, every step of the blueprints a picker shows. A
+ *    partial load answers "none" about a row on page three.
  *  - **A full reorder**: a write that must name the caller's entire visible set,
- *    such as a drag-to-reorder that submits the new order. A partial load
- *    submits a partial order.
+ *    such as a drag-to-reorder that submits the new order, or a PUT that
+ *    replaces the whole tracked set. A partial load submits a partial set.
  *
  *  It is never how a surface filters, searches or sorts. Those are fields on
  *  the list route (`search`, `sort_key`/`sort_dir`, the route's filters), and a

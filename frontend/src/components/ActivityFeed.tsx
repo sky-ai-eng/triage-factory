@@ -189,7 +189,7 @@ export default function ActivityFeed({
   const pageKey = `${listPath}|${JSON.stringify(filterBody)}`
 
   const feed = usePagedList<FeedRow>(listPath, "Couldn't load activity.", { keyOf: feedRowKey })
-  const { items, load, loadMore, hasMore, loading, error } = feed
+  const { items, total, load, loadMore, hasMore, loading, error } = feed
 
   const setFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -274,7 +274,10 @@ export default function ActivityFeed({
 
   const visible = loaded === null ? null : items
 
-  const count = visible?.length ?? 0
+  // The list's own total when it reports one; the rows held, marked open-ended,
+  // only when it cannot count itself.
+  const count = total ?? visible?.length ?? 0
+  const openEnded = total === null && hasMore
   // The noun follows the rows actually on screen, not the selected lens — during
   // a hold the header would otherwise count "objects" over a list of actions.
   const rowMode = loaded?.mode ?? mode
@@ -297,7 +300,7 @@ export default function ActivityFeed({
           <span className="font-mono text-sm tabular-nums text-ink-3">
             {visible === null
               ? '—'
-              : `${count}${hasMore ? '+' : ''} ${noun}${count === 1 ? '' : 's'}`}
+              : `${count}${openEnded ? '+' : ''} ${noun}${count === 1 ? '' : 's'}`}
           </span>
         </div>
       </div>
@@ -397,7 +400,7 @@ export default function ActivityFeed({
                 ),
               )}
             </ul>
-            {/* "Load more" pages the server feed; the count above carries the '+' */}
+            {/* "Load more" pages the server feed; the count above is the list's total */}
             {hasMore && (
               <div className="mt-3 flex justify-center">
                 <button

@@ -65,11 +65,6 @@ const SEARCH_DEBOUNCE_MS = 250
  *  where the ping does not land (a socket that reconnected mid-refresh). */
 const DISCOVERY_POLL_MS = 4_000
 
-/** The rows render in the order given: the tracked section's, then the list
- *  route's. No column names a `sortKey`, so no header reorders them, and this
- *  is never called. */
-const KEEP_ORDER = () => {}
-
 /** The catalog pages the page holds, and the search they answer. */
 interface Catalog {
   search: string
@@ -449,8 +444,9 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
               columns={columns}
               rows={rows}
               pageSize="auto"
+              // The order given: the tracked section's, then the list route's.
+              // No column names a sortKey, so no header reorders it.
               sort={null}
-              onSortChange={KEEP_ORDER}
               barPosition="absolute"
               emptyLabel={
                 !tracked
