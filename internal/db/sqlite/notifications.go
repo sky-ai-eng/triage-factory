@@ -330,7 +330,7 @@ func (s *notificationStore) ListForViewer(ctx context.Context, orgID, userID str
 	if err != nil {
 		return nil, 0, err
 	}
-	return s.list(ctx, orgID, userID, where, args, opts)
+	return s.list(ctx, orgID, userID, where, args, db.NotificationOrderSQL(f), opts)
 }
 
 func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string, f db.NotificationOrgListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
@@ -350,7 +350,7 @@ func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string
 		where += ` AND n.team_id IN (SELECT value FROM json_each(?))`
 		args = append(args, string(teams))
 	}
-	return s.list(ctx, orgID, userID, where, args, opts)
+	return s.list(ctx, orgID, userID, where, args, db.NotificationOrderSQL(f.NotificationListFilter), opts)
 }
 
 func sqliteNotificationFilters(base string, args []any, f db.NotificationListFilter) (string, []any, error) {
@@ -375,8 +375,8 @@ func sqliteNotificationFilters(base string, args []any, f db.NotificationListFil
 }
 
 // list counts and pages where over the same join to the viewer's marks,
-// whose placeholder precedes where's.
-func (s *notificationStore) list(ctx context.Context, orgID, userID, where string, args []any, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+// whose placeholder precedes where's, in the order orderBy renders.
+func (s *notificationStore) list(ctx context.Context, orgID, userID, where string, args []any, orderBy string, opts db.ListOpts) ([]domain.NotificationView, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
@@ -394,7 +394,7 @@ func (s *notificationStore) list(ctx context.Context, orgID, userID, where strin
 	if opts.CountOnly {
 		return []domain.NotificationView{}, total, nil
 	}
-	query := `SELECT ` + sqliteNotificationViewCols + from + where + db.NotificationOrderSQL()
+	query := `SELECT ` + sqliteNotificationViewCols + from + where + orderBy
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)

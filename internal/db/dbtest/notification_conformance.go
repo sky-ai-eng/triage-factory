@@ -516,6 +516,65 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		})
 	})
 
+	t.Run("sorts_by_resolved_at", func(t *testing.T) {
+		f := mk(t)
+		s := f.Stores.Notifications
+		// Resolved high, then urgent, then low: the default order (urgent,
+		// high, low), resolved_at desc and resolved_at asc all differ.
+		high := raise(t, f, db.NotificationOccurrence{Key: "h", Priority: domain.NotificationHigh}).Notification
+		urgent := raise(t, f, db.NotificationOccurrence{Key: "u", Priority: domain.NotificationUrgent}).Notification
+		low := raise(t, f, db.NotificationOccurrence{Key: "l", Priority: domain.NotificationLow}).Notification
+		for _, key := range []string{"h", "u", "l"} {
+			if _, err := s.ResolveSystem(ctx, f.OrgID, domain.NotificationOriginSystem, "test.kind", key); err != nil {
+				t.Fatalf("ResolveSystem(%s): %v", key, err)
+			}
+		}
+		// An open row, which the default order puts first.
+		open := raise(t, f, db.NotificationOccurrence{Key: "o", Priority: domain.NotificationUrgent}).Notification
+
+		byResolution := func(dir string, status domain.NotificationStatus) db.NotificationListFilter {
+			return db.NotificationListFilter{Status: status, SortKey: db.NotificationSortResolvedAt, SortDir: dir}
+		}
+		for name, c := range map[string]struct {
+			f    db.NotificationListFilter
+			want []string
+		}{
+			"default":       {db.NotificationListFilter{Status: domain.NotificationResolved}, []string{urgent.ID, high.ID, low.ID}},
+			"desc":          {byResolution(db.NotificationSortDirDesc, domain.NotificationResolved), []string{low.ID, urgent.ID, high.ID}},
+			"asc":           {byResolution(db.NotificationSortDirAsc, domain.NotificationResolved), []string{high.ID, urgent.ID, low.ID}},
+			"desc, no dir":  {byResolution("", domain.NotificationResolved), []string{low.ID, urgent.ID, high.ID}},
+			"desc and open": {byResolution(db.NotificationSortDirDesc, ""), []string{low.ID, urgent.ID, high.ID, open.ID}},
+			"asc and open":  {byResolution(db.NotificationSortDirAsc, ""), []string{high.ID, urgent.ID, low.ID, open.ID}},
+		} {
+			if items, total := inbox(t, f, c.f); total != len(c.want) || !slices.Equal(ids(items), c.want) {
+				t.Errorf("%s: %v (total %d); want %v", name, ids(items), total, c.want)
+			}
+		}
+
+		f.As(t, f.Viewer, func(s db.NotificationStore) {
+			// One row is the latest resolution, whatever its priority.
+			items, total, err := s.ListForViewer(ctx, f.OrgID, f.Viewer, byResolution(db.NotificationSortDirDesc, domain.NotificationResolved), db.ListOpts{Limit: 1})
+			if err != nil || total != 3 || !slices.Equal(ids(items), []string{low.ID}) {
+				t.Errorf("latest resolution = %v (total %d), %v; want %s", ids(items), total, err, low.ID)
+			}
+			items, _, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{
+				NotificationListFilter: byResolution(db.NotificationSortDirAsc, ""),
+			}, db.ListOpts{Limit: 50})
+			if want := []string{high.ID, urgent.ID, low.ID, open.ID}; err != nil || !slices.Equal(ids(items), want) {
+				t.Errorf("ListForOrg asc = %v, %v; want %v", ids(items), err, want)
+			}
+			for name, bad := range map[string]db.NotificationListFilter{
+				"unknown key":       {SortKey: "title"},
+				"unknown direction": {SortKey: db.NotificationSortResolvedAt, SortDir: "up"},
+				"direction alone":   {SortDir: db.NotificationSortDirAsc},
+			} {
+				if _, _, err := s.ListForViewer(ctx, f.OrgID, f.Viewer, bad, db.ListOpts{Limit: 50}); !errors.Is(err, db.ErrInvalidNotificationFilter) {
+					t.Errorf("%s: err = %v; want ErrInvalidNotificationFilter", name, err)
+				}
+			}
+		})
+	})
+
 	t.Run("marks", func(t *testing.T) {
 		f := mk(t)
 		row := raise(t, f, db.NotificationOccurrence{Key: "d", Dismissible: true}).Notification

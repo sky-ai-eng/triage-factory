@@ -335,7 +335,7 @@ func (s *notificationStore) ListForViewer(ctx context.Context, orgID, userID str
 	}
 	where, args := pgNotificationFilters(`n.org_id = $1 AND `+pgNotificationNotExpired+` AND `+pgNotificationSent,
 		[]any{orgID, userID}, f)
-	return s.list(ctx, where, args, opts)
+	return s.list(ctx, where, args, db.NotificationOrderSQL(f), opts)
 }
 
 func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string, f db.NotificationOrgListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
@@ -348,7 +348,7 @@ func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string
 		args = append(args, pgUUIDArray(filterValidUUIDs(f.TeamIDIn)))
 		where += fmt.Sprintf(` AND n.team_id = ANY($%d::uuid[])`, len(args))
 	}
-	return s.list(ctx, where, args, opts)
+	return s.list(ctx, where, args, db.NotificationOrderSQL(f.NotificationListFilter), opts)
 }
 
 func pgNotificationFilters(base string, args []any, f db.NotificationListFilter) (string, []any) {
@@ -372,8 +372,9 @@ func pgNotificationFilters(base string, args []any, f db.NotificationListFilter)
 	return strings.Join(clauses, " AND "), args
 }
 
-// list counts and pages where over the same join to the viewer's marks.
-func (s *notificationStore) list(ctx context.Context, where string, args []any, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+// list counts and pages where over the same join to the viewer's marks, in
+// the order orderBy renders.
+func (s *notificationStore) list(ctx context.Context, where string, args []any, orderBy string, opts db.ListOpts) ([]domain.NotificationView, int, error) {
 	if err := db.RefuseNotificationKeyset(opts); err != nil {
 		return nil, 0, err
 	}
@@ -387,7 +388,7 @@ func (s *notificationStore) list(ctx context.Context, where string, args []any, 
 	if opts.CountOnly {
 		return []domain.NotificationView{}, total, nil
 	}
-	query := `SELECT ` + pgNotificationViewCols + from + where + db.NotificationOrderSQL()
+	query := `SELECT ` + pgNotificationViewCols + from + where + orderBy
 	if opts.Limit > 0 {
 		args = append(args, opts.Limit, opts.Offset)
 		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
