@@ -107,12 +107,53 @@ When you combine pods in a query:
 - **Counters and histograms** are per process, so `sum` them.
 - **Gauges about the deployment's queues and claims** (`tf_claims_*`,
   `tf_work_*`, `tf_conversations_deferred`, `tf_upstream_up`,
-  `tf_github_scope_drift_repos`,
+  `tf_source_orgs`, `tf_github_scope_drift_repos`,
   `tf_commit_signing_oldest_pending_age_seconds`) come only from the control
   pod holding the background-brain lease. Don't sum them.
 - **Rate-limit readings** (`tf_upstream_rate_limit_*`) are the upstream's own
   count, so take `min`. Slack's `tf_upstream_rate_limit_used` is the
   exception: `sum` it.
+
+### Orgs by source state
+
+`tf_source_orgs` is the number of active orgs in each `state` of each
+`source`:
+
+| `source`         | `state`                                         |
+| ---------------- | ----------------------------------------------- |
+| `github`         | `available`, `no_installations`, `unconfigured` |
+| `jira`, `linear` | `available`, `unconfigured`, `disabled`         |
+
+- `available`: the org has connected the source.
+- `unconfigured`: the org has not connected it.
+- `disabled`: the org's admin turned it off. GitHub can't be turned off.
+- `no_installations`: the org connected GitHub through a GitHub App of its
+  own, but the App is installed on no account on the org's GitHub host, so
+  every GitHub poll for the org is skipped. These orgs are not counted under
+  `available`. The org's admin fixes it by installing the App on GitHub.
+
+Each pair in the table has a series, reading 0 when no org is in that state.
+The counts are refreshed every 5 minutes. When the background-brain lease moves
+to another pod, the series are missing until that pod's first count, up to 5
+minutes later.
+
+No alert fires on this gauge. An org that has not connected a source, or has
+turned one off, is not a fault in the deployment: connecting a source is part
+of the org's setup, and turning one off is its admin's choice. Use the gauge to
+see, for example, how many orgs have not finished setting up. The dashboard's
+Connections row charts it as **Orgs by source state**.
+
+Which signal covers which situation:
+
+| Situation                                                                 | Signal                                                                      |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| An org has not connected a source, or has turned it off                   | `tf_source_orgs`                                                            |
+| An org has connected a source, but Triage Factory can't reach it          | `tf_upstream_up` reads 0                                                    |
+| GitHub is reachable, but teams track repositories outside the App's grant | [`tf_github_scope_drift_repos`](#repositories-outside-the-github-app-grant) |
+
+An org that has not connected a source, or has turned it off, has no
+`tf_upstream_up` series for it, because Triage Factory makes no requests to
+that source for the org.
 
 ### Repositories outside the GitHub App grant
 

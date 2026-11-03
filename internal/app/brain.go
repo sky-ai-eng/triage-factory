@@ -131,6 +131,13 @@ func (a *App) startBrain(term int64) {
 	a.scopeDriftGauge = poller.NewScopeDriftObserver(otel.GetMeterProvider(),
 		poller.ScopeDriftStores(a.stores.Orgs, a.stores.GitHubApps, a.stores.ReachableRepos))
 	go a.scopeDriftGauge.Run(brainCtx, poller.DefaultScopeDriftInterval)
+	// Source orgs gauge (tf_source_orgs): how many orgs are in each state of
+	// each source, from the same event-source derivation as the org's sources
+	// route. Every active org is counted, including the ones the poll skips
+	// before making a request, which have no tf_upstream_up series.
+	// Brain-gated so one process exports it.
+	a.sourceOrgsGauge = poller.NewSourceOrgsObserver(otel.GetMeterProvider(), poller.SourceOrgsStores(a.stores))
+	go a.sourceOrgsGauge.Run(brainCtx, poller.DefaultSourceOrgsInterval)
 	// Commit-signing queue gauges: the requests no control pod has claimed,
 	// and how long the oldest has waited. Here rather than beside the
 	// signers, which run on every control pod: a queue every signer stopped
@@ -344,6 +351,10 @@ func (a *App) stopBrain(reason string) {
 	if a.scopeDriftGauge != nil {
 		a.scopeDriftGauge.Close()
 		a.scopeDriftGauge = nil
+	}
+	if a.sourceOrgsGauge != nil {
+		a.sourceOrgsGauge.Close()
+		a.sourceOrgsGauge = nil
 	}
 	if a.commitSignQueue != nil {
 		a.commitSignQueue.Close()
