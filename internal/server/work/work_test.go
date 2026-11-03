@@ -573,10 +573,10 @@ func TestWorkHandler_UnknownAccessPolicyIsRefused(t *testing.T) {
 	}
 }
 
-// TestWorkHandler_LocalModeRefusesForeignOrg pins the sentinel check: local
-// mode's membership gate admits every caller to every well-formed org id, so
-// a foreign id reaching the package's org-bound verbs would answer an empty
-// page or a zero count as if the org existed. It is a 404 at the door.
+// TestWorkHandler_LocalModeRefusesForeignOrg pins that local mode answers a
+// well-formed org id other than the local org as one the caller is not in: a
+// foreign id reaching the package's org-bound verbs would answer an empty page
+// or a zero count as if the org existed. It is a 404 at the door.
 func TestWorkHandler_LocalModeRefusesForeignOrg(t *testing.T) {
 	f := newFakeWorkKind(t, "fixture")
 	parked := f.park(t, runmode.LocalDefaultOrgID, "l1")

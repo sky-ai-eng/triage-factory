@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // membership is every fact about who a caller is that a gate here needs, and
@@ -54,7 +55,19 @@ type membership interface {
 // localMembership is N=1: one org, one user, and that user is its admin and its
 // owner. Nothing reads anything — the local schema holds no memberships, and the
 // sole user is every role by construction.
+//
+// The org-keyed facts hold for runmode.LocalDefaultOrgID and no other org: an
+// org id a caller names in a path is an org the sole user is not a member of
+// unless it is that one, so the gates answer it the way multi answers an
+// outsider's org. The team-keyed facts take the org from the session, which is
+// always the local org here.
 type localMembership struct{}
+
+// isLocalOrg reports whether orgID names the local org, in any spelling
+// uuid.Parse accepts.
+func isLocalOrg(orgID string) bool {
+	return sameOrgID(orgID, runmode.LocalDefaultOrgID)
+}
 
 func (localMembership) teamInOrg(context.Context, string, string, string) (bool, error) {
 	return true, nil
@@ -69,24 +82,24 @@ func (localMembership) userIsTeamAdmin(context.Context, string, string, string) 
 	return true, nil
 }
 
-func (localMembership) userAdministersATeam(context.Context, string, string) (bool, error) {
-	return true, nil
+func (localMembership) userAdministersATeam(_ context.Context, orgID, _ string) (bool, error) {
+	return isLocalOrg(orgID), nil
 }
 
 func (localMembership) userCanWriteTeam(context.Context, string, string, string) (bool, error) {
 	return true, nil
 }
 
-func (localMembership) userHasOrgAccess(context.Context, string, string) (bool, error) {
-	return true, nil
+func (localMembership) userHasOrgAccess(_ context.Context, _, orgID string) (bool, error) {
+	return isLocalOrg(orgID), nil
 }
 
-func (localMembership) userIsOrgAdmin(context.Context, string, string) (bool, error) {
-	return true, nil
+func (localMembership) userIsOrgAdmin(_ context.Context, _, orgID string) (bool, error) {
+	return isLocalOrg(orgID), nil
 }
 
-func (localMembership) userOwnsOrg(context.Context, string, string) (bool, error) {
-	return true, nil
+func (localMembership) userOwnsOrg(_ context.Context, _, orgID string) (bool, error) {
+	return isLocalOrg(orgID), nil
 }
 
 func (localMembership) orgMemberCount(context.Context, string, string) (int, error) {

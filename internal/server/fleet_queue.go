@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // fleetQueueReader is the narrow view the fleet queue endpoint needs of the
@@ -68,15 +67,15 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "org query parameter is required")
 		return
 	}
-	// Match the placement explainer's path-org validation: reject a non-uuid
-	// org in multi mode before the admin check (local mode has one synthetic
-	// org).
-	if runmode.Current() != runmode.ModeLocal {
-		if _, err := uuid.Parse(orgID); err != nil {
-			notFound(w, "org")
-			return
-		}
+	// RequireOrgAdmin's path-org handling: a non-uuid org is not found, and a
+	// uuid is read in its canonical form, which is the spelling the stores and
+	// the shares rows carry.
+	parsedOrg, err := uuid.Parse(orgID)
+	if err != nil {
+		notFound(w, "org")
+		return
 	}
+	orgID = parsedOrg.String()
 	if !s.az.RequireOrgAdminRole(w, r, orgID, claims.Subject) {
 		return
 	}

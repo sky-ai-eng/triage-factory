@@ -16,6 +16,7 @@ import (
 	ws "github.com/coder/websocket"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -386,6 +387,38 @@ func TestBearerAuth_OrgScopeCoversCallerNamedOrgs(t *testing.T) {
 	rec := r.serve(r.bearerReq("GET", "/api/fleet/queue?org="+orgB.String(), plaintext))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("token naming another org in ?org= = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestFleetQueue_SessionDenialIsTwoValued: a session naming an org in ?org= gets
+// the disclosure rule's two answers — 403 in an org it belongs to without the
+// admin role, 404 in an org it is not in — and an admin reads it.
+func TestFleetQueue_SessionDenialIsTwoValued(t *testing.T) {
+	r := newAuthRig(t)
+	founder := r.seedUser()
+	orgA, teamA := r.seedOrg(founder, "fleet-org-a")
+	member := r.seedUser()
+	pgtest.AddOrgMember(t, r.h, member.String(), orgA.String(), teamA.String(), "member", "member")
+	orgB, _ := r.seedOrg(r.seedUser(), "fleet-org-b")
+
+	founderResp, _ := r.driveCallback(founder)
+	memberResp, _ := r.driveCallback(member)
+	cases := []struct {
+		name string
+		sid  string
+		org  string
+		want int
+	}{
+		{"an admin of the org", r.sidFromResp(founderResp), orgA.String(), http.StatusOK},
+		{"a plain member of the org", r.sidFromResp(memberResp), orgA.String(), http.StatusForbidden},
+		{"an org the caller is not in", r.sidFromResp(memberResp), orgB.String(), http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := r.requestWithSid("GET", "/api/fleet/queue?org="+tc.org, tc.sid).StatusCode; got != tc.want {
+				t.Errorf("GET /api/fleet/queue?org=%s = %d, want %d", tc.org, got, tc.want)
+			}
+		})
 	}
 }
 
