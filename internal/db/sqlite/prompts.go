@@ -39,17 +39,21 @@ var _ db.PromptStore = (*promptStore)(nil)
 // shape as columns are added.
 const sqlitePromptColumns = `id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at`
 
-// List ignores teamID: local mode is single-team, so every prompt
+// List ignores f.TeamID: local mode is single-team, so every prompt
 // already belongs to the sole team and the multi-team narrowing the
-// param expresses is a no-op here.
-func (s *promptStore) List(ctx context.Context, orgID string, _ string, opts db.ListOpts) ([]domain.Prompt, int, error) {
+// field expresses is a no-op here.
+func (s *promptStore) List(ctx context.Context, orgID string, f db.PromptListFilter, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
+	where := ` WHERE hidden = 0 AND deleted_at IS NULL`
+	args := []any{}
+	if clause, searchArgs := db.SQLiteSearch(f.Search, "name"); clause != "" {
+		where += ` AND ` + clause
+		args = append(args, searchArgs...)
+	}
 	var total int
-	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM prompts WHERE hidden = 0 AND deleted_at IS NULL
-	`).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompts`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
@@ -57,8 +61,7 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string, opts db.
 	}
 	query := `
 		SELECT ` + sqlitePromptColumns + `
-		FROM prompts WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC, id`
-	args := []any{}
+		FROM prompts` + where + ` ORDER BY updated_at DESC, id`
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)

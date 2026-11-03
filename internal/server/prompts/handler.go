@@ -72,15 +72,18 @@ func (h *Handler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 
 // promptListRequest is the body of POST /api/prompts/list. TeamID narrows to
 // one team's prompts on the multi-team prompts page; empty returns everything
-// visible (solo/local, or an unfiltered view).
+// visible (solo/local, or an unfiltered view). Search narrows to prompts whose
+// name carries it, case-insensitively and literally (httpx.Search).
 type promptListRequest struct {
 	TeamID string `json:"team_id"`
+	Search string `json:"search"`
 
 	httpx.PageRequest
 }
 
 type promptListFilterKey struct {
 	TeamID string `json:"team_id"`
+	Search string `json:"search"`
 }
 
 // POST /api/prompts/list
@@ -97,7 +100,10 @@ func (h *Handler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	}
 	var v httpx.Validation
 	httpx.TeamIDFilterField(&v, req.TeamID)
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(promptListFilterKey{TeamID: req.TeamID}), 0)
+	filter := db.PromptListFilter{TeamID: req.TeamID, Search: httpx.Search(&v, req.Search)}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(promptListFilterKey{
+		TeamID: filter.TeamID, Search: httpx.SearchKey(filter.Search),
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -108,7 +114,7 @@ func (h *Handler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		list, total, e = tx.Prompts.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		httpx.InternalError(w, "prompts", err)

@@ -277,6 +277,10 @@ type BlueprintListFilter struct {
 	// total wrong: the rows a caller cannot see must not be counted, and the
 	// only place that can be true is the query that counts them.
 	GatedEventTypes []string
+
+	// Search narrows to blueprints whose name carries it as a
+	// case-insensitive literal substring. Empty matches every blueprint.
+	Search string
 }
 
 // BlueprintStepListFilter is the step list's filter set.
@@ -287,6 +291,11 @@ type BlueprintStepListFilter struct {
 	// blueprint in scope — the canvas's bulk read. A non-empty set is the
 	// per-blueprint read, which is why there is no second route for it.
 	BlueprintIDs []string
+	// Search narrows to steps whose name carries it as a case-insensitive
+	// literal substring. A step has no name of its own: it is named by the
+	// prompt it runs, which is the name every surface draws it under. Empty
+	// matches every step.
+	Search string
 }
 
 // BlueprintRunListFilter is the blueprint-run list's filter set.
