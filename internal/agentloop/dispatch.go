@@ -34,10 +34,10 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // is answered before this returns without an error, so it is the point in the
 // transcript by which everything the batch did to the workspace is done.
 //
-// Each result row carries how long its call ran, measured around the tool's
-// own work and nothing else: the gate before it can hold a call at the
-// checkpoint barrier, and the rewrite after it does the loop's bookkeeping,
-// not the tool's. A call that was never dispatched carries no duration.
+// Each result row carries how long its call ran, measured around the tool
+// host's call and nothing else: time a call spends held at the gate before
+// it, or in the rewrite after it, is the loop's, not the tool's. A call that
+// was never dispatched carries no duration.
 func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, deaths *toolHostDeaths) (result Result, terminated bool, position float64, err error) {
 	var terminal *Result
 	allTerminate := true
