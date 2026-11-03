@@ -151,6 +151,14 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 		where += ` AND kind = ?`
 		args = append(args, f.Kind)
 	}
+	if f.Audience != "" {
+		where += ` AND notify_audience = ?`
+		args = append(args, f.Audience)
+	}
+	if f.CreatorUserID != "" {
+		where += ` AND creator_user_id = ?`
+		args = append(args, f.CreatorUserID)
+	}
 	if len(f.GatedEventTypes) > 0 {
 		placeholders := make([]string, len(f.GatedEventTypes))
 		for i, et := range f.GatedEventTypes {

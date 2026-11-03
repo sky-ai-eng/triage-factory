@@ -419,7 +419,7 @@ The membership read uses the inbox's own "is sent" predicate (`RecipientsSystem`
 | Edit or delete a personal rule                                 | Its creator, or a team admin       |
 | Create, edit or delete a team rule, or move a rule to or from `team` | Team admin                   |
 
-A rule whose audience is the whole team badges every member, so it is a team admin's decision. Team members can read each other's personal rules through the API, as they can every handler of their team; the editor lists only the caller's own and the team's.
+A rule whose audience is the whole team badges every member, so it is a team admin's decision. Team members can read each other's personal rules through the API, as they can every handler of their team; the editor lists only the caller's own and the team's, as two reads of `POST /api/event-handlers/list` narrowed by its `audience` (`creator` or `team`) and `creator_user_id` filters.
 
 ### Matching
 

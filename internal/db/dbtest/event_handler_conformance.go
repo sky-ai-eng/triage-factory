@@ -664,6 +664,76 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
+	t.Run("List_AudienceAndCreatorFilters", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		eventType := domain.EventGitHubPRCICheckFailed
+		notify := func(name, audience string) domain.EventHandler {
+			t.Helper()
+			h, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+				ID: uuid.New().String(), Kind: domain.EventHandlerKindNotify, EventType: eventType, Enabled: true,
+				Name: name, Audience: audience,
+			})
+			if err != nil {
+				t.Fatalf("Create (notify %s): %v", name, err)
+			}
+			return h
+		}
+		personal := notify("mine", domain.NotifyAudienceCreator)
+		team := notify("team", domain.NotifyAudienceTeam)
+		priority, sortOrder := 0.5, 0
+		rule, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
+			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		})
+		if err != nil {
+			t.Fatalf("Create (rule): %v", err)
+		}
+		// Shipped rows have no creator; the creator filter leaves them out.
+		bps := seedBlueprints(t, "system-pr-review", "system-conflict-resolution", "system-ci-fix",
+			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback")
+		if err := store.Seed(ctx, orgID, teamID, bps); err != nil {
+			t.Fatalf("Seed: %v", err)
+		}
+
+		ids := func(t *testing.T, f db.EventHandlerListFilter) []string {
+			t.Helper()
+			rows, total, err := store.List(ctx, orgID, f, db.ListOpts{Limit: 200})
+			if err != nil {
+				t.Fatalf("List(%+v): %v", f, err)
+			}
+			if _, count, err := store.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || count != total {
+				t.Errorf("List(%+v) count-only = %d, %v; want the paged total %d", f, count, err, total)
+			}
+			out := make([]string, len(rows))
+			for i, h := range rows {
+				out[i] = h.ID
+			}
+			slices.Sort(out)
+			return out
+		}
+		sorted := func(in ...string) []string { slices.Sort(in); return in }
+		for name, tc := range map[string]struct {
+			f    db.EventHandlerListFilter
+			want []string
+		}{
+			"creator audience": {db.EventHandlerListFilter{Audience: domain.NotifyAudienceCreator}, []string{personal.ID}},
+			"team audience":    {db.EventHandlerListFilter{Audience: domain.NotifyAudienceTeam}, []string{team.ID}},
+			// Every handler the creator authored, of any kind, and none shipped.
+			"creator": {db.EventHandlerListFilter{CreatorUserID: personal.CreatorUserID}, sorted(personal.ID, team.ID, rule.ID)},
+			"creator's personal notify rules": {
+				db.EventHandlerListFilter{Kind: domain.EventHandlerKindNotify, Audience: domain.NotifyAudienceCreator, CreatorUserID: personal.CreatorUserID},
+				[]string{personal.ID},
+			},
+			"another creator":      {db.EventHandlerListFilter{CreatorUserID: uuid.New().String()}, []string{}},
+			"an audience on rules": {db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, Audience: domain.NotifyAudienceTeam}, []string{}},
+		} {
+			if got := ids(t, tc.f); !slices.Equal(got, tc.want) {
+				t.Errorf("%s: List = %v, want %v", name, got, tc.want)
+			}
+		}
+	})
+
 	t.Run("Delete_RemovesRow", func(t *testing.T) {
 		store, orgID, teamID, _, _ := factory(t)
 		ctx := context.Background()

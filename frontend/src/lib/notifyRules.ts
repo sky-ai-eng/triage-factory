@@ -3,8 +3,9 @@
 // callers render failures through httpErrorMessage, so an HttpError passes
 // through unchanged.
 
-import type { NotifyAudience, NotifyHandler } from '../types'
-import { apiFetch, apiListAll } from './apiClient'
+import type { EventHandler, NotifyAudience } from '../types'
+import { apiFetch, apiJSON } from './apiClient'
+import type { ListRequest } from './apiClient'
 import { handlersBase, notifyCreatePath } from './scope'
 
 export interface NotifyRuleCreate {
@@ -29,8 +30,28 @@ function rulePath(id: string): string {
   return `${handlersBase()}/${encodeURIComponent(id)}`
 }
 
-export function listNotifyRules(): Promise<NotifyHandler[]> {
-  return apiListAll<NotifyHandler>(`${handlersBase()}/list`, { kind: 'notify' })
+/** The handler list route the panel's reads page through. */
+export function notifyRulesListPath(): string {
+  return `${handlersBase()}/list`
+}
+
+/** The list body for a person's own personal rules: the notify rules telling
+ *  their creator, authored by userId. */
+export function personalNotifyRulesFilter(userId: string): ListRequest {
+  return { kind: 'notify', audience: 'creator', creator_user_id: userId }
+}
+
+/** The list body for the team rules of the caller's teams. Another member's
+ *  personal rule is readable too, but it tells only its creator, so neither
+ *  read lists it. */
+export function teamNotifyRulesFilter(): ListRequest {
+  return { kind: 'notify', audience: 'team' }
+}
+
+/** getNotifyRule reads one handler by id, for a link to a rule that need not
+ *  be on a page the panel has read. The caller checks it is a notify rule. */
+export function getNotifyRule(id: string): Promise<EventHandler> {
+  return apiJSON<EventHandler>(rulePath(id))
 }
 
 export async function createNotifyRule(body: NotifyRuleCreate): Promise<void> {
