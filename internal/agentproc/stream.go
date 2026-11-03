@@ -347,7 +347,10 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 			})
 
 		case "tool_use":
+			// A TF tool is stored under its own name, as the native loop
+			// stores it, not under the MCP name the SDK called it by.
 			toolName, _ := b["name"].(string)
+			toolName = storedToolName(toolName)
 			toolID, _ := b["id"].(string)
 			toolInput, _ := b["input"].(map[string]any)
 			s.current.ToolCalls = append(s.current.ToolCalls, domain.ToolCall{

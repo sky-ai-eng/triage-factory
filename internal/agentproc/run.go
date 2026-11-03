@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // ContentBlock is one block of a block-content user message: the shape the
@@ -203,6 +204,21 @@ type RunOptions struct {
 	// Storage-neutral: delegate uses the conversation id, the toolless
 	// system jobs use a fixed per-job label (e.g. "scorer-batch").
 	TraceID string
+
+	// ConversationID is the conversation this launch drives, handed to a TF
+	// tool's handler as part of the run's identity (tooldefs.Run) with OrgID
+	// and ClaimID. Empty for launches that drive no conversation, the system
+	// jobs among them.
+	ConversationID string
+
+	// TFTools are the TF tools this run is offered (tooldefs.TFTools). The
+	// wrapper serves them from an in-process MCP server, so the model sees
+	// each as mcp__tf__<name>, and every call is answered here, by the
+	// tool's handler, on a goroutine of its own. BuildArgs adds each to
+	// --allowedTools, so a call never prompts. Interactive-mode only: the
+	// one-shot path has no channel to answer a call on, and BuildArgs leaves
+	// them off its argv.
+	TFTools []tooldefs.Tool
 
 	// ClaimID is the executor engagement this launch belongs to — the claims
 	// row the dispatcher minted (or, for a driven follow-up, the claim that

@@ -1,6 +1,7 @@
 package tooldefs
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,26 +9,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestFlowControl_IsOneToolGatedOnHavingABlueprint pins the shape the prompts
-// are written against: a single tool with all three arguments required,
-// offered only where there is something for it to stop.
-func TestFlowControl_IsOneToolGatedOnHavingABlueprint(t *testing.T) {
-	if got := FlowControl(false); len(got) != 0 {
-		t.Fatalf("a conversation with no blueprint has nothing to stop: %+v", got)
+// TestStopBlueprint_Shape pins the shape the prompts are written against:
+// all three arguments required, and a type that is exactly finish or abort.
+func TestStopBlueprint_Shape(t *testing.T) {
+	if StopBlueprint.Handler == nil {
+		t.Error("stop_blueprint must be answered by TF, never dispatched into the jail")
 	}
-	flow := FlowControl(true)
-	if len(flow) != 1 || flow[0].Name != StopBlueprintName {
-		t.Fatalf("flow control is exactly one tool: %+v", flow)
-	}
-	if flow[0].Handler == nil {
-		t.Error("a flow-control tool must be answered loop-side, never dispatched into the jail")
-	}
-	if req := flow[0].Params.Required; len(req) != 3 || req[0] != "type" || req[1] != "reason" || req[2] != "summary" {
+	if req := StopBlueprint.Params.Required; len(req) != 3 || req[0] != "type" || req[1] != "reason" || req[2] != "summary" {
 		t.Fatalf("required = %v, want type, reason and summary — an unexplained stop with a blank result is the thing being prevented", req)
 	}
 
 	var enum []string
-	for _, f := range flow[0].Params.Fields {
+	for _, f := range StopBlueprint.Params.Fields {
 		if f.Name == "type" {
 			enum = f.Enum
 		}
@@ -48,24 +41,8 @@ func TestFlowControl_IsOneToolGatedOnHavingABlueprint(t *testing.T) {
 func TestSandbox_HasNoHandlers(t *testing.T) {
 	for _, tool := range Sandbox() {
 		if tool.Handler != nil {
-			t.Errorf("%s has a loop-side handler; the harness owns this tool", tool.Name)
+			t.Errorf("%s has a TF-side handler; the harness owns this tool", tool.Name)
 		}
-	}
-}
-
-// TestLoopSide_ResolvesOnlyWhatWasOffered pins that a name means nothing
-// where the tool was never registered. A hallucinated stop_blueprint in a
-// taskless conversation must fall through to the jail and come back "unknown
-// tool" rather than silently ending a conversation someone is mid-sentence in.
-func TestLoopSide_ResolvesOnlyWhatWasOffered(t *testing.T) {
-	if _, ok := LoopSide(StopBlueprintName, true); !ok {
-		t.Error("a blueprint conversation must resolve its own flow-control tool")
-	}
-	if _, ok := LoopSide(StopBlueprintName, false); ok {
-		t.Error("nothing is loop-side in a conversation with no blueprint")
-	}
-	if _, ok := LoopSide("bash", true); ok {
-		t.Error("a jail tool must never resolve loop-side")
 	}
 }
 
@@ -121,7 +98,7 @@ func TestStopBlueprint_Handler(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := StopBlueprint.Handler(tc.args)
+			got := StopBlueprint.Handler(context.Background(), Call{Args: tc.args})
 			if got.IsError != tc.wantError {
 				t.Errorf("IsError = %v, want %v (%q)", got.IsError, tc.wantError, got.Content)
 			}

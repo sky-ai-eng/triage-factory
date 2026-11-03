@@ -11,11 +11,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 

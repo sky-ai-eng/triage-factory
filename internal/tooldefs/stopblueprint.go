@@ -1,6 +1,10 @@
 package tooldefs
 
-import "github.com/sky-ai-eng/triage-factory/internal/domain"
+import (
+	"context"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
 
 // StopBlueprintName is the wire name, exported because the engine's tests and
 // the delegate path both reason about this tool by name.
@@ -32,7 +36,7 @@ const (
 //
 // The name says what it acts on, which is what makes its absence obvious: a
 // conversation with no blueprint has nothing for it to stop, and does not get
-// it. Resolved loop-side, so it never enters the sandbox.
+// it. Answered by TF, so it never enters the sandbox.
 var StopBlueprint = Tool{
 	Name: StopBlueprintName,
 	Description: "End this run in a way other than simply finishing. You do NOT need this to complete your work normally — " +
@@ -62,7 +66,8 @@ var StopBlueprint = Tool{
 //
 // A correction is an ordinary error result, never a termination — the run
 // continues and the model gets to fix its call.
-func stopBlueprint(args map[string]any) Outcome {
+func stopBlueprint(_ context.Context, call Call) Outcome {
+	args := call.Args
 	reason := stringArg(args, "reason")
 	summary := stringArg(args, "summary")
 

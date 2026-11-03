@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // The control protocol bridging Go and wrapper.mjs in streaming-input
@@ -23,6 +25,7 @@ import (
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
 //	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
 //	{"kind":"tool_batch_reply","id":"<id>","context":"..."}
+//	{"kind":"tool_call_reply","id":"<id>","content":"...","is_error":true|false}
 //	{"kind":"end"}
 //
 // A user_message spells its content one way or the other — text is a plain
@@ -42,6 +45,8 @@ import (
 //	{"type":"control","subtype":"interrupted"}
 //	{"type":"control","subtype":"tool_batch","id":"<id>"}
 //	{"type":"control","subtype":"tool_batch_result","id":"<id>","delivered":true|false}
+//	{"type":"control","subtype":"tool_call","id":"<id>","tool_call_id":"<tool_use id>","tool_name":"...","input":{...}}
+//	{"type":"control","subtype":"tool_call_cancel","id":"<id>"}
 //	{"type":"control","subtype":"tool_started","tool_call_id":"<id>"}
 //
 // A tool_started is the SDK's PreToolUse hook: Claude Code is starting to run
@@ -54,6 +59,13 @@ import (
 // with context gets a tool_batch_result saying whether the hook was still
 // waiting for it: an interrupt gives the hook up, and a reply that arrives
 // after that reaches nobody.
+//
+// A tool_call is the model calling a TF tool (RunOptions.TFTools), named
+// without its mcp__tf__ prefix. The wrapper's handler waits on the
+// tool_call_reply with the same id, whose content and is_error become the
+// tool result. tool_call_id is the call's tool_use id, the one its rows
+// carry. A tool_call_cancel means the wrapper settled the call itself, on an
+// interrupt, and wants its handler stopped; it takes no reply.
 
 // PermissionRequest is one canUseTool round-trip surfaced from the
 // wrapper. The handler decides allow/deny; the reader writes the
@@ -153,10 +165,23 @@ type LiveRun struct {
 	// goroutine.
 	batchUndos map[string]func()
 
-	// Close phase bounds; zero falls back to the package consts. Fields
-	// (not just consts) so tests can drive the timeout paths quickly.
-	drainTimeout time.Duration
-	killTimeout  time.Duration
+	// tfTools answers each tool_call, by tool name (RunOptions.TFTools), and
+	// tfRun is the identity each handler is handed. runCtx is what every
+	// handler's context derives from; nil reads as context.Background.
+	tfTools map[string]tooldefs.Tool
+	tfRun   tooldefs.Run
+	runCtx  context.Context
+	// toolCalls holds the cancel of each TF tool call still running, by the
+	// wrapper's id. Written by the reader and by each call's goroutine.
+	toolCallsMu sync.Mutex
+	toolCalls   map[string]context.CancelFunc
+
+	// Close phase bounds and the TF tool call deadline; zero falls back to
+	// the package consts. Fields (not just consts) so tests can drive the
+	// timeout paths quickly.
+	drainTimeout    time.Duration
+	killTimeout     time.Duration
+	toolCallTimeout time.Duration
 
 	// closing is raised at the top of Close, ahead of the end control, so a
 	// Send racing the close is refused (ErrRunClosing) instead of written
@@ -262,6 +287,9 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		ready:     make(chan struct{}),
 		stream:    NewStreamState(),
 		toolBatch: opts.OnToolBatch,
+		tfTools:   tfToolsByName(opts.TFTools),
+		tfRun:     tooldefs.Run{OrgID: opts.OrgID, ConversationID: opts.ConversationID, ClaimID: opts.ClaimID},
+		runCtx:    runCtx,
 	}
 
 	// opts travels whole because the teardown stamp at the end of the loop
@@ -570,6 +598,7 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 	reader := bufio.NewReader(stdout)
 	observer := stream.observeSink(sink)
 	defer l.abandonToolBatches()
+	defer l.cancelToolCalls()
 
 	sessionDelivered := false
 	interruptPending := false
@@ -610,6 +639,10 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					l.handleToolBatchResult(ctl)
 				case "tool_started":
 					stream.MarkToolStarted(ctl.ToolCallID)
+				case "tool_call":
+					l.handleToolCall(ctl)
+				case "tool_call_cancel":
+					l.cancelToolCall(ctl.ID)
 				}
 				// Control lines are not sink content.
 			} else {

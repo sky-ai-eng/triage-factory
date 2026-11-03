@@ -12,6 +12,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 func TestRun_ImplicitCompletionConcludesWithFinalText(t *testing.T) {
@@ -1432,6 +1433,67 @@ func TestRun_StopBlueprintIsInertWithoutABlueprint(t *testing.T) {
 	}
 	if calls := host.calls(); len(calls) != 1 || calls[0] != ToolStopBlueprint {
 		t.Fatalf("the call must be dispatched like any other unknown tool: %v", calls)
+	}
+}
+
+// TestRun_TFToolHandlerReceivesTheCallAndTheConversation pins what a TF
+// tool's handler is handed on a native run: the call's tool_use id, its
+// arguments, and the identity of the conversation making it. The call is
+// answered in the loop, so the jail never sees it, and the handler's result
+// is the row the model reads.
+func TestRun_TFToolHandlerReceivesTheCallAndTheConversation(t *testing.T) {
+	var seen []tooldefs.Call
+	tooldefs.OfferForTest(t, tooldefs.Tool{
+		Name:        "record_call",
+		Description: "test tool",
+		Params:      tooldefs.Schema{Type: "object"},
+		Handler: func(ctx context.Context, call tooldefs.Call) tooldefs.Outcome {
+			if ctx.Err() != nil {
+				t.Errorf("handler ran on a dead context: %v", ctx.Err())
+			}
+			seen = append(seen, call)
+			return tooldefs.Outcome{Content: "recorded " + call.ID}
+		},
+	})
+
+	tr := newMemTranscript(pendingUser("go"))
+	host := newScriptedToolHost()
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "toolu_native_1", Name: "record_call", Input: map[string]any{"note": "hi"}}}},
+		{text: "done"},
+	}}
+	e := newTestEngine(tr, p, host)
+	params := testParams()
+	params.ClaimID = "claim"
+
+	if got := e.Run(context.Background(), params); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("handler ran %d times, want once", len(seen))
+	}
+	call := seen[0]
+	if call.ID != "toolu_native_1" || call.Args["note"] != "hi" {
+		t.Errorf("handler saw id %q args %v, want toolu_native_1 and the call's arguments", call.ID, call.Args)
+	}
+	if want := (tooldefs.Run{OrgID: "org", ConversationID: "conv", ClaimID: "claim"}); call.Run != want {
+		t.Errorf("handler saw run %+v, want %+v", call.Run, want)
+	}
+	if calls := host.calls(); len(calls) != 0 {
+		t.Errorf("a TF tool's call reached the jail: %v", calls)
+	}
+	if r := tr.toolResults(); len(r) != 1 || r[0].Content != "recorded toolu_native_1" || r[0].IsError {
+		t.Errorf("tool results = %+v, want the handler's answer", r)
+	}
+
+	var offered []string
+	for _, tool := range p.requests[0].Tools {
+		if tool.Function != nil {
+			offered = append(offered, tool.Function.Name)
+		}
+	}
+	if len(offered) == 0 || offered[len(offered)-1] != "record_call" {
+		t.Errorf("tools = %v, want the TF tool offered after the sandbox tools", offered)
 	}
 }
 

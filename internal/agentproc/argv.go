@@ -80,6 +80,11 @@ func BuildArgs(opts RunOptions) []string {
 		if opts.OnToolBatch != nil {
 			args = append(args, "--tool-batch-notes")
 		}
+		// The TF tools the wrapper serves. Omitted when there are none, so
+		// the wrapper builds no MCP server and imports no zod.
+		if len(opts.TFTools) > 0 {
+			args = append(args, "--tf-tools", tfToolsFlag(opts.TFTools))
+		}
 	} else {
 		args = append(args, "-p", opts.Message)
 	}
@@ -104,8 +109,12 @@ func BuildArgs(opts RunOptions) []string {
 		"--output-format", "stream-json",
 		"--verbose",
 	)
-	if opts.AllowedTools != "" {
-		args = append(args, "--allowedTools", opts.AllowedTools)
+	allowedTools := opts.AllowedTools
+	if opts.Interactive {
+		allowedTools = withTFToolGrants(allowedTools, opts.TFTools)
+	}
+	if allowedTools != "" {
+		args = append(args, "--allowedTools", allowedTools)
 	}
 	args = append(args, "--disallowedTools", disallowedTools)
 	for _, dir := range opts.AddDirs {

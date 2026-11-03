@@ -110,6 +110,9 @@ type Hooks struct {
 type Params struct {
 	OrgID          string
 	ConversationID string
+	// ClaimID is the executor engagement this is, handed to a TF tool's
+	// handler as part of the conversation's identity.
+	ClaimID string
 
 	// Model is the provider model id. SystemPrompt is the fully assembled
 	// envelope (see envelope.go) — the loop never composes prompt text
@@ -124,7 +127,7 @@ type Params struct {
 	// single-block system message.
 	SystemAddendum string
 
-	// HasBlueprint registers the flow-control tool. True for a delegation,
+	// HasBlueprint offers the flow-control tool. True for a delegation,
 	// where the conversation executes a blueprint against a task; false for
 	// a conversation with a human in it, which has no blueprint to stop and
 	// nobody absent to leave a reason for. It must agree with the composed
@@ -910,17 +913,16 @@ func escalateMaxTokens(current int, model string) int {
 	return current * 2
 }
 
-// toolSchemas assembles the call's tool list: the seven in-jail tools, plus
-// flow control when there is a blueprint to control. Built per call from
-// immutable inputs so no mutation can leak between engagements. Within a
-// blueprint the list does not vary with the step's position — only the
-// system prompt does.
+// toolSchemas assembles the call's tool list: the seven in-jail tools, then
+// the TF tools this engagement is offered. Built per call from immutable
+// inputs so no mutation can leak between engagements. Within a blueprint the
+// list does not vary with the step's position — only the system prompt does.
 func (e *Engine) toolSchemas(params Params) []schemas.ChatTool {
 	sandboxed := SandboxTools()
-	flow := flowControlTools(params.HasBlueprint)
-	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(flow))
+	tf := tfTools(params)
+	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(tf))
 	out = append(out, sandboxed...)
-	out = append(out, flow...)
+	out = append(out, tf...)
 	return out
 }
 
