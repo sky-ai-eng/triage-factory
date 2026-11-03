@@ -199,16 +199,17 @@ func writeCheck(w http.ResponseWriter, err error) bool {
 	return false
 }
 
-// RequireOrgAdminRole checks the user is an admin of the given org.
-// Returns 403 on non-admin.
+// RequireOrgAdminRole checks the user is an admin of the given org. Its denial
+// is RequireOrgAdmin's: 403 to a member who is not an admin, 404 to a caller
+// who is not a member.
 //
 // Unlike RequireOrgAdmin the org arrives as an argument, and most callers pass
-// the request's own cursor — for those the token-scope check below is
-// trivially true, since the cursor IS the token's org. It earns its place for
-// the handful that let the CALLER name an org (the fleet placement and queue
-// reads take it from ?org=), where a token would otherwise reach an org it was
-// never sealed to just by asking for it. 404 rather than the 403 beneath it,
-// per the disclosure rule.
+// the request's own cursor — for those the token-scope check and the 404 arm
+// are trivially unreachable, since the cursor IS the token's org and one the
+// caller belongs to. They earn their place for the handful that let the CALLER
+// name an org (the fleet placement and queue reads take it from ?org=), where a
+// token would otherwise reach an org it was never sealed to just by asking for
+// it, and a session would learn that an org it is not in exists.
 func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, orgID, userID string) bool {
 	if !tokenScopeAllows(r, orgID) {
 		httpx.NotFound(w, "org")
@@ -220,10 +221,29 @@ func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, o
 		return false
 	}
 	if !isAdmin {
-		writeForbidden(w, "org admin role required")
+		az.writeNotOrgAdmin(w, r, userID, orgID)
 		return false
 	}
 	return true
+}
+
+// writeNotOrgAdmin answers a caller who is not an admin of orgID with the
+// two-valued denial the disclosure rule asks for: a caller who can see the org
+// gets 403 for the role they lack, and only a caller who cannot see it at all
+// gets 404. Answering 404 to a member reads as a bug — they can list the org
+// everywhere else in the app. The membership read runs only on this denial
+// path, so the admin path still costs one query.
+func (az *Checker) writeNotOrgAdmin(w http.ResponseWriter, r *http.Request, userID, orgID string) {
+	hasAccess, err := az.UserHasOrgAccess(r.Context(), userID, orgID)
+	if err != nil {
+		httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, orgID, err))
+		return
+	}
+	if hasAccess {
+		writeForbidden(w, "org admin role required")
+		return
+	}
+	httpx.NotFound(w, "org")
 }
 
 // OrgMemberCount returns the number of members in the org.
@@ -366,13 +386,12 @@ func tokenScopeAllows(r *http.Request, rawOrgID string) bool {
 }
 
 // sameOrgID compares two org ids as IDENTITIES rather than as strings, because
-// the two sides reach here spelled differently: the token's org is canonical
-// text out of the database, while the path or query value is whatever the
-// caller typed. uuid.Parse accepts uppercase and unhyphenated forms, and every
-// gate around this one hands such a value straight to Postgres, which equates
-// them — so a raw string compare would 404 a token on its OWN org for a request
-// a session answers 200. Anything that is not a pair of parseable uuids falls
-// back to exact equality, which is what local mode's sentinel org needs.
+// the two sides can reach here spelled differently: the token's org and the
+// local org are canonical text, while a query value RequireOrgAdminRole is
+// handed is whatever the caller typed, and uuid.Parse accepts uppercase and
+// unhyphenated forms. Postgres equates those spellings, so a raw string compare
+// would 404 a token on its OWN org for a request a session answers 200.
+// Anything that is not a pair of parseable uuids falls back to exact equality.
 func sameOrgID(a, b string) bool {
 	if a == b {
 		return true
@@ -382,19 +401,35 @@ func sameOrgID(a, b string) bool {
 	return errA == nil && errB == nil && parsedA == parsedB
 }
 
+// pathOrgID reads {org_id} from the URL path as a canonical uuid string, and
+// reports false for a value that is not a uuid.
+//
+// Canonical because the gates hand the id straight to the stores, and the
+// SQLite layer compares org ids as strings: a spelling uuid.Parse accepts
+// (uppercase, unhyphenated) would pass the gate and then be refused by the
+// store. Postgres equates the spellings, so canonicalizing changes nothing
+// there.
+func pathOrgID(r *http.Request) (string, bool) {
+	parsed, err := uuid.Parse(r.PathValue("org_id"))
+	if err != nil {
+		return "", false
+	}
+	return parsed.String(), true
+}
+
 // RequireOrgMember validates {org_id} from the URL path and checks the caller
-// is a member of that org (any role). Returns (orgID, userID, true) on success;
-// writes an error and returns ("", "", false) on failure. The read-only sibling
-// of RequireOrgAdmin.
+// is a member of that org (any role). Returns (orgID, userID, true) on success,
+// with orgID in canonical uuid form; writes an error and returns ok=false on
+// failure. The read-only sibling of RequireOrgAdmin.
 func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	rawOrgID := r.PathValue("org_id")
-	if _, err := uuid.Parse(rawOrgID); err != nil {
+	pathOrg, valid := pathOrgID(r)
+	if !valid {
 		httpx.NotFound(w, "org")
 		return
 	}
 	// Ahead of the membership probe: the caller may well be a member here and
 	// still not be able to reach the org with the credential they used.
-	if !tokenScopeAllows(r, rawOrgID) {
+	if !tokenScopeAllows(r, pathOrg) {
 		httpx.NotFound(w, "org")
 		return
 	}
@@ -406,24 +441,25 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 	}
 	userID = claims.Subject
 
-	hasAccess, err := az.UserHasOrgAccess(r.Context(), userID, rawOrgID)
+	hasAccess, err := az.UserHasOrgAccess(r.Context(), userID, pathOrg)
 	if err != nil {
-		httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, rawOrgID, err))
+		httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, pathOrg, err))
 		return
 	}
 	if !hasAccess {
 		httpx.NotFound(w, "org")
 		return
 	}
-	return rawOrgID, userID, true
+	return pathOrg, userID, true
 }
 
 // RequireOrgAdmin validates {org_id} from the URL path and checks the caller is
 // both a member and an admin of that org. Returns (orgID, userID, true) on
-// success; writes an error and returns ("", "", false) on failure.
+// success, with orgID in canonical uuid form; writes an error and returns
+// ok=false on failure.
 func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	rawOrgID := r.PathValue("org_id")
-	if _, err := uuid.Parse(rawOrgID); err != nil {
+	pathOrg, valid := pathOrgID(r)
+	if !valid {
 		httpx.NotFound(w, "org")
 		return
 	}
@@ -431,7 +467,7 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 	// path: out-of-scope is 404 whatever role the caller holds there, so the
 	// two-valued denial below never gets to disclose an org this credential
 	// cannot name.
-	if !tokenScopeAllows(r, rawOrgID) {
+	if !tokenScopeAllows(r, pathOrg) {
 		httpx.NotFound(w, "org")
 		return
 	}
@@ -443,31 +479,16 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 	}
 	userID = claims.Subject
 
-	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, rawOrgID)
+	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, pathOrg)
 	if err != nil {
-		httpx.InternalError(w, "authz", fmt.Errorf("admin check %s/%s: %w", userID, rawOrgID, err))
+		httpx.InternalError(w, "authz", fmt.Errorf("admin check %s/%s: %w", userID, pathOrg, err))
 		return
 	}
 	if !isAdmin {
-		// Two-valued denial, per the disclosure rule: a caller who can see
-		// the org gets 403 for the role they lack, and only a caller who
-		// cannot see it at all gets 404. Answering 404 to a member reads as
-		// a bug — they can list the org everywhere else in the app. The
-		// membership read only runs on the denial path, so the admin path
-		// still costs one query.
-		hasAccess, accessErr := az.UserHasOrgAccess(r.Context(), userID, rawOrgID)
-		if accessErr != nil {
-			httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, rawOrgID, accessErr))
-			return
-		}
-		if hasAccess {
-			writeForbidden(w, "org admin role required")
-			return
-		}
-		httpx.NotFound(w, "org")
+		az.writeNotOrgAdmin(w, r, userID, pathOrg)
 		return
 	}
-	return rawOrgID, userID, true
+	return pathOrg, userID, true
 }
 
 // resolveError carries whether a failed team-ID resolve should render as a 404

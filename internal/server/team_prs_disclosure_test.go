@@ -23,10 +23,10 @@ import (
 )
 
 // The disclosure half of POST /api/teams/{team_id}/prs/list, which only multi
-// mode can state: localMembership answers yes to every gate, so the two-valued
-// denial — a team outside the caller's org is 404-invisible, a team inside it
-// that they are not on answers an empty list rather than its work — needs a
-// real org graph and the app pool's RLS. Skips without Docker.
+// mode can state: localMembership answers yes to every team gate, so the
+// two-valued denial — a team outside the caller's org is 404-invisible, a team
+// inside it that they are not on answers an empty list rather than its work —
+// needs a real org graph and the app pool's RLS. Skips without Docker.
 
 type teamPRsRig struct {
 	h        *pgtest.Harness

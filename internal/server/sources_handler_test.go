@@ -66,8 +66,8 @@ func TestOrgSources_LocalOmitsWhatCannotExist(t *testing.T) {
 // settings read's member gate, so a plain member reads it and every denial,
 // including the 404 that hides a foreign org, matches the settings read.
 func TestOrgSources_DeniesExactlyLikeOrgSettings(t *testing.T) {
-	// Multi mode, because that is where the gate has anything to do: local
-	// mode is one tenant and RequireOrgMember admits every caller.
+	// Multi mode, because that is where the gate has a plain member to admit:
+	// local mode has one org and one user, who is its admin.
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 

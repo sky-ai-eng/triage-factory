@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -178,9 +179,17 @@ func TestOrgTeamsList_Local(t *testing.T) {
 	if rec := l.orgList(t, runmode.LocalDefaultOrgID, map[string]any{"page_size": 1, "page_token": own.NextPageToken}); rec.Code != http.StatusBadRequest {
 		t.Errorf("own list's token on the org list = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	// A path segment that names no org is not found.
-	if rec := l.orgList(t, "not-an-org", map[string]any{}); rec.Code != http.StatusNotFound {
-		t.Errorf("a malformed org = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	// A path segment that names no org is not found, and so is a well-formed
+	// org that is not the local one.
+	for _, org := range []string{"not-an-org", "00000000-0000-0000-0000-000000000099"} {
+		if rec := l.orgList(t, org, map[string]any{}); rec.Code != http.StatusNotFound {
+			t.Errorf("org %q = %d, want 404; body=%s", org, rec.Code, rec.Body.String())
+		}
+	}
+	// The local org spelled without hyphens is the local org.
+	unhyphenated := strings.ReplaceAll(runmode.LocalDefaultOrgID, "-", "")
+	if rec := l.orgList(t, unhyphenated, map[string]any{}); rec.Code != http.StatusOK {
+		t.Errorf("org %q = %d, want 200; body=%s", unhyphenated, rec.Code, rec.Body.String())
 	}
 }
 

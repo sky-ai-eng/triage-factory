@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -191,9 +190,6 @@ func (th *Handler) handleOrgTeamsList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The path spells the org as the caller typed it; the rows carry its
-	// canonical form. RequireOrgMember has parsed it.
-	orgID = uuid.MustParse(orgID).String()
 
 	var req teamListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
