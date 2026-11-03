@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.18.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.18.0...v1.18.1) (2026-11-03)
+
+
+### Features
+
+* **observability:** export how many orgs have GitHub, Jira and Linear connected (TFAC-1311) ([#1463](https://github.com/sky-ai-eng/triage-factory/issues/1463)) ([e61eae2](https://github.com/sky-ai-eng/triage-factory/commit/e61eae2d72be03de3512ff43d537597d2c931f8b))
+
+
+### Bug Fixes
+
+* **agentloop, agentproc:** time each tool row from when its call ran (TFAC-1331) ([#1468](https://github.com/sky-ai-eng/triage-factory/issues/1468)) ([52790fd](https://github.com/sky-ai-eng/triage-factory/commit/52790fdc7601b5da3c3cf0bf8ee618db2098fc9a))
+* **agentproc:** turn off the login's claude.ai connectors unless the team allows them (TFAC-1303) ([#1466](https://github.com/sky-ai-eng/triage-factory/issues/1466)) ([bace831](https://github.com/sky-ai-eng/triage-factory/commit/bace831668010ea79ea7cdfa4ce77fd27c2fcd38))
+* **authz:** answer a foreign org 404 in local mode, and hand stores the canonical org id (TFAC-1325) ([#1467](https://github.com/sky-ai-eng/triage-factory/issues/1467)) ([156f443](https://github.com/sky-ai-eng/triage-factory/commit/156f443cd4cd75cb8574828e642363f81b359c67))
+* **notifications:** dismiss many rows in one call (TFAC-1327) ([#1472](https://github.com/sky-ai-eng/triage-factory/issues/1472)) ([c8006ac](https://github.com/sky-ai-eng/triage-factory/commit/c8006ace7d76930d12af20427dbd684259374802))
+* **notifications:** sort the lists by resolved_at, and read the last resolution as one row (TFAC-1328) ([#1465](https://github.com/sky-ai-eng/triage-factory/issues/1465)) ([1853480](https://github.com/sky-ai-eng/triage-factory/commit/1853480236bed7cb0a87a5f318c5ae6a356fefc3))
+
 ## [1.18.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.17.0...v1.18.0) (2026-11-02)
 
 
