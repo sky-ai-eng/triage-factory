@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ActivityFeed from './ActivityFeed'
-import type { ActivityAction, ActivityObject } from '../types'
-import { listBody } from '../test/apiResponse'
+import type { ActivityAction, ActivityFacet, ActivityObject } from '../types'
+import { jsonBody, listBody } from '../test/apiResponse'
 
 const action = (over: Partial<ActivityAction>): ActivityAction => ({
   id: 'x1',
@@ -31,13 +31,34 @@ const object = (over: Partial<ActivityObject>): ActivityObject => ({
   ...over,
 })
 
-// stubByLens answers the actions list route with action rows and the artifacts
-// list route with object rows, recording every request. The two lenses are two
-// routes, so the stub branches on the path: a request can only reach the rows
-// whose shape it can render.
-function stubByLens(actionsRows: ActivityAction[], objectsRows: ActivityObject[] = []) {
+interface StubFacets {
+  teams?: ActivityFacet[]
+  actors?: ActivityFacet[]
+}
+
+// facetsReply is what a facets node answers: the actions node carries both
+// cuts, the artifacts node by_team alone.
+function facetsReply(url: string, f: StubFacets) {
+  const teams = f.teams ?? []
+  return url.includes('/artifacts/facets')
+    ? { by_team: teams }
+    : { by_actor: f.actors ?? [], by_team: teams }
+}
+
+// stubByLens answers the actions list route with action rows, the artifacts
+// list route with object rows, and each facets node with facets, recording
+// every request. The lenses are separate routes, so the stub branches on the
+// path: a request can only reach the rows whose shape it can render.
+function stubByLens(
+  actionsRows: ActivityAction[],
+  objectsRows: ActivityObject[] = [],
+  facets: StubFacets = {},
+) {
   const fetchMock = vi.fn().mockImplementation((url: string) => {
-    const rows: (ActivityAction | ActivityObject)[] = String(url).includes('/artifacts/list')
+    const u = String(url)
+    if (u.endsWith('/facets'))
+      return Promise.resolve({ ok: true, ...jsonBody(facetsReply(u, facets)) })
+    const rows: (ActivityAction | ActivityObject)[] = u.includes('/artifacts/list')
       ? objectsRows
       : actionsRows
     return Promise.resolve({ ok: true, ...listBody(rows) })
@@ -51,10 +72,19 @@ function calledUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
 }
 
 // calledBodies parses each recorded request's JSON body — the filters live
-// there now, not in a query string.
-function calledBodies(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
-  return fetchMock.mock.calls.map((c) => JSON.parse(String((c[1] as RequestInit)?.body ?? '{}')))
+// there now, not in a query string. suffix keeps the requests to one kind of
+// route ('/list' or '/facets').
+function calledBodies(fetchMock: ReturnType<typeof vi.fn>, suffix = ''): Record<string, unknown>[] {
+  return fetchMock.mock.calls
+    .filter((c) => String(c[0]).endsWith(suffix))
+    .map((c) => JSON.parse(String((c[1] as RequestInit)?.body ?? '{}')))
 }
+
+const facet = (value: string, count: number, name: string): ActivityFacet => ({
+  value,
+  count,
+  name,
+})
 
 describe('ActivityFeed', () => {
   beforeEach(() => vi.restoreAllMocks())
@@ -182,7 +212,11 @@ describe('ActivityFeed', () => {
     const fetchMock = vi.fn().mockImplementation((url: string) =>
       Promise.resolve({
         ok: true,
-        ...(String(url).includes('/artifacts/list') ? pages.shift() : listBody([])),
+        ...(String(url).endsWith('/facets')
+          ? jsonBody(facetsReply(String(url), {}))
+          : String(url).includes('/artifacts/list')
+            ? pages.shift()
+            : listBody([])),
       }),
     )
     vi.stubGlobal('fetch', fetchMock)
@@ -231,7 +265,7 @@ describe('ActivityFeed', () => {
   })
 
   it('org Objects feed tags each object with every team that changed it', async () => {
-    stubByLens(
+    const fetchMock = stubByLens(
       [],
       [
         object({
@@ -255,6 +289,7 @@ describe('ActivityFeed', () => {
           teams: [{ id: 't2', name: 'Growth' }],
         }),
       ],
+      { teams: [facet('t2', 2, 'Growth'), facet('t1', 1, 'Platform')] },
     )
 
     render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
@@ -268,10 +303,27 @@ describe('ActivityFeed', () => {
     expect(branch?.textContent).toContain('Growth')
     expect(branch?.textContent).toContain('2 runs')
 
-    // Scoping to a team keeps every object that team changed, without a refetch.
+    // The team options are the artifacts facets node's, in its order.
+    await waitFor(() =>
+      expect(
+        Array.from((screen.getByLabelText('team') as HTMLSelectElement).options).map(
+          (o) => o.textContent,
+        ),
+      ).toEqual(['All teams', 'Growth', 'Platform']),
+    )
+    expect(calledUrls(fetchMock)).toContain('/api/orgs/o1/usage/artifacts/facets')
+
+    // Picking a team is a read: the list and the facets both carry team_id,
+    // and the rows the server answers all render, a row naming only another
+    // team included.
     fireEvent.change(screen.getByLabelText('team'), { target: { value: 't1' } })
+    await waitFor(() =>
+      expect(calledBodies(fetchMock, '/artifacts/list').some((b) => b.team_id === 't1')).toBe(true),
+    )
+    expect(calledBodies(fetchMock, '/artifacts/facets').some((b) => b.team_id === 't1')).toBe(true)
+    await waitFor(() => expect(screen.getByLabelText('team')).toHaveValue('t1'))
     expect(screen.getByText('org/repo')).toBeInTheDocument()
-    expect(screen.queryByText('SKY-1')).not.toBeInTheDocument()
+    expect(screen.getByText('SKY-1')).toBeInTheDocument()
   })
 
   it('sends the Objects filters as the artifacts route spells them', async () => {
@@ -353,44 +405,51 @@ describe('ActivityFeed', () => {
     expect(calledBodies(fetchMock).every((b) => !('object_kind' in b))).toBe(true)
   })
 
-  it('org Actions feed shows the owning team + actor, and narrows in-memory by team', async () => {
-    stubByLens([
-      action({
-        id: 'a',
-        team_id: 't1',
-        team_name: 'Platform',
-        actor_user_id: 'u1',
-        actor_name: 'Ada',
-        target: 'org/repo#1',
-      }),
-      action({
-        id: 'b',
-        team_id: 't2',
-        team_name: 'Growth',
-        actor_user_id: 'u2',
-        actor_name: 'Bo',
-        performed_by: 'person',
-        action: 'pr_marked_ready',
-        target: 'org/repo#2',
-      }),
-      action({
-        id: 'c',
-        team_id: 't2',
-        team_name: 'Growth',
-        actor_user_id: 'u3',
-        performed_by: 'system',
-        action: 'issue_transitioned',
-        provider: 'jira',
-        target: 'SKY-3',
-      }),
-      action({
-        id: 'd',
-        team_id: 't1',
-        team_name: 'Platform',
-        actor_user_id: 'u4',
-        target: 'org/repo#4',
-      }),
-    ])
+  it('org Actions feed shows the owning team + actor, and filters by team on the server', async () => {
+    const fetchMock = stubByLens(
+      [
+        action({
+          id: 'a',
+          team_id: 't1',
+          team_name: 'Platform',
+          actor_user_id: 'u1',
+          actor_name: 'Ada',
+          target: 'org/repo#1',
+        }),
+        action({
+          id: 'b',
+          team_id: 't2',
+          team_name: 'Growth',
+          actor_user_id: 'u2',
+          actor_name: 'Bo',
+          performed_by: 'person',
+          action: 'pr_marked_ready',
+          target: 'org/repo#2',
+        }),
+        action({
+          id: 'c',
+          team_id: 't2',
+          team_name: 'Growth',
+          actor_user_id: 'u3',
+          performed_by: 'system',
+          action: 'issue_transitioned',
+          provider: 'jira',
+          target: 'SKY-3',
+        }),
+        action({
+          id: 'd',
+          team_id: 't1',
+          team_name: 'Platform',
+          actor_user_id: 'u4',
+          target: 'org/repo#4',
+        }),
+      ],
+      [],
+      {
+        teams: [facet('t2', 2, 'Growth'), facet('t1', 2, 'Platform')],
+        actors: [facet('u1', 1, 'Ada'), facet('u2', 1, 'Bo')],
+      },
+    )
 
     render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
 
@@ -409,10 +468,58 @@ describe('ActivityFeed', () => {
     // authorized it without naming one.
     expect(screen.getByTitle('Agent action, authorized by a person').textContent).toBe('agent')
 
-    // Scope to team t1 (client-side) — the t2 row drops without a refetch.
+    // Picking a team sends team_id to the list and the facets; the feed
+    // renders what the server answers, so the stub's t2 rows stay on screen.
+    await waitFor(() => expect(screen.getByLabelText('team')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('team'), { target: { value: 't1' } })
+    await waitFor(() =>
+      expect(calledBodies(fetchMock, '/actions/list').some((b) => b.team_id === 't1')).toBe(true),
+    )
+    expect(calledBodies(fetchMock, '/actions/facets').some((b) => b.team_id === 't1')).toBe(true)
+    await waitFor(() => expect(screen.getByLabelText('team')).toHaveValue('t1'))
     expect(screen.getByText('org/repo#1')).toBeInTheDocument()
-    expect(screen.queryByText('org/repo#2')).not.toBeInTheDocument()
+    expect(screen.getByText('org/repo#2')).toBeInTheDocument()
+
+    // The actor options are the facets node's, and a pick is the list's
+    // `actor` field.
+    fireEvent.change(screen.getByLabelText('actor'), { target: { value: 'u2' } })
+    await waitFor(() =>
+      expect(
+        calledBodies(fetchMock, '/actions/list').some(
+          (b) => b.actor === 'u2' && b.team_id === 't1',
+        ),
+      ).toBe(true),
+    )
+    expect(screen.getByText('org/repo#1')).toBeInTheDocument()
+  })
+
+  it('team Actions feed offers its actors from the team facets node, and never sends team_id', async () => {
+    const fetchMock = stubByLens(
+      [action({ id: 'a', actor_user_id: 'u1', target: 'org/repo#1' })],
+      [],
+      {
+        teams: [facet('t1', 1, 'Platform')],
+        actors: [facet('u1', 1, 'Ada')],
+      },
+    )
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
+    await screen.findByText('org/repo#1')
+    await waitFor(() => expect(screen.getByLabelText('actor')).toBeInTheDocument())
+    expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/actions/facets')
+    // The team feed is one team: no team select.
+    expect(screen.queryByLabelText('team')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('actor'), { target: { value: 'u1' } })
+    await waitFor(() =>
+      expect(calledBodies(fetchMock, '/actions/list').some((b) => b.actor === 'u1')).toBe(true),
+    )
+    expect(calledBodies(fetchMock).every((b) => !('team_id' in b))).toBe(true)
+    // Switching lens drops the actor: the artifacts route has no such field.
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+    await waitFor(() =>
+      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/artifacts/list'),
+    )
+    expect(calledBodies(fetchMock, '/artifacts/list').every((b) => !('actor' in b))).toBe(true)
   })
 
   it('pages with "load more", sending the server\'s token back for the next page', async () => {
@@ -420,10 +527,15 @@ describe('ActivityFeed', () => {
       action({ id: `p1-${i}`, target: `org/repo#${i}` }),
     )
     const page2 = [action({ id: 'p2-0', target: 'org/repo#999' })]
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, ...listBody(page1, 'tok-2', 51) })
-      .mockResolvedValueOnce({ ok: true, ...listBody(page2, '', 51) })
+    const pages = [listBody(page1, 'tok-2', 51), listBody(page2, '', 51)]
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        ...(String(url).endsWith('/facets')
+          ? jsonBody(facetsReply(String(url), {}))
+          : pages.shift()),
+      }),
+    )
     vi.stubGlobal('fetch', fetchMock)
 
     render(<ActivityFeed basePath="/api/teams/t1/usage" />)

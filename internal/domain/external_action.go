@@ -575,11 +575,14 @@ type ExternalActionListOpts struct {
 	// query doesn't, and the page comes back empty. Limit and Offset are
 	// ignored. Mirrors db.ListOpts.CountOnly (the explicit page_size: 0 request).
 	CountOnly bool
-	// Provider / Action / ActorUserID are optional exact-match filters on the
-	// matching column. Empty means no filter on that column.
+	// Provider / Action / ActorUserID / TeamID are optional exact-match
+	// filters on the matching column. Empty means no filter on that column.
+	// ActorUserID and TeamID are compared as stored, so a caller passes the
+	// canonical id the rows carry.
 	Provider    string
 	Action      string
 	ActorUserID string
+	TeamID      string
 	// ObjectID keeps the rows of the artifact whose ObjectID equals it: the
 	// rows naming that object that the artifact reads group (performed by one
 	// of ArtifactPerformers, of an action that can name an object), so TF's

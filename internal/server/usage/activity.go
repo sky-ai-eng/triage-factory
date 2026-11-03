@@ -3,12 +3,11 @@ package usage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -41,7 +40,11 @@ import (
 //     history (team admin OR org admin).
 //   - POST /api/orgs/{org_id}/usage/{artifacts,actions}/list — every team's
 //     history (org admin), the System cross-team read; items carry their teams
-//     (+ actor_name for actions).
+//     (+ actor_name for actions), and team_id narrows to one team's rows.
+//
+// Beside each list, at both scopes and behind the same gates, a facets node
+// (…/{artifacts,actions}/facets) answers the teams and people its filters
+// offer and how many rows carry each.
 //
 // Unlicensed builds (local mode included) 404, agreeing with the FE
 // useEntitlements gate that hides the surface entirely.
@@ -110,10 +113,22 @@ func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliver
 	return out
 }
 
-// artifactActivityListRequest is the body of the artifacts feeds. The filters
-// select ledger rows (db.ArtifactListOpts): Since / Until bound occurred_at to
-// the half-open window [since, until), RFC3339 or YYYY-MM-DD, and both default
-// to UNBOUNDED, since the feed is a full history, not a calendar month.
+// The artifacts feeds' bodies. The filters select ledger rows
+// (db.ArtifactListOpts): Since / Until bound occurred_at to the half-open
+// window [since, until), RFC3339 or YYYY-MM-DD, and both default to
+// UNBOUNDED, since the feed is a full history, not a calendar month. The org
+// feed adds team_id, the rows one team's runs wrote; the team feed names its
+// team in the path, so a team_id in its body is an unknown field.
+//
+// Each body spells its fields out rather than embedding one shared struct:
+// encoding/json names a type fault inside an embedded struct by the struct's
+// Go name, which would reach the error's field. They meet in
+// artifactActivityFilters.
+// TODO(TFAC-1255): embed one shared filter struct once the decode error
+// names the JSON field.
+
+// artifactActivityListRequest is the body of POST
+// /api/teams/{team_id}/usage/artifacts/list.
 type artifactActivityListRequest struct {
 	Provider   string `json:"provider"`
 	ObjectKind string `json:"object_kind"`
@@ -123,20 +138,81 @@ type artifactActivityListRequest struct {
 	httpx.PageRequest
 }
 
+// orgArtifactActivityListRequest is the body of POST
+// /api/orgs/{org_id}/usage/artifacts/list.
+type orgArtifactActivityListRequest struct {
+	Provider   string `json:"provider"`
+	ObjectKind string `json:"object_kind"`
+	TeamID     string `json:"team_id"`
+	Since      string `json:"since"`
+	Until      string `json:"until"`
+
+	httpx.PageRequest
+}
+
+// artifactActivityFacetsRequest is the body of POST
+// /api/teams/{team_id}/usage/artifacts/facets: the team list's filters, and
+// the paging pair declared only to be refused (refuseFacetPaging).
+type artifactActivityFacetsRequest struct {
+	Provider   string `json:"provider"`
+	ObjectKind string `json:"object_kind"`
+	Since      string `json:"since"`
+	Until      string `json:"until"`
+
+	PageSize  json.RawMessage `json:"page_size"`
+	PageToken json.RawMessage `json:"page_token"`
+}
+
+// orgArtifactActivityFacetsRequest is the body of POST
+// /api/orgs/{org_id}/usage/artifacts/facets: the org list's filters.
+type orgArtifactActivityFacetsRequest struct {
+	Provider   string `json:"provider"`
+	ObjectKind string `json:"object_kind"`
+	TeamID     string `json:"team_id"`
+	Since      string `json:"since"`
+	Until      string `json:"until"`
+
+	PageSize  json.RawMessage `json:"page_size"`
+	PageToken json.RawMessage `json:"page_token"`
+}
+
+// artifactActivityFilters is the artifacts filters as any of the four bodies
+// sent them, before validation. TeamID is empty on a team-scoped body.
+type artifactActivityFilters struct {
+	Provider, ObjectKind, TeamID, Since, Until string
+}
+
 // resolveArtifactActivityFilters validates the body's filters into the store's
 // opts. Both vocabularies are closed: an unknown value is a 400 naming the
 // field, never a filter that matches nothing and reads as "the bot did
 // nothing".
-func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityListRequest) db.ArtifactListOpts {
+func resolveArtifactActivityFilters(v *httpx.Validation, f artifactActivityFilters) db.ArtifactListOpts {
 	opts := db.ArtifactListOpts{
-		Provider:   resolveActivityProvider(v, req.Provider),
-		ObjectKind: req.ObjectKind,
+		Provider:   resolveActivityProvider(v, f.Provider),
+		ObjectKind: f.ObjectKind,
+		TeamID:     f.TeamID,
 	}
 	if opts.ObjectKind != "" && !slices.Contains(domain.ObjectKinds(), opts.ObjectKind) {
 		v.Invalid("object_kind", "must be one of: "+strings.Join(domain.ObjectKinds(), ", "))
 	}
-	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)
+	httpx.CanonicalIDFilterField(v, "team_id", opts.TeamID, "team")
+	opts.Since, opts.Until = resolveActivityWindow(v, f.Since, f.Until)
 	return opts
+}
+
+// refuseFacetPaging refuses the paging pair on a facets body. The fields are
+// declared rather than left to strict decoding's unknown-field fault because
+// each is a real field of the sibling list: a caller sending one has misread
+// what the node answers rather than mistyped a name. json.RawMessage, so
+// presence is what is refused, whatever the value.
+func refuseFacetPaging(v *httpx.Validation, pageSize, pageToken json.RawMessage) {
+	const pages = "%s is not accepted: the facets are one bounded answer over the scope's teams and people, not a page"
+	if pageSize != nil {
+		v.Invalid("page_size", fmt.Sprintf(pages, "page_size"))
+	}
+	if pageToken != nil {
+		v.Invalid("page_token", fmt.Sprintf(pages, "page_token"))
+	}
 }
 
 // resolveActivityProvider validates both feeds' provider filter against
@@ -179,7 +255,9 @@ func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var v httpx.Validation
-	opts := resolveArtifactActivityFilters(&v, req)
+	opts := resolveArtifactActivityFilters(&v, artifactActivityFilters{
+		Provider: req.Provider, ObjectKind: req.ObjectKind, Since: req.Since, Until: req.Until,
+	})
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -219,7 +297,8 @@ func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Reques
 // the latest action on each first. Gate: FeatureGovernance AND org admin — a
 // cross-team read, so the ledger and the deliverables are both the System
 // reads on the admin pool. Each item names its teams, resolved through
-// Teams.GetSystem.
+// Teams.GetSystem. team_id keeps the rows one team's runs wrote, so an item
+// then names that team alone and counts its runs and actions.
 //
 // POST /api/orgs/{org_id}/usage/artifacts/list
 func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -227,12 +306,14 @@ func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var req artifactActivityListRequest
+	var req orgArtifactActivityListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	opts := resolveArtifactActivityFilters(&v, req)
+	opts := resolveArtifactActivityFilters(&v, artifactActivityFilters{
+		Provider: req.Provider, ObjectKind: req.ObjectKind, TeamID: req.TeamID, Since: req.Since, Until: req.Until,
+	})
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -278,6 +359,227 @@ func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request
 		out[i] = orgObjectActivityJSON{objectActivityJSON: toObjectActivityJSON(a, deliverables), Teams: teams}
 	}
 	httpx.WriteList(w, page, out, total)
+}
+
+// --- The activity feeds' facets nodes ---
+//
+// Each list has a facets node beside it at the same scope, answering the
+// values its select filters offer and how many rows carry each. A cut is
+// computed under the list's filters except its own, so by_team still offers
+// every team while one is selected, and a client cannot derive the set from
+// the list either: it holds one page of a filtered query. No paging and no
+// total: each cut is bounded by the scope's teams or people. The gates are the
+// list's, and the same node name answers the same cuts at both scopes (the
+// team scope's by_team is its one team).
+
+// activityFacetJSON is one value of an activity facets cut: the id the list's
+// filter takes, how many rows carry it, and the name the list's rows already
+// show for it (team_name, actor_name), so a client can label the option with
+// nothing the list does not already disclose. Name is empty for a team or a
+// user whose row is gone.
+type activityFacetJSON struct {
+	httpx.FacetJSON
+	Name string `json:"name"`
+}
+
+// artifactActivityFacetsJSON is the artifacts facets node's fixed schema:
+// by_team counts the objects each team's runs changed.
+type artifactActivityFacetsJSON struct {
+	ByTeam []activityFacetJSON `json:"by_team"`
+}
+
+// actionActivityFacetsJSON is the actions facets node's fixed schema: by_actor
+// counts the rows each person performed or authorized, by_team the rows each
+// team holds.
+type actionActivityFacetsJSON struct {
+	ByActor []activityFacetJSON `json:"by_actor"`
+	ByTeam  []activityFacetJSON `json:"by_team"`
+}
+
+// namedFacets renders a cut with each value's name, ordered by name the way a
+// select lists its options (case-folded, then by id), with the values that
+// have no name last. Never nil: a cut nothing matched is `[]`.
+func namedFacets(in []db.Facet, names map[string]string) []activityFacetJSON {
+	out := make([]activityFacetJSON, len(in))
+	for i, f := range in {
+		out[i] = activityFacetJSON{FacetJSON: httpx.FacetJSON{Value: f.Value, Count: f.Count}, Name: names[f.Value]}
+	}
+	slices.SortStableFunc(out, func(a, b activityFacetJSON) int {
+		if (a.Name == "") != (b.Name == "") {
+			if a.Name == "" {
+				return 1
+			}
+			return -1
+		}
+		if c := strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Value, b.Value)
+	})
+	return out
+}
+
+// facetValues is the values of a cut, for the name resolvers.
+func facetValues(in []db.Facet) []string {
+	out := make([]string, len(in))
+	for i, f := range in {
+		out[i] = f.Value
+	}
+	return out
+}
+
+// handleUsageTeamArtifactFacets answers the team artifacts feed's facets.
+// Same gates and pools as the list.
+//
+// POST /api/teams/{team_id}/usage/artifacts/facets
+func (h *Handler) handleUsageTeamArtifactFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
+	if !ok {
+		return
+	}
+	var req artifactActivityFacetsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	refuseFacetPaging(&v, req.PageSize, req.PageToken)
+	opts := resolveArtifactActivityFilters(&v, artifactActivityFilters{
+		Provider: req.Provider, ObjectKind: req.ObjectKind, Since: req.Since, Until: req.Until,
+	})
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	h.writeArtifactFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ArtifactFacets, error) {
+		return tx.Artifacts.FacetsByTeam(r.Context(), orgID, teamID, opts)
+	})
+}
+
+// handleUsageOrgArtifactFacets answers the org artifacts feed's facets. Same
+// gates and pools as the list.
+//
+// POST /api/orgs/{org_id}/usage/artifacts/facets
+func (h *Handler) handleUsageOrgArtifactFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req orgArtifactActivityFacetsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	refuseFacetPaging(&v, req.PageSize, req.PageToken)
+	opts := resolveArtifactActivityFilters(&v, artifactActivityFilters{
+		Provider: req.Provider, ObjectKind: req.ObjectKind, TeamID: req.TeamID, Since: req.Since, Until: req.Until,
+	})
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	h.writeArtifactFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ArtifactFacets, error) {
+		return tx.Artifacts.FacetsByOrgSystem(r.Context(), orgID, opts)
+	})
+}
+
+// writeArtifactFacets runs read under the caller's claims, names the teams
+// the way the org list names them (Teams.GetSystem), and writes the cuts.
+func (h *Handler) writeArtifactFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, read func(db.TxStores) (db.ArtifactFacets, error)) {
+	var (
+		facets    db.ArtifactFacets
+		teamNames map[string]string
+	)
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if facets, e = read(tx); e != nil {
+			return e
+		}
+		teamNames, e = resolveTeamNames(r.Context(), tx, orgID, facetValues(facets.ByTeam))
+		return e
+	}); err != nil {
+		httpx.InternalError(w, "usage", err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, artifactActivityFacetsJSON{ByTeam: namedFacets(facets.ByTeam, teamNames)})
+}
+
+// handleUsageTeamActionFacets answers the team actions feed's facets. Same
+// gates and pools as the list.
+//
+// POST /api/teams/{team_id}/usage/actions/facets
+func (h *Handler) handleUsageTeamActionFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
+	if !ok {
+		return
+	}
+	var req actionActivityFacetsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	refuseFacetPaging(&v, req.PageSize, req.PageToken)
+	opts := resolveActionActivityFilters(&v, actionActivityFilters{
+		Provider: req.Provider, Action: req.Action, Actor: req.Actor, Since: req.Since, Until: req.Until,
+	})
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	h.writeActionFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ExternalActionFacets, error) {
+		return tx.ExternalActions.FacetsByTeam(r.Context(), orgID, teamID, opts)
+	})
+}
+
+// handleUsageOrgActionFacets answers the org actions feed's facets. Same
+// gates and pools as the list.
+//
+// POST /api/orgs/{org_id}/usage/actions/facets
+func (h *Handler) handleUsageOrgActionFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req orgActionActivityFacetsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	refuseFacetPaging(&v, req.PageSize, req.PageToken)
+	opts := resolveActionActivityFilters(&v, actionActivityFilters{
+		Provider: req.Provider, Action: req.Action, Actor: req.Actor, TeamID: req.TeamID, Since: req.Since, Until: req.Until,
+	})
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	h.writeActionFacets(w, r, orgID, userID, func(tx db.TxStores) (db.ExternalActionFacets, error) {
+		return tx.ExternalActions.FacetsByOrgSystem(r.Context(), orgID, opts)
+	})
+}
+
+// writeActionFacets runs read under the caller's claims, names the teams and
+// people the way the lists name them (Teams.GetSystem, Users.GetProfile), and
+// writes the cuts.
+func (h *Handler) writeActionFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, read func(db.TxStores) (db.ExternalActionFacets, error)) {
+	var (
+		facets     db.ExternalActionFacets
+		teamNames  map[string]string
+		actorNames map[string]string
+	)
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if facets, e = read(tx); e != nil {
+			return e
+		}
+		if teamNames, e = resolveTeamNames(r.Context(), tx, orgID, facetValues(facets.ByTeam)); e != nil {
+			return e
+		}
+		actorNames, e = resolveActorNames(r.Context(), tx, facetValues(facets.ByActor))
+		return e
+	}); err != nil {
+		httpx.InternalError(w, "usage", err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, actionActivityFacetsJSON{
+		ByActor: namedFacets(facets.ByActor, actorNames),
+		ByTeam:  namedFacets(facets.ByTeam, teamNames),
+	})
 }
 
 // resolveActivityWindow parses the shared half-open [since, until) filter. Each
@@ -460,40 +762,88 @@ func ToActionJSON(a domain.ExternalAction) ActionJSON {
 	}
 }
 
-// actionActivityListRequest is the body of the action-log feeds. It shares
-// provider and the time window with artifactActivityListRequest but filters on
-// the action discriminator and the actor user id instead of the object kind —
-// the two resources' filter vocabularies are genuinely different, which is why
-// they are two routes rather than one with a lens selector.
+// The action-log feeds' bodies. They share provider and the time window with
+// the artifacts bodies but filter on the action discriminator and the actor
+// user id instead of the object kind — the two resources' filter vocabularies
+// are genuinely different, which is why they are two routes rather than one
+// with a lens selector. Since / Until bound occurred_at (not created_at) to
+// [since, until). actor is the actor_user_id the rows carry. The org feed adds
+// team_id; the team feed names its team in the path. The four bodies spell
+// their fields out for the reason the artifacts bodies do, and meet in
+// actionActivityFilters.
+
+// actionActivityListRequest is the body of POST
+// /api/teams/{team_id}/usage/actions/list.
 type actionActivityListRequest struct {
 	Provider string `json:"provider"`
 	Action   string `json:"action"`
 	Actor    string `json:"actor"`
-	// Since / Until bound occurred_at (not created_at) to [since, until).
-	Since string `json:"since"`
-	Until string `json:"until"`
+	Since    string `json:"since"`
+	Until    string `json:"until"`
 
 	httpx.PageRequest
 }
 
-func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListRequest) domain.ExternalActionListOpts {
+// orgActionActivityListRequest is the body of POST
+// /api/orgs/{org_id}/usage/actions/list.
+type orgActionActivityListRequest struct {
+	Provider string `json:"provider"`
+	Action   string `json:"action"`
+	Actor    string `json:"actor"`
+	TeamID   string `json:"team_id"`
+	Since    string `json:"since"`
+	Until    string `json:"until"`
+
+	httpx.PageRequest
+}
+
+// actionActivityFacetsRequest is the body of POST
+// /api/teams/{team_id}/usage/actions/facets: the team list's filters, and the
+// paging pair declared only to be refused (refuseFacetPaging).
+type actionActivityFacetsRequest struct {
+	Provider string `json:"provider"`
+	Action   string `json:"action"`
+	Actor    string `json:"actor"`
+	Since    string `json:"since"`
+	Until    string `json:"until"`
+
+	PageSize  json.RawMessage `json:"page_size"`
+	PageToken json.RawMessage `json:"page_token"`
+}
+
+// orgActionActivityFacetsRequest is the body of POST
+// /api/orgs/{org_id}/usage/actions/facets: the org list's filters.
+type orgActionActivityFacetsRequest struct {
+	Provider string `json:"provider"`
+	Action   string `json:"action"`
+	Actor    string `json:"actor"`
+	TeamID   string `json:"team_id"`
+	Since    string `json:"since"`
+	Until    string `json:"until"`
+
+	PageSize  json.RawMessage `json:"page_size"`
+	PageToken json.RawMessage `json:"page_token"`
+}
+
+// actionActivityFilters is the actions filters as any of the four bodies sent
+// them, before validation. TeamID is empty on a team-scoped body.
+type actionActivityFilters struct {
+	Provider, Action, Actor, TeamID, Since, Until string
+}
+
+func resolveActionActivityFilters(v *httpx.Validation, f actionActivityFilters) domain.ExternalActionListOpts {
 	opts := domain.ExternalActionListOpts{
-		Provider:    resolveActivityProvider(v, req.Provider),
-		Action:      req.Action,
-		ActorUserID: req.Actor,
+		Provider:    resolveActivityProvider(v, f.Provider),
+		Action:      f.Action,
+		ActorUserID: f.Actor,
+		TeamID:      f.TeamID,
 	}
 	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
 		v.Invalid("action", "not a known action type")
 	}
-	// The id is bound as sent and stored ids are canonical, so any other
-	// spelling uuid.Parse accepts (uppercase, braces, a urn: prefix) would
-	// match nothing.
-	if opts.ActorUserID != "" {
-		if parsed, err := uuid.Parse(opts.ActorUserID); err != nil || parsed.String() != opts.ActorUserID {
-			v.Invalid("actor", "must be a user id in canonical form")
-		}
-	}
-	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)
+	httpx.CanonicalIDFilterField(v, "actor", opts.ActorUserID, "user")
+	httpx.CanonicalIDFilterField(v, "team_id", opts.TeamID, "team")
+	opts.Since, opts.Until = resolveActivityWindow(v, f.Since, f.Until)
 	return opts
 }
 
@@ -516,7 +866,9 @@ func (h *Handler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var v httpx.Validation
-	opts := resolveActionActivityFilters(&v, req)
+	opts := resolveActionActivityFilters(&v, actionActivityFilters{
+		Provider: req.Provider, Action: req.Action, Actor: req.Actor, Since: req.Since, Until: req.Until,
+	})
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -554,7 +906,7 @@ func (h *Handler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request)
 // admin pool) because crossing teams is the point, then resolves each row's
 // team name (Teams.GetSystem, admin pool) and human actor's display name
 // (Users.GetProfile, org-scoped under the caller's claims) so the feed reads
-// "team X's bot did Y, authorized by Z".
+// "team X's bot did Y, authorized by Z". team_id keeps one team's rows.
 //
 // POST /api/orgs/{org_id}/usage/actions/list
 func (h *Handler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) {
@@ -563,12 +915,14 @@ func (h *Handler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req actionActivityListRequest
+	var req orgActionActivityListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	opts := resolveActionActivityFilters(&v, req)
+	opts := resolveActionActivityFilters(&v, actionActivityFilters{
+		Provider: req.Provider, Action: req.Action, Actor: req.Actor, TeamID: req.TeamID, Since: req.Since, Until: req.Until,
+	})
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -645,25 +999,36 @@ func resolveTeamNames(ctx context.Context, tx db.TxStores, orgID string, teamIDs
 	return names, nil
 }
 
-// resolveActionActorNames maps each distinct human actor to a display name via the
-// app pool (Users.GetProfile, org-scoped RLS — a co-member's profile is readable,
-// the same path the spend by-member breakdown uses). System actions (empty
-// actor_user_id — event-triggered bot runs, the Jira mirror) carry no actor and
-// are skipped. N+1 over the small distinct-id set is fine for v1.
+// resolveActionActorNames maps each distinct human actor in the action set to
+// a display name (resolveActorNames). System actions (empty actor_user_id —
+// event-triggered bot runs, the Jira mirror) carry no actor and are skipped.
 func resolveActionActorNames(ctx context.Context, tx db.TxStores, actions []domain.ExternalAction) (map[string]string, error) {
-	names := map[string]string{}
+	userIDs := make([]string, 0, len(actions))
 	for _, a := range actions {
-		if a.ActorUserID == "" {
+		userIDs = append(userIDs, a.ActorUserID)
+	}
+	return resolveActorNames(ctx, tx, userIDs)
+}
+
+// resolveActorNames maps each distinct non-empty id of userIDs to a display
+// name via the app pool (Users.GetProfile, org-scoped RLS — a co-member's
+// profile is readable, the same path the spend by-member breakdown uses). A
+// user whose profile is not readable maps to "". N+1 over the small
+// distinct-id set is fine: a page, or a facet cut, names few people.
+func resolveActorNames(ctx context.Context, tx db.TxStores, userIDs []string) (map[string]string, error) {
+	names := map[string]string{}
+	for _, id := range userIDs {
+		if id == "" {
 			continue
 		}
-		if _, done := names[a.ActorUserID]; done {
+		if _, done := names[id]; done {
 			continue
 		}
-		name, _, err := tx.Users.GetProfile(ctx, a.ActorUserID)
+		name, _, err := tx.Users.GetProfile(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		names[a.ActorUserID] = name
+		names[id] = name
 	}
 	return names, nil
 }

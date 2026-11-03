@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -749,6 +750,192 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 		if _, _, err := s.f.Stores.Artifacts.ListByOrgSystem(ctx, s.f.OrgID, db.ArtifactListOpts{ListOpts: db.ListOpts{Limit: 2, After: []string{"x"}}}); err == nil {
 			t.Error("a keyset window was accepted, want it refused")
+		}
+	})
+
+	t.Run("Scope_reads_filter_rows_by_team_and_facet_the_teams", func(t *testing.T) {
+		s := setup(t)
+		mine, theirs := s.f.NewConversation(t), s.f.NewConversation(t)
+		// The branch both teams pushed, the PR only this team opened, and the
+		// issue only the other team moved.
+		record(t, s, mine, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(1))
+		record(t, s, mine, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(2))
+		pushed := branch(s, domain.ActionBranchPushed, "octo/api", "")
+		pushed.TeamID = s.f.OtherTeamID
+		record(t, s, theirs, pushed, at(3))
+		pr := record(t, s, mine, pullRequest(s, domain.ActionPRCreated), at(4))
+		issue := record(t, s, theirs, domain.ExternalAction{
+			Provider: domain.ProviderJira, Scope: "https://acme.atlassian.net", Action: domain.ActionIssueTransitioned,
+			Target: "SKY-1", Credential: domain.CredentialJiraOrg, TeamID: s.f.OtherTeamID,
+			ObjectKind: domain.ObjectKindIssue, ObjectKey: "jira:issue:acme-10001",
+		}, at(5))
+		// TF's own row names the other team and no object it changed for a run.
+		system := pullRequest(s, domain.ActionPRClosed)
+		system.TeamID, system.PerformedBy = s.f.OtherTeamID, domain.PerformedBySystem
+		record(t, s, theirs, system, at(6))
+
+		// The filter selects the team's rows, so the shared branch carries
+		// that team alone and counts its rows.
+		got, total := scopeList(t, s, "", db.ArtifactListOpts{TeamID: s.f.OtherTeamID, ListOpts: db.ListOpts{Limit: 50}})
+		if len(got) != 2 || total != 2 || got[0].ObjectID != objectRef(t, issue) {
+			t.Fatalf("org read for the other team = %+v (total %d), want the issue then the branch", got, total)
+		}
+		if b := got[1]; b.ObjectKind != domain.ObjectKindBranch || b.ActionCount != 1 || b.ConversationCount != 1 ||
+			!slices.Equal(b.TeamIDs, []string{s.f.OtherTeamID}) {
+			t.Errorf("the shared branch under the other team = %+v, want its one row on that team alone", b)
+		}
+		got, total = scopeList(t, s, "", db.ArtifactListOpts{TeamID: s.f.TeamID, ListOpts: db.ListOpts{Limit: 50}})
+		if len(got) != 2 || total != 2 || got[0].ObjectID != objectRef(t, pr) || got[1].ActionCount != 2 {
+			t.Errorf("org read for this team = %+v (total %d), want the PR then the branch's two rows", got, total)
+		}
+		if none, total := scopeList(t, s, "", db.ArtifactListOpts{TeamID: uuid.NewString(), ListOpts: db.ListOpts{Limit: 50}}); len(none) != 0 || total != 0 {
+			t.Errorf("a team with no rows read %d objects (total %d)", len(none), total)
+		}
+
+		facets := func(t *testing.T, teamID string, opts db.ArtifactListOpts) []db.Facet {
+			t.Helper()
+			var (
+				f   db.ArtifactFacets
+				err error
+			)
+			if teamID != "" {
+				f, err = s.f.Stores.Artifacts.FacetsByTeam(ctx, s.f.OrgID, teamID, opts)
+			} else {
+				f, err = s.f.Stores.Artifacts.FacetsByOrgSystem(ctx, s.f.OrgID, opts)
+			}
+			if err != nil {
+				t.Fatalf("facets (team %q, %+v): %v", teamID, opts, err)
+			}
+			if f.ByTeam == nil {
+				t.Fatalf("facets (team %q, %+v) by_team is nil, want a slice", teamID, opts)
+			}
+			return f.ByTeam
+		}
+		teams := []db.Facet{{Value: s.f.TeamID, Count: 2}, {Value: s.f.OtherTeamID, Count: 2}}
+		slices.SortFunc(teams, func(a, b db.Facet) int { return strings.Compare(a.Value, b.Value) })
+		// The cut ignores its own filter, so a selected team still offers
+		// every team; each count is the total the list answers under it.
+		for _, opts := range []db.ArtifactListOpts{{}, {TeamID: s.f.OtherTeamID}} {
+			if got := facets(t, "", opts); !slices.Equal(got, teams) {
+				t.Errorf("org by_team (%+v) = %+v, want %+v", opts, got, teams)
+			}
+		}
+		for _, f := range teams {
+			if _, total := scopeList(t, s, "", db.ArtifactListOpts{TeamID: f.Value, ListOpts: db.ListOpts{CountOnly: true}}); total != f.Count {
+				t.Errorf("by_team %s = %d, the list under it counts %d", f.Value, f.Count, total)
+			}
+		}
+		// Every other filter narrows it.
+		if got := facets(t, "", db.ArtifactListOpts{ObjectKind: domain.ObjectKindBranch}); !slices.Equal(got,
+			[]db.Facet{{Value: teams[0].Value, Count: 1}, {Value: teams[1].Value, Count: 1}}) {
+			t.Errorf("org by_team over branches = %+v, want one object per team", got)
+		}
+		if got := facets(t, "", db.ArtifactListOpts{Provider: domain.ProviderSlack}); len(got) != 0 {
+			t.Errorf("org by_team over a provider no row has = %+v, want []", got)
+		}
+		if got := facets(t, s.f.TeamID, db.ArtifactListOpts{}); !slices.Equal(got, []db.Facet{{Value: s.f.TeamID, Count: 2}}) {
+			t.Errorf("team by_team = %+v, want the team's two objects", got)
+		}
+	})
+
+	t.Run("The_action_lists_filter_by_team_and_facet_actors_and_teams", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		ada, bo := uuid.NewString(), uuid.NewString()
+		person := func(teamID, actor string, minute int) domain.ExternalAction {
+			a := pullRequest(s, domain.ActionPRMarkedReady)
+			a.TeamID, a.ActorUserID, a.PerformedBy = teamID, actor, domain.PerformedByPerson
+			return record(t, s, conv, a, at(minute))
+		}
+		person(s.f.TeamID, ada, 1)
+		person(s.f.TeamID, ada, 2)
+		person(s.f.TeamID, bo, 3)
+		person(s.f.OtherTeamID, bo, 4)
+		// An agent row names no actor, and is in no by_actor value.
+		agent := branch(s, domain.ActionBranchPushed, "octo/api", "")
+		agent.TeamID = s.f.OtherTeamID
+		record(t, s, conv, agent, at(5))
+
+		list := func(t *testing.T, opts domain.ExternalActionListOpts) int {
+			t.Helper()
+			opts.CountOnly = true
+			_, total, err := s.f.Stores.ExternalActions.ListByOrgSystem(ctx, s.f.OrgID, opts)
+			if err != nil {
+				t.Fatalf("ListByOrgSystem(%+v): %v", opts, err)
+			}
+			return total
+		}
+		rows, total, err := s.f.Stores.ExternalActions.ListByOrgSystem(ctx, s.f.OrgID, domain.ExternalActionListOpts{TeamID: s.f.OtherTeamID})
+		if err != nil || total != 2 || len(rows) != 2 {
+			t.Fatalf("ListByOrgSystem(other team) = %d rows (total %d), %v; want its two", len(rows), total, err)
+		}
+		for _, r := range rows {
+			if r.TeamID != s.f.OtherTeamID {
+				t.Errorf("team filter leaked a row of team %q", r.TeamID)
+			}
+		}
+		if got := list(t, domain.ExternalActionListOpts{TeamID: s.f.TeamID, ActorUserID: bo}); got != 1 {
+			t.Errorf("this team's rows by bo = %d, want 1", got)
+		}
+
+		cuts := func(t *testing.T, teamID string, opts domain.ExternalActionListOpts) db.ExternalActionFacets {
+			t.Helper()
+			var (
+				f   db.ExternalActionFacets
+				err error
+			)
+			if teamID != "" {
+				f, err = s.f.Stores.ExternalActions.FacetsByTeam(ctx, s.f.OrgID, teamID, opts)
+			} else {
+				f, err = s.f.Stores.ExternalActions.FacetsByOrgSystem(ctx, s.f.OrgID, opts)
+			}
+			if err != nil {
+				t.Fatalf("facets (team %q, %+v): %v", teamID, opts, err)
+			}
+			if f.ByActor == nil || f.ByTeam == nil {
+				t.Fatalf("facets (team %q, %+v) = %+v, want slices for both cuts", teamID, opts, f)
+			}
+			return f
+		}
+		sorted := func(in ...db.Facet) []db.Facet {
+			slices.SortFunc(in, func(a, b db.Facet) int { return strings.Compare(a.Value, b.Value) })
+			return in
+		}
+		actors := sorted(db.Facet{Value: ada, Count: 2}, db.Facet{Value: bo, Count: 2})
+		teams := sorted(db.Facet{Value: s.f.TeamID, Count: 3}, db.Facet{Value: s.f.OtherTeamID, Count: 2})
+		// Each cut ignores its own filter and honors the other's.
+		for _, tc := range []struct {
+			opts          domain.ExternalActionListOpts
+			actors, teams []db.Facet
+		}{
+			{domain.ExternalActionListOpts{}, actors, teams},
+			{domain.ExternalActionListOpts{ActorUserID: ada}, actors, sorted(db.Facet{Value: s.f.TeamID, Count: 2})},
+			{domain.ExternalActionListOpts{TeamID: s.f.OtherTeamID}, []db.Facet{{Value: bo, Count: 1}}, teams},
+			{domain.ExternalActionListOpts{Action: domain.ActionBranchPushed}, []db.Facet{}, []db.Facet{{Value: s.f.OtherTeamID, Count: 1}}},
+		} {
+			got := cuts(t, "", tc.opts)
+			if !slices.Equal(got.ByActor, tc.actors) || !slices.Equal(got.ByTeam, tc.teams) {
+				t.Errorf("org facets (%+v) = %+v, want by_actor %+v and by_team %+v", tc.opts, got, tc.actors, tc.teams)
+			}
+		}
+		// A value read back as the list's filter counts what the cut says: the
+		// actor id a row carries is the one the filter takes.
+		for _, f := range actors {
+			if got := list(t, domain.ExternalActionListOpts{ActorUserID: f.Value}); got != f.Count {
+				t.Errorf("by_actor %s = %d, the list under it counts %d", f.Value, f.Count, got)
+			}
+		}
+		for _, f := range teams {
+			if got := list(t, domain.ExternalActionListOpts{TeamID: f.Value}); got != f.Count {
+				t.Errorf("by_team %s = %d, the list under it counts %d", f.Value, f.Count, got)
+			}
+		}
+		got := cuts(t, s.f.TeamID, domain.ExternalActionListOpts{})
+		if !slices.Equal(got.ByActor, sorted(db.Facet{Value: ada, Count: 2}, db.Facet{Value: bo, Count: 1})) {
+			t.Errorf("team by_actor = %+v, want ada's two rows and bo's one", got.ByActor)
+		}
+		if !slices.Equal(got.ByTeam, []db.Facet{{Value: s.f.TeamID, Count: 3}}) {
+			t.Errorf("team by_team = %+v, want the team's three rows", got.ByTeam)
 		}
 	})
 

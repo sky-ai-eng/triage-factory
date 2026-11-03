@@ -226,6 +226,34 @@ func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts 
 	return listPgObjectActivity(ctx, s.admin, `ea.org_id = $1`, []any{orgID}, opts)
 }
 
+func (s *artifactStore) FacetsByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) (db.ArtifactFacets, error) {
+	return pgArtifactFacets(ctx, s.q, `ea.org_id = $1 AND ea.team_id = $2::uuid`, []any{orgID, teamID}, opts)
+}
+
+func (s *artifactStore) FacetsByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) (db.ArtifactFacets, error) {
+	return pgArtifactFacets(ctx, s.admin, `ea.org_id = $1`, []any{orgID}, opts)
+}
+
+// pgArtifactFacets counts, per team, the objects the rows base and opts
+// select name: the list's WHERE with the team filter cleared, so the cut
+// offers every team the other filters leave.
+func pgArtifactFacets(ctx context.Context, q queryer, base string, args []any, opts db.ArtifactListOpts) (db.ArtifactFacets, error) {
+	opts.TeamID = ""
+	where, args := pgArtifactListWhere(base, args, opts)
+	rows, err := q.QueryContext(ctx, `
+		SELECT ea.team_id::text, COUNT(DISTINCT `+pgActionObjectIDSQL+`)
+		  FROM external_actions ea
+		 WHERE `+where+pgArtifactRowFilter+` AND ea.team_id IS NOT NULL
+		 GROUP BY ea.team_id
+		 ORDER BY 1`, args...)
+	if err != nil {
+		return db.ArtifactFacets{}, err
+	}
+	defer rows.Close()
+	teams, err := db.ScanFacets(rows)
+	return db.ArtifactFacets{ByTeam: teams}, err
+}
+
 // listPgObjectActivity is both scopes' read: base and args select the scope's
 // rows, opts' filters narrow them, and the page is of objects.
 func listPgObjectActivity(ctx context.Context, q queryer, base string, args []any, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
@@ -309,6 +337,9 @@ func pgArtifactListWhere(base string, args []any, opts db.ArtifactListOpts) (str
 	}
 	if opts.ObjectKind != "" {
 		add(` AND ea.object_kind = $%d`, opts.ObjectKind)
+	}
+	if opts.TeamID != "" {
+		add(` AND ea.team_id = $%d::uuid`, opts.TeamID)
 	}
 	if !opts.Since.IsZero() {
 		add(` AND ea.occurred_at >= $%d`, opts.Since)
