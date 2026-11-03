@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -218,13 +220,26 @@ func TestRepoBranches_SearchesEachUpstreamPage(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := newAppAPIMux()
+	// 250 branches, served the way GitHub serves them: per_page at a time.
+	// Two hold a literal "release/100%"; "1000-fix" would match it only as a
+	// LIKE pattern.
+	all := make([]string, 250)
+	for i := range all {
+		all[i] = fmt.Sprintf("b-%03d", i)
+	}
+	all[5], all[180], all[230] = "release/100%", "Release/100%-hotfix", "1000-fix"
+	var perPages []string
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/branches", func(w http.ResponseWriter, r *http.Request) {
-		pages := map[string][]map[string]any{
-			"1": {{"name": "main"}, {"name": "Release/100%"}},
-			"2": {{"name": "1000-fix"}},
+		perPages = append(perPages, r.URL.Query().Get("per_page"))
+		per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		n, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		lo, hi := min((n-1)*per, len(all)), min(n*per, len(all))
+		rows := make([]map[string]any, 0, hi-lo)
+		for _, name := range all[lo:hi] {
+			rows = append(rows, map[string]any{"name": name})
 		}
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(pages[r.URL.Query().Get("page")])
+		_ = json.NewEncoder(w).Encode(rows)
 	})
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
@@ -239,15 +254,40 @@ func TestRepoBranches_SearchesEachUpstreamPage(t *testing.T) {
 		return strings.Join(out, ",")
 	}
 
-	first := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{"search": "release/100%", "page_size": 2}))
-	if names(first) != "Release/100%" || first.NextPageToken == "" {
-		t.Fatalf("page 1 = %q (next %q); want Release/100%% and a token — the upstream page was full", names(first), first.NextPageToken)
+	// A page fills across GitHub's pages: both matches in one answer of two.
+	both := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{"search": "release/100%", "page_size": 2}))
+	if names(both) != "release/100%,Release/100%-hotfix" {
+		t.Fatalf("page of two = %q; want both literal matches", names(both))
+	}
+
+	// A page that fills partway through one of GitHub's pages resumes inside
+	// it, and a match that first appears on GitHub's second page is found.
+	first := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{"search": "release/100%", "page_size": 1}))
+	if names(first) != "release/100%" || first.NextPageToken == "" {
+		t.Fatalf("page 1 = %q (next %q); want release/100%% and a token", names(first), first.NextPageToken)
 	}
 	second := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{
-		"search": "RELEASE/100%", "page_size": 2, "page_token": first.NextPageToken,
+		"search": "RELEASE/100%", "page_size": 1, "page_token": first.NextPageToken,
 	}))
-	if names(second) != "" || second.NextPageToken != "" {
-		t.Errorf("page 2 = %q (next %q); want nothing — 1000-fix does not hold a literal 100%%, and the short page ends the walk", names(second), second.NextPageToken)
+	if names(second) != "Release/100%-hotfix" || second.NextPageToken == "" {
+		t.Fatalf("page 2 = %q (next %q); want the hotfix branch from GitHub's second page and a token", names(second), second.NextPageToken)
+	}
+	third := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{
+		"search": "release/100%", "page_size": 1, "page_token": second.NextPageToken,
+	}))
+	if names(third) != "" || third.NextPageToken != "" {
+		t.Errorf("page 3 = %q (next %q); want nothing — 1000-fix does not hold a literal 100%%, and GitHub's short page ends the walk", names(third), third.NextPageToken)
+	}
+
+	// The search that once ended at GitHub's first page, which holds no match.
+	hotfix := httpxtest.DecodeList[branchJSON](t, doJSON(t, srv, http.MethodPost, path, map[string]any{"search": "hotfix", "page_size": 30}))
+	if names(hotfix) != "Release/100%-hotfix" {
+		t.Errorf("hotfix = %q; want the branch on GitHub's second page", names(hotfix))
+	}
+	for _, per := range perPages {
+		if per != strconv.Itoa(maxBranchPageSize) {
+			t.Fatalf("per_page = %q, want GitHub's largest page whatever page_size asked", per)
+		}
 	}
 
 	for _, tc := range []struct {

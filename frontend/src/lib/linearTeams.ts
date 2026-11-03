@@ -1,4 +1,4 @@
-import { HttpError, apiJSON, apiList, apiListAll } from './apiClient'
+import { HttpError, apiJSON, apiListAll, apiListFirstRows } from './apiClient'
 
 /** One option in the Linear team picker. The id is what the rules are keyed
  *  on and what the save sends; key and name are what a person recognizes the
@@ -45,7 +45,7 @@ export async function listLinearTeams(
   search: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<LinearTeamPage> {
-  const page = await apiList<LinearTeamCandidate>(
+  const page = await apiListFirstRows<LinearTeamCandidate>(
     `/api/orgs/${encodeURIComponent(orgId)}/linear/teams/list`,
     { search, page_size: LINEAR_TEAM_PAGE_SIZE },
     options,

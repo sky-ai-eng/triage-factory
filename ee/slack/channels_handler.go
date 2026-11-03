@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 )
 
 // slackEntitlementGate is the shared local-mode-404 + entitlement-404 gate
@@ -64,6 +66,55 @@ type channelsHandler struct {
 	stores db.Stores
 	az     *authz.Checker
 	client *http.Client
+	// candidates holds each org's last live enumeration of its workspaces'
+	// channels, keyed by org id, so the channel list's pages, searches and
+	// facets read Slack once per slackCandidatesTTL rather than once per
+	// request. PUT's gate reads Slack live and drops the org's entry.
+	candidates *ttlcache.Cache[slackCandidateSet]
+}
+
+// slackCandidatesTTL is how long one enumeration answers the channel list. A
+// channel created or renamed in Slack shows up within it; conversations.list
+// allows a workspace about twenty calls a minute, which a reader paging and
+// searching would otherwise spend in seconds.
+const slackCandidatesTTL = time.Minute
+
+// slackCandidateSet is one org's live enumeration, as liveSlackCandidates
+// answered it, and the workspaces it enumerated.
+type slackCandidateSet struct {
+	workspaces   string
+	candidates   []slackCandidate
+	anyFailed    bool
+	anyTruncated bool
+}
+
+// slackWorkspaceKey names a set of workspaces, so an enumeration taken
+// before one was connected or disconnected is not served for the new set.
+func slackWorkspaceKey(workspaces []slackstore.Workspace) string {
+	ids := make([]string, len(workspaces))
+	for i, ws := range workspaces {
+		ids[i] = ws.WorkspaceID
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, ",")
+}
+
+// cachedSlackCandidates is liveSlackCandidates through the org's cache entry.
+// An enumeration in which a workspace failed is answered but not kept, so the
+// next read asks Slack again rather than serving the gap for a minute.
+func (h *channelsHandler) cachedSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Workspace) ([]slackCandidate, bool, bool) {
+	key := slackWorkspaceKey(workspaces)
+	load := func(ctx context.Context) (slackCandidateSet, bool, error) {
+		candidates, failed, truncated := h.liveSlackCandidates(ctx, orgID, workspaces)
+		return slackCandidateSet{workspaces: key, candidates: candidates, anyFailed: failed, anyTruncated: truncated}, !failed, nil
+	}
+	// load never errs: a failed workspace is reported in the set.
+	set, _ := h.candidates.Get(ctx, orgID, load)
+	if set.workspaces != key {
+		h.candidates.Forget(orgID)
+		set, _ = h.candidates.Get(ctx, orgID, load)
+	}
+	return set.candidates, set.anyFailed, set.anyTruncated
 }
 
 // channelsWarning is one entry in a channels response's Warnings — a tagged
@@ -278,6 +329,9 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		joinWarnings = append(joinWarnings, h.autoJoin(r.Context(), orgID, gate.workspaces, gate.candidates, addedChannels)...)
 	}
 
+	// The auto-join changes which channels the bot is in, so the answer, and
+	// the reads after it, enumerate Slack again.
+	h.candidates.Forget(orgID)
 	resp, err := h.buildChannelsResponse(r.Context(), orgID, userID, teamID, "admin")
 	if err != nil {
 		httpx.InternalError(w, "slack/channels", err)
@@ -436,7 +490,7 @@ func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, tea
 	}
 
 	warnings := []channelsWarning{}
-	candidates, anyFailed, anyTruncated := h.liveSlackCandidates(ctx, orgID, workspaces)
+	candidates, anyFailed, anyTruncated := h.cachedSlackCandidates(ctx, orgID, workspaces)
 	if anyFailed {
 		warnings = append(warnings, channelsWarning{Code: "slack_unreachable"})
 	}

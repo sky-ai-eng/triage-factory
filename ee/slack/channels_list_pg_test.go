@@ -6,9 +6,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 )
 
 // listRig is a team with a connected workspace listing every channel in
@@ -290,5 +292,47 @@ func TestChannelsFacets_CountsTheMergedSet(t *testing.T) {
 	l.hdl.handleFacets(rec, l.facetsReq(outsider, l.orgID, l.teamID, map[string]any{}))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("non-member facets: status = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChannelsList_EnumeratesSlackOncePerWindow pins the cache: the list's
+// pages, a search and the facets answer from one enumeration of the
+// workspace, and a PUT, whose auto-join changes what Slack answers, makes the
+// next read enumerate again.
+func TestChannelsList_EnumeratesSlackOncePerWindow(t *testing.T) {
+	l := newListRig(t, "chan-cache", listChannelSet)
+	l.hdl.candidates = ttlcache.New[slackCandidateSet](time.Minute)
+	calls := func() int {
+		l.fake.mu.Lock()
+		defer l.fake.mu.Unlock()
+		return l.fake.listCalls
+	}
+
+	before := calls()
+	first := l.listOK(map[string]any{"page_size": 2})
+	l.listOK(map[string]any{"page_size": 2, "page_token": first.NextPageToken})
+	l.listOK(map[string]any{"search": "dep"})
+	rec := httptest.NewRecorder()
+	l.hdl.handleFacets(rec, l.facetsReq(l.owner, l.orgID, l.teamID, map[string]any{}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("facets status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if got := calls() - before; got != 1 {
+		t.Fatalf("conversations.list calls for two pages, a search and the facets = %d, want 1", got)
+	}
+
+	rec = httptest.NewRecorder()
+	l.hdl.handlePut(rec, l.req(http.MethodPut, "/api/slack/teams/"+l.teamID+"/channels", l.owner, l.orgID, l.teamID,
+		map[string]any{"channel_ids": []string{"C1"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	afterPut := calls()
+	if afterPut-before < 3 {
+		t.Fatalf("conversations.list calls through the PUT = %d, want the gate's live read and a fresh one for its answer", afterPut-before)
+	}
+	l.listOK(map[string]any{})
+	if got := calls() - afterPut; got != 0 {
+		t.Fatalf("conversations.list calls for a list right after the PUT = %d, want 0: the PUT's answer refilled the cache", got)
 	}
 }

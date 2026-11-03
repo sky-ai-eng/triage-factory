@@ -48,6 +48,7 @@ type fakeChannelsSlack struct {
 	info         map[string]map[string]string
 	infoFailCode map[string]string
 	infoCalls    int
+	listCalls    int // conversations.list requests answered
 }
 
 func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
@@ -66,6 +67,7 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/conversations.list"):
 			f.mu.Lock()
+			f.listCalls++
 			fail := f.failList[token]
 			chans := f.public[token]
 			nextCursor := ""

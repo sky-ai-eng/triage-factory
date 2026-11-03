@@ -230,3 +230,32 @@ func TestGitHubGroupRows(t *testing.T) {
 		t.Errorf("rows = %+v\nwant %+v", got, want)
 	}
 }
+
+// The checklist's reads share one GitHub listing until it is dropped: a team
+// GitHub adds is not listed until the org's entry is forgotten (the tracked
+// repositories' PUT does that) or its minute passes.
+func TestTeamGitHubGroupsList_HoldsTheListing(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	set := switchableGroupsServer(t, srv, acmeFourTeamsGraphQL)
+
+	if got := listGitHubGroups(t, srv, nil); got.TotalCount != 4 {
+		t.Fatalf("first read total = %d, want 4", got.TotalCount)
+	}
+	set(strings.Replace(acmeFourTeamsGraphQL,
+		`{"databaseId":11,"slug":"platform","name":"Platform","members":{"totalCount":8}}`,
+		`{"databaseId":11,"slug":"platform","name":"Platform","members":{"totalCount":8}},
+		{"databaseId":15,"slug":"zebra","name":"Zebra","members":{"totalCount":1}}`, 1))
+	if got := listGitHubGroups(t, srv, map[string]any{"search": "zebra"}); got.TotalCount != 0 {
+		t.Fatalf("held read searching the new team total = %d, want 0: the held listing predates it", got.TotalCount)
+	}
+
+	host, err := srv.orgGitHubHost(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.gitHubGroupListings.Forget(gitHubGroupListingKey(runmode.LocalDefaultOrgID, host))
+	if got := listGitHubGroups(t, srv, map[string]any{"search": "zebra"}); got.TotalCount != 1 {
+		t.Fatalf("read after the entry was dropped total = %d, want 1", got.TotalCount)
+	}
+}

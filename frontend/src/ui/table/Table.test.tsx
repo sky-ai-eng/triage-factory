@@ -357,6 +357,38 @@ describe('Table — the draft page', () => {
 })
 
 describe('Table — the caller narrows', () => {
+  it('holds an Enter pressed while the answer is pending, and takes the answer for what was typed', async () => {
+    const onAdd = vi.fn()
+    const user = userEvent.setup()
+    const addProps = (options: Array<{ id: string; name: string }>, pending: boolean) => ({
+      label: 'add teammate',
+      options,
+      pending,
+      onQuery: vi.fn(),
+      onAdd,
+    })
+    const { rerender } = render(<Table columns={COLS} rows={ROWS} add={addProps([], false)} />)
+
+    await user.click(screen.getByRole('button', { name: /add teammate/ }))
+    const field = screen.getByRole('combobox')
+    rerender(
+      <Table columns={COLS} rows={ROWS} add={addProps([{ id: 'a', name: 'alice' }], false)} />,
+    )
+    await user.type(field, 'alex')
+    // The caller is still answering "alex"; alice is "ali"'s answer.
+    rerender(
+      <Table columns={COLS} rows={ROWS} add={addProps([{ id: 'a', name: 'alice' }], true)} />,
+    )
+    await user.keyboard('{Enter}')
+    rerender(
+      <Table columns={COLS} rows={ROWS} add={addProps([{ id: 'x', name: 'alex' }], false)} />,
+    )
+
+    await user.keyboard('{Escape}')
+    expect(onAdd).toHaveBeenCalledTimes(1)
+    expect(onAdd.mock.calls[0][0].name).toBe('alex')
+  })
+
   it('hands the query to onQuery and offers the options as given', async () => {
     const onQuery = vi.fn()
     const user = userEvent.setup()

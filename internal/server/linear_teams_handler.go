@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"slices"
 
@@ -51,7 +50,7 @@ type linearTeamListRequest struct {
 	// Search is matched against the team key and name as a case-insensitive
 	// literal substring (httpx.Search). Absent matches every team the
 	// credential can see. Linear applies it upstream, and each page it serves
-	// is re-checked here (readLinearSearchedPage).
+	// is re-checked here (readLinearScannedPage).
 	Search string `json:"search"`
 	httpx.PageRequest
 }
@@ -64,49 +63,33 @@ type linearTeamListFilterKey struct {
 	Search string `json:"search"`
 }
 
-// linearSearchedPageReads bounds how many of Linear's pages one request reads
-// past pages the re-check left empty.
-const linearSearchedPageReads = 10
-
-// readLinearSearchedPage reads one page of a Linear listing searched for
-// needle, starting at the cursor after, and returns the rows whose fields carry
-// needle as a literal substring and the cursor the next page resumes from, ""
-// for none.
+// readLinearScannedPage fills one page of a Linear listing searched for
+// needle, from the position from, with the rows whose fields carry needle as a
+// literal substring, and returns them and the position the next page resumes
+// from ("" for none).
 //
 // Linear applies the search upstream (containsIgnoreCase) and documents it as a
 // case-insensitive contains, but not how it reads a % or an _, which a
-// LIKE-backed filter takes as wildcards. Re-checking each page with the literal
+// LIKE-backed filter takes as wildcards. Re-checking each row with the literal
 // predicate holds the route to the literal match whichever way Linear reads
 // them, and loses no row: a literal match is a match under either reading, so
-// Linear served it, and the cursor resumes after the last row Linear served
-// rather than after the last row kept. The page can come back shorter than
-// Linear's, which a proxy list's page already may. A page the re-check leaves
-// empty cannot carry a page token (httpx.WriteProxyList), so while Linear has
-// more the next page is read in its place, at most linearSearchedPageReads in
-// all; past that the read fails rather than end the listing early.
+// Linear served it. The re-check can leave a Linear page short or empty, so
+// the page is filled from as many of Linear's pages as it takes
+// (httpx.ScanUpstream).
 //
 // read is one upstream page from a cursor: its rows, whether Linear has more,
 // and the cursor after them.
-func readLinearSearchedPage[T any](needle, after string, fields func(T) []string,
+func readLinearScannedPage[T any](from httpx.ScanCursor, limit int, needle string, fields func(T) []string,
 	read func(after string) (rows []T, hasNext bool, endCursor string, err error)) ([]T, string, error) {
-	for range linearSearchedPageReads {
-		rows, hasNext, end, err := read(after)
-		if err != nil {
-			return nil, "", err
-		}
-		rows = slices.DeleteFunc(rows, func(row T) bool { return !httpx.SearchMatches(needle, fields(row)...) })
-		if !hasNext {
-			return rows, "", nil
-		}
-		if len(rows) > 0 {
+	return httpx.ScanUpstream(from, limit,
+		func(row T) bool { return httpx.SearchMatches(needle, fields(row)...) },
+		func(after string) ([]T, string, error) {
+			rows, hasNext, end, err := read(after)
+			if err != nil || !hasNext {
+				return rows, "", err
+			}
 			return rows, end, nil
-		}
-		if end == "" || end == after {
-			return nil, "", errors.New("linear: listing cursor did not advance")
-		}
-		after = end
-	}
-	return nil, "", fmt.Errorf("linear: %d pages in a row held no literal match for the search", linearSearchedPageReads)
+		})
 }
 
 // linearTeamJSON is one Linear team. The id is what the team write takes; key
@@ -139,6 +122,7 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ResolvePage(&v, req.PageRequest,
 		httpx.FilterFingerprint(linearTeamListFilterKey{OrgID: orgID, Search: httpx.SearchKey(search)}), 0)
 	refuseLinearCountOnly(&v, page)
+	from := httpx.ScanCursorFrom(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -147,7 +131,7 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	teams, next, err := readLinearSearchedPage(search, page.Cursor,
+	teams, next, err := readLinearScannedPage(from, page.Limit, search,
 		func(t linear.Team) []string { return []string{t.Key, t.Name} },
 		func(after string) ([]linear.Team, bool, string, error) {
 			p, err := client.ListTeams(r.Context(), search, after, min(page.Limit, linearPageMax))
@@ -161,7 +145,7 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	for _, t := range teams {
 		items = append(items, toLinearTeamJSON(t))
 	}
-	httpx.WriteProxyList(w, page, items, next)
+	httpx.WriteScannedProxyList(w, page, items, next)
 }
 
 // GET /api/orgs/{org_id}/linear/teams/{linear_team_id}

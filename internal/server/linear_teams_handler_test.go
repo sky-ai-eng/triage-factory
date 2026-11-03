@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
@@ -134,11 +135,12 @@ func TestLinearTeamsList_SearchIsLiteral(t *testing.T) {
 }
 
 // TestLinearTeamsList_SearchedReadsAreBounded: a request reads at most
-// linearSearchedPageReads of Linear's pages past pages the literal re-check
-// left empty, and past that answers 502 rather than end the listing early.
+// httpx.MaxScanReads of Linear's pages past pages the literal re-check left
+// empty, and then answers an empty page whose token resumes the scan rather
+// than ending the listing early.
 func TestLinearTeamsList_SearchedReadsAreBounded(t *testing.T) {
-	teams := make([]linear.Team, 0, linearSearchedPageReads+1)
-	for i := range linearSearchedPageReads {
+	teams := make([]linear.Team, 0, httpx.MaxScanReads+1)
+	for i := range httpx.MaxScanReads {
 		key := fmt.Sprintf("A%dC", i)
 		teams = append(teams, linear.Team{ID: fixtureUUID("t-" + key), Key: key, Name: key})
 	}
@@ -147,10 +149,18 @@ func TestLinearTeamsList_SearchedReadsAreBounded(t *testing.T) {
 	fake.SetLikeWildcards(true)
 
 	before := fake.Calls()
-	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"search": "a%c", "page_size": 1}),
-		http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
-	if got := fake.Calls() - before; got != linearSearchedPageReads {
-		t.Errorf("reads = %d, want %d", got, linearSearchedPageReads)
+	empty := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"search": "a%c", "page_size": 1}))
+	if len(empty.Items) != 0 || empty.NextPageToken == "" {
+		t.Fatalf("bounded page = %s (token %q), want no rows and a token", linearTeamKeysOf(empty.Items), empty.NextPageToken)
+	}
+	if got := fake.Calls() - before; got != httpx.MaxScanReads {
+		t.Errorf("reads = %d, want %d", got, httpx.MaxScanReads)
+	}
+	next := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"search": "a%c", "page_size": 1, "page_token": empty.NextPageToken}))
+	if got := linearTeamKeysOf(next.Items); got != "A%C" || next.NextPageToken != "" {
+		t.Errorf("resumed page = %s (token %q), want A%%C and no token", got, next.NextPageToken)
 	}
 	// Pages of two reach A%C on Linear's sixth page, inside the bound.
 	page := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,

@@ -738,6 +738,7 @@ export default function TeamSettings() {
                           placeholder: 'name or email — three characters',
                           options: candidates,
                           onQuery: setPeopleNeedle,
+                          pending: !!people?.pending,
                           fields: [{ key: 'role', options: ['member', 'admin'], value: 'member' }],
                           onAdd: (person, values) => {
                             if (person.id) void sendAdd(person.id, values.role || 'member')

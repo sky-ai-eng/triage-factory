@@ -189,6 +189,28 @@ export async function apiList<T>(
   return listPage(await apiJSON<Partial<ListPage<T>>>(path, listInit(body, options)))
 }
 
+/** How many further pages `apiListFirstRows` follows past empty ones. */
+const MAX_EMPTY_PAGES = 10
+
+/** apiListFirstRows reads a list's first page that holds a row. A scanned
+ *  proxy list (a branch search, a Linear search) narrows rows its upstream
+ *  cannot, and answers an empty page with a token when the upstream pages one
+ *  request read held no match and more remain; a surface that shows one page
+ *  follows that token rather than report no match. It stops after
+ *  MAX_EMPTY_PAGES and answers the empty page it reached, token included, so a
+ *  caller can still say there is more. */
+export async function apiListFirstRows<T>(
+  path: string,
+  body: ListRequest,
+  options: ApiFetchOptions = {},
+): Promise<ListPage<T>> {
+  let page = await apiList<T>(path, body, options)
+  for (let i = 0; i < MAX_EMPTY_PAGES && page.items.length === 0 && page.next_page_token; i++) {
+    page = await apiList<T>(path, { ...body, page_token: page.next_page_token }, options)
+  }
+  return page
+}
+
 /** apiListAt is `apiList`, also answering the server's clock when it answered
  *  (its `Date` header), for a caller comparing the rows' timestamps with now:
  *  the viewer's own clock may be minutes off the server's. Without the header

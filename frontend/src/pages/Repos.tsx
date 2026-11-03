@@ -9,7 +9,7 @@ import { useTeams } from '../hooks/useTeams'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
-import { apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, apiList, apiListFirstRows, httpErrorMessage } from '../lib/apiClient'
 import type { RepoRef } from '../lib/githubRepos'
 import { fetchTeamRepos, saveTeamRepos } from './settings/teamConfig'
 
@@ -136,7 +136,7 @@ function BranchPicker({
       try {
         // One page is what the picker shows: it is a type-to-filter box, and
         // the filter is what narrows the list, not scrolling it.
-        const page = await apiList<{ name: string }>(
+        const page = await apiListFirstRows<{ name: string }>(
           `/api/repos/${encodeURIComponent(profile.id)}/branches/list`,
           { search: q, page_size: 30 },
           { signal: controller.signal },

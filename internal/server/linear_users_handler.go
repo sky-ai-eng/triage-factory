@@ -31,7 +31,7 @@ type linearUserListRequest struct {
 	// Search is matched against the name, the display name and the email as a
 	// case-insensitive literal substring (httpx.Search). Absent matches every
 	// active user. Linear applies it upstream, and each page it serves is
-	// re-checked here (readLinearSearchedPage).
+	// re-checked here (readLinearScannedPage).
 	Search string `json:"search"`
 	httpx.PageRequest
 }
@@ -78,6 +78,7 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 	page := httpx.ResolvePage(&v, req.PageRequest,
 		httpx.FilterFingerprint(linearUserListFilterKey{OrgID: orgID, Search: httpx.SearchKey(search)}), 0)
 	refuseLinearCountOnly(&v, page)
+	from := httpx.ScanCursorFrom(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -86,7 +87,7 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	users, next, err := readLinearSearchedPage(search, page.Cursor,
+	users, next, err := readLinearScannedPage(from, page.Limit, search,
 		func(u linear.User) []string { return []string{u.Name, u.DisplayName, u.Email} },
 		func(after string) ([]linear.User, bool, string, error) {
 			p, err := client.ListUsers(r.Context(), search, after, min(page.Limit, linearPageMax))
@@ -100,7 +101,7 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 	for _, u := range users {
 		items = append(items, toLinearUserJSON(u))
 	}
-	httpx.WriteProxyList(w, page, items, next)
+	httpx.WriteScannedProxyList(w, page, items, next)
 }
 
 // GET /api/orgs/{org_id}/linear/users/{linear_user_id}

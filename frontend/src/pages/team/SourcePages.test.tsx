@@ -472,6 +472,50 @@ describe('GitHub source page', () => {
     )
   })
 
+  it('keeps the pages the reader loaded when the refresh ping re-reads the catalog', async () => {
+    const base = stub(REPOS)
+    const envelope = (body: Record<string, unknown>) =>
+      body.page_token
+        ? {
+            items: [{ github_id: '4', full_name: 'sky/second-page' }],
+            next_page_token: '',
+            total_count: 2,
+            status: 'ready',
+          }
+        : {
+            items: [{ github_id: '3', full_name: 'sky/docs-site' }],
+            next_page_token: 'tok-2',
+            total_count: 2,
+            status: 'ready',
+          }
+    const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+      if (String(input) !== '/api/github/repos/list') return base(input, init)
+      const env = envelope(JSON.parse(String(init?.body)))
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(env),
+        text: () => Promise.resolve(JSON.stringify(env)),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<GitHubSource {...BODY} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '1 more · show them' }))
+    await waitFor(() => expect(screen.getByText('sky/second-page')).toBeInTheDocument())
+
+    const before = catalogBodies(fetchMock).length
+    act(() => ws.handlers.forEach((h) => h({ type: 'github_repos_updated' })))
+    // Both pages are read again, and both stay on screen.
+    await waitFor(() => expect(catalogBodies(fetchMock).length).toBe(before + 2))
+    expect(catalogBodies(fetchMock).slice(before)).toEqual([
+      { search: '', page_size: 100 },
+      { search: '', page_size: 100, page_token: 'tok-2' },
+    ])
+    expect(screen.getByText('sky/docs-site')).toBeInTheDocument()
+    expect(screen.getByText('sky/second-page')).toBeInTheDocument()
+  })
+
   it('says the reachable set is still being discovered, and re-reads on the refresh ping', async () => {
     const fetchMock = stub({
       ...REPOS,
@@ -1062,8 +1106,8 @@ describe('Slack source page', () => {
   })
 
   it('opens on the primary order and leaves the rows in the order the server sent', async () => {
-    // Unwatched first, then ours: the opposite of the star ranking, which the
-    // page used to apply to whatever it held.
+    // Unwatched first, then ours: the opposite of the star ranking, so a page
+    // that ranked the rows it held would reorder them.
     const fetchMock = stubSlack(() => [ROWS[2], ROWS[0]])
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())

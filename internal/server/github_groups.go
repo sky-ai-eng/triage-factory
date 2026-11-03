@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -241,7 +242,7 @@ func (s *Server) handleTeamGitHubGroupsList(w http.ResponseWriter, r *http.Reque
 	candidates := []gitHubGroupCandidateJSON{}
 	credsMissing := false
 	if role != "" {
-		if listing, err := s.gitHubGroupCandidates(r.Context(), orgID, host); err != nil {
+		if listing, err := s.cachedGitHubGroupCandidates(r.Context(), orgID, host); err != nil {
 			githubGroupsLog.Error("list github team candidates failed", "error", err)
 		} else {
 			candidates, credsMissing = listing.candidates, listing.credentialsMissing
@@ -519,6 +520,30 @@ type unlistedGitHubOwner struct {
 	err   error
 }
 
+// gitHubTeamsTTL is how long one GitHub team listing, and one caller's own
+// teams, answer the GitHub-team checklist. A team created or renamed on GitHub
+// shows up within it.
+const gitHubTeamsTTL = time.Minute
+
+// cachedGitHubGroupCandidates is gitHubGroupCandidates through the org's cache
+// entry, for the list route. A listing in which an owner's teams could not be
+// read is answered but not kept, so the next read asks GitHub again. The PUT
+// validates against a live listing instead, so a team created on GitHub a
+// moment ago can be mapped.
+//
+// The candidates are a copy: the caller marks the ones it belongs to in
+// place, and the held listing is every caller's.
+func (s *Server) cachedGitHubGroupCandidates(ctx context.Context, orgID, host string) (gitHubGroupListing, error) {
+	listing, err := s.gitHubGroupListings.Get(ctx, gitHubGroupListingKey(orgID, host), func(ctx context.Context) (gitHubGroupListing, bool, error) {
+		listing, err := s.gitHubGroupCandidates(ctx, orgID, host)
+		return listing, len(listing.unlisted) == 0, err
+	})
+	listing.candidates = slices.Clone(listing.candidates)
+	return listing, err
+}
+
+func gitHubGroupListingKey(orgID, host string) string { return orgID + "|" + host }
+
 // gitHubGroupCandidates fetches the org's live GitHub teams on host (one
 // organization.teams query per distinct tracked-repo owner) as the flat
 // candidate list the editor presents. Read-only — the deletion-reconcile
@@ -640,7 +665,10 @@ func writeGitHubGroupsUnconfirmed(w http.ResponseWriter, ids []string, missing [
 // logged, never fatal — the candidate list is the load-bearing part; the
 // pre-check is a convenience the user can override.
 func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userID string, candidates []gitHubGroupCandidateJSON) {
-	teams, err := s.callerGitHubTeams(ctx, orgID, userID)
+	teams, err := s.gitHubUserTeams.Get(ctx, orgID+"|"+userID, func(ctx context.Context) ([]ghclient.UserTeam, bool, error) {
+		teams, err := s.callerGitHubTeams(ctx, orgID, userID)
+		return teams, true, err
+	})
 	if err != nil {
 		// errNoGitHub (local, no PAT) is the expected "can't resolve
 		// membership" case — silent. Anything else is worth a log line.

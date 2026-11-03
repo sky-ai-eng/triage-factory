@@ -257,6 +257,9 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	if s.profilerTrigger != nil {
 		s.profilerTrigger(orgID, true)
 	}
+	// The tracked set's owners are whose GitHub teams the team checklist
+	// offers, so its next read lists them again.
+	s.gitHubGroupListings.Forget(gitHubGroupListingKey(orgID, host))
 
 	writeJSON(w, http.StatusOK, teamReposPutResponse{Repos: trackedReposJSON(stored)})
 }

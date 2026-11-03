@@ -98,6 +98,9 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 func TestGitHubGroupCandidates_CredentialsMissing(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
+	// The test tracks a repository straight in the store, past the PUT that
+	// drops the org's held listing, so it reads every listing live.
+	srv.gitHubGroupListings = nil
 
 	// No tracked repos: no owner to resolve, so nothing is missing.
 	if resp := listGitHubGroups(t, srv, nil); resp.CredentialsMissing {

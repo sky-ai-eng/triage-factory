@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 	"go.opentelemetry.io/otel"
 
 	// Link the Slack store factories (postgres + sqlite) so the Slack
@@ -106,10 +107,11 @@ func install(api server.ExtensionAPI) {
 	api.API("GET /api/slack/manifest", h.handleManifest)
 
 	ch := &channelsHandler{
-		tx:     api.Tx(),
-		stores: stores,
-		az:     api.Authz(),
-		client: slackHTTPClient,
+		tx:         api.Tx(),
+		stores:     stores,
+		az:         api.Authz(),
+		client:     slackHTTPClient,
+		candidates: ttlcache.New[slackCandidateSet](slackCandidatesTTL),
 	}
 	// The list and its facets node are reads; they mount through
 	// APIMutating because they are POSTs, and CSRF follows the method.

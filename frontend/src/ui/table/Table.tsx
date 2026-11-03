@@ -99,6 +99,13 @@ export type TableProps = {
      * `search` and passes them back as `options`.
      */
     onQuery?: (needle: string) => void
+    /**
+     * True while `options` answer an earlier query than the one typed: the
+     * caller's read for the current one is still out. Enter waits for it, so
+     * it takes the top match for what was typed rather than for a query the
+     * reader has moved past.
+     */
+    pending?: boolean
     fields?: Array<{ key: string; options?: string[]; value?: string }>
     onAdd?: (option: TableCandidate, values: Record<string, string>) => void
     onSelect?: () => void
@@ -563,6 +570,18 @@ export function Table({
     setHi(0)
     if (draftInput.current) draftInput.current.focus()
   }
+  // An Enter that arrived while the caller was still answering the query,
+  // taken once the answer is on screen.
+  const enterQueued = useRef(false)
+  const answering = !!(add && add.pending)
+  useEffect(() => {
+    if (answering || !enterQueued.current) return
+    enterQueued.current = false
+    // The answer arrives from the caller, outside the table: staging the top
+    // match is the table catching up with it, once.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    commitDraft()
+  })
   const openDraft = () => {
     setSel({})
     setDrafting(true)
@@ -1094,7 +1113,8 @@ export function Table({
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           e.preventDefault()
-                          commitDraft()
+                          if (answering) enterQueued.current = true
+                          else commitDraft()
                         } else if (e.key === 'Escape') {
                           e.preventDefault()
                           closeDraft()

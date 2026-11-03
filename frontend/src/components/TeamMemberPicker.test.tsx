@@ -6,8 +6,7 @@ import { jsonBody } from '../test/apiResponse'
 describe('TeamMemberPicker', () => {
   it('asks the org roster for the people not on the team, and offers what it answers', async () => {
     // u1 is on the team as far as any client could know. The server's answer
-    // is the candidate set, so it is offered as given rather than checked
-    // against a roster the picker no longer reads.
+    // is the candidate set, so it is offered as given.
     const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<unknown>>(() =>
       Promise.resolve({
         ok: true,

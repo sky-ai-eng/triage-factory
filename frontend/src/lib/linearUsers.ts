@@ -1,4 +1,4 @@
-import { apiJSON, apiList, HttpError, httpErrorMessage } from './apiClient'
+import { apiJSON, apiListFirstRows, HttpError, httpErrorMessage } from './apiClient'
 
 /** A person in the org's Linear workspace: Linear's user id, which a Linear
  *  predicate's people filters (assignee_in, creator_in, commenter_in) store,
@@ -31,7 +31,7 @@ const usersPath = (orgId: string) => `/api/orgs/${encodeURIComponent(orgId)}/lin
  *  answer, not a failure. */
 export async function searchLinearUsers(orgId: string, search: string): Promise<LinearUserSearch> {
   try {
-    const page = await apiList<LinearUser>(`${usersPath(orgId)}/list`, {
+    const page = await apiListFirstRows<LinearUser>(`${usersPath(orgId)}/list`, {
       search,
       page_size: LINEAR_USER_SEARCH_SIZE,
     })

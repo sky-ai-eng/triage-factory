@@ -157,6 +157,13 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   // newer one.
   const wanted = useRef('')
 
+  // How many rows of which search the reader holds, for a refresh that
+  // re-reads them all.
+  const held = useRef({ search: '', count: 0 })
+  useEffect(() => {
+    held.current = { search: catalog?.search ?? '', count: catalog?.items.length ?? 0 }
+  }, [catalog])
+
   // Best-effort: without the catalog the page still shows and can still
   // unwatch what is tracked.
   const readCatalog = useCallback(async (search: string, pageToken = '') => {
@@ -203,24 +210,55 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     return () => clearTimeout(id)
   }, [filter, readCatalog])
 
+  // A refresh of the search the reader is asking for now. It reads as many
+  // pages as they hold of it and replaces them in one step, so a refresh does
+  // not take back the rows "show more" loaded. A failed refresh keeps what is
+  // on screen.
+  const refreshCatalog = useCallback(async () => {
+    const search = wanted.current
+    const depth = held.current.search === search ? held.current.count : 0
+    const seq = ++readSeq.current
+    try {
+      let page = await listReachableRepos(search)
+      let items = page.items
+      while (page.next_page_token && items.length < depth) {
+        if (seq !== readSeq.current) return
+        page = await listReachableRepos(search, page.next_page_token)
+        items = [...items, ...page.items]
+      }
+      if (seq !== readSeq.current) return
+      setCatalogError('')
+      setCatalog({
+        search,
+        items,
+        next: page.next_page_token,
+        total: page.total_count,
+        status: page.status,
+      })
+      if (!search && page.status === 'ready') setVisibleTotal(page.total_count)
+    } catch {
+      // The rows on screen are the last good answer; the next refresh retries.
+    }
+  }, [])
+
   // The server refreshes the reachable set out of band and says so with a
   // payload-free ping; re-reading on it is what turns "discovering" into
   // repositories without a reload.
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
-        if (event.type === 'github_repos_updated') void readCatalog(wanted.current)
+        if (event.type === 'github_repos_updated') void refreshCatalog()
       },
-      [readCatalog],
+      [refreshCatalog],
     ),
   )
 
   const discovering = catalog?.status === 'discovering'
   useEffect(() => {
     if (!discovering) return
-    const id = setInterval(() => void readCatalog(wanted.current), DISCOVERY_POLL_MS)
+    const id = setInterval(() => void refreshCatalog(), DISCOVERY_POLL_MS)
     return () => clearInterval(id)
-  }, [discovering, readCatalog])
+  }, [discovering, refreshCatalog])
 
   const loadMore = useCallback(() => {
     if (catalog?.next) void readCatalog(catalog.search, catalog.next)
