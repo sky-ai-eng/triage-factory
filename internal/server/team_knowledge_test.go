@@ -233,6 +233,68 @@ func TestTeamKnowledge_ListPagesAndCountsOnly(t *testing.T) {
 	}
 }
 
+// TestTeamKnowledge_ListSearchesAndSortsBeforeTheWindow: search and order are
+// the route's, applied to the whole listing before the page is cut, so the
+// total counts the matches and page 1 is the first of them in the order
+// asked for.
+func TestTeamKnowledge_ListSearchesAndSortsBeforeTheWindow(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	mustUpload(t, s, "private", "Runbooks", map[string]string{"deploy.md": "a much longer body"})
+	mustUpload(t, s, "private", "notes", map[string]string{
+		"100%-done.md": "bb", "1000-items.md": "ccc", "zeta.md": "d",
+	})
+
+	for _, tc := range []struct {
+		body  map[string]any
+		want  []string
+		total int
+	}{
+		// A folder name finds what is filed under it, whatever its case.
+		{map[string]any{"search": "runbooks"}, []string{"private/Runbooks/deploy.md"}, 1},
+		// A % is a literal percent sign: "100%" must not also match "1000".
+		{map[string]any{"search": "100%"}, []string{"private/notes/100%-done.md"}, 1},
+		// The window cuts the matches, in the order asked for.
+		{map[string]any{"search": "notes/", "sort_key": "path", "sort_dir": "desc", "page_size": 2},
+			[]string{"private/notes/zeta.md", "private/notes/1000-items.md"}, 3},
+		{map[string]any{"sort_key": "size", "page_size": 2},
+			[]string{"private/Runbooks/deploy.md", "private/notes/1000-items.md"}, 4},
+		// Path order folds case, so Runbooks sits among the lower-case names.
+		{map[string]any{"sort_key": "path"}, []string{
+			"private/notes/100%-done.md", "private/notes/1000-items.md", "private/notes/zeta.md", "private/Runbooks/deploy.md",
+		}, 4},
+	} {
+		items, total := listKnowledge(t, s, tc.body)
+		if got := refsOf(items); !equalSlices(got, tc.want) || total != tc.total {
+			t.Errorf("%v = %v (total %d), want %v (total %d)", tc.body, got, total, tc.want, tc.total)
+		}
+	}
+
+	// A page token addresses a position in one search and one order.
+	rec := doJSON(t, s, http.MethodPost, kbPath("/list"), map[string]any{"search": "notes", "page_size": 1})
+	var first struct {
+		Next string `json:"next_page_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil || first.Next == "" {
+		t.Fatalf("page 1 = %s; want a next_page_token", rec.Body.String())
+	}
+	for _, body := range []map[string]any{
+		{"search": "runbooks", "page_size": 1, "page_token": first.Next},
+		{"search": "notes", "sort_key": "size", "page_size": 1, "page_token": first.Next},
+	} {
+		rec := doJSON(t, s, http.MethodPost, kbPath("/list"), body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%v = %d, want 400; body=%s", body, rec.Code, rec.Body.String())
+		}
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidParam, "page_token")
+	}
+	// The predicate folds case, so two spellings of one needle share a token.
+	items, _ := listKnowledge(t, s, map[string]any{"search": "NOTES", "page_size": 1, "page_token": first.Next})
+	if len(items) != 1 {
+		t.Errorf("page 2 under a case-folded needle = %v, want one row", refsOf(items))
+	}
+}
+
 func TestTeamKnowledge_MovePublishesAndUnpublishes(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -375,6 +437,38 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
 		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "page_size")
+	})
+
+	t.Run("list search past the cap", func(t *testing.T) {
+		rec := doJSON(t, s, http.MethodPost, kbPath("/list"), map[string]any{"search": strings.Repeat("x", 201)})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "search")
+	})
+
+	t.Run("list sort_key outside the vocabulary", func(t *testing.T) {
+		rec := doJSON(t, s, http.MethodPost, kbPath("/list"), map[string]any{"sort_key": "name"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "sort_key")
+	})
+
+	t.Run("list sort_dir without a sort_key", func(t *testing.T) {
+		rec := doJSON(t, s, http.MethodPost, kbPath("/list"), map[string]any{"sort_dir": "asc"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "sort_dir")
+	})
+
+	t.Run("list sort_dir outside asc and desc", func(t *testing.T) {
+		rec := doJSON(t, s, http.MethodPost, kbPath("/list"), map[string]any{"sort_key": "path", "sort_dir": "up"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "sort_dir")
 	})
 
 	t.Run("move without a destination", func(t *testing.T) {

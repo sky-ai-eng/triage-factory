@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -34,7 +35,7 @@ func runKBConformance(t *testing.T, kb KB) {
 	ctx := context.Background()
 
 	t.Run("empty kb lists nothing", func(t *testing.T) {
-		got, err := kb.List(ctx, testOrg, "team-never-written", Roots(), "")
+		got, err := kb.List(ctx, testOrg, "team-never-written", ListQuery{Roots: Roots()})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -49,7 +50,7 @@ func runKBConformance(t *testing.T, kb KB) {
 		put(t, kb, team, RootPrivate, "notes/deploy.md", "how we deploy")
 		put(t, kb, team, RootPrivate, "architecture.md", "the shape of it")
 
-		got, err := kb.List(ctx, testOrg, team, Roots(), "")
+		got, err := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots()})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -75,7 +76,7 @@ func runKBConformance(t *testing.T, kb KB) {
 		put(t, kb, team, RootPrivate, "secret.md", "ours alone")
 		put(t, kb, team, RootShared, "public.md", "for everyone")
 
-		got, err := kb.List(ctx, testOrg, team, []Root{RootShared}, "")
+		got, err := kb.List(ctx, testOrg, team, ListQuery{Roots: []Root{RootShared}})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -85,7 +86,7 @@ func runKBConformance(t *testing.T, kb KB) {
 
 		// An empty root set is an empty answer, never "everything" — a
 		// visibility gate that resolved to nothing must not widen.
-		none, err := kb.List(ctx, testOrg, team, nil, "")
+		none, err := kb.List(ctx, testOrg, team, ListQuery{})
 		if err != nil {
 			t.Fatalf("List with no roots: %v", err)
 		}
@@ -100,13 +101,91 @@ func runKBConformance(t *testing.T, kb KB) {
 		put(t, kb, team, RootPrivate, "notes/deep/b.md", "b")
 		put(t, kb, team, RootPrivate, "notes-archive/c.md", "c")
 
-		got, err := kb.List(ctx, testOrg, team, Roots(), "notes")
+		got, err := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots(), PathPrefix: "notes"})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
 		want := []string{"private/notes/a.md", "private/notes/deep/b.md"}
 		if !equalStrings(refStrings(got), want) {
 			t.Fatalf("prefix List = %v; want %v (notes-archive is a sibling, not a child)", refStrings(got), want)
+		}
+	})
+
+	t.Run("search matches the path, case-insensitively and literally", func(t *testing.T) {
+		team := "team-search"
+		put(t, kb, team, RootPrivate, "Runbooks/Deploy.md", "a")
+		put(t, kb, team, RootPrivate, "notes/100%-done.md", "b")
+		put(t, kb, team, RootPrivate, "notes/1000-items.md", "c")
+		put(t, kb, team, RootPrivate, "notes/plan.md", "d")
+		put(t, kb, team, RootShared, "runbooks/shared.md", "e")
+
+		for _, tc := range []struct {
+			q    ListQuery
+			want []string
+		}{
+			// A folder name matches what is filed under it, in either root.
+			{ListQuery{Roots: Roots(), Search: "RUNBOOKS"}, []string{"private/Runbooks/Deploy.md", "shared/runbooks/shared.md"}},
+			// A % is a literal percent sign: "100%" must not also match "1000".
+			{ListQuery{Roots: Roots(), Search: "100%"}, []string{"private/notes/100%-done.md"}},
+			{ListQuery{Roots: Roots(), Search: "  plan "}, []string{"private/notes/plan.md"}},
+			// Search narrows the scope; it never widens it.
+			{ListQuery{Roots: []Root{RootShared}, Search: "deploy"}, []string{}},
+			{ListQuery{Roots: Roots(), PathPrefix: "notes", Search: "md"}, []string{
+				"private/notes/100%-done.md", "private/notes/1000-items.md", "private/notes/plan.md",
+			}},
+			{ListQuery{Roots: Roots(), Search: "absent"}, []string{}},
+		} {
+			got, err := kb.List(ctx, testOrg, team, tc.q)
+			if err != nil {
+				t.Fatalf("List(%+v): %v", tc.q, err)
+			}
+			if !equalStrings(refStrings(got), tc.want) {
+				t.Errorf("List(%+v) = %v; want %v", tc.q, refStrings(got), tc.want)
+			}
+		}
+	})
+
+	t.Run("each sort key orders the listing, and the default order breaks ties", func(t *testing.T) {
+		team := "team-sort"
+		// Written in this order, a pause apart, so mod times run c, d, a, b, A.
+		for _, e := range []struct {
+			root       Root
+			path, body string
+		}{
+			{RootPrivate, "c.md", "x"},
+			{RootPrivate, "d.md", "x"},
+			{RootShared, "a.md", "xxx"},
+			{RootPrivate, "b.md", "xx"},
+			{RootPrivate, "A.md", "xxxxx"},
+		} {
+			put(t, kb, team, e.root, e.path, e.body)
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		for _, tc := range []struct {
+			sort Sort
+			want []string
+		}{
+			// Root first, then path, folding case.
+			{Sort{}, []string{"private/A.md", "private/b.md", "private/c.md", "private/d.md", "shared/a.md"}},
+			// Path across both roots; two paths that fold together fall back
+			// to their bytes.
+			{Sort{Key: SortPath}, []string{"private/A.md", "shared/a.md", "private/b.md", "private/c.md", "private/d.md"}},
+			{Sort{Key: SortPath, Desc: true}, []string{"private/d.md", "private/c.md", "private/b.md", "shared/a.md", "private/A.md"}},
+			// c and d are the same size: the default order breaks the tie,
+			// ascending whatever the direction.
+			{Sort{Key: SortSize, Desc: true}, []string{"private/A.md", "shared/a.md", "private/b.md", "private/c.md", "private/d.md"}},
+			{Sort{Key: SortSize}, []string{"private/c.md", "private/d.md", "private/b.md", "shared/a.md", "private/A.md"}},
+			{Sort{Key: SortModTime, Desc: true}, []string{"private/A.md", "private/b.md", "shared/a.md", "private/d.md", "private/c.md"}},
+			{Sort{Key: SortModTime}, []string{"private/c.md", "private/d.md", "shared/a.md", "private/b.md", "private/A.md"}},
+		} {
+			got, err := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots(), Sort: tc.sort})
+			if err != nil {
+				t.Fatalf("List(%+v): %v", tc.sort, err)
+			}
+			if !equalStrings(refStrings(got), tc.want) {
+				t.Errorf("List(%+v) = %v; want %v", tc.sort, refStrings(got), tc.want)
+			}
 		}
 	})
 
@@ -151,7 +230,7 @@ func runKBConformance(t *testing.T, kb KB) {
 		if n != 2 {
 			t.Fatalf("Delete count = %d; want 2", n)
 		}
-		got, err := kb.List(ctx, testOrg, team, Roots(), "")
+		got, err := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots()})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -180,7 +259,7 @@ func runKBConformance(t *testing.T, kb KB) {
 		if n != 2 {
 			t.Fatalf("Move count = %d; want 2", n)
 		}
-		got, err := kb.List(ctx, testOrg, team, Roots(), "")
+		got, err := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots()})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -201,7 +280,7 @@ func runKBConformance(t *testing.T, kb KB) {
 			Ref{Root: RootPrivate, Path: "final/notes.md"}); err != nil {
 			t.Fatalf("Move: %v", err)
 		}
-		got, _ := kb.List(ctx, testOrg, team, Roots(), "")
+		got, _ := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots()})
 		if !equalStrings(refStrings(got), []string{"private/final/notes.md"}) {
 			t.Fatalf("after rename = %v", refStrings(got))
 		}
@@ -249,7 +328,7 @@ func runKBConformance(t *testing.T, kb KB) {
 	t.Run("teams never see each other", func(t *testing.T) {
 		put(t, kb, "team-one", RootShared, "mine.md", "one")
 		put(t, kb, "team-two", RootShared, "mine.md", "two")
-		got, _ := kb.List(ctx, testOrg, "team-one", Roots(), "")
+		got, _ := kb.List(ctx, testOrg, "team-one", ListQuery{Roots: Roots()})
 		if !equalStrings(refStrings(got), []string{"shared/mine.md"}) {
 			t.Fatalf("team-one List = %v", refStrings(got))
 		}
@@ -277,10 +356,10 @@ func runKBConformance(t *testing.T, kb KB) {
 		if err := kb.Put(ctx, testOrg, team, unknown, strings.NewReader("x")); !errors.Is(err, ErrInvalidName) {
 			t.Errorf("Put with an unknown root = %v; want ErrInvalidName", err)
 		}
-		if _, err := kb.List(ctx, testOrg, team, []Root{"public"}, ""); !errors.Is(err, ErrInvalidName) {
+		if _, err := kb.List(ctx, testOrg, team, ListQuery{Roots: []Root{"public"}}); !errors.Is(err, ErrInvalidName) {
 			t.Errorf("List with an unknown root = %v; want ErrInvalidName", err)
 		}
-		if _, err := kb.List(ctx, testOrg, team, Roots(), "../x"); !errors.Is(err, ErrInvalidName) {
+		if _, err := kb.List(ctx, testOrg, team, ListQuery{Roots: Roots(), PathPrefix: "../x"}); !errors.Is(err, ErrInvalidName) {
 			t.Errorf("List with a traversal prefix = %v; want ErrInvalidName", err)
 		}
 	})
@@ -462,7 +541,7 @@ func TestLocalKB_SymlinkIsNeverAnEntry(t *testing.T) {
 	}
 
 	// And the listing still shows only the team's own document.
-	got, err := kb.List(ctx, testOrg, testTeam, Roots(), "")
+	got, err := kb.List(ctx, testOrg, testTeam, ListQuery{Roots: Roots()})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -513,7 +592,7 @@ func TestLocalKB_SkipsSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "link.md")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	got, err := kb.List(context.Background(), testOrg, testTeam, Roots(), "")
+	got, err := kb.List(context.Background(), testOrg, testTeam, ListQuery{Roots: Roots()})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -551,7 +630,7 @@ func TestObjectKB_RollbackAttemptsEveryCopy(t *testing.T) {
 
 	// Every copy the move made is gone except the one whose delete was refused,
 	// and the error names that one so an operator can clean it up.
-	left, listErr := kb.List(ctx, testOrg, testTeam, []Root{RootShared}, "")
+	left, listErr := kb.List(ctx, testOrg, testTeam, ListQuery{Roots: []Root{RootShared}})
 	if listErr != nil {
 		t.Fatalf("List: %v", listErr)
 	}
@@ -563,7 +642,7 @@ func TestObjectKB_RollbackAttemptsEveryCopy(t *testing.T) {
 	}
 
 	// And the sources are untouched: the knowledge is still readable where it was.
-	src, _ := kb.List(ctx, testOrg, testTeam, []Root{RootPrivate}, "")
+	src, _ := kb.List(ctx, testOrg, testTeam, ListQuery{Roots: []Root{RootPrivate}})
 	if len(src) != 4 {
 		t.Errorf("sources = %v; a refused move must not remove any", refStrings(src))
 	}

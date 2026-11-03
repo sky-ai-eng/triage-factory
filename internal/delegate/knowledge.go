@@ -179,7 +179,7 @@ func (s *Spawner) stageOneKnowledgeSet(
 	knowledgeRoot, dir, label string,
 	staged *stagedKnowledge,
 ) {
-	entries, err := kb.List(ctx, orgID, teamID, roots, "")
+	entries, err := kb.List(ctx, orgID, teamID, kbstore.ListQuery{Roots: roots})
 	if err != nil {
 		delegateLog.Warn("list team knowledge failed; this run stages none of it", "team", teamID, "error", err)
 		return

@@ -152,6 +152,49 @@ describe('Knowledge — listing', () => {
     await waitFor(() => expect(api.apiList).toHaveBeenCalled())
   })
 
+  it('searches on the server and renders every row it answers, unfiltered', async () => {
+    draw()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+    // The server's answer to the needle — including a row whose path does
+    // not contain it. Whatever the server matched is what the page shows.
+    api.apiList.mockClear()
+    api.apiList.mockResolvedValue({ items: FILES, next_page_token: '', total_count: 2 })
+
+    fireEvent.change(screen.getByLabelText('Search documents'), { target: { value: '  deploy ' } })
+
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+    const [path, body] = api.apiList.mock.calls[api.apiList.mock.calls.length - 1]
+    expect(path).toBe('/api/teams/t1/kb/list')
+    expect(body).toMatchObject({ root: 'private', search: 'deploy' })
+    await waitFor(() => expect(screen.getByText('runbooks/deploy.md')).toBeTruthy())
+    expect(screen.getByText('architecture.md')).toBeTruthy()
+  })
+
+  it('orders on the server: the path order by default, a header click asks for another', async () => {
+    draw()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+    expect(api.apiList.mock.calls[0][1]).toMatchObject({ sort_key: 'path', sort_dir: 'asc' })
+
+    // The server answers by size, largest first; the page keeps that order
+    // even though it is not the path order.
+    api.apiList.mockClear()
+    api.apiList.mockResolvedValue({
+      items: [FILES[0], FILES[1]],
+      next_page_token: '',
+      total_count: 2,
+    })
+    fireEvent.click(screen.getByRole('columnheader', { name: /SIZE/ }))
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+    expect(api.apiList.mock.calls[0][1]).toMatchObject({ sort_key: 'size', sort_dir: 'desc' })
+
+    await waitFor(() => expect(screen.getByText('runbooks/deploy.md')).toBeTruthy())
+    const order = screen
+      .getAllByRole('button')
+      .map((b) => b.textContent)
+      .filter((t) => t === 'runbooks/deploy.md' || t === 'architecture.md')
+    expect(order).toEqual(['runbooks/deploy.md', 'architecture.md'])
+  })
+
   it('offers no team switcher to a one-team member', async () => {
     draw()
     await waitFor(() => expect(api.apiList).toHaveBeenCalled())

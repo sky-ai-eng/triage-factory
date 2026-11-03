@@ -174,6 +174,25 @@ func TestTeamKnowledge_RootsAreTheVisibilityModel(t *testing.T) {
 	}
 }
 
+// TestTeamKnowledge_SearchStaysInsideTheReadableRoots: search narrows the
+// roots the caller may read and never reaches past them, so a needle naming a
+// private document finds it for a member and nothing for anyone else.
+func TestTeamKnowledge_SearchStaysInsideTheReadableRoots(t *testing.T) {
+	r := newKBRig(t)
+	r.seedAlphaKB(t)
+
+	if _, got := r.list(t, r.alphaMember, r.alpha, map[string]any{"search": "SECRET"}); !equalSlices(got, []string{"private/secret.md"}) {
+		t.Fatalf("member search = %v; want the private document", got)
+	}
+	rec, got := r.list(t, r.betaMember, r.alpha, map[string]any{"search": "secret"})
+	if rec.Code != http.StatusOK || len(got) != 0 {
+		t.Fatalf("non-member search = %d %v; want 200 and an empty page", rec.Code, got)
+	}
+	if _, got := r.list(t, r.betaMember, r.alpha, map[string]any{"search": ".md", "sort_key": "path"}); !equalSlices(got, []string{"shared/published.md"}) {
+		t.Fatalf("non-member broad search = %v; want the shared root alone", got)
+	}
+}
+
 // TestTeamKnowledge_PrivateReadIs404ToANonMember: invisible, not forbidden. A
 // 403 would confirm the document exists.
 func TestTeamKnowledge_PrivateReadIs404ToANonMember(t *testing.T) {
