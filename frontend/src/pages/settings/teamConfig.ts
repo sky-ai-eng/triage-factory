@@ -76,6 +76,9 @@ export interface TeamConfigForm {
   // Claude Code SDK permission posture. Exposed only on the local Settings
   // page; multi mode is always auto and native conversations ignore it.
   auto_mode_enabled: boolean
+  // Whether a run on the operator's own Claude Code login keeps that login's
+  // claude.ai connectors. Local only, like auto mode: only local runs the SDK.
+  claude_ai_connectors_enabled: boolean
   // Branch-name template suggested (not enforced) to delegated agents when they
   // create a branch (TFAC-498). The `<ticket-id>` literal is replaced with the
   // ticket id at run time. Same key on the GET and POST wire.
@@ -124,6 +127,7 @@ export interface TeamSettingsData {
     DefaultModel: string
     AutoDelegateEnabled: boolean
     AutoModeEnabled: boolean
+    ClaudeAIConnectorsEnabled: boolean
     BranchTemplate: string
     ReviewPosture: string
     BaseBranchPushPolicy: string
@@ -482,6 +486,7 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
   default_model: '',
   auto_delegate_enabled: true,
   auto_mode_enabled: true,
+  claude_ai_connectors_enabled: false,
   branch_template: 'tfac/<ticket-id>',
   review_posture: 'identity',
   base_branch_push_policy: 'never',
@@ -503,6 +508,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
     default_model: data.team_settings.DefaultModel,
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
     auto_mode_enabled: data.team_settings.AutoModeEnabled ?? true,
+    claude_ai_connectors_enabled: data.team_settings.ClaudeAIConnectorsEnabled ?? false,
     branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',
     review_posture: data.team_settings.ReviewPosture || 'identity',
     base_branch_push_policy: data.team_settings.BaseBranchPushPolicy || 'never',
@@ -580,7 +586,12 @@ export async function saveTeamSettings(
         ai_auto_delegate_enabled: form.auto_delegate_enabled,
         // Multi mode always uses auto and must not grow a hidden
         // setup/settings write for this local-only field.
-        ...(isLocal ? { auto_mode_enabled: form.auto_mode_enabled } : {}),
+        ...(isLocal
+          ? {
+              auto_mode_enabled: form.auto_mode_enabled,
+              claude_ai_connectors_enabled: form.claude_ai_connectors_enabled,
+            }
+          : {}),
         branch_template: form.branch_template,
         review_posture: form.review_posture,
         base_branch_push_policy: form.base_branch_push_policy,

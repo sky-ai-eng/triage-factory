@@ -5,12 +5,14 @@ import { describe, it, expect, vi } from 'vitest'
 
 import {
   dropStatus,
+  emptyTeamConfig,
   projectIsArmed,
   projectRulesValid,
   ruleIsIdentified,
   saveTeamGitHubGroups,
   saveTeamJiraProjects,
   saveTeamRepos,
+  saveTeamSettings,
   teamProjectsBlocked,
   unresolvableStatuses,
   watchedProject,
@@ -354,5 +356,26 @@ describe('saveTeamGitHubGroups', () => {
     expect(put[0]).toBe('/api/teams/team-1/github-groups')
     expect(put[1].method).toBe('PUT')
     expect(JSON.parse(put[1].body)).toEqual({ github_team_ids: ['11'] })
+  })
+})
+
+describe('saveTeamSettings', () => {
+  const sentBody = async (isLocal: boolean) => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, ...jsonBody({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    const form = { ...emptyTeamConfig(), default_model: 'm', claude_ai_connectors_enabled: true }
+    expect(await saveTeamSettings('team-1', form, isLocal)).toEqual({ ok: true })
+    const [[, init]] = fetchMock.mock.calls as unknown as [string, { body: string }][]
+    return JSON.parse(init.body) as Record<string, unknown>
+  }
+
+  it('sends the claude.ai connectors choice in local mode', async () => {
+    expect((await sentBody(true)).claude_ai_connectors_enabled).toBe(true)
+  })
+
+  it('leaves the local-only fields out in multi mode', async () => {
+    const body = await sentBody(false)
+    expect(body).not.toHaveProperty('claude_ai_connectors_enabled')
+    expect(body).not.toHaveProperty('auto_mode_enabled')
   })
 })

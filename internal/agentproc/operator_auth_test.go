@@ -210,3 +210,34 @@ func TestNewDirectCommand_StoredCredentialForwardsNothing(t *testing.T) {
 		t.Errorf("ANTHROPIC_BASE_URL reached a run with a stored credential: %q", env["ANTHROPIC_BASE_URL"])
 	}
 }
+
+// TestNewDirectCommand_ClaudeAIConnectorsOnlyOnTheOperatorLogin pins when the
+// spawn leaves the claude.ai connectors on: only when the run asked for them
+// and resolved no credential, so it runs on the login that carries them. A
+// stored key keeps them off whatever the run asked for.
+func TestNewDirectCommand_ClaudeAIConnectorsOnlyOnTheOperatorLogin(t *testing.T) {
+	writeOperatorSettings(t, `{}`)
+	stored := func(context.Context, string, string) (map[string]string, error) {
+		return map[string]string{"ANTHROPIC_API_KEY": "sk-stored"}, nil
+	}
+	for _, tc := range []struct {
+		name     string
+		opts     RunOptions
+		wantFlag bool
+	}{
+		{name: "operator login, allowed", opts: RunOptions{ClaudeAIConnectors: true}, wantFlag: true},
+		{name: "operator login, not allowed", opts: RunOptions{}},
+		{name: "stored key, allowed", opts: RunOptions{ClaudeAIConnectors: true, LLMResolver: stored}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts.Cwd = t.TempDir()
+			cmd, err := newDirectCommand(context.Background(), tc.opts, []string{"wrapper.mjs"})
+			if err != nil {
+				t.Fatalf("newDirectCommand: %v", err)
+			}
+			if got := slices.Contains(cmd.Args, "--claude-ai-connectors"); got != tc.wantFlag {
+				t.Errorf("--claude-ai-connectors in argv = %v, want %v: %v", got, tc.wantFlag, cmd.Args)
+			}
+		})
+	}
+}

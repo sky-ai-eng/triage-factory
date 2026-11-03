@@ -36,10 +36,13 @@ making use of your existing subscription. Choose under **Claude credentials**:
   from the environment and `settings.json` are ignored.
 
 Nothing else from your Claude Code setup reaches a run: no permission rules,
-hooks, plugins, MCP servers, `CLAUDE.md`, skills, agents or commands. Proxy and
-CA variables (`HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`) in
-`settings.json` don't carry over either; set them in Triage Factory's own
-environment.
+hooks, plugins, MCP servers (your claude.ai connectors included), `CLAUDE.md`,
+skills, agents or commands. Proxy and CA variables (`HTTPS_PROXY`, `NO_PROXY`,
+`NODE_EXTRA_CA_CERTS`) in `settings.json` don't carry over either; set them in
+Triage Factory's own environment.
+
+The one exception is the team setting **claude.ai connectors**, off by default,
+which lets runs on system Claude Code credentials use your connectors.
 
 ## Agent sandbox (Linux)
 

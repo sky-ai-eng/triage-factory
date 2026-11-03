@@ -75,6 +75,7 @@ func (s *teamsStore) GetSettingsSystem(ctx context.Context, teamID string) (doma
 const pgTeamSettingsColumns = `array_to_json(jira_projects)::text,
 		       ai_reprioritize_threshold, ai_preference_update_interval,
 		       default_model, auto_delegate_enabled, auto_mode_enabled,
+		       claude_ai_connectors_enabled,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
 		       max_daily_cost_usd, branch_template, review_posture,
 		       base_branch_push_policy, enabled_models, array_to_json(linear_teams)::text`
@@ -87,6 +88,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		defaultModel            string
 		autoDelegate            bool
 		autoMode                bool
+		claudeAIConnectors      bool
 		permAbsentGraceMS       int
 		permAbsentAutodeny      bool
 		maxDailyCost            sql.NullFloat64
@@ -98,7 +100,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	)
 	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
-		&defaultModel, &autoDelegate, &autoMode,
+		&defaultModel, &autoDelegate, &autoMode, &claudeAIConnectors,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
 		&enabledModels, &linearTeamsJSON,
@@ -129,6 +131,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		DefaultModel:                    defaultModel,
 		AutoDelegateEnabled:             autoDelegate,
 		AutoModeEnabled:                 autoMode,
+		ClaudeAIConnectorsEnabled:       claudeAIConnectors,
 		PermissionAbsentGraceMS:         permAbsentGraceMS,
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
@@ -679,17 +682,18 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		INSERT INTO team_settings (
 			team_id, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
-			auto_mode_enabled,
+			auto_mode_enabled, claude_ai_connectors_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			branch_template, review_posture,
 			base_branch_push_policy, enabled_models, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
 			ai_preference_update_interval = EXCLUDED.ai_preference_update_interval,
 			default_model = EXCLUDED.default_model,
 			auto_delegate_enabled = EXCLUDED.auto_delegate_enabled,
 			auto_mode_enabled = EXCLUDED.auto_mode_enabled,
+			claude_ai_connectors_enabled = EXCLUDED.claude_ai_connectors_enabled,
 			permission_absent_grace_ms = EXCLUDED.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = EXCLUDED.permission_absent_autodeny_enabled,
 			branch_template = EXCLUDED.branch_template,
@@ -700,7 +704,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		RETURNING `+pgTeamSettingsColumns,
 		teamID, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
-		u.AutoModeEnabled,
+		u.AutoModeEnabled, u.ClaudeAIConnectorsEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		u.BranchTemplate, u.ReviewPosture,
 		u.BaseBranchPushPolicy, db.ModelSetColumnValue(u.EnabledModels),
