@@ -555,7 +555,7 @@ func TestNotificationMarkRead(t *testing.T) {
 		t.Errorf("pings = %+v; want one to the caller", got)
 	}
 
-	tooMany := make([]string, maxMarkReadIDs+1)
+	tooMany := make([]string, maxNotificationIDs+1)
 	for i := range tooMany {
 		tooMany[i] = a
 	}
@@ -586,6 +586,120 @@ func TestNotificationMarkRead(t *testing.T) {
 	}
 	if got := pings.take(); len(got) != 0 {
 		t.Errorf("marking nothing pinged %+v", got)
+	}
+}
+
+// TestNotificationDismiss dismisses the ids the client selected and answers
+// which it dismissed; an id the caller cannot read is left out. A readable row
+// that is not dismissible refuses the call, naming each ids[i] that holds one,
+// and nothing is written.
+func TestNotificationDismiss(t *testing.T) {
+	s, pings := newNotificationsServer(t)
+	a := localNotification(t, s, "a")
+	b := localNotification(t, s, "b")
+	c := localNotification(t, s, "c")
+	pings.take()
+
+	rec := doJSON(t, s, http.MethodPost, meNotifications+"/dismiss", map[string]any{
+		"ids": []string{b, strings.ToUpper(a), fixtureUUID("gone"), a},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []string{a, b}
+	if a > b {
+		want = []string{b, a}
+	}
+	if strings.Join(out.IDs, ",") != strings.Join(want, ",") {
+		t.Errorf("dismissed = %v, want %v", out.IDs, want)
+	}
+	if got := listNotifications(t, s, meNotifications+"/list", map[string]any{"dismissed": false}); got.Total() != 1 || got.Items[0].ID != c {
+		t.Errorf("undismissed after dismiss = %+v", got.Items)
+	}
+	if got := pings.take(); len(got) != 1 || got[0].UserID != runmode.LocalDefaultUserID {
+		t.Errorf("pings = %+v; want one to the caller", got)
+	}
+
+	tooMany := make([]string, maxNotificationIDs+1)
+	for i := range tooMany {
+		tooMany[i] = c
+	}
+	for _, tc := range []struct {
+		name   string
+		body   map[string]any
+		reason string
+		fields []string
+	}{
+		{"absent", map[string]any{}, httpx.ReasonMissingField, []string{"ids"}},
+		{"empty", map[string]any{"ids": []string{}}, httpx.ReasonMissingField, []string{"ids"}},
+		{"malformed", map[string]any{"ids": []string{c, "x", "y"}}, httpx.ReasonInvalidField, []string{"ids[1]", "ids[2]"}},
+		{"too many", map[string]any{"ids": tooMany}, httpx.ReasonOutOfRange, []string{"ids"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, s, http.MethodPost, meNotifications+"/dismiss", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			var fields []string
+			for _, it := range errorItems(t, rec) {
+				if it.Reason != tc.reason {
+					t.Errorf("reason = %q, want %q", it.Reason, tc.reason)
+				}
+				fields = append(fields, it.Field)
+			}
+			if strings.Join(fields, ",") != strings.Join(tc.fields, ",") {
+				t.Errorf("fields = %v, want %v", fields, tc.fields)
+			}
+		})
+	}
+
+	// Two rows that stay until their condition is fixed refuse the call, one
+	// fault per index holding one, and the dismissible row beside them is
+	// left as it was.
+	for _, id := range []string{"r1", "r2"} {
+		requiredCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: id}, true)
+	}
+	required := listNotifications(t, s, meNotifications+"/list", map[string]any{"priority_in": []string{"urgent"}})
+	if required.Total() != 2 {
+		t.Fatalf("required rows = %d, want 2", required.Total())
+	}
+	pings.take()
+	rec = doJSON(t, s, http.MethodPost, meNotifications+"/dismiss", map[string]any{
+		"ids": []string{c, required.Items[0].ID, fixtureUUID("gone"), required.Items[1].ID},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("dismiss with non-dismissible rows = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	var fields []string
+	for _, it := range errorItems(t, rec) {
+		if it.Reason != httpx.ReasonInvalidField || !strings.Contains(it.Message, "can't be dismissed") {
+			t.Errorf("fault = %+v", it)
+		}
+		fields = append(fields, it.Field)
+	}
+	if strings.Join(fields, ",") != "ids[1],ids[3]" {
+		t.Errorf("fault fields = %v, want ids[1] and ids[3]", fields)
+	}
+	if got := listNotifications(t, s, meNotifications+"/list", map[string]any{"dismissed": true}); got.Total() != 2 {
+		t.Errorf("dismissed after the refusal = %d rows, want the first call's 2", got.Total())
+	}
+	if got := pings.take(); len(got) != 0 {
+		t.Errorf("a refused dismiss pinged %+v", got)
+	}
+
+	// Nothing readable is a 200 that dismissed nothing, and pings nobody.
+	rec = doJSON(t, s, http.MethodPost, meNotifications+"/dismiss", map[string]any{"ids": []string{fixtureUUID("gone")}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ids":[]`) {
+		t.Errorf("dismiss of nothing readable = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := pings.take(); len(got) != 0 {
+		t.Errorf("dismissing nothing pinged %+v", got)
 	}
 }
 

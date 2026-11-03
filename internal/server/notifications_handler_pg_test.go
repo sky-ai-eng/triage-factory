@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -235,4 +238,67 @@ func TestNotifications_Postgres_Invoke(t *testing.T) {
 		t.Errorf("org admin's open inbox after the team row resolved = %d, want the org row still open", got.Total())
 	}
 	assertFault(t, r.tokensJSON(http.MethodPost, path, nil, r.infraAdminSid, ""), http.StatusConflict, httpx.ReasonConflict)
+}
+
+// TestNotifications_Postgres_Dismiss: dismiss takes any row the caller may
+// read, so an org admin dismisses a team's row for themselves and its team's
+// admin still has it; a row the caller may not read is left out of the answer.
+// A non-dismissible row refuses the call and writes nothing.
+func TestNotifications_Postgres_Dismiss(t *testing.T) {
+	r := newNotificationsRig(t)
+	dismiss := func(sid string, ids ...string) *httptest.ResponseRecorder {
+		t.Helper()
+		return r.tokensJSON(http.MethodPost, meNotifications+"/dismiss", map[string]any{"ids": ids}, sid, "")
+	}
+	answer := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("dismiss = %d: %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return strings.Join(out.IDs, ",")
+	}
+
+	if got := answer(dismiss(r.plainSid, r.orgRowID, r.teamRowID)); got != "" {
+		t.Errorf("a member of no team dismissed %q; want nothing", got)
+	}
+	if got := r.pings.take(); len(got) != 0 {
+		t.Errorf("dismissing nothing pinged %+v", got)
+	}
+
+	requiredCondition.Set(context.Background(), r.orgID.String(), notificationTestParams{ID: "r"}, true)
+	required := r.list(r.ownerSid, "", meNotifications+"/list", map[string]any{"priority_in": []string{"urgent"}})
+	if required.Total() != 1 {
+		t.Fatalf("org admin's urgent rows = %d, want the required row", required.Total())
+	}
+	r.pings.take()
+	rec := dismiss(r.ownerSid, r.orgRowID, required.Items[0].ID)
+	assertFault(t, rec, http.StatusUnprocessableEntity, httpx.ReasonInvalidField)
+	if f := errorItems(t, rec)[0].Field; f != "ids[1]" {
+		t.Errorf("non-dismissible fault field = %q, want ids[1]", f)
+	}
+	if got := r.list(r.ownerSid, "", meNotifications+"/list", map[string]any{"dismissed": true, "page_size": 0}); got.Total() != 0 {
+		t.Errorf("dismissed after the refusal = %d, want 0", got.Total())
+	}
+
+	want := []string{r.orgRowID, r.teamRowID}
+	slices.Sort(want)
+	if got := answer(dismiss(r.ownerSid, r.teamRowID, r.orgRowID)); got != strings.Join(want, ",") {
+		t.Errorf("org admin dismissed %q, want %v", got, want)
+	}
+	if got := r.pings.take(); len(got) != 1 || got[0].UserID != r.owner.String() {
+		t.Errorf("pings = %+v; want one to the org admin", got)
+	}
+	if got := r.list(r.ownerSid, "", r.orgNotifications, map[string]any{"dismissed": false, "priority_in": []string{"low"}}); got.Total() != 0 {
+		t.Errorf("org admin's undismissed team-condition rows = %+v, want none", got.Items)
+	}
+	// Marks are per person: the team's admin still has the row.
+	if got := r.list(r.infraAdminSid, "", meNotifications+"/list", map[string]any{"dismissed": false}); got.Total() != 1 || got.Items[0].ID != r.teamRowID {
+		t.Errorf("infra admin's undismissed inbox = %+v; want the team row", got.Items)
+	}
 }

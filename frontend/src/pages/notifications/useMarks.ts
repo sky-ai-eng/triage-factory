@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from '../../components/Toast/toastStore'
 import { httpErrorMessage } from '../../lib/apiClient'
 import {
-  MARK_READ_MAX,
+  BULK_MARKS_MAX,
+  dismissNotifications,
   markNotificationsRead,
   setNotificationMarks,
   type NotificationItem,
@@ -52,10 +53,18 @@ function prune(marks: ReadonlyMap<string, Mark>, served: NotificationItem[]): Ma
   return out
 }
 
-function sendRead(ids: string[], keepalive: boolean, onFail: (ids: string[], e: unknown) => void) {
-  for (let i = 0; i < ids.length; i += MARK_READ_MAX) {
-    const chunk = ids.slice(i, i + MARK_READ_MAX)
-    markNotificationsRead(chunk, { keepalive }).catch((e) => onFail(chunk, e))
+type BulkSend = (ids: string[], init: { keepalive?: boolean }) => Promise<unknown>
+
+/** Send ids through a bulk verb, BULK_MARKS_MAX to a call. */
+function sendChunks(
+  send: BulkSend,
+  ids: string[],
+  keepalive: boolean,
+  onFail: (ids: string[], e: unknown) => void,
+) {
+  for (let i = 0; i < ids.length; i += BULK_MARKS_MAX) {
+    const chunk = ids.slice(i, i + BULK_MARKS_MAX)
+    send(chunk, { keepalive }).catch((e) => onFail(chunk, e))
   }
 }
 
@@ -87,22 +96,30 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
   useEffect(() => {
     reloadRef.current = reload
   })
-  // A read that did not land is put back as it was, and said.
-  const readFailed = useCallback((ids: string[], e: unknown) => {
+  // A bulk write that did not land is put back as it was, and said.
+  const bulkFailed = useCallback((ids: string[], e: unknown, fallback: string) => {
     setMarks((prev) => {
       const next = new Map(prev)
       for (const id of ids) next.delete(id)
       return next
     })
-    toast.error(httpErrorMessage(e, 'Could not mark those notifications read.'))
+    toast.error(httpErrorMessage(e, fallback))
     reloadRef.current()
   }, [])
+  const readFailed = useCallback(
+    (ids: string[], e: unknown) => bulkFailed(ids, e, 'Could not mark those notifications read.'),
+    [bulkFailed],
+  )
+  const dismissFailed = useCallback(
+    (ids: string[], e: unknown) => bulkFailed(ids, e, 'Could not dismiss those notifications.'),
+    [bulkFailed],
+  )
   const queue = useRef(new Set<string>())
   const flush = useCallback(
     (keepalive = false) => {
       const ids = [...queue.current]
       queue.current.clear()
-      sendRead(ids, keepalive, readFailed)
+      sendChunks(markNotificationsRead, ids, keepalive, readFailed)
     },
     [readFailed],
   )
@@ -159,7 +176,7 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
   const commitRead = useCallback(
     (ids: string[], keepalive: boolean) => {
       mark(ids, { read: true })
-      sendRead(ids, keepalive, readFailed)
+      sendChunks(markNotificationsRead, ids, keepalive, readFailed)
     },
     [mark, readFailed],
   )
@@ -167,26 +184,9 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
   const commitDismissed = useCallback(
     (ids: string[], keepalive: boolean) => {
       mark(ids, { dismissed: true })
-      void Promise.allSettled(
-        ids.map((id) => setNotificationMarks(id, { dismissed: true }, { keepalive })),
-      ).then((results) => {
-        const failed = results.flatMap((r, i) =>
-          r.status === 'rejected' ? [{ id: ids[i], r }] : [],
-        )
-        if (!failed.length) return
-        for (const f of failed) unmark(f.id)
-        toast.error(
-          httpErrorMessage(
-            failed[0].r.reason,
-            failed.length === 1
-              ? 'One notification could not be dismissed.'
-              : `${failed.length} notifications could not be dismissed.`,
-          ),
-        )
-        reloadRef.current()
-      })
+      sendChunks(dismissNotifications, ids, keepalive, dismissFailed)
     },
-    [mark, unmark],
+    [mark, dismissFailed],
   )
 
   const items = useMemo(

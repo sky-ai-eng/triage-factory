@@ -491,27 +491,78 @@ func (s *notificationStore) MarkRead(ctx context.Context, orgID, userID string, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	out := []domain.NotificationMarks{}
 	if len(ids) == 0 {
-		return out, nil
+		return []domain.NotificationMarks{}, nil
 	}
+	return s.stamp(ctx, orgID, userID, ids, "read_at", "")
+}
+
+func (s *notificationStore) Dismiss(ctx context.Context, orgID, userID string, ids []string) ([]domain.NotificationMarks, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []domain.NotificationMarks{}, nil
+	}
+	fixed, err := s.notDismissible(ctx, orgID, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	if len(fixed) > 0 {
+		return nil, &db.NotificationsNotDismissibleError{IDs: fixed}
+	}
+	return s.stamp(ctx, orgID, userID, ids, "dismissed_at", ` AND n.dismissible`)
+}
+
+// notDismissible returns the readable rows of ids that are not dismissible,
+// sorted.
+func (s *notificationStore) notDismissible(ctx context.Context, orgID, userID string, ids []string) ([]string, error) {
+	idsJSON, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT n.id FROM notifications n
+		WHERE `+sqliteNotificationReadable+` AND n.id IN (SELECT value FROM json_each(?))
+		  AND NOT n.dismissible
+		ORDER BY n.id`,
+		orgID, time.Now().UTC(), userID, string(idsJSON))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// stamp writes now into the viewer's marks column on the readable rows of ids
+// that also meet cond, and returns the marks written.
+func (s *notificationStore) stamp(ctx context.Context, orgID, userID string, ids []string, column, cond string) ([]domain.NotificationMarks, error) {
 	idsJSON, err := json.Marshal(ids)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	rows, err := s.q.QueryContext(ctx, `
-		INSERT INTO notification_marks AS m (notification_id, user_id, org_id, read_at)
+		INSERT INTO notification_marks AS m (notification_id, user_id, org_id, `+column+`)
 		SELECT n.id, ?, n.org_id, ?
 		FROM notifications n
-		WHERE `+sqliteNotificationReadable+` AND n.id IN (SELECT value FROM json_each(?))
-		ON CONFLICT (notification_id, user_id) DO UPDATE SET read_at = excluded.read_at
+		WHERE `+sqliteNotificationReadable+` AND n.id IN (SELECT value FROM json_each(?))`+cond+`
+		ON CONFLICT (notification_id, user_id) DO UPDATE SET `+column+` = excluded.`+column+`
 		RETURNING `+sqliteNotificationMarksCols,
 		userID, now, orgID, now, userID, string(idsJSON))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	out := []domain.NotificationMarks{}
 	for rows.Next() {
 		m, err := db.ScanNotificationMarks(rows.Scan)
 		if err != nil {
