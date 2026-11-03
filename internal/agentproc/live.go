@@ -47,6 +47,11 @@ import (
 //	{"type":"control","subtype":"tool_batch_result","id":"<id>","delivered":true|false}
 //	{"type":"control","subtype":"tool_call","id":"<id>","tool_call_id":"<tool_use id>","tool_name":"...","input":{...}}
 //	{"type":"control","subtype":"tool_call_cancel","id":"<id>"}
+//	{"type":"control","subtype":"tool_started","tool_call_id":"<id>"}
+//
+// A tool_started is the SDK's PreToolUse hook: Claude Code is starting to run
+// the main thread's call tool_call_id, and the call's result is timed from
+// it. Nothing answers it; the hook returns as soon as it has written the line.
 //
 // A tool_batch is the SDK's PostToolBatch hook: every tool call of a batch
 // has resolved and the model's next request waits on the reply, whose
@@ -632,6 +637,8 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					l.handleToolBatch(ctl)
 				case "tool_batch_result":
 					l.handleToolBatchResult(ctl)
+				case "tool_started":
+					stream.MarkToolStarted(ctl.ToolCallID)
 				case "tool_call":
 					l.handleToolCall(ctl)
 				case "tool_call_cancel":
