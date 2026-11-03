@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -193,4 +195,137 @@ func TestDashboardPRs_PageTokenIsBoundToItsFilters(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for a token minted under other filters; body=%s", rec.Code, rec.Body.String())
 	}
 	assertFieldError(t, rec, "page_token")
+}
+
+// prNumbers reads one PR list page and returns its numbers in served order,
+// checking the total agrees with the page.
+func prNumbers(t *testing.T, s *Server, path string, body map[string]any) []int {
+	t.Helper()
+	out := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", path, body))
+	got := make([]int, len(out.Items))
+	for i, p := range out.Items {
+		got[i] = p.Number
+	}
+	if out.Total() != len(got) {
+		t.Errorf("%s %v: total %d, page %d", path, body, out.Total(), len(got))
+	}
+	return got
+}
+
+// TestPRLists_DraftFilterAndUpdatedAtSort pins the board's column reads on
+// both routes: each column is states plus draft, newest activity first, and
+// the narrowing and the order are the server's.
+func TestPRLists_DraftFilterAndUpdatedAtSort(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	host := dashboardTestHost(t, s, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
+	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
+		t.Fatalf("bind identity: %v", err)
+	}
+	for _, p := range []struct {
+		n       int
+		draft   bool
+		updated string
+	}{
+		{30, false, "2026-10-01T09:00:00Z"},
+		{31, true, "2026-10-02T09:00:00Z"},
+		{32, false, "2026-10-04T09:00:00Z"},
+		{33, true, "2026-10-03T09:00:00Z"},
+	} {
+		seedCommissionedPR(t, s, domain.PRSnapshot{
+			Number: p.n, Repo: "acme/widget", Author: "octocat", State: "OPEN", IsDraft: p.draft, UpdatedAt: p.updated,
+		}, "", "")
+	}
+
+	for _, tc := range []struct {
+		body map[string]any
+		want []int
+	}{
+		{map[string]any{"states": []string{"open"}, "draft": true, "sort_key": "updated_at"}, []int{33, 31}},
+		{map[string]any{"states": []string{"open"}, "draft": false, "sort_key": "updated_at"}, []int{32, 30}},
+		{map[string]any{"sort_key": "updated_at", "sort_dir": "asc"}, []int{30, 31, 33, 32}},
+		{map[string]any{"draft": false, "sort_key": "updated_at", "sort_dir": "desc"}, []int{32, 30}},
+	} {
+		for _, path := range []string{"/api/dashboard/prs/list", teamPRsPath} {
+			if got := prNumbers(t, s, path, tc.body); !slices.Equal(got, tc.want) {
+				t.Errorf("%s %v = %v, want %v", path, tc.body, got, tc.want)
+			}
+		}
+	}
+}
+
+// TestPRLists_DraftAndSortAreStrict: a draft that is not a boolean, an
+// unknown sort key or direction, and a direction with no key are each a 400
+// naming the field, on both routes; an order spelled any other way is an
+// unknown field.
+func TestPRLists_DraftAndSortAreStrict(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	for _, tc := range []struct {
+		body  map[string]any
+		field string
+	}{
+		{map[string]any{"draft": "yes"}, "draft"},
+		{map[string]any{"draft": 1}, "draft"},
+		{map[string]any{"sort_key": "title"}, "sort_key"},
+		{map[string]any{"sort_key": "updated_at", "sort_dir": "newest"}, "sort_dir"},
+		{map[string]any{"sort_dir": "desc"}, "sort_dir"},
+		{map[string]any{"order": "updated_at"}, "order"},
+	} {
+		for _, path := range []string{"/api/dashboard/prs/list", teamPRsPath} {
+			rec := doJSON(t, s, "POST", path, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s %v: status = %d, want 400; body=%s", path, tc.body, rec.Code, rec.Body.String())
+				continue
+			}
+			assertFieldError(t, rec, tc.field)
+		}
+	}
+}
+
+// TestPRLists_PageTokenIsBoundToDraftAndSort: an offset addresses a position
+// in one filtered ordering, so a token minted under one draft value or order
+// is refused under another.
+func TestPRLists_PageTokenIsBoundToDraftAndSort(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	host := dashboardTestHost(t, s, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
+	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
+		t.Fatalf("bind identity: %v", err)
+	}
+	for i := range 3 {
+		seedCommissionedPR(t, s, domain.PRSnapshot{
+			Number: 40 + i, Repo: "acme/widget", Author: "octocat", State: "OPEN", IsDraft: true,
+		}, "", "")
+	}
+
+	for _, tc := range []struct{ mint, reuse map[string]any }{
+		{map[string]any{"draft": true}, map[string]any{"draft": false}},
+		{map[string]any{"draft": true}, map[string]any{}},
+		{map[string]any{}, map[string]any{"sort_key": "updated_at"}},
+		{map[string]any{"sort_key": "updated_at"}, map[string]any{"sort_key": "updated_at", "sort_dir": "asc"}},
+	} {
+		for _, path := range []string{"/api/dashboard/prs/list", teamPRsPath} {
+			mint := map[string]any{"page_size": 2}
+			maps.Copy(mint, tc.mint)
+			first := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", path, mint))
+			if first.NextPageToken == "" {
+				t.Fatalf("%s %v: no next_page_token on a page that leaves rows behind", path, tc.mint)
+			}
+			reuse := map[string]any{"page_size": 2, "page_token": first.NextPageToken}
+			maps.Copy(reuse, tc.reuse)
+			rec := doJSON(t, s, "POST", path, reuse)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s: token minted under %v reused under %v = %d, want 400; body=%s",
+					path, tc.mint, tc.reuse, rec.Code, rec.Body.String())
+				continue
+			}
+			assertFieldError(t, rec, "page_token")
+		}
+	}
 }

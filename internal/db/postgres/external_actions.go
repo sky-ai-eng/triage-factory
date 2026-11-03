@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -161,6 +162,45 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return out, total, err
 }
 
+func (s *externalActionStore) FacetsByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) (db.ExternalActionFacets, error) {
+	return pgExternalActionFacets(ctx, s.admin, `org_id = $1`, []any{orgID}, opts)
+}
+
+func (s *externalActionStore) FacetsByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) (db.ExternalActionFacets, error) {
+	return pgExternalActionFacets(ctx, s.q, `org_id = $1 AND team_id = $2`, []any{orgID, teamID}, opts)
+}
+
+// pgExternalActionFacets groups the rows where and opts select by actor and
+// by team, each cut under the list's predicate with its own filter cleared,
+// on the pool the list reads from.
+func pgExternalActionFacets(ctx context.Context, q queryer, where string, base []any, opts domain.ExternalActionListOpts) (db.ExternalActionFacets, error) {
+	cut := func(column string, opts domain.ExternalActionListOpts) ([]db.Facet, error) {
+		query, args := appendPgExternalActionPredicates(`
+			SELECT `+column+`::text, COUNT(*)
+			  FROM external_actions ea
+			 WHERE `+where+` AND `+column+` IS NOT NULL`, slices.Clip(base), opts)
+		rows, err := q.QueryContext(ctx, query+` GROUP BY `+column+` ORDER BY 1`, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return db.ScanFacets(rows)
+	}
+	byActor := opts
+	byActor.ActorUserID = ""
+	actors, err := cut("actor_user_id", byActor)
+	if err != nil {
+		return db.ExternalActionFacets{}, err
+	}
+	byTeam := opts
+	byTeam.TeamID = ""
+	teams, err := cut("team_id", byTeam)
+	if err != nil {
+		return db.ExternalActionFacets{}, err
+	}
+	return db.ExternalActionFacets{ByActor: actors, ByTeam: teams}, nil
+}
+
 // ListByConversation reads one conversation's actions on the app pool, under the same
 // org-scoped policy ListByTeam reads through — the conversation-visibility
 // check the handler already made is what narrows it to a conversation the
@@ -305,6 +345,10 @@ func appendPgExternalActionPredicates(query string, args []any, opts domain.Exte
 	if opts.ActorUserID != "" {
 		args = append(args, opts.ActorUserID)
 		query += fmt.Sprintf(" AND actor_user_id = $%d", len(args))
+	}
+	if opts.TeamID != "" {
+		args = append(args, opts.TeamID)
+		query += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
 	if opts.ObjectID != "" {
 		args = append(args, opts.ObjectID)

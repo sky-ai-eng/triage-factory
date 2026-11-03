@@ -35,6 +35,10 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 	if err != nil {
 		return nil, 0, err
 	}
+	order, err := pgPRSummaryOrder(f.Sort)
+	if err != nil {
+		return nil, 0, err
+	}
 	accounts, err := s.memberAccounts(ctx, orgID, teamID, githubBaseURL)
 	if err != nil {
 		return nil, 0, err
@@ -57,7 +61,7 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 	where := `
 		WHERE e.org_id = $1 AND e.source = 'github' AND e.snapshot_json IS NOT NULL
 		  AND ` + factoryGitHubRepoTrackedForTeams("$2") + `
-		  AND (e.owning_team_id = $2` + memberLeg + `)` + stateClause
+		  AND (e.owning_team_id = $2` + memberLeg + `)` + stateClause + pgPRDraftClause(f.Draft)
 
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
@@ -67,7 +71,7 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT ` + pgPRSummaryColumns + ` FROM entities e` + where + pgPRSummaryOrder
+	query := `SELECT ` + pgPRSummaryColumns + ` FROM entities e` + where + order
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)

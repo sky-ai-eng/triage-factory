@@ -530,6 +530,29 @@ export interface ActivityAction {
   actor_name?: string
 }
 
+// ActivityFacet is one value of an activity facets cut: the id the list's
+// team_id or actor filter takes, how many rows (actions) or objects
+// (artifacts) carry it, and the name the list's rows show for it, empty for a
+// team or user whose row is gone. Mirrors internal/server/usage
+// activityFacetJSON.
+export interface ActivityFacet {
+  value: string
+  count: number
+  name: string
+}
+
+// The activity facets nodes beside each list
+// (POST {basePath}/actions/facets, POST {basePath}/artifacts/facets), each
+// cut ordered by name the way the select lists it.
+export interface ActivityActionFacets {
+  by_actor: ActivityFacet[]
+  by_team: ActivityFacet[]
+}
+
+export interface ActivityArtifactFacets {
+  by_team: ActivityFacet[]
+}
+
 // Message is the single snake_case transcript-row DTO shared by every
 // surface, mirroring domain.MessageDTO (internal/domain/agent.go).
 // conversation_id links the row to its owning conversation.

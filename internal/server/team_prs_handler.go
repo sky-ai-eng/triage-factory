@@ -51,8 +51,8 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
-	states := canonicalPRStates(&v, req.States)
-	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("team-prs", teamID, states), 0)
+	filter := resolvePRListFilter(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("team-prs", teamID, filter), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -70,7 +70,7 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		prs, total, e = tx.TeamPRs.TeamPRs(r.Context(), orgID, teamID, orgSet.GitHubBaseURL,
-			db.PRListFilter{States: states},
+			filter,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {

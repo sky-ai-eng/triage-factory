@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -522,6 +523,61 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		}
 		if e := resolve(t, viewerOf("", other), othersCommission); e == nil {
 			t.Error("the other viewer's own commission did not resolve for them")
+		}
+	})
+
+	t.Run("PRs_DraftFilterAndUpdatedAtOrder", func(t *testing.T) {
+		store, orgID, viewerID, seed := factory(t)
+		// Two ready, two drafts, and one ready with no updated_at at all, which
+		// sorts last whichever way the order runs.
+		seed.Snapshot(t, domain.PRSnapshot{Number: 80, Author: username, State: "OPEN", Repo: "owner/repo", UpdatedAt: "2026-10-01T09:00:00Z"})
+		seed.Snapshot(t, domain.PRSnapshot{Number: 81, Author: username, State: "OPEN", Repo: "owner/repo", UpdatedAt: "2026-10-03T09:00:00Z"})
+		seed.Snapshot(t, domain.PRSnapshot{Number: 82, Author: username, State: "OPEN", IsDraft: true, Repo: "owner/repo", UpdatedAt: "2026-10-02T09:00:00Z"})
+		seed.Snapshot(t, domain.PRSnapshot{Number: 83, Author: username, State: "OPEN", IsDraft: true, Repo: "owner/repo", UpdatedAt: "2026-10-04T09:00:00Z"})
+		seed.Snapshot(t, domain.PRSnapshot{Number: 84, Author: username, State: "OPEN", Repo: "owner/repo"})
+
+		viewer := viewerOf(username, viewerID)
+		read := func(t *testing.T, f db.PRListFilter, opts db.ListOpts) ([]int, int) {
+			t.Helper()
+			prs, total, err := store.PRs(context.Background(), orgID, viewer, f, opts)
+			if err != nil {
+				t.Fatalf("PRs(%+v): %v", f, err)
+			}
+			out := make([]int, len(prs))
+			for i, p := range prs {
+				out[i] = p.Number
+			}
+			return out, total
+		}
+		yes, no := true, false
+		byUpdated := func(dir string) db.Sort { return db.Sort{Key: db.PRSortUpdatedAt, Dir: dir} }
+		for _, tc := range []struct {
+			name string
+			f    db.PRListFilter
+			want []int
+		}{
+			{"drafts newest first", db.PRListFilter{Draft: &yes, Sort: byUpdated(db.SortDesc)}, []int{83, 82}},
+			{"ready newest first", db.PRListFilter{Draft: &no, Sort: byUpdated(db.SortDesc)}, []int{81, 80, 84}},
+			{"ready oldest first", db.PRListFilter{Draft: &no, Sort: byUpdated(db.SortAsc)}, []int{80, 81, 84}},
+			{"every state and draft", db.PRListFilter{States: []string{domain.PRStateOpen}, Sort: byUpdated(db.SortDesc)}, []int{83, 81, 82, 80, 84}},
+		} {
+			got, total := read(t, tc.f, db.Unwindowed)
+			if !slices.Equal(got, tc.want) || total != len(tc.want) {
+				t.Errorf("%s = %v (total %d), want %v", tc.name, got, total, tc.want)
+			}
+			// The figure and the page agree under the same filter.
+			if _, count := read(t, tc.f, db.ListOpts{CountOnly: true}); count != len(tc.want) {
+				t.Errorf("%s count-only total = %d, want %d", tc.name, count, len(tc.want))
+			}
+		}
+		// The order holds across pages.
+		first, _ := read(t, db.PRListFilter{Sort: byUpdated(db.SortDesc)}, db.ListOpts{Limit: 3})
+		second, _ := read(t, db.PRListFilter{Sort: byUpdated(db.SortDesc)}, db.ListOpts{Limit: 3, Offset: 3})
+		if got := append(first, second...); !slices.Equal(got, []int{83, 81, 82, 80, 84}) {
+			t.Errorf("paged updated_at order = %v, want [83 81 82 80 84]", got)
+		}
+		if _, _, err := store.PRs(context.Background(), orgID, viewer, db.PRListFilter{Sort: db.Sort{Key: "title", Dir: db.SortAsc}}, db.Unwindowed); !errors.Is(err, db.ErrUnknownPRSort) {
+			t.Errorf("PRs(sort=title) err = %v, want db.ErrUnknownPRSort", err)
 		}
 	})
 

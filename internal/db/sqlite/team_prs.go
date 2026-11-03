@@ -34,6 +34,10 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 	if err != nil {
 		return nil, 0, err
 	}
+	order, err := sqlitePRSummaryOrder(f.Sort)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	// The member leg is correlated INs rather than a resolved account list:
 	// one statement, and it reads as the join it is. A member is matched as
@@ -56,7 +60,7 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 		          SELECT gh.login` + members + `
 		            AND (gh.github_user_id IS NULL OR json_extract(e.snapshot_json, '$.author_id') IS NULL)
 		      )
-		  )` + stateClause
+		  )` + stateClause + sqlitePRDraftClause(f.Draft)
 	host := db.EffectiveGitHubHost(githubBaseURL)
 	args := []any{teamID, teamID, host, teamID, host}
 
@@ -68,7 +72,7 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT ` + sqlitePRSummaryColumns + ` FROM entities e` + where + sqlitePRSummaryOrder
+	query := `SELECT ` + sqlitePRSummaryColumns + ` FROM entities e` + where + order
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)

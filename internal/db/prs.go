@@ -34,13 +34,36 @@ type PRListFilter struct {
 	// and the objects on the belt cannot disagree. "merged" and "closed" come
 	// off the snapshot, closed meaning closed-and-not-merged.
 	States []string
+
+	// Draft narrows to the snapshot's draft flag when set: true keeps the
+	// drafts, false the pull requests ready for review. Nil is both. It
+	// composes with States rather than implying one, so a draft filter with no
+	// states also reads a closed pull request that was a draft when it closed.
+	Draft *bool
+
+	// Sort is the order the page is read in. The zero value is the default:
+	// last polled first. PRSortUpdatedAt orders by the snapshot's updated_at,
+	// GitHub's last-activity time, which the snapshot spells as GitHub returned
+	// it (RFC 3339 in UTC, whose text order is its time order); a snapshot
+	// with no updated_at sorts last in either direction. Every order ends in
+	// the entity id.
+	Sort Sort
 }
+
+// PRSortUpdatedAt is the pull-request lists' one sort key: the snapshot's
+// updated_at.
+const PRSortUpdatedAt = "updated_at"
 
 // ErrUnknownPRState is what both arms answer when States names something
 // outside domain.PRListStates. The route validates first and reports the field
 // — this is the store refusing to widen a result set behind a bad filter, the
 // fault the list contract cares about most.
 var ErrUnknownPRState = errors.New("db: unknown pull-request state filter")
+
+// ErrUnknownPRSort is what both arms answer when Sort names a key other than
+// PRSortUpdatedAt. The route validates first; the store refuses rather than
+// reading an unknown key as the default order.
+var ErrUnknownPRSort = errors.New("db: unknown pull-request sort key")
 
 // PRViewer is the personal arm's identity. Two legs because "mine" is a union
 // of two different things: pull requests my GitHub account authored, and pull
@@ -78,8 +101,10 @@ type PRViewer struct {
 // on Postgres the tracked-set semi-join leans on team_github_repos RLS, so a
 // caller who is not on the team sees an empty list rather than a team's work.
 type TeamPRStore interface {
-	// TeamPRs returns one page of the team's pull requests, newest polled
-	// first, plus the filtered total.
+	// TeamPRs returns one page of the team's pull requests, in f.Sort's
+	// order (newest polled first by default), plus the filtered total. An
+	// unknown state is ErrUnknownPRState and an unknown sort key
+	// ErrUnknownPRSort.
 	//
 	// The population is: github entities in the repos this team tracks, that
 	// a member of this team authored OR that carry this team as their

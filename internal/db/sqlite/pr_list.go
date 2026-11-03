@@ -55,11 +55,41 @@ func sqlitePRStateClause(states []string) (string, error) {
 	return "\n\t\t  AND (" + strings.Join(arms, " OR ") + ")", nil
 }
 
-// sqlitePRSummaryOrder is the total order both arms page by. The id
-// tiebreaker is required: without it, rows sharing a last_polled_at drop and
-// repeat across offset pages.
-const sqlitePRSummaryOrder = `
-	ORDER BY e.last_polled_at DESC, e.id`
+// sqlitePRDraftClause renders the draft filter as a trailing AND, or "" when
+// it is unset, the twin of the Postgres pgPRDraftClause. json_extract returns
+// 1/0 for a JSON boolean, and a snapshot with no is_draft is not a draft.
+func sqlitePRDraftClause(draft *bool) string {
+	switch {
+	case draft == nil:
+		return ""
+	case *draft:
+		return "\n\t\t  AND json_extract(e.snapshot_json, '$.is_draft') = 1"
+	default:
+		return "\n\t\t  AND IFNULL(json_extract(e.snapshot_json, '$.is_draft'), 0) <> 1"
+	}
+}
+
+// sqlitePRSummaryOrder renders the total order both arms page by, the twin of
+// the Postgres pgPRSummaryOrder. The id tiebreaker is required: without it,
+// rows sharing a key drop and repeat across offset pages. updated_at is text
+// under SQLite's BINARY collation, its time order for the RFC 3339 spelling
+// GitHub returns, and an empty or missing one sorts last in both directions.
+func sqlitePRSummaryOrder(sort db.Sort) (string, error) {
+	switch sort.Key {
+	case "":
+		return `
+	ORDER BY e.last_polled_at DESC, e.id`, nil
+	case db.PRSortUpdatedAt:
+		dir := "ASC"
+		if sort.Desc() {
+			dir = "DESC"
+		}
+		return `
+	ORDER BY NULLIF(json_extract(e.snapshot_json, '$.updated_at'), '') ` + dir + ` NULLS LAST, e.id`, nil
+	default:
+		return "", fmt.Errorf("%w: %q", db.ErrUnknownPRSort, sort.Key)
+	}
+}
 
 // sqlitePRSummaryColumns is the select list sqliteScanPRSummaries reads: the
 // entity id the row is addressed by, and the snapshot the rest of the row

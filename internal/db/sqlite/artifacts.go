@@ -222,6 +222,38 @@ func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts 
 	return s.listObjectActivity(ctx, orgID, `ea.org_id = ?`, []any{orgID}, opts)
 }
 
+func (s *artifactStore) FacetsByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) (db.ArtifactFacets, error) {
+	return s.facets(ctx, orgID, `ea.org_id = ? AND ea.team_id = ?`, []any{orgID, teamID}, opts)
+}
+
+// FacetsByOrgSystem is FacetsByTeam over every team: N=1, no pool split.
+func (s *artifactStore) FacetsByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) (db.ArtifactFacets, error) {
+	return s.facets(ctx, orgID, `ea.org_id = ?`, []any{orgID}, opts)
+}
+
+// facets counts, per team, the objects the rows base and opts select name:
+// the list's WHERE with the team filter cleared, so the cut offers every team
+// the other filters leave.
+func (s *artifactStore) facets(ctx context.Context, orgID, base string, args []any, opts db.ArtifactListOpts) (db.ArtifactFacets, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.ArtifactFacets{}, err
+	}
+	opts.TeamID = ""
+	where, args := sqliteArtifactListWhere(base, args, opts)
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT ea.team_id, COUNT(DISTINCT `+sqliteActionObjectIDSQL+`)
+		  FROM external_actions ea
+		 WHERE `+where+sqliteArtifactRowFilter+` AND ea.team_id IS NOT NULL
+		 GROUP BY ea.team_id
+		 ORDER BY ea.team_id`, args...)
+	if err != nil {
+		return db.ArtifactFacets{}, err
+	}
+	defer rows.Close()
+	teams, err := db.ScanFacets(rows)
+	return db.ArtifactFacets{ByTeam: teams}, err
+}
+
 // listObjectActivity is both scopes' read: base and args select the scope's
 // rows, opts' filters narrow them, and the page is of objects.
 func (s *artifactStore) listObjectActivity(ctx context.Context, orgID, base string, args []any, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
@@ -312,6 +344,10 @@ func sqliteArtifactListWhere(base string, args []any, opts db.ArtifactListOpts) 
 	if opts.ObjectKind != "" {
 		where += ` AND ea.object_kind = ?`
 		args = append(args, opts.ObjectKind)
+	}
+	if opts.TeamID != "" {
+		where += ` AND ea.team_id = ?`
+		args = append(args, opts.TeamID)
 	}
 	if !opts.Since.IsZero() {
 		where += ` AND datetime(ea.occurred_at) >= datetime(?)`
