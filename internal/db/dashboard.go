@@ -35,8 +35,9 @@ type DashboardStore interface {
 	// A zero `since` means unbounded.
 	Stats(ctx context.Context, orgID string, viewer domain.GitHubAccount, since time.Time) (*domain.DashboardStats, error)
 
-	// PRs returns one page of the caller's PR summary rows, newest
-	// last_polled_at first, plus the filtered total. Org-wide across
+	// PRs returns one page of the caller's PR summary rows, in f.Sort's
+	// order (newest last_polled_at first by default), plus the filtered
+	// total. Org-wide across
 	// every polled repo — the personal view has no tracked-set gate,
 	// because a pull request of mine in a repo no team of mine tracks
 	// is still mine.
@@ -49,7 +50,7 @@ type DashboardStore interface {
 	// load and cannot be paged (the window would be over the wrong set).
 	//
 	// f narrows within that population; an unknown state is
-	// ErrUnknownPRState.
+	// ErrUnknownPRState and an unknown sort key ErrUnknownPRSort.
 	PRs(ctx context.Context, orgID string, viewer PRViewer, f PRListFilter, opts ListOpts) ([]domain.PRSummaryRow, int, error)
 
 	// PR returns the pull request entity with this id when it is in the

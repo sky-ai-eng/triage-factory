@@ -27,7 +27,9 @@ import PRCard from '../components/PRCard'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { WSEvent } from '../types'
 import { apiFetch, apiJSON } from '../lib/apiClient'
+import type { ListRequest } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
+import type { PagedList } from '../hooks/usePagedList'
 
 export interface PRSummary {
   /** The pull request's entity id: the key the board holds it by and the id
@@ -57,6 +59,24 @@ interface Stats {
 
 type ColumnId = 'ready' | 'draft'
 
+/** The board's four columns. Each is its own read of the list, narrowed and
+ *  ordered by the server, so a column's count and its next page are about the
+ *  column rather than about a page of the whole list. */
+type BoardColumn = ColumnId | 'merged' | 'closed'
+
+const BOARD_COLUMNS: BoardColumn[] = ['ready', 'draft', 'merged', 'closed']
+
+const PR_LIST_PATH = '/api/dashboard/prs/list'
+
+/** COLUMN_FILTERS is each column's list body: the states and draft filters
+ *  that say what the column holds, newest GitHub activity first. */
+const COLUMN_FILTERS: Record<BoardColumn, ListRequest> = {
+  ready: { states: ['open'], draft: false, sort_key: 'updated_at' },
+  draft: { states: ['open'], draft: true, sort_key: 'updated_at' },
+  merged: { states: ['merged'], sort_key: 'updated_at' },
+  closed: { states: ['closed'], sort_key: 'updated_at' },
+}
+
 function loadCached<T>(key: string): T | null {
   try {
     const raw = sessionStorage.getItem(key)
@@ -74,68 +94,76 @@ function saveCache(key: string, data: unknown) {
   }
 }
 
-/** How many PRs one page of the board carries. The board buckets its rows into
- *  four columns, so a page is a page of the *whole* list, not of one column —
- *  which is why the "Load more" below the board is not optional decoration: the
- *  next page is where the rest of the merged/closed history lives. */
-const PR_PAGE_SIZE = 100
+/** cacheKey is where a column's first page is cached for a cold open. */
+const cacheKey = (col: BoardColumn) => `pr-dash-prs-${col}`
+
+/** How many PRs one page of a column carries; "Load more" under a column
+ *  reads its next page. */
+const PR_PAGE_SIZE = 50
+
+const PR_LIST_ERROR = 'Could not load your pull requests.'
 
 export default function PRDashboard() {
-  const prList = usePagedList<PRSummary>(
-    '/api/dashboard/prs/list',
-    'Could not load your pull requests.',
-  )
-  const { items: prs, setItems: setPrs, load: loadPRs, loadMore, hasMore, total } = prList
-  // How many pages deep the user has paged. A refresh REPLACES the held items
-  // with page 1 (that is what usePagedList.load does), and this board refreshes
-  // on an interval, on tab focus, and on every debounced github:pr:* event — so
-  // without re-walking, a routine PR event would silently throw away every
-  // "Load more" the user clicked. Held in a ref because it describes what to
-  // re-fetch, not anything rendered.
-  const pagesLoaded = useRef(1)
+  // One list per column. The hooks are called one by one because a hook
+  // cannot be called in a loop.
+  const ready = usePagedList<PRSummary>(PR_LIST_PATH, PR_LIST_ERROR)
+  const draft = usePagedList<PRSummary>(PR_LIST_PATH, PR_LIST_ERROR)
+  const merged = usePagedList<PRSummary>(PR_LIST_PATH, PR_LIST_ERROR)
+  const closed = usePagedList<PRSummary>(PR_LIST_PATH, PR_LIST_ERROR)
+  const columns: Record<BoardColumn, PagedList<PRSummary>> = { ready, draft, merged, closed }
   const [stats, setStats] = useState<Stats | null>(() => loadCached<Stats>('pr-dash-stats'))
   const [loading, setLoading] = useState(true)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
 
   // Paint the last session's rows immediately, before the first fetch lands.
-  // The hook owns the items, so the cache is seeded into it rather than being
-  // a second copy of the list living beside it.
+  // The hooks own the items, so each column's cache is seeded into its list
+  // rather than being a second copy living beside it.
   const seededFromCache = useRef(false)
   if (!seededFromCache.current) {
     seededFromCache.current = true
-    // A row cached before the list served entity ids has no id to address it
-    // by, so it is left out rather than painted as a card that cannot act.
-    const cached = loadCached<PRSummary[]>('pr-dash-prs')?.filter(
-      (pr) => typeof pr.entity_id === 'string' && pr.entity_id !== '',
-    )
-    if (cached && cached.length > 0) setPrs(() => cached)
+    for (const col of BOARD_COLUMNS) {
+      const cached = loadCached<PRSummary[]>(cacheKey(col))
+      if (cached && cached.length > 0) columns[col].setItems(() => cached)
+    }
   }
 
   // Tracks whether we've completed a first fetch. Used to avoid flashing
   // skeletons on every interval refresh — they should only show on cold load.
   // A ref (not state) because flipping it shouldn't trigger a re-render.
   const hasLoadedOnce = useRef(false)
+  const { load: loadReady } = ready
+  const { load: loadDraft } = draft
+  const { load: loadMerged } = merged
+  const { load: loadClosed } = closed
   const fetchAll = useCallback(async () => {
     if (!hasLoadedOnce.current) setLoading(true)
+    const loads: Record<BoardColumn, typeof loadReady> = {
+      ready: loadReady,
+      draft: loadDraft,
+      merged: loadMerged,
+      closed: loadClosed,
+    }
     try {
-      const [prsRes, statsRes] = await Promise.all([
-        loadPRs({ page_size: PR_PAGE_SIZE }),
+      // keepDepth: this board refreshes on an interval, on tab focus, and on
+      // every debounced github:pr:* event, and a refresh that answered page 1
+      // alone would throw away every "Load more" the user clicked. Each column
+      // rereads as deep as it held.
+      const [pages, statsRes] = await Promise.all([
+        Promise.all(
+          BOARD_COLUMNS.map((col) =>
+            loads[col]({ ...COLUMN_FILTERS[col], page_size: PR_PAGE_SIZE }, { keepDepth: true }),
+          ),
+        ),
         apiJSON<Stats>('/api/dashboard/stats'),
       ])
       setStats(statsRes)
-      // Re-walk to the depth the user had. Sequential, because each page's
-      // token comes from the one before it. A page that no longer exists (PRs
-      // merged since) just ends the walk early — loadMore is a no-op without a
-      // token — which is the right answer rather than an error.
-      if (prsRes) {
-        for (let i = 1; i < pagesLoaded.current; i++) {
-          await loadMore()
-        }
-      }
-      // Only page 1 is cached: the cache exists to paint something instantly on
-      // a cold open, and a cold open starts at page 1 anyway.
-      if (prsRes) saveCache('pr-dash-prs', prsRes.items)
+      // Only the first page is cached: the cache exists to paint something
+      // instantly on a cold open, and a cold open starts at page 1 anyway.
+      BOARD_COLUMNS.forEach((col, i) => {
+        const page = pages[i]
+        if (page) saveCache(cacheKey(col), page.items.slice(0, PR_PAGE_SIZE))
+      })
       saveCache('pr-dash-stats', statsRes)
       hasLoadedOnce.current = true
     } catch (err) {
@@ -145,7 +173,7 @@ export default function PRDashboard() {
     } finally {
       setLoading(false)
     }
-  }, [loadPRs, loadMore])
+  }, [loadReady, loadDraft, loadMerged, loadClosed])
 
   useEffect(() => {
     fetchAll()
@@ -177,8 +205,8 @@ export default function PRDashboard() {
   // function identity every render, causing useWebSocket's latest-ref
   // update effect to re-run on each render (the subscription itself stays
   // stable, but the ref-assignment effect is still a per-render tick).
-  // Since fetchAll is already stable (useCallback with []), this handler
-  // is effectively created once for the lifetime of the component.
+  // Since fetchAll is stable (its loads are), this handler is effectively
+  // created once for the lifetime of the component.
   const wsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleWSEvent = useCallback(
     (event: WSEvent) => {
@@ -201,22 +229,24 @@ export default function PRDashboard() {
     }
   }, [])
 
-  const byRecent = (a: PRSummary, b: PRSummary) =>
-    new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-
-  const draftPRs = prs.filter((pr) => pr.state === 'open' && pr.draft).sort(byRecent)
-  const readyPRs = prs.filter((pr) => pr.state === 'open' && !pr.draft).sort(byRecent)
-  const mergedPRs = prs.filter((pr) => pr.state === 'merged').sort(byRecent)
-  const closedPRs = prs.filter((pr) => pr.state === 'closed').sort(byRecent)
+  const readyPRs = ready.items
+  const draftPRs = draft.items
+  const mergedPRs = merged.items
+  const closedPRs = closed.items
 
   const prKey = (pr: PRSummary) => pr.entity_id
-  const prMap = new Map(prs.map((pr) => [prKey(pr), pr]))
+  // The draggable cards, by id: the two open columns.
+  const prMap = new Map([...readyPRs, ...draftPRs].map((pr) => [prKey(pr), pr]))
 
   const getColumn = (id: string): ColumnId | null => {
     const pr = prMap.get(id)
     if (!pr) return null
     return pr.draft ? 'draft' : 'ready'
   }
+
+  // columnCount is what a column's header counts: the server's total for its
+  // filters, which covers the pages not loaded yet.
+  const columnCount = (col: BoardColumn) => columns[col].total ?? columns[col].items.length
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -234,6 +264,14 @@ export default function PRDashboard() {
     }
   }
 
+  // moveCard moves the card being dragged from one open column's held items to
+  // the other's, ahead of the refetch that reconciles both with the server.
+  const moveCard = (pr: PRSummary, from: ColumnId, to: ColumnId) => {
+    const id = prKey(pr)
+    columns[from].setItems((prev) => prev.filter((p) => prKey(p) !== id))
+    columns[to].setItems((prev) => [{ ...pr, draft: to === 'draft' }, ...prev])
+  }
+
   const handleDragEnd = async (e: DragEndEvent) => {
     setActiveId(null)
     setOverColumn(null)
@@ -243,7 +281,7 @@ export default function PRDashboard() {
     const pr = prMap.get(id)
     if (!pr) return
 
-    const sourceCol = pr.draft ? 'draft' : 'ready'
+    const sourceCol: ColumnId = pr.draft ? 'draft' : 'ready'
     const overId = String(e.over.id)
     const targetCol: ColumnId =
       overId === 'ready' || overId === 'draft' ? overId : getColumn(overId) || sourceCol
@@ -252,7 +290,7 @@ export default function PRDashboard() {
 
     // Optimistic update
     const makeDraft = targetCol === 'draft'
-    setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: makeDraft } : p)))
+    moveCard(pr, sourceCol, targetCol)
 
     // Hit the API
     try {
@@ -263,7 +301,7 @@ export default function PRDashboard() {
       })
     } catch {
       // Revert on failure
-      setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: !makeDraft } : p)))
+      moveCard({ ...pr, draft: makeDraft }, targetCol, sourceCol)
     }
 
     fetchAll()
@@ -316,7 +354,7 @@ export default function PRDashboard() {
           <DroppableColumn
             id="ready"
             title="Ready for review"
-            count={readyPRs.length}
+            count={columnCount('ready')}
             isOver={overColumn === 'ready' && getColumn(activeId!) !== 'ready'}
           >
             <SortableContext items={readyPRs.map(prKey)} strategy={verticalListSortingStrategy}>
@@ -326,12 +364,13 @@ export default function PRDashboard() {
                 readyPRs.map((pr) => <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />)
               )}
             </SortableContext>
+            <LoadMore list={ready} label="ready pull requests" />
           </DroppableColumn>
 
           <DroppableColumn
             id="draft"
             title="Drafts"
-            count={draftPRs.length}
+            count={columnCount('draft')}
             isOver={overColumn === 'draft' && getColumn(activeId!) !== 'draft'}
           >
             <SortableContext items={draftPRs.map(prKey)} strategy={verticalListSortingStrategy}>
@@ -341,6 +380,7 @@ export default function PRDashboard() {
                 draftPRs.map((pr) => <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />)
               )}
             </SortableContext>
+            <LoadMore list={draft} label="drafts" />
           </DroppableColumn>
         </div>
 
@@ -353,40 +393,46 @@ export default function PRDashboard() {
         </DragOverlay>
       </DndContext>
 
-      {hasMore && (
-        <div className="mt-4 text-center">
-          <button
-            onClick={() => {
-              pagesLoaded.current += 1
-              void loadMore()
-            }}
-            disabled={loading}
-            className="text-[12px] text-warm hover:text-warm/70 font-medium transition-colors disabled:opacity-50"
-          >
-            Load more{total !== null ? ` (${prs.length} of ${total})` : ''}
-          </button>
-        </div>
-      )}
-
       {/* Merged & closed — non-draggable history */}
       {(mergedPRs.length > 0 || closedPRs.length > 0) && (
         <div className="grid grid-cols-2 gap-6 mt-6">
-          <StaticColumn title="Recently merged" count={mergedPRs.length}>
+          <StaticColumn title="Recently merged" count={columnCount('merged')}>
             {mergedPRs.length === 0 ? (
               <p className="text-ui text-ink-3 text-center py-8">No merged PRs</p>
             ) : (
               mergedPRs.map((pr) => <PRCard key={prKey(pr)} pr={pr} />)
             )}
+            <LoadMore list={merged} label="merged pull requests" />
           </StaticColumn>
-          <StaticColumn title="Closed" count={closedPRs.length}>
+          <StaticColumn title="Closed" count={columnCount('closed')}>
             {closedPRs.length === 0 ? (
               <p className="text-ui text-ink-3 text-center py-8">No closed PRs</p>
             ) : (
               closedPRs.map((pr) => <PRCard key={prKey(pr)} pr={pr} />)
             )}
+            <LoadMore list={closed} label="closed pull requests" />
           </StaticColumn>
         </div>
       )}
+    </div>
+  )
+}
+
+/** LoadMore reads a column's next page, and renders nothing once the column
+ *  holds its last one. */
+function LoadMore({ list, label }: { list: PagedList<PRSummary>; label: string }) {
+  if (!list.hasMore) return null
+  return (
+    <div className="text-center">
+      <button
+        onClick={() => void list.loadMore()}
+        disabled={list.loading}
+        aria-label={`Load more ${label}`}
+        className="text-[12px] text-warm hover:text-warm/70 font-medium transition-colors disabled:opacity-50"
+      >
+        Load more
+        {list.total !== null ? ` (${list.items.length} of ${list.total})` : ''}
+      </button>
     </div>
   )
 }

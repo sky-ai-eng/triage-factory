@@ -119,7 +119,8 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 }
 
 // handleDashboardPRs returns one page of the caller's PRs from entity
-// snapshots, newest polled first.
+// snapshots, newest polled first unless sort_key names another order, narrowed
+// by the shared prListRequest filters.
 //
 // "Mine" is a union of two legs: pull requests my GitHub login authored, and
 // pull requests a run I commissioned opened under the bot's login
@@ -146,10 +147,10 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	}
 	var v httpx.Validation
 	// The identity legs are the route's subject, not a filter — the body
-	// cannot name them — so the fingerprint is over the states filter and the
-	// scope that says which population this token walks.
-	states := canonicalPRStates(&v, req.States)
-	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("dashboard-prs", "", states), 0)
+	// cannot name them — so the fingerprint is over the narrowing fields and
+	// the scope that says which population this token walks.
+	filter := resolvePRListFilter(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, prListFingerprint("dashboard-prs", "", filter), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -183,7 +184,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		var e error
 		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID,
 			db.PRViewer{Login: me.Login, GitHubUserID: me.ID, UserID: userID},
-			db.PRListFilter{States: states},
+			filter,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
