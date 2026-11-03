@@ -13,11 +13,11 @@
 //     AsyncIterable<SDKUserMessage> fed from newline-delimited control
 //     messages on stdin. This is the only mode in which the SDK exposes
 //     its live controls — interrupt(), setPermissionMode(), the
-//     canUseTool permission callback and the PostToolBatch hook — so it
-//     backs the interactive LiveRun API on the Go side. It is also the only
-//     mode that serves TF's own tools (--tf-tools), whose calls are answered
-//     on the Go side. The control protocol is documented alongside the Go
-//     LiveRun type (live.go).
+//     canUseTool permission callback and the PreToolUse and PostToolBatch
+//     hooks — so it backs the interactive LiveRun API on the Go side. It is
+//     also the only mode that serves TF's own tools (--tf-tools), whose calls
+//     are answered on the Go side. The control protocol is documented
+//     alongside the Go LiveRun type (live.go).
 //
 // Auth resolves through the SDK's own env-var/keychain logic — we
 // deliberately don't touch ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK,
@@ -439,6 +439,22 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
     })
     options.mcpServers = { ...options.mcpServers, tf: createSdkMcpServer({ name: "tf", alwaysLoad: true, tools }) }
   }
+
+  // PreToolUse fires as Claude Code starts running a call, which for a call
+  // that waited behind an earlier one in the same message is later than its
+  // tool_use block. Each one emits a tool_started naming the call, so its
+  // result is timed from when it ran. Nothing answers it and the hook never
+  // waits: anything it held up would be the call it reports on. A subagent's
+  // calls (agent_id set) are skipped, as in PostToolBatch.
+  const onToolStarted = async (input, toolUseID) => {
+    if (closing || input?.agent_id) return {}
+    const id = typeof toolUseID === "string" && toolUseID !== "" ? toolUseID : input?.tool_use_id
+    if (typeof id === "string" && id !== "") {
+      emit({ type: "control", subtype: "tool_started", tool_call_id: id })
+    }
+    return {}
+  }
+  options.hooks = { ...options.hooks, PreToolUse: [{ hooks: [onToolStarted] }] }
 
   const q = query({ prompt: input, options })
 

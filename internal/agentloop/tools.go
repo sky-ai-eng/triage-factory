@@ -30,17 +30,19 @@ func tfTools(params Params) []schemas.ChatTool {
 }
 
 // resolveLoopSide answers a call to a TF tool without leaving the
-// orchestrator, reporting false for anything the jail owns.
+// orchestrator, reporting false for anything the jail owns. ran is the
+// milliseconds the handler took.
 //
 // The lookup goes through the offered set, so a name means nothing where the
 // tool was never offered: a hallucinated call falls through to the sandbox
 // and comes back "unknown tool", which is the right answer.
-func resolveLoopSide(ctx context.Context, call domain.ToolCall, params Params) (tooldefs.Outcome, bool) {
+func (e *Engine) resolveLoopSide(ctx context.Context, call domain.ToolCall, params Params) (out tooldefs.Outcome, ran int, ok bool) {
 	tool, ok := tooldefs.TFTool(call.Name, tfToolFacts(params.HasBlueprint))
 	if !ok {
-		return tooldefs.Outcome{}, false
+		return tooldefs.Outcome{}, 0, false
 	}
-	return tool.Handler(ctx, tooldefs.Call{
+	started := e.now()
+	out = tool.Handler(ctx, tooldefs.Call{
 		ID:   call.ID,
 		Args: call.Input,
 		Run: tooldefs.Run{
@@ -48,5 +50,6 @@ func resolveLoopSide(ctx context.Context, call domain.ToolCall, params Params) (
 			ConversationID: params.ConversationID,
 			ClaimID:        params.ClaimID,
 		},
-	}), true
+	})
+	return out, e.msSince(started), true
 }

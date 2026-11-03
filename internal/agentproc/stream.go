@@ -50,10 +50,14 @@ type StreamState struct {
 	markMu    sync.Mutex
 	requestAt time.Time
 
-	// toolDispatchedAt is when each pending tool_use was handed to the
-	// harness, keyed by tool_use id and consumed by the matching result. A
-	// call that never resolves (an interrupted turn) leaves its mark behind;
-	// the map is bounded by the tool calls of one process's stream.
+	// toolDispatchedAt is when each pending tool call started running,
+	// keyed by tool_use id and consumed by the matching result. The mark
+	// comes from the harness's tool_started line (MarkToolStarted), which
+	// fires when Claude Code starts the call; where none arrives, parsing
+	// the tool_use block sets it instead. A call that never resolves (an
+	// interrupted turn) leaves its mark behind; the map is bounded by the
+	// tool calls of one process's stream. Read and written only on the
+	// reader goroutine.
 	toolDispatchedAt map[string]time.Time
 
 	// observer, when set, hears about tool calls and turn ends as they are
@@ -110,6 +114,19 @@ func (s *StreamState) MarkRequest() {
 // Now reads the stream's clock. Exposed so a caller timing a window that
 // parks the reader measures it on the same clock the marks below use.
 func (s *StreamState) Now() time.Time { return s.now() }
+
+// MarkToolStarted records that the harness has just started running the
+// call id, so its result is measured from here rather than from when the
+// model asked for it. Claude Code runs some calls of one message one at a
+// time, and a call measured from its tool_use block would carry the time it
+// waited behind the calls before it. It replaces any earlier mark for the
+// call, the parse fallback's included.
+func (s *StreamState) MarkToolStarted(id string) {
+	if id == "" {
+		return
+	}
+	s.toolDispatchedAt[id] = s.now()
+}
 
 // DiscountGate rolls every live mark forward by the time spent since `at`,
 // which the caller takes immediately before parking on something that is not
@@ -341,10 +358,15 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 				Name:  toolName,
 				Input: toolInput,
 			})
-			// The harness runs the call as soon as the block lands, so this
-			// is the dispatch its result is measured against.
+			// The fallback mark, for a call no tool_started reaches: the
+			// one-shot path registers no hook, and a call refused before
+			// hooks run fires none. It never moves a mark already set,
+			// because the call's tool_started line can arrive before this
+			// one.
 			if toolID != "" {
-				s.toolDispatchedAt[toolID] = s.now()
+				if _, marked := s.toolDispatchedAt[toolID]; !marked {
+					s.toolDispatchedAt[toolID] = s.now()
+				}
 				if s.observer != nil {
 					s.observer.OnToolUse(toolID, toolName)
 				}

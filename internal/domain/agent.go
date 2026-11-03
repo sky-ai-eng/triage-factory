@@ -745,8 +745,15 @@ type Message struct {
 
 	// DurationMs is the wall-clock milliseconds of the work this row
 	// represents: for an assistant row, request issued → message complete
-	// (reasoning included); for a tool row, dispatch → result; nil for every
+	// (reasoning included); for a tool row, the call starting to run → its
+	// result, measured from when the runtime started the call and not from
+	// when the model asked for it, so a call that waited behind an earlier
+	// one in the same message carries none of that wait; nil for every
 	// other role and for any row written before the runtime measured it.
+	// A tool row is nil too for a call that was never dispatched. On the
+	// native loop that includes a call refused at the gate; on the SDK
+	// runtime Claude Code dispatches a call before its permission check, so
+	// a refused call there reads as a measured near-zero.
 	// Always a measured value the writer held both marks for — never a
 	// subtraction of two rows' CreatedAt, which streaming, paging, and
 	// compaction each break in their own way. nil is "not measured", 0 is
