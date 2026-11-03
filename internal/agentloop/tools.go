@@ -1,10 +1,12 @@
 package agentloop
 
 import (
+	"context"
+
 	"github.com/maximhq/bifrost/core/schemas"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // ToolStopBlueprint is the flow-control tool's wire name, re-exported so the
@@ -17,22 +19,37 @@ func SandboxTools() []schemas.ChatTool {
 	return tooldefs.ChatTools(tooldefs.Sandbox())
 }
 
-// flowControlTools returns the loop-side tool definitions for this
-// conversation — none when there is no blueprint to control.
-func flowControlTools(hasBlueprint bool) []schemas.ChatTool {
-	return tooldefs.ChatTools(tooldefs.FlowControl(hasBlueprint))
+// tfToolFacts are what tooldefs decides a native engagement's TF tools from.
+func tfToolFacts(hasBlueprint bool) tooldefs.Facts {
+	return tooldefs.Facts{Runtime: domain.ConversationRuntimeNative, HasBlueprint: hasBlueprint}
 }
 
-// resolveLoopSide answers a call without leaving the orchestrator, reporting
-// false for anything the jail owns.
+// tfTools returns the definitions of the TF tools this engagement is offered.
+func tfTools(params Params) []schemas.ChatTool {
+	return tooldefs.ChatTools(tooldefs.TFTools(tfToolFacts(params.HasBlueprint)))
+}
+
+// resolveLoopSide answers a call to a TF tool without leaving the
+// orchestrator, reporting false for anything the jail owns. ran is the
+// milliseconds the handler took.
 //
-// hasBlueprint mirrors registration, so a name means nothing where the tool
-// was never offered: a hallucinated call falls through to the sandbox and
-// comes back "unknown tool", which is the right answer.
-func resolveLoopSide(call domain.ToolCall, hasBlueprint bool) (tooldefs.Outcome, bool) {
-	tool, ok := tooldefs.LoopSide(call.Name, hasBlueprint)
+// The lookup goes through the offered set, so a name means nothing where the
+// tool was never offered: a hallucinated call falls through to the sandbox
+// and comes back "unknown tool", which is the right answer.
+func (e *Engine) resolveLoopSide(ctx context.Context, call domain.ToolCall, params Params) (out tooldefs.Outcome, ran int, ok bool) {
+	tool, ok := tooldefs.TFTool(call.Name, tfToolFacts(params.HasBlueprint))
 	if !ok {
-		return tooldefs.Outcome{}, false
+		return tooldefs.Outcome{}, 0, false
 	}
-	return tool.Handler(call.Input), true
+	started := e.now()
+	out = tool.Handler(ctx, tooldefs.Call{
+		ID:   call.ID,
+		Args: call.Input,
+		Run: tooldefs.Run{
+			OrgID:          params.OrgID,
+			ConversationID: params.ConversationID,
+			ClaimID:        params.ClaimID,
+		},
+	})
+	return out, e.msSince(started), true
 }

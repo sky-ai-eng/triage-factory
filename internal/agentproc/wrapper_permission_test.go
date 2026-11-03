@@ -481,6 +481,107 @@ func TestHandleToolBatch_RepliesByID(t *testing.T) {
 	}
 }
 
+// toolStartedStubSDK fires the wrapper's PreToolUse hook as Claude Code does
+// when it starts each call: a main-thread call with the id as the callback's
+// second argument, one with only the input's tool_use_id, and a subagent's.
+// It yields what each returned, then fires the PostToolBatch hook, yielding
+// null for it when the wrapper registered none.
+const toolStartedStubSDK = `
+export function query({ options }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const pre = options.hooks?.PreToolUse?.[0]?.hooks?.[0]
+      if (!pre) {
+        yield { type: "stub_pre", output: null }
+        return
+      }
+      const signal = new AbortController().signal
+      const call = (id, extra) => ({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: {}, tool_use_id: id, ...extra })
+      yield { type: "stub_pre", output: await pre(call("toolu_MAIN"), "toolu_MAIN", { signal }) }
+      yield { type: "stub_pre", output: await pre(call("toolu_FROM_INPUT"), undefined, { signal }) }
+      yield { type: "stub_pre", output: await pre(call("toolu_SUB", { agent_id: "sub-1" }), "toolu_SUB", { signal }) }
+      const post = options.hooks?.PostToolBatch?.[0]?.hooks?.[0]
+      if (!post) {
+        yield { type: "stub_post", output: null }
+        return
+      }
+      yield { type: "stub_post", output: await post({ hook_event_name: "PostToolBatch", tool_calls: [] }, undefined, { signal }) }
+    },
+    async interrupt() {},
+    async setPermissionMode() {},
+  }
+}
+`
+
+// TestWrapperPreToolUseEmitsToolStarted: in streaming-input mode the wrapper
+// reports each main-thread call Claude Code starts with one tool_started
+// carrying its id, answers the hook with nothing at once, and reports no
+// subagent call. The PostToolBatch hook registered beside it still runs.
+func TestWrapperPreToolUseEmitsToolStarted(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	expectStarted := func(t *testing.T, w *wrapperProc, id string) {
+		t.Helper()
+		if got := w.next(); got["type"] != "control" || got["subtype"] != "tool_started" || got["tool_call_id"] != id {
+			t.Fatalf("got %v, want a tool_started for %s (stderr: %s)", got, id, w.stderr.String())
+		}
+	}
+	expectAnswered := func(t *testing.T, w *wrapperProc) {
+		t.Helper()
+		got := w.next()
+		output, ok := got["output"].(map[string]any)
+		if got["type"] != "stub_pre" || !ok || len(output) != 0 {
+			t.Fatalf("got %v, want the hook answered with an empty object (stderr: %s)", got, w.stderr.String())
+		}
+	}
+	runCalls := func(t *testing.T, w *wrapperProc) {
+		t.Helper()
+		expectStarted(t, w, "toolu_MAIN")
+		expectAnswered(t, w)
+		expectStarted(t, w, "toolu_FROM_INPUT")
+		expectAnswered(t, w)
+		// The subagent's call: its answer comes next, with no tool_started
+		// ahead of it.
+		expectAnswered(t, w)
+	}
+
+	t.Run("without tool batch notes", func(t *testing.T) {
+		w := startWrapper(t, node, toolStartedStubSDK)
+		runCalls(t, w)
+		if got := w.next(); got["type"] != "stub_post" || got["output"] != nil {
+			t.Errorf("got %v, want no PostToolBatch hook without the flag", got)
+		}
+	})
+
+	t.Run("beside the PostToolBatch hook", func(t *testing.T) {
+		w := startWrapper(t, node, toolStartedStubSDK, "--tool-batch-notes")
+		runCalls(t, w)
+		req := w.next()
+		id, _ := req["id"].(string)
+		if req["subtype"] != "tool_batch" || id == "" {
+			t.Fatalf("got %v, want the PostToolBatch hook's tool_batch (stderr: %s)", req, w.stderr.String())
+		}
+		reply, err := json.Marshal(map[string]any{"kind": "tool_batch_reply", "id": id, "context": "noted"})
+		if err != nil {
+			t.Fatalf("marshal tool_batch_reply: %v", err)
+		}
+		if _, err := w.stdin.Write(append(reply, '\n')); err != nil {
+			t.Fatalf("write tool_batch_reply: %v", err)
+		}
+		if res := w.next(); res["subtype"] != "tool_batch_result" || res["delivered"] != true {
+			t.Fatalf("got %v, want the reply delivered", res)
+		}
+		out := w.next()
+		output, _ := out["output"].(map[string]any)
+		specific, _ := output["hookSpecificOutput"].(map[string]any)
+		if out["type"] != "stub_post" || specific["additionalContext"] != "noted" {
+			t.Errorf("got %v, want the PostToolBatch hook to return the reply's context", out)
+		}
+	})
+}
+
 // missingToolUseIDStubSDK is the contract-violating case sdk.d.ts says cannot
 // happen: canUseTool invoked with no toolUseID at all. It gates two calls
 // concurrently, because collapsing both onto one absent key is how a missing id
@@ -569,14 +670,23 @@ type wrapperProc struct {
 // permission prompts on. The process is killed and reaped at test end.
 func startWrapper(t *testing.T, node, stubSDK string, extraArgs ...string) *wrapperProc {
 	t.Helper()
+	return startWrapperWith(t, node, map[string]string{"@anthropic-ai/claude-agent-sdk": stubSDK}, extraArgs...)
+}
+
+// startWrapperWith is startWrapper with a stub for each named package, as the
+// source of its ES module.
+func startWrapperWith(t *testing.T, node string, stubs map[string]string, extraArgs ...string) *wrapperProc {
+	t.Helper()
 	dir := t.TempDir()
-	pkgDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
-		t.Fatalf("mkdir stub sdk: %v", err)
+	for name, source := range stubs {
+		pkgDir := filepath.Join(dir, "node_modules", filepath.FromSlash(name))
+		if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+			t.Fatalf("mkdir stub %s: %v", name, err)
+		}
+		writeFile(t, filepath.Join(pkgDir, "package.json"),
+			`{"name":"`+name+`","version":"0.0.0-stub","type":"module","main":"index.mjs"}`)
+		writeFile(t, filepath.Join(pkgDir, "index.mjs"), source)
 	}
-	writeFile(t, filepath.Join(pkgDir, "package.json"),
-		`{"name":"@anthropic-ai/claude-agent-sdk","version":"0.0.0-stub","type":"module","main":"index.mjs"}`)
-	writeFile(t, filepath.Join(pkgDir, "index.mjs"), stubSDK)
 	wrapper := filepath.Join(dir, "wrapper.mjs")
 	writeFile(t, wrapper, string(wrapperJS))
 

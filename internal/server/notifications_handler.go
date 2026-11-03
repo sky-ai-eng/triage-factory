@@ -621,6 +621,10 @@ func patchMark(v *httpx.Validation, raw json.RawMessage, field string) *bool {
 	return &on
 }
 
+// notDismissibleMessage is the refusal to dismiss a row that is not
+// dismissible, on the marks PATCH and the bulk dismiss alike.
+const notDismissibleMessage = "this notification can't be dismissed: it stays until the condition is fixed"
+
 // handleNotificationMarksPatch writes the caller's own marks on a row they may
 // read and returns the row as they now see it. Dismissing a row that is not
 // dismissible is refused: it stays until the system resolves it.
@@ -671,7 +675,7 @@ func (s *Server) handleNotificationMarksPatch(w http.ResponseWriter, r *http.Req
 	case errors.Is(err, db.ErrNotificationNotDismissible):
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 			Reason:  httpx.ReasonInvalidField,
-			Message: "this notification can't be dismissed: it stays until the condition is fixed",
+			Message: notDismissibleMessage,
 			Field:   "dismissed",
 		})
 		return
@@ -687,20 +691,67 @@ func (s *Server) handleNotificationMarksPatch(w http.ResponseWriter, r *http.Req
 	writeNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view)
 }
 
-// maxMarkReadIDs bounds a mark-read call at the largest page a client can
-// have rendered.
-const maxMarkReadIDs = httpx.MaxPageSize
+// maxNotificationIDs bounds a mark-read or dismiss call at the largest page a
+// client can have rendered.
+const maxNotificationIDs = httpx.MaxPageSize
 
-// notificationMarkReadRequest is the body of POST
-// /api/me/notifications/mark-read: the rows the client rendered.
-type notificationMarkReadRequest struct {
+// notificationIDsRequest is the body of POST /api/me/notifications/mark-read
+// and POST /api/me/notifications/dismiss: the rows the client rendered.
+type notificationIDsRequest struct {
 	IDs []string `json:"ids"`
 }
 
-// notificationMarkReadResponse names the rows the call marked read. An id the
-// caller cannot read, or that no longer exists, is absent from it.
-type notificationMarkReadResponse struct {
+// notificationIDsResponse names the rows the call wrote. An id the caller
+// cannot read, or that no longer exists, is absent from it.
+type notificationIDsResponse struct {
 	IDs []string `json:"ids"`
+}
+
+// notificationIDsBody reads a bulk marks body: 1 to maxNotificationIDs ids,
+// each a UUID, returned in their canonical spelling at the index the body
+// gave them. Every malformed id is reported.
+func notificationIDsBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	var req notificationIDsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return nil, false
+	}
+	var v httpx.Validation
+	switch {
+	case len(req.IDs) == 0:
+		v.Missing("ids")
+	case len(req.IDs) > maxNotificationIDs:
+		v.OutOfRange("ids", fmt.Sprintf("at most %d ids per call", maxNotificationIDs))
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	ids := make([]string, len(req.IDs))
+	for i, raw := range req.IDs {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			v.Invalid(fmt.Sprintf("ids[%d]", i), fmt.Sprintf("%q is not a valid notification id", raw))
+			continue
+		}
+		ids[i] = id.String()
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	return ids, true
+}
+
+// writeNotificationMarksWritten answers a bulk marks call with the sorted ids
+// of the marks it wrote, and pings the caller's other tabs when there are any.
+func (s *Server) writeNotificationMarksWritten(w http.ResponseWriter, orgID, userID string, marks []domain.NotificationMarks) {
+	out := notificationIDsResponse{IDs: make([]string, len(marks))}
+	for i, m := range marks {
+		out.IDs[i] = m.NotificationID
+	}
+	slices.Sort(out.IDs)
+	if len(marks) > 0 {
+		s.pingMarksChanged(orgID, userID)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleNotificationMarkRead marks read the rows the client rendered. It takes
@@ -713,33 +764,10 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	var req notificationMarkReadRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	ids, ok := notificationIDsBody(w, r)
+	if !ok {
 		return
 	}
-	var v httpx.Validation
-	switch {
-	case len(req.IDs) == 0:
-		v.Missing("ids")
-	case len(req.IDs) > maxMarkReadIDs:
-		v.OutOfRange("ids", fmt.Sprintf("at most %d ids per call", maxMarkReadIDs))
-	}
-	if v.Flush(w, http.StatusBadRequest) {
-		return
-	}
-	ids := make([]string, 0, len(req.IDs))
-	for i, raw := range req.IDs {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			v.Invalid(fmt.Sprintf("ids[%d]", i), fmt.Sprintf("%q is not a valid notification id", raw))
-			continue
-		}
-		ids = append(ids, id.String())
-	}
-	if v.Flush(w, http.StatusBadRequest) {
-		return
-	}
-
 	var marks []domain.NotificationMarks
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -749,15 +777,49 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 		internalError(w, "notifications", err)
 		return
 	}
-	out := notificationMarkReadResponse{IDs: make([]string, len(marks))}
-	for i, m := range marks {
-		out.IDs[i] = m.NotificationID
+	s.writeNotificationMarksWritten(w, orgID, userID, marks)
+}
+
+// handleNotificationDismiss dismisses the rows the client selected. An id the
+// caller cannot read is left out, since it went away between render and call.
+// A readable row that is not dismissible refuses the whole call with a 422 on
+// each ids[i] naming one, and nothing is written: every item says whether it
+// is dismissible, so sending one is a bad call.
+//
+// POST /api/me/notifications/dismiss
+func (s *Server) handleNotificationDismiss(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := notificationCaller(w, r)
+	if !ok {
+		return
 	}
-	slices.Sort(out.IDs)
-	if len(marks) > 0 {
-		s.pingMarksChanged(orgID, userID)
+	ids, ok := notificationIDsBody(w, r)
+	if !ok {
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	var marks []domain.NotificationMarks
+	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		marks, e = tx.Notifications.Dismiss(r.Context(), orgID, userID, ids)
+		return e
+	})
+	var refused *db.NotificationsNotDismissibleError
+	switch {
+	case errors.As(err, &refused):
+		var v httpx.Validation
+		for i, id := range ids {
+			if slices.Contains(refused.IDs, id) {
+				v.Invalid(fmt.Sprintf("ids[%d]", i), notDismissibleMessage)
+			}
+		}
+		if !v.Flush(w, http.StatusUnprocessableEntity) {
+			internalError(w, "notifications", err)
+		}
+		return
+	case err != nil:
+		internalError(w, "notifications", err)
+		return
+	}
+	s.writeNotificationMarksWritten(w, orgID, userID, marks)
 }
 
 // --------------------------------------------------------------------
@@ -850,12 +912,14 @@ func (s *Server) registerNotificationRoutes() {
 	// invoke actions. Viewer-relative: the org is the credential's, so an API
 	// token reaches all of it. The list is the rows the caller is SENT; the
 	// single read, the marks and the actions take any row they may READ,
-	// which for an org admin includes every team's. mark-read is a verb
-	// because it is a multi-row transition over the ids the client rendered.
-	// facets is the list's counts, a POST because its filters are a body.
+	// which for an org admin includes every team's. mark-read and dismiss
+	// are verbs because each is a multi-row transition over the ids the client
+	// rendered. facets is the list's counts, a POST because its filters are a
+	// body.
 	s.apiMutating("POST /api/me/notifications/list", s.handleNotificationList)
 	s.apiMutating("POST /api/me/notifications/facets", s.handleNotificationFacets)
 	s.apiMutating("POST /api/me/notifications/mark-read", s.handleNotificationMarkRead)
+	s.apiMutating("POST /api/me/notifications/dismiss", s.handleNotificationDismiss)
 	s.api("GET /api/me/notifications/{id}", s.handleNotificationGet)
 	s.apiMutating("PATCH /api/me/notifications/{id}", s.handleNotificationMarksPatch)
 	s.apiMutating("POST /api/me/notifications/{id}/actions/{action_id}", s.handleNotificationAction)

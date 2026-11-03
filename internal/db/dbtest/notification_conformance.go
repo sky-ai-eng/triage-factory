@@ -824,6 +824,62 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		})
 	})
 
+	t.Run("dismiss", func(t *testing.T) {
+		f := mk(t)
+		a := raise(t, f, db.NotificationOccurrence{Key: "a", Dismissible: true}).Notification
+		b := raise(t, f, db.NotificationOccurrence{Key: "b", Dismissible: true}).Notification
+		c := raise(t, f, db.NotificationOccurrence{Key: "c", Dismissible: true}).Notification
+		fixed := raise(t, f, db.NotificationOccurrence{Key: "f"}).Notification
+		other := raise(t, f, db.NotificationOccurrence{Key: "o", Dismissible: true, Audience: domain.NotificationAudience{
+			Scope: domain.NotificationScopeUser, UserID: f.Other}}).Notification
+		if _, err := setMarks(t, f, b.ID, db.NotificationMarksPatch{Read: &yes}); err != nil {
+			t.Fatal(err)
+		}
+		dismiss := func(ids ...string) ([]domain.NotificationMarks, error) {
+			var got []domain.NotificationMarks
+			var err error
+			f.As(t, f.Viewer, func(s db.NotificationStore) { got, err = s.Dismiss(ctx, f.OrgID, f.Viewer, ids) })
+			return got, err
+		}
+
+		got, err := dismiss(a.ID, b.ID, other.ID, "not-a-uuid", a.ID)
+		if err != nil {
+			t.Fatalf("Dismiss: %v", err)
+		}
+		byID := map[string]domain.NotificationMarks{}
+		for _, m := range got {
+			byID[m.NotificationID] = m
+		}
+		if len(got) != 2 || len(byID) != 2 || byID[a.ID].DismissedAt == nil || byID[b.ID].DismissedAt == nil {
+			t.Fatalf("Dismiss = %+v; want a and b dismissed, and the unreadable ids skipped", got)
+		}
+		for _, id := range []string{a.ID, b.ID} {
+			AssertWriteReturnedStoredRow(t, "Dismiss "+id, byID[id], func() (*domain.NotificationMarks, error) {
+				return get(t, f, id).Marks, nil
+			})
+		}
+		if v := get(t, f, b.ID); !v.Dismissed || !v.Read {
+			t.Errorf("b after Dismiss: read=%v dismissed=%v; want its read mark kept", v.Read, v.Dismissed)
+		}
+
+		// A non-dismissible row refuses the batch, naming it, and the
+		// dismissible row beside it is left as it was.
+		_, err = dismiss(c.ID, fixed.ID, other.ID)
+		var refused *db.NotificationsNotDismissibleError
+		if !errors.As(err, &refused) || !errors.Is(err, db.ErrNotificationNotDismissible) || !slices.Equal(refused.IDs, []string{fixed.ID}) {
+			t.Fatalf("Dismiss with a non-dismissible row: err = %v; want a refusal naming %s", err, fixed.ID)
+		}
+		for _, id := range []string{c.ID, fixed.ID} {
+			if v := get(t, f, id); v.Dismissed || v.Marks != nil {
+				t.Errorf("%s after a refused Dismiss: marks %+v; want none written", id, v.Marks)
+			}
+		}
+
+		if got, err := dismiss(other.ID, "not-a-uuid"); err != nil || len(got) != 0 {
+			t.Errorf("Dismiss of nothing readable = %+v, %v; want nothing written", got, err)
+		}
+	})
+
 	t.Run("recipients", func(t *testing.T) {
 		f := mk(t)
 		recipients := func(a domain.NotificationAudience) []string {

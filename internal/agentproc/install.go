@@ -149,13 +149,18 @@ func sdkAlreadyInstalled(sdkDir string) bool {
 // so a drift test compares the two renderings. Drift is not cosmetic:
 // npm ci hard-refuses to install when the manifest and the lockfile
 // disagree about a dependency.
+//
+// zod is a direct dependency, pinned at the version the lockfile resolves
+// for the SDK's own peer dependency, because wrapper.mjs imports it to build
+// a TF tool's input schema. The SDK and the wrapper therefore share one copy.
 func sdkPackageJSON() []byte {
 	return []byte(fmt.Sprintf(`{
   "name": "triagefactory-sdk-runtime",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "%s"
+    "@anthropic-ai/claude-agent-sdk": "%s",
+    "zod": "4.6.7"
   }
 }
 `, sdkVersion))

@@ -110,6 +110,9 @@ type Hooks struct {
 type Params struct {
 	OrgID          string
 	ConversationID string
+	// ClaimID is the executor engagement this is, handed to a TF tool's
+	// handler as part of the conversation's identity.
+	ClaimID string
 
 	// Model is the provider model id. SystemPrompt is the fully assembled
 	// envelope (see envelope.go) — the loop never composes prompt text
@@ -124,7 +127,7 @@ type Params struct {
 	// single-block system message.
 	SystemAddendum string
 
-	// HasBlueprint registers the flow-control tool. True for a delegation,
+	// HasBlueprint offers the flow-control tool. True for a delegation,
 	// where the conversation executes a blueprint against a task; false for
 	// a conversation with a human in it, which has no blueprint to stop and
 	// nobody absent to leave a reason for. It must agree with the composed
@@ -305,6 +308,24 @@ type Engine struct {
 
 	// Log receives operational messages. Optional.
 	Log Logger
+
+	// Now is the clock every duration the loop records is read from: the
+	// engagement's, each provider call's, each tool call's. Nil reads
+	// time.Now.
+	Now func() time.Time
+}
+
+// now reads the engine's clock.
+func (e *Engine) now() time.Time {
+	if e.Now == nil {
+		return time.Now()
+	}
+	return e.Now()
+}
+
+// msSince is the whole milliseconds from t to now on the engine's clock.
+func (e *Engine) msSince(t time.Time) int {
+	return int(e.now().Sub(t) / time.Millisecond)
 }
 
 // Activity, when set, is told where the loop blocks. Every method is
@@ -359,7 +380,7 @@ type Logger interface {
 // guards (before every call, not every turn) → assemble → credentials →
 // stream → persist → stop-reason handling → tool dispatch → would-stop.
 func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
-	started := time.Now()
+	started := e.now()
 
 	// The engagement's spend, in this frame because the Engine is shared
 	// across engagements. Stamped by one deferred assignment so every exit
@@ -481,7 +502,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				Kind:       ResultParked,
 				ParkNotice: notice,
 				NumTurns:   turn,
-				DurationMs: msSince(started),
+				DurationMs: e.msSince(started),
 			}
 		}
 
@@ -500,7 +521,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			maxTokens = escalatedMaxTokens
 			escalatedMaxTokens = 0
 		}
-		callStarted := time.Now()
+		callStarted := e.now()
 		completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, maxTokens))
 		if release != nil {
 			release()
@@ -558,7 +579,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		if class.interrupted() {
 			stubTruncatedToolArgs(completion)
 		}
-		assistantRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
+		assistantRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}
@@ -724,7 +745,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 					outcome.ResultSummary = lastText
 				}
 				outcome.NumTurns = turn
-				outcome.DurationMs = msSince(started)
+				outcome.DurationMs = e.msSince(started)
 				return outcome
 			}
 			bareDrain = false
@@ -774,7 +795,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			Outcome:       domain.ConversationOutcomeContinue,
 			ResultSummary: lastText,
 			NumTurns:      turn,
-			DurationMs:    msSince(started),
+			DurationMs:    e.msSince(started),
 		}
 	}
 }
@@ -892,17 +913,16 @@ func escalateMaxTokens(current int, model string) int {
 	return current * 2
 }
 
-// toolSchemas assembles the call's tool list: the seven in-jail tools, plus
-// flow control when there is a blueprint to control. Built per call from
-// immutable inputs so no mutation can leak between engagements. Within a
-// blueprint the list does not vary with the step's position — only the
-// system prompt does.
+// toolSchemas assembles the call's tool list: the seven in-jail tools, then
+// the TF tools this engagement is offered. Built per call from immutable
+// inputs so no mutation can leak between engagements. Within a blueprint the
+// list does not vary with the step's position — only the system prompt does.
 func (e *Engine) toolSchemas(params Params) []schemas.ChatTool {
 	sandboxed := SandboxTools()
-	flow := flowControlTools(params.HasBlueprint)
-	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(flow))
+	tf := tfTools(params)
+	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(tf))
 	out = append(out, sandboxed...)
-	out = append(out, flow...)
+	out = append(out, tf...)
 	return out
 }
 
@@ -938,7 +958,7 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) strin
 func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, notice string) error {
 	at := toolResultPositions(ownerID, len(calls))
 	for i, call := range calls {
-		if _, err := e.insertToolResult(ctx, params, call, notice, true, at(i)); err != nil {
+		if _, err := e.insertToolResult(ctx, params, call, notice, true, at(i), nil); err != nil {
 			return err
 		}
 	}
@@ -958,7 +978,7 @@ func (e *Engine) parkOnStop(ctx context.Context, params Params, started time.Tim
 		Kind:       ResultParked,
 		ParkNotice: notice,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 	}
 }
 
@@ -1007,7 +1027,7 @@ func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err er
 		Kind:        ResultFailed,
 		FailureKind: domain.ConversationFailureAgentError,
 		NumTurns:    turn,
-		DurationMs:  msSince(started),
+		DurationMs:  e.msSince(started),
 		Err:         err,
 	}
 }
@@ -1020,7 +1040,7 @@ func (e *Engine) unavailable(started time.Time, turn int, err error) Result {
 	return Result{
 		Kind:       ResultUpstreamUnavailable,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 		Err:        err,
 	}
 }
@@ -1033,7 +1053,7 @@ func (e *Engine) toolHostLost(started time.Time, turn int, lost *ToolHostLostErr
 	return Result{
 		Kind:       ResultToolHostLost,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 		Err:        lost,
 	}
 }
@@ -1052,7 +1072,7 @@ func (e *Engine) cancelled(ctx context.Context, started time.Time, turn int) Res
 	return Result{
 		Kind:       ResultCancelled,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 		Err:        cause,
 	}
 }
@@ -1067,10 +1087,6 @@ func (e *Engine) info(msg string, args ...any) {
 	if e.Log != nil {
 		e.Log.Info(msg, args...)
 	}
-}
-
-func msSince(t time.Time) int {
-	return int(time.Since(t) / time.Millisecond)
 }
 
 // ErrNoCredentials is returned by a Credentials implementation that has

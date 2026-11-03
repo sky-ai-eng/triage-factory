@@ -114,6 +114,7 @@ let markReadFails: boolean
 // What a facets node answers; unset, it counts the rows the status and
 // dismissed filters match, and nothing narrower.
 let facetsAnswer: { by_priority: Facet[]; by_audience: Facet[] } | null
+let dismissFails: boolean
 type Call = { url: string; method: string; body: Record<string, unknown> | null }
 let calls: Call[]
 
@@ -220,6 +221,26 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (markReadFails) return ok({ errors: [{ reason: 'INTERNAL', message: 'it broke' }] }, 500)
     return ok({ ids: body.ids })
   }
+  if (url === '/api/me/notifications/dismiss') {
+    if (dismissFails) {
+      return ok(
+        {
+          errors: [
+            {
+              reason: 'INVALID_FIELD',
+              message:
+                "this notification can't be dismissed: it stays until the condition is fixed",
+              field: 'ids[0]',
+            },
+          ],
+        },
+        422,
+      )
+    }
+    const ids = body.ids as string[]
+    for (const n of rows) if (ids.includes(n.id)) n.dismissed = true
+    return ok({ ids: [...ids].sort() })
+  }
   const m = /^\/api\/me\/notifications\/([^/]+)(\/actions\/(.+))?$/.exec(url)
   if (m) {
     const n = [...rows, ...orgRows].find((r) => r.id === m[1])
@@ -294,6 +315,7 @@ beforeEach(() => {
   orgId.v = 'org-1'
   markReadFails = false
   facetsAnswer = null
+  dismissFails = false
   ws.dispatch = null
   actionAnswer = () => ({ status: 200, body: { notification: null, outcome: 'Done.' } })
   for (const t of Object.values(toasts)) t.mockClear()
@@ -691,9 +713,10 @@ describe('the table', () => {
   })
 
   it('dismisses the selected rows once the undo window closes', async () => {
-    rows = [note('a'), note('b')]
+    rows = [note('a'), note('b'), note('c')]
     await mount()
     fireEvent.click(within(rowOf('title a')).getByRole('checkbox'))
+    fireEvent.click(within(rowOf('title b')).getByRole('checkbox'))
     fireEvent.pointerDown(screen.getByRole('button', { name: 'Dismiss' }), {
       button: 0,
       clientX: 0,
@@ -701,16 +724,15 @@ describe('the table', () => {
     })
     await settle(300)
     expect(screen.queryByText('title a')).toBeNull()
-    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+    expect(screen.queryByText('title b')).toBeNull()
+    const dismissCalls = () => calls.filter((c) => c.url === '/api/me/notifications/dismiss')
+    expect(dismissCalls()).toHaveLength(0)
 
     await settle(10_000)
-    expect(calls).toContainEqual(
-      expect.objectContaining({
-        url: '/api/me/notifications/a',
-        method: 'PATCH',
-        body: { dismissed: true },
-      }),
-    )
+    expect(dismissCalls()).toHaveLength(1)
+    expect([...(dismissCalls()[0].body!.ids as string[])].sort()).toEqual(['a', 'b'])
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+    expect(screen.getByText('title c')).toBeInTheDocument()
   })
 
   it('offers Dismiss only when every selected row can be dismissed', async () => {
@@ -801,6 +823,28 @@ describe('marks that do not land', () => {
     await settle(2000)
     expect(toasts.error).toHaveBeenCalledWith('it broke')
     expect(dot()).toHaveAttribute('data-on')
+  })
+
+  it('puts a dismissal back, and says so, when the server refuses it', async () => {
+    rows = [note('a'), note('b')]
+    dismissFails = true
+    await mount()
+    fireEvent.click(within(rowOf('title a')).getByRole('checkbox'))
+    fireEvent.click(within(rowOf('title b')).getByRole('checkbox'))
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Dismiss' }), {
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    })
+    await settle(300)
+    expect(screen.queryByText('title a')).toBeNull()
+
+    await settle(10_000)
+    expect(toasts.error).toHaveBeenCalledWith(
+      "this notification can't be dismissed: it stays until the condition is fixed",
+    )
+    expect(screen.getByText('title a')).toBeInTheDocument()
+    expect(screen.getByText('title b')).toBeInTheDocument()
   })
 })
 

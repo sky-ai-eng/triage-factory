@@ -217,7 +217,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	if err != nil {
 		return err
 	}
-	callStarted := time.Now()
+	callStarted := e.now()
 	// The request-invariance contract: this is buildRequest — the same
 	// constructor the working loop calls, same system prompt, same tools,
 	// same tool_choice (absent), same model, same effort — over the same
@@ -260,7 +260,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	// Success: the reply is a genuine transcript event — persist it like any
 	// assistant turn (usage, cost, duration), then flip it inactive with the
 	// span it summarized.
-	replyRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
+	replyRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
 	if err != nil {
 		return err
 	}
@@ -286,7 +286,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) e
 	if err != nil {
 		return err
 	}
-	callStarted := time.Now()
+	callStarted := e.now()
 	// Rows assemble with undelivered rows excluded (the default), so queued
 	// input is never summarized: it survives the commit as live input ordered
 	// after the result row.
@@ -318,7 +318,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) e
 	// warm attempt would have left, byte-shape identical, honestly
 	// attributed to the model that produced it, inactive from the moment it
 	// exists. Cost lands on the row carrying the call's output.
-	durationMs := msSince(callStarted)
+	durationMs := e.msSince(callStarted)
 	replyRow := &domain.Message{
 		// Sanitized like every persisted model text: the analysis and
 		// summary arrive raw from the tool-call arguments, and a summary
@@ -332,9 +332,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) e
 	}
 	stampUsage(replyRow, completion.Usage)
 	stampFinishReason(replyRow, completion.FinishReason)
-	if durationMs > 0 {
-		replyRow.DurationMs = &durationMs
-	}
+	replyRow.DurationMs = &durationMs
 	if cost, ok := inference.CostForUsage(replyRow.Model, completion.Usage); ok {
 		replyRow.CostUSD = &cost
 	}

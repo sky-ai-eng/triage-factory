@@ -19,8 +19,8 @@ var (
 	// (expired notices included).
 	ErrNoSuchNotification = errors.New("db: no such notification")
 
-	// ErrNotificationNotDismissible is SetMarks' refusal to dismiss a
-	// non-dismissible row.
+	// ErrNotificationNotDismissible is SetMarks' and Dismiss's refusal to
+	// dismiss a non-dismissible row.
 	ErrNotificationNotDismissible = errors.New("db: notification is not dismissible")
 
 	ErrInvalidNotification         = errors.New("db: invalid notification")
@@ -136,7 +136,25 @@ type NotificationStore interface {
 	// MarkRead stamps read_at on the ids the viewer may read and returns the
 	// marks written; unreadable ids are skipped.
 	MarkRead(ctx context.Context, orgID, userID string, ids []string) ([]domain.NotificationMarks, error)
+
+	// Dismiss stamps dismissed_at on the ids the viewer may read and returns
+	// the marks written; unreadable ids are skipped. A readable id that is not
+	// dismissible refuses the whole batch with a
+	// *NotificationsNotDismissibleError, and nothing is written.
+	Dismiss(ctx context.Context, orgID, userID string, ids []string) ([]domain.NotificationMarks, error)
 }
+
+// NotificationsNotDismissibleError is Dismiss's refusal. IDs are the readable
+// rows of the batch that are not dismissible, sorted.
+type NotificationsNotDismissibleError struct {
+	IDs []string
+}
+
+func (e *NotificationsNotDismissibleError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrNotificationNotDismissible, strings.Join(e.IDs, ", "))
+}
+
+func (e *NotificationsNotDismissibleError) Unwrap() error { return ErrNotificationNotDismissible }
 
 // NotificationOccurrence is what UpsertOpenSystem writes. The store mints the
 // id and every timestamp but ExpiresAt.

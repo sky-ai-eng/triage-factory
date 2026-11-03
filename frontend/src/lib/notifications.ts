@@ -222,21 +222,40 @@ export function markNotificationRead(id: string): Promise<NotificationItem> {
   return setNotificationMarks(id, { read: true })
 }
 
-/** The most ids one mark-read call takes: the largest page a client renders. */
-export const MARK_READ_MAX = 200
+/** The most ids one mark-read or dismiss call takes: the largest page a
+ *  client renders. */
+export const BULK_MARKS_MAX = 200
 
-/** Mark the rendered items read, at most MARK_READ_MAX of them. Answers the
- *  ids it marked; one the viewer cannot read is left out. */
-export function markNotificationsRead(
+function postIDs(
+  path: string,
   ids: string[],
-  init: { keepalive?: boolean } = {},
+  init: { keepalive?: boolean },
 ): Promise<{ ids: string[] }> {
-  return apiJSON<{ ids: string[] }>('/api/me/notifications/mark-read', {
+  return apiJSON<{ ids: string[] }>(path, {
     ...init,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids }),
   })
+}
+
+/** Mark the rendered items read, at most BULK_MARKS_MAX of them. Answers the
+ *  ids it marked; one the viewer cannot read is left out. */
+export function markNotificationsRead(
+  ids: string[],
+  init: { keepalive?: boolean } = {},
+): Promise<{ ids: string[] }> {
+  return postIDs('/api/me/notifications/mark-read', ids, init)
+}
+
+/** Dismiss the selected items for this viewer, at most BULK_MARKS_MAX of
+ *  them. Answers the ids it dismissed; one the viewer cannot read is left out.
+ *  One that is not dismissible refuses the whole call with a 422. */
+export function dismissNotifications(
+  ids: string[],
+  init: { keepalive?: boolean } = {},
+): Promise<{ ids: string[] }> {
+  return postIDs('/api/me/notifications/dismiss', ids, init)
 }
 
 /** What an invoke action did: its outcome, in a sentence, and the item as the

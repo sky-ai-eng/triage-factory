@@ -3,8 +3,8 @@ package server
 import (
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // current_action — the one prose line a WORKING conversation shows in place of

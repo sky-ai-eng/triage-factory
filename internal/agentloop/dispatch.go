@@ -33,6 +33,11 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // position is the assembly key of the last result the batch wrote. Every call
 // is answered before this returns without an error, so it is the point in the
 // transcript by which everything the batch did to the workspace is done.
+//
+// Each result row carries how long its call ran, measured around the tool
+// host's call and nothing else: time a call spends held at the gate before
+// it, or in the rewrite after it, is the loop's, not the tool's. A call that
+// was never dispatched carries no duration.
 func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, deaths *toolHostDeaths) (result Result, terminated bool, position float64, err error) {
 	var terminal *Result
 	allTerminate := true
@@ -43,11 +48,11 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			return Result{}, false, 0, ctxErr
 		}
 
-		// A handler-backed tool resolves loop-side and never enters the
-		// sandbox. Its result row still lands, so the transcript stays legal
-		// and a later reader sees why the run ended.
-		if out, ok := resolveLoopSide(call, params.HasBlueprint); ok {
-			key, err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i))
+		// A TF tool resolves loop-side and never enters the sandbox. Its
+		// result row still lands, so the transcript stays legal and a later
+		// reader sees why the run ended.
+		if out, ran, ok := e.resolveLoopSide(ctx, call, params); ok {
+			key, err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i), &ran)
 			if err != nil {
 				return Result{}, false, 0, err
 			}
@@ -77,7 +82,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 		// strictly more useful than killing the run.
 		if e.Hooks.BeforeToolCall != nil {
 			if deny := e.Hooks.BeforeToolCall(ctx, call); deny != "" {
-				key, err := e.insertToolResult(ctx, params, call, deny, true, at(i))
+				key, err := e.insertToolResult(ctx, params, call, deny, true, at(i), nil)
 				if err != nil {
 					return Result{}, false, 0, err
 				}
@@ -86,7 +91,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			}
 		}
 
-		out, dispatchErr := e.callTool(ctx, call)
+		out, ran, dispatchErr := e.callTool(ctx, call)
 		if e.Hooks.AfterToolCall != nil {
 			out = e.Hooks.AfterToolCall(ctx, call, out)
 		}
@@ -102,13 +107,14 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 				return Result{}, false, 0, ctxErr
 			}
 			// The restart comes before the answers, so each answer can say
-			// where the conversation goes on.
+			// where the conversation goes on. The lost call's duration was
+			// taken when it failed, so the restart is not in it.
 			lost := toolHostLostFor(dispatchErr, out.Protocol)
 			restarted := e.restartToolHost(ctx, params, call, deaths)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return Result{}, false, 0, ctxErr
 			}
-			key, err := e.answerLostBatch(ctx, params, calls, at, i, lost, restarted)
+			key, err := e.answerLostBatch(ctx, params, calls, at, i, lost, restarted, ran)
 			if err != nil {
 				return Result{}, false, 0, err
 			}
@@ -126,13 +132,13 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			// Survivable: an unknown tool, a malformed frame, an over-cap
 			// response. The model gets the message and the loop reads the
 			// next frame.
-			key, insertErr = e.insertToolResult(ctx, params, call, out.Protocol.Error(), true, at(i))
+			key, insertErr = e.insertToolResult(ctx, params, call, out.Protocol.Error(), true, at(i), &ran)
 		case out.ToolError != "":
-			key, insertErr = e.insertToolResult(ctx, params, call, out.ToolError, true, at(i))
+			key, insertErr = e.insertToolResult(ctx, params, call, out.ToolError, true, at(i), &ran)
 		case len(out.Images) > 0:
-			key, insertErr = e.insertToolResultWithImages(ctx, params, call, out.Content, out.Images, at(i))
+			key, insertErr = e.insertToolResultWithImages(ctx, params, call, out.Content, out.Images, at(i), &ran)
 		default:
-			key, insertErr = e.insertToolResult(ctx, params, call, out.Content, false, at(i))
+			key, insertErr = e.insertToolResult(ctx, params, call, out.Content, false, at(i), &ran)
 		}
 		if insertErr != nil {
 			return Result{}, false, 0, insertErr
@@ -147,13 +153,17 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 }
 
 // callTool dispatches into the jail, or reports that no tool host is wired.
-func (e *Engine) callTool(ctx context.Context, call domain.ToolCall) (ToolOutcome, error) {
+// ran is the milliseconds from the request going to the tool host to its
+// answer or its failure.
+func (e *Engine) callTool(ctx context.Context, call domain.ToolCall) (out ToolOutcome, ran int, err error) {
 	if e.Tools == nil {
-		return ToolOutcome{}, fmt.Errorf("agentloop: no tool host wired: %w", errRequestNotSent)
+		return ToolOutcome{}, 0, fmt.Errorf("agentloop: no tool host wired: %w", errRequestNotSent)
 	}
 	_ = ctx // the socket round trip carries its own deadline; ctx cancellation is observed by the caller between calls
 	defer e.beginActivity(ToolActivityOpPrefix+call.Name, e.ActivityBounds.Tool)()
-	return e.Tools.Call(call.Name, call.Input)
+	started := e.now()
+	out, err = e.Tools.Call(call.Name, call.Input)
+	return out, e.msSince(started), err
 }
 
 // answerLostBatch answers the call at index from, which the tool host died
@@ -162,21 +172,24 @@ func (e *Engine) callTool(ctx context.Context, call domain.ToolCall) (ToolOutcom
 // back. Without these the transcript would carry an assistant message whose
 // tool calls have no results, illegal on the next assembly. position is the
 // assembly key of the last answer.
-func (e *Engine) answerLostBatch(ctx context.Context, params Params, calls []domain.ToolCall, at func(int) *float64, from int, lost *ToolHostLostError, restarted bool) (position float64, err error) {
+//
+// ran is how long the call at from ran before the tool host died. The calls
+// after it never ran and carry no duration.
+func (e *Engine) answerLostBatch(ctx context.Context, params Params, calls []domain.ToolCall, at func(int) *float64, from int, lost *ToolHostLostError, restarted bool, ran int) (position float64, err error) {
 	next, remaining := newSandboxSentence, fatalToolHostNotice
 	if restarted {
 		next, remaining = restartedSentence, restartedRemainingNotice
 	}
 	for i := from; i < len(calls); i++ {
-		content := remaining
+		content, durationMs := remaining, (*int)(nil)
 		if i == from {
-			content = lost.Notice + " " + next
+			content, durationMs = lost.Notice+" "+next, &ran
 		}
 		// The insert context may itself be cancelled if the failure was a
 		// shutdown; a detached write here would race the claim release, so
 		// let the error propagate and leave the repair pass to finish the job
 		// on the next claim.
-		if position, err = e.insertToolResult(ctx, params, calls[i], content, true, at(i)); err != nil {
+		if position, err = e.insertToolResult(ctx, params, calls[i], content, true, at(i), durationMs); err != nil {
 			return 0, err
 		}
 	}

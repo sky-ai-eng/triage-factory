@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // TestSDK_LiveSmoke is a live end-to-end smoke test against the real
@@ -462,6 +463,140 @@ func TestSDK_LiveSmoke_AllowlistShortCircuitsHandler(t *testing.T) {
 	mu.Unlock()
 	if _, statErr := os.Stat(allowedTarget); statErr != nil {
 		t.Errorf("allowed.txt was not written despite Write being allowlisted (allow short-circuit failed): %v", statErr)
+	}
+}
+
+// TestSDK_LiveSmoke_TFTool runs a TF tool end to end against the real SDK and
+// model: the wrapper serves it from the tf MCP server, the model calls it
+// once with arguments the handler accepts and once with arguments it
+// rejects, and each call is answered by the Go handler. It pins the four
+// things the stub tests cannot: the handler sees the same tool_use id the
+// stored row carries, the row names the tool without its MCP prefix, a
+// rejection lands as an is_error result, and an allowlisted TF tool never
+// reaches the permission handler. Gated like the other live smokes.
+func TestSDK_LiveSmoke_TFTool(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	var calls []tooldefs.Call
+	tool := tooldefs.Tool{
+		Name:        "record_marker",
+		Description: "Records a marker word for the test harness.",
+		Params: tooldefs.Schema{
+			Type:     "object",
+			Fields:   []tooldefs.Field{{Name: "marker", Schema: tooldefs.Schema{Type: "string", Description: "The marker word to record."}}},
+			Required: []string{"marker"},
+		},
+		Handler: func(_ context.Context, call tooldefs.Call) tooldefs.Outcome {
+			mu.Lock()
+			calls = append(calls, call)
+			mu.Unlock()
+			if call.Args["marker"] == "ACCEPT" {
+				return tooldefs.Outcome{Content: "Recorded ACCEPT."}
+			}
+			return tooldefs.Outcome{Content: "Rejected: only ACCEPT can be recorded.", IsError: true}
+		},
+	}
+
+	var prompted []string
+	perms := func(req PermissionRequest) PermissionDecision {
+		mu.Lock()
+		prompted = append(prompted, req.ToolName)
+		mu.Unlock()
+		return PermissionDecision{Behavior: "deny", Message: "denied by test"}
+	}
+
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: t.TempDir(),
+		Message: "Call the record_marker tool with marker ACCEPT. After it answers, call record_marker again with marker REJECT. " +
+			"Make the calls one at a time, do not call any other tool, and once both have answered reply with exactly the word DONE.",
+		Model:          "haiku",
+		TraceID:        "live-tf-tool",
+		ConversationID: "conv-live-tf-tool",
+		ClaimID:        "claim-live-tf-tool",
+		TFTools:        []tooldefs.Tool{tool},
+		AllowedTools:   BuildAllowedTools(""),
+	}, sink, perms)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	deadline := time.After(150 * time.Second)
+wait:
+	for {
+		select {
+		case m := <-sink.asst:
+			if strings.Contains(m.Content, "DONE") {
+				break wait
+			}
+		case <-deadline:
+			_ = lr.Close()
+			t.Fatalf("timed out waiting for the model to finish both calls (stderr: %s)", lr.Stderr())
+		}
+	}
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompted) != 0 {
+		t.Errorf("the permission handler was asked about %v; an allowlisted TF tool must never prompt", prompted)
+	}
+
+	stored := map[string]domain.ToolCall{}
+	results := map[string]*domain.Message{}
+	for _, m := range sink.snapshot() {
+		if m.Role == "assistant" {
+			for _, c := range m.ToolCalls {
+				stored[c.ID] = c
+			}
+		}
+		if m.Role == "tool" {
+			results[m.ToolCallID] = m
+		}
+	}
+
+	var accepted, rejected bool
+	for _, call := range calls {
+		if call.Run.ConversationID != "conv-live-tf-tool" || call.Run.ClaimID != "claim-live-tf-tool" {
+			t.Errorf("handler saw run %+v, want the launch's conversation and claim", call.Run)
+		}
+		row, ok := stored[call.ID]
+		if !ok {
+			t.Errorf("handler saw tool_use id %q, which no stored assistant row carries (stored: %v)", call.ID, stored)
+			continue
+		}
+		if row.Name != tool.Name {
+			t.Errorf("stored tool name = %q, want %q without the MCP prefix", row.Name, tool.Name)
+		}
+		result := results[call.ID]
+		if result == nil {
+			t.Errorf("no stored result answers %s", call.ID)
+			continue
+		}
+		switch call.Args["marker"] {
+		case "ACCEPT":
+			accepted = true
+			if result.IsError {
+				t.Errorf("the accepted call's result is marked is_error: %+v", result)
+			}
+		case "REJECT":
+			rejected = true
+			if !result.IsError {
+				t.Errorf("the rejected call's result is not marked is_error: %+v", result)
+			}
+		}
+	}
+	if !accepted || !rejected {
+		t.Fatalf("handler calls = %+v, want one ACCEPT and one REJECT (stderr: %s)", calls, lr.Stderr())
 	}
 }
 
