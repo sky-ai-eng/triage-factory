@@ -56,6 +56,21 @@ func tfToolsFlag(tools []tooldefs.Tool) string {
 	return string(b)
 }
 
+// withTFToolGrants adds each TF tool to the --allowedTools value, under the
+// MCP name the model calls it by. TF answers the call itself, so a call that
+// prompted would wait on a person for nothing. Granting them here, beside
+// --tf-tools, means a served tool is always a granted one.
+func withTFToolGrants(allowed string, tools []tooldefs.Tool) string {
+	grants := make([]string, 0, len(tools)+1)
+	if allowed != "" {
+		grants = append(grants, allowed)
+	}
+	for _, t := range tools {
+		grants = append(grants, tfToolPrefix+t.Name)
+	}
+	return strings.Join(grants, ",")
+}
+
 // tfToolsByName indexes the run's TF tools for the reader. A tool with no
 // handler is left out: nothing could answer it.
 func tfToolsByName(tools []tooldefs.Tool) map[string]tooldefs.Tool {
@@ -121,7 +136,7 @@ func (l *LiveRun) handleToolCall(ctl controlLine) {
 			l.replyToolCall(ctl.ID, out.Content, out.IsError)
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				l.replyToolCall(ctl.ID, fmt.Sprintf("%s timed out after %s and was stopped.", ctl.ToolName, timeout), true)
+				l.replyToolCall(ctl.ID, fmt.Sprintf("%s did not answer within %s, so its result was abandoned. The work it started may still complete.", ctl.ToolName, timeout), true)
 			}
 		}
 	}()

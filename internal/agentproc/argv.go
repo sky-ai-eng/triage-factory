@@ -109,8 +109,12 @@ func BuildArgs(opts RunOptions) []string {
 		"--output-format", "stream-json",
 		"--verbose",
 	)
-	if opts.AllowedTools != "" {
-		args = append(args, "--allowedTools", opts.AllowedTools)
+	allowedTools := opts.AllowedTools
+	if opts.Interactive {
+		allowedTools = withTFToolGrants(allowedTools, opts.TFTools)
+	}
+	if allowedTools != "" {
+		args = append(args, "--allowedTools", allowedTools)
 	}
 	args = append(args, "--disallowedTools", disallowedTools)
 	for _, dir := range opts.AddDirs {

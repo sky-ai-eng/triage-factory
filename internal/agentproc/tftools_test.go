@@ -68,17 +68,31 @@ func TestBuildArgs_TFToolsOnlyInteractiveWithATool(t *testing.T) {
 	}
 }
 
-// TestBuildAllowedToolsFor_GrantsTFToolsByTheirMCPName pins that each TF tool
-// is granted under the name the model calls it by, so a call never prompts.
-func TestBuildAllowedToolsFor_GrantsTFToolsByTheirMCPName(t *testing.T) {
-	got := strings.Split(BuildAllowedToolsFor(AllowedToolsOptions{SelfBin: "/bin/tf", TFTools: []string{"render_component", "record_call"}}), ",")
-	for _, want := range []string{"mcp__tf__render_component", "mcp__tf__record_call"} {
+// TestBuildArgs_GrantsServedTFToolsByTheirMCPName pins that every TF tool the
+// wrapper serves is granted under the name the model calls it by, beside the
+// caller's own allowlist, so a call never prompts; and that a one-shot run,
+// which serves none, grants none.
+func TestBuildArgs_GrantsServedTFToolsByTheirMCPName(t *testing.T) {
+	tools := []tooldefs.Tool{testTFTool("render_component", nil), testTFTool("record_call", nil)}
+	allowedTools := func(args []string) []string {
+		i := slices.Index(args, "--allowedTools")
+		if i < 0 || i+1 >= len(args) {
+			return nil
+		}
+		return strings.Split(args[i+1], ",")
+	}
+
+	got := allowedTools(BuildArgs(RunOptions{Interactive: true, TFTools: tools, AllowedTools: "Read,Write"}))
+	for _, want := range []string{"Read", "Write", "mcp__tf__render_component", "mcp__tf__record_call"} {
 		if !slices.Contains(got, want) {
-			t.Errorf("allowlist is missing %s", want)
+			t.Errorf("--allowedTools %v is missing %s", got, want)
 		}
 	}
-	if none := BuildAllowedToolsFor(AllowedToolsOptions{SelfBin: "/bin/tf"}); strings.Contains(none, tfToolPrefix) {
-		t.Errorf("a run offered no TF tool grants one: %s", none)
+	if got := allowedTools(BuildArgs(RunOptions{Interactive: true, TFTools: tools[:1]})); !slices.Equal(got, []string{"mcp__tf__render_component"}) {
+		t.Errorf("with no caller allowlist, --allowedTools = %v, want only the TF tool", got)
+	}
+	if got := allowedTools(BuildArgs(RunOptions{Message: "hi", TFTools: tools, AllowedTools: "Read"})); !slices.Equal(got, []string{"Read"}) {
+		t.Errorf("a one-shot run's --allowedTools = %v, want the caller's alone", got)
 	}
 }
 
@@ -287,8 +301,8 @@ func TestConsumeStreamInteractive_UnknownAndTimedOutToolCallsAreErrors(t *testin
 	if r := byID["w-unknown"]; r["is_error"] != true || !strings.Contains(r["content"].(string), "no_such_tool") {
 		t.Errorf("unknown tool reply = %v, want an error naming it", r)
 	}
-	if r := byID["w-stuck"]; r["is_error"] != true || !strings.Contains(r["content"].(string), "timed out") {
-		t.Errorf("timed-out reply = %v, want an error saying it timed out", r)
+	if r := byID["w-stuck"]; r["is_error"] != true || !strings.Contains(r["content"].(string), "did not answer within") {
+		t.Errorf("timed-out reply = %v, want an error saying it did not answer in time", r)
 	}
 }
 

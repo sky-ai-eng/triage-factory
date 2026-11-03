@@ -75,12 +75,6 @@ type AllowedToolsOptions struct {
 	// didn't authenticate. See ghBashPatterns for what is granted and, more
 	// importantly, what isn't.
 	GH bool
-
-	// TFTools are the names of the TF tools the run is offered
-	// (RunOptions.TFTools). Each is granted under the MCP name the model
-	// calls it by, mcp__tf__<name>: TF answers the call itself, and a call
-	// that prompted would wait on a person for nothing.
-	TFTools []string
 }
 
 // BuildAllowedToolsFor is the full-control form of BuildAllowedTools.
@@ -331,9 +325,6 @@ func BuildAllowedToolsFor(o AllowedToolsOptions) string {
 	// sandbox (which isn't available in -p mode per the CC docs).
 	otherTools := []string{
 		"Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch",
-	}
-	for _, name := range o.TFTools {
-		otherTools = append(otherTools, tfToolPrefix+name)
 	}
 
 	all := strings.Join(append(bashPatterns, otherTools...), ",")

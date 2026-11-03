@@ -521,7 +521,7 @@ func TestSDK_LiveSmoke_TFTool(t *testing.T) {
 		ConversationID: "conv-live-tf-tool",
 		ClaimID:        "claim-live-tf-tool",
 		TFTools:        []tooldefs.Tool{tool},
-		AllowedTools:   BuildAllowedToolsFor(AllowedToolsOptions{TFTools: []string{tool.Name}}),
+		AllowedTools:   BuildAllowedTools(""),
 	}, sink, perms)
 	if err != nil {
 		t.Fatalf("RunInteractive failed: %v", err)

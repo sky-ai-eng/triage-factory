@@ -214,10 +214,10 @@ type RunOptions struct {
 	// TFTools are the TF tools this run is offered (tooldefs.TFTools). The
 	// wrapper serves them from an in-process MCP server, so the model sees
 	// each as mcp__tf__<name>, and every call is answered here, by the
-	// tool's handler, on a goroutine of its own. The caller grants them in
-	// the allowlist too (AllowedToolsOptions.TFTools), so a call never
-	// prompts. Interactive-mode only: the one-shot path has no channel to
-	// answer a call on, and BuildArgs leaves them off its argv.
+	// tool's handler, on a goroutine of its own. BuildArgs adds each to
+	// --allowedTools, so a call never prompts. Interactive-mode only: the
+	// one-shot path has no channel to answer a call on, and BuildArgs leaves
+	// them off its argv.
 	TFTools []tooldefs.Tool
 
 	// ClaimID is the executor engagement this launch belongs to — the claims

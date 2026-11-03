@@ -263,6 +263,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   const pendingPerms = new Map()
   const pendingBatches = new Map()
   const pendingToolCalls = new Map()
+  const toolResult = (text, isError) => ({ content: [{ type: "text", text }], isError })
   let closing = false
 
   // Deny + clear every parked permission promise. Called on end/EOF (and
@@ -391,11 +392,9 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   // and parks on the tool_call_reply carrying the same id; Go runs the
   // handler. tool_call_id is the call's tool_use id, which the SDK hands the
   // handler in its _meta. An abort settles the call as an error and tells Go
-  // to stop the handler; closing settles every call still waiting. zod and
-  // the SDK's MCP helpers are imported only here, so a run offered no TF tool
-  // loads neither.
+  // to stop the handler; closing settles every call still waiting. zod is
+  // imported only here, so a run offered no TF tool never loads it.
   if (tfTools) {
-    const toolResult = (text, isError) => ({ content: [{ type: "text", text }], isError })
     const callTFTool = (name, args, extra) => {
       if (closing) return Promise.resolve(toolResult("run ended", true))
       const id = randomUUID()
@@ -450,9 +449,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
     closing = true
     denyAllPending("run ended")
     for (const settle of [...pendingBatches.values()]) settle("")
-    for (const settle of [...pendingToolCalls.values()]) {
-      settle({ content: [{ type: "text", text: "run ended" }], isError: true })
-    }
+    for (const settle of [...pendingToolCalls.values()]) settle(toolResult("run ended", true))
     input.end()
   }
 
@@ -527,7 +524,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
 
       case "tool_call_reply": {
         const settle = pendingToolCalls.get(ctl.id)
-        if (settle) settle({ content: [{ type: "text", text: ctl.content ?? "" }], isError: Boolean(ctl.is_error) })
+        if (settle) settle(toolResult(ctl.content ?? "", Boolean(ctl.is_error)))
         else process.stderr.write(`wrapper: no pending tool call ${ctl.id}\n`)
         break
       }

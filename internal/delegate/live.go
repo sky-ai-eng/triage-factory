@@ -153,19 +153,9 @@ type liveRunSpec struct {
 
 // sdkTFTools are the TF tools an SDK delegation is offered. Every SDK
 // conversation the spawner drives is a delegation, which executes a
-// blueprint, as a native one does. The launch serves them and the allowlist
-// grants them, and both read this, so a tool the agent holds is one it can
-// call without a prompt.
+// blueprint, as a native one does.
 func sdkTFTools() []tooldefs.Tool {
 	return tooldefs.TFTools(tooldefs.Facts{Runtime: domain.ConversationRuntimeSDK, HasBlueprint: true})
-}
-
-func tfToolNames(tools []tooldefs.Tool) []string {
-	names := make([]string, 0, len(tools))
-	for _, t := range tools {
-		names = append(names, t.Name)
-	}
-	return names
 }
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the

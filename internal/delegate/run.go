@@ -590,7 +590,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			SelfBin: selfBin,
 			Extras:  cfg.extraAllowedTools,
 			GH:      ghChannel != nil,
-			TFTools: tfToolNames(sdkTFTools()),
 		}),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,

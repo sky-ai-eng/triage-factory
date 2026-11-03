@@ -21,10 +21,6 @@
 // which relays each call to the stream reader in internal/agentproc. TFTools
 // is the only place that decides which of them a run is offered. Today that is
 // only stop_blueprint.
-//
-// A Handler reads its arguments and the identity of the conversation making
-// the call, and nothing else: anything more a tool needs reaches it on Run as
-// an interface its caller implements, so this package imports no store.
 package tooldefs
 
 import (

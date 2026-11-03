@@ -43,8 +43,9 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			return Result{}, false, 0, ctxErr
 		}
 
-		// A TF tool resolves loop-side and never enters the sandbox. Its result row still lands, so the transcript stays legal
-		// and a later reader sees why the run ended.
+		// A TF tool resolves loop-side and never enters the sandbox. Its
+		// result row still lands, so the transcript stays legal and a later
+		// reader sees why the run ended.
 		if out, ok := resolveLoopSide(ctx, call, params); ok {
 			key, err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i))
 			if err != nil {
