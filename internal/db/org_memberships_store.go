@@ -33,6 +33,30 @@ var ErrLastOwnerGuard = errors.New("db: each org must retain at least one owner"
 // for a between-check-and-write ownership race.
 var ErrNotOrgOwner = errors.New("db: only the current org owner can transfer ownership")
 
+// OrgMemberFilter narrows an org roster read
+// (OrgMembershipsStore.ListWithIdentity). The zero value is the whole roster.
+type OrgMemberFilter struct {
+	// Search keeps a member when the needle is a case-insensitive literal
+	// substring of their display name, or, with SearchEmails set, of an email
+	// address one of their sign-in identities holds as verified. Empty (after
+	// trimming) is no search.
+	Search string
+
+	// SearchEmails lets Search match email addresses. The roster shows nobody's
+	// address, and a substring search over them reveals an address to whoever
+	// tries substrings of it, so the caller sets this only for a reader
+	// allowed to look people up by address. Only verified addresses
+	// match, because a sign-in identity can claim any address unverified, and
+	// a search that matched one would offer the claimant under somebody
+	// else's address.
+	SearchEmails bool
+
+	// ExcludingTeamID keeps only members who are not on this team. The caller
+	// has confirmed the team is in the org; a team the read cannot see excludes
+	// nobody.
+	ExcludingTeamID string
+}
+
 // OrgMembershipsStore owns the org_memberships table — the (user_id, org_id,
 // role) rows that place a human in an org with an org-level role
 // (owner | admin | member). The org People roster (TFAC-417) reads the full
@@ -46,14 +70,16 @@ var ErrNotOrgOwner = errors.New("db: only the current org owner can transfer own
 // statement trigger is the sole authority on the last-owner invariant —
 // UpdateRole / Remove surface its SQLSTATE 23514 as ErrLastOwnerGuard rather
 // than pre-checking in Go. The admin pool carries ONLY ListWithIdentity's
-// cross-member GitHub/Jira identity enrichment: the user_*_identities select
-// policies are self-only, so a member can't read a peer's identity under RLS;
-// the enrichment bypasses that but stays scoped to the org by a membership
-// join, so it surfaces only the same members the RLS roster already returned.
+// cross-member GitHub/Jira identity enrichment and its email search: the
+// user_*_identities select policies are self-only, so a member can't read a
+// peer's identity under RLS, and user_identities has no app-pool grant at
+// all. Both reads bypass that but stay scoped to the org by a membership
+// join, so they surface only the same members the RLS roster already returned.
 //
 // Multi-mode only in practice: the /org surface is multi-only and its
 // handlers 404 in local mode. The SQLite impl exists so the local store
-// bundle satisfies the interface; its mutators return ErrNotApplicableInLocal.
+// bundle satisfies the interface; ListWithIdentity and the mutators return
+// ErrNotApplicableInLocal.
 type OrgMembershipsStore interface {
 	// ListWithIdentity returns one page of orgID's members with their org
 	// role and host-scoped identity readiness plus the unpaged total,
@@ -68,10 +94,11 @@ type OrgMembershipsStore interface {
 	// JiraAccountID is nil when they hold no binding on that host.
 	// linearWorkspaceID is the org's Linear workspace, matched verbatim ("" —
 	// no Linear — matches nothing); a member's LinearUserID is nil when they
-	// hold no binding in it. The roster reads under the app pool
-	// (org_memberships_select RLS); the identity enrichment reads under the
-	// admin pool (see the type doc).
-	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts ListOpts) ([]domain.OrgMember, int, error)
+	// hold no binding in it. filter narrows the roster (OrgMemberFilter); the
+	// total is counted under the same filter. The roster reads under the app
+	// pool (org_memberships_select RLS); the identity enrichment and the
+	// email half of the search read under the admin pool (see the type doc).
+	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, filter OrgMemberFilter, opts ListOpts) ([]domain.OrgMember, int, error)
 
 	// RoleFor returns userID's org_role in orgID ("owner" | "admin" |
 	// "member"), or "" when they hold no membership row. App pool: the

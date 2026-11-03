@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { teamRosterSearch } from '../../lib/teamRoster'
+import { jsonBody } from '../../test/apiResponse'
 import type { Task, TeamBot, TeamMember } from '../../types'
 
 // The lifted picker lives in the browser's top layer, and a popover the
@@ -60,6 +62,7 @@ const handlers = {
   onUnclaim: vi.fn(async () => {}),
   onDelegate: vi.fn(),
   onReassign: vi.fn(async () => {}),
+  searchMembers: teamRosterSearch('t1'),
 }
 
 beforeEach(() => {
@@ -96,6 +99,44 @@ describe('AssigneePicker in the top layer', () => {
     // jsdom's UA sheet hides a [popover] it cannot open itself, whatever the
     // stubbed state says, so the row is asked for past the accessibility gate.
     expect(screen.getByRole('option', { name: 'Aidan Allchin', hidden: true })).toBeInTheDocument()
+  })
+
+  it('draws a query’s rows from the roster route, in its order, in the top layer', async () => {
+    const team = Array.from({ length: 8 }, (_, i) => ({
+      ...ME,
+      user_id: `u${i + 10}`,
+      display_name: `Person ${String.fromCharCode(65 + i)}`,
+      is_current_user: false,
+    }))
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      ...jsonBody({ items: [team[5], team[0]], total_count: 2, bot: BOT }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <AssigneePicker
+        task={task}
+        currentUserID="u1"
+        members={[ME, ...team]}
+        bot={BOT}
+        {...handlers}
+      />,
+    )
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Unassigned' }))
+    })
+    fireEvent.change(screen.getByRole('combobox', { hidden: true }), { target: { value: 'zz' } })
+
+    await waitFor(() =>
+      expect(screen.getAllByRole('option', { hidden: true }).map((o) => o.textContent)).toEqual([
+        'Person F',
+        'Person A',
+      ]),
+    )
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+      page_size: 5,
+      search: 'zz',
+    })
   })
 
   it('leaves an already-shown popover alone when opening', async () => {

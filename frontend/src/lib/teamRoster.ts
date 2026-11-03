@@ -22,6 +22,16 @@ export interface TeamRoster {
  *  cache does. */
 export const ROSTER_PAGE_SIZE = 200
 
+/** What a roster read asks for beyond the team. */
+export interface TeamRosterQuery {
+  /** The route's `search`: a substring of a member's display name or of an
+   *  identity handle their row carries (GitHub login, Jira account id, Linear
+   *  name). Blank is no search. */
+  search?: string
+  /** Rows to read; ROSTER_PAGE_SIZE when absent. */
+  pageSize?: number
+}
+
 /** fetchTeamRoster reads a team's members and its bot in one call.
  *
  *  `teamId` is a concrete team, never an implied one: passing it is what keeps
@@ -29,14 +39,20 @@ export const ROSTER_PAGE_SIZE = 200
  *  what a session-scoped roster read could not promise for a user in more than
  *  one team.
  *
+ *  The rows come in the server's order, narrowed by `query.search` on the
+ *  server: a consumer that offers a search box sends what is typed here rather
+ *  than filtering the roster it holds.
+ *
  *  It goes through `apiJSON` rather than `apiList` for the same reason
  *  `listReachableRepos` does: the response carries a field beside the standard
  *  envelope, and `apiList` normalizes to the envelope alone. The paging keys are
  *  the standard ones and are normalized here identically. */
 export async function fetchTeamRoster(
   teamId: string,
+  query: TeamRosterQuery = {},
   options: ApiFetchOptions = {},
 ): Promise<TeamRoster> {
+  const search = query.search?.trim() ?? ''
   const page = await apiJSON<{
     items?: TeamMember[]
     total_count?: number
@@ -45,7 +61,10 @@ export async function fetchTeamRoster(
     ...options,
     method: 'POST',
     headers: { ...options.headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page_size: ROSTER_PAGE_SIZE }),
+    body: JSON.stringify({
+      page_size: query.pageSize ?? ROSTER_PAGE_SIZE,
+      ...(search ? { search } : {}),
+    }),
   })
   const members = page.items ?? []
   return {
@@ -53,6 +72,22 @@ export async function fetchTeamRoster(
     bot: page.bot ?? null,
     totalCount: page.total_count ?? members.length,
   }
+}
+
+/** RosterSearch reads the team's members matching `needle` through the
+ *  roster's `search`, at most `pageSize` of them, in the server's order. A
+ *  picker takes one rather than a team id, so the picker decides how many rows
+ *  it shows and its host decides which team and route answer. */
+export type RosterSearch = (
+  needle: string,
+  pageSize: number,
+  signal: AbortSignal,
+) => Promise<TeamRoster>
+
+/** teamRosterSearch is the RosterSearch for one team's roster route. */
+export function teamRosterSearch(teamId: string): RosterSearch {
+  return (needle, pageSize, signal) =>
+    fetchTeamRoster(teamId, { search: needle, pageSize }, { signal })
 }
 
 /** usableBot is the bot a surface may OFFER: the roster's bot when the team has

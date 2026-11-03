@@ -100,7 +100,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		seed.Membership(t, alice, teamID, "admin")
 		seed.Membership(t, bob, teamID, "member")
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.Unwindowed)
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.TeamMemberFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -140,7 +140,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 
 		seen := map[string]bool{}
 		for offset := 0; offset < 6; offset += 2 {
-			page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "",
+			page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.TeamMemberFilter{},
 				db.ListOpts{Limit: 2, Offset: offset})
 			if err != nil {
 				t.Fatalf("ListMembers(offset=%d): %v", offset, err)
@@ -171,7 +171,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		u := seed.User(t, "Only")
 		seed.Membership(t, u, teamID, "admin")
 
-		page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "",
+		page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.TeamMemberFilter{},
 			db.ListOpts{Limit: 10, Offset: 10})
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
@@ -186,7 +186,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 
 	t.Run("ListMembers_EmptyTeam", func(t *testing.T) {
 		stores, _, teamID := team(t)
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.Unwindowed)
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.TeamMemberFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -211,7 +211,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Fatalf("UpsertLinearIdentity: %v", err)
 		}
 
-		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.Unwindowed)
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.TeamMemberFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -256,7 +256,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			}
 		}
 
-		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.Unwindowed)
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.TeamMemberFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -291,7 +291,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Fatalf("UpsertLinearIdentity: %v", err)
 		}
 
-		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", "", linearWorkspace, db.Unwindowed)
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", "", linearWorkspace, db.TeamMemberFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -317,7 +317,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		other := seed.Team(t, seed.Org(t, theirs))
 		seed.Membership(t, theirs, other, "admin")
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.Unwindowed)
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.TeamMemberFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -344,7 +344,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Fatalf("UpsertLinearIdentity: %v", err)
 		}
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace,
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.TeamMemberFilter{},
 			db.ListOpts{Limit: 200, Offset: 0})
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
@@ -372,6 +372,122 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Errorf("linear_user_id = %v, want lin-solo", m.LinearUserID)
 		}
 	})
+	ids := func(members []domain.TeamMember) []string {
+		out := make([]string, len(members))
+		for i, m := range members {
+			out[i] = m.UserID
+		}
+		return out
+	}
+	search := func(t *testing.T, stores TeamRosterStores, teamID, needle string, opts db.ListOpts) ([]string, int) {
+		t.Helper()
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace,
+			db.TeamMemberFilter{Search: needle}, opts)
+		if err != nil {
+			t.Fatalf("ListMembers(search %q): %v", needle, err)
+		}
+		return ids(members), total
+	}
+	sameOrder := func(t *testing.T, label string, got, want []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s = %v, want %v", label, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s = %v, want %v (display-name order)", label, got, want)
+			}
+		}
+	}
+
+	t.Run("ListMembers_SearchMatchesNameAndHandles", func(t *testing.T) {
+		// The search covers the display name and every handle the row
+		// carries, and only those: a binding on a host the org does not use
+		// is not on the row, so it matches nothing.
+		stores, seed, teamID := team(t)
+		alice := seed.User(t, "Alice Anders")
+		bob := seed.User(t, "Bob")
+		carol := seed.User(t, "Carol")
+		dan := seed.User(t, "Dan")
+		eve := seed.User(t, "Eve")
+		for _, u := range []string{alice, bob, carol, dan, eve} {
+			seed.Membership(t, u, teamID, "member")
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, bob, ghHost, "octo-bob", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, eve, "https://ghe.corp.example", "octo-eve", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertJiraIdentity(ctx, carol, jiraHost, "557058:carol-acct", "Carol", "pat"); err != nil {
+			t.Fatalf("UpsertJiraIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertLinearIdentity(ctx, dan, linearWorkspace, "lin-dan", "dan.lin", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
+
+		for _, c := range []struct {
+			needle string
+			want   []string
+		}{
+			{"aLiCe", []string{alice}},         // display name, case-insensitive
+			{"  alice  ", []string{alice}},     // trimmed
+			{"OCTO", []string{bob}},            // GitHub login on the org's host only
+			{"carol-acct", []string{carol}},    // Jira account id
+			{"dan.lin", []string{dan}},         // Linear display name
+			{"lin-dan", nil},                   // the Linear user id is not a handle the search covers
+			{"a", []string{alice, carol, dan}}, // several, in the roster's order
+			{"nobody", nil},
+		} {
+			got, total := search(t, stores, teamID, c.needle, db.Unwindowed)
+			sameOrder(t, "search "+c.needle, got, c.want)
+			if total != len(c.want) {
+				t.Errorf("search %q total = %d, want %d (counted under the search)", c.needle, total, len(c.want))
+			}
+		}
+
+		// The window cuts the searched set, and the total stays the searched
+		// count on every page and on a count-only read.
+		got, total := search(t, stores, teamID, "a", db.ListOpts{Limit: 1, Offset: 1})
+		sameOrder(t, "search a, second page", got, []string{carol})
+		if total != 3 {
+			t.Errorf("search a paged total = %d, want 3", total)
+		}
+		got, total = search(t, stores, teamID, "a", db.ListOpts{CountOnly: true})
+		if len(got) != 0 || total != 3 {
+			t.Errorf("search a count-only = %v / %d, want no rows / 3", got, total)
+		}
+	})
+
+	t.Run("ListMembers_SearchIsLiteral", func(t *testing.T) {
+		// % and _ in a needle are the characters themselves, in the name and
+		// in a handle alike, never LIKE wildcards.
+		stores, seed, teamID := team(t)
+		percent := seed.User(t, "100% done")
+		digits := seed.User(t, "1000 done")
+		under := seed.User(t, "Plain")
+		other := seed.User(t, "Other")
+		for _, u := range []string{percent, digits, under, other} {
+			seed.Membership(t, u, teamID, "member")
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, under, ghHost, "x_y", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, other, ghHost, "xzy", "", "", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+
+		got, total := search(t, stores, teamID, "100%", db.Unwindowed)
+		sameOrder(t, "search 100%", got, []string{percent})
+		if total != 1 {
+			t.Errorf("search 100%% total = %d, want 1", total)
+		}
+		got, _ = search(t, stores, teamID, "%", db.Unwindowed)
+		sameOrder(t, "search %", got, []string{percent})
+		got, _ = search(t, stores, teamID, "x_y", db.Unwindowed)
+		sameOrder(t, "search x_y", got, []string{under})
+	})
+
 	t.Run("MemberIDsSystem_EveryRole_OrgScoped", func(t *testing.T) {
 		// The websocket audience for a private-root knowledge change: every
 		// member of the team, whatever their role, and nobody outside it.

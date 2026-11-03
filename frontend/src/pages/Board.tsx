@@ -19,7 +19,8 @@ import { stripWorktree } from '../lib/worktree'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import { useTeamMembers } from '../hooks/useDeploymentConfig'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { usableBot } from '../lib/teamRoster'
+import { teamRosterSearch, usableBot } from '../lib/teamRoster'
+import type { RosterSearch } from '../lib/teamRoster'
 import { usePagedList } from '../hooks/usePagedList'
 import type { PagedList } from '../hooks/usePagedList'
 import {
@@ -266,8 +267,11 @@ export default function Board() {
   // (the same one the write pickers seed to) rather than the org's default.
   // The bot is filtered to the one the delegate handlers would accept: a
   // disabled bot is not an assignable option.
-  const { members, bot: rosterBot } = useTeamMembers()
+  const { teamId: rosterTeamId, members, bot: rosterBot } = useTeamMembers()
   const bot = useMemo(() => usableBot(rosterBot), [rosterBot])
+  // What the picker's query reads: the same team's roster, searched on the
+  // server. Memoized on the team so the cards' memo boundary holds.
+  const searchMembers = useMemo(() => teamRosterSearch(rosterTeamId), [rosterTeamId])
   const [currentUserID, setCurrentUserID] = useState<string>('')
 
   // multi-team. teamFilter is the per-page read scope (threaded
@@ -1488,6 +1492,7 @@ export default function Board() {
                       onResolvePermission={resolvePermission}
                       currentUserID={currentUserID}
                       members={members}
+                      searchMembers={searchMembers}
                       bot={bot}
                       delegateFailures={delegateFailures}
                       onPickerClaim={handlePickerClaim}
@@ -1591,6 +1596,7 @@ function lanePaging(list: PagedList<Task>): LanePaging {
 interface PickerProps {
   currentUserID: string
   members: TeamMember[]
+  searchMembers: RosterSearch
   bot: TeamBot | null
   pickerReadOnly: boolean
   onPickerClaim: (task: Task) => Promise<void>
@@ -1616,6 +1622,7 @@ function ColumnContents({
   onResolvePermission,
   currentUserID,
   members,
+  searchMembers,
   bot,
   delegateFailures,
   onPickerClaim,
@@ -1647,6 +1654,7 @@ function ColumnContents({
   const picker: PickerProps = {
     currentUserID,
     members,
+    searchMembers,
     bot,
     pickerReadOnly: colId === 'done',
     onPickerClaim,
@@ -1786,6 +1794,7 @@ const SortableCard = memo(function SortableCard({
             task={task}
             currentUserID={picker.currentUserID}
             members={picker.members}
+            searchMembers={picker.searchMembers}
             bot={picker.bot}
             onClaim={picker.onPickerClaim}
             onUnclaim={picker.onPickerUnclaim}

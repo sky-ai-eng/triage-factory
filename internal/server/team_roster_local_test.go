@@ -129,3 +129,28 @@ func TestTeamRosterList_RejectsUnknownField(t *testing.T) {
 		t.Fatalf("status = %d, want 400 (unknown field): %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestTeamRosterList_LocalSearch: the search runs in local mode too, over the
+// one member's display name and the GitHub login their row carries.
+func TestTeamRosterList_LocalSearch(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
+		ghbase.DefaultBaseURL(), "AidanAllchin", "583231", "", "pat"); err != nil {
+		t.Fatalf("seed github identity: %v", err)
+	}
+
+	for needle, want := range map[string]int{"aidanall": 1, "no-such-person": 0} {
+		rec := doJSON(t, s, http.MethodPost, "/api/teams/default/members/list",
+			map[string]any{"search": needle})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("search %q status = %d, want 200: %s", needle, rec.Code, rec.Body.String())
+		}
+		var resp teamRosterListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Items) != want || resp.TotalCount != want {
+			t.Errorf("search %q = %d rows / total %d, want %d / %d", needle, len(resp.Items), resp.TotalCount, want, want)
+		}
+	}
+}

@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AssigneePicker from './AssigneePicker'
+import { teamRosterSearch } from '../../lib/teamRoster'
+import { jsonBody } from '../../test/apiResponse'
 import type { Task, TeamBot, TeamMember } from '../../types'
 
-// The picker's interaction is settled; these pin what a row DOES and the two
-// rules about the scrim: it takes the pointer while up, and a click outside
-// closes the menu and does nothing else.
+// The picker's interaction is settled; these pin what a row DOES, the two
+// rules about the scrim — it takes the pointer while up, and a click outside
+// closes the menu and does nothing else — and that a query is the roster
+// route's search, answered in the route's order.
 
 const ME = {
   user_id: 'u1',
@@ -35,12 +38,21 @@ const handlers = {
   onDelegate: vi.fn(),
   onReassign: vi.fn(async () => {}),
 }
+// The board's own search, against the stubbed fetch below.
+const searchMembers = teamRosterSearch('t1')
 
 function renderPicker(t: Task, members: TeamMember[] = [ME, PRIYA], bot: TeamBot | null = BOT) {
   return render(
     <>
       <button type="button">outside</button>
-      <AssigneePicker task={t} currentUserID="u1" members={members} bot={bot} {...handlers} />
+      <AssigneePicker
+        task={t}
+        currentUserID="u1"
+        members={members}
+        searchMembers={searchMembers}
+        bot={bot}
+        {...handlers}
+      />
     </>,
   )
 }
@@ -77,7 +89,14 @@ describe('AssigneePicker', () => {
     const { rerender } = renderPicker(task({ claimed_by_agent_id: 'a1' }))
     expect(screen.getByRole('button', { name: 'Assigned to Agent · machinist' })).toHaveClass('bot')
     rerender(
-      <AssigneePicker task={task()} currentUserID="u1" members={[ME]} bot={BOT} {...handlers} />,
+      <AssigneePicker
+        task={task()}
+        currentUserID="u1"
+        members={[ME]}
+        searchMembers={searchMembers}
+        bot={BOT}
+        {...handlers}
+      />,
     )
     expect(screen.getByRole('button', { name: 'Unassigned' })).toHaveTextContent('—')
   })
@@ -110,22 +129,50 @@ describe('AssigneePicker', () => {
     expect(handlers.onUnclaim).toHaveBeenCalledTimes(1)
   })
 
-  it('filters rather than scrolls past six, five rows always', () => {
+  it('searches the roster route rather than scrolls past six, five rows always', async () => {
     const many = Array.from({ length: 12 }, (_, i) => ({
       ...PRIYA,
       user_id: `u${i + 10}`,
       display_name: `Person ${String.fromCharCode(65 + i)}`,
     }))
+    // The route's answer, in the route's order: two rows a client-side match
+    // on the query would drop, and an order no client ranking would produce.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      ...jsonBody({ items: [many[7], many[2], ME], total_count: 9, bot: BOT }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
     renderPicker(task(), [ME, ...many])
     fireEvent.click(screen.getByRole('button', { name: 'Unassigned' }))
     // The empty query is the five you actually pick: the agent, yourself, the
     // first of the rest, and the escape hatch — with a count for what is not
-    // shown, never a scrollbar.
+    // shown, never a scrollbar. Nothing is asked of the route for it.
     expect(screen.getAllByRole('option')).toHaveLength(5)
     expect(screen.getAllByRole('option').at(-1)).toHaveTextContent('Unassign')
     expect(screen.getByText(/^\+\d+ more$/)).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'person c' } })
-    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(['Person C'])
+    await waitFor(() =>
+      expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([
+        'Person H',
+        'Person C',
+        'Aidan Allchin',
+      ]),
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/teams/t1/members/list')
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      page_size: 5,
+      search: 'person c',
+    })
+    // The count is the route's total less what is shown.
+    expect(screen.getByText('+6 more')).toBeInTheDocument()
+
+    // Enter takes the route's first answer.
+    fireEvent.keyDown(document.querySelector('.assign')!, { key: 'Enter' })
+    expect(handlers.onReassign).toHaveBeenCalledWith(expect.objectContaining({ id: 't1' }), 'u17')
   })
 
   it('recedes the page while open, and a click outside closes and does nothing else', async () => {
@@ -161,6 +208,7 @@ describe('AssigneePicker', () => {
         task={task({ claimed_by_user_id: 'u2' })}
         currentUserID="u1"
         members={[ME, PRIYA]}
+        searchMembers={searchMembers}
         bot={BOT}
         {...handlers}
         readOnly

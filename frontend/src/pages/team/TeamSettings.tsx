@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import Table from '../../ui/table/Table'
 import type { TableCandidate, TableRow } from '../../ui/table/Table'
@@ -30,8 +30,11 @@ import { effectiveModelKeys, money, spendShares } from './models'
 import { archiveTeam, fetchArchivePreview } from '../../lib/teamLifecycle'
 import type { ArchivePreview } from '../../lib/teamLifecycle'
 import { toast } from '../../components/Toast/toastStore'
-import { apiFetch, apiList } from '../../lib/apiClient'
+import { apiFetch } from '../../lib/apiClient'
 import { fetchTeamRoster } from '../../lib/teamRoster'
+import { listOrgMembers } from '../../lib/orgMembers'
+import { useSearchAnswer } from '../../hooks/useSearchAnswer'
+import type { TeamMember } from '../../types'
 import { fetchTeamRepos } from '../settings/teamConfig'
 import './team-settings.css'
 
@@ -79,14 +82,23 @@ const SOURCE_NAMES: Record<SourceKind, string> = {
   linear: 'Linear',
 }
 
-type MemberApiRow = {
-  user_id: string
-  display_name: string
-  github_username: string | null
-  jira_account_id: string | null
-  role: string
-  is_current_user: boolean
+// rosterMemberOf normalizes a roster row the way the roster hook holds it, so
+// the held roster and a searched page render through one row builder.
+function rosterMemberOf(m: TeamMember): RosterMember {
+  return {
+    userId: m.user_id,
+    displayName: m.display_name,
+    githubUsername: m.github_username,
+    jiraAccountId: m.jira_account_id,
+    linearUserId: m.linear_user_id,
+    role: m.role,
+    isCurrentUser: m.is_current_user,
+  }
 }
+
+// How many people `+ add teammate` asks for: more than the draft page has
+// rows to show them in.
+const CANDIDATE_PAGE_SIZE = 50
 
 const TEAM_ROLES = ['admin', 'member', 'viewer']
 const ROLE_LABELS: Record<string, string> = {
@@ -289,15 +301,7 @@ export default function TeamSettings() {
         // comes back as "endpoint not found".
         if (!teamId) return []
         const roster = await fetchTeamRoster(teamId)
-        return roster.members.map((m) => ({
-          userId: m.user_id,
-          displayName: m.display_name,
-          githubUsername: m.github_username,
-          jiraAccountId: m.jira_account_id,
-          linearUserId: m.linear_user_id,
-          role: m.role,
-          isCurrentUser: m.is_current_user,
-        }))
+        return roster.members.map(rosterMemberOf)
       },
       async changeRole(userId, role) {
         await sendRole(userId, role)
@@ -390,40 +394,46 @@ export default function TeamSettings() {
     return out
   }, [watched, members.length, preview])
 
-  // The org's people, so `+ add teammate` has candidates. Anyone already on the
-  // team is listed and disabled rather than hidden — a name missing from a
-  // directory reads as the directory being wrong.
-  const [orgPeople, setOrgPeople] = useState<MemberApiRow[]>([])
-  useEffect(() => {
-    if (!orgId || !isAdmin) return
-    let live = true
-    // page_size at the route max: the candidate set is the whole directory
-    // minus the team, which is a comparison across both rosters rather than a
-    // page of rows to read.
-    void apiList<MemberApiRow>(`/api/orgs/${encodeURIComponent(orgId)}/members/list`, {
-      page_size: 200,
-    })
-      .then((page) => {
-        if (live) setOrgPeople(page.items)
-      })
-      .catch(() => {
-        // A directory that cannot be read leaves the draft page with nothing to
-        // offer, which its own placeholder already says.
-      })
-    return () => {
-      live = false
-    }
-  }, [orgId, isAdmin])
+  // The candidates `+ add teammate` offers are the org roster's answer to what
+  // is typed: its `search`, over the org's people who are not on this team
+  // (`excluding_team_id`), in the order it gives them. The table hands the
+  // query over once it is three characters long.
+  const [peopleNeedle, setPeopleNeedle] = useState('')
+  const readPeople = useCallback(
+    (needle: string, signal: AbortSignal) =>
+      listOrgMembers(
+        orgId ?? '',
+        { search: needle, excludingTeamId: teamId, pageSize: CANDIDATE_PAGE_SIZE },
+        { signal },
+      ).then((page) => page.items),
+    [orgId, teamId],
+  )
+  // A directory that cannot be read leaves the draft page with nothing to
+  // offer, which its own placeholder already says.
+  const people = useSearchAnswer(isAdmin && orgId && teamId ? peopleNeedle : '', readPeople)
+  const peopleFound = people ? people.value : null
+  const candidates: TableCandidate[] = useMemo(
+    () => (peopleFound ?? []).map((p) => ({ id: p.user_id, name: p.display_name })),
+    [peopleFound],
+  )
 
-  const candidates: TableCandidate[] = useMemo(() => {
-    const on = new Set(members.map((m) => m.userId))
-    return orgPeople.map((p) => ({
-      id: p.user_id,
-      name: p.display_name,
-      disabled: on.has(p.user_id),
-      disabledNote: on.has(p.user_id) ? 'already on this team' : undefined,
-    }))
-  }, [orgPeople, members])
+  // The filter box is the roster route's `search`: what is typed goes to the
+  // server, and the rows shown are the ones it answers, in its order. Cleared,
+  // the table shows the roster as held.
+  const readRoster = useCallback(
+    (needle: string, signal: AbortSignal) =>
+      fetchTeamRoster(teamId, { search: needle }, { signal }).then((r) =>
+        r.members.map(rosterMemberOf),
+      ),
+    [teamId],
+  )
+  const searched = useSearchAnswer(teamId ? filter : '', readRoster)
+  // undefined while nothing is searched; null until the route answers.
+  const searchedRows = searched ? searched.value : undefined
+  const shown = useMemo(
+    () => (searchedRows === undefined ? members : (searchedRows ?? [])),
+    [searchedRows, members],
+  )
 
   // The band states the team, and a source hangs off it: the name is the crumb
   // you return by, so it stays visible everywhere in the team rather than only
@@ -443,10 +453,9 @@ export default function TeamSettings() {
   )
   usePageHeader(header)
 
-  const rows: TableRow[] = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    return members
-      .map((m) => ({
+  const rows: TableRow[] = useMemo(
+    () =>
+      shown.map((m) => ({
         id: m.userId,
         name: displayNameFor(m),
         github: m.githubUsername ?? '—',
@@ -459,15 +468,15 @@ export default function TeamSettings() {
         tasks: '—',
         spend: spendByUser ? fmtSpendUSD(spendByUser.get(m.userId) ?? 0) : '—',
         seen: '—',
-      }))
-      .filter((r) => !q || r.name.toLowerCase().includes(q) || r.github.toLowerCase().includes(q))
-  }, [members, filter, spendByUser])
+      })),
+    [shown, spendByUser],
+  )
 
   // A team keeps at least one admin, and the database is what enforces it — so
   // a gesture that would empty the seat is never offered, rather than sent and
-  // refused. Counted over the whole roster, never `rows`: the filter box
-  // narrows what is on screen, and an admin scrolled out of view still holds
-  // the seat.
+  // refused. Counted over the whole roster, never `rows`: the filter box's
+  // search decides which rows are on screen, and an admin it leaves out still
+  // holds the seat.
   const adminCount = useMemo(() => members.filter((m) => m.role === 'admin').length, [members])
   const strands = useCallback(
     (sel: TableRow[]) => adminCount - sel.filter((r) => r.role === 'admin').length < 1,
@@ -724,8 +733,9 @@ export default function TeamSettings() {
                     isAdmin
                       ? {
                           label: 'add teammate',
-                          placeholder: 'name — three characters',
+                          placeholder: 'name or email — three characters',
                           options: candidates,
+                          onQuery: setPeopleNeedle,
                           fields: [{ key: 'role', options: ['member', 'admin'], value: 'member' }],
                           onAdd: (person, values) => {
                             if (person.id) void sendAdd(person.id, values.role || 'member')

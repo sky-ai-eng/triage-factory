@@ -26,7 +26,13 @@ const me: MeResponse = {
 const roster = vi.hoisted(() => ({ members: [] as TeamMember[] }))
 vi.mock('../hooks/useDeploymentConfig', () => ({
   useMe: () => ({ me, loading: false, error: null }),
-  useTeamMembers: () => ({ members: roster.members, bot: null, loading: false, error: null }),
+  useTeamMembers: () => ({
+    teamId: 'team-acting',
+    members: roster.members,
+    bot: null,
+    loading: false,
+    error: null,
+  }),
 }))
 
 // The acting team the channel field falls back to when no teamId is passed.
@@ -181,6 +187,37 @@ describe('PredicateEditor GitHub identities', () => {
 
     fireEvent.focus(await screen.findByRole('combobox'))
     expect(screen.getByText('— no GitHub identity')).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByText('ada-gh'))
+    expect(onChange).toHaveBeenCalledWith({ author_id_in: ['1001'] })
+  })
+
+  it('searches the team on the roster route and offers the rows it answers', async () => {
+    roster.members = githubTeam
+    // The route answers Ada for "zz": a match on something the field cannot
+    // see, which a filter of the field's own would drop.
+    const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<unknown>>((url) => {
+      const [status, body] = url.startsWith('/api/event-schemas/')
+        ? [200, { fields: [{ name: 'author_id_in', type: 'string_list' }] }]
+        : url === '/api/teams/team-acting/members/list'
+          ? [200, { items: [githubTeam[1]], total_count: 1, bot: null }]
+          : [404, { errors: [] }]
+      return Promise.resolve({ ok: status < 400, status, ...jsonBody(body) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onChange = vi.fn()
+    render(<PredicateEditor eventType="github:pr:opened" value={{}} onChange={onChange} />)
+
+    fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'zz' } })
+
+    expect(await screen.findByText('ada-gh')).toBeInTheDocument()
+    expect(screen.queryByText('octocat')).not.toBeInTheDocument()
+    const search = fetchMock.mock.calls.find(
+      ([url]) => url === '/api/teams/team-acting/members/list',
+    )
+    expect(JSON.parse(String(search?.[1]?.body))).toEqual({
+      page_size: 200,
+      search: 'zz',
+    })
     fireEvent.mouseDown(screen.getByText('ada-gh'))
     expect(onChange).toHaveBeenCalledWith({ author_id_in: ['1001'] })
   })
