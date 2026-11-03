@@ -12,14 +12,15 @@
 // half-saved team), while the per-slice savers let a surface that only touched
 // one slice (e.g. Settings' change-aware save) write just that one.
 
-import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
+import { apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate, GitHubTeamRef } from '../../lib/githubTeams'
 import type { JiraProjectCandidate } from '../../lib/jiraProjects'
 import { registerRepository } from '../../lib/githubRepos'
 import type { RepoRef } from '../../lib/githubRepos'
 import type { LinearStateOption, LinearStateRef } from '../../lib/linearTeams'
-import type { SlackChannelsResponse } from '../../types'
+import type { Facet } from '../../lib/apiClient'
+import type { SlackChannelView } from '../../types'
 
 // JiraProjectConfig mirrors the backend per-project read shape: the project's
 // identifiers, its key and name for display, and the four status rules. One
@@ -765,12 +766,14 @@ export async function saveTeamGitHubGroups(
   }
 }
 
-// slackChannelsPath is the ee/slack channel-tracking route — deliberately
+// slackChannelsListPath is the ee/slack channel list route — deliberately
 // under /api/slack/* rather than teamPath()'s /api/teams/... (see
 // ee/slack/channels_handler.go's package doc: ee-owned routes stay in the
-// slack namespace).
-const slackChannelsPath = (teamId: string) =>
-  `/api/slack/teams/${encodeURIComponent(teamId)}/channels`
+// slack namespace). It searches (`search`: name or Slack channel id),
+// narrows (`tracked`, `ids`) and orders (`sort_key`: name, last_mention_at,
+// primary) on the server.
+export const slackChannelsListPath = (teamId: string) =>
+  `/api/slack/teams/${encodeURIComponent(teamId)}/channels/list`
 
 // TrackedRepository is a row of POST /api/repos/list as the repo_in picker
 // reads it: the registry id a filter stores, and the owner/repo it is shown as.
@@ -839,57 +842,57 @@ export async function fetchTeamTrackedLinearTeams(
   return (data.linear_teams ?? []).map(({ id, key, name }) => ({ id, key, name }))
 }
 
-// fetchTeamSlackChannels returns the merged channel list (tracked + sighting
-// registry + live Slack candidates, deduped by channel_id) for teamId, or
-// null on failure — 404 when unentitled/local/non-member, or a transient
-// error. Same null-vs-empty-array contract as fetchTeamRepos: a caller must
-// not read a failed load as "tracks nothing."
-export async function fetchTeamSlackChannels(
+// fetchTeamTrackedSlackChannels returns every channel teamId tracks, in the
+// list's default order (name, then channel id), or null on failure — 404 when
+// unentitled/local/non-member, or a transient error. Same null-vs-empty
+// contract as fetchTeamRepos: a failed load is not "tracks nothing."
+//
+// It walks the whole tracked set rather than reading a page because both of
+// its callers reason over all of it: the channel_in editor tells which stored
+// entries the team no longer tracks, and a tracking save replaces the whole
+// set, so a partial read would drop the channels past its first page.
+export async function fetchTeamTrackedSlackChannels(
   teamId: string,
-): Promise<SlackChannelsResponse | null> {
-  return apiJSON<SlackChannelsResponse>(slackChannelsPath(teamId)).catch(() => null)
+): Promise<SlackChannelView[] | null> {
+  return apiListAll<SlackChannelView>(slackChannelsListPath(teamId), { tracked: true }).catch(
+    () => null,
+  )
 }
 
-export type SlackSaveResult =
-  | { ok: true; data: SlackChannelsResponse }
-  | { ok: false; error: string }
-
-// saveTeamSlackChannels persists the tracked-channel set via PUT (full-set
-// replace). The response is the post-change GET shape plus any auto-join
-// warnings (invite-required / join-failed), so callers refresh their rows
-// straight from `data` rather than re-fetching.
-export async function saveTeamSlackChannels(
+// fetchSlackChannelsByID returns the rows of teamId's channel list with these
+// registry ids, or null on failure: how a stored channel_in entry the team no
+// longer tracks is named. An id the list does not hold has no row.
+export async function fetchSlackChannelsByID(
   teamId: string,
-  channelIds: string[],
-): Promise<SlackSaveResult> {
-  try {
-    const data = await apiJSON<SlackChannelsResponse>(slackChannelsPath(teamId), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel_ids: channelIds }),
-    })
-    return { ok: true, data }
-  } catch (e) {
-    return { ok: false, error: httpErrorMessage(e, 'Could not save the Slack channels.') }
-  }
+  ids: string[],
+): Promise<SlackChannelView[] | null> {
+  return apiListAll<SlackChannelView>(slackChannelsListPath(teamId), { ids }).catch(() => null)
 }
 
-// reassignSlackChannelPrimary makes teamId the primary tracker of channelId
-// (org-admin only; the server 400s if teamId isn't already tracking it).
-export async function reassignSlackChannelPrimary(
-  channelId: string,
+// SlackChannelFacets is the channel list's facets node: how many of the
+// team's channels it tracks (`tracked`: "true" | "false") and whose primary
+// each is (`primary`: "this_team" | "no_primary" | "other_team" |
+// "unwatched"). A value no channel carries is absent from its cut.
+export interface SlackChannelFacets {
+  tracked: Facet[]
+  primary: Facet[]
+}
+
+// fetchTeamSlackChannelFacets reads the facets node over every channel the
+// list holds for teamId, or null on failure.
+export async function fetchTeamSlackChannelFacets(
   teamId: string,
-): Promise<SaveResult> {
-  try {
-    await apiFetch(`/api/slack/channels/${encodeURIComponent(channelId)}/primary`, {
+): Promise<SlackChannelFacets | null> {
+  return apiJSON<Partial<SlackChannelFacets>>(
+    `/api/slack/teams/${encodeURIComponent(teamId)}/channels/facets`,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ team_id: teamId }),
-    })
-    return { ok: true }
-  } catch (e) {
-    return { ok: false, error: httpErrorMessage(e, 'Could not reassign the primary team.') }
-  }
+      body: JSON.stringify({}),
+    },
+  )
+    .then((f) => ({ tracked: f.tracked ?? [], primary: f.primary ?? [] }))
+    .catch(() => null)
 }
 
 // partialFailure builds a "<saved> saved, but <failed> did not — <err>"

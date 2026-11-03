@@ -111,7 +111,10 @@ func install(api server.ExtensionAPI) {
 		az:     api.Authz(),
 		client: slackHTTPClient,
 	}
-	api.API("GET /api/slack/teams/{team_id}/channels", ch.handleList)
+	// The list and its facets node are reads; they mount through
+	// APIMutating because they are POSTs, and CSRF follows the method.
+	api.APIMutating("POST /api/slack/teams/{team_id}/channels/list", ch.handleList)
+	api.APIMutating("POST /api/slack/teams/{team_id}/channels/facets", ch.handleFacets)
 	api.APIMutating("PUT /api/slack/teams/{team_id}/channels", ch.handlePut)
 	api.APIMutating("POST /api/slack/channels/{channel_id}/primary", ch.handlePrimary)
 

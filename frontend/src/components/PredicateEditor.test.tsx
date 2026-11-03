@@ -494,19 +494,32 @@ function channel(over: Partial<SlackChannelView>): SlackChannelView {
   }
 }
 
-// The team's channel read: two tracked channels, one registry row the team
-// does not track, and a live Slack channel TF holds no row for.
+// Registry ids, the shape channel_in stores.
+const ROW_ENG = '11111111-1111-4111-8111-111111111111'
+const ROW_OPS = '22222222-2222-4222-8222-222222222222'
+const ROW_OLD = '33333333-3333-4333-8333-333333333333'
+const ROW_GONE = '44444444-4444-4444-8444-444444444444'
+
+// The team's channels: two tracked, one registry row the team does not
+// track, and a live Slack channel TF holds no row for.
 const teamChannels: SlackChannelView[] = [
-  channel({ id: 'row-eng', channel_id: 'C1', name: 'eng' }),
-  channel({ id: 'row-ops', channel_id: 'G2', name: 'ops', is_private: true }),
-  channel({ id: 'row-old', channel_id: 'C3', name: 'old', tracked: false, source: 'sighting' }),
+  channel({ id: ROW_ENG, channel_id: 'C1', name: 'eng' }),
+  channel({ id: ROW_OPS, channel_id: 'G2', name: 'ops', is_private: true }),
+  channel({ id: ROW_OLD, channel_id: 'C3', name: 'old', tracked: false, source: 'sighting' }),
   channel({ channel_id: 'C4', name: 'random', tracked: false, source: 'slack' }),
 ]
 
+type ListBody = { tracked?: boolean; ids?: string[] }
+
 // stubChannelField answers the schema read with a channel_in field and the
-// team's channel read with channels, or a 500 when channels is null.
-function stubChannelField(channels: SlackChannelView[] | null) {
-  const fetchMock = vi.fn((url: string) => {
+// team's channel list as the server would: `tracked: true` with the tracked
+// rows, `ids` with the rows carrying them. tracked overrides the tracked
+// read's answer; null channels is a 500.
+function stubChannelField(
+  channels: SlackChannelView[] | null,
+  tracked: SlackChannelView[] | null = null,
+) {
+  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (url.startsWith('/api/event-schemas/')) {
       return Promise.resolve({
         ok: true,
@@ -517,18 +530,29 @@ function stubChannelField(channels: SlackChannelView[] | null) {
     if (channels === null) {
       return Promise.resolve({ ok: false, status: 500, ...jsonBody({ errors: [] }) })
     }
+    const body = JSON.parse(String(init?.body ?? '{}')) as ListBody
+    const items = body.ids
+      ? channels.filter((c) => c.id && body.ids!.includes(c.id))
+      : (tracked ?? channels.filter((c) => c.tracked))
     return Promise.resolve({
       ok: true,
       status: 200,
-      ...jsonBody({ role: 'member', warnings: [], channels }),
+      ...jsonBody({ items, next_page_token: '', total_count: items.length }),
     })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
 
+// The bodies the field sent the channel list.
+function channelListBodies(fetchMock: ReturnType<typeof stubChannelField>, team: string) {
+  return fetchMock.mock.calls
+    .filter(([url]) => url === `/api/slack/teams/${team}/channels/list`)
+    .map(([, init]) => JSON.parse(String(init?.body)) as ListBody)
+}
+
 describe('PredicateEditor channel_in', () => {
-  it("offers only the handler team's tracked channels and writes their registry ids", async () => {
+  it("offers the handler team's tracked channels and writes their registry ids", async () => {
     const fetchMock = stubChannelField(teamChannels)
     const onChange = vi.fn()
     render(
@@ -537,11 +561,32 @@ describe('PredicateEditor channel_in', () => {
 
     fireEvent.click(await screen.findByRole('checkbox', { name: /#ops/ }))
 
-    expect(onChange).toHaveBeenCalledWith({ channel_in: ['row-ops'] })
+    expect(onChange).toHaveBeenCalledWith({ channel_in: [ROW_OPS] })
     expect(screen.getAllByRole('checkbox')).toHaveLength(2)
     expect(screen.queryByText('#old')).not.toBeInTheDocument()
     expect(screen.queryByText('#random')).not.toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledWith('/api/slack/teams/team-b/channels', expect.anything())
+    // The server narrows to the tracked set; the field reads all of it.
+    expect(channelListBodies(fetchMock, 'team-b')).toEqual([{ tracked: true, page_size: 200 }])
+  })
+
+  it('renders the tracked read as the server answered it', async () => {
+    // Out of name order, and carrying a row the field once filtered out
+    // itself: what the server answers is what the field offers, in its order.
+    stubChannelField(teamChannels, [
+      channel({ id: ROW_OPS, channel_id: 'G2', name: 'ops' }),
+      channel({ id: ROW_OLD, channel_id: 'C3', name: 'old', tracked: false }),
+      channel({ id: ROW_ENG, channel_id: 'C1', name: 'eng' }),
+    ])
+    render(
+      <PredicateEditor eventType="slack:message" teamId="team-b" value={{}} onChange={vi.fn()} />,
+    )
+
+    await screen.findByRole('checkbox', { name: /#ops/ })
+    expect(screen.getAllByRole('checkbox').map((box) => box.parentElement?.textContent)).toEqual([
+      '#ops',
+      '#old',
+      '#eng',
+    ])
   })
 
   it('reads an empty list as every channel the team tracks', async () => {
@@ -566,31 +611,35 @@ describe('PredicateEditor channel_in', () => {
     render(<PredicateEditor eventType="slack:message" value={{}} onChange={vi.fn()} />)
 
     await screen.findByRole('checkbox', { name: /#eng/ })
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/slack/teams/team-acting/channels',
-      expect.anything(),
-    )
+    expect(channelListBodies(fetchMock, 'team-acting')).toEqual([{ tracked: true, page_size: 200 }])
   })
 
   it('keeps a stored channel the team no longer tracks, named and removable', async () => {
-    stubChannelField(teamChannels)
+    const fetchMock = stubChannelField(teamChannels)
     const onChange = vi.fn()
     render(
       <PredicateEditor
         eventType="slack:message"
         teamId="team-b"
-        value={{ channel_in: ['row-eng', 'row-old', 'row-gone'] }}
+        value={{ channel_in: [ROW_ENG, ROW_OLD, ROW_GONE, 'legacy-entry'] }}
         onChange={onChange}
       />,
     )
 
     expect(await screen.findByRole('checkbox', { name: /#eng/ })).toBeChecked()
-    expect(screen.getByText('#old · not tracked')).toBeInTheDocument()
+    expect(await screen.findByText('#old · not tracked')).toBeInTheDocument()
     // A row the read does not list at all shows its id.
-    expect(screen.getByText('row-gone · not tracked')).toBeInTheDocument()
+    expect(screen.getByText(`${ROW_GONE} · not tracked`)).toBeInTheDocument()
+    expect(screen.getByText('legacy-entry · not tracked')).toBeInTheDocument()
+    // Named by registry id; an entry that is not one names no row and is not
+    // sent.
+    expect(channelListBodies(fetchMock, 'team-b')).toContainEqual({
+      ids: [ROW_OLD, ROW_GONE],
+      page_size: 200,
+    })
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove #old' }))
-    expect(onChange).toHaveBeenCalledWith({ channel_in: ['row-eng', 'row-gone'] })
+    expect(onChange).toHaveBeenCalledWith({ channel_in: [ROW_ENG, ROW_GONE, 'legacy-entry'] })
   })
 
   it('clears the field when the last channel is deselected', async () => {
@@ -600,7 +649,7 @@ describe('PredicateEditor channel_in', () => {
       <PredicateEditor
         eventType="slack:message"
         teamId="team-b"
-        value={{ channel_in: ['row-eng'] }}
+        value={{ channel_in: [ROW_ENG] }}
         onChange={onChange}
       />,
     )

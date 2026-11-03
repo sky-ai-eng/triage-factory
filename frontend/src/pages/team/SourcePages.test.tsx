@@ -752,53 +752,90 @@ describe('Jira source page', () => {
 })
 
 describe('Slack source page', () => {
-  const CHANNELS = {
-    '/api/slack/teams/t1/channels': {
-      role: 'admin',
-      warnings: [],
-      channels: [
-        {
-          channel_id: 'C1',
-          name: 'deploys',
-          workspace_id: 'W',
-          is_private: false,
-          bot_is_member: true,
-          tracked: true,
-          is_primary: true,
-          tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: true }],
-          last_mention_at: new Date(Date.now() - 4 * 60000).toISOString(),
-          source: 'tracked',
-        },
-        {
-          channel_id: 'C2',
-          name: 'oncall-platform',
-          workspace_id: 'W',
-          is_private: false,
-          bot_is_member: true,
-          tracked: true,
-          is_primary: false,
-          // Watched by somebody, owned by nobody — the one state on this page
-          // that needs a person.
-          tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: false }],
-          source: 'tracked',
-        },
-        {
-          channel_id: 'C3',
-          name: 'eng-general',
-          workspace_id: 'W',
-          is_private: false,
-          bot_is_member: false,
-          tracked: false,
-          is_primary: false,
-          tracked_by: [],
-          source: 'sighting',
-        },
-      ],
+  const LIST = '/api/slack/teams/t1/channels/list'
+  const FACETS = '/api/slack/teams/t1/channels/facets'
+  const ROWS = [
+    {
+      channel_id: 'C1',
+      name: 'deploys',
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: true,
+      tracked: true,
+      is_primary: true,
+      tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: true }],
+      last_mention_at: new Date(Date.now() - 4 * 60000).toISOString(),
+      source: 'tracked',
     },
+    {
+      channel_id: 'C2',
+      name: 'oncall-platform',
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: true,
+      tracked: true,
+      is_primary: false,
+      // Watched by somebody, owned by nobody — the one state on this page
+      // that needs a person.
+      tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: false }],
+      source: 'tracked',
+    },
+    {
+      channel_id: 'C3',
+      name: 'eng-general',
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: false,
+      tracked: false,
+      is_primary: false,
+      tracked_by: [],
+      source: 'sighting',
+    },
+  ]
+  // What the facets node answers over ROWS: it, not the page, is where the
+  // figures come from.
+  const COUNTS = {
+    tracked: [
+      { value: 'true', count: 2 },
+      { value: 'false', count: 1 },
+    ],
+    primary: [
+      { value: 'this_team', count: 1 },
+      { value: 'no_primary', count: 1 },
+      { value: 'unwatched', count: 1 },
+    ],
   }
 
+  type Body = Record<string, unknown>
+
+  /** stubSlack answers the channel list with rows(body) for each read, the
+   *  facets node with `counts`, and everything else as `stub` does. */
+  function stubSlack(
+    rows: (body: Body) => unknown[] = () => ROWS,
+    counts: unknown = COUNTS,
+    payloads: Record<string, unknown> = {},
+  ) {
+    const base = stub({ [FACETS]: counts, ...payloads })
+    const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+      if (String(input).split('?')[0] === LIST) {
+        const items = rows(JSON.parse(String(init?.body ?? '{}')) as Body)
+        const text = JSON.stringify({ items, next_page_token: '', total_count: items.length })
+        return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(text) })
+      }
+      return base(input, init)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  /** The bodies the page sent the channel list, in order. */
+  const listBodies = (fetchMock: ReturnType<typeof stubSlack>): Body[] =>
+    fetchMock.mock.calls
+      .filter(([path]) => String(path) === LIST)
+      .map(([, init]) => JSON.parse(String(init?.body)) as Body)
+
   it('counts what it watches, what it owns, and what nobody owns', async () => {
-    stub(CHANNELS)
+    stubSlack()
     render(<SlackSource {...BODY} />)
 
     await waitFor(() => expect(screen.getByText('watched of 3 visible')).toBeInTheDocument())
@@ -807,8 +844,30 @@ describe('Slack source page', () => {
     expect(reading(row('with no primary team'))).toBe('1')
   })
 
+  it('counts from the facets node, not from the page it holds', async () => {
+    // One row on the page; the node counts forty channels behind it.
+    stubSlack(() => [ROWS[0]], {
+      tracked: [
+        { value: 'true', count: 12 },
+        { value: 'false', count: 28 },
+      ],
+      primary: [
+        { value: 'this_team', count: 5 },
+        { value: 'no_primary', count: 3 },
+        { value: 'other_team', count: 4 },
+        { value: 'unwatched', count: 28 },
+      ],
+    })
+    render(<SlackSource {...BODY} />)
+
+    await waitFor(() => expect(screen.getByText('watched of 40 visible')).toBeInTheDocument())
+    expect(reading(row('watched of 40 visible'))).toBe('12')
+    expect(reading(row('primary here'))).toBe('5')
+    expect(reading(row('with no primary team'))).toBe('3')
+  })
+
   it('reads a last event it has and dashes the count it does not', async () => {
-    stub(CHANNELS)
+    stubSlack()
     render(<SlackSource {...BODY} />)
 
     // The registry carries a timestamp; the node has not answered here, so
@@ -818,7 +877,7 @@ describe('Slack source page', () => {
   })
 
   it('keeps the dash where the node answers that the count is undefined', async () => {
-    stub({ ...CHANNELS, '/api/teams/t1/activity': ACTIVITY })
+    stubSlack(undefined, undefined, { '/api/teams/t1/activity': ACTIVITY })
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('watched of 3 visible')).toBeInTheDocument())
 
@@ -833,7 +892,7 @@ describe('Slack source page', () => {
   })
 
   it('marks the primary channels and only those', async () => {
-    stub(CHANNELS)
+    stubSlack()
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())
 
@@ -846,23 +905,17 @@ describe('Slack source page', () => {
   })
 
   it('reads another team as theirs whatever that team is called', async () => {
-    const read = CHANNELS['/api/slack/teams/t1/channels']
     // Watched here, primary on a team whose name spells what the table prints
     // for this team or for nobody.
     const ownedBy = (name: string, teamName: string) => ({
-      ...read.channels[1],
+      ...ROWS[1],
       channel_id: name,
       name,
-      tracked_by: [
-        ...read.channels[1].tracked_by,
-        { team_id: 't2', team_name: teamName, is_primary: true },
-      ],
+      tracked_by: [...ROWS[1].tracked_by, { team_id: 't2', team_name: teamName, is_primary: true }],
     })
-    stub({
-      '/api/slack/teams/t1/channels': {
-        ...read,
-        channels: [ownedBy('named-no-one', 'no one'), ownedBy('named-this-team', 'this team')],
-      },
+    stubSlack(() => [ownedBy('named-no-one', 'no one'), ownedBy('named-this-team', 'this team')], {
+      tracked: [{ value: 'true', count: 2 }],
+      primary: [{ value: 'other_team', count: 2 }],
     })
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#named-no-one')).toBeInTheDocument())
@@ -872,6 +925,84 @@ describe('Slack source page', () => {
     )
     expect(tones).toEqual(['theirs', 'theirs'])
     expect(reading(row('with no primary team'))).toBe('0')
+  })
+
+  it('opens on the primary order and leaves the rows in the order the server sent', async () => {
+    // Unwatched first, then ours: the opposite of the star ranking, which the
+    // page used to apply to whatever it held.
+    const fetchMock = stubSlack(() => [ROWS[2], ROWS[0]])
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())
+
+    expect(listBodies(fetchMock)[0]).toEqual({
+      sort_key: 'primary',
+      sort_dir: 'asc',
+      page_size: 50,
+    })
+    const names = screen
+      .getAllByRole('row')
+      .map((r) => r.textContent ?? '')
+      .filter((t) => t.includes('#'))
+    expect(names[0]).toContain('#eng-general')
+    expect(names[1]).toContain('#deploys')
+  })
+
+  it('sends the filter as the list search and renders every row the server answers', async () => {
+    const fetchMock = stubSlack((body) => (body.search ? [ROWS[0], ROWS[2]] : ROWS))
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#oncall-platform')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Filter channels'), { target: { value: ' deploys ' } })
+    await waitFor(() => expect(screen.queryByText('#oncall-platform')).not.toBeInTheDocument())
+
+    expect(listBodies(fetchMock).at(-1)).toEqual({
+      search: 'deploys',
+      sort_key: 'primary',
+      sort_dir: 'asc',
+      page_size: 50,
+    })
+    // #eng-general does not carry the filter's text; the server answered it,
+    // so it is on screen.
+    expect(screen.getByText('#deploys')).toBeInTheDocument()
+    expect(screen.getByText('#eng-general')).toBeInTheDocument()
+  })
+
+  it('asks the server for a column order instead of reordering the page', async () => {
+    const fetchMock = stubSlack()
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('columnheader', { name: 'CHANNEL' }))
+    await waitFor(() =>
+      expect(listBodies(fetchMock).at(-1)).toEqual({
+        sort_key: 'name',
+        sort_dir: 'asc',
+        page_size: 50,
+      }),
+    )
+    fireEvent.click(screen.getByRole('columnheader', { name: 'LAST EVENT' }))
+    await waitFor(() =>
+      expect(listBodies(fetchMock).at(-1)).toMatchObject({
+        sort_key: 'last_mention_at',
+        sort_dir: 'desc',
+      }),
+    )
+  })
+
+  it('watches a channel by writing the whole tracked set back with it', async () => {
+    const fetchMock = stubSlack((body) => (body.tracked === true ? [ROWS[0], ROWS[1]] : ROWS))
+    const puts = (): string[][] =>
+      fetchMock.mock.calls
+        .filter(([path, init]) => path === '/api/slack/teams/t1/channels' && init?.method === 'PUT')
+        .map(([, init]) => JSON.parse(String(init!.body)).channel_ids)
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#eng-general')).toBeInTheDocument())
+
+    commitVerb('#eng-general', 'Watch', 300)
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]).toEqual(['C1', 'C2', 'C3'])
+    // The set it wrote back is the tracked read's, not the page's.
+    expect(listBodies(fetchMock).some((b) => b.tracked === true)).toBe(true)
   })
 })
 
