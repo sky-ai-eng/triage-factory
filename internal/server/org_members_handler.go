@@ -92,8 +92,8 @@ type orgMemberRow struct {
 type orgMemberListRequest struct {
 	httpx.PageRequest
 	// Search keeps a member when it is a case-insensitive substring of their
-	// display name, or, for a caller who may look people up by address, of a
-	// verified email address of theirs (db.OrgMemberFilter).
+	// display name or of a verified email address of theirs
+	// (db.OrgMemberFilter).
 	Search string `json:"search"`
 	// ExcludingTeamID keeps only the members who are not on this team: the
 	// people a team could add. A team id that is malformed is a 400; one that
@@ -102,12 +102,9 @@ type orgMemberListRequest struct {
 }
 
 // orgMemberListFilterKey is the filter set the org roster's page token is
-// fingerprinted against. SearchEmails is in it because it changes which rows
-// a search matches, so a token minted under one answer names different rows
-// under the other.
+// fingerprinted against.
 type orgMemberListFilterKey struct {
 	Search          string `json:"search"`
-	SearchEmails    bool   `json:"search_emails"`
 	ExcludingTeamID string `json:"excluding_team_id"`
 }
 
@@ -134,11 +131,9 @@ var orgRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 // the caller's own read of it: a team in another org and a team that does not
 // exist get the same 422, so the field discloses nothing about other orgs.
 //
-// `search` matches email addresses only for a caller who may add people to a
-// team: an org admin, or the admin of one of the org's teams. Those are the
-// readers the address lookup is for (the add-teammate field). No roster shows
-// an address, and a substring search over them would let any other member work
-// out a colleague's address by trying substrings until one matches.
+// `search` matches verified email addresses for every member. The rows never
+// carry an address: a match says that this colleague holds an address with
+// that substring, which is directory information inside one org.
 //
 // POST /api/orgs/{org_id}/members/list
 func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.Request) {
@@ -167,18 +162,8 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			v.Invalid("excluding_team_id", fmt.Sprintf("excluding_team_id %q is not a valid team id", filter.ExcludingTeamID))
 		}
 	}
-	// Only a request that will be answered needs the role probe.
-	if filter.Search != "" && len(v.Items()) == 0 {
-		emails, err := h.mayLookUpByAddress(r.Context(), orgID, userID)
-		if err != nil {
-			internalError(w, "org-members", err)
-			return
-		}
-		filter.SearchEmails = emails
-	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(orgMemberListFilterKey{
 		Search:          httpx.SearchKey(filter.Search),
-		SearchEmails:    filter.SearchEmails,
 		ExcludingTeamID: filter.ExcludingTeamID,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -235,16 +220,6 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		}
 	}
 	httpx.WriteList(w, page, out, total)
-}
-
-// mayLookUpByAddress reports whether the caller may find org members by email
-// address: an org admin, or the admin of one of the org's teams.
-func (h *orgMembersHandler) mayLookUpByAddress(ctx context.Context, orgID, userID string) (bool, error) {
-	isAdmin, err := h.az.UserIsOrgAdmin(ctx, userID, orgID)
-	if err != nil || isAdmin {
-		return isAdmin, err
-	}
-	return h.az.UserAdministersATeam(ctx, userID, orgID)
 }
 
 // handleOrgMemberRoleChange changes a member's org role. Org-admin only

@@ -179,21 +179,12 @@ func TestOrgMembersList_SearchByName(t *testing.T) {
 	assertIDs(t, "search zzz", memberIDs(page.Items), page.Total())
 }
 
-func TestOrgMembersList_SearchMatchesAddressesOnlyForATeamManager(t *testing.T) {
+func TestOrgMembersList_SearchMatchesAddressesForEveryMember(t *testing.T) {
 	r := newOrgMembersRig(t)
 	pgtest.SeedIdentity(t, r.h, r.admin, "ops-lead@corp.example", true)
-	// An admin of a team who is no org admin: someone the add-teammate field
-	// is for.
-	lead := pgtest.SeedUser(t, r.h, "lead")
-	pgtest.AddOrgMember(t, r.h, lead, r.orgID, pgtest.SeedTeam(t, r.h, r.orgID, "second"), "member", "admin")
 
-	// A plain member is not shown addresses anywhere, so a search does not
-	// match on them either.
-	page := r.orgList(t, r.memb, map[string]any{"search": "corp.example"})
-	assertIDs(t, "member searches an address", memberIDs(page.Items), page.Total())
-
-	page = r.orgList(t, lead, map[string]any{"search": "OPS-LEAD@"})
-	assertIDs(t, "team admin searches an address", memberIDs(page.Items), page.Total(), r.admin)
+	page := r.orgList(t, r.memb, map[string]any{"search": "OPS-LEAD@"})
+	assertIDs(t, "member searches an address", memberIDs(page.Items), page.Total(), r.admin)
 
 	page = r.orgList(t, r.owner, map[string]any{"search": "corp.example"})
 	assertIDs(t, "org owner searches an address", memberIDs(page.Items), page.Total(), r.admin)

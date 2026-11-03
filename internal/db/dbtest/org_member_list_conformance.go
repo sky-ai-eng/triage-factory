@@ -101,7 +101,7 @@ func RunOrgMemberListConformance(t *testing.T, mk OrgMemberListFactory) {
 		}
 	})
 
-	t.Run("SearchMatchesVerifiedEmailsOnlyWhenAsked", func(t *testing.T) {
+	t.Run("SearchMatchesVerifiedEmails", func(t *testing.T) {
 		store, seed := mk(t)
 		owner := seed.User(t, "Owner")
 		org := seed.Org(t, owner)
@@ -117,13 +117,11 @@ func RunOrgMemberListConformance(t *testing.T, mk OrgMemberListFactory) {
 		// Verified, but not a member of this org.
 		seed.SignInEmail(t, outsider, "outsider@corp.example", true)
 
-		got, total := list(t, store, org, db.OrgMemberFilter{Search: "corp.example"}, db.Unwindowed)
-		expect(t, "search an address, emails not asked for", got, total)
-		got, total = list(t, store, org, db.OrgMemberFilter{Search: "CORP.example", SearchEmails: true}, db.Unwindowed)
+		got, total := list(t, store, org, db.OrgMemberFilter{Search: "CORP.example"}, db.Unwindowed)
 		expect(t, "search an address", got, total, bob)
 		// The email arm sits beside the display name, not in place of it.
-		got, total = list(t, store, org, db.OrgMemberFilter{Search: "dan", SearchEmails: true}, db.Unwindowed)
-		expect(t, "search a name with emails on", got, total, dan)
+		got, total = list(t, store, org, db.OrgMemberFilter{Search: "dan"}, db.Unwindowed)
+		expect(t, "search a name", got, total, dan)
 	})
 
 	t.Run("SearchIsLiteral", func(t *testing.T) {
@@ -144,7 +142,7 @@ func RunOrgMemberListConformance(t *testing.T, mk OrgMemberListFactory) {
 		expect(t, "search 100%", got, total, percent)
 		got, total = list(t, store, org, db.OrgMemberFilter{Search: "%"}, db.Unwindowed)
 		expect(t, "search %", got, total, percent)
-		got, total = list(t, store, org, db.OrgMemberFilter{Search: "a_b", SearchEmails: true}, db.Unwindowed)
+		got, total = list(t, store, org, db.OrgMemberFilter{Search: "a_b"}, db.Unwindowed)
 		expect(t, "search a_b", got, total, under)
 	})
 

@@ -162,9 +162,6 @@ func (s *orgMembershipsStore) listWhere(ctx context.Context, orgID string, f db.
 	}
 	var name string
 	name, args = db.PostgresSearch(needle, args, "u.display_name")
-	if !f.SearchEmails {
-		return where + " AND " + name, args, nil
-	}
 	ids, err := s.memberIDsWithVerifiedEmailMatching(ctx, orgID, needle)
 	if err != nil {
 		return "", nil, err

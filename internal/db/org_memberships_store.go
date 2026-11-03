@@ -37,19 +37,12 @@ var ErrNotOrgOwner = errors.New("db: only the current org owner can transfer own
 // (OrgMembershipsStore.ListWithIdentity). The zero value is the whole roster.
 type OrgMemberFilter struct {
 	// Search keeps a member when the needle is a case-insensitive literal
-	// substring of their display name, or, with SearchEmails set, of an email
-	// address one of their sign-in identities holds as verified. Empty (after
-	// trimming) is no search.
+	// substring of their display name or of an email address one of their
+	// sign-in identities holds as verified. Only verified addresses match,
+	// because a sign-in identity can claim any address unverified, and a
+	// search that matched one would offer the claimant under somebody else's
+	// address. Empty (after trimming) is no search.
 	Search string
-
-	// SearchEmails lets Search match email addresses. The roster shows nobody's
-	// address, and a substring search over them reveals an address to whoever
-	// tries substrings of it, so the caller sets this only for a reader
-	// allowed to look people up by address. Only verified addresses
-	// match, because a sign-in identity can claim any address unverified, and
-	// a search that matched one would offer the claimant under somebody
-	// else's address.
-	SearchEmails bool
 
 	// ExcludingTeamID keeps only members who are not on this team. The caller
 	// has confirmed the team is in the org; a team the read cannot see excludes
