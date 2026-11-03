@@ -474,23 +474,68 @@ func (s *notificationStore) marksMiss(ctx context.Context, orgID, userID, id str
 }
 
 func (s *notificationStore) MarkRead(ctx context.Context, orgID, userID string, ids []string) ([]domain.NotificationMarks, error) {
-	out := []domain.NotificationMarks{}
 	ids = filterValidUUIDs(ids)
 	if len(ids) == 0 {
-		return out, nil
+		return []domain.NotificationMarks{}, nil
 	}
+	return s.stamp(ctx, orgID, userID, ids, "read_at", "")
+}
+
+func (s *notificationStore) Dismiss(ctx context.Context, orgID, userID string, ids []string) ([]domain.NotificationMarks, error) {
+	ids = filterValidUUIDs(ids)
+	if len(ids) == 0 {
+		return []domain.NotificationMarks{}, nil
+	}
+	fixed, err := s.notDismissible(ctx, orgID, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	if len(fixed) > 0 {
+		return nil, &db.NotificationsNotDismissibleError{IDs: fixed}
+	}
+	return s.stamp(ctx, orgID, userID, ids, "dismissed_at", ` AND n.dismissible`)
+}
+
+// notDismissible returns the readable rows of ids that are not dismissible,
+// sorted.
+func (s *notificationStore) notDismissible(ctx context.Context, orgID, userID string, ids []string) ([]string, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		INSERT INTO notification_marks AS m (notification_id, user_id, org_id, read_at)
+		SELECT n.id::text FROM notifications n
+		WHERE `+pgNotificationReadable+` AND n.id = ANY($3::uuid[])
+		  AND NOT n.dismissible
+		ORDER BY 1`,
+		orgID, userID, pgUUIDArray(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// stamp writes the time into the viewer's marks column on the readable rows of
+// ids that also meet cond, and returns the marks written.
+func (s *notificationStore) stamp(ctx context.Context, orgID, userID string, ids []string, column, cond string) ([]domain.NotificationMarks, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		INSERT INTO notification_marks AS m (notification_id, user_id, org_id, `+column+`)
 		SELECT n.id, $2::uuid, n.org_id, clock_timestamp()
 		FROM notifications n
-		WHERE `+pgNotificationReadable+` AND n.id = ANY($3::uuid[])
-		ON CONFLICT (notification_id, user_id) DO UPDATE SET read_at = EXCLUDED.read_at
+		WHERE `+pgNotificationReadable+` AND n.id = ANY($3::uuid[])`+cond+`
+		ON CONFLICT (notification_id, user_id) DO UPDATE SET `+column+` = EXCLUDED.`+column+`
 		RETURNING `+pgNotificationMarksCols,
 		orgID, userID, pgUUIDArray(ids))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	out := []domain.NotificationMarks{}
 	for rows.Next() {
 		m, err := db.ScanNotificationMarks(rows.Scan)
 		if err != nil {
