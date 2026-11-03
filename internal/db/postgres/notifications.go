@@ -508,16 +508,7 @@ func (s *notificationStore) notDismissible(ctx context.Context, orgID, userID st
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return scanIDs(rows, "non-dismissible notifications")
 }
 
 // stamp writes the time into the viewer's marks column on the readable rows of
