@@ -133,9 +133,9 @@ func (a *App) startBrain(term int64) {
 	go a.scopeDriftGauge.Run(brainCtx, poller.DefaultScopeDriftInterval)
 	// Source orgs gauge (tf_source_orgs): how many orgs are in each state of
 	// each source, from the same event-source derivation as the org's sources
-	// route. It counts the orgs the poll skips before making a request, which
-	// therefore have no tf_upstream_up series. Brain-gated so one process
-	// exports it.
+	// route. Every active org is counted, including the ones the poll skips
+	// before making a request, which have no tf_upstream_up series.
+	// Brain-gated so one process exports it.
 	a.sourceOrgsGauge = poller.NewSourceOrgsObserver(otel.GetMeterProvider(), poller.SourceOrgsStores(a.stores))
 	go a.sourceOrgsGauge.Run(brainCtx, poller.DefaultSourceOrgsInterval)
 	// Commit-signing queue gauges: the requests no control pod has claimed,
