@@ -37,6 +37,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
@@ -150,6 +151,23 @@ type liveRunSpec struct {
 	mirror *memoryMirror
 }
 
+// sdkTFTools are the TF tools an SDK delegation is offered. Every SDK
+// conversation the spawner drives is a delegation, which executes a
+// blueprint, as a native one does. The launch serves them and the allowlist
+// grants them, and both read this, so a tool the agent holds is one it can
+// call without a prompt.
+func sdkTFTools() []tooldefs.Tool {
+	return tooldefs.TFTools(tooldefs.Facts{Runtime: domain.ConversationRuntimeSDK, HasBlueprint: true})
+}
+
+func tfToolNames(tools []tooldefs.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
 // driver. Each turn produces one result and the driver consumes one per loop
 // iteration; the bounded re-prompt loop is sequential (read a turn, then send
@@ -194,6 +212,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	spec.opts.OnToolBatch = func() agentproc.ToolBatchNotes {
 		return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID)
 	}
+	spec.opts.TFTools = sdkTFTools()
 	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
 
 	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)

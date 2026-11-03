@@ -310,6 +310,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	result := engine.Run(ctx, agentloop.Params{
 		OrgID:          orgID,
 		ConversationID: conversationID,
+		ClaimID:        cfg.claimID,
 		Model:          model,
 		SystemPrompt:   systemPrompt,
 		SystemAddendum: launchText.systemBlock,

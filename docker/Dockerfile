@@ -86,7 +86,7 @@ RUN set -eu; \
         exit 1; \
     fi; \
     echo "Using sdkVersion=${SDK_VERSION} (from internal/agentproc/install.go)"; \
-    printf '{\n  "name": "triagefactory-sdk-runtime",\n  "private": true,\n  "type": "module",\n  "dependencies": {\n    "@anthropic-ai/claude-agent-sdk": "%s"\n  }\n}\n' "$SDK_VERSION" > package.json; \
+    printf '{\n  "name": "triagefactory-sdk-runtime",\n  "private": true,\n  "type": "module",\n  "dependencies": {\n    "@anthropic-ai/claude-agent-sdk": "%s",\n    "zod": "4.6.7"\n  }\n}\n' "$SDK_VERSION" > package.json; \
     npm ci --no-audit --no-fund --omit=dev --ignore-scripts; \
     rm -f /tmp/install.go
 

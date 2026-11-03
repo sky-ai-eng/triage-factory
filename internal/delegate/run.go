@@ -590,14 +590,16 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			SelfBin: selfBin,
 			Extras:  cfg.extraAllowedTools,
 			GH:      ghChannel != nil,
+			TFTools: tfToolNames(sdkTFTools()),
 		}),
-		ExtraEnv:     extraEnv,
-		TraceID:      conversationID,
-		WorkspaceKey: namespace,
-		SystemPrompt: systemPrompt,
-		OrgID:        orgID,
-		Secrets:      s.getRunSecrets(),
-		LLMResolver:  s.llmResolverForConversation(orgID, conversationID),
+		ExtraEnv:       extraEnv,
+		TraceID:        conversationID,
+		ConversationID: conversationID,
+		WorkspaceKey:   namespace,
+		SystemPrompt:   systemPrompt,
+		OrgID:          orgID,
+		Secrets:        s.getRunSecrets(),
+		LLMResolver:    s.llmResolverForConversation(orgID, conversationID),
 		// Measured sandbox cost lands on the engagement that paid for it, at
 		// teardown. Empty claim id (a path with no claimed run in scope)
 		// records nothing.

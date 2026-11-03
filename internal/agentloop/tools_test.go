@@ -10,7 +10,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 func TestSandboxTools_AreTheSevenInHarnessOrder(t *testing.T) {
@@ -139,7 +139,7 @@ func TestToolDefinitions_MatchHarness(t *testing.T) {
 	// right order is instead of merely that the two sides agree.
 	want, got := canonicalJSON(t, out), canonicalJSON(t, mine)
 	if got != want {
-		t.Fatalf("internal/agentloop/tooldefs has drifted from the harness.\n"+
+		t.Fatalf("internal/tooldefs has drifted from the harness.\n"+
 			"The model would be told one thing and the jail would do another.\n\n"+
 			"tooldefs says:\n%s\n\nharness/tf-harness-tools says:\n%s", got, want)
 	}

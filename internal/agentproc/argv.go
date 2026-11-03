@@ -80,6 +80,11 @@ func BuildArgs(opts RunOptions) []string {
 		if opts.OnToolBatch != nil {
 			args = append(args, "--tool-batch-notes")
 		}
+		// The TF tools the wrapper serves. Omitted when there are none, so
+		// the wrapper builds no MCP server and imports no zod.
+		if len(opts.TFTools) > 0 {
+			args = append(args, "--tf-tools", tfToolsFlag(opts.TFTools))
+		}
 	} else {
 		args = append(args, "-p", opts.Message)
 	}

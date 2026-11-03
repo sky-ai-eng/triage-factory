@@ -569,14 +569,23 @@ type wrapperProc struct {
 // permission prompts on. The process is killed and reaped at test end.
 func startWrapper(t *testing.T, node, stubSDK string, extraArgs ...string) *wrapperProc {
 	t.Helper()
+	return startWrapperWith(t, node, map[string]string{"@anthropic-ai/claude-agent-sdk": stubSDK}, extraArgs...)
+}
+
+// startWrapperWith is startWrapper with a stub for each named package, as the
+// source of its ES module.
+func startWrapperWith(t *testing.T, node string, stubs map[string]string, extraArgs ...string) *wrapperProc {
+	t.Helper()
 	dir := t.TempDir()
-	pkgDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
-		t.Fatalf("mkdir stub sdk: %v", err)
+	for name, source := range stubs {
+		pkgDir := filepath.Join(dir, "node_modules", filepath.FromSlash(name))
+		if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+			t.Fatalf("mkdir stub %s: %v", name, err)
+		}
+		writeFile(t, filepath.Join(pkgDir, "package.json"),
+			`{"name":"`+name+`","version":"0.0.0-stub","type":"module","main":"index.mjs"}`)
+		writeFile(t, filepath.Join(pkgDir, "index.mjs"), source)
 	}
-	writeFile(t, filepath.Join(pkgDir, "package.json"),
-		`{"name":"@anthropic-ai/claude-agent-sdk","version":"0.0.0-stub","type":"module","main":"index.mjs"}`)
-	writeFile(t, filepath.Join(pkgDir, "index.mjs"), stubSDK)
 	wrapper := filepath.Join(dir, "wrapper.mjs")
 	writeFile(t, wrapper, string(wrapperJS))
 

@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // interruptedToolResult composes the synthetic result written for a tool call
@@ -160,7 +160,7 @@ func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, facts resumeFacts) 
 // a mid-engagement checkpoint at asOf. It names the first tool call after the
 // checkpoint and counts the rest, read from rows — the window this claim
 // assembles from — so what the agent is told is missing is what it can see it
-// did. Flow-control calls are left out: they resolve in the loop and never
+// did. Calls to TF tools are left out: they resolve in the loop and never
 // touch the workspace.
 func checkpointRestoredNotice(rows []domain.Message, asOf float64, facts resumeFacts, hasBlueprint bool) string {
 	var after []domain.ToolCall
@@ -176,7 +176,7 @@ func checkpointRestoredNotice(rows []domain.Message, asOf float64, facts resumeF
 			continue
 		}
 		for _, call := range r.ToolCalls {
-			if _, loopSide := tooldefs.LoopSide(call.Name, hasBlueprint); loopSide {
+			if _, loopSide := tooldefs.TFTool(call.Name, tfToolFacts(hasBlueprint)); loopSide {
 				continue
 			}
 			after = append(after, call)

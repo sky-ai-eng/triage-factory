@@ -14,8 +14,10 @@
 //     messages on stdin. This is the only mode in which the SDK exposes
 //     its live controls — interrupt(), setPermissionMode(), the
 //     canUseTool permission callback and the PostToolBatch hook — so it
-//     backs the interactive LiveRun API on the Go side. The control protocol is documented
-//     alongside the Go LiveRun type (live.go).
+//     backs the interactive LiveRun API on the Go side. It is also the only
+//     mode that serves TF's own tools (--tf-tools), whose calls are answered
+//     on the Go side. The control protocol is documented alongside the Go
+//     LiveRun type (live.go).
 //
 // Auth resolves through the SDK's own env-var/keychain logic — we
 // deliberately don't touch ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK,
@@ -62,6 +64,7 @@ function parseArgs(argv) {
   let permissionPrompts = false
   let toolBatchNotes = false
   let claudeAiConnectors = false
+  let tfTools = null
   const opts = {}
   const addDirs = []
 
@@ -146,6 +149,13 @@ function parseArgs(argv) {
         // it has something to answer with.
         toolBatchNotes = true
         break
+      case "--tf-tools":
+        // The TF tools this run is offered, as [{name, description,
+        // input_schema}] with each schema plain JSON Schema. Go holds their
+        // only definition; streaming-input mode serves them and relays every
+        // call back to Go.
+        tfTools = JSON.parse(next())
+        break
       case "--claude-ai-connectors":
         // Leave the login's claude.ai connectors connected (valueless flag).
         // The Go side emits it only for a spawn on the operator's own Claude
@@ -173,7 +183,7 @@ function parseArgs(argv) {
   if (!claudeAiConnectors) {
     opts.settings = { ...opts.settings, disableClaudeAiConnectors: true }
   }
-  return { prompt, options: opts, streamInput, permissionPrompts, toolBatchNotes }
+  return { prompt, options: opts, streamInput, permissionPrompts, toolBatchNotes, tfTools }
 }
 
 function emit(obj) {
@@ -246,11 +256,13 @@ function userMessage(text, blocks) {
 // until end/EOF. permissionPrompts gates canUseTool: when false the
 // callback is left unset and the SDK gates solely on --allowedTools, so an
 // off-allowlist tool auto-denies with no prompt (the autonomous-run path).
-// toolBatchNotes gates the PostToolBatch hook the same way.
-async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
+// toolBatchNotes gates the PostToolBatch hook the same way, and tfTools, when
+// present, the in-process MCP server that serves TF's tools.
+async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfTools) {
   const input = createInputStream()
   const pendingPerms = new Map()
   const pendingBatches = new Map()
+  const pendingToolCalls = new Map()
   let closing = false
 
   // Deny + clear every parked permission promise. Called on end/EOF (and
@@ -374,6 +386,60 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
     options.hooks = { ...options.hooks, PostToolBatch: [{ hooks: [onToolBatch] }] }
   }
 
+  // TF tools are served by an in-process MCP server named "tf", so the model
+  // sees each one as mcp__tf__<name>. A call is relayed to Go as a tool_call
+  // and parks on the tool_call_reply carrying the same id; Go runs the
+  // handler. tool_call_id is the call's tool_use id, which the SDK hands the
+  // handler in its _meta. An abort settles the call as an error and tells Go
+  // to stop the handler; closing settles every call still waiting. zod and
+  // the SDK's MCP helpers are imported only here, so a run offered no TF tool
+  // loads neither.
+  if (tfTools) {
+    const toolResult = (text, isError) => ({ content: [{ type: "text", text }], isError })
+    const callTFTool = (name, args, extra) => {
+      if (closing) return Promise.resolve(toolResult("run ended", true))
+      const id = randomUUID()
+      emit({
+        type: "control",
+        subtype: "tool_call",
+        id,
+        tool_call_id: extra?._meta?.["claudecode/toolUseId"],
+        tool_name: name,
+        input: args,
+      })
+      return new Promise((resolve) => {
+        let done = false
+        const settle = (result) => {
+          if (done) return false
+          done = true
+          pendingToolCalls.delete(id)
+          resolve(result)
+          return true
+        }
+        pendingToolCalls.set(id, settle)
+        const signal = extra?.signal
+        if (signal) {
+          const abort = () => {
+            if (settle(toolResult("interrupted", true))) emit({ type: "control", subtype: "tool_call_cancel", id })
+          }
+          if (signal.aborted) abort()
+          else signal.addEventListener("abort", abort, { once: true })
+        }
+      })
+    }
+    const [{ tool, createSdkMcpServer }, { fromJSONSchema }] = await Promise.all([
+      import("@anthropic-ai/claude-agent-sdk"),
+      import("zod"),
+    ])
+    const tools = tfTools.map((def) => {
+      const shape = fromJSONSchema(def.input_schema).shape
+      return tool(def.name, def.description, shape, (args, extra) => callTFTool(def.name, args, extra), {
+        alwaysLoad: true,
+      })
+    })
+    options.mcpServers = { ...options.mcpServers, tf: createSdkMcpServer({ name: "tf", alwaysLoad: true, tools }) }
+  }
+
   const q = query({ prompt: input, options })
 
   // closeInput is the single drain path: deny anything parked, end the
@@ -384,6 +450,9 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
     closing = true
     denyAllPending("run ended")
     for (const settle of [...pendingBatches.values()]) settle("")
+    for (const settle of [...pendingToolCalls.values()]) {
+      settle({ content: [{ type: "text", text: "run ended" }], isError: true })
+    }
     input.end()
   }
 
@@ -456,6 +525,13 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
         break
       }
 
+      case "tool_call_reply": {
+        const settle = pendingToolCalls.get(ctl.id)
+        if (settle) settle({ content: [{ type: "text", text: ctl.content ?? "" }], isError: Boolean(ctl.is_error) })
+        else process.stderr.write(`wrapper: no pending tool call ${ctl.id}\n`)
+        break
+      }
+
       case "end":
         closeInput()
         break
@@ -497,7 +573,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
   process.exit(0)
 }
 
-const { prompt, options, streamInput, permissionPrompts, toolBatchNotes } = parseArgs(process.argv.slice(2))
+const { prompt, options, streamInput, permissionPrompts, toolBatchNotes, tfTools } = parseArgs(process.argv.slice(2))
 
 // Forward the spawned Claude Code subprocess's stderr through our own.
 // Without this, the SDK swallows the child's stderr ("ignore" in its
@@ -513,7 +589,7 @@ if (!options.pathToClaudeCodeExecutable) {
 }
 
 if (streamInput) {
-  await runStreamingInput(options, permissionPrompts, toolBatchNotes)
+  await runStreamingInput(options, permissionPrompts, toolBatchNotes, tfTools)
 } else {
   if (!prompt) {
     process.stderr.write("wrapper: missing -p <message>\n")
