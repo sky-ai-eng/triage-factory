@@ -387,11 +387,12 @@ func tokenScopeAllows(r *http.Request, rawOrgID string) bool {
 
 // sameOrgID compares two org ids as IDENTITIES rather than as strings, because
 // the two sides can reach here spelled differently: the token's org and the
-// local org are canonical text, while a query value RequireOrgAdminRole is
-// handed is whatever the caller typed, and uuid.Parse accepts uppercase and
-// unhyphenated forms. Postgres equates those spellings, so a raw string compare
-// would 404 a token on its OWN org for a request a session answers 200.
-// Anything that is not a pair of parseable uuids falls back to exact equality.
+// local org are canonical text, while RequireOrgAdminRole and the exported
+// probes take an org id however their caller spelled it, and uuid.Parse accepts
+// uppercase and unhyphenated forms. Postgres equates those spellings, so a raw
+// string compare would 404 a token on its OWN org for a request a session
+// answers 200. Anything that is not a pair of parseable uuids falls back to
+// exact equality.
 func sameOrgID(a, b string) bool {
 	if a == b {
 		return true
