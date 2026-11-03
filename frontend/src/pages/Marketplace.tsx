@@ -147,11 +147,13 @@ export default function Marketplace() {
   const refresh = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
+    // Every option the sort control offers reads highest first.
     const page = await loadListings({
-      ...(debouncedQuery ? { query: debouncedQuery } : {}),
+      ...(debouncedQuery ? { search: debouncedQuery } : {}),
       ...(eventType ? { event_type: eventType } : {}),
       ...(kind ? { kind } : {}),
-      sort,
+      sort_key: sort,
+      sort_dir: 'desc',
     })
     if (page === null) setLoadError(listingList.error || 'Could not load the marketplace listings.')
     setLoading(false)

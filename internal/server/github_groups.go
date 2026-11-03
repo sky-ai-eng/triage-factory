@@ -1,10 +1,12 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -17,11 +19,12 @@ import (
 // --------------------------------------------------------------------
 // /api/teams/{team_id}/github-groups — the GitHub twin of the per-team
 // Jira project rules. GET (any team member) returns the team's current
-// GitHub-team mappings plus the org's live GitHub teams as
-// import-and-choose candidates; PUT (team admin) replace-sets the
-// mappings, naming each GitHub team by GitHub's id. The {team_id} segment
-// accepts a UUID or the literal "default", same as the sibling team
-// routes.
+// GitHub-team mappings, the set the PUT (team admin) replaces, naming each
+// GitHub team by GitHub's id. POST …/github-groups/list (any team member)
+// pages the GitHub teams the team can map — the org's live GitHub teams as
+// import-and-choose candidates, beside any mapping GitHub no longer lists —
+// searched and ordered here. The {team_id} segment accepts a UUID or the
+// literal "default", same as the sibling team routes.
 // --------------------------------------------------------------------
 
 // gitHubGroupJSON is the wire shape for one stored mapping row.
@@ -53,30 +56,29 @@ type gitHubGroupCandidateJSON struct {
 	Name         string `json:"name"`
 	MemberCount  int    `json:"member_count,omitempty"`
 	// Mine is true when the requesting user personally belongs to this
-	// GitHub team. Populated only when the caller asks via
-	// ?include_membership=true (the onboarding wizard, to pre-check the
-	// admin's own teams); the Settings editor omits the flag and ignores
-	// it. Pre-checking is the ONLY onboarding-specific behavior — the
+	// GitHub team. Populated only when the list is asked for it
+	// (include_membership or only_mine — the onboarding wizard, to pre-check
+	// the admin's own teams); the Settings editor asks for neither and
+	// ignores it. Pre-checking is the ONLY onboarding-specific behavior — the
 	// candidate set itself is the same org-wide list both surfaces read.
 	Mine bool `json:"mine,omitempty"`
 }
 
+// teamGitHubGroupsResponse is the team's stored mapping set, the resource the
+// PUT replaces.
 type teamGitHubGroupsResponse struct {
-	Groups     []gitHubGroupJSON          `json:"groups"`
-	Candidates []gitHubGroupCandidateJSON `json:"candidates"`
+	Groups []gitHubGroupJSON `json:"groups"`
 	// Role is the caller's role in this team ("admin"/"member"/""), so
 	// the editor can disable Save for non-admins without a second call.
 	Role string `json:"role"`
-	// CredentialsMissing is true when the team tracks repos but NOT ONE of
-	// their owners had a resolvable GitHub credential (no App install and no
-	// org PAT). Without this flag an empty candidate list is ambiguous — a
-	// genuine "no teams" reads identical to "your GitHub credential is gone."
-	// The setup wizard surfaces it as "reconnect GitHub" rather than a
-	// silent empty checklist; the Settings editor can do the same. Omitted
-	// (false) in the common healthy case.
-	CredentialsMissing bool `json:"credentials_missing,omitempty"`
 }
 
+// handleTeamGitHubGroupsGet returns the team's stored GitHub-team mappings on
+// the org's current GitHub host. It reads only the store: the GitHub teams a
+// mapping can be chosen from are the list route's (handleTeamGitHubGroupsList),
+// which is where GitHub is asked.
+//
+// GET /api/teams/{team_id}/github-groups
 func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -91,34 +93,146 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-
-	// Resolve the caller's role first: candidates are fetched with the
-	// org-level GitHub credential, NOT through RLS, so a non-member of
-	// this team would otherwise enumerate the org's GitHub team names
-	// through it even though the stored mappings (ListForTeam, below) are
-	// RLS-empty for them. Gate the fetch on membership — role=="" means
-	// the caller isn't on this team, so they get no candidates (and we
-	// skip the GitHub API round-trip).
 	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "teams/github-groups", err)
 		return
 	}
+	// The team's mappings are read on the org's current GitHub host: an org
+	// login on a host the org has left names another organization.
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "teams/github-groups", err)
+		return
+	}
+	groups, err := s.teamGitHubGroupsOnHost(r.Context(), orgID, userID, teamID, host)
+	if err != nil {
+		internalError(w, "teams/github-groups", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, teamGitHubGroupsResponse{Groups: toGitHubGroupJSON(groups), Role: role})
+}
 
-	// Import-and-choose: fetch the org's live GitHub teams as candidates
-	// (read-only). The deletion-reconcile prune runs in the GitHub poll
-	// cycle, not here, so this GET never mutates — stale mappings just
-	// show flagged "not found" until the next cycle prunes them.
-	//
-	// ?include_membership=true (the onboarding wizard) additionally flags
-	// the candidates the caller personally belongs to, so the wizard can
-	// pre-check the admin's own teams. The Settings editor omits it — same
-	// candidate list, no per-user pre-check. Best-effort: a membership
-	// fetch failure leaves every Mine=false, never blanks the candidates.
-	//
+// teamGitHubGroupsOnHost reads the team's stored mappings on host through RLS,
+// so a caller who is not on the team reads none. No host is no mappings.
+func (s *Server) teamGitHubGroupsOnHost(ctx context.Context, orgID, userID, teamID, host string) ([]domain.TeamGitHubGroup, error) {
+	var groups []domain.TeamGitHubGroup
+	err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if host == "" {
+			return nil
+		}
+		var e error
+		groups, e = tx.TeamGitHubGroups.ListForTeam(ctx, teamID, host)
+		return e
+	})
+	return groups, err
+}
+
+// teamGitHubGroupsListRequest is the body of POST
+// /api/teams/{team_id}/github-groups/list.
+type teamGitHubGroupsListRequest struct {
+	// Search is a case-insensitive literal substring of a team's
+	// org_login/team_slug handle or its name (httpx.Search: trimmed, empty is
+	// absent, at most 200 characters).
+	Search string `json:"search"`
+	// IncludeMembership sets Mine on the teams the caller belongs to. It
+	// annotates rows and narrows nothing, so it is not in the fingerprint.
+	IncludeMembership bool `json:"include_membership"`
+	// OnlyMine narrows to the teams the caller belongs to, and sets Mine on
+	// them, as include_membership does. Membership is best-effort: when it
+	// cannot be read, no team is the caller's.
+	OnlyMine bool `json:"only_mine"`
+
+	httpx.PageRequest
+}
+
+// teamGitHubGroupsListFilterKey is the filter set the page token is
+// fingerprinted against.
+type teamGitHubGroupsListFilterKey struct {
+	Search   string `json:"search"`
+	OnlyMine bool   `json:"only_mine"`
+}
+
+// gitHubGroupListItemJSON is one GitHub team the team can map: a candidate
+// GitHub lists, or a stored mapping no candidate carries.
+type gitHubGroupListItemJSON struct {
+	gitHubGroupCandidateJSON
+	// Listed is false for a team this team maps that the org's GitHub
+	// credentials did not list: deleted on GitHub since the last poll, or in
+	// an organization whose teams could not be read. It carries no name or
+	// member count, and stays listed so an admin can always un-assign it.
+	Listed bool `json:"listed"`
+}
+
+// teamGitHubGroupsListResponse is the list envelope with the credential state
+// beside it.
+type teamGitHubGroupsListResponse struct {
+	Items         []gitHubGroupListItemJSON `json:"items"`
+	NextPageToken string                    `json:"next_page_token,omitempty"`
+	TotalCount    int                       `json:"total_count"`
+	// CredentialsMissing is true when the team tracks repos but NOT ONE of
+	// their owners had a resolvable GitHub credential (no App install and no
+	// org PAT). Without this flag an empty list is ambiguous — a genuine "no
+	// teams" reads identical to "your GitHub credential is gone." It is a fact
+	// about the whole candidate set, not about this page, and the same under
+	// every search.
+	CredentialsMissing bool `json:"credentials_missing"`
+}
+
+// handleTeamGitHubGroupsList pages the GitHub teams this team can map,
+// ordered by folded org_login/team_slug and then GitHub's team id.
+//
+// The set is built in Go rather than read from one table — the candidates are
+// a live GitHub read per tracked-repository owner, beside the team's stored
+// mappings — so the search, the only_mine filter and the order all run over
+// the whole built set here, before the page window is cut.
+//
+// Gated as the team's other reads are: any org member may call it, and the
+// candidates are listed only for a member of the team, because they are read
+// with the org-level GitHub credential rather than through RLS, so a
+// non-member would otherwise enumerate the org's GitHub team names through
+// it. The stored mappings are read through RLS. The listing degrades rather
+// than failing: with the tracked repositories unreadable the editor still
+// edits existing mappings, and an owner whose teams could not be listed just
+// contributes none.
+//
+// POST /api/teams/{team_id}/github-groups/list
+func (s *Server) handleTeamGitHubGroupsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	if err != nil {
+		authz.WriteResolveError(w, "teams/github-groups", err)
+		return
+	}
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
+		return
+	}
+
+	var req teamGitHubGroupsListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(teamGitHubGroupsListFilterKey{
+		Search:   httpx.SearchKey(search),
+		OnlyMine: req.OnlyMine,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	if err != nil {
+		internalError(w, "teams/github-groups", err)
+		return
+	}
 	// The candidates are listed from the org's current GitHub host, and the
-	// team's mappings are read on it: an org login on a host the org has left
-	// names another organization.
+	// team's mappings are read on it.
 	host, err := s.orgGitHubHost(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "teams/github-groups", err)
@@ -127,39 +241,83 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	candidates := []gitHubGroupCandidateJSON{}
 	credsMissing := false
 	if role != "" {
-		// The browse list degrades rather than failing: with the tracked
-		// repositories unreadable the editor still edits existing mappings,
-		// and an owner whose teams could not be listed just contributes none.
 		if listing, err := s.gitHubGroupCandidates(r.Context(), orgID, host); err != nil {
 			githubGroupsLog.Error("list github team candidates failed", "error", err)
 		} else {
 			candidates, credsMissing = listing.candidates, listing.credentialsMissing
 		}
-		if r.URL.Query().Get("include_membership") == "true" {
+		if req.IncludeMembership || req.OnlyMine {
 			s.annotateGitHubGroupMembership(r.Context(), orgID, userID, candidates)
 		}
 	}
-
-	var groups []domain.TeamGitHubGroup
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if host == "" {
-			return nil // no GitHub URL: no mappings on a host
-		}
-		var e error
-		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID, host)
-		return e
-	}); err != nil {
+	stored, err := s.teamGitHubGroupsOnHost(r.Context(), orgID, userID, teamID, host)
+	if err != nil {
 		internalError(w, "teams/github-groups", err)
 		return
 	}
 
-	resp := teamGitHubGroupsResponse{
-		Groups:             toGitHubGroupJSON(groups),
-		Candidates:         candidates,
-		Role:               role,
-		CredentialsMissing: credsMissing,
+	rows := gitHubGroupRows(candidates, stored)
+	matched := make([]gitHubGroupListItemJSON, 0, len(rows))
+	for _, row := range rows {
+		if req.OnlyMine && !row.Mine {
+			continue
+		}
+		if !httpx.SearchMatches(search, row.OrgLogin+"/"+row.TeamSlug, row.Name) {
+			continue
+		}
+		matched = append(matched, row)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	total := len(matched)
+	items := []gitHubGroupListItemJSON{}
+	if !page.CountOnly {
+		lo := min(page.Offset, total)
+		items = matched[lo:min(lo+page.Limit, total)]
+	}
+	writeJSON(w, http.StatusOK, teamGitHubGroupsListResponse{
+		Items:              items,
+		NextPageToken:      httpx.NextPageToken(page, len(items), total),
+		TotalCount:         total,
+		CredentialsMissing: credsMissing,
+	})
+}
+
+// gitHubGroupRows is every GitHub team the editor offers a team, in the list's
+// order: each candidate GitHub listed, and each stored mapping no candidate
+// carries. A stored mapping is the candidate with its GitHub team id, or —
+// when it has none yet, a local one stored before ids were recorded — the
+// candidate with its handle, so it is one row rather than two.
+//
+// The order is the folded org_login/team_slug handle, then GitHub's team id,
+// which is a total order over every row with an id: two teams can share a
+// handle (a deleted team and the one now under its slug), never an id.
+func gitHubGroupRows(candidates []gitHubGroupCandidateJSON, stored []domain.TeamGitHubGroup) []gitHubGroupListItemJSON {
+	handle := func(login, slug string) string { return strings.ToLower(login + "/" + slug) }
+	rows := make([]gitHubGroupListItemJSON, 0, len(candidates)+len(stored))
+	ids := make(map[string]bool, len(candidates))
+	handles := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		rows = append(rows, gitHubGroupListItemJSON{gitHubGroupCandidateJSON: c, Listed: true})
+		ids[c.GitHubTeamID] = true
+		handles[handle(c.OrgLogin, c.TeamSlug)] = true
+	}
+	for _, g := range stored {
+		if g.GitHubTeamID != "" && ids[g.GitHubTeamID] {
+			continue
+		}
+		if g.GitHubTeamID == "" && handles[handle(g.OrgLogin, g.TeamSlug)] {
+			continue
+		}
+		rows = append(rows, gitHubGroupListItemJSON{gitHubGroupCandidateJSON: gitHubGroupCandidateJSON{
+			GitHubTeamID: g.GitHubTeamID, GitHubOrgID: g.GitHubOrgID, OrgLogin: g.OrgLogin, TeamSlug: g.TeamSlug,
+		}})
+	}
+	slices.SortStableFunc(rows, func(a, b gitHubGroupListItemJSON) int {
+		return cmp.Or(
+			cmp.Compare(handle(a.OrgLogin, a.TeamSlug), handle(b.OrgLogin, b.TeamSlug)),
+			cmp.Compare(a.GitHubTeamID, b.GitHubTeamID),
+		)
+	})
+	return rows
 }
 
 func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Request) {
@@ -365,10 +523,10 @@ type unlistedGitHubOwner struct {
 // organization.teams query per distinct tracked-repo owner) as the flat
 // candidate list the editor presents. Read-only — the deletion-reconcile
 // prune runs in the GitHub poll cycle (poller.Manager.reconcileGitHubGroups),
-// not here, so the GET stays a pure read. Stale mappings (a GitHub team
-// deleted since the last poll) still surface in the editor flagged "not
-// found" until the next cycle prunes them, and an admin can remove one
-// immediately via the PUT.
+// not here, so the list read stays a pure read. Stale mappings (a GitHub team
+// deleted since the last poll) still surface in the list with listed=false
+// until the next cycle prunes them, and an admin can remove one immediately
+// via the PUT.
 //
 // Credentials resolve through s.ghResolver.ClientFor, which mints an App
 // installation token for the owner when one is installed (tier 1) and

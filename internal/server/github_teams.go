@@ -19,10 +19,11 @@ import (
 // GitHub teams in the github-groups mapping step.
 //
 // This is NOT a standalone endpoint. It rides on
-// GET /api/teams/{team_id}/github-groups?include_membership=true (see
-// handleTeamGitHubGroupsGet), so the wizard and the Settings editor read
-// the *same* org-wide candidate list and differ only in pre-checking —
-// the candidate set is no longer sourced from one user's perspective.
+// POST /api/teams/{team_id}/github-groups/list with include_membership or
+// only_mine (see handleTeamGitHubGroupsList), so the wizard and the Settings
+// editor read the *same* org-wide candidate list and differ only in
+// pre-checking — the candidate set is not sourced from one user's
+// perspective.
 //
 // Two sourcing paths, branched on deployment mode:
 //   - Local (N=1): the org PAT *is* the user, so GET /user/teams answers

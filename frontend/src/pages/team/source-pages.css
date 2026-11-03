@@ -267,6 +267,31 @@
   margin-left: 6px;
 }
 
+/* The catalog's next page, asked for from the pager's footer slot. */
+.sp-more {
+  appearance: none;
+  background: none;
+  border: 1px solid var(--color-line-1);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-2);
+  cursor: pointer;
+}
+
+.sp-more:hover {
+  border-color: var(--color-line-2);
+  color: var(--color-ink-1);
+}
+
+/* A line in the pager's footer slot that reports a state, not a control. */
+.sp-foot {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-4);
+}
+
 /* A name sharing its cell with a tag. A cell holding more than text owns its
    own type, so the name restates the table's text cell. */
 .sp-cellname {

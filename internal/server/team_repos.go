@@ -616,4 +616,7 @@ func (s *Server) registerTrackedSetRoutes() {
 	s.apiMutating("PUT /api/teams/{team_id}/github-repos", s.handleTeamReposPut)
 	s.api("GET /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
 	s.apiMutating("PUT /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
+	// The GitHub teams a mapping can be chosen from, searched and paged. A
+	// POST because the search is a body; it reads and writes nothing.
+	s.apiMutating("POST /api/teams/{team_id}/github-groups/list", s.handleTeamGitHubGroupsList)
 }

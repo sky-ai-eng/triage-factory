@@ -210,7 +210,7 @@ describe('Marketplace', () => {
       expect(await screen.findByText('1 team · 5 runs')).toBeInTheDocument()
     })
 
-    it('offers "Most used" as a sort option and re-fetches with sort=used', async () => {
+    it('offers "Most used" as a sort option and re-fetches with sort_key=used', async () => {
       const fetchMock = mockFetchRouter({ listings: [listing({})] })
       renderPage()
       await screen.findByText('Triage Helper')
@@ -219,9 +219,41 @@ describe('Marketplace', () => {
       fireEvent.change(screen.getByLabelText('Sort listings'), { target: { value: 'used' } })
 
       await waitFor(() => {
-        expect(calledBodies(fetchMock).some((b) => b.sort === 'used')).toBe(true)
+        expect(
+          calledBodies(fetchMock).some((b) => b.sort_key === 'used' && b.sort_dir === 'desc'),
+        ).toBe(true)
       })
+      expect(calledBodies(fetchMock).every((b) => !('sort' in b))).toBe(true)
     })
+  })
+
+  // The search and the order are the list route's: the needle travels as
+  // `search`, and the page renders every row the server answered in the
+  // order it answered them — including one that does not contain the needle
+  // and one a client-side sort by installs would move.
+  it('searches and sorts on the server and renders what it answers, in its order', async () => {
+    const fetchMock = mockFetchRouter({
+      listings: [
+        listing({ id: 'l1', name: 'Deploy Chain', install_count: 1 }),
+        listing({ id: 'l2', name: 'Quiet Helper', install_count: 9 }),
+      ],
+    })
+    renderPage()
+    await screen.findByText('Deploy Chain')
+
+    fetchMock.mockClear()
+    fireEvent.change(screen.getByLabelText('Search marketplace listings'), {
+      target: { value: 'triage' },
+    })
+    await waitFor(() => {
+      expect(
+        calledBodies(fetchMock).some(
+          (b) => b.search === 'triage' && b.sort_key === 'installs' && !('query' in b),
+        ),
+      ).toBe(true)
+    })
+    const names = screen.getAllByText(/Deploy Chain|Quiet Helper/).map((el) => el.textContent)
+    expect(names).toEqual(['Deploy Chain', 'Quiet Helper'])
   })
 
   it('shows the org-empty state (with a link to the team prompts workspace) when there are zero listings and no filters', async () => {

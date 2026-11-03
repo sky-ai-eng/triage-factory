@@ -85,8 +85,9 @@ type MarketplaceStore interface {
 	// Returns the updated row, or ErrNoSuchListing. See Delist.
 	Relist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error)
 
-	// List returns browse-page summaries matching f, most-relevant-first per
-	// f.Sort (ListingSortInstalls/Votes/Recent, defaulting to Recent).
+	// List returns browse-page summaries matching f, ordered by f.SortKey
+	// (domain.ListingSortKeys, defaulting to recent) in f.SortDir (desc unless
+	// asc), with the filtered total.
 	// viewerUserID populates ListingSummary.ViewerVoted; pass "" from a
 	// caller with no user context (viewer_voted always false). RLS scopes
 	// the underlying rows to org members + published-or-own-team listings —

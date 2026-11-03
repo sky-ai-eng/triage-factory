@@ -32,6 +32,15 @@ vi.mock('../../hooks/useEventSources', () => ({
   }),
 }))
 
+// The shared socket is not opened under test; a test that needs the server's
+// refresh ping fires it through the handler a page registered.
+const ws = vi.hoisted(() => ({ handlers: new Set<(event: { type: string }) => void>() }))
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: (handler: (event: { type: string }) => void) => {
+    ws.handlers.add(handler)
+  },
+}))
+
 vi.mock('../../contexts/OrgContext', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../contexts/OrgContext')>()
   return { ...actual, useActiveOrgId: () => 'org-1' }
@@ -95,10 +104,13 @@ function stub(payloads: Record<string, unknown>) {
       // here as the rows alone and wrapped on the way out — the reads are POSTs
       // and are matched by path like any other, since the method is about how
       // the request is framed rather than whether it writes.
+      // A payload that is already an envelope (a further page, a readiness
+      // state) goes out as written.
       const raw = payloads[path]
-      const body = path.endsWith('/list')
-        ? { items: raw, next_page_token: '', total_count: (raw as unknown[]).length }
-        : raw
+      const body =
+        path.endsWith('/list') && Array.isArray(raw)
+          ? { items: raw, next_page_token: '', total_count: raw.length }
+          : raw
       const text = JSON.stringify(body)
       // Both readers: fetchTeamSettings takes .json(), apiJSON takes .text()
       // and parses it itself so a 200 index.html cannot reach a caller as a
@@ -170,6 +182,7 @@ function commitVerb(rowText: string, verb: string | RegExp, holdMs: number) {
 
 beforeEach(() => {
   sources.state = {}
+  ws.handlers.clear()
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
@@ -254,8 +267,9 @@ describe('GitHub source page', () => {
     // never sent one.
     expect(within(rowOf('sky/planner')).getByText('0')).toBeInTheDocument()
     expect(within(rowOf('sky/planner')).getByText('—')).toBeInTheDocument()
-    // Not watched: nothing counts it, so neither column is a number.
-    expect(within(rowOf('sky/docs-site')).getAllByText('—')).toHaveLength(2)
+    // Not watched: nothing counts it, so neither column is a number. It is a
+    // catalog row, which arrives with its own read.
+    await waitFor(() => expect(within(rowOf('sky/docs-site')).getAllByText('—')).toHaveLength(2))
   })
 
   it('lists a tracked repository the picker can no longer see', async () => {
@@ -361,7 +375,127 @@ describe('GitHub source page', () => {
 
     // Selection exists for the verbs, so it goes with them.
     expect(document.querySelector('.tb-check')).toBeNull()
+    expect(await screen.findByText('tracked of 3 visible')).toBeInTheDocument()
+  })
+
+  /** The JSON bodies the page sent to the reachable list, in order. */
+  const catalogBodies = (fetchMock: ReturnType<typeof stub>) =>
+    (fetchMock.mock.calls as unknown as [string, RequestInit | undefined][])
+      .filter(([path]) => path === '/api/github/repos/list')
+      .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)
+
+  it('ranks the tracked section by runs, ahead of the catalog in its own order', async () => {
+    stub({
+      ...REPOS,
+      // r1 has three runs and r2 none (ACTIVITY), so the ranking puts the
+      // later name first.
+      '/api/teams/t1/github-repos': {
+        repos: [
+          { id: 'r2', github_id: '2', owner: 'sky', repo: 'planner' },
+          { id: 'r1', github_id: '1', owner: 'sky', repo: 'zz-runner' },
+        ],
+      },
+      // The route's order, which is not the alphabet's.
+      '/api/github/repos/list': [
+        { github_id: '3', full_name: 'sky/zeta' },
+        { github_id: '2', full_name: 'sky/planner' },
+        { github_id: '4', full_name: 'sky/alpha' },
+      ],
+      '/api/teams/t1/activity': ACTIVITY,
+    })
+    render(<GitHubSource {...BODY} />)
+    const names = () =>
+      screen
+        .getAllByRole('row')
+        .slice(1)
+        .map((r) => r.textContent ?? '')
+        .map((t) => t.match(/sky\/[a-z-]+/)?.[0])
+    await waitFor(() =>
+      expect(names()).toEqual(['sky/zz-runner', 'sky/planner', 'sky/zeta', 'sky/alpha']),
+    )
+  })
+
+  it('searches the catalog on the server and shows its answer as given', async () => {
+    const fetchMock = stub(REPOS)
+    render(<GitHubSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('sky/docs-site')).toBeInTheDocument())
+    // One page asked for, never a walk of every page.
+    expect(catalogBodies(fetchMock)).toEqual([{ search: '', page_size: 100 }])
+
+    // The server's answer to "plan" carries a repository that does not
+    // contain the needle; it is shown, because the answer is the server's.
+    const answer = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      if (String(input) !== '/api/github/repos/list') return answer(input, init)
+      const text = JSON.stringify({
+        items: [
+          { github_id: '2', full_name: 'sky/planner' },
+          { github_id: '7', full_name: 'sky/unrelated' },
+        ],
+        total_count: 2,
+        next_page_token: '',
+        status: 'ready',
+      })
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(text) })
+    })
+    fireEvent.change(screen.getByLabelText('Search repositories'), { target: { value: ' plan ' } })
+
+    await waitFor(() => expect(screen.getByText('sky/unrelated')).toBeInTheDocument())
+    expect(catalogBodies(fetchMock).at(-1)).toEqual({ search: 'plan', page_size: 100 })
+    // The table is the answer: the tracked repository the search did not
+    // match is not on it, and the one it did is, marked as watched.
+    expect(screen.queryByText('sky/agent-runner')).not.toBeInTheDocument()
+    expect(screen.getByText('sky/planner')).toBeInTheDocument()
+    // The visible figure is the org's whole reach, not the search's.
     expect(screen.getByText('tracked of 3 visible')).toBeInTheDocument()
+  })
+
+  it('reads the next catalog page with the server’s token', async () => {
+    const fetchMock = stub({
+      ...REPOS,
+      '/api/github/repos/list': {
+        items: [{ github_id: '3', full_name: 'sky/docs-site' }],
+        next_page_token: 'tok-2',
+        total_count: 2,
+        status: 'ready',
+      },
+    })
+    render(<GitHubSource {...BODY} />)
+    const more = await screen.findByRole('button', { name: '1 more · show them' })
+    fireEvent.click(more)
+    await waitFor(() =>
+      expect(catalogBodies(fetchMock).at(-1)).toEqual({
+        search: '',
+        page_size: 100,
+        page_token: 'tok-2',
+      }),
+    )
+  })
+
+  it('says the reachable set is still being discovered, and re-reads on the refresh ping', async () => {
+    const fetchMock = stub({
+      ...REPOS,
+      '/api/github/repos/list': {
+        items: [],
+        next_page_token: '',
+        total_count: 0,
+        status: 'discovering',
+      },
+    })
+    render(<GitHubSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(screen.getByText('tracked · discovering repositories')).toBeInTheDocument(),
+    )
+    expect(
+      screen.getByText('discovering the repositories this organization can reach…'),
+    ).toBeInTheDocument()
+    // The tracked set still shows: discovery is about the catalog.
+    expect(screen.getByText('sky/planner')).toBeInTheDocument()
+
+    const before = catalogBodies(fetchMock).length
+    act(() => ws.handlers.forEach((h) => h({ type: 'github_repos_updated' })))
+    await waitFor(() => expect(catalogBodies(fetchMock).length).toBe(before + 1))
   })
 
   it('sends a later save only after one that registers a repository first', async () => {

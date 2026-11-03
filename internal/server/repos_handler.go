@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -38,20 +37,21 @@ import (
 // --------------------------------------------------------------------
 
 // githubRepoListRequest is the body of POST /api/github/repos/list: the
-// server-side search the picker used to do in the browser, plus the paging pair.
+// picker's search, plus the paging pair.
 type githubRepoListRequest struct {
-	// Q is a case-insensitive substring matched against the slug, the
-	// description and the language. Empty matches everything.
-	Q string `json:"q"`
+	// Search is a case-insensitive literal substring matched against the
+	// slug, the description and the language (httpx.Search: trimmed, empty
+	// is absent, at most 200 characters).
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
 // githubRepoListFilterKey is the canonicalized filter set the page token is
-// fingerprinted against. Canonicalized to lowercase-and-trimmed because that is
-// what the store matches on, so two spellings of one query are one query and a
-// token minted under either addresses the same result set.
+// fingerprinted against: the needle through httpx.SearchKey, so two spellings
+// of one query are one query and a token minted under either addresses the
+// same result set.
 type githubRepoListFilterKey struct {
-	Q string `json:"q"`
+	Search string `json:"search"`
 }
 
 // Readiness discriminator for the picker list. A first-ever open has nothing to
@@ -119,9 +119,10 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(req.Q))
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(githubRepoListFilterKey{Q: q}), 0)
+	search := httpx.Search(&v, req.Search)
+	page := httpx.ResolvePage(&v, req.PageRequest,
+		httpx.FilterFingerprint(githubRepoListFilterKey{Search: httpx.SearchKey(search)}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -180,7 +181,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, host, class, q,
+	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, host, class, search,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		reposLog.Error("list reachable repos failed", "org", orgID, "error", err)
@@ -1165,16 +1166,16 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 const maxBranchPageSize = 100
 
 // branchListRequest is the body of POST /api/repos/{id}/branches/list.
-// Q is the same substring filter the old ?q= carried, moved to a body field
-// with its semantics unchanged.
 type branchListRequest struct {
-	Q string `json:"q"`
+	// Search is a case-insensitive literal substring of the branch name
+	// (httpx.Search: trimmed, empty is absent, at most 200 characters).
+	Search string `json:"search"`
 
 	httpx.PageRequest
 }
 
 type branchListFilterKey struct {
-	Q string `json:"q"`
+	Search string `json:"search"`
 }
 
 // branchJSON is one row. It is an object rather than a bare string so the
@@ -1211,8 +1212,9 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(branchListFilterKey{Q: req.Q}), maxBranchPageSize)
+		httpx.FilterFingerprint(branchListFilterKey{Search: httpx.SearchKey(search)}), maxBranchPageSize)
 	upstreamPage, ok := upstreamPageFromCursor(&v, page.Cursor)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -1257,23 +1259,28 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	branches, rawCount, err := client.ListBranchesPage(r.Context(), owner, repo, req.Q, page.Limit, upstreamPage)
+	branches, err := client.ListBranchesPage(r.Context(), owner, repo, page.Limit, upstreamPage)
 	if err != nil {
 		reposLog.Warn("fetch branches failed", "org", orgID, "owner", owner, "repo", repo, "error", err)
 		httpx.WriteUpstreamUnavailable(w, "failed to fetch branches from GitHub", err)
 		return
 	}
 
-	out := make([]branchJSON, len(branches))
-	for i, b := range branches {
-		out[i] = branchJSON{Name: b.Name}
+	// GitHub's branches endpoint takes no search parameter, so the needle is
+	// matched here, over the upstream page as it arrived and before any of it
+	// is answered.
+	out := make([]branchJSON, 0, len(branches))
+	for _, b := range branches {
+		if httpx.SearchMatches(search, b.Name) {
+			out = append(out, branchJSON{Name: b.Name})
+		}
 	}
 	// "Is there more" is decided by the RAW upstream page, not by how many
-	// rows survived the filter: a full upstream page means GitHub has more to
-	// give even when none of it matched `q`, and stopping on a short filtered
-	// page would end the walk at the first unlucky page.
+	// rows survived the search: a full upstream page means GitHub has more to
+	// give even when none of it matched, and stopping on a short filtered page
+	// would end the walk at the first unlucky page.
 	next := ""
-	if rawCount == page.Limit {
+	if len(branches) == page.Limit {
 		next = strconv.Itoa(upstreamPage + 1)
 	}
 	httpx.WriteProxyList(w, page, out, next)

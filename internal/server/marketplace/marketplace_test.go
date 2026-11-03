@@ -625,7 +625,7 @@ func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestMarketplaceList_Filters: browse filters narrow the list — query to a name
+// TestMarketplaceList_Filters: browse filters narrow the list — search to a name
 // or description match, event_type to listings faceted on it, kind to prompts
 // or blueprints — and every row names its publisher team, readable by any member.
 func TestMarketplaceList_Filters(t *testing.T) {
@@ -648,7 +648,8 @@ func TestMarketplaceList_Filters(t *testing.T) {
 		want        []string
 	}{
 		{"no filter", "", []string{triage, deploy, chain}},
-		{"query", "query=triage", []string{triage}},
+		{"search", "search=triage", []string{triage}},
+		{"search on the description", "search=DEPLOYS", []string{deploy}},
 		{"event type", "event_type=" + eventTypeFixture, []string{triage}},
 		{"prompt kind", "kind=prompt", []string{triage, deploy}},
 		{"blueprint kind", "kind=blueprint", []string{chain}},
@@ -670,15 +671,120 @@ func TestMarketplaceList_Filters(t *testing.T) {
 	}
 }
 
-// TestMarketplaceList_InvalidKindOrSortIs400 rejects an unrecognized kind or
-// sort value before ever reaching the store.
-func TestMarketplaceList_InvalidKindOrSortIs400(t *testing.T) {
+// TestMarketplaceList_RefusesBadBodies rejects a bad value before ever reaching
+// the store, naming the field: an unrecognized kind or sort key, a lone
+// sort_dir, a search over the cap, and the field names this route does not
+// take.
+func TestMarketplaceList_RefusesBadBodies(t *testing.T) {
 	r := newMarketplaceRig(t)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{"kind": "widget"})); rec.Code != http.StatusBadRequest {
-		t.Errorf("bad kind: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	for _, tc := range []struct {
+		name   string
+		body   map[string]any
+		reason string
+		field  string
+	}{
+		{"bad kind", map[string]any{"kind": "widget"}, httpx.ReasonInvalidField, "kind"},
+		{"bad sort_key", map[string]any{"sort_key": "popularity"}, httpx.ReasonInvalidField, "sort_key"},
+		{"bad sort_dir", map[string]any{"sort_key": "votes", "sort_dir": "down"}, httpx.ReasonInvalidField, "sort_dir"},
+		{"lone sort_dir", map[string]any{"sort_dir": "asc"}, httpx.ReasonInvalidField, "sort_dir"},
+		{"search over the cap", map[string]any{"search": strings.Repeat("x", httpx.MaxSearchRunes+1)}, httpx.ReasonInvalidField, "search"},
+		{"the query field", map[string]any{"query": "triage"}, httpx.ReasonUnknownField, "query"},
+		{"the sort field", map[string]any{"sort": "votes"}, httpx.ReasonUnknownField, "sort"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, tc.body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			faults := marketplaceFaults(t, rec)
+			if len(faults) != 1 || faults[0].Reason != tc.reason || faults[0].Field != tc.field {
+				t.Errorf("errors = %+v; want one %s on %q", faults, tc.reason, tc.field)
+			}
+		})
 	}
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{"sort": "popularity"})); rec.Code != http.StatusBadRequest {
-		t.Errorf("bad sort: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+}
+
+// marketplaceFaults decodes the error envelope a refused request answers.
+func marketplaceFaults(t *testing.T, rec *httptest.ResponseRecorder) []httpx.ErrorItem {
+	t.Helper()
+	var env struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || len(env.Errors) == 0 {
+		t.Fatalf("decode error envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	return env.Errors
+}
+
+// TestMarketplaceList_PageTokenIsBoundToTheQuery: a token minted under one
+// search or sort is refused under another, because its offset addresses a
+// position in a different result set — and is honored under the same query
+// spelled another way (the default sort named, the needle cased differently).
+func TestMarketplaceList_PageTokenIsBoundToTheQuery(t *testing.T) {
+	r := newMarketplaceRig(t)
+	for _, name := range []string{"Alpha Tool", "Beta Tool"} {
+		r.publishListing(t, r.admin, map[string]any{
+			"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, name, "m", "", ""), "name": name,
+		})
+	}
+	list := func(body map[string]any) *httptest.ResponseRecorder {
+		return doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, body))
+	}
+	first := httpxtest.DecodeList[domain.ListingSummary](t, list(map[string]any{"page_size": 1, "search": "tool"}))
+	if first.NextPageToken == "" {
+		t.Fatal("page 1 has no next_page_token; want one")
+	}
+	tok := first.NextPageToken
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"another search", map[string]any{"page_size": 1, "page_token": tok, "search": "alpha"}},
+		{"another sort key", map[string]any{"page_size": 1, "page_token": tok, "search": "tool", "sort_key": "votes"}},
+		{"another sort direction", map[string]any{"page_size": 1, "page_token": tok, "search": "tool", "sort_dir": "asc", "sort_key": "installs"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := list(tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if faults := marketplaceFaults(t, rec); faults[0].Field != "page_token" {
+				t.Errorf("errors = %+v; want a page_token fault", faults)
+			}
+		})
+	}
+	same := list(map[string]any{"page_size": 1, "page_token": tok, "search": "TOOL", "sort_key": "installs", "sort_dir": "desc"})
+	if same.Code != http.StatusOK {
+		t.Fatalf("same query respelled: status = %d, want 200; body=%s", same.Code, same.Body.String())
+	}
+	if page := httpxtest.DecodeList[domain.ListingSummary](t, same); len(page.Items) != 1 || page.Items[0].ID == first.Items[0].ID {
+		t.Errorf("page 2 = %v; want the one listing page 1 did not hold", listingIDs(page.Items))
+	}
+}
+
+// TestMarketplaceList_SearchIsLiteral: a % or _ in the needle matches itself,
+// not any run of characters.
+func TestMarketplaceList_SearchIsLiteral(t *testing.T) {
+	r := newMarketplaceRig(t)
+	pct := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, "Coverage", "m", "", ""),
+		"name": "Coverage", "description": "keeps coverage at 100%",
+	})
+	r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, "Thousand", "m", "", ""),
+		"name": "Thousand", "description": "1000 runs a day",
+	})
+	under := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, "snake_case", "m", "", ""), "name": "snake_case",
+	})
+	r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, "snakeXcase", "m", "", ""), "name": "snakeXcase",
+	})
+	if ids := listingIDs(r.list(t, r.admin, "search="+url.QueryEscape("100%"))); !slices.Equal(ids, []string{pct}) {
+		t.Errorf("search 100%% = %v; want [%s] alone", ids, pct)
+	}
+	if ids := listingIDs(r.list(t, r.admin, "search=snake_")); !slices.Equal(ids, []string{under}) {
+		t.Errorf("search snake_ = %v; want [%s] alone", ids, under)
 	}
 }
 
@@ -720,31 +826,38 @@ func TestMarketplaceList_SortOrders(t *testing.T) {
 		t.Fatalf("vote fresh/admin: status = %d, want 204", rec.Code)
 	}
 
-	if ids := listingIDs(r.list(t, r.admin, "sort=installs")); len(ids) != 3 || ids[0] != old || ids[1] != mid || ids[2] != fresh {
-		t.Fatalf("sort=installs: ids = %v, want [%s %s %s] (2, 1, 0 installs)", ids, old, mid, fresh)
+	order := func(t *testing.T, query string, want ...string) {
+		t.Helper()
+		if ids := listingIDs(r.list(t, r.admin, query)); !slices.Equal(ids, want) {
+			t.Errorf("%q: ids = %v, want %v", query, ids, want)
+		}
 	}
-	if ids := listingIDs(r.list(t, r.admin, "sort=votes")); len(ids) != 3 || ids[0] != mid || ids[1] != fresh || ids[2] != old {
-		t.Fatalf("sort=votes: ids = %v, want [%s %s %s] (2, 1, 0 votes)", ids, mid, fresh, old)
-	}
-	if ids := listingIDs(r.list(t, r.admin, "sort=recent")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
-		t.Fatalf("sort=recent: ids = %v, want [%s %s %s] (newest updated_at first)", ids, fresh, mid, old)
-	}
+	order(t, "sort_key=installs", old, mid, fresh) // 2, 1, 0 installs
+	order(t, "sort_key=installs&sort_dir=asc", fresh, mid, old)
+	order(t, "sort_key=votes", mid, fresh, old) // 2, 1, 0 votes
+	order(t, "sort_key=votes&sort_dir=asc", old, fresh, mid)
+	order(t, "sort_key=recent", fresh, mid, old) // newest updated_at first
+	order(t, "sort_key=recent&sort_dir=asc", old, mid, fresh)
 
-	// Run-derived usage: fresh has the most total_runs despite having zero
-	// installs/votes, old has none — sort=used must order purely on
-	// total_runs, independent of the other two signals.
-	r.seedStats(t, old, 2, 0)
+	// Run-derived usage, before the aggregation has computed anything: no
+	// listing has a stats row, so all three count as zero runs and tie, and
+	// the tie orders by the most recently updated whichever way the key runs.
+	order(t, "sort_key=used", fresh, mid, old)
+	order(t, "sort_key=used&sort_dir=asc", fresh, mid, old)
+
+	// fresh has the most total_runs despite having zero installs; mid has a
+	// stats row and old still has none, which sorts as the zero it means —
+	// last descending, first ascending. sort_key=used orders purely on
+	// total_runs, independent of the other signals.
 	r.seedStats(t, mid, 1, 3)
 	r.seedStats(t, fresh, 1, 7)
-	if ids := listingIDs(r.list(t, r.admin, "sort=used")); len(ids) != 3 || ids[0] != fresh || ids[1] != mid || ids[2] != old {
-		t.Fatalf("sort=used: ids = %v, want [%s %s %s] (7, 3, 0 total_runs)", ids, fresh, mid, old)
-	}
-	// Default (sort omitted) matches "installs" — the handler pins this
+	order(t, "sort_key=used", fresh, mid, old) // 7, 3, no row
+	order(t, "sort_key=used&sort_dir=asc", old, mid, fresh)
+
+	// Default (sort_key omitted) matches installs — the handler pins this
 	// explicitly rather than falling through to the store's own internal
 	// default (recent), so the HTTP contract doesn't depend on the store.
-	if ids := listingIDs(r.list(t, r.admin, "")); len(ids) != 3 || ids[0] != old || ids[1] != mid || ids[2] != fresh {
-		t.Fatalf("default sort: ids = %v, want [%s %s %s] (installs)", ids, old, mid, fresh)
-	}
+	order(t, "", old, mid, fresh)
 }
 
 // TestMarketplaceGet_DelistedVisibleToPublisherOnly: the detail endpoint

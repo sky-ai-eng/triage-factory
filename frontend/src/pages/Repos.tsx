@@ -138,7 +138,7 @@ function BranchPicker({
         // the filter is what narrows the list, not scrolling it.
         const page = await apiList<{ name: string }>(
           `/api/repos/${encodeURIComponent(profile.id)}/branches/list`,
-          { q, page_size: 30 },
+          { search: q, page_size: 30 },
           { signal: controller.signal },
         )
         if (mountedRef.current) setBranches(page.items.map((b) => b.name))
