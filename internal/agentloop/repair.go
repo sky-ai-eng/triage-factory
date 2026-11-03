@@ -331,7 +331,7 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 	for _, rep := range repairs {
 		afterCheckpoint := params.WorkspaceAsOf != nil && rep.ownerKey > *params.WorkspaceAsOf
 		content := interruptedToolResult(params.Workspace, params.ExecutorChanged, afterCheckpoint)
-		if _, err := e.insertToolResult(ctx, params, rep.call, content, true, rep.seq); err != nil {
+		if _, err := e.insertToolResult(ctx, params, rep.call, content, true, rep.seq, nil); err != nil {
 			return fmt.Errorf("insert synthetic result for %s: %w", rep.call.ID, err)
 		}
 	}

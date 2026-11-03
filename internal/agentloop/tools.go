@@ -24,15 +24,17 @@ func flowControlTools(hasBlueprint bool) []schemas.ChatTool {
 }
 
 // resolveLoopSide answers a call without leaving the orchestrator, reporting
-// false for anything the jail owns.
+// false for anything the jail owns. ran is the milliseconds the handler took.
 //
 // hasBlueprint mirrors registration, so a name means nothing where the tool
 // was never offered: a hallucinated call falls through to the sandbox and
 // comes back "unknown tool", which is the right answer.
-func resolveLoopSide(call domain.ToolCall, hasBlueprint bool) (tooldefs.Outcome, bool) {
+func (e *Engine) resolveLoopSide(call domain.ToolCall, hasBlueprint bool) (out tooldefs.Outcome, ran int, ok bool) {
 	tool, ok := tooldefs.LoopSide(call.Name, hasBlueprint)
 	if !ok {
-		return tooldefs.Outcome{}, false
+		return tooldefs.Outcome{}, 0, false
 	}
-	return tool.Handler(call.Input), true
+	started := e.now()
+	out = tool.Handler(call.Input)
+	return out, e.msSince(started), true
 }

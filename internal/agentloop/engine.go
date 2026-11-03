@@ -305,6 +305,24 @@ type Engine struct {
 
 	// Log receives operational messages. Optional.
 	Log Logger
+
+	// Now is the clock every duration the loop records is read from: the
+	// engagement's, each provider call's, each tool call's. Nil reads
+	// time.Now.
+	Now func() time.Time
+}
+
+// now reads the engine's clock.
+func (e *Engine) now() time.Time {
+	if e.Now == nil {
+		return time.Now()
+	}
+	return e.Now()
+}
+
+// msSince is the whole milliseconds from t to now on the engine's clock.
+func (e *Engine) msSince(t time.Time) int {
+	return int(e.now().Sub(t) / time.Millisecond)
 }
 
 // Activity, when set, is told where the loop blocks. Every method is
@@ -359,7 +377,7 @@ type Logger interface {
 // guards (before every call, not every turn) → assemble → credentials →
 // stream → persist → stop-reason handling → tool dispatch → would-stop.
 func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
-	started := time.Now()
+	started := e.now()
 
 	// The engagement's spend, in this frame because the Engine is shared
 	// across engagements. Stamped by one deferred assignment so every exit
@@ -481,7 +499,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				Kind:       ResultParked,
 				ParkNotice: notice,
 				NumTurns:   turn,
-				DurationMs: msSince(started),
+				DurationMs: e.msSince(started),
 			}
 		}
 
@@ -500,7 +518,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			maxTokens = escalatedMaxTokens
 			escalatedMaxTokens = 0
 		}
-		callStarted := time.Now()
+		callStarted := e.now()
 		completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, maxTokens))
 		if release != nil {
 			release()
@@ -558,7 +576,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		if class.interrupted() {
 			stubTruncatedToolArgs(completion)
 		}
-		assistantRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
+		assistantRow, err := e.persistAssistant(ctx, params, completion, e.msSince(callStarted))
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}
@@ -724,7 +742,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 					outcome.ResultSummary = lastText
 				}
 				outcome.NumTurns = turn
-				outcome.DurationMs = msSince(started)
+				outcome.DurationMs = e.msSince(started)
 				return outcome
 			}
 			bareDrain = false
@@ -774,7 +792,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			Outcome:       domain.ConversationOutcomeContinue,
 			ResultSummary: lastText,
 			NumTurns:      turn,
-			DurationMs:    msSince(started),
+			DurationMs:    e.msSince(started),
 		}
 	}
 }
@@ -938,7 +956,7 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) strin
 func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, notice string) error {
 	at := toolResultPositions(ownerID, len(calls))
 	for i, call := range calls {
-		if _, err := e.insertToolResult(ctx, params, call, notice, true, at(i)); err != nil {
+		if _, err := e.insertToolResult(ctx, params, call, notice, true, at(i), nil); err != nil {
 			return err
 		}
 	}
@@ -958,7 +976,7 @@ func (e *Engine) parkOnStop(ctx context.Context, params Params, started time.Tim
 		Kind:       ResultParked,
 		ParkNotice: notice,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 	}
 }
 
@@ -1007,7 +1025,7 @@ func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err er
 		Kind:        ResultFailed,
 		FailureKind: domain.ConversationFailureAgentError,
 		NumTurns:    turn,
-		DurationMs:  msSince(started),
+		DurationMs:  e.msSince(started),
 		Err:         err,
 	}
 }
@@ -1020,7 +1038,7 @@ func (e *Engine) unavailable(started time.Time, turn int, err error) Result {
 	return Result{
 		Kind:       ResultUpstreamUnavailable,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 		Err:        err,
 	}
 }
@@ -1033,7 +1051,7 @@ func (e *Engine) toolHostLost(started time.Time, turn int, lost *ToolHostLostErr
 	return Result{
 		Kind:       ResultToolHostLost,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 		Err:        lost,
 	}
 }
@@ -1052,7 +1070,7 @@ func (e *Engine) cancelled(ctx context.Context, started time.Time, turn int) Res
 	return Result{
 		Kind:       ResultCancelled,
 		NumTurns:   turn,
-		DurationMs: msSince(started),
+		DurationMs: e.msSince(started),
 		Err:        cause,
 	}
 }
@@ -1067,10 +1085,6 @@ func (e *Engine) info(msg string, args ...any) {
 	if e.Log != nil {
 		e.Log.Info(msg, args...)
 	}
-}
-
-func msSince(t time.Time) int {
-	return int(time.Since(t) / time.Millisecond)
 }
 
 // ErrNoCredentials is returned by a Credentials implementation that has

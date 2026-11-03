@@ -473,7 +473,8 @@ type StreamObserver interface {
 	// steady stream of them, and none of it is progress.
 	OnLine()
 	// OnToolUse reports an assistant line handing tool call id to the
-	// harness, which runs it as soon as the block lands.
+	// harness. The call may start later than this, behind an earlier call
+	// of the same message.
 	OnToolUse(id, name string)
 	// OnToolResult reports the result of tool call id arriving.
 	OnToolResult(id string)

@@ -33,10 +33,9 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 		row.WindowState = domain.MessageWindowInactive
 	}
 	// Wall time from request to complete message, retries included — the
-	// same request-to-row span the SDK parser stamps.
-	if durationMs > 0 {
-		row.DurationMs = &durationMs
-	}
+	// same request-to-row span the SDK parser stamps. A call that measured 0
+	// stores 0.
+	row.DurationMs = &durationMs
 
 	// Cost settles per assistant row on this path — the ledger's stamp
 	// density is the only thing that differs between runtimes, and
@@ -168,9 +167,13 @@ func toolResultPositions(ownerID, n int) func(int) *float64 {
 // an id in between. A nil seq is the tail, and every caller that passes one
 // has established that the tail IS the position under the call.
 //
+// durationMs is how long the call ran, from its dispatch to its result, and
+// nil for a call that never ran. Every caller states which, because only the
+// caller knows whether the call was dispatched.
+//
 // It returns the row's assembly key, which is how a batch learns the position
 // of the last row it wrote.
-func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool, seq *float64) (float64, error) {
+func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool, seq *float64, durationMs *int) (float64, error) {
 	row := &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "tool",
@@ -178,6 +181,7 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 		Content:        sanitizeForStore(content),
 		IsError:        isErr,
 		Seq:            seq,
+		DurationMs:     durationMs,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {
@@ -192,7 +196,7 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 // Content column so the display path is unchanged, and the image rides
 // ContentBlocks, which is what the assembly bijection replays to the
 // provider.
-func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage, seq *float64) (float64, error) {
+func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage, seq *float64, durationMs *int) (float64, error) {
 	blocks := make([]domain.ContentBlock, 0, len(images))
 	for _, img := range images {
 		blocks = append(blocks, domain.ContentBlock{
@@ -212,6 +216,7 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, 
 		Content:        sanitizeForStore(content),
 		ContentBlocks:  blocks,
 		Seq:            seq,
+		DurationMs:     durationMs,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {

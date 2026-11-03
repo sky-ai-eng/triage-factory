@@ -335,3 +335,138 @@ func TestPermissionGate_SandboxedAutoApproveDiscountsNothing(t *testing.T) {
 		t.Errorf("tool DurationMs = %d, want 9000 (nothing to discount)", got)
 	}
 }
+
+// streamStep is one line of a live stream and the time that passes on the
+// test clock before the reader gets it.
+type streamStep struct {
+	wait time.Duration
+	line string
+}
+
+// steppedRun drives the real reader over steps, with a permission handler
+// that takes gateWait on the test clock to answer, and returns the rows it
+// produced.
+func steppedRun(t *testing.T, c *streamClock, gateWait time.Duration, steps ...streamStep) []*domain.Message {
+	t.Helper()
+	l := &LiveRun{stdin: nopWriteCloser{}, done: make(chan struct{}), ready: make(chan struct{}), stream: c.state()}
+	sink := &captureSink{}
+	lines := make([]string, len(steps))
+	for i, s := range steps {
+		lines[i] = s.line
+	}
+	src := &lineReader{lines: lines, before: func(i int) { c.advance(steps[i].wait) }}
+	perms := func(PermissionRequest) PermissionDecision {
+		c.advance(gateWait)
+		return PermissionDecision{Behavior: "allow"}
+	}
+	if _, err := l.consumeStreamInteractive(src, sink, l.stream, perms, nil, "t"); err != nil {
+		t.Fatalf("consumeStreamInteractive: %v", err)
+	}
+	return sink.messages
+}
+
+// toolRowFor returns the tool row answering id among msgs.
+func toolRowFor(t *testing.T, msgs []*domain.Message, id string) *domain.Message {
+	t.Helper()
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID == id {
+			return m
+		}
+	}
+	t.Fatalf("no tool row for %s among %d rows", id, len(msgs))
+	return nil
+}
+
+const (
+	bashUseLine     = `{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`
+	bashStartedLine = `{"type":"control","subtype":"tool_started","tool_call_id":"tu1"}`
+	bashGateLine    = `{"type":"control","subtype":"permission_request","tool_call_id":"tu1","tool_name":"Bash","input":{}}`
+	bashResultLine  = `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"out"}]}}`
+)
+
+// TestToolStarted_ReplacesTheParseMark: the call is timed from when the
+// harness started it, not from when its tool_use block was parsed.
+func TestToolStarted_ReplacesTheParseMark(t *testing.T) {
+	c := newStreamClock()
+	msgs := steppedRun(t, c, 0,
+		streamStep{time.Second, bashUseLine},
+		streamStep{4 * time.Second, bashStartedLine},
+		streamStep{2 * time.Second, bashResultLine},
+	)
+	if got := durationOrFail(t, "tool", toolRowFor(t, msgs, "tu1").DurationMs); got != 2000 {
+		t.Errorf("tool DurationMs = %d, want 2000 (from tool_started, not the 6s since the parse)", got)
+	}
+}
+
+// TestToolStarted_AParseAfterItDoesNotMoveIt: the hook can report a call
+// before the reader has parsed the block that asked for it, and the parse
+// must not reset the mark to its own, later arrival.
+func TestToolStarted_AParseAfterItDoesNotMoveIt(t *testing.T) {
+	c := newStreamClock()
+	msgs := steppedRun(t, c, 0,
+		streamStep{time.Second, bashStartedLine},
+		streamStep{time.Second, bashUseLine},
+		streamStep{2 * time.Second, bashResultLine},
+	)
+	if got := durationOrFail(t, "tool", toolRowFor(t, msgs, "tu1").DurationMs); got != 3000 {
+		t.Errorf("tool DurationMs = %d, want 3000 (from tool_started, before the parse)", got)
+	}
+}
+
+// TestToolStarted_ASerialCallMeasuresFromItsOwnStart is the case the hook
+// exists for: two calls in one message, the second started only once the
+// first finished. Each reads the time it ran; the second carries none of
+// the first's.
+func TestToolStarted_ASerialCallMeasuresFromItsOwnStart(t *testing.T) {
+	c := newStreamClock()
+	msgs := steppedRun(t, c, 0,
+		streamStep{time.Second, `{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","content":[
+			{"type":"tool_use","id":"tu1","name":"Bash","input":{}},
+			{"type":"tool_use","id":"tu2","name":"Bash","input":{}}]}}`},
+		streamStep{0, `{"type":"control","subtype":"tool_started","tool_call_id":"tu1"}`},
+		streamStep{2 * time.Second, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"one"}]}}`},
+		streamStep{0, `{"type":"control","subtype":"tool_started","tool_call_id":"tu2"}`},
+		streamStep{2 * time.Second, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"two"}]}}`},
+	)
+	if got := durationOrFail(t, "tu1", toolRowFor(t, msgs, "tu1").DurationMs); got != 2000 {
+		t.Errorf("tu1 DurationMs = %d, want 2000", got)
+	}
+	if got := durationOrFail(t, "tu2", toolRowFor(t, msgs, "tu2").DurationMs); got != 2000 {
+		t.Errorf("tu2 DurationMs = %d, want 2000 (its own run, not the 4s since the block landed)", got)
+	}
+}
+
+// TestToolStarted_PermissionGateExcludedInEitherOrder: whichever of the
+// hook and the prompt Claude Code fires first, the human's wait stays out of
+// the row. Hook first, the gate rolls the started mark forward by the wait;
+// prompt first, the mark is set after the answer.
+func TestToolStarted_PermissionGateExcludedInEitherOrder(t *testing.T) {
+	for name, steps := range map[string][]streamStep{
+		"tool_started before the prompt": {
+			{3 * time.Second, bashUseLine},
+			{time.Second, bashStartedLine},
+			{0, bashGateLine},
+			{7 * time.Second, bashResultLine},
+		},
+		"tool_started after the prompt": {
+			{3 * time.Second, bashUseLine},
+			{time.Second, bashGateLine},
+			{0, bashStartedLine},
+			{7 * time.Second, bashResultLine},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newStreamClock()
+			msgs := steppedRun(t, c, 5*time.Minute, steps...)
+			if len(msgs) != 2 {
+				t.Fatalf("expected the assistant row and the tool row; got %d", len(msgs))
+			}
+			if got := durationOrFail(t, "assistant", msgs[0].DurationMs); got != 3000 {
+				t.Errorf("assistant DurationMs = %d, want 3000", got)
+			}
+			if got := durationOrFail(t, "gated tool", toolRowFor(t, msgs, "tu1").DurationMs); got != 7000 {
+				t.Errorf("gated tool DurationMs = %d, want 7000 (its own run; the 5m gate, dropped)", got)
+			}
+		})
+	}
+}
