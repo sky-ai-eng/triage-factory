@@ -462,13 +462,15 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	defer func() { _ = localSbx.Close() }()
 
+	teamOpts := s.resolveSDKTeamOptions(ctx, opts.TeamID)
 	baseOpts := agentproc.RunOptions{
-		Cwd:             cwd,
-		Model:           model,
-		PermissionMode:  s.resolveSDKPermissionMode(ctx, opts.TeamID),
-		SessionID:       sessionID,
-		Message:         message,
-		OnOpeningUnsent: opts.openingUnsent,
+		Cwd:                cwd,
+		Model:              model,
+		PermissionMode:     teamOpts.permissionMode,
+		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
+		SessionID:          sessionID,
+		Message:            message,
+		OnOpeningUnsent:    opts.openingUnsent,
 		// The append the launch gave this conversation, through the composer the
 		// launch used. The harness replays the session's own history but not the
 		// prompt that was appended to it, so a turn sent without this one wakes

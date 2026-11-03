@@ -1581,6 +1581,10 @@ CREATE TABLE public.team_settings (
     -- SDK permission posture: multi-mode SDK runs force auto, local mode honors
     -- this setting, native runs ignore it.
     auto_mode_enabled boolean DEFAULT true NOT NULL,
+    -- Whether an SDK run on the operator's Claude Code login keeps its claude.ai
+    -- connectors. Only local mode runs the SDK, so multi stores it and nothing
+    -- reads it.
+    claude_ai_connectors_enabled boolean DEFAULT false NOT NULL,
     -- Grace window (ms) an unattended permission prompt waits before denying with
     -- "no operator available"; the boolean off waits out the full timeout instead.
     permission_absent_grace_ms integer DEFAULT 15000 NOT NULL,

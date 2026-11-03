@@ -121,6 +121,14 @@ type RunOptions struct {
 	// MaxTurns sets --max-turns. Zero omits the flag.
 	MaxTurns int
 
+	// ClaudeAIConnectors leaves the claude.ai connectors of the operator's
+	// Claude Code login connected, as MCP servers the agent is offered. It
+	// applies only to a spawn that resolved no credential, the one that runs
+	// on that login; a spawn on a stored key turns them off whatever this says,
+	// as every spawn does by default (wrapper.mjs). The delegate sets it from
+	// the team's choice; the system jobs leave it false.
+	ClaudeAIConnectors bool
+
 	// Interactive switches the invocation into the SDK's streaming-input
 	// mode: BuildArgs emits `--input-format stream-json` and omits
 	// `-p`/Message (the initial message is sent over stdin by the
@@ -647,6 +655,9 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	}
 	if auth.settings != "" {
 		nodeArgs = append(slices.Clip(nodeArgs), "--settings", auth.settings)
+	}
+	if len(creds) == 0 && opts.ClaudeAIConnectors {
+		nodeArgs = append(slices.Clip(nodeArgs), "--claude-ai-connectors")
 	}
 	argv, err := directArgv(opts, nodeArgs)
 	if err != nil {

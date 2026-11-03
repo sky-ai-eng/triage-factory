@@ -1026,6 +1026,37 @@ func TestTeamSettingsPatch_ReviewPosture(t *testing.T) {
 	}
 }
 
+// TestTeamSettingsPatch_ClaudeAIConnectors: off on a fresh team, on once a
+// save names it, untouched by an unrelated save, back off on null, and a
+// non-boolean is refused naming the field rather than stored.
+func TestTeamSettingsPatch_ClaudeAIConnectors(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if teamSettingsSnapshot(t, s).ClaudeAIConnectorsEnabled {
+		t.Error("a fresh team keeps the claude.ai connectors; want them off")
+	}
+
+	patchTeamSettingsOK(t, s, "default", map[string]any{"claude_ai_connectors_enabled": true})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasHaiku})
+	if !teamSettingsSnapshot(t, s).ClaudeAIConnectorsEnabled {
+		t.Error("claude_ai_connectors_enabled = false after saving true and an unrelated field")
+	}
+
+	patchTeamSettingsOK(t, s, "default", map[string]any{"claude_ai_connectors_enabled": nil})
+	if teamSettingsSnapshot(t, s).ClaudeAIConnectorsEnabled {
+		t.Error("null left the claude.ai connectors on; want the default (off)")
+	}
+
+	rec := doJSON(t, s, "PATCH", teamSettingsPath("default"), map[string]any{"claude_ai_connectors_enabled": "yes"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("string value = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"field":"claude_ai_connectors_enabled"`) {
+		t.Errorf("refusal does not name the field: %s", rec.Body.String())
+	}
+}
+
 // --- base-branch push policy -----------------------------------------------
 
 // teamBasePushPolicy reads the stored policy back off the team settings GET

@@ -400,6 +400,7 @@ type teamSettingsPatch struct {
 	EnabledModels                   json.RawMessage `json:"enabled_models"`
 	AIAutoDelegate                  json.RawMessage `json:"ai_auto_delegate_enabled"`
 	AutoModeEnabled                 json.RawMessage `json:"auto_mode_enabled"`
+	ClaudeAIConnectorsEnabled       json.RawMessage `json:"claude_ai_connectors_enabled"`
 	AIReprioritizeThreshold         json.RawMessage `json:"ai_reprioritize_threshold"`
 	AIPreferenceUpdateInterval      json.RawMessage `json:"ai_preference_update_interval"`
 	BranchTemplate                  json.RawMessage `json:"branch_template"`
@@ -583,7 +584,7 @@ func plural(n int, one, many string) string {
 func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (apply func(*domain.TeamSettings), ok bool) {
 	if !httpx.PatchNamed(
 		req.AIModel, req.EnabledModels, req.AIAutoDelegate, req.AutoModeEnabled,
-		req.AIReprioritizeThreshold,
+		req.ClaudeAIConnectorsEnabled, req.AIReprioritizeThreshold,
 		req.AIPreferenceUpdateInterval, req.BranchTemplate, req.ReviewPosture,
 		req.BaseBranchPushPolicy, req.PermissionAbsentAutodenyEnabled,
 		req.PermissionAbsentGraceSeconds,
@@ -660,6 +661,13 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 			next = v
 		}
 		set(func(t *domain.TeamSettings) { t.AutoModeEnabled = next })
+	}
+	if v, st := httpx.PatchBool(&shape, req.ClaudeAIConnectorsEnabled, "claude_ai_connectors_enabled"); st != httpx.PatchAbsent {
+		next := defaults.ClaudeAIConnectorsEnabled
+		if st == httpx.PatchSet {
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.ClaudeAIConnectorsEnabled = next })
 	}
 	if v, st := httpx.PatchInt(&shape, req.AIReprioritizeThreshold, "ai_reprioritize_threshold"); st != httpx.PatchAbsent {
 		next := defaults.AIReprioritizeThreshold

@@ -620,6 +620,14 @@ type TeamSettings struct {
 	// multi-mode SDK conversations always enable auto mode, and the native
 	// runtime ignores this field entirely.
 	AutoModeEnabled bool
+	// ClaudeAIConnectorsEnabled leaves the claude.ai connectors of the
+	// operator's Claude Code login connected in this team's SDK-runtime
+	// delegated conversations. It matters only to a run on that login (the
+	// org's "system Claude Code credentials"): a run on a stored key, and every
+	// system job, has them off whatever this says. Off by default, because a
+	// run reads untrusted text and a connector's tools act on the operator's
+	// account. The native runtime has no such connectors and ignores it.
+	ClaudeAIConnectorsEnabled bool
 
 	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
 	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
