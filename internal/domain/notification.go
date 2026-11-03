@@ -42,6 +42,10 @@ const (
 	NotificationRoleAdmins  NotificationRole = "admins"
 )
 
+func AllNotificationRoles() []NotificationRole {
+	return []NotificationRole{NotificationRoleAdmins, NotificationRoleMembers}
+}
+
 type NotificationPriority string
 
 const (

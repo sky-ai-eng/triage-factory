@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -154,58 +155,137 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 }
 
 // --------------------------------------------------------------------
-// lists
+// lists and their facets
 // --------------------------------------------------------------------
 
-// notificationListRequest is the body of POST /api/me/notifications/list. An
-// absent field does not filter. A present one filters by exactly its value,
-// so an empty list or an empty string is refused rather than read as "no
-// filter", which would answer a wider question than the caller asked.
+// notificationListRequest is the body of both lists, POST
+// /api/me/notifications/list and POST /api/orgs/{org_id}/notifications/list.
+// An absent filter does not filter. A present one filters by exactly its
+// value, so an empty list or an empty string is refused rather than read as
+// "no filter", which would answer a wider question than the caller asked.
+// search is the exception: as on every list, it is trimmed, and empty after
+// the trim is absent.
 //
-// The filters are spelled out here and in notificationOrgListRequest rather
+//   - search: a case-insensitive literal substring of the title or the body.
+//   - scope_in, role_in, team_id_in: the audience filters. A user row has no
+//     role and no team, so role_in or team_id_in leaves it out. The
+//     by_audience facet's values each name the filters that select them.
+//   - sort_key: db.NotificationListSortKeys. Absent is the default order,
+//     priority then the latest escalation, and there is no "default" value
+//     to send, so an empty string is refused. sort_dir is its direction,
+//     the key's own (db.NotificationSortDefaultDir) when absent, and is
+//     refused without a key: the default order has no direction to flip.
+//
+// The filters are spelled out here and in notificationFacetsRequest rather
 // than embedded from one struct: encoding/json names a type fault inside an
 // embedded struct by the struct's Go name, which would reach the error's
 // field.
 // TODO(TFAC-1255): embed one shared filter struct once the decode error
 // names the JSON field.
-//
-// sort_key reorders the list (db.NotificationListSortKeys); absent is the
-// default order, priority then the latest escalation, and there is no
-// "default" value to send. sort_dir is its direction, desc when absent, and
-// is refused without a key: the default order has no direction to flip.
 type notificationListRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
 	Unread     *bool    `json:"unread"`
 	PriorityIn []string `json:"priority_in"`
 	ScopeIn    []string `json:"scope_in"`
+	RoleIn     []string `json:"role_in"`
+	TeamIDIn   []string `json:"team_id_in"`
+	Search     string   `json:"search"`
 	SortKey    *string  `json:"sort_key"`
 	SortDir    *string  `json:"sort_dir"`
 
 	httpx.PageRequest
 }
 
-// notificationOrgListRequest is the body of POST
-// /api/orgs/{org_id}/notifications/list: the inbox's filters plus the teams
-// whose rows to show, in the same orders.
-type notificationOrgListRequest struct {
+func (r notificationListRequest) filters() notificationFilterFields {
+	return notificationFilterFields{
+		Status: r.Status, Dismissed: r.Dismissed, Unread: r.Unread,
+		PriorityIn: r.PriorityIn, ScopeIn: r.ScopeIn, RoleIn: r.RoleIn, TeamIDIn: r.TeamIDIn,
+		Search: r.Search,
+	}
+}
+
+// notificationFacetsRequest is the body of both facets nodes, POST
+// /api/me/notifications/facets and POST
+// /api/orgs/{org_id}/notifications/facets: the list's filters, on the list's
+// terms. The order and paging fields are declared so that sending one is
+// refused by name rather than as an unknown field: they are real fields of
+// the list, and a caller sending one has misread what this route answers.
+// They are json.RawMessage so presence is what is detected.
+type notificationFacetsRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
 	Unread     *bool    `json:"unread"`
 	PriorityIn []string `json:"priority_in"`
 	ScopeIn    []string `json:"scope_in"`
-	SortKey    *string  `json:"sort_key"`
-	SortDir    *string  `json:"sort_dir"`
+	RoleIn     []string `json:"role_in"`
 	TeamIDIn   []string `json:"team_id_in"`
+	Search     string   `json:"search"`
 
-	httpx.PageRequest
+	SortKey   json.RawMessage `json:"sort_key"`
+	SortDir   json.RawMessage `json:"sort_dir"`
+	PageSize  json.RawMessage `json:"page_size"`
+	PageToken json.RawMessage `json:"page_token"`
 }
 
-// notificationListFilterKey is the canonicalized filter set a page token is
-// fingerprinted against. It names the list and the org too, since the inbox
-// and the All-teams list share their filters but not their rows. The sort is
-// in it because an offset addresses a position in an ordering, so a token
-// minted under one sort names different rows under another.
+func (r notificationFacetsRequest) filters() notificationFilterFields {
+	return notificationFilterFields{
+		Status: r.Status, Dismissed: r.Dismissed, Unread: r.Unread,
+		PriorityIn: r.PriorityIn, ScopeIn: r.ScopeIn, RoleIn: r.RoleIn, TeamIDIn: r.TeamIDIn,
+		Search: r.Search,
+	}
+}
+
+// notificationFilterFields is the filters a list or facets body carries, as
+// decoded.
+type notificationFilterFields struct {
+	Status                                *string
+	Dismissed, Unread                     *bool
+	PriorityIn, ScopeIn, RoleIn, TeamIDIn []string
+	Search                                string
+}
+
+// notificationListSortKeys is db.NotificationListSortKeys as the lists'
+// sort vocabulary, each with the direction it takes without a sort_dir.
+var notificationListSortKeys = func() []httpx.SortKey {
+	keys := make([]httpx.SortKey, len(db.NotificationListSortKeys))
+	for i, k := range db.NotificationListSortKeys {
+		keys[i] = httpx.SortKey{Name: k, Default: db.NotificationSortDefaultDir(k)}
+	}
+	return keys
+}()
+
+// parseNotificationSort validates a list's sort_key and sort_dir. An explicit
+// empty string is refused rather than read as absent: neither field has a
+// value that names the default.
+func parseNotificationSort(v *httpx.Validation, key, dir *string) (sortKey, sortDir string) {
+	refused := false
+	if key != nil && *key == "" {
+		v.Invalid("sort_key", fmt.Sprintf("sort_key must be one of %s; leave it out for the default order",
+			strings.Join(db.NotificationListSortKeys, ", ")))
+		refused = true
+	}
+	if dir != nil && *dir == "" {
+		v.Invalid("sort_dir", fmt.Sprintf("sort_dir must be one of %s; leave it out for the key's own direction",
+			strings.Join(db.NotificationListSortDirs, ", ")))
+		refused = true
+	}
+	if refused {
+		return "", ""
+	}
+	deref := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
+	}
+	order := httpx.Sort(v, deref(key), deref(dir), notificationListSortKeys)
+	return order.Key, order.Dir
+}
+
+// notificationListFilterKey is the canonicalized filter set and order a page
+// token is fingerprinted against. It names the list and the org too, since
+// the inbox and the All-teams list share their filters but not their rows.
 type notificationListFilterKey struct {
 	List       string                        `json:"list"`
 	OrgID      string                        `json:"org_id"`
@@ -214,47 +294,48 @@ type notificationListFilterKey struct {
 	Unread     *bool                         `json:"unread"`
 	PriorityIn []domain.NotificationPriority `json:"priority_in"`
 	ScopeIn    []domain.NotificationScope    `json:"scope_in"`
-	SortKey    string                        `json:"sort_key"`
-	SortDir    string                        `json:"sort_dir"`
+	RoleIn     []domain.NotificationRole     `json:"role_in"`
 	TeamIDIn   []string                      `json:"team_id_in"`
+	Search     string                        `json:"search"`
+	// The sort is in it because an offset addresses a position in an
+	// ordering, so a token minted under one sort names different rows under
+	// another.
+	SortKey string `json:"sort_key"`
+	SortDir string `json:"sort_dir"`
 }
 
-// parseNotificationFilter validates the filters and the sort both lists
-// share.
-func parseNotificationFilter(v *httpx.Validation, status *string, dismissed, unread *bool, priorityIn, scopeIn []string, sortKey, sortDir *string) db.NotificationListFilter {
-	f := db.NotificationListFilter{Dismissed: dismissed, Unread: unread}
-	if status != nil {
-		switch st := domain.NotificationStatus(*status); st {
+// parseNotificationFilter validates the filters the lists and the facets
+// nodes share.
+func parseNotificationFilter(v *httpx.Validation, in notificationFilterFields) db.NotificationListFilter {
+	f := db.NotificationListFilter{Dismissed: in.Dismissed, Unread: in.Unread}
+	if in.Status != nil {
+		switch st := domain.NotificationStatus(*in.Status); st {
 		case domain.NotificationOpen, domain.NotificationResolved:
 			f.Status = st
 		default:
 			v.Invalid("status", fmt.Sprintf("status must be %q or %q; leave it out to match both", domain.NotificationOpen, domain.NotificationResolved))
 		}
 	}
-	f.PriorityIn = parseNotificationEnums(v, "priority_in", priorityIn, domain.AllNotificationPriorities())
-	f.ScopeIn = parseNotificationEnums(v, "scope_in", scopeIn, domain.AllNotificationScopes())
-	if sortKey != nil {
-		if slices.Contains(db.NotificationListSortKeys, *sortKey) {
-			f.SortKey = *sortKey
-		} else {
-			v.Invalid("sort_key", fmt.Sprintf("sort_key: %q is not one of %s; leave it out for the default order",
-				*sortKey, strings.Join(db.NotificationListSortKeys, ", ")))
+	f.PriorityIn = parseNotificationEnums(v, "priority_in", in.PriorityIn, domain.AllNotificationPriorities())
+	f.ScopeIn = parseNotificationEnums(v, "scope_in", in.ScopeIn, domain.AllNotificationScopes())
+	f.RoleIn = parseNotificationEnums(v, "role_in", in.RoleIn, domain.AllNotificationRoles())
+	if in.TeamIDIn != nil {
+		if len(in.TeamIDIn) == 0 {
+			v.Invalid("team_id_in", "team_id_in must name at least one team; leave it out to match every team")
 		}
-	}
-	if sortDir != nil {
-		switch {
-		case !slices.Contains(db.NotificationListSortDirs, *sortDir):
-			v.Invalid("sort_dir", fmt.Sprintf("sort_dir: %q is not one of %s",
-				*sortDir, strings.Join(db.NotificationListSortDirs, ", ")))
-		case sortKey == nil:
-			v.Invalid("sort_dir", "sort_dir requires sort_key; the default order has no direction to flip")
-		default:
-			f.SortDir = *sortDir
+		for _, raw := range in.TeamIDIn {
+			id, err := uuid.Parse(raw)
+			if err != nil {
+				v.Invalid("team_id_in", fmt.Sprintf("team_id_in: %q is not a valid team id", raw))
+				f.TeamIDIn = nil
+				break
+			}
+			f.TeamIDIn = append(f.TeamIDIn, id.String())
 		}
+		slices.Sort(f.TeamIDIn)
+		f.TeamIDIn = slices.Compact(f.TeamIDIn)
 	}
-	if f.SortKey != "" && f.SortDir == "" {
-		f.SortDir = db.NotificationSortDirDesc
-	}
+	f.Search = httpx.Search(v, in.Search)
 	return f
 }
 
@@ -285,6 +366,24 @@ func parseNotificationEnums[T ~string](v *httpx.Validation, field string, raw []
 	return slices.Compact(out)
 }
 
+// notificationOrgCaller resolves the /api/orgs/{org_id} routes' subject: an
+// admin of the org the path names. The path spells the org as the caller
+// typed it, and the rows carry its canonical form, which their actions are
+// checked against; RequireOrgAdmin has parsed it.
+func (s *Server) notificationOrgCaller(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+	orgID, userID, ok = s.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return "", "", false
+	}
+	return uuid.MustParse(orgID).String(), userID, true
+}
+
+// notificationListRead is one list's store read, as a method expression.
+type notificationListRead = func(db.NotificationStore, context.Context, string, string, db.NotificationListFilter, db.ListOpts) ([]domain.NotificationView, int, error)
+
+// notificationFacetsRead is one list's facets read, as a method expression.
+type notificationFacetsRead = func(db.NotificationStore, context.Context, string, string, db.NotificationListFilter) (db.NotificationFacets, error)
+
 // handleNotificationList is the caller's inbox: the rows they are sent, which
 // for an org admin excludes the teams' rows they may read but are not sent.
 // page_size 0 is the badge's count-only read.
@@ -300,32 +399,13 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var v httpx.Validation
-	f := parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn, req.SortKey, req.SortDir)
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
-		List: "inbox", OrgID: orgID,
-		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
-		SortKey: f.SortKey, SortDir: f.SortDir,
-	}), 0)
+	f := parseNotificationListRequest(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, notificationListFingerprint("inbox", orgID, f), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-
-	var (
-		views []domain.NotificationView
-		total int
-	)
-	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		views, total, e = tx.Notifications.ListForViewer(r.Context(), orgID, userID, f,
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
-		return e
-	}); err != nil {
-		internalError(w, "notifications", err)
-		return
-	}
-	items, err := notificationItems(r, notify.NewCaller(s.az, orgID, userID), views)
-	if err != nil {
-		internalError(w, "notifications", err)
+	items, total, ok := s.readNotificationPage(w, r, orgID, userID, f, page, db.NotificationStore.ListForViewer)
+	if !ok {
 		return
 	}
 	httpx.WriteList(w, page, items, total)
@@ -336,66 +416,158 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 //
 // POST /api/orgs/{org_id}/notifications/list
 func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
+	orgID, userID, ok := s.notificationOrgCaller(w, r)
 	if !ok {
 		return
 	}
-	// The path spells the org as the caller typed it, and the rows carry its
-	// canonical form, which their actions are checked against. RequireOrgAdmin
-	// has parsed it.
-	orgID = uuid.MustParse(orgID).String()
-	var req notificationOrgListRequest
+	var req notificationListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	f := db.NotificationOrgListFilter{
-		NotificationListFilter: parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn, req.SortKey, req.SortDir),
-	}
-	if req.TeamIDIn != nil {
-		if len(req.TeamIDIn) == 0 {
-			v.Invalid("team_id_in", "team_id_in must name at least one team; leave it out to match every team")
-		}
-		for _, raw := range req.TeamIDIn {
-			id, err := uuid.Parse(raw)
-			if err != nil {
-				v.Invalid("team_id_in", fmt.Sprintf("team_id_in: %q is not a valid team id", raw))
-				f.TeamIDIn = nil
-				break
-			}
-			f.TeamIDIn = append(f.TeamIDIn, id.String())
-		}
-		slices.Sort(f.TeamIDIn)
-		f.TeamIDIn = slices.Compact(f.TeamIDIn)
-	}
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
-		List: "org", OrgID: orgID,
-		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
-		SortKey: f.SortKey, SortDir: f.SortDir, TeamIDIn: f.TeamIDIn,
-	}), 0)
+	f := parseNotificationListRequest(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, notificationListFingerprint("org", orgID, f), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
+	items, total, ok := s.readNotificationPage(w, r, orgID, userID, f, page, db.NotificationStore.ListForOrg)
+	if !ok {
+		return
+	}
+	httpx.WriteList(w, page, items, total)
+}
 
+// parseNotificationListRequest validates a list body's filters and order.
+func parseNotificationListRequest(v *httpx.Validation, req notificationListRequest) db.NotificationListFilter {
+	f := parseNotificationFilter(v, req.filters())
+	f.SortKey, f.SortDir = parseNotificationSort(v, req.SortKey, req.SortDir)
+	return f
+}
+
+// notificationListFingerprint is the page fingerprint of list's read of f in
+// orgID.
+func notificationListFingerprint(list, orgID string, f db.NotificationListFilter) string {
+	return httpx.FilterFingerprint(notificationListFilterKey{
+		List: list, OrgID: orgID,
+		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread,
+		PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn, RoleIn: f.RoleIn, TeamIDIn: f.TeamIDIn,
+		Search: httpx.SearchKey(f.Search), SortKey: f.SortKey, SortDir: f.SortDir,
+	})
+}
+
+// readNotificationPage reads one page through read and renders it for the
+// caller, answering a 500 itself when either fails.
+func (s *Server) readNotificationPage(w http.ResponseWriter, r *http.Request, orgID, userID string,
+	f db.NotificationListFilter, page httpx.Page, read notificationListRead,
+) ([]notificationJSON, int, bool) {
 	var (
 		views []domain.NotificationView
 		total int
 	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		views, total, e = tx.Notifications.ListForOrg(r.Context(), orgID, userID, f,
+		views, total, e = read(tx.Notifications, r.Context(), orgID, userID, f,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		return e
+	}); err != nil {
+		internalError(w, "notifications", err)
+		return nil, 0, false
+	}
+	items, err := notificationItems(r, notify.NewCaller(s.az, orgID, userID), views)
+	if err != nil {
+		internalError(w, "notifications", err)
+		return nil, 0, false
+	}
+	return items, total, true
+}
+
+// notificationFacetsResponse is the facets nodes' fixed schema of named cuts.
+//
+//   - by_priority: the priorities present, urgent first, counted under every
+//     filter but priority_in.
+//   - by_audience: the audiences present, counted under every filter but the
+//     audience filters (scope_in, role_in, team_id_in), in the byte order of
+//     their values. A value names the filters that list exactly its rows:
+//     "user" is scope_in [user]; "org:admins" and "org:members" are scope_in
+//     [org] with role_in [admins] or [members]; "team:<team id>" is
+//     team_id_in [<team id>], whichever role the team's rows are for.
+//
+// A value no row carries is absent, so an empty cut is [].
+type notificationFacetsResponse struct {
+	ByPriority []httpx.FacetJSON `json:"by_priority"`
+	ByAudience []httpx.FacetJSON `json:"by_audience"`
+}
+
+// handleNotificationFacets is the inbox's synthetic sibling: how many of the
+// rows its filters match sit at each priority and each audience, which a
+// client's filter chips count from. It is a node rather than a field on the
+// list because the answer is numbers about rows, and a client cannot count
+// them from the list, which it holds one page of.
+//
+// POST /api/me/notifications/facets
+func (s *Server) handleNotificationFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := notificationCaller(w, r)
+	if !ok {
+		return
+	}
+	s.writeNotificationFacets(w, r, orgID, userID, db.NotificationStore.FacetsForViewer)
+}
+
+// handleOrgNotificationFacets is the All-teams list's synthetic sibling, on
+// the same terms as the inbox's.
+//
+// POST /api/orgs/{org_id}/notifications/facets
+func (s *Server) handleOrgNotificationFacets(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.notificationOrgCaller(w, r)
+	if !ok {
+		return
+	}
+	s.writeNotificationFacets(w, r, orgID, userID, db.NotificationStore.FacetsForOrg)
+}
+
+// writeNotificationFacets decodes a facets body and answers the cuts read
+// counts. It takes no paging: the cuts group closed vocabularies, so the
+// answer is bounded by them rather than by a window.
+func (s *Server) writeNotificationFacets(w http.ResponseWriter, r *http.Request, orgID, userID string, read notificationFacetsRead) {
+	var req notificationFacetsRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	const orders = "%s orders the list; the facets count rows and have no order to take"
+	const pages = "%s is not accepted: the facets are one answer over closed vocabularies, not a page"
+	for _, refused := range []struct {
+		field  string
+		sent   json.RawMessage
+		reason string
+	}{
+		{"sort_key", req.SortKey, orders},
+		{"sort_dir", req.SortDir, orders},
+		{"page_size", req.PageSize, pages},
+		{"page_token", req.PageToken, pages},
+	} {
+		if refused.sent != nil {
+			v.Invalid(refused.field, fmt.Sprintf(refused.reason, refused.field))
+		}
+	}
+	f := parseNotificationFilter(&v, req.filters())
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var facets db.NotificationFacets
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		facets, e = read(tx.Notifications, r.Context(), orgID, userID, f)
 		return e
 	}); err != nil {
 		internalError(w, "notifications", err)
 		return
 	}
-	items, err := notificationItems(r, notify.NewCaller(s.az, orgID, userID), views)
-	if err != nil {
-		internalError(w, "notifications", err)
-		return
-	}
-	httpx.WriteList(w, page, items, total)
+	writeJSON(w, http.StatusOK, notificationFacetsResponse{
+		ByPriority: httpx.Facets(facets.ByPriority),
+		ByAudience: httpx.Facets(facets.ByAudience),
+	})
 }
 
 // --------------------------------------------------------------------
@@ -680,7 +852,9 @@ func (s *Server) registerNotificationRoutes() {
 	// single read, the marks and the actions take any row they may READ,
 	// which for an org admin includes every team's. mark-read is a verb
 	// because it is a multi-row transition over the ids the client rendered.
+	// facets is the list's counts, a POST because its filters are a body.
 	s.apiMutating("POST /api/me/notifications/list", s.handleNotificationList)
+	s.apiMutating("POST /api/me/notifications/facets", s.handleNotificationFacets)
 	s.apiMutating("POST /api/me/notifications/mark-read", s.handleNotificationMarkRead)
 	s.api("GET /api/me/notifications/{id}", s.handleNotificationGet)
 	s.apiMutating("PATCH /api/me/notifications/{id}", s.handleNotificationMarksPatch)
@@ -689,4 +863,5 @@ func (s *Server) registerNotificationRoutes() {
 	// included, which an org admin may read but is not sent. Authorized
 	// against {org_id}; a member who is not an admin gets 403.
 	s.apiMutating("POST /api/orgs/{org_id}/notifications/list", s.handleOrgNotificationList)
+	s.apiMutating("POST /api/orgs/{org_id}/notifications/facets", s.handleOrgNotificationFacets)
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import Table from '../../ui/table/Table'
-import type { TableColumn, TableCommitReason, TableRow } from '../../ui/table/Table'
+import type { TableColumn, TableCommitReason, TableRow, TableSort } from '../../ui/table/Table'
 import { Segmented } from '../../ui/segmented/Segmented'
 import Checkbox from '../../ui/checkbox/Checkbox'
 import { ago } from '../../ui/table/cells'
@@ -23,20 +23,26 @@ import {
 import { toast } from '../../components/Toast/toastStore'
 import { HttpError, httpErrorMessage } from '../../lib/apiClient'
 import {
+  NOTIFICATIONS_FACETS_PATH,
   NOTIFICATIONS_LIST_PATH,
+  audienceFilter,
   followNotificationLink,
   getNotification,
   isExternalHref,
   listNotifications,
   listOrgNotifications,
+  notificationFacets,
   notificationPath,
+  orgNotificationsFacetsPath,
   orgNotificationsListPath,
   usableActions,
   type NotificationAction,
+  type NotificationFacets,
   type NotificationFilter,
   type NotificationItem,
   type NotificationPriority,
   type NotificationSort,
+  type NotificationSortKey,
 } from '../../lib/notifications'
 import { listOrgTeams } from '../../lib/orgTeams'
 import { fetchArchivedTeams } from '../../lib/teamLifecycle'
@@ -48,9 +54,11 @@ import './notifications.css'
 
 // Notifications: one table of what the viewer is sent, open or resolved, with
 // filters beside it. Everything a row says is the API's: its title, body,
-// actions and their labels, who it is for, and why it resolved. The page adds
-// the reading of it: which rows have been seen (on dwell), the filters, and
-// an org admin's view of every team's rows.
+// actions and their labels, who it is for, and why it resolved. So is every
+// narrowing: the search, the filters, the order and the counts beside the
+// filters are the list route's and its facets node's, never worked out over
+// the rows a page holds. The page adds the reading of it: which rows have been
+// seen (on dwell), and an org admin's view of every team's rows.
 
 type Tab = 'open' | 'resolved'
 type List = 'sent' | 'all'
@@ -63,8 +71,11 @@ const TINT_MS = 2400
 const LINK_OFFSET = 90
 /** Pings come in bursts; one read answers a burst. */
 const HINT_DEBOUNCE_MS = 250
+/** Typing pauses this long before the search is read. */
+const SEARCH_DEBOUNCE_MS = 250
+/** The list route's cap on a search. */
+const SEARCH_MAX = 200
 
-const RANK: Record<NotificationPriority, number> = { urgent: 0, high: 1, low: 2 }
 const PRIORITY_LABEL: Record<NotificationPriority, string> = {
   urgent: 'Urgent',
   high: 'High',
@@ -72,8 +83,18 @@ const PRIORITY_LABEL: Record<NotificationPriority, string> = {
 }
 const PRIORITIES: NotificationPriority[] = ['urgent', 'high', 'low']
 
+/** The orders a tab's columns offer. */
+const TAB_SORTS: Record<Tab, NotificationSortKey[]> = {
+  open: ['priority', 'title', 'first_seen_at', 'last_seen_at'],
+  resolved: ['priority', 'title', 'resolved_at'],
+}
+
 function listPath(list: List, org: string): string {
   return list === 'all' ? orgNotificationsListPath(org) : NOTIFICATIONS_LIST_PATH
+}
+
+function facetsPath(list: List, org: string): string {
+  return list === 'all' ? orgNotificationsFacetsPath(org) : NOTIFICATIONS_FACETS_PATH
 }
 
 /** What a tab reads. Dismissed rows are left out of Open unless asked for;
@@ -83,8 +104,38 @@ function tabFilter(tab: Tab, showDismissed: boolean): NotificationFilter {
   return showDismissed ? { status: 'open' } : { status: 'open', dismissed: false }
 }
 
-function viewKey(path: string, tab: Tab, showDismissed: boolean): string {
-  return `${path}|${tab}|${tab === 'open' && showDismissed}`
+/** The reader's narrowing of a tab: a priority, an audience (a `by_audience`
+ *  value), and a search. */
+type Narrowing = { pri: NotificationPriority | null; who: string | null; search: string }
+const NO_NARROWING: Narrowing = { pri: null, who: null, search: '' }
+
+/** The filters a view reads under, which its list and its facets share. */
+function viewFilter(tab: Tab, showDismissed: boolean, n: Narrowing): NotificationFilter {
+  return {
+    ...tabFilter(tab, showDismissed),
+    ...(n.pri ? { priority_in: [n.pri] } : {}),
+    ...((n.who && audienceFilter(n.who)) || {}),
+    ...(n.search ? { search: n.search } : {}),
+  }
+}
+
+/** The order a tab reads in: the one asked for, while the tab has a column
+ *  for it, else the route's default. */
+function tabSort(tab: Tab, sort: TableSort | null): TableSort | null {
+  return sort && (TAB_SORTS[tab] as string[]).includes(sort.key) ? sort : null
+}
+
+/** A view's list read: its filters and its order. */
+type ViewRequest = NotificationFilter & Partial<NotificationSort>
+
+function viewRequest(filter: NotificationFilter, sort: TableSort | null): ViewRequest {
+  return sort
+    ? { ...filter, sort_key: sort.key as NotificationSortKey, sort_dir: sort.dir }
+    : filter
+}
+
+function viewKey(path: string, request: ViewRequest): string {
+  return `${path}|${JSON.stringify(request)}`
 }
 
 /** The Open tab's count: what is open and not dismissed. */
@@ -105,18 +156,13 @@ function minutes(at: string | null, now: number): number {
 
 type Team = { id: string; name: string; mine: boolean }
 
-/** Who a row is for, as the FOR column and its filter name it. The filter
- *  groups a team's rows by team, whichever of its roles they are for. */
-function audienceOf(n: NotificationItem, teamName: (id: string) => string | undefined) {
+/** Who a row is for, as the FOR column names it. */
+function audienceLabel(n: NotificationItem, teamName: (id: string) => string | undefined): string {
   const a = n.audience
-  if (a.scope === 'user') return { facet: 'you', label: 'You' }
-  if (a.scope === 'org') {
-    return a.role === 'admins'
-      ? { facet: 'org:admins', label: 'Org admins' }
-      : { facet: 'org:members', label: 'Everyone' }
-  }
+  if (a.scope === 'user') return 'You'
+  if (a.scope === 'org') return a.role === 'admins' ? 'Org admins' : 'Everyone'
   const name = (a.team_id && teamName(a.team_id)) || 'Team'
-  return { facet: `team:${a.team_id}`, label: a.role === 'admins' ? `${name} admins` : name }
+  return a.role === 'admins' ? `${name} admins` : name
 }
 
 /** Re-render on a clock, so the ages in the table move while the page is open. */
@@ -149,8 +195,12 @@ function OrgNotifications({ org }: { org: string }) {
   const [chosenList, setList] = useState<List>('sent')
   const list: List = orgAdmin ? chosenList : 'sent'
   const [fPri, setFPri] = useState<NotificationPriority | null>(null)
+  // A by_audience value.
   const [fWho, setFWho] = useState<string | null>(null)
+  // What is typed, and the search read: the same once typing pauses.
   const [q, setQ] = useState('')
+  const [search, setSearch] = useState('')
+  const [sorted, setSorted] = useState<TableSort | null>(null)
   const [showDismissed, setShowDismissed] = useState(false)
   const [tint, setTint] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ id: string; anchor: HTMLElement } | null>(null)
@@ -161,18 +211,35 @@ function OrgNotifications({ org }: { org: string }) {
     setFPri(null)
     setFWho(null)
     setQ('')
+    setSearch('')
   }
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(q.trim()), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(t)
+  }, [q])
 
   // ---- reads --------------------------------------------------------
 
   const path = listPath(list, org)
+  const fpath = facetsPath(list, org)
   const paged = usePagedList<NotificationItem>(path, 'Could not load your notifications.', {
     keyOf: idOf,
   })
   const loadPage = paged.load
-  const key = viewKey(path, tab, showDismissed)
+  const sort = tabSort(tab, sorted)
+  const filter = useMemo(
+    () => viewFilter(tab, showDismissed, { pri: fPri, who: fWho, search }),
+    [tab, showDismissed, fPri, fWho, search],
+  )
+  const request = useMemo(() => viewRequest(filter, sort), [filter, sort])
+  const key = viewKey(path, request)
   const [loadedKey, setLoadedKey] = useState('')
   const [openCount, setOpenCount] = useState<{ path: string; n: number; any: number } | null>(null)
+  const [facetAnswer, setFacetAnswer] = useState<{
+    path: string
+    facets: NotificationFacets
+  } | null>(null)
   const reload = useRef<() => void>(() => {})
   const reads = useRef(0)
 
@@ -185,10 +252,7 @@ function OrgNotifications({ org }: { org: string }) {
       const n = ++reads.current
       const latest = () => live && n === reads.current
       // A reread keeps the depth "load more" reached.
-      const listed = loadPage(
-        { ...tabFilter(tab, showDismissed), page_size: PAGE },
-        { keepDepth: true },
-      )
+      const listed = loadPage({ ...request, page_size: PAGE }, { keepDepth: true })
       const count = (f: NotificationFilter) =>
         list === 'all' ? listOrgNotifications(org, f, 0) : listNotifications(f, 0)
       const counted = Promise.all([count(OPEN_COUNT), count(OPEN_ANY)]).then(([open, any]) => {
@@ -196,6 +260,12 @@ function OrgNotifications({ org }: { org: string }) {
           setOpenCount({ path, n: open.total_count, any: any.total_count })
         }
       })
+      // The filters' counts. Until they answer, the last ones stay.
+      notificationFacets(fpath, filter)
+        .then((facets) => {
+          if (latest()) setFacetAnswer({ path: fpath, facets })
+        })
+        .catch(() => {})
       // Loaded once both have answered: with nothing undismissed open, the
       // counts are what say whether anything is.
       void Promise.allSettled([listed, counted]).then(() => {
@@ -207,7 +277,7 @@ function OrgNotifications({ org }: { org: string }) {
     return () => {
       live = false
     }
-  }, [org, list, path, tab, showDismissed, key, loadPage])
+  }, [org, list, path, fpath, filter, request, key, loadPage])
 
   // The invalidation ping, and a reconnect, which may have missed some.
   const hint = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -266,6 +336,8 @@ function OrgNotifications({ org }: { org: string }) {
 
   const reloadNow = useCallback(() => reload.current(), [])
   const { items, markRead, ...marks } = useMarks(paged.items, reloadNow)
+  // The list already leaves dismissed rows out of Open; this hides only a row
+  // the viewer has just dismissed here, until the next read agrees.
   const pool = useMemo(
     () => (tab === 'open' && !showDismissed ? items.filter((n) => !n.dismissed) : items),
     [items, tab, showDismissed],
@@ -299,9 +371,9 @@ function OrgNotifications({ org }: { org: string }) {
       mounted.current = false
     }
   }, [])
-  const linkView = useRef({ list, tab, showDismissed, orgAdmin, org, markRead })
+  const linkView = useRef({ list, tab, showDismissed, sorted, orgAdmin, org, markRead })
   useEffect(() => {
-    linkView.current = { list, tab, showDismissed, orgAdmin, org, markRead }
+    linkView.current = { list, tab, showDismissed, sorted, orgAdmin, org, markRead }
   })
   // The link being opened, so a second run of the effect for the same one (a
   // development double-mount) does not open it twice; and the last one asked
@@ -335,10 +407,17 @@ function OrgNotifications({ org }: { org: string }) {
         setList(nextList)
         setTab(nextTab)
         setShowDismissed(nextDismissed)
+        // The filters are cleared, so they cannot hide it; the order is kept,
+        // since it hides nothing.
         setFPri(null)
         setFWho(null)
         setQ('')
-        setSeek({ id: n.id, key: viewKey(listPath(nextList, v.org), nextTab, nextDismissed) })
+        setSearch('')
+        const nextView = viewRequest(
+          viewFilter(nextTab, nextDismissed, NO_NARROWING),
+          tabSort(nextTab, v.sorted),
+        )
+        setSeek({ id: n.id, key: viewKey(listPath(nextList, v.org), nextView) })
         v.markRead([n.id], true)
       })
       .catch((e) => {
@@ -444,22 +523,14 @@ function OrgNotifications({ org }: { org: string }) {
 
   // ---- filters ------------------------------------------------------
 
-  const audience = useCallback((n: NotificationItem) => audienceOf(n, teamName), [teamName])
-  const passPri = useCallback((n: NotificationItem) => !fPri || n.priority === fPri, [fPri])
-  const passWho = useCallback(
-    (n: NotificationItem) => !fWho || audience(n).facet === fWho,
-    [fWho, audience],
-  )
-
+  // The options are drawn from the facets node: the priorities and audiences
+  // present across the whole list, each counted under the other filter, not
+  // only the rows loaded. The option list itself is the page's own, so a
+  // chosen option with nothing left in it stays to be unchosen.
+  const facetCounts = facetAnswer?.path === fpath ? facetAnswer.facets : null
   const facets = useMemo(() => {
-    const byPri = new Map<string, number>()
-    for (const n of pool) if (passWho(n)) byPri.set(n.priority, (byPri.get(n.priority) ?? 0) + 1)
-    const byWho = new Map<string, number>()
-    for (const n of pool) {
-      if (!passPri(n)) continue
-      const f = audience(n).facet
-      byWho.set(f, (byWho.get(f) ?? 0) + 1)
-    }
+    const byPri = new Map((facetCounts?.by_priority ?? []).map((f) => [f.value, f.count]))
+    const byWho = new Map((facetCounts?.by_audience ?? []).map((f) => [f.value, f.count]))
     const shown = (facet: string, count: number, selected: string | null) =>
       count > 0 || selected === facet
     const priority = PRIORITIES.map((p) => ({
@@ -472,10 +543,10 @@ function OrgNotifications({ org }: { org: string }) {
       opt('org:admins', 'Org admins'),
       opt('org:members', 'Everyone'),
       ...teams.filter((t) => t.mine).map((t) => opt(`team:${t.id}`, t.name)),
-      opt('you', 'You'),
+      opt('user', 'You'),
     ].filter((o) => shown(o.facet, o.count, fWho))
-    // Teams the viewer reads only as an org admin, by the facet their rows
-    // carry, so a team whose name has not loaded yet still has a row.
+    // Teams the viewer reads only as an org admin, by the value their rows
+    // carry, so a team whose name has not loaded yet still has an option.
     const otherFacets = new Set(
       [...byWho.keys()].filter((f) => f.startsWith('team:') && !forMine.some((o) => o.facet === f)),
     )
@@ -487,24 +558,19 @@ function OrgNotifications({ org }: { org: string }) {
             .sort((a, b) => a.name.localeCompare(b.name))
         : []
     return { priority, forMine, others }
-  }, [pool, passPri, passWho, audience, teams, teamName, fPri, fWho, list])
+  }, [facetCounts, teams, teamName, fPri, fWho, list])
 
-  const rows = useMemo<TableRow[]>(() => {
-    const needle = q.trim().toLowerCase()
-    return pool
-      .filter((n) => passPri(n) && passWho(n))
-      .map((n) => ({ n, who: audience(n).label }))
-      .filter(
-        ({ n, who }) => !needle || [n.title, n.body, who].join(' ').toLowerCase().includes(needle),
-      )
-      .map(({ n, who }) => ({
+  // The rows in the order the list answered them.
+  const rows = useMemo<TableRow[]>(
+    () =>
+      pool.map((n) => ({
         id: n.id,
         item: n,
-        rank: RANK[n.priority],
-        who,
+        who: audienceLabel(n, teamName),
         unread: !n.read && !n.resolved_at,
-      }))
-  }, [pool, passPri, passWho, audience, q])
+      })),
+    [pool, teamName],
+  )
 
   // ---- the table ----------------------------------------------------
 
@@ -518,7 +584,8 @@ function OrgNotifications({ org }: { org: string }) {
         key: 'pri',
         label: 'PRIORITY',
         width: '84px',
-        sortValue: (r) => r.rank,
+        sortKey: 'priority',
+        sortFirst: 'asc',
         render: (r) => (
           <span
             className="nt-pri"
@@ -534,7 +601,8 @@ function OrgNotifications({ org }: { org: string }) {
         key: 'note',
         label: 'NOTIFICATION',
         floor: 320,
-        sortValue: (r) => r.item.title,
+        sortKey: 'title',
+        sortFirst: 'asc',
         render: (r) => (
           <NoteCell
             n={r.item}
@@ -559,7 +627,9 @@ function OrgNotifications({ org }: { org: string }) {
         label: resolvedTab ? 'RESOLVED' : 'TRUE FOR',
         width: '76px',
         align: 'end',
-        sortValue: (r) => minutes(resolvedTab ? r.item.resolved_at : r.item.first_seen_at, now),
+        // Newest first: the shortest time.
+        sortKey: resolvedTab ? 'resolved_at' : 'first_seen_at',
+        sortFirst: 'desc',
         render: (r) =>
           resolvedTab
             ? `${ago(minutes(r.item.resolved_at, now))} ago`
@@ -573,7 +643,6 @@ function OrgNotifications({ org }: { org: string }) {
             align: 'end',
             drop: 1,
             color: () => 'var(--color-ink-4)',
-            sortValue: (r) => r.item.resolution ?? '',
             // A row whose sentence could not be written says nothing rather
             // than something the API did not say.
             render: (r) => r.item.resolution ?? '—',
@@ -585,10 +654,9 @@ function OrgNotifications({ org }: { org: string }) {
             align: 'end',
             drop: 1,
             color: () => 'var(--color-ink-4)',
-            sortValue: (r) =>
-              r.item.lifecycle === 'notice' && r.item.expires_at
-                ? -minutes(r.item.expires_at, now)
-                : minutes(r.item.last_seen_at, now),
+            // A notice sorts by when it was posted, its last sighting.
+            sortKey: 'last_seen_at',
+            sortFirst: 'desc',
             // A notice is not seen again; what it has left is time.
             render: (r) =>
               r.item.lifecycle === 'notice' && r.item.expires_at
@@ -836,12 +904,15 @@ function OrgNotifications({ org }: { org: string }) {
               lines="wrap"
               mark={(r) => r.unread}
               pageSize={0}
+              sort={sort}
+              onSortChange={setSorted}
               selectable={tab === 'open'}
               headerRight={
                 <input
                   className="nt-search"
                   type="search"
                   value={q}
+                  maxLength={SEARCH_MAX}
                   onChange={(e) => setQ(e.target.value)}
                   placeholder="Search notifications"
                   aria-label="Search notifications"

@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -159,6 +161,79 @@ func TestNotifications_Postgres_SentAndReadable(t *testing.T) {
 		assertFault(t, r.tokensJSON(http.MethodGet, meNotifications+"/"+id, nil, r.plainSid, ""), http.StatusNotFound, httpx.ReasonNotFound)
 		assertFault(t, r.tokensJSON(http.MethodPatch, meNotifications+"/"+id, map[string]any{"read": true}, r.plainSid, ""), http.StatusNotFound, httpx.ReasonNotFound)
 	}
+}
+
+// TestNotifications_Postgres_Audience: the audience filters select what the
+// by_audience values name, on both lists, and the facets count each list's own
+// rows: the org admin's inbox holds no team row, their All-teams list does.
+func TestNotifications_Postgres_Audience(t *testing.T) {
+	r := newNotificationsRig(t)
+	team := "team:" + r.infra.String()
+
+	for _, c := range []struct {
+		name, sid, path string
+		body            map[string]any
+		want            []string
+	}{
+		{"org admins on All teams", r.ownerSid, r.orgNotifications, map[string]any{"scope_in": []string{"org"}, "role_in": []string{"admins"}}, []string{r.orgRowID}},
+		{"admins on All teams", r.ownerSid, r.orgNotifications, map[string]any{"role_in": []string{"admins"}}, []string{r.orgRowID, r.teamRowID}},
+		{"members on All teams", r.ownerSid, r.orgNotifications, map[string]any{"role_in": []string{"members"}}, nil},
+		{"infra on All teams", r.ownerSid, r.orgNotifications, map[string]any{"team_id_in": []string{r.infra.String()}}, []string{r.teamRowID}},
+		{"infra in the team admin's inbox", r.infraAdminSid, meNotifications + "/list", map[string]any{"team_id_in": []string{strings.ToUpper(r.infra.String())}}, []string{r.teamRowID}},
+		{"infra in the org admin's inbox", r.ownerSid, meNotifications + "/list", map[string]any{"team_id_in": []string{r.infra.String()}}, nil},
+	} {
+		got := r.list(c.sid, "", c.path, c.body)
+		var ids []string
+		for _, it := range got.Items {
+			ids = append(ids, it.ID)
+		}
+		slices.Sort(ids)
+		slices.Sort(c.want)
+		if !slices.Equal(ids, c.want) || got.Total() != len(c.want) {
+			t.Errorf("%s = %v (total %d), want %v", c.name, ids, got.Total(), c.want)
+		}
+	}
+
+	facets := func(sid, path string) notificationFacetsWire {
+		t.Helper()
+		rec := r.tokensJSON(http.MethodPost, path, map[string]any{"status": "open"}, sid, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		var out notificationFacetsWire
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode facets: %v", err)
+		}
+		return out
+	}
+	orgFacets := "/api/orgs/" + r.orgID.String() + "/notifications/facets"
+	for _, c := range []struct {
+		name, sid, path string
+		want            []httpx.FacetJSON
+	}{
+		{"org admin's inbox", r.ownerSid, meNotifications + "/facets", []httpx.FacetJSON{{Value: "org:admins", Count: 1}}},
+		{"team admin's inbox", r.infraAdminSid, meNotifications + "/facets", []httpx.FacetJSON{{Value: team, Count: 1}}},
+		{"All teams", r.ownerSid, orgFacets, []httpx.FacetJSON{{Value: "org:admins", Count: 1}, {Value: team, Count: 1}}},
+	} {
+		got := facets(c.sid, c.path)
+		if !slices.Equal(got.ByAudience, c.want) {
+			t.Errorf("%s by_audience = %+v, want %+v", c.name, got.ByAudience, c.want)
+		}
+		var n int
+		for _, p := range got.ByPriority {
+			n += p.Count
+		}
+		if n != len(c.want) {
+			t.Errorf("%s by_priority = %+v, want %d rows counted", c.name, got.ByPriority, len(c.want))
+		}
+	}
+
+	// The All-teams facets are the All-teams list's: authorized against
+	// {org_id} the same way.
+	assertFault(t, r.tokensJSON(http.MethodPost, orgFacets, map[string]any{}, r.infraAdminSid, ""), http.StatusForbidden, httpx.ReasonForbidden)
+	other, _ := r.seedOrg(r.seedUser(), "facets-elsewhere")
+	assertFault(t, r.tokensJSON(http.MethodPost, "/api/orgs/"+other.String()+"/notifications/facets", map[string]any{}, r.ownerSid, ""),
+		http.StatusNotFound, httpx.ReasonNotFound)
 }
 
 // TestNotifications_Postgres_OrgListGate: the All-teams list authorizes

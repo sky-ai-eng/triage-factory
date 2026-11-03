@@ -1,4 +1,4 @@
-import { apiJSON, apiList, apiListAt, type ListPage } from './apiClient'
+import { apiJSON, apiList, apiListAt, type Facet, type ListPage, type SortDir } from './apiClient'
 
 // The notifications inbox (specs/durable-notifications.md, HTTP API). It is
 // viewer-relative, so every route is under /api/me and answers for the org the
@@ -6,6 +6,7 @@ import { apiJSON, apiList, apiListAt, type ListPage } from './apiClient'
 
 export type NotificationPriority = 'urgent' | 'high' | 'low'
 export type NotificationScope = 'org' | 'team' | 'user'
+export type NotificationRole = 'admins' | 'members'
 
 export interface NotificationAction {
   id: string
@@ -51,30 +52,85 @@ export interface NotificationItem {
   sent: boolean
 }
 
-/** The inbox's filters. An absent field does not filter. */
+/** The lists' filters, which both lists and both facets nodes take. An absent
+ *  field does not filter. `search` matches the title or the body. */
 export interface NotificationFilter {
   status?: 'open' | 'resolved'
   dismissed?: boolean
   unread?: boolean
   priority_in?: NotificationPriority[]
   scope_in?: NotificationScope[]
+  role_in?: NotificationRole[]
+  team_id_in?: string[]
+  search?: string
 }
+
+/** What a list can be ordered by. `priority` ascending is urgent first. */
+export type NotificationSortKey =
+  | 'priority'
+  | 'title'
+  | 'first_seen_at'
+  | 'last_seen_at'
+  | 'resolved_at'
 
 /** A list's order. Absent, a list orders by priority, then the latest
  *  escalation. Sorted by resolved_at, open rows trail in either direction. */
 export interface NotificationSort {
-  sort_key: 'resolved_at'
-  /** Absent means desc. */
-  sort_dir?: 'asc' | 'desc'
+  sort_key: NotificationSortKey
+  /** Absent, the key's own: ascending for priority and title (urgent first,
+   *  A to Z), descending for the times (the latest first). */
+  sort_dir?: SortDir
 }
 
 /** The viewer's inbox. */
 export const NOTIFICATIONS_LIST_PATH = '/api/me/notifications/list'
 
+/** The inbox's counts by priority and audience. */
+export const NOTIFICATIONS_FACETS_PATH = '/api/me/notifications/facets'
+
 /** Every notification in an org, team rows included: an org admin's All
  *  teams view. */
 export function orgNotificationsListPath(orgID: string): string {
   return `/api/orgs/${encodeURIComponent(orgID)}/notifications/list`
+}
+
+/** The All teams view's counts by priority and audience. */
+export function orgNotificationsFacetsPath(orgID: string): string {
+  return `/api/orgs/${encodeURIComponent(orgID)}/notifications/facets`
+}
+
+/** A facets node's answer: how many rows the filters match at each priority
+ *  (counted without `priority_in`) and each audience (counted without the
+ *  audience filters). A value no row carries is absent. */
+export interface NotificationFacets {
+  by_priority: Facet[]
+  by_audience: Facet[]
+}
+
+/** The counts beside a list, read from its facets node at `path`. */
+export function notificationFacets(
+  path: string,
+  filter: NotificationFilter,
+): Promise<NotificationFacets> {
+  return apiJSON<NotificationFacets>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(filter),
+  })
+}
+
+/** The list filters that select exactly the rows of one `by_audience` value,
+ *  or null for a value this client does not know. A value is `user`,
+ *  `org:admins`, `org:members`, or `team:<team id>` for a team's rows
+ *  whichever their role. */
+export function audienceFilter(value: string): NotificationFilter | null {
+  if (value === 'user') return { scope_in: ['user'] }
+  if (value === 'org:admins') return { scope_in: ['org'], role_in: ['admins'] }
+  if (value === 'org:members') return { scope_in: ['org'], role_in: ['members'] }
+  if (value.startsWith('team:') && value.length > 'team:'.length) {
+    return { team_id_in: [value.slice('team:'.length)] }
+  }
+  return null
 }
 
 /** The actions this viewer can use, in the row's order: a link with somewhere

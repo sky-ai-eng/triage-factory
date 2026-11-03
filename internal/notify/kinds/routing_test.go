@@ -114,7 +114,7 @@ func TestAutomationConflict_OneRowPerLosingTeam(t *testing.T) {
 
 func conflictRows(t *testing.T, stores db.Stores, orgID, viewer string) []domain.Notification {
 	t.Helper()
-	views, _, err := stores.Notifications.ListForOrg(context.Background(), orgID, viewer, db.NotificationOrgListFilter{}, db.ListOpts{Limit: 200})
+	views, _, err := stores.Notifications.ListForOrg(context.Background(), orgID, viewer, db.NotificationListFilter{}, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("ListForOrg: %v", err)
 	}
