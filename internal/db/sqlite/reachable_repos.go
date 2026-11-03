@@ -349,12 +349,9 @@ func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, ho
 	}
 	where := ` WHERE r.org_id = ? AND r.credential_class = ? AND ` + reachableOnHost("r")
 	args := []any{orgID, string(class), host}
-	if term := strings.TrimSpace(q); term != "" {
-		pattern := "%" + db.LikeEscape(strings.ToLower(term)) + "%"
-		where += ` AND (LOWER(r.owner || '/' || r.repo) LIKE ? ESCAPE '\'
-		            OR LOWER(r.description) LIKE ? ESCAPE '\'
-		            OR LOWER(r.language) LIKE ? ESCAPE '\')`
-		args = append(args, pattern, pattern, pattern)
+	if clause, a := db.SQLiteSearch(q, "r.owner || '/' || r.repo", "r.description", "r.language"); clause != "" {
+		where += " AND " + clause
+		args = append(args, a...)
 	}
 
 	var total int

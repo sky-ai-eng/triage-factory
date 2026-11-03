@@ -68,6 +68,7 @@ export function TableCard() {
   const [log, setLog] = useState<string | null>(null)
   const [build, setBuild] = useState(0)
   const [opens, setOpens] = useState(false)
+  const [needle, setNeedle] = useState('')
 
   return (
     <div className="gal-card">
@@ -140,7 +141,12 @@ export function TableCard() {
           add={{
             label: 'add teammate',
             placeholder: 'name or email — three characters',
-            options: CANDIDATES,
+            // The gallery's directory is a fixed handful; a real one is a list
+            // route read with `search`.
+            options: needle
+              ? CANDIDATES.filter((c) => c.name.toLowerCase().includes(needle.toLowerCase()))
+              : [],
+            onQuery: setNeedle,
             onAdd: (person) => {
               setRows((r) => [
                 ...r,

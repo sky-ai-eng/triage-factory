@@ -355,12 +355,9 @@ func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, ho
 	}
 	where := ` WHERE r.org_id = $1 AND r.credential_class = $2 AND ` + reachableOnHost("r", "$3")
 	args := []any{orgID, string(class), host}
-	if term := strings.TrimSpace(q); term != "" {
-		args = append(args, "%"+db.LikeEscape(strings.ToLower(term))+"%")
-		p := fmt.Sprintf("$%d", len(args))
-		where += fmt.Sprintf(` AND (lower(r.owner || '/' || r.repo) LIKE %[1]s ESCAPE '\'
-		            OR lower(r.description) LIKE %[1]s ESCAPE '\'
-		            OR lower(r.language) LIKE %[1]s ESCAPE '\')`, p)
+	var search string
+	if search, args = db.PostgresSearch(q, args, "r.owner || '/' || r.repo", "r.description", "r.language"); search != "" {
+		where += " AND " + search
 	}
 
 	var total int

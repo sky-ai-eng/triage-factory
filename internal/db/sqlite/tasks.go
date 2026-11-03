@@ -479,17 +479,10 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 			args = append(args, et)
 		}
 	}
-	if term := strings.TrimSpace(f.Search); term != "" {
-		// The four fields the card shows, matched as a literal substring:
-		// LikeEscape neutralizes the wildcards, so a needle holding '%'
-		// matches a percent sign instead of every row. A NULL ai_summary
-		// simply fails its arm — no COALESCE needed for an OR.
-		pattern := "%" + db.LikeEscape(strings.ToLower(term)) + "%"
-		clauses = append(clauses, `(LOWER(e.title) LIKE ? ESCAPE '\'
-		            OR LOWER(e.source_id) LIKE ? ESCAPE '\'
-		            OR LOWER(t.ai_summary) LIKE ? ESCAPE '\'
-		            OR LOWER(t.event_type) LIKE ? ESCAPE '\')`)
-		args = append(args, pattern, pattern, pattern, pattern)
+	// The four fields the card shows, matched as a literal substring.
+	if clause, a := db.SQLiteSearch(f.Search, "e.title", "e.source_id", "t.ai_summary", "t.event_type"); clause != "" {
+		clauses = append(clauses, clause)
+		args = append(args, a...)
 	}
 	if len(f.Sources) > 0 {
 		ph := strings.TrimRight(strings.Repeat("?, ", len(f.Sources)), ", ")

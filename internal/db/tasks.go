@@ -220,8 +220,8 @@ const (
 	// ascending list.
 	TaskSortClaimee = "claimee"
 
-	TaskSortDirAsc  = "asc"
-	TaskSortDirDesc = "desc"
+	TaskSortDirAsc  = SortAsc
+	TaskSortDirDesc = SortDesc
 )
 
 // TaskListSortKeys is the full vocabulary TaskListFilter.SortKey accepts.

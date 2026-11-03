@@ -12,18 +12,21 @@ table is this component with people columns.
 import Table from './Table'
 import { tableCells, ago } from './cells'
 
-<Table
+;<Table
   columns={memberCols}
   rows={memberRows}
   add={{
     label: 'add teammate',
     placeholder: 'name or email',
-    options: org,                                   // [{ id, name, note, disabled }]
+    options: matches, // [{ id, name, note, disabled }]
+    onQuery: (needle) => void readMatches(needle), // its list route, with `search`
     fields: [{ key: 'role', options: ['member', 'admin'] }],
     onAdd: (person, { role }) => assign(person, role),
   }}
 />
 ```
+
+**The candidates are the caller's answer to the query.** The table hands what the reader types to `onQuery` — trimmed, once it is three characters long, and `''` when it stops being — and shows `options` as given. It never narrows them itself: the directory is a list route, it holds one page of it, and a match on a page it has not read would be invisible to a filter of its own. The caller reads its list route with `search` and passes the page back.
 
 **Nothing is offered until three characters are typed**, and the field's own placeholder is what says so — the ask belongs where the typing happens, which also means it has to be short: it shares a name column with a role picker at any zoom. A directory dumped the moment the row opens invites picking a name off a list; the reader is meant to know who they are adding.
 
@@ -69,11 +72,11 @@ failure this model invites if the handler is not exhaustive, and it is silent.
 **A window can end three ways, and all three owe the request.** `reason` says
 which:
 
-| | |
-| --- | --- |
-| `window` | it ran out, or a second action cut it short |
+|              |                                              |
+| ------------ | -------------------------------------------- |
+| `window`     | it ran out, or a second action cut it short  |
 | `navigation` | the table unmounted with a window still open |
-| `unload` | the page is going away |
+| `unload`     | the page is going away                       |
 
 The last two used to drop the request — the reader watched the row go and
 nothing was sent. They flush now. On `unload` the caller must set
@@ -179,13 +182,19 @@ from cannot be printed in the ink reserved for "no data".
 import Table from './Table'
 import { tableCells, ago } from './cells'
 
-<Table
+;<Table
   label="CHANNELS"
   columns={[
     { key: 'name', label: 'CHANNEL', width: 'minmax(0,2fr)' },
     { key: 'owner', label: 'PRIMARY TEAM', align: 'end', render: (r) => r.owner || '—' },
     { key: 'mentions', label: 'MENTIONS · 7D', align: 'end', width: '120px' },
-    { key: 'last', label: 'LAST EVENT', align: 'end', width: '96px', render: (r) => tableAgo(r.lastMin) },
+    {
+      key: 'last',
+      label: 'LAST EVENT',
+      align: 'end',
+      width: '96px',
+      render: (r) => tableAgo(r.lastMin),
+    },
   ]}
   rows={channels}
   pageSize={8}
@@ -201,7 +210,12 @@ import { tableCells, ago } from './cells'
         enabledFor: (rows) => rows.every((r) => !r.owner),
         message: (n) => 'this team is primary in ' + n + ' channels',
       },
-      { id: 'drop', label: 'Stop watching', tone: 'bad', message: (n) => n + ' channels unwatched' },
+      {
+        id: 'drop',
+        label: 'Stop watching',
+        tone: 'bad',
+        message: (n) => n + ' channels unwatched',
+      },
     ],
   }}
   barPosition="absolute"
@@ -216,7 +230,7 @@ A people table is the same component with people columns:
 import Table from './Table'
 import { tableCells, ago } from './cells'
 
-<Table
+;<Table
   label="MEMBERS · 14"
   columns={[
     { key: 'name', label: 'NAME', type: 'identity' },
@@ -228,8 +242,15 @@ import { tableCells, ago } from './cells'
   add={{ label: 'add teammate', onSelect: invite }}
   headerRight={<Filter />}
   bar={{
-    picker: { label: 'Role', options: roles, action: { id: 'role', message: (n, o) => n + ' members are now ' + o.name } },
-    danger: { label: 'Hold to remove', action: { id: 'remove', message: (n) => n + ' members removed' } },
+    picker: {
+      label: 'Role',
+      options: roles,
+      action: { id: 'role', message: (n, o) => n + ' members are now ' + o.name },
+    },
+    danger: {
+      label: 'Hold to remove',
+      action: { id: 'remove', message: (n) => n + ' members removed' },
+    },
   }}
   mutate={(row, id, pick) => (id === 'remove' ? null : { ...row, role: pick.id })}
 />
@@ -240,6 +261,28 @@ used to fetch both over HTTP and `eval` the response so that a caller could
 mount the table without knowing they were separate files; the loader resolves
 that now, and the fallback square the fetch needed is gone with it. `barPosition="absolute"` needs a positioned
 ancestor.
+
+## Server-sorted rows: `sort` and `onSortChange`
+
+A table showing one page of a list route cannot sort it: ordering the rows it holds ranks a different set from the one the header names. Pass `onSortChange` and the table renders `rows` in the order given, and a header click calls back with the order asked for instead of reordering. `sort` is the order the rows are in, and `null` is the route's default order, which no column claims.
+
+```tsx
+<Table
+  columns={[
+    { key: 'name', label: 'NAME', sortKey: 'name' },
+    { key: 'used', label: 'LAST USED', sortKey: 'last_used_at', sortFirst: 'desc' },
+    { key: 'scopes', label: 'SCOPES' }, // no sortKey: not sortable
+  ]}
+  rows={page.items}
+  sort={sort}
+  onSortChange={(next) => {
+    setSort(next)
+    reload({ sort_key: next.key, sort_dir: next.dir })
+  }}
+/>
+```
+
+Only a column naming a `sortKey` sorts — the route's `sort_key` it orders by. `sortFirst` is the direction a first click asks for (default `asc`); clicking the active column flips it. A sort change returns the pager to page 1, since the rows that come back are a new first page.
 
 ## Pages that fit the frame
 
@@ -254,11 +297,10 @@ reports the viewport height while the page inside it is taller.
 
 From that floor it subtracts everything still owed room below the table: each
 ancestor's bottom padding and border, and any sibling stacked underneath (a
-danger card, a footnote). Siblings *beside* the table are skipped — a column
+danger card, a footnote). Siblings _beside_ the table are skipped — a column
 takes no height from its neighbor.
 
 ## Narrow tables
-
 
 Columns are measured in px before the grid is built — an explicit `width`, or
 the wider of the header label and the widest cell across every row. A flexible
@@ -279,7 +321,7 @@ a page and narrow in a column, and only the element knows which it is. A
 `ResizeObserver` means it re-fits on zoom, on the rail opening, on a panel
 resizing — no breakpoints to declare and none to keep in sync.
 
-Formatting *inside* a cell is the cell's own business, not a table parameter.
+Formatting _inside_ a cell is the cell's own business, not a table parameter.
 Every cell is a query container, so a renderer that wants to say the same thing
 more briefly when it is narrow writes `@container (max-width: 90px)` in its own
 CSS. The table stays out of it.
@@ -336,7 +378,7 @@ where it returns true draw a 5px `--color-ink-1` dot at the column's left.
 import Table from './Table'
 import { tableCells, ago } from './cells'
 
-<Table build columns={cols} rows={rows} />
+;<Table build columns={cols} rows={rows} />
 ```
 
 ## CSS
@@ -405,7 +447,6 @@ is wanted, it is a deliberate piece of work, not an attribute.
 The build is CSS — `tb-fill`, `tb-hatch`, `tb-beam` — so the blanket rule in
 `tokens/motion.css` covers it: under the preference the rows are simply there.
 The undo window's dial is `Countdown`, which handles the preference itself.
-
 
 ## Changed in the port
 

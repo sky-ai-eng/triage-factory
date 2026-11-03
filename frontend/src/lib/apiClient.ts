@@ -156,6 +156,16 @@ export type ListRequest = Record<string, unknown> & {
   page_token?: string
 }
 
+/** One value of a facets node's cut and how many rows carry it — the shape
+ *  every `POST /…/facets` node answers each of its named cuts in. */
+export interface Facet {
+  value: string
+  count: number
+}
+
+/** The two directions a list route's `sort_dir` takes. */
+export type SortDir = 'asc' | 'desc'
+
 /** apiList calls a `POST /api/<resource>/list` read and normalizes the
  *  envelope, so callers never guard for a missing field.
  *

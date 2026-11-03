@@ -16,6 +16,10 @@ import './table.css'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type TableRow = Record<string, any> & { id: string | number }
 
+/** The order a server-sorted table shows: one of its list route's `sort_key`
+ *  values and a `sort_dir`. */
+export type TableSort = { key: string; dir: 'asc' | 'desc' }
+
 /** Someone the draft page could add — the shape `add.options` supplies. */
 export type TableCandidate = {
   id?: string
@@ -38,6 +42,15 @@ export type TableColumn = {
   /** Drop order when the table runs out of room. 1 goes first; no drop never goes. */
   drop?: number
   sortable?: boolean
+  /**
+   * The list route's `sort_key` this column orders by, when the table is
+   * server-sorted (`onSortChange`). In that mode a column without one is not
+   * sortable: the server orders the rows, and a header that reordered only the
+   * rows loaded would rank a different set from the one it names.
+   */
+  sortKey?: string
+  /** The direction a first click on this column asks for. Default 'asc'. */
+  sortFirst?: 'asc' | 'desc'
   render?: (row: TableRow, col: TableColumn) => ReactNode
   measure?: (row: TableRow, col: TableColumn) => string | number
   sortValue?: (row: TableRow, col: TableColumn) => string | number
@@ -74,7 +87,18 @@ export type TableProps = {
     label: string
     placeholder?: string
     hint?: string
+    /**
+     * The candidates to offer, in the order to offer them. The table does not
+     * narrow them: it hands what the reader types to `onQuery`, and the caller
+     * answers with the options its list route returned for that `search`.
+     */
     options?: TableCandidate[]
+    /**
+     * Called with the trimmed query once it is long enough to offer anything,
+     * and with '' when it stops being. The caller reads its candidates with
+     * `search` and passes them back as `options`.
+     */
+    onQuery?: (needle: string) => void
     fields?: Array<{ key: string; options?: string[]; value?: string }>
     onAdd?: (option: TableCandidate, values: Record<string, string>) => void
     onSelect?: () => void
@@ -130,6 +154,14 @@ export type TableProps = {
   barPosition?: 'fixed' | 'absolute' | 'inline'
   sortKey?: string
   sortDir?: 1 | -1
+  /**
+   * Server-sort mode. With `onSortChange` the table renders `rows` in the order
+   * given and a header click calls back with the order asked for instead of
+   * reordering; `sort` is the order the rows are in (null: the route's default
+   * order, which no column claims). Only a column naming a `sortKey` sorts.
+   */
+  sort?: TableSort | null
+  onSortChange?: ((sort: TableSort) => void) | null
   /** Height reserved for an inline bar. Must still clear the bar itself (~38px). */
   barSlot?: number
   headerRight?: ReactNode
@@ -267,6 +299,8 @@ export function Table({
   barPosition = 'fixed',
   sortKey = '',
   sortDir = 1,
+  sort: serverSort = null,
+  onSortChange = null,
   barSlot = BAR_SLOT,
   headerRight = null,
   headerLeft = null,
@@ -501,9 +535,17 @@ export function Table({
   // who they are adding and types their name.
   const MIN_Q = 3
   const asked = q.trim().length >= MIN_Q
-  const hits = asked
-    ? pool.filter((o) => (o.name || '').toLowerCase().indexOf(q.trim().toLowerCase()) >= 0)
-    : []
+  // The caller's options are its answer to the query, already narrowed by its
+  // list route's `search`: narrowing them again here would hide a match the
+  // server returned on a rule of the table's own.
+  const needle = asked ? q.trim() : ''
+  const asking = useRef('')
+  useEffect(() => {
+    if (needle === asking.current) return
+    asking.current = needle
+    addRef.current?.onQuery?.(needle)
+  }, [needle])
+  const hits = asked ? pool : []
   const shownHits = hits.slice(0, hitRoom)
   const takeable = shownHits.filter((o) => !o.disabled)
   const commitDraft = (o?: TableCandidate) => {
@@ -648,7 +690,9 @@ export function Table({
     [shown, selectable, marked],
   )
 
+  const serverSorted = !!onSortChange
   const sorted = useMemo(() => {
+    if (serverSorted) return working
     const col = cols.find((c) => c.key === sort.k)
     const val = (r: TableRow) => (col && col.sortValue ? col.sortValue(r, col) : r[sort.k])
     const norm = (v: unknown) => (v === null || v === undefined ? '' : v)
@@ -662,7 +706,7 @@ export function Table({
       if (typeof x === 'string' && typeof y === 'string') return x.localeCompare(y) * sort.d
       return (x < y ? -1 : x > y ? 1 : 0) * sort.d
     })
-  }, [working, sort, cols])
+  }, [working, sort, cols, serverSorted])
 
   // Everything below reads `size`, so 'auto' is resolved in exactly one place.
   // The draft row and its hint are worth about two rows, and they are paid for
@@ -949,10 +993,22 @@ export function Table({
           />
         ) : null}
         {shown.map(({ c }) => {
-          const sortable = c.sortable !== false
-          const active = sort.k === c.key
-          const doSort = () =>
-            sortable && setSort((s) => ({ k: c.key, d: s.k === c.key ? -s.d : 1 }))
+          const sortable = serverSorted ? !!c.sortKey && c.sortable !== false : c.sortable !== false
+          const active = serverSorted
+            ? !!c.sortKey && serverSort?.key === c.sortKey
+            : sort.k === c.key
+          const ascending = serverSorted ? serverSort?.dir === 'asc' : sort.d > 0
+          const doSort = () => {
+            if (!sortable) return
+            if (serverSorted) {
+              const dir = active ? (ascending ? 'desc' : 'asc') : c.sortFirst || 'asc'
+              // The rows that come back are a new first page, in a new order.
+              setPage(0)
+              onSortChange!({ key: c.sortKey as string, dir })
+              return
+            }
+            setSort((s) => ({ k: c.key, d: s.k === c.key ? -s.d : 1 }))
+          }
           return (
             <span
               key={c.key}
@@ -962,7 +1018,7 @@ export function Table({
               // an order, and a header that does nothing when clicked is worse
               // than one that says it does nothing.
               aria-sort={
-                active ? (sort.d > 0 ? 'ascending' : 'descending') : sortable ? 'none' : undefined
+                active ? (ascending ? 'ascending' : 'descending') : sortable ? 'none' : undefined
               }
               data-active={active || undefined}
               data-align={c.align}
@@ -980,7 +1036,7 @@ export function Table({
               {active ? (
                 <span
                   className="tb-caret"
-                  data-dir={sort.d > 0 ? 'up' : 'down'}
+                  data-dir={ascending ? 'up' : 'down'}
                   aria-hidden="true"
                 />
               ) : null}
