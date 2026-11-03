@@ -363,15 +363,49 @@ func (s *Store) IsLiveSystem(ctx context.Context, tokenID string) (live bool, ss
 	return live, ssoProviderID, nil
 }
 
-// ListForUserSystem returns the user's un-revoked tokens, newest first, with
-// the filtered total under the same filters. orgFilter narrows to one org when
-// set; nil means every org the user holds tokens in.
+// The list's sort keys. The zero db.Sort is the default order, newest first.
+const (
+	// SortLastUsedAt orders by when the token last authenticated a request.
+	SortLastUsedAt = "last_used_at"
+	// SortCreatedAt orders by when the token was minted.
+	SortCreatedAt = "created_at"
+)
+
+// tokenListOrderBy renders the list's ORDER BY for order. The key selects a
+// constant fragment and the direction a keyword, so nothing from the request
+// reaches the SQL as text.
+//
+// A token nobody has used has no last_used_at, and it sorts last whichever way
+// that key is asked for: "never" is the absence of a use, not a use older than
+// every other, and it should not fill the top of the column a reader just
+// asked to rank. Tokens that tie on the key, the never-used ones among them,
+// fall to the default order (newest first), and the id ends every order so
+// offset paging walks a total one.
+func tokenListOrderBy(order db.Sort) string {
+	dir := "ASC"
+	if order.Desc() {
+		dir = "DESC"
+	}
+	switch order.Key {
+	case SortLastUsedAt:
+		return "t.last_used_at " + dir + " NULLS LAST, t.created_at DESC, t.id"
+	case SortCreatedAt:
+		return "t.created_at " + dir + ", t.id"
+	default:
+		return "t.created_at DESC, t.id"
+	}
+}
+
+// ListForUserSystem returns the user's un-revoked tokens in order (the zero
+// db.Sort is newest first), with the filtered total under the same filters.
+// orgFilter narrows to one org when set; nil means every org the user holds
+// tokens in.
 //
 // Revoked rows are gone from this read — a revoked token is not a thing anyone
 // can act on, and the reaper deletes it outright once the audit window passes.
 // Expired ones stay: they still occupy a name their owner may want to reuse,
 // and only a list that shows them makes them deletable.
-func (s *Store) ListForUserSystem(ctx context.Context, userID string, orgFilter *string, opts db.ListOpts) ([]Token, int, error) {
+func (s *Store) ListForUserSystem(ctx context.Context, userID string, orgFilter *string, order db.Sort, opts db.ListOpts) ([]Token, int, error) {
 	if !isValidUUID(userID) {
 		return []Token{}, 0, nil
 	}
@@ -397,11 +431,9 @@ func (s *Store) ListForUserSystem(ctx context.Context, userID string, orgFilter 
 		return []Token{}, total, nil
 	}
 
-	// The id tiebreaker is what makes offset paging total: without it two rows
-	// minted in the same instant can swap places between pages.
 	query := `SELECT ` + tokenColumns + `
 		  FROM ` + tokenFrom + where + `
-		 ORDER BY t.created_at DESC, t.id`
+		 ORDER BY ` + tokenListOrderBy(order)
 	args := []any{userID, org}
 	if opts.Limit > 0 {
 		query += `

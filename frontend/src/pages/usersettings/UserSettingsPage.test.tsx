@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import UserSettingsPage from './UserSettingsPage'
 import { HttpError } from '../../lib/apiClient'
-import type { ApiToken, LoginMethod } from '../../types'
+import type { ApiToken, ApiTokenCreated, LoginMethod } from '../../types'
 
 // The page's claims, checked against what it actually calls: the header is
 // the login identity (the door), the accounts list is the integration
@@ -15,6 +15,7 @@ const NOW = Date.UTC(2026, 8, 5, 12, 0, 0)
 
 const api = vi.hoisted(() => ({
   apiJSON: vi.fn(),
+  apiList: vi.fn(),
   apiListAll: vi.fn(),
   apiFetch: vi.fn(),
 }))
@@ -125,20 +126,37 @@ const TOKENS: ApiToken[] = [
 
 type Routes = Record<string, unknown | ((body: unknown) => unknown)>
 
+/** stub answers the page's reads from a small server: the token list holds
+ *  what a create, a rename and a revoke the routes accept leave behind, since
+ *  the page re-reads the list after each one. */
 function stub(routes: Routes, opts: { tokens?: ApiToken[] } = {}) {
+  let held = [...(opts.tokens ?? TOKENS)]
   api.apiJSON.mockImplementation(async (path: string, init?: RequestInit) => {
     const r = routes[path]
     if (r === undefined) throw new Error('unstubbed ' + path)
     if (r instanceof Error) throw r
-    return typeof r === 'function' ? r(init?.body ? JSON.parse(String(init.body)) : undefined) : r
+    const out =
+      typeof r === 'function' ? r(init?.body ? JSON.parse(String(init.body)) : undefined) : r
+    if (path === '/api/me/tokens' && init?.method === 'POST') {
+      const { token: _secret, ...row } = out as ApiTokenCreated
+      void _secret
+      held = [row, ...held]
+    } else if (path.startsWith('/api/me/tokens/') && init?.method === 'PATCH') {
+      held = held.map((t) => (t.id === (out as ApiToken).id ? (out as ApiToken) : t))
+    }
+    return out
   })
-  api.apiListAll.mockImplementation(async (path: string) => {
+  api.apiList.mockImplementation(async (path: string) => {
     // A fresh array per read, as a fetch would give — the Table keys its
     // reset on the rows' identity.
-    if (path === '/api/me/tokens/list') return [...(opts.tokens ?? TOKENS)]
+    if (path === '/api/me/tokens/list')
+      return { items: [...held], next_page_token: '', total_count: held.length }
     throw new Error('unstubbed list ' + path)
   })
-  api.apiFetch.mockResolvedValue({ status: 204, ok: true })
+  api.apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+    if (init?.method === 'DELETE') held = held.filter((t) => path !== '/api/me/tokens/' + t.id)
+    return { status: 204, ok: true }
+  })
 }
 
 const BASE: Routes = {
@@ -158,6 +176,7 @@ async function openTokens() {
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true, now: NOW })
   api.apiJSON.mockReset()
+  api.apiList.mockReset()
   api.apiListAll.mockReset()
   api.apiFetch.mockReset()
 })
@@ -332,6 +351,73 @@ describe('UserSettingsPage — the tokens', () => {
         'No tokens. Everything you do in the browser uses your session instead.',
       ),
     ).toBeInTheDocument()
+  })
+})
+
+describe('UserSettingsPage — the list is the server’s, in its order', () => {
+  /** The bodies of every token-list read, in order. */
+  const listBodies = () =>
+    api.apiList.mock.calls
+      .filter((c) => c[0] === '/api/me/tokens/list')
+      .map((c) => c[1] as Record<string, unknown>)
+
+  /** The token names in the order the table draws them. */
+  const drawn = () =>
+    Array.from(document.querySelectorAll('.us-tokname')).map((el) => el.textContent ?? '')
+
+  it('reads last used first, asks the server for the other direction, and draws what it answers', async () => {
+    stub(BASE)
+    await openTokens()
+    expect(listBodies()[0]).toEqual({ sort_key: 'last_used_at', sort_dir: 'desc', page_size: 50 })
+
+    // An order no client-side sort of these rows produces: whatever the server
+    // answers is the order on screen.
+    api.apiList.mockImplementation(async () => ({
+      items: [TOKENS[1], TOKENS[2], TOKENS[0]],
+      next_page_token: '',
+      total_count: 3,
+    }))
+    fireEvent.click(screen.getByRole('columnheader', { name: /LAST USED/ }))
+    await waitFor(() =>
+      expect(listBodies().at(-1)).toEqual({
+        sort_key: 'last_used_at',
+        sort_dir: 'asc',
+        page_size: 50,
+      }),
+    )
+    await waitFor(() =>
+      expect(drawn()).toEqual(['deploy hook', 'github action · release', 'laptop']),
+    )
+    // The other columns are not the route's to order, so they do not offer to.
+    expect(screen.getByRole('columnheader', { name: /EXPIRES/ })).not.toHaveAttribute('tabindex')
+  })
+
+  it('counts from the server, offers the next page, and claims no next expiry until it holds them all', async () => {
+    stub(BASE)
+    api.apiList.mockImplementation(async (_path: string, body: Record<string, unknown>) =>
+      body.page_token === 'p2'
+        ? { items: [TOKENS[2]], next_page_token: '', total_count: 3 }
+        : { items: [TOKENS[0], TOKENS[1]], next_page_token: 'p2', total_count: 3 },
+    )
+    render(<UserSettingsPage />)
+    expect(await screen.findByText('3 tokens')).toBeInTheDocument()
+    // The soonest expiry might be on the page not yet read.
+    expect(screen.queryByText(/next expiry/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /API TOKENS/ }))
+    await screen.findByText('deploy hook')
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() =>
+      expect(listBodies().at(-1)).toEqual({
+        sort_key: 'last_used_at',
+        sort_dir: 'desc',
+        page_size: 50,
+        page_token: 'p2',
+      }),
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument(),
+    )
   })
 })
 

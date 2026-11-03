@@ -186,7 +186,7 @@ func TestMintReturnsTheStoredRow(t *testing.T) {
 	// The list read is the point read for this row: Mint RETURNs the same
 	// projection List SELECTs, which is the drift this pins.
 	read := func() (*Token, error) {
-		got, total, err := store.ListForUserSystem(ctx, userID, &orgID, db.Unwindowed)
+		got, total, err := store.ListForUserSystem(ctx, userID, &orgID, db.Sort{}, db.Unwindowed)
 		if err != nil {
 			return nil, err
 		}
@@ -229,7 +229,7 @@ func TestRenameReturnsTheStoredRow(t *testing.T) {
 		t.Errorf("renamed = %+v, want name=after on the same row", renamed)
 	}
 	read := func() (*Token, error) {
-		got, total, err := store.ListForUserSystem(ctx, userID, &orgID, db.Unwindowed)
+		got, total, err := store.ListForUserSystem(ctx, userID, &orgID, db.Sort{}, db.Unwindowed)
 		if err != nil {
 			return nil, err
 		}
@@ -412,7 +412,7 @@ func TestRevoke(t *testing.T) {
 		t.Errorf("Revoke of a malformed id: got %v, want ErrNoSuchToken", err)
 	}
 	// Revoked rows leave the list; the token is not something to act on.
-	got, total, err := store.ListForUserSystem(ctx, userID, nil, db.Unwindowed)
+	got, total, err := store.ListForUserSystem(ctx, userID, nil, db.Sort{}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestList(t *testing.T) {
 		t.Fatalf("Mint stranger: %v", err)
 	}
 
-	all, total, err := store.ListForUserSystem(ctx, userID, nil, db.Unwindowed)
+	all, total, err := store.ListForUserSystem(ctx, userID, nil, db.Sort{}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestList(t *testing.T) {
 		}
 	}
 
-	scoped, total, err := store.ListForUserSystem(ctx, userID, &otherOrg, db.Unwindowed)
+	scoped, total, err := store.ListForUserSystem(ctx, userID, &otherOrg, db.Sort{}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("List(orgFilter): %v", err)
 	}
@@ -561,19 +561,80 @@ func TestList(t *testing.T) {
 	}
 
 	// A page and a count-only read answer under the same filters.
-	page, total, err := store.ListForUserSystem(ctx, userID, nil, db.ListOpts{Limit: 2})
+	page, total, err := store.ListForUserSystem(ctx, userID, nil, db.Sort{}, db.ListOpts{Limit: 2})
 	if err != nil {
 		t.Fatalf("List(page): %v", err)
 	}
 	if len(page) != 2 || total != 4 {
 		t.Errorf("page = %d row(s) / total %d, want 2 / 4", len(page), total)
 	}
-	counted, total, err := store.ListForUserSystem(ctx, userID, nil, db.ListOpts{CountOnly: true})
+	counted, total, err := store.ListForUserSystem(ctx, userID, nil, db.Sort{}, db.ListOpts{CountOnly: true})
 	if err != nil {
 		t.Fatalf("List(count-only): %v", err)
 	}
 	if len(counted) != 0 || total != 4 {
 		t.Errorf("count-only = %d row(s) / total %d, want 0 / 4", len(counted), total)
+	}
+}
+
+// TestListOrder pins each sort key's order, and where a token nobody has used
+// lands under last_used_at: last in both directions, newest first among
+// themselves.
+func TestListOrder(t *testing.T) {
+	store, h, userID, orgID := newStoreForTest(t)
+	ctx := context.Background()
+
+	// created: old-never 4d ago, used-long 3d, used-recent 2d, new-never 1d.
+	// used: used-long 5h ago, used-recent 1h ago; the other two never.
+	ids := map[string]string{}
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		usedAgo time.Duration
+	}{
+		{"old-never", 96 * time.Hour, 0},
+		{"used-long", 72 * time.Hour, 5 * time.Hour},
+		{"used-recent", 48 * time.Hour, time.Hour},
+		{"new-never", 24 * time.Hour, 0},
+	} {
+		tok, _, err := store.MintSystem(ctx, userID, orgID, tc.name, nil, nil, "", userID)
+		if err != nil {
+			t.Fatalf("Mint %s: %v", tc.name, err)
+		}
+		ids[tok.ID] = tc.name
+		backdate(t, h, tok.ID, tc.age)
+		if tc.usedAgo > 0 {
+			pgtest.MustExec(t, h.AdminDB,
+				`UPDATE user_api_tokens SET last_used_at = now() - $2::interval WHERE id = $1`,
+				tok.ID, tc.usedAgo.String())
+		}
+	}
+
+	names := func(order db.Sort) []string {
+		t.Helper()
+		got, _, err := store.ListForUserSystem(ctx, userID, nil, order, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("List(%+v): %v", order, err)
+		}
+		out := make([]string, len(got))
+		for i, tok := range got {
+			out[i] = ids[tok.ID]
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		order db.Sort
+		want  []string
+	}{
+		{db.Sort{}, []string{"new-never", "used-recent", "used-long", "old-never"}},
+		{db.Sort{Key: SortLastUsedAt, Dir: db.SortDesc}, []string{"used-recent", "used-long", "new-never", "old-never"}},
+		{db.Sort{Key: SortLastUsedAt, Dir: db.SortAsc}, []string{"used-long", "used-recent", "new-never", "old-never"}},
+		{db.Sort{Key: SortCreatedAt, Dir: db.SortDesc}, []string{"new-never", "used-recent", "used-long", "old-never"}},
+		{db.Sort{Key: SortCreatedAt, Dir: db.SortAsc}, []string{"old-never", "used-long", "used-recent", "new-never"}},
+	} {
+		if got := names(tc.order); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("order %+v = %v, want %v", tc.order, got, tc.want)
+		}
 	}
 }
 
@@ -595,7 +656,7 @@ func TestTokenLimit(t *testing.T) {
 		t.Errorf("mint in a second org at the first org's cap: %v", err)
 	}
 	// Revoking makes room again.
-	got, _, err := store.ListForUserSystem(ctx, userID, &orgID, db.ListOpts{Limit: 1})
+	got, _, err := store.ListForUserSystem(ctx, userID, &orgID, db.Sort{}, db.ListOpts{Limit: 1})
 	if err != nil || len(got) != 1 {
 		t.Fatalf("List: %v / %d rows", err, len(got))
 	}
@@ -929,7 +990,7 @@ func TestTouchLastUsed(t *testing.T) {
 	if err := store.TouchLastUsedSystem(ctx, tok.ID); err != nil {
 		t.Fatalf("TouchLastUsed: %v", err)
 	}
-	got, _, err := store.ListForUserSystem(ctx, userID, nil, db.Unwindowed)
+	got, _, err := store.ListForUserSystem(ctx, userID, nil, db.Sort{}, db.Unwindowed)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("List: %v / %d rows", err, len(got))
 	}

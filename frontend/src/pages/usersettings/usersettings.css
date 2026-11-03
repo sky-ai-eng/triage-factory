@@ -176,6 +176,20 @@
   font: 400 10.5px/1.5 var(--font-mono);
   color: var(--color-alarm);
 }
+.us-more {
+  appearance: none;
+  background: none;
+  border: 1px solid var(--color-line-1);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font: 400 11px/1.5 var(--font-mono);
+  color: var(--color-ink-2);
+  cursor: pointer;
+}
+.us-more:hover {
+  border-color: var(--color-line-2);
+  color: var(--color-ink-1);
+}
 
 /* ---- the dialogs' foot: the page's verb vocabulary ----
    Every control is the same quiet block — mono, an inset hairline, no fill —

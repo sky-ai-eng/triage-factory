@@ -545,6 +545,88 @@ func TestAPITokenList_MalformedFilterIsRejected(t *testing.T) {
 	assertFault(t, rec, http.StatusBadRequest, "INVALID_FIELD")
 }
 
+// TestAPITokenList_Sort: sort_key orders the list on the server, a token
+// never used sorts last in both directions, a bad key or a lone sort_dir is a
+// 400 naming its field, and a page token minted under one order is refused
+// under another.
+func TestAPITokenList_Sort(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	orgID, _ := r.seedOrg(userID, "sort-org")
+	sid := r.signIn(userID)
+
+	used := func(name string, ago time.Duration) {
+		tok, _ := r.mintToken(userID, orgID, name)
+		if ago == 0 {
+			return
+		}
+		if _, err := r.h.AdminDB.Exec(
+			`UPDATE user_api_tokens SET last_used_at = now() - $2::interval WHERE id = $1`,
+			tok.ID, ago.String()); err != nil {
+			t.Fatalf("set last_used_at: %v", err)
+		}
+	}
+	used("never", 0)
+	used("stale", 3*time.Hour)
+	used("fresh", time.Minute)
+
+	names := func(body map[string]any) []string {
+		t.Helper()
+		got := r.listTokens(sid, "", body)
+		out := make([]string, len(got.Items))
+		for i, it := range got.Items {
+			out[i] = it.Name
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		body map[string]any
+		want string
+	}{
+		// The key's own direction is most recent first.
+		{map[string]any{"sort_key": "last_used_at"}, "fresh,stale,never"},
+		{map[string]any{"sort_key": "last_used_at", "sort_dir": "asc"}, "stale,fresh,never"},
+		{map[string]any{"sort_key": "created_at", "sort_dir": "asc"}, "never,stale,fresh"},
+	} {
+		if got := strings.Join(names(tc.body), ","); got != tc.want {
+			t.Errorf("%v = %s, want %s", tc.body, got, tc.want)
+		}
+	}
+
+	for _, tc := range []struct {
+		body  map[string]any
+		field string
+	}{
+		{map[string]any{"sort_key": "name"}, "sort_key"},
+		{map[string]any{"sort_key": "created_at", "sort_dir": "up"}, "sort_dir"},
+		{map[string]any{"sort_dir": "asc"}, "sort_dir"},
+	} {
+		rec := r.tokensJSON("POST", "/api/me/tokens/list", tc.body, sid, "")
+		assertFault(t, rec, http.StatusBadRequest, "INVALID_FIELD")
+		if f := errorItems(t, rec)[0].Field; f != tc.field {
+			t.Errorf("%v faulted field %q, want %q", tc.body, f, tc.field)
+		}
+	}
+
+	first := r.listTokens(sid, "", map[string]any{"page_size": 1, "sort_key": "last_used_at"})
+	if first.NextPageToken == "" {
+		t.Fatal("page 1 minted no token")
+	}
+	for _, body := range []map[string]any{
+		{"page_size": 1, "page_token": first.NextPageToken, "sort_key": "created_at"},
+		{"page_size": 1, "page_token": first.NextPageToken, "sort_key": "last_used_at", "sort_dir": "asc"},
+		{"page_size": 1, "page_token": first.NextPageToken},
+	} {
+		rec := r.tokensJSON("POST", "/api/me/tokens/list", body, sid, "")
+		assertFault(t, rec, http.StatusBadRequest, "INVALID_PARAM")
+	}
+	if got := r.listTokens(sid, "", map[string]any{
+		"page_size": 1, "page_token": first.NextPageToken, "sort_key": "last_used_at", "sort_dir": "desc",
+	}); len(got.Items) != 1 || got.Items[0].Name != "stale" {
+		t.Errorf("page 2 under the same order = %+v, want stale", got.Items)
+	}
+}
+
 // TestAPITokenList_HidesOtherUsersAndRevoked: the list is the caller's own live
 // tokens and nothing else.
 func TestAPITokenList_HidesOtherUsersAndRevoked(t *testing.T) {
