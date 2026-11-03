@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +78,10 @@ type linearCatalogFake struct {
 	labels  map[string][]linear.Label
 	users   []linear.User
 	failing bool
+	// likeWildcards makes the Teams and Users filters read a % or an _ in the
+	// search as a LIKE wildcard: Linear documents containsIgnoreCase as a
+	// case-insensitive contains and leaves that reading open.
+	likeWildcards bool
 	// teamFailing fails the Team read of these ids only, so one request can
 	// carry a field fault and an upstream failure together.
 	teamFailing map[string]bool
@@ -109,6 +114,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 	failing := f.failing || (op == "Team" && f.teamFailing[stringVar(body.Variables, "id")])
 	teams := append([]linear.Team(nil), f.teams...)
 	users := append([]linear.User(nil), f.users...)
+	like := f.likeWildcards
 	statesOf := func(teamID string) []linear.WorkflowState {
 		if st, custom := f.states[teamID]; custom {
 			return st
@@ -145,7 +151,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		q := teamsFilterQuery(body.Variables)
 		var matched []linear.Team
 		for _, t := range teams {
-			if q == "" || strings.Contains(strings.ToLower(t.Key), q) || strings.Contains(strings.ToLower(t.Name), q) {
+			if q == "" || fakeContains(t.Key, q, like) || fakeContains(t.Name, q, like) {
 				matched = append(matched, t)
 			}
 		}
@@ -212,8 +218,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 			if !u.Active {
 				continue
 			}
-			if q == "" || strings.Contains(strings.ToLower(u.Name), q) ||
-				strings.Contains(strings.ToLower(u.DisplayName), q) || strings.Contains(strings.ToLower(u.Email), q) {
+			if q == "" || fakeContains(u.Name, q, like) || fakeContains(u.DisplayName, q, like) || fakeContains(u.Email, q, like) {
 				matched = append(matched, u)
 			}
 		}
@@ -232,6 +237,29 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"unexpected document `+op+`"}]}`)
 	}
+}
+
+// fakeContains is containsIgnoreCase as the fake answers it, for a lowercased
+// q: field carries q as a literal substring, or, with like, matches it as a
+// LIKE pattern in which % is any run of characters and _ any one.
+func fakeContains(field, q string, like bool) bool {
+	field = strings.ToLower(field)
+	if !like {
+		return strings.Contains(field, q)
+	}
+	var pattern strings.Builder
+	pattern.WriteString("(?s)")
+	for _, r := range q {
+		switch r {
+		case '%':
+			pattern.WriteString(".*")
+		case '_':
+			pattern.WriteString(".")
+		default:
+			pattern.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	return regexp.MustCompile(pattern.String()).MatchString(field)
 }
 
 // fakeConnection is one page of items as a GraphQL connection, paged by the
@@ -347,6 +375,14 @@ func (f *linearCatalogFake) OnCall(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.onCall = fn
+}
+
+// SetLikeWildcards makes the Teams and Users filters read % and _ as LIKE
+// wildcards.
+func (f *linearCatalogFake) SetLikeWildcards(like bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.likeWildcards = like
 }
 
 // SetFailing makes every later request fail, standing in for an unreachable

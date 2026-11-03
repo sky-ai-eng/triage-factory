@@ -17,22 +17,36 @@ import (
 //   GET  /api/orgs/{org_id}/linear/teams/{linear_team_id}/labels/{label_id}
 //
 // Proxied live and member-gated like the rest of the Linear catalog
-// (linear_teams_handler.go). The labels are read whole and windowed here, by
-// name and then id, because whether a label is a group is only known from the
-// whole list: a group is a label other labels name as their parent, and a
-// child can sit on any page. The list is a proxy list, so total_count is null.
+// (linear_teams_handler.go). The labels are read whole, then narrowed and
+// windowed here, by name and then id, because whether a label is a group is
+// only known from the whole list: a group is a label other labels name as their
+// parent, and a child can sit on any page. The list is a proxy list, so
+// total_count is null.
 // --------------------------------------------------------------------
 
-// linearLabelListRequest is the labels list's body: the paging pair alone.
+// linearLabelListRequest is the labels list's body: a search, the group
+// filter, and the paging pair. Both narrowings are applied to the whole list in
+// hand, before the window.
 type linearLabelListRequest struct {
+	// Search is matched against the label's name and the name of the group it
+	// sits in, as a case-insensitive literal substring (httpx.Search), so a
+	// group's name finds the group and every label in it. Absent matches every
+	// label.
+	Search string `json:"search"`
+	// IsGroup narrows the list to the groups (true) or to the labels an issue
+	// can carry (false). Absent is no narrowing.
+	IsGroup *bool `json:"is_group"`
 	httpx.PageRequest
 }
 
 // linearLabelListFilterKey fingerprints a labels page token to the org and the
-// team, whose list the wrapped offset points into.
+// team, whose list the wrapped offset points into, and to the narrowing, which
+// decides which of its labels the offset counts.
 type linearLabelListFilterKey struct {
 	OrgID        string `json:"org_id"`
 	LinearTeamID string `json:"linear_team_id"`
+	Search       string `json:"search"`
+	IsGroup      *bool  `json:"is_group"`
 }
 
 // linearLabelJSON is one label. The id is what a predicate names it by. Group
@@ -66,8 +80,10 @@ func (s *Server) handleLinearLabelsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(linearLabelListFilterKey{OrgID: orgID, LinearTeamID: teamID}), 0)
+	search := httpx.Search(&v, req.Search)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(linearLabelListFilterKey{
+		OrgID: orgID, LinearTeamID: teamID, Search: httpx.SearchKey(search), IsGroup: req.IsGroup,
+	}), 0)
 	startAt := jiraStartAtFromCursor(&v, page.Cursor)
 	refuseLinearCountOnly(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -77,7 +93,13 @@ func (s *Server) handleLinearLabelsList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	// The groups are taken from the whole list before it is narrowed: a
+	// label is a group because of the labels that name it, which a narrowing
+	// may leave out.
 	groups := linearLabelGroupIDs(labels)
+	labels = slices.DeleteFunc(labels, func(l linear.Label) bool {
+		return (req.IsGroup != nil && groups[l.ID] != *req.IsGroup) || !httpx.SearchMatches(search, l.Name, l.Group)
+	})
 	items, next := jiraWindow(labels, startAt, page.Limit, func(l linear.Label) linearLabelJSON {
 		return toLinearLabelJSON(l, groups)
 	})

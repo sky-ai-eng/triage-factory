@@ -360,7 +360,7 @@ function renderLinearField(
       return answer(200, { fields: [{ name: field, type: 'string_list' }] })
     }
     if (url === `${linearUsers}list`) {
-      const q = (JSON.parse(init?.body ?? '{}').q as string).toLowerCase()
+      const q = (JSON.parse(init?.body ?? '{}').search as string).toLowerCase()
       const items = linearPeople.filter(
         (u) => u.name.toLowerCase().includes(q) || u.display_name.includes(q),
       )
@@ -391,7 +391,7 @@ describe('PredicateEditor Linear identities', () => {
     expect(screen.queryByText('Adabot')).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
       `${linearUsers}list`,
-      expect.objectContaining({ body: JSON.stringify({ q: 'ada', page_size: 10 }) }),
+      expect.objectContaining({ body: JSON.stringify({ search: 'ada', page_size: 10 }) }),
     )
     expect(onChange).not.toHaveBeenCalled()
 
