@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Prompt } from '../types'
 import PromptPicker from './PromptPicker'
-import { apiListAll } from '../lib/apiClient'
+import { apiJSON } from '../lib/apiClient'
 
 interface Props {
   // The chain prompt's own id, so the picker can hide it from the
@@ -16,8 +16,8 @@ interface Props {
   // True when the parent is currently saving — disables drag/drop and
   // the picker so the working state can't change mid-PUT.
   busy?: boolean
-  // The active team on the single-team prompts page. Scopes both the
-  // name-lookup fetch and the step picker so a chain on team A can only
+  // The active team on the single-team prompts page. Scopes the step
+  // picker so a chain on team A can only
   // reference team A's (and org-visible) leaf prompts — otherwise a
   // multi-team user could add a team-B step to a team-A chain, and the
   // chain would run another team's prompt. '' for solo/local (the server
@@ -38,30 +38,38 @@ export default function ChainStepEditor({
   busy,
   lockedTeamId,
 }: Props) {
-  const [allPrompts, setAllPrompts] = useState<Prompt[]>([])
+  const [names, setNames] = useState<Record<string, Prompt | null>>({})
   const [pickerOpen, setPickerOpen] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
 
-  // Cache the prompts list so we can show step names. The picker
-  // re-fetches on its own (already a low-volume call), so this fetch
-  // is purely for the per-step name lookup. Scoped to the locked team so
-  // a step's name resolves only within the chain's own team set (matches
-  // the picker's options); refetches if the team changes.
+  // Each step's prompt, read by its id, for the name and body the step row
+  // shows. The steps are the chain's own handful, so a read per id is the
+  // whole cost; the picker reads its own options with search.
+  const missing = steps
+    .map((s) => s.step_prompt_id)
+    .filter((id, i, all) => id && all.indexOf(id) === i && !(id in names))
+    .join(',')
   useEffect(() => {
+    if (!missing) return
     let cancelled = false
-    apiListAll<Prompt>('/api/prompts/list', lockedTeamId ? { team_id: lockedTeamId } : {})
-      .then((prompts) => {
-        if (!cancelled) setAllPrompts(prompts)
-      })
-      .catch(() => {})
+    const ids = missing.split(',')
+    void Promise.all(
+      ids.map((id) =>
+        apiJSON<Prompt>(`/api/prompts/${encodeURIComponent(id)}`)
+          .then((p) => [id, p] as const)
+          .catch(() => [id, null] as const),
+      ),
+    ).then((pairs) => {
+      if (!cancelled) setNames((prev) => ({ ...prev, ...Object.fromEntries(pairs) }))
+    })
     return () => {
       cancelled = true
     }
-  }, [pickerOpen, lockedTeamId])
+  }, [missing])
 
   const update = (next: ChainStepDraft[]) => onChange(next)
 
-  const promptById = (id: string) => allPrompts.find((p) => p.id === id)
+  const promptById = (id: string) => names[id] ?? undefined
 
   const onDragStart = (i: number) => () => setDragIndex(i)
   const onDragOver = (i: number) => (e: React.DragEvent) => {
