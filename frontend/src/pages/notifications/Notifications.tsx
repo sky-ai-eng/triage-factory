@@ -36,6 +36,7 @@ import {
   type NotificationFilter,
   type NotificationItem,
   type NotificationPriority,
+  type NotificationSort,
 } from '../../lib/notifications'
 import { listOrgTeams } from '../../lib/orgTeams'
 import { fetchArchivedTeams } from '../../lib/teamLifecycle'
@@ -91,6 +92,9 @@ const OPEN_COUNT: NotificationFilter = { status: 'open', dismissed: false }
 /** Whether anything is open at all, dismissed rows included: with nothing
  *  undismissed but dismissed rows left, the page still offers to show them. */
 const OPEN_ANY: NotificationFilter = { status: 'open' }
+/** The empty state's last resolution: the first resolved row by resolution. */
+const RESOLVED: NotificationFilter = { status: 'resolved' }
+const LATEST_RESOLUTION: NotificationSort = { sort_key: 'resolved_at', sort_dir: 'desc' }
 
 /** Minutes between an ISO time and `now`, past or future. */
 function minutes(at: string | null, now: number): number {
@@ -660,7 +664,7 @@ function OrgNotifications({ org }: { org: string }) {
               'Nothing open to show.'
 
   // The last thing that resolved, for the empty state: read only when it
-  // shows, from the same list.
+  // shows, from the same list, as its first row by resolution.
   const [lastResolved, setLastResolved] = useState<{ path: string; n: NotificationItem } | null>(
     null,
   )
@@ -668,18 +672,11 @@ function OrgNotifications({ org }: { org: string }) {
     if (!isEmpty || !org) return
     const read =
       list === 'all'
-        ? listOrgNotifications(org, { status: 'resolved' }, PAGE)
-        : listNotifications({ status: 'resolved' }, PAGE)
+        ? listOrgNotifications(org, RESOLVED, 1, LATEST_RESOLUTION)
+        : listNotifications(RESOLVED, 1, LATEST_RESOLUTION)
     read
       .then((p) => {
-        // The list is ordered by priority; the latest is the one resolved last.
-        const latest = p.items.reduce<NotificationItem | null>(
-          (best, n) =>
-            !best || Date.parse(n.resolved_at ?? '') > Date.parse(best.resolved_at ?? '')
-              ? n
-              : best,
-          null,
-        )
+        const latest = p.items[0]
         if (latest) setLastResolved({ path, n: latest })
       })
       .catch(() => {})

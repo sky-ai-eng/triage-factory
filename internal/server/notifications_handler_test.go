@@ -350,6 +350,91 @@ func TestNotificationList_Filters(t *testing.T) {
 	}
 }
 
+// TestNotificationList_Sort: sort_key resolved_at puts the latest resolution
+// first on both lists, open rows trail, a malformed sort is refused with its
+// field named, and a page token is bound to the order it was minted under.
+func TestNotificationList_Sort(t *testing.T) {
+	s, _ := newNotificationsServer(t)
+	localNotification(t, s, "a")
+	localNotification(t, s, "b")
+	localNotification(t, s, "c")
+	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "b"}, false)
+	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "a"}, false)
+
+	titles := func(page httpxtest.ListEnvelope[notificationItemWire]) string {
+		var out []string
+		for _, it := range page.Items {
+			out = append(out, it.Title)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, path := range []string{meNotifications + "/list", orgNotificationsList()} {
+		for _, c := range []struct {
+			name string
+			body map[string]any
+			want string
+		}{
+			{"latest resolution", map[string]any{"status": "resolved", "sort_key": "resolved_at", "sort_dir": "desc", "page_size": 1}, "fixable a"},
+			{"desc by default", map[string]any{"status": "resolved", "sort_key": "resolved_at"}, "fixable a,fixable b"},
+			{"asc", map[string]any{"status": "resolved", "sort_key": "resolved_at", "sort_dir": "asc"}, "fixable b,fixable a"},
+			{"open rows trail desc", map[string]any{"sort_key": "resolved_at"}, "fixable a,fixable b,fixable c"},
+			{"open rows trail asc", map[string]any{"sort_key": "resolved_at", "sort_dir": "asc"}, "fixable b,fixable a,fixable c"},
+			{"null is absent", map[string]any{"status": "resolved", "sort_key": nil, "sort_dir": nil}, "fixable b,fixable a"},
+		} {
+			t.Run(path+" "+c.name, func(t *testing.T) {
+				if got := titles(listNotifications(t, s, path, c.body)); got != c.want {
+					t.Errorf("titles = %s, want %s", got, c.want)
+				}
+			})
+		}
+	}
+
+	for _, c := range []struct {
+		name  string
+		body  map[string]any
+		field string
+	}{
+		{"unknown sort_key", map[string]any{"sort_key": "title"}, "sort_key"},
+		{"empty sort_key", map[string]any{"sort_key": ""}, "sort_key"},
+		{"unknown sort_dir", map[string]any{"sort_key": "resolved_at", "sort_dir": "up"}, "sort_dir"},
+		{"sort_dir alone", map[string]any{"sort_dir": "asc"}, "sort_dir"},
+	} {
+		t.Run("refuses "+c.name, func(t *testing.T) {
+			for _, path := range []string{meNotifications + "/list", orgNotificationsList()} {
+				rec := doJSON(t, s, http.MethodPost, path, c.body)
+				assertFault(t, rec, http.StatusBadRequest, httpx.ReasonInvalidField)
+				if f := errorItems(t, rec)[0].Field; f != c.field {
+					t.Errorf("%s: field = %q, want %q", path, f, c.field)
+				}
+			}
+		})
+	}
+
+	// An offset addresses a position in an ordering, so a token minted under
+	// one sort is refused under another, and under none.
+	sorted := map[string]any{"sort_key": "resolved_at", "sort_dir": "desc", "page_size": 1}
+	first := listNotifications(t, s, meNotifications+"/list", sorted)
+	if first.NextPageToken == "" {
+		t.Fatalf("sorted page 1 has no next page")
+	}
+	for _, body := range []map[string]any{
+		{"sort_key": "resolved_at", "sort_dir": "asc", "page_size": 1, "page_token": first.NextPageToken},
+		{"page_size": 1, "page_token": first.NextPageToken},
+	} {
+		assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/list", body), http.StatusBadRequest, httpx.ReasonInvalidParam)
+	}
+	// An absent sort_dir is desc, so a token minted with one spelling serves
+	// the other.
+	second := listNotifications(t, s, meNotifications+"/list", map[string]any{"sort_key": "resolved_at", "page_size": 1, "page_token": first.NextPageToken})
+	if titles(second) != "fixable b" {
+		t.Errorf("sorted page 2 = %s, want fixable b", titles(second))
+	}
+	unsorted := listNotifications(t, s, meNotifications+"/list", map[string]any{"page_size": 1})
+	assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/list",
+		map[string]any{"sort_key": "resolved_at", "page_size": 1, "page_token": unsorted.NextPageToken}),
+		http.StatusBadRequest, httpx.ReasonInvalidParam)
+}
+
 // TestNotificationGet: a readable row by id, and 404 for an id that names
 // nothing the caller may read.
 func TestNotificationGet(t *testing.T) {
