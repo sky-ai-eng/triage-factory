@@ -715,7 +715,9 @@ export default function TeamSettings() {
                   ]}
                   rows={rows}
                   pageSize="auto"
-                  sortKey="name"
+                  // The roster route has one order, display name then id, and
+                  // the rows are shown in it.
+                  sort={null}
                   barPosition="absolute"
                   // Selection exists for the verbs, so it goes with them: a
                   // member sees no row checkboxes and no bar at all.

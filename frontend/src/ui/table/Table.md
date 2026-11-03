@@ -11,7 +11,6 @@ table is this component with people columns.
 ```tsx
 import Table from './Table'
 import { tableCells, ago } from './cells'
-
 ;<Table
   columns={memberCols}
   rows={memberRows}
@@ -181,7 +180,6 @@ from cannot be printed in the ink reserved for "no data".
 ```tsx
 import Table from './Table'
 import { tableCells, ago } from './cells'
-
 ;<Table
   label="CHANNELS"
   columns={[
@@ -229,7 +227,6 @@ A people table is the same component with people columns:
 ```tsx
 import Table from './Table'
 import { tableCells, ago } from './cells'
-
 ;<Table
   label="MEMBERS · 14"
   columns={[
@@ -264,7 +261,7 @@ ancestor.
 
 ## Server-sorted rows: `sort` and `onSortChange`
 
-A table showing one page of a list route cannot sort it: ordering the rows it holds ranks a different set from the one the header names. Pass `onSortChange` and the table renders `rows` in the order given, and a header click calls back with the order asked for instead of reordering. `sort` is the order the rows are in, and `null` is the route's default order, which no column claims.
+A table showing one page of a list route cannot sort it: ordering the rows it holds ranks a different set from the one the header names. Pass `sort` and the table renders `rows` in the order given, and a header click calls `onSortChange` with the order asked for instead of reordering. `sort` is the order the rows are in, and `null` is the route's default order, which no column claims. A route with one order passes `sort={null}` and no column names a `sortKey`.
 
 ```tsx
 <Table
@@ -377,7 +374,6 @@ where it returns true draw a 5px `--color-ink-1` dot at the column's left.
 ```tsx
 import Table from './Table'
 import { tableCells, ago } from './cells'
-
 ;<Table build columns={cols} rows={rows} />
 ```
 

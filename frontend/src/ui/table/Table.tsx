@@ -44,7 +44,7 @@ export type TableColumn = {
   sortable?: boolean
   /**
    * The list route's `sort_key` this column orders by, when the table is
-   * server-sorted (`onSortChange`). In that mode a column without one is not
+   * server-sorted (`sort` given). In that mode a column without one is not
    * sortable: the server orders the rows, and a header that reordered only the
    * rows loaded would rank a different set from the one it names.
    */
@@ -155,10 +155,11 @@ export type TableProps = {
   sortKey?: string
   sortDir?: 1 | -1
   /**
-   * Server-sort mode. With `onSortChange` the table renders `rows` in the order
-   * given and a header click calls back with the order asked for instead of
-   * reordering; `sort` is the order the rows are in (null: the route's default
-   * order, which no column claims). Only a column naming a `sortKey` sorts.
+   * Server-sort mode. Given `sort`, the table renders `rows` in the order
+   * given and never reorders them: `sort` is the order they are in (null: the
+   * route's default order, which no column claims), and a header click calls
+   * `onSortChange` with the order asked for. Only a column naming a `sortKey`
+   * sorts, so `sort={null}` alone is a table in its route's one order.
    */
   sort?: TableSort | null
   onSortChange?: ((sort: TableSort) => void) | null
@@ -299,7 +300,7 @@ export function Table({
   barPosition = 'fixed',
   sortKey = '',
   sortDir = 1,
-  sort: serverSort = null,
+  sort: serverSort,
   onSortChange = null,
   barSlot = BAR_SLOT,
   headerRight = null,
@@ -690,7 +691,7 @@ export function Table({
     [shown, selectable, marked],
   )
 
-  const serverSorted = !!onSortChange
+  const serverSorted = serverSort !== undefined
   const sorted = useMemo(() => {
     if (serverSorted) return working
     const col = cols.find((c) => c.key === sort.k)
@@ -1004,7 +1005,7 @@ export function Table({
               const dir = active ? (ascending ? 'desc' : 'asc') : c.sortFirst || 'asc'
               // The rows that come back are a new first page, in a new order.
               setPage(0)
-              onSortChange!({ key: c.sortKey as string, dir })
+              onSortChange?.({ key: c.sortKey as string, dir })
               return
             }
             setSort((s) => ({ k: c.key, d: s.k === c.key ? -s.d : 1 }))
