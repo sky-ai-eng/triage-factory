@@ -60,6 +60,14 @@ export interface NotificationFilter {
   scope_in?: NotificationScope[]
 }
 
+/** A list's order. Absent, a list orders by priority, then the latest
+ *  escalation. Sorted by resolved_at, open rows trail in either direction. */
+export interface NotificationSort {
+  sort_key: 'resolved_at'
+  /** Absent means desc. */
+  sort_dir?: 'asc' | 'desc'
+}
+
 /** The viewer's inbox. */
 export const NOTIFICATIONS_LIST_PATH = '/api/me/notifications/list'
 
@@ -101,8 +109,13 @@ export function notificationPath(id: string): string {
 export function listNotifications(
   filter: NotificationFilter,
   pageSize: number,
+  sort?: NotificationSort,
 ): Promise<ListPage<NotificationItem>> {
-  return apiList<NotificationItem>(NOTIFICATIONS_LIST_PATH, { ...filter, page_size: pageSize })
+  return apiList<NotificationItem>(NOTIFICATIONS_LIST_PATH, {
+    ...filter,
+    ...sort,
+    page_size: pageSize,
+  })
 }
 
 /** One page of the inbox, with the server's clock when it answered. */
@@ -119,9 +132,11 @@ export function listOrgNotifications(
   orgID: string,
   filter: NotificationFilter,
   pageSize: number,
+  sort?: NotificationSort,
 ): Promise<ListPage<NotificationItem>> {
   return apiList<NotificationItem>(orgNotificationsListPath(orgID), {
     ...filter,
+    ...sort,
     page_size: pageSize,
   })
 }

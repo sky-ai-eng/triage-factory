@@ -260,19 +260,51 @@ func compactJSON(raw json.RawMessage, empty string) (json.RawMessage, error) {
 	return json.RawMessage(b.Bytes()), nil
 }
 
+// The notification-list sort vocabulary: the keys a reader may order a list
+// by, and the two directions.
+const (
+	NotificationSortResolvedAt = "resolved_at"
+
+	NotificationSortDirAsc  = "asc"
+	NotificationSortDirDesc = "desc"
+)
+
+// NotificationListSortKeys is the full vocabulary NotificationListFilter.SortKey
+// accepts. Empty is not a member: absent is how a caller asks for the default
+// order, so there is no "default" spelling to collide with a real key.
+var NotificationListSortKeys = []string{NotificationSortResolvedAt}
+
+// NotificationListSortDirs is the full vocabulary NotificationListFilter.SortDir
+// accepts.
+var NotificationListSortDirs = []string{NotificationSortDirAsc, NotificationSortDirDesc}
+
 // NotificationListFilter: a zero field, including an empty slice, does not
-// filter.
+// filter. An empty SortKey is the default order, and SortDir is SortKey's
+// direction, desc when empty.
 type NotificationListFilter struct {
 	Status     domain.NotificationStatus
 	Dismissed  *bool
 	Unread     *bool
 	PriorityIn []domain.NotificationPriority
 	ScopeIn    []domain.NotificationScope
+	SortKey    string
+	SortDir    string
 }
 
 func (f NotificationListFilter) Validate() error {
 	if f.Status != "" && f.Status != domain.NotificationOpen && f.Status != domain.NotificationResolved {
 		return fmt.Errorf("%w: status %q is not %q or %q", ErrInvalidNotificationFilter, f.Status, domain.NotificationOpen, domain.NotificationResolved)
+	}
+	if f.SortKey != "" && !slices.Contains(NotificationListSortKeys, f.SortKey) {
+		return fmt.Errorf("%w: sort key %q is not one of %v", ErrInvalidNotificationFilter, f.SortKey, NotificationListSortKeys)
+	}
+	if f.SortDir != "" {
+		if !slices.Contains(NotificationListSortDirs, f.SortDir) {
+			return fmt.Errorf("%w: sort direction %q is not one of %v", ErrInvalidNotificationFilter, f.SortDir, NotificationListSortDirs)
+		}
+		if f.SortKey == "" {
+			return fmt.Errorf("%w: a sort direction needs a sort key", ErrInvalidNotificationFilter)
+		}
 	}
 	for _, p := range f.PriorityIn {
 		if p.Rank() == 0 {
@@ -344,8 +376,22 @@ func notOrSQL(want bool, expr string) string {
 	return `NOT ` + expr
 }
 
-func NotificationOrderSQL() string {
-	return ` ORDER BY ` + NotificationPriorityRankSQL("n.priority") + ` DESC, n.escalated_at DESC, n.id DESC`
+// NotificationOrderSQL renders f's order. The default is priority, then the
+// latest escalation. Sorted by resolved_at, an open row trails every resolved
+// one in both directions: the leading IS NULL term orders false before true in
+// both dialects, where a bare NULL's position would differ between them by
+// direction.
+func NotificationOrderSQL(f NotificationListFilter) string {
+	switch f.SortKey {
+	case NotificationSortResolvedAt:
+		dir := ` DESC`
+		if f.SortDir == NotificationSortDirAsc {
+			dir = ` ASC`
+		}
+		return ` ORDER BY (n.resolved_at IS NULL), n.resolved_at` + dir + `, n.id` + dir
+	default:
+		return ` ORDER BY ` + NotificationPriorityRankSQL("n.priority") + ` DESC, n.escalated_at DESC, n.id DESC`
+	}
 }
 
 // NotificationPriorityRankSQL renders NotificationPriority.Rank over expr.

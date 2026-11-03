@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -53,24 +52,15 @@ func (h *Handler) find(name string) db.WorkKindHandle {
 	return nil
 }
 
-// resolveOrg reads {org_id} from the path and the caller's claims. A
-// malformed org id names nothing and is a 404 before any store is touched;
-// no session is a 401.
-//
-// Local mode has exactly one org, and its membership gate admits every
-// caller to every org id without reading anything, so the sentinel is
-// checked here: the routes below run the package's reads and controls on
-// the kind's connection with org_id bound by argument, and a well-formed id
-// that is not the local org would otherwise answer an empty page or a zero
-// count as if the org existed.
+// resolveOrg reads {org_id} from the path, in canonical form, and the
+// caller's claims. A malformed org id names nothing and is a 404 before any
+// store is touched; no session is a 401. Whether the caller may address the
+// org is authorize's question: the routes below run the package's reads and
+// controls on the kind's connection with org_id bound by argument, so every
+// one of them asks it before reading.
 func (h *Handler) resolveOrg(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	orgID = r.PathValue("org_id")
-	parsed, err := uuid.Parse(orgID)
+	parsed, err := uuid.Parse(r.PathValue("org_id"))
 	if err != nil {
-		httpx.NotFound(w, "org")
-		return "", "", false
-	}
-	if runmode.Current() == runmode.ModeLocal && parsed != uuid.MustParse(runmode.LocalDefaultOrgID) {
 		httpx.NotFound(w, "org")
 		return "", "", false
 	}
@@ -79,7 +69,7 @@ func (h *Handler) resolveOrg(w http.ResponseWriter, r *http.Request) (orgID, use
 		httpx.WriteUnauth(w)
 		return "", "", false
 	}
-	return orgID, claims.Subject, true
+	return parsed.String(), claims.Subject, true
 }
 
 // authorize is the per-kind access gate: one arm per declared policy, and a

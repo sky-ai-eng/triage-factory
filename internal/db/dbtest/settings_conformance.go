@@ -1521,6 +1521,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			DefaultModel:                    domain.ModelOpus,
 			AutoDelegateEnabled:             true,
 			AutoModeEnabled:                 false,
+			ClaudeAIConnectorsEnabled:       true,
 			PermissionAbsentGraceMS:         30000,
 			PermissionAbsentAutodenyEnabled: false,
 			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap

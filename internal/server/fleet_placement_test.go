@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -54,6 +55,14 @@ func (o placementOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSet
 	return domain.OrgSettings{GitHubBaseURL: o.githubBase}, nil
 }
 
+// localOrg is the org the local-mode handler tests address: the one org local
+// mode has, so RequireOrgAdminRole authorizes it without a DB. otherOrg is any
+// other org, which it answers 404.
+const (
+	localOrg = runmode.LocalDefaultOrgID
+	otherOrg = "00000000-0000-0000-0000-000000000099"
+)
+
 // localModeReq builds a GET request carrying local-mode claims so
 // RequireOrgAdminRole short-circuits to authorized (local mode) without a DB.
 func localModeReq(target string) *http.Request {
@@ -70,7 +79,7 @@ var fleetRepos = placementRepos{rows: []domain.Repository{
 
 func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	fe := &fakeExplainer{plan: placement.Plan{
-		Enabled: true, OrgID: "org1", RepositoryID: "repo-web",
+		Enabled: true, OrgID: localOrg, RepositoryID: "repo-web",
 		PreferredSet: []string{"exec-a"},
 		Aging:        20 * time.Second, Liveness: 12 * time.Second,
 		Candidates: []placement.Candidate{
@@ -82,7 +91,7 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	s := &Server{az: &authz.Checker{}, placement: fe, orgs: placementOrgs{githubBase: "https://ghe.example.com/"}, repos: fleetRepos}
 
 	rec := httptest.NewRecorder()
-	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/web"))
+	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org="+localOrg+"&repo=acme/web"))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -106,7 +115,7 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	}
 	// The handler resolved the name on the org's current GitHub host to its
 	// registry row, and keyed the resolver on the row's id.
-	if fe.lastKey != [2]string{"org1", "repo-web"} {
+	if fe.lastKey != [2]string{localOrg, "repo-web"} {
 		t.Fatalf("resolver keyed on %v", fe.lastKey)
 	}
 }
@@ -115,7 +124,7 @@ func TestHandleFleetPlacement_UnregisteredRepoIsNotFound(t *testing.T) {
 	fe := &fakeExplainer{}
 	s := &Server{az: &authz.Checker{}, placement: fe, orgs: placementOrgs{githubBase: "https://ghe.example.com"}, repos: fleetRepos}
 	rec := httptest.NewRecorder()
-	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/api"))
+	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org="+localOrg+"&repo=acme/api"))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("a name no registry row answers to should 404, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -128,13 +137,13 @@ func TestHandleFleetPlacement_UnregisteredRepoIsNotFound(t *testing.T) {
 // is not owner/name, or an unknown kind is a 400.
 func TestHandleFleetPlacement_RejectsBadQuery(t *testing.T) {
 	for _, query := range []string{
-		"org=org1",
+		"org=" + localOrg,
 		"repo=acme/web",
-		"org=org1&repo=acme/web&kind=bogus",
-		"org=org1&repo=acme",
-		"org=org1&repo=acme/",
-		"org=org1&repo=/web",
-		"org=org1&repo=acme/web/extra",
+		"org=" + localOrg + "&repo=acme/web&kind=bogus",
+		"org=" + localOrg + "&repo=acme",
+		"org=" + localOrg + "&repo=acme/",
+		"org=" + localOrg + "&repo=/web",
+		"org=" + localOrg + "&repo=acme/web/extra",
 	} {
 		s := &Server{az: &authz.Checker{}, placement: &fakeExplainer{}, repos: fleetRepos}
 		rec := httptest.NewRecorder()
@@ -148,7 +157,7 @@ func TestHandleFleetPlacement_RejectsBadQuery(t *testing.T) {
 func TestHandleFleetPlacement_UnwiredResolverNotConfigured(t *testing.T) {
 	s := &Server{az: &authz.Checker{}} // placement nil
 	rec := httptest.NewRecorder()
-	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/web"))
+	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org="+localOrg+"&repo=acme/web"))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("nil resolver should 409 NOT_CONFIGURED, got %d", rec.Code)
 	}

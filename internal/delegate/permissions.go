@@ -130,14 +130,26 @@ const defaultPresencePollInterval = time.Second
 // out, or never existed. The permission endpoint maps it to 404.
 var ErrNoPendingPermission = errors.New("no pending permission request")
 
-// resolveSDKPermissionMode chooses the initial Claude Code permission posture
-// for SDK-runtime delegated conversations. Multi mode is always unattended and
-// always starts in auto. Local mode honors the team toggle, falling back to the
-// schema default on a missing row or read failure. Native conversations never
-// call this helper, so the setting cannot affect their own permission gate.
-func (s *Spawner) resolveSDKPermissionMode(ctx context.Context, teamID string) string {
+// sdkTeamOptions is what a team's settings decide about an SDK-runtime
+// delegated conversation's spawn.
+type sdkTeamOptions struct {
+	// permissionMode is RunOptions.PermissionMode: "auto", or "" for the
+	// allowlist-decides default.
+	permissionMode string
+	// claudeAIConnectors is RunOptions.ClaudeAIConnectors.
+	claudeAIConnectors bool
+}
+
+// resolveSDKTeamOptions reads the team's settings once for an SDK-runtime
+// delegated conversation's spawn. Multi mode is always unattended and always
+// starts in auto, and its SDK conversations run on no operator login, so the
+// connectors stay off. Local mode honors the team's choices, falling back to
+// the schema defaults on a missing row or read failure, which leaves the
+// connectors off. Native conversations never call this helper, so neither
+// setting can affect their own permission gate.
+func (s *Spawner) resolveSDKTeamOptions(ctx context.Context, teamID string) sdkTeamOptions {
 	if runmode.Current() == runmode.ModeMulti {
-		return "auto"
+		return sdkTeamOptions{permissionMode: "auto"}
 	}
 
 	ts := domain.DefaultTeamSettingsFor(runmode.Current() == runmode.ModeMulti)
@@ -145,13 +157,14 @@ func (s *Spawner) resolveSDKPermissionMode(ctx context.Context, teamID string) s
 		if loaded, err := s.teams.GetSettingsSystem(ctx, teamID); err == nil {
 			ts = loaded
 		} else {
-			delegateLog.Warn("load team settings for auto mode failed; using default", "team", teamID, "error", err)
+			delegateLog.Warn("load team settings for the SDK spawn failed; using defaults", "team", teamID, "error", err)
 		}
 	}
+	opts := sdkTeamOptions{claudeAIConnectors: ts.ClaudeAIConnectorsEnabled}
 	if ts.AutoModeEnabled {
-		return "auto"
+		opts.permissionMode = "auto"
 	}
-	return ""
+	return opts
 }
 
 // pendingPermission is one in-flight browser permission prompt: the 1-buffered

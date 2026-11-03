@@ -94,31 +94,52 @@ func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
 	}
 }
 
-func TestResolveSDKPermissionMode(t *testing.T) {
+func TestResolveSDKTeamOptions(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		mode        runmode.Mode
-		teamEnabled bool
-		want        string
+		name           string
+		mode           runmode.Mode
+		autoMode       bool
+		connectors     bool
+		wantMode       string
+		wantConnectors bool
 	}{
-		{name: "local enabled", mode: runmode.ModeLocal, teamEnabled: true, want: "auto"},
-		{name: "local disabled", mode: runmode.ModeLocal, teamEnabled: false, want: ""},
-		{name: "multi ignores stored false", mode: runmode.ModeMulti, teamEnabled: false, want: "auto"},
+		{name: "local auto mode on", mode: runmode.ModeLocal, autoMode: true, wantMode: "auto"},
+		{name: "local auto mode off", mode: runmode.ModeLocal, autoMode: false, wantMode: ""},
+		{name: "local connectors on", mode: runmode.ModeLocal, autoMode: true, connectors: true, wantMode: "auto", wantConnectors: true},
+		{name: "multi ignores stored false", mode: runmode.ModeMulti, autoMode: false, wantMode: "auto"},
+		{name: "multi ignores stored connectors", mode: runmode.ModeMulti, autoMode: true, connectors: true, wantMode: "auto"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, tc.mode)
 			database := newDelegateTestDB(t)
 			stores := sqlitestore.New(database)
 			settings := domain.DefaultTeamSettingsFor(tc.mode == runmode.ModeMulti)
-			settings.AutoModeEnabled = tc.teamEnabled
+			settings.AutoModeEnabled = tc.autoMode
+			settings.ClaudeAIConnectorsEnabled = tc.connectors
 			if _, err := stores.Teams.UpdateSettings(t.Context(), runmode.LocalDefaultTeamID, settings); err != nil {
 				t.Fatalf("UpdateSettings: %v", err)
 			}
 			s := NewSpawner(database, stores, nil, nil, "")
-			if got := s.resolveSDKPermissionMode(t.Context(), runmode.LocalDefaultTeamID); got != tc.want {
-				t.Errorf("permission mode = %q, want %q", got, tc.want)
+			got := s.resolveSDKTeamOptions(t.Context(), runmode.LocalDefaultTeamID)
+			if got.permissionMode != tc.wantMode {
+				t.Errorf("permission mode = %q, want %q", got.permissionMode, tc.wantMode)
+			}
+			if got.claudeAIConnectors != tc.wantConnectors {
+				t.Errorf("claude.ai connectors = %v, want %v", got.claudeAIConnectors, tc.wantConnectors)
 			}
 		})
+	}
+}
+
+// TestResolveSDKTeamOptions_ConnectorsOffWithoutARow pins the fallback: a team
+// with no settings row gets the schema defaults, which leave the claude.ai
+// connectors off.
+func TestResolveSDKTeamOptions_ConnectorsOffWithoutARow(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, sqlitestore.New(database), nil, nil, "")
+	if got := s.resolveSDKTeamOptions(t.Context(), "no-such-team"); got.claudeAIConnectors {
+		t.Error("a team with no settings row keeps the claude.ai connectors; want them off")
 	}
 }
 

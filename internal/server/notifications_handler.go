@@ -168,25 +168,34 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 // field.
 // TODO(TFAC-1255): embed one shared filter struct once the decode error
 // names the JSON field.
+//
+// sort_key reorders the list (db.NotificationListSortKeys); absent is the
+// default order, priority then the latest escalation, and there is no
+// "default" value to send. sort_dir is its direction, desc when absent, and
+// is refused without a key: the default order has no direction to flip.
 type notificationListRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
 	Unread     *bool    `json:"unread"`
 	PriorityIn []string `json:"priority_in"`
 	ScopeIn    []string `json:"scope_in"`
+	SortKey    *string  `json:"sort_key"`
+	SortDir    *string  `json:"sort_dir"`
 
 	httpx.PageRequest
 }
 
 // notificationOrgListRequest is the body of POST
 // /api/orgs/{org_id}/notifications/list: the inbox's filters plus the teams
-// whose rows to show.
+// whose rows to show, in the same orders.
 type notificationOrgListRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
 	Unread     *bool    `json:"unread"`
 	PriorityIn []string `json:"priority_in"`
 	ScopeIn    []string `json:"scope_in"`
+	SortKey    *string  `json:"sort_key"`
+	SortDir    *string  `json:"sort_dir"`
 	TeamIDIn   []string `json:"team_id_in"`
 
 	httpx.PageRequest
@@ -194,7 +203,9 @@ type notificationOrgListRequest struct {
 
 // notificationListFilterKey is the canonicalized filter set a page token is
 // fingerprinted against. It names the list and the org too, since the inbox
-// and the All-teams list share their filters but not their rows.
+// and the All-teams list share their filters but not their rows. The sort is
+// in it because an offset addresses a position in an ordering, so a token
+// minted under one sort names different rows under another.
 type notificationListFilterKey struct {
 	List       string                        `json:"list"`
 	OrgID      string                        `json:"org_id"`
@@ -203,11 +214,14 @@ type notificationListFilterKey struct {
 	Unread     *bool                         `json:"unread"`
 	PriorityIn []domain.NotificationPriority `json:"priority_in"`
 	ScopeIn    []domain.NotificationScope    `json:"scope_in"`
+	SortKey    string                        `json:"sort_key"`
+	SortDir    string                        `json:"sort_dir"`
 	TeamIDIn   []string                      `json:"team_id_in"`
 }
 
-// parseNotificationFilter validates the filters both lists share.
-func parseNotificationFilter(v *httpx.Validation, status *string, dismissed, unread *bool, priorityIn, scopeIn []string) db.NotificationListFilter {
+// parseNotificationFilter validates the filters and the sort both lists
+// share.
+func parseNotificationFilter(v *httpx.Validation, status *string, dismissed, unread *bool, priorityIn, scopeIn []string, sortKey, sortDir *string) db.NotificationListFilter {
 	f := db.NotificationListFilter{Dismissed: dismissed, Unread: unread}
 	if status != nil {
 		switch st := domain.NotificationStatus(*status); st {
@@ -219,6 +233,28 @@ func parseNotificationFilter(v *httpx.Validation, status *string, dismissed, unr
 	}
 	f.PriorityIn = parseNotificationEnums(v, "priority_in", priorityIn, domain.AllNotificationPriorities())
 	f.ScopeIn = parseNotificationEnums(v, "scope_in", scopeIn, domain.AllNotificationScopes())
+	if sortKey != nil {
+		if slices.Contains(db.NotificationListSortKeys, *sortKey) {
+			f.SortKey = *sortKey
+		} else {
+			v.Invalid("sort_key", fmt.Sprintf("sort_key: %q is not one of %s; leave it out for the default order",
+				*sortKey, strings.Join(db.NotificationListSortKeys, ", ")))
+		}
+	}
+	if sortDir != nil {
+		switch {
+		case !slices.Contains(db.NotificationListSortDirs, *sortDir):
+			v.Invalid("sort_dir", fmt.Sprintf("sort_dir: %q is not one of %s",
+				*sortDir, strings.Join(db.NotificationListSortDirs, ", ")))
+		case sortKey == nil:
+			v.Invalid("sort_dir", "sort_dir requires sort_key; the default order has no direction to flip")
+		default:
+			f.SortDir = *sortDir
+		}
+	}
+	if f.SortKey != "" && f.SortDir == "" {
+		f.SortDir = db.NotificationSortDirDesc
+	}
 	return f
 }
 
@@ -264,10 +300,11 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var v httpx.Validation
-	f := parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn)
+	f := parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn, req.SortKey, req.SortDir)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
 		List: "inbox", OrgID: orgID,
 		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
+		SortKey: f.SortKey, SortDir: f.SortDir,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -313,7 +350,7 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 	}
 	var v httpx.Validation
 	f := db.NotificationOrgListFilter{
-		NotificationListFilter: parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn),
+		NotificationListFilter: parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn, req.SortKey, req.SortDir),
 	}
 	if req.TeamIDIn != nil {
 		if len(req.TeamIDIn) == 0 {
@@ -334,7 +371,7 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
 		List: "org", OrgID: orgID,
 		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
-		TeamIDIn: f.TeamIDIn,
+		SortKey: f.SortKey, SortDir: f.SortDir, TeamIDIn: f.TeamIDIn,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return

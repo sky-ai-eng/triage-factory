@@ -128,6 +128,51 @@ func TestWrapperSettingsFlagsReachSDKOptions(t *testing.T) {
 	}
 }
 
+// TestWrapperDisablesClaudeAIConnectors pins that every spawn turns off the
+// claude.ai connectors of the login it runs on: with no --settings at all (a
+// run on a stored key) and with --settings carrying the operator's auth
+// helpers, which must survive the merge. Only --claude-ai-connectors leaves
+// the key unset, and the helpers still arrive.
+func TestWrapperDisablesClaudeAIConnectors(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	const helpers = `{"apiKeyHelper":"/usr/local/bin/key-helper"}`
+	settingsOf := func(t *testing.T, args ...string) map[string]any {
+		t.Helper()
+		msg := startWrapper(t, node, optionsEchoStubSDK, args...).next()
+		if msg["type"] != "stub_options" {
+			t.Fatalf("first non-ready line = %v, want stub_options", msg)
+		}
+		settings, ok := msg["settings"].(map[string]any)
+		if !ok {
+			t.Fatalf("settings = %#v, want an object", msg["settings"])
+		}
+		return settings
+	}
+
+	if got := settingsOf(t)["disableClaudeAiConnectors"]; got != true {
+		t.Errorf("no --settings: disableClaudeAiConnectors = %v, want true", got)
+	}
+
+	withHelpers := settingsOf(t, "--settings", helpers)
+	if got := withHelpers["disableClaudeAiConnectors"]; got != true {
+		t.Errorf("with --settings: disableClaudeAiConnectors = %v, want true", got)
+	}
+	if got := withHelpers["apiKeyHelper"]; got != "/usr/local/bin/key-helper" {
+		t.Errorf("with --settings: apiKeyHelper = %v, want the helper kept", got)
+	}
+
+	allowed := settingsOf(t, "--settings", helpers, "--claude-ai-connectors")
+	if got, ok := allowed["disableClaudeAiConnectors"]; ok {
+		t.Errorf("with --claude-ai-connectors: disableClaudeAiConnectors = %v, want it unset", got)
+	}
+	if got := allowed["apiKeyHelper"]; got != "/usr/local/bin/key-helper" {
+		t.Errorf("with --claude-ai-connectors: apiKeyHelper = %v, want the helper kept", got)
+	}
+}
+
 // TestWrapperPermissionRequestUsesToolUseID pins the identifier the wrapper
 // puts on a permission prompt: the SDK's own toolUseID for the gated call,
 // emitted as tool_call_id, with the SDK's prompt copy alongside it. The reply

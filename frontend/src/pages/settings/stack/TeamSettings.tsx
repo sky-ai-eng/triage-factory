@@ -213,6 +213,7 @@ export default function TeamSettings({
   const [defaultModel, setDefaultModel] = useState('')
   const [autoDelegate, setAutoDelegate] = useState(true)
   const [autoMode, setAutoMode] = useState(true)
+  const [claudeAIConnectors, setClaudeAIConnectors] = useState(false)
   // Advisory branch-name template suggested to delegated agents (TFAC-498).
   const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
   // How finished agent reviews reach GitHub.
@@ -290,6 +291,7 @@ export default function TeamSettings({
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
         setAutoMode(form.auto_mode_enabled)
+        setClaudeAIConnectors(form.claude_ai_connectors_enabled)
         setBranchTemplate(form.branch_template)
         setReviewPosture(form.review_posture)
         setBasePushPolicy(form.base_branch_push_policy)
@@ -413,6 +415,7 @@ export default function TeamSettings({
     defaultModel !== baseline.default_model ||
     autoDelegate !== baseline.auto_delegate_enabled ||
     (isLocal && autoMode !== baseline.auto_mode_enabled) ||
+    (isLocal && claudeAIConnectors !== baseline.claude_ai_connectors_enabled) ||
     branchTemplate !== baseline.branch_template ||
     reviewPosture !== baseline.review_posture ||
     basePushPolicy !== baseline.base_branch_push_policy
@@ -431,6 +434,7 @@ export default function TeamSettings({
           default_model: defaultModel,
           auto_delegate_enabled: autoDelegate,
           auto_mode_enabled: autoMode,
+          claude_ai_connectors_enabled: claudeAIConnectors,
           branch_template: branchTemplate,
           review_posture: reviewPosture,
           base_branch_push_policy: basePushPolicy,
@@ -446,6 +450,7 @@ export default function TeamSettings({
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
         auto_mode_enabled: autoMode,
+        claude_ai_connectors_enabled: claudeAIConnectors,
         branch_template: branchTemplate,
         review_posture: reviewPosture,
         base_branch_push_policy: basePushPolicy,
@@ -647,6 +652,7 @@ export default function TeamSettings({
           setDefaultModel(baseline.default_model)
           setAutoDelegate(baseline.auto_delegate_enabled)
           setAutoMode(baseline.auto_mode_enabled)
+          setClaudeAIConnectors(baseline.claude_ai_connectors_enabled)
           setBranchTemplate(baseline.branch_template)
           setReviewPosture(baseline.review_posture)
           setBasePushPolicy(baseline.base_branch_push_policy)
@@ -710,6 +716,35 @@ export default function TeamSettings({
               <span
                 className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-raised shadow-sm transition-transform ${
                   autoMode ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        )}
+        {isLocal && (
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[13px] text-ink-1">claude.ai connectors</p>
+              <p className="mt-0.5 text-[11px] text-ink-3">
+                Let agents use the connectors your Claude account has connected, such as Linear or
+                Google Drive. Applies only when agents use system Claude Code credentials. Agents
+                read text from pull requests and issues, which anyone may have written, and a
+                connector acts as you.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-label="claude.ai connectors"
+              aria-checked={claudeAIConnectors}
+              onClick={() => setClaudeAIConnectors((v) => !v)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                claudeAIConnectors ? 'bg-warm' : 'bg-line-2'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-raised shadow-sm transition-transform ${
+                  claudeAIConnectors ? 'translate-x-4' : 'translate-x-0'
                 }`}
               />
             </button>

@@ -23,6 +23,12 @@
 // process (Triage Factory binary) put in env and --settings wins, and the
 // SDK falls back to the user's local Claude Code OAuth login when nothing
 // is set, billing against their Pro/Max subscription.
+//
+// That login also carries the claude.ai connectors its account has connected
+// (Linear, Google Drive, ...), which Claude Code fetches from the account and
+// connects as MCP servers whichever settings sources a spawn loads. Every
+// spawn turns them off (disableClaudeAiConnectors below) unless the Go side
+// passes --claude-ai-connectors.
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
@@ -55,6 +61,7 @@ function parseArgs(argv) {
   let streamInput = false
   let permissionPrompts = false
   let toolBatchNotes = false
+  let claudeAiConnectors = false
   const opts = {}
   const addDirs = []
 
@@ -139,6 +146,12 @@ function parseArgs(argv) {
         // it has something to answer with.
         toolBatchNotes = true
         break
+      case "--claude-ai-connectors":
+        // Leave the login's claude.ai connectors connected (valueless flag).
+        // The Go side emits it only for a spawn on the operator's own Claude
+        // Code login whose team allows the connectors.
+        claudeAiConnectors = true
+        break
       case "--output-format":
         // CLI flag — the SDK iterator already emits the same shape.
         next()
@@ -152,6 +165,14 @@ function parseArgs(argv) {
   }
 
   if (addDirs.length > 0) opts.additionalDirectories = addDirs
+  // Set here rather than on the Go side so it covers every spawn the same way,
+  // a run with a stored key included, whose argv carries no --settings at all.
+  // Merged over --settings, which holds the operator's auth helpers. Left unset
+  // rather than false when allowed: any settings source that sets it true
+  // turns the connectors off, so a false here would override nothing.
+  if (!claudeAiConnectors) {
+    opts.settings = { ...opts.settings, disableClaudeAiConnectors: true }
+  }
   return { prompt, options: opts, streamInput, permissionPrompts, toolBatchNotes }
 }
 

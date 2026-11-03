@@ -119,6 +119,20 @@ function matches(n: NotificationItem, f: Record<string, unknown>): boolean {
   return true
 }
 
+// The server's order for a sort_key, or the rows as held for none. Sorted by
+// resolution, open rows trail in either direction.
+function ordered(items: NotificationItem[], f: Record<string, unknown>): NotificationItem[] {
+  if (f.sort_key !== 'resolved_at') return items
+  const sign = f.sort_dir === 'asc' ? 1 : -1
+  const at = (n: NotificationItem) => (n.resolved_at ? Date.parse(n.resolved_at) : null)
+  return [...items].sort((a, b) => {
+    const x = at(a)
+    const y = at(b)
+    if (x === null || y === null) return (x === null ? 1 : 0) - (y === null ? 1 : 0)
+    return sign * (x - y)
+  })
+}
+
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const method = init?.method ?? 'GET'
   const body = init?.body ? JSON.parse(String(init.body)) : null
@@ -136,9 +150,12 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (countFails) return ok({ errors: [{ reason: 'INTERNAL', message: 'it broke' }] }, 500)
     }
     const from = url.startsWith('/api/orgs') ? orgRows : rows
-    const items = from.filter((n) => matches(n, body))
+    const items = ordered(
+      from.filter((n) => matches(n, body)),
+      body,
+    )
     return ok({
-      items: body.page_size === 0 ? [] : items,
+      items: items.slice(0, body.page_size),
       next_page_token: '',
       total_count: items.length,
     })
@@ -682,5 +699,13 @@ describe('nothing open', () => {
     await settle()
     expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
     expect(screen.getByText(/Last resolved 1d ago · Newer · Fixed now\./)).toBeInTheDocument()
+    // One row, the latest resolution, which the server picks.
+    expect(
+      calls.filter((c) => c.url === '/api/me/notifications/list' && c.body?.status === 'resolved'),
+    ).toEqual([
+      expect.objectContaining({
+        body: { status: 'resolved', sort_key: 'resolved_at', sort_dir: 'desc', page_size: 1 },
+      }),
+    ])
   })
 })
