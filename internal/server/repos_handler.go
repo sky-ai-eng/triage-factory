@@ -1165,6 +1165,10 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 // this feeds is a type-to-filter box, not a browse.
 const maxBranchPageSize = 100
 
+// branchPagesTTL is how long one of GitHub's branch pages answers the branch
+// list. A branch pushed or deleted on GitHub shows up within it.
+const branchPagesTTL = time.Minute
+
 // branchListRequest is the body of POST /api/repos/{id}/branches/list.
 type branchListRequest struct {
 	// Search is a case-insensitive literal substring of the branch name
@@ -1261,7 +1265,9 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 
 	// GitHub's pages are read at its own largest size whatever the caller's
 	// page_size, so a cursor's page number means the same page on every
-	// request of a walk.
+	// request of a walk. Each page is held for branchPagesTTL: a search scans
+	// the same pages for every needle typed, and a repository with thousands
+	// of branches would otherwise cost dozens of GitHub calls per keystroke.
 	branches, next, err := httpx.ScanUpstream(from, page.Limit,
 		func(b ghclient.Branch) bool { return httpx.SearchMatches(search, b.Name) },
 		func(upstream string) ([]ghclient.Branch, string, error) {
@@ -1272,7 +1278,11 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 					return nil, "", fmt.Errorf("branch cursor %q is not a page number", upstream)
 				}
 			}
-			rows, err := client.ListBranchesPage(r.Context(), owner, repo, maxBranchPageSize, n)
+			key := orgID + "|" + row.ID + "|" + strconv.Itoa(n)
+			rows, err := s.branchPages.Get(r.Context(), key, func(ctx context.Context) ([]ghclient.Branch, bool, error) {
+				rows, err := client.ListBranchesPage(ctx, owner, repo, maxBranchPageSize, n)
+				return rows, true, err
+			})
 			if err != nil || len(rows) < maxBranchPageSize {
 				return rows, "", err
 			}

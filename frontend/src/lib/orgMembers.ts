@@ -14,9 +14,8 @@ export interface OrgMember {
 
 /** What an org roster read asks for. */
 export interface OrgMemberQuery {
-  /** The route's `search`: a substring of a member's display name, and of
-   *  their verified email addresses when the caller may look people up by
-   *  address (an org admin, or the admin of a team). Blank is no search. */
+  /** The route's `search`: a substring of a member's display name or of one
+   *  of their verified email addresses. Blank is no search. */
   search?: string
   /** The route's `excluding_team_id`: only the members not on this team, the
    *  people it could add. */

@@ -259,9 +259,11 @@ func channelPage(channels []channelView, page httpx.Page) []channelView {
 // every connected workspace, narrowed by search, tracked and ids, in the order
 // sort_key names (default: name, then channel id).
 //
-// The live half is enumerated from Slack on every read, page and search
-// alike: conversations.list and users.conversations per connected workspace,
-// each collecting at most slackConversationsListCap channels. Past that cap
+// The live half is one enumeration of every connected workspace, held for
+// slackCandidatesTTL and shared by every page, search and the facets node
+// (cachedSlackCandidates): conversations.list and users.conversations per
+// workspace, each collecting at most slackConversationsListCap channels. Past
+// that cap
 // the workspace's live channels are a prefix of its universe, so a search
 // cannot find a channel beyond it and total_count counts only what the cap
 // let in; the response says so with a slack_channels_truncated warning rather

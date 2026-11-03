@@ -99,6 +99,8 @@ func TestLinearTeamsList_SearchIsLiteral(t *testing.T) {
 		linear.Team{ID: fixtureUUID("t-axc"), Key: "AXC", Name: "Axc"},
 	)
 	fake.SetLikeWildcards(true)
+	// One team per Linear page, so the walk crosses Linear's pages.
+	fake.SetPageCap(1)
 	if !fakeContains("ABC", "a%c", true) {
 		t.Fatal("the fake does not read % as a wildcard, so this test proves nothing")
 	}
@@ -147,6 +149,7 @@ func TestLinearTeamsList_SearchedReadsAreBounded(t *testing.T) {
 	teams = append(teams, linear.Team{ID: fixtureUUID("t-pct"), Key: "A%C", Name: "Percent"})
 	s, fake := newServerWithLinearCatalog(t, teams...)
 	fake.SetLikeWildcards(true)
+	fake.SetPageCap(1)
 
 	before := fake.Calls()
 	empty := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
@@ -162,11 +165,50 @@ func TestLinearTeamsList_SearchedReadsAreBounded(t *testing.T) {
 	if got := linearTeamKeysOf(next.Items); got != "A%C" || next.NextPageToken != "" {
 		t.Errorf("resumed page = %s (token %q), want A%%C and no token", got, next.NextPageToken)
 	}
-	// Pages of two reach A%C on Linear's sixth page, inside the bound.
+	// When Linear answers two teams a page, A%C is on its sixth page, inside
+	// the bound.
+	fake.SetPageCap(2)
 	page := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"search": "a%c", "page_size": 2}))
+		map[string]any{"search": "a%c", "page_size": 1}))
 	if got := linearTeamKeysOf(page.Items); got != "A%C" || page.NextPageToken != "" {
-		t.Errorf("pages of two = %s (token %q), want A%%C and no token", got, page.NextPageToken)
+		t.Errorf("Linear pages of two = %s (token %q), want A%%C and no token", got, page.NextPageToken)
+	}
+}
+
+// TestLinearTeamsList_PageSizeChangeMidWalk: the token's position counts rows
+// of an upstream page read at one size whatever page_size asks, so a walk that
+// changes page_size between pages neither repeats nor skips a team. Linear
+// reads the % as a wildcard and serves two decoys the literal re-check drops,
+// so the first page ends two matches into an upstream page, which a smaller
+// upstream read on the next request would hold only one of.
+func TestLinearTeamsList_PageSizeChangeMidWalk(t *testing.T) {
+	teams := []linear.Team{
+		{ID: fixtureUUID("x1"), Key: "ZX1", Name: "Decoy one"},
+		{ID: fixtureUUID("x2"), Key: "ZX2", Name: "Decoy two"},
+	}
+	for i := 1; i <= 6; i++ {
+		key := fmt.Sprintf("Z%%%d", i)
+		teams = append(teams, linear.Team{ID: fixtureUUID(fmt.Sprintf("t-%d", i)), Key: key, Name: fmt.Sprintf("Match %d", i)})
+	}
+	s, fake := newServerWithLinearCatalog(t, teams...)
+	fake.SetLikeWildcards(true)
+	var got []string
+	token := ""
+	for _, size := range []int{4, 1, 1, 1} {
+		body := map[string]any{"search": "z%", "page_size": size}
+		if token != "" {
+			body["page_token"] = token
+		}
+		page := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath, body))
+		for _, team := range page.Items {
+			got = append(got, team.Key)
+		}
+		if token = page.NextPageToken; token == "" {
+			break
+		}
+	}
+	if strings.Join(got, ",") != "Z%1,Z%2,Z%3,Z%4,Z%5,Z%6" {
+		t.Errorf("walk of 4 then 1s = %v, want every matching team once", got)
 	}
 }
 

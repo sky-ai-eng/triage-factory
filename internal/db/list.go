@@ -2,8 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
+
+	"modernc.org/sqlite"
 )
 
 // ListOpts is the pagination window every paginated store read takes. It is
@@ -126,14 +129,39 @@ func SearchPattern(needle string) string {
 	return "%" + LikeEscape(strings.ToLower(needle)) + "%"
 }
 
+// sqliteSearchFold is the SQL function SQLiteSearch lowers a column with.
+// SQLite's own LOWER folds only A-Z, while the needle is lowered in Go, so
+// LOWER("Überprüfung") stays "Überprüfung" and a search for "Über" (pattern
+// "%über%") would not match the text it was typed from. This function lowers
+// the column with strings.ToLower, the same fold the needle and the page
+// fingerprint take.
+const sqliteSearchFold = "tf_search_fold"
+
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction(sqliteSearchFold, 1,
+		func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			switch v := args[0].(type) {
+			case string:
+				return strings.ToLower(v), nil
+			case []byte:
+				return strings.ToLower(string(v)), nil
+			default:
+				// NULL stays NULL and fails its arm; a number is matched as
+				// the text SQLite renders it in, which has no case.
+				return v, nil
+			}
+		})
+}
+
 // SQLiteSearch renders a list's search predicate for SQLite: needle as a
 // case-insensitive literal substring of any of cols, one `?` per column. An
 // empty needle (after trimming) renders no clause and no args, so a caller
 // appends the clause only when it is non-empty.
 //
 // A NULL column simply fails its arm; no COALESCE is needed inside an OR.
-// lower()+LIKE rather than a dialect's own case-insensitive operator, so both
-// dialects fold case through the same expression.
+// Both dialects lower both sides and match with LIKE, rather than using a
+// dialect's own case-insensitive operator; SQLite lowers the column through
+// sqliteSearchFold, since its LOWER folds ASCII only.
 func SQLiteSearch(needle string, cols ...string) (string, []any) {
 	needle = strings.TrimSpace(needle)
 	if needle == "" || len(cols) == 0 {
@@ -143,7 +171,7 @@ func SQLiteSearch(needle string, cols ...string) (string, []any) {
 	arms := make([]string, len(cols))
 	args := make([]any, len(cols))
 	for i, c := range cols {
-		arms[i] = "LOWER(" + c + ") LIKE ? ESCAPE '\\'"
+		arms[i] = sqliteSearchFold + "(" + c + ") LIKE ? ESCAPE '\\'"
 		args[i] = pattern
 	}
 	return "(" + strings.Join(arms, " OR ") + ")", args

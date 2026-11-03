@@ -82,6 +82,10 @@ type linearCatalogFake struct {
 	// search as a LIKE wildcard: Linear documents containsIgnoreCase as a
 	// case-insensitive contains and leaves that reading open.
 	likeWildcards bool
+	// pageCap, when set, is the most rows one Teams or Users page answers
+	// whatever first asks, so a test can spread a short catalog over many
+	// upstream pages.
+	pageCap int
 	// teamFailing fails the Team read of these ids only, so one request can
 	// carry a field fault and an upstream failure together.
 	teamFailing map[string]bool
@@ -115,6 +119,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 	teams := append([]linear.Team(nil), f.teams...)
 	users := append([]linear.User(nil), f.users...)
 	like := f.likeWildcards
+	pageCap := f.pageCap
 	statesOf := func(teamID string) []linear.WorkflowState {
 		if st, custom := f.states[teamID]; custom {
 			return st
@@ -155,7 +160,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 				matched = append(matched, t)
 			}
 		}
-		writeGraphQLData(w, map[string]any{"teams": fakeConnection(matched, body.Variables)})
+		writeGraphQLData(w, map[string]any{"teams": fakeConnection(matched, body.Variables, pageCap)})
 	case "TeamsByID":
 		ids, _ := body.Variables["ids"].([]any)
 		matched := []linear.Team{}
@@ -183,7 +188,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 			writeGraphQLData(w, map[string]any{"team": nil})
 			return
 		}
-		writeGraphQLData(w, map[string]any{"team": map[string]any{"states": fakeConnection(states, body.Variables)}})
+		writeGraphQLData(w, map[string]any{"team": map[string]any{"states": fakeConnection(states, body.Variables, 0)}})
 	case "WorkflowState":
 		id := stringVar(body.Variables, "id")
 		for _, t := range teams {
@@ -210,7 +215,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			nodes = append(nodes, node)
 		}
-		writeGraphQLData(w, map[string]any{"issueLabels": fakeConnection(nodes, body.Variables)})
+		writeGraphQLData(w, map[string]any{"issueLabels": fakeConnection(nodes, body.Variables, 0)})
 	case "Users":
 		q := usersFilterQuery(body.Variables)
 		matched := []linear.User{}
@@ -222,7 +227,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 				matched = append(matched, u)
 			}
 		}
-		writeGraphQLData(w, map[string]any{"users": fakeConnection(matched, body.Variables)})
+		writeGraphQLData(w, map[string]any{"users": fakeConnection(matched, body.Variables, pageCap)})
 	case "User":
 		id := stringVar(body.Variables, "id")
 		for _, u := range users {
@@ -263,10 +268,14 @@ func fakeContains(field, q string, like bool) bool {
 }
 
 // fakeConnection is one page of items as a GraphQL connection, paged by the
-// request's first and after, with the cursor an offset.
-func fakeConnection[T any](items []T, vars map[string]any) map[string]any {
+// request's first and after, with the cursor an offset. A pageCap above zero
+// caps first.
+func fakeConnection[T any](items []T, vars map[string]any, pageCap int) map[string]any {
 	start, _ := strconv.Atoi(stringVar(vars, "after"))
 	first := int(vars["first"].(float64))
+	if pageCap > 0 {
+		first = min(first, pageCap)
+	}
 	start = min(start, len(items))
 	end := min(start+first, len(items))
 	page := items[start:end]
@@ -383,6 +392,14 @@ func (f *linearCatalogFake) SetLikeWildcards(like bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.likeWildcards = like
+}
+
+// SetPageCap makes every later Teams and Users page answer at most n rows,
+// whatever first asks; 0 lifts the cap.
+func (f *linearCatalogFake) SetPageCap(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pageCap = n
 }
 
 // SetFailing makes every later request fail, standing in for an unreachable

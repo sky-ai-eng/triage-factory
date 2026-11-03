@@ -90,7 +90,7 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 	users, next, err := readLinearScannedPage(from, page.Limit, search,
 		func(u linear.User) []string { return []string{u.Name, u.DisplayName, u.Email} },
 		func(after string) ([]linear.User, bool, string, error) {
-			p, err := client.ListUsers(r.Context(), search, after, min(page.Limit, linearPageMax))
+			p, err := client.ListUsers(r.Context(), search, after, linearPageMax)
 			return p.Items, p.HasNextPage, p.EndCursor, err
 		})
 	if err != nil {

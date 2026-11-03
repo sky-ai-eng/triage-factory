@@ -39,9 +39,10 @@ import (
 // --------------------------------------------------------------------
 
 // linearPageMax is the most items one upstream page carries — the client's
-// page cap. A larger page_size is accepted and served short, with a
-// next_page_token, the way a Jira Cloud page is: a proxy list never promises a
-// full window.
+// page cap. The scanned lists read every upstream page at this size whatever
+// the caller's page_size, so the skip a page token carries counts rows of the
+// same upstream page on every request of a walk; a larger page_size is filled
+// from several upstream pages (readLinearScannedPage).
 const linearPageMax = 50
 
 // linearTeamListRequest is the body: the picker's search box plus the standard
@@ -134,7 +135,7 @@ func (s *Server) handleLinearTeamsList(w http.ResponseWriter, r *http.Request) {
 	teams, next, err := readLinearScannedPage(from, page.Limit, search,
 		func(t linear.Team) []string { return []string{t.Key, t.Name} },
 		func(after string) ([]linear.Team, bool, string, error) {
-			p, err := client.ListTeams(r.Context(), search, after, min(page.Limit, linearPageMax))
+			p, err := client.ListTeams(r.Context(), search, after, linearPageMax)
 			return p.Items, p.HasNextPage, p.EndCursor, err
 		})
 	if err != nil {

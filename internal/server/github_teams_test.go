@@ -123,6 +123,27 @@ func TestGitHubGroupCandidates_CredentialsMissing(t *testing.T) {
 	}
 }
 
+// TestGitHubGroupCandidates_CredentialsMissingIsNotHeld: a listing in which no
+// owner had a credential is answered but not kept, so the read after the
+// credential state changes answers the change rather than "reconnect GitHub".
+// The change here is the tracked set emptied straight in the store, past the
+// PUT that drops the held listing, so only the listing's own keep decides.
+func TestGitHubGroupCandidates_CredentialsMissingIsNotHeld(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+
+	repoID := seedConfiguredRepo(t, srv, "acme", "api")
+	if resp := listGitHubGroups(t, srv, nil); !resp.CredentialsMissing {
+		t.Fatalf("credentials_missing=false with a tracked repo and no creds; want true")
+	}
+	if _, err := srv.db.Exec(`DELETE FROM team_github_repos WHERE repository_id = ?`, repoID); err != nil {
+		t.Fatalf("untrack: %v", err)
+	}
+	if resp := listGitHubGroups(t, srv, nil); resp.CredentialsMissing {
+		t.Errorf("credentials_missing=true after the tracked set emptied; the listing was held")
+	}
+}
+
 // TestGitHubGroupCandidates_OwnersFromTrackedReposOnly: candidates come from the
 // owners of tracked repositories only, so an untracked registry row's owner is
 // never asked for its teams.

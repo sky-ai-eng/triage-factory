@@ -527,16 +527,18 @@ const gitHubTeamsTTL = time.Minute
 
 // cachedGitHubGroupCandidates is gitHubGroupCandidates through the org's cache
 // entry, for the list route. A listing in which an owner's teams could not be
-// read is answered but not kept, so the next read asks GitHub again. The PUT
-// validates against a live listing instead, so a team created on GitHub a
-// moment ago can be mapped.
+// read is answered but not kept, so the next read asks GitHub again. Neither
+// is one in which no owner had a credential: it made no GitHub call to save,
+// and keeping it would go on saying "reconnect GitHub" after the credential
+// is connected. The PUT validates against a live listing instead, so a team
+// created on GitHub a moment ago can be mapped.
 //
 // The candidates are a copy: the caller marks the ones it belongs to in
 // place, and the held listing is every caller's.
 func (s *Server) cachedGitHubGroupCandidates(ctx context.Context, orgID, host string) (gitHubGroupListing, error) {
 	listing, err := s.gitHubGroupListings.Get(ctx, gitHubGroupListingKey(orgID, host), func(ctx context.Context) (gitHubGroupListing, bool, error) {
 		listing, err := s.gitHubGroupCandidates(ctx, orgID, host)
-		return listing, len(listing.unlisted) == 0, err
+		return listing, len(listing.unlisted) == 0 && !listing.credentialsMissing, err
 	})
 	listing.candidates = slices.Clone(listing.candidates)
 	return listing, err

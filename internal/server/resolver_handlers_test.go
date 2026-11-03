@@ -289,6 +289,11 @@ func TestRepoBranches_SearchesEachUpstreamPage(t *testing.T) {
 			t.Fatalf("per_page = %q, want GitHub's largest page whatever page_size asked", per)
 		}
 	}
+	// Every search above scanned the same three pages of GitHub's, and each
+	// was read from GitHub once: a page is held across needles.
+	if len(perPages) != 3 {
+		t.Errorf("GitHub was asked for %d branch pages across the searches, want 3 (each page once)", len(perPages))
+	}
 
 	for _, tc := range []struct {
 		name          string
