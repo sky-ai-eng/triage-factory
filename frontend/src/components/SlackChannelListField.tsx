@@ -1,21 +1,31 @@
 import { useEffect, useState } from 'react'
 import { Lock, X } from 'lucide-react'
 import { useTeams, pickerDefault } from '../hooks/useTeams'
-import { fetchTeamSlackChannels } from '../pages/settings/teamConfig'
+import { fetchSlackChannelsByID, fetchTeamTrackedSlackChannels } from '../pages/settings/teamConfig'
 import type { SlackChannelView } from '../types'
+
+/** A channel the team tracks: a tracked row always carries its registry id,
+ *  which is what channel_in stores. */
+type TrackedSlackChannel = SlackChannelView & { id: string }
+
+/** The shape of a channel registry id. A stored entry of any other shape
+ *  names no row, so it is never sent to the by-id read, which would refuse
+ *  the whole request over it. */
+const REGISTRY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** SlackChannelListField is the editor for slack:message's `channel_in`: a
  *  multi-select over the channels the handler's team tracks
- *  (GET /api/slack/teams/{team_id}/channels), submitting each channel's
- *  registry `id`. The server accepts only those, since the router delivers a
- *  team's handlers only messages from channels it tracks.
+ *  (POST /api/slack/teams/{team_id}/channels/list with `tracked: true`),
+ *  submitting each channel's registry `id`. The server accepts only those,
+ *  since the router delivers a team's handlers only messages from channels it
+ *  tracks.
  *
  *  teamId is the handler's team. '' (create with the picker hidden) falls
  *  back to the acting team, which is the sole team in that case.
  *
  *  A stored entry the team no longer tracks stays in the value and renders
  *  as a removable "not tracked" chip, so opening and saving a handler never
- *  drops it without the user seeing it.
+ *  drops it without the user seeing it. Its name is read by registry id.
  *
  *  Wire shape: `string[] | undefined` — undefined when nothing is selected,
  *  which matches every channel the team tracks. */
@@ -34,14 +44,24 @@ export default function SlackChannelListField({
   // previous team's list.
   const [result, setResult] = useState<{
     team: string
-    channels: SlackChannelView[] | null
+    channels: TrackedSlackChannel[] | null
   } | null>(null)
+  // Names of stored entries the team does not track, by registry id, for the
+  // team they were read under. An id the read could not name maps to itself.
+  const [named, setNamed] = useState<{ team: string; byId: Record<string, string> }>({
+    team: '',
+    byId: {},
+  })
 
   useEffect(() => {
     if (!team) return
     let cancelled = false
-    fetchTeamSlackChannels(team).then((data) => {
-      if (!cancelled) setResult({ team, channels: data?.channels ?? null })
+    fetchTeamTrackedSlackChannels(team).then((rows) => {
+      if (cancelled) return
+      // The guard drops nothing the server sends; it is what lets the
+      // checkboxes below submit `id` as the string channel_in takes.
+      const channels = rows && rows.flatMap((c) => (c.id ? [{ ...c, id: c.id }] : []))
+      setResult({ team, channels })
     })
     return () => {
       cancelled = true
@@ -49,24 +69,45 @@ export default function SlackChannelListField({
   }, [team])
 
   const selected = value ?? []
+  const ready = !!team && result?.team === team
+  const tracked = ready ? (result.channels ?? []) : []
+  const trackedIds = new Set(tracked.map((c) => c.id))
+  const untracked = selected.filter((id) => !trackedIds.has(id))
+  const known = named.team === team ? named.byId : {}
+  // The entries still to name, as one string so the read below runs once per
+  // set rather than once per render.
+  const toName =
+    ready && result.channels !== null
+      ? untracked.filter((id) => REGISTRY_ID.test(id) && !(id in known)).join(',')
+      : ''
+
+  useEffect(() => {
+    if (!toName) return
+    let cancelled = false
+    const ids = toName.split(',')
+    fetchSlackChannelsByID(team, ids).then((rows) => {
+      if (cancelled) return
+      setNamed((prev) => {
+        const byId = prev.team === team ? { ...prev.byId } : {}
+        for (const id of ids) byId[id] = id
+        for (const row of rows ?? []) if (row.id) byId[row.id] = displayName(row)
+        return { team, byId }
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [team, toName])
+
   const set = (next: string[]) => onChange(next.length > 0 ? next : undefined)
   const toggle = (id: string) =>
     set(selected.includes(id) ? selected.filter((c) => c !== id) : [...selected, id])
 
-  if (!team || result?.team !== team) {
+  if (!ready) {
     return <div className="h-10 rounded-lg bg-tint-2 animate-pulse" />
   }
   const channels = result.channels
-  const tracked = (channels ?? [])
-    .filter((c): c is SlackChannelView & { id: string } => c.tracked && !!c.id)
-    .sort((a, b) => displayName(a).localeCompare(displayName(b)))
-  const untracked = selected.filter((id) => !tracked.some((c) => c.id === id))
-  // The response also lists registry rows the team does not track, which
-  // names a stored entry the team has since untracked.
-  const nameOf = (id: string) => {
-    const row = channels?.find((c) => c.id === id)
-    return row ? displayName(row) : id
-  }
+  const nameOf = (id: string) => known[id.toLowerCase()] ?? known[id] ?? id
 
   return (
     <div className="space-y-2">

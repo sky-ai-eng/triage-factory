@@ -632,6 +632,28 @@
   color: var(--color-alarm);
 }
 
+/* The line under a table that holds one window of a list: how much of it is
+   loaded, and the ask for the next window. */
+.sp-loadmore {
+  padding: 10px 12px 0;
+  font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.sp-loadmore button {
+  all: unset;
+  cursor: pointer;
+  color: var(--color-ink-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+
+.sp-loadmore button:disabled {
+  cursor: default;
+  color: var(--color-ink-4);
+}
+
 /* ── Reduced motion ────────────────────────────────────────────────────
    The blanket in tokens/motion.css removes the animation, and a label that
    fills `both` from opacity 0 is then never shown at all. The end state is
