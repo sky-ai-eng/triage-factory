@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { useMe, useTeamMembers } from '../hooks/useDeploymentConfig'
+import { useSearchAnswer } from '../hooks/useSearchAnswer'
+import { fetchTeamRoster } from '../lib/teamRoster'
 import { useApiOrgId } from '../hooks/useApiOrgId'
 import { findGitHubAccountByLogin, getGitHubAccount } from '../lib/githubAccounts'
 import { findLinearUser, isLinearID, linearUserHandle, searchLinearUsers } from '../lib/linearUsers'
@@ -20,7 +22,8 @@ import type { MeResponse, TeamMember } from '../types'
  *    configure-<source> hint.
  *
  *  - Variant B (multi-member team): chips + searchable dropdown of team
- *    members. Free-text entry supports external identities (bots,
+ *    members, the query sent to the same roster route as its `search`.
+ *    Free-text entry supports external identities (bots,
  *    contractors not on the team). Implements the ARIA combobox
  *    pattern + keyboard navigation (Arrow keys, Enter, Escape).
  *
@@ -58,7 +61,7 @@ export default function IdentityListField({
   onChange: (val: string[] | undefined) => void
 }) {
   const { me, loading: meLoading, error: meError } = useMe()
-  const { members, loading: membersLoading, error: membersError } = useTeamMembers()
+  const { teamId, members, loading: membersLoading, error: membersError } = useTeamMembers()
   const labels = labelsForField(fieldName, identityKind)
   const resolver = useIdentityResolver(
     identityKind,
@@ -108,6 +111,7 @@ export default function IdentityListField({
     <VariantB
       value={value}
       onChange={onChange}
+      teamId={teamId}
       members={members}
       labels={labels}
       identityKind={identityKind}
@@ -532,6 +536,7 @@ type DropdownItem =
 function VariantB({
   value,
   onChange,
+  teamId,
   members,
   labels,
   identityKind,
@@ -539,12 +544,27 @@ function VariantB({
 }: {
   value: string[] | undefined
   onChange: (val: string[] | undefined) => void
+  teamId: string
   members: TeamMember[]
   labels: ActorLabels
   identityKind: IdentityKind
   resolver: IdentityResolver
 }) {
   const [search, setSearch] = useState('')
+  // A typed query is the roster route's `search`, and the team rows the
+  // dropdown offers for it are the ones that come back, in their order. The
+  // empty query offers the roster as held.
+  const readRoster = useCallback(
+    (needle: string, signal: AbortSignal): Promise<TeamMember[]> =>
+      teamId
+        ? fetchTeamRoster(teamId, { search: needle }, { signal }).then((r) => r.members)
+        : Promise.resolve([]),
+    [teamId],
+  )
+  const searched = useSearchAnswer(search, readRoster)
+  // undefined while nothing is searched; null until the route answers.
+  const answer = searched ? searched.value : undefined
+  const rows = useMemo(() => (answer === undefined ? members : (answer ?? [])), [answer, members])
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const [pending, setPending] = useState(false)
@@ -609,19 +629,19 @@ function VariantB({
         .map((choice) => ({ kind: 'choice', choice }))
     }
     const q = search.trim().toLowerCase()
-    const teamMatches = members.filter((m) => {
-      const handle = memberHandle(m)
-      if (!handle) return false
+    // Every row the route answered is shown: one with a handle as an option,
+    // unless the field already holds it, and one without as a "no identity"
+    // line beneath the options.
+    const teamMatches = rows.filter((m) => {
+      if (!memberHandle(m)) return false
       const v = memberValue(m)
-      if (v && selected.some((h) => h.toLowerCase() === v.toLowerCase())) return false
-      return (
-        q === '' ||
-        handle.toLowerCase().includes(q) ||
-        (m.display_name || '').toLowerCase().includes(q)
-      )
+      return !(v && selected.some((h) => h.toLowerCase() === v.toLowerCase()))
     })
     const items: DropdownItem[] = teamMatches.map((m) => ({ kind: 'team', member: m }))
-    const exactMatchExists = members.some((m) => memberHandle(m)?.toLowerCase() === q)
+    // Whether a member already holds exactly the handle typed, in the roster
+    // held or in the route's answer, decides whether to offer it as an
+    // external identity.
+    const exactMatchExists = [...members, ...rows].some((m) => memberHandle(m)?.toLowerCase() === q)
     const alreadySelected = selected.some(
       (h) => h.toLowerCase() === q || resolver.handleOf(h).toLowerCase() === q,
     )
@@ -630,10 +650,10 @@ function VariantB({
     }
     return items
     // identityKind, the resolver's names and the choices a lookup offered are
-    // the only mutable inputs besides search/selected. members is
-    // identity-stable per fetch.
+    // the only mutable inputs besides search/selected and the rows. members
+    // is identity-stable per fetch, and rows per answer.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members, search, selected, identityKind, resolver, choices])
+  }, [members, rows, search, selected, identityKind, resolver, choices])
 
   // Clamp the active-index during render rather than via an effect:
   // storing the raw setState value and reading a clamped derivation
@@ -893,7 +913,7 @@ function VariantB({
           {/* Members without captured identity render outside the option
               flow so they're not navigable and don't enter the
               active-descendant rotation. Surfaces the gap honestly. */}
-          {members
+          {rows
             .filter((m) => !memberHandle(m))
             .map((m) => (
               <li

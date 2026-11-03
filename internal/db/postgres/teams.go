@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -796,8 +797,13 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 	return stored, nil
 }
 
-func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
-	// 0. The filtered total, on the same pool and the same FROM as the page
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, filter db.TeamMemberFilter, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+	where, args, err := s.memberListWhere(ctx, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 0. The filtered total, on the same pool, FROM and WHERE as the page
 	//    below — a count taken through a different join could disagree with
 	//    the rows it is meant to describe.
 	var total int
@@ -805,8 +811,7 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		SELECT COUNT(*)
 		FROM memberships m
 		JOIN users u ON u.id = m.user_id
-		WHERE m.team_id = $1
-	`, teamID).Scan(&total); err != nil {
+		WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count team members: %w", err)
 	}
 	if opts.CountOnly {
@@ -823,13 +828,12 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		SELECT m.user_id::text, COALESCE(u.display_name, ''), m.role::text
 		FROM memberships m
 		JOIN users u ON u.id = m.user_id
-		WHERE m.team_id = $1
+		WHERE ` + where + `
 		ORDER BY COALESCE(u.display_name, ''), m.user_id`
-	args := []any{teamID}
 	if opts.Limit > 0 {
-		query += `
-		LIMIT $2 OFFSET $3`
 		args = append(args, opts.Limit, opts.Offset)
+		query += fmt.Sprintf(`
+		LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 	}
 	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -931,6 +935,69 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		}
 	}
 	return out, total, nil
+}
+
+// memberListWhere renders ListMembers' WHERE clause and its args, which the
+// count and the page both run so the total describes the rows it accompanies.
+//
+// A search matches the display name in the clause itself, and identity
+// handles through ids resolved first: the clause runs on the app pool, where
+// the identity tables show the caller only their own bindings, so an EXISTS
+// over them there would never match a teammate's handle. The admin-pool read
+// is scoped to this team's members and keyed by the same host and workspace
+// the enrichment shows, so it matches exactly the handles the rows carry.
+func (s *teamsStore) memberListWhere(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, f db.TeamMemberFilter) (string, []any, error) {
+	where := "m.team_id = $1"
+	args := []any{teamID}
+	needle := strings.TrimSpace(f.Search)
+	if needle == "" {
+		return where, args, nil
+	}
+	ids, err := s.memberIDsWithHandleMatching(ctx, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID, needle)
+	if err != nil {
+		return "", nil, err
+	}
+	var name string
+	name, args = db.PostgresSearch(needle, args, "u.display_name")
+	args = append(args, pgUUIDArray(ids))
+	return where + fmt.Sprintf(" AND (%s OR m.user_id = ANY($%d))", name, len(args)), args, nil
+}
+
+// memberIDsWithHandleMatching returns the ids of teamID's members whose GitHub
+// login on the org's GitHub host, Jira account id on its Jira site, or Linear
+// display name in its workspace carries needle. Admin pool, past the self-only
+// identity RLS, and joined to the team's memberships so it answers for this
+// team's members alone.
+func (s *teamsStore) memberIDsWithHandleMatching(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID, needle string) ([]string, error) {
+	args := []any{teamID, db.EffectiveGitHubHost(githubBaseURL), db.NormalizeJiraHost(jiraBaseURL), linearWorkspaceID}
+	var gh, jira, linear string
+	gh, args = db.PostgresSearch(needle, args, "gh.login")
+	jira, args = db.PostgresSearch(needle, args, "j.account_id")
+	linear, args = db.PostgresSearch(needle, args, "l.display_name")
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT m.user_id::text
+		FROM memberships m
+		WHERE m.team_id = $1 AND (
+			EXISTS (SELECT 1 FROM user_github_identities gh
+				WHERE gh.user_id = m.user_id AND gh.github_base_url = $2 AND `+gh+`)
+			OR EXISTS (SELECT 1 FROM user_jira_identities j
+				WHERE j.user_id = m.user_id AND j.jira_base_url = $3 AND `+jira+`)
+			OR EXISTS (SELECT 1 FROM user_linear_identities l
+				WHERE l.user_id = m.user_id AND l.workspace_id = $4 AND `+linear+`)
+		)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("match team member handles: %w", err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan team member handle match: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // queryIdentityMap runs a (user_id, value) query on q and returns the

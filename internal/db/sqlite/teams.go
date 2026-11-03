@@ -721,16 +721,17 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 // editor's variant choice — so this is a read local mode needs answered, not
 // a stub for interface parity. The WRITES below are the local refusals:
 // enrolling a second member is the thing N=1 has no concept of.
-func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
-	// The filtered total, on the same FROM as the page below so the count
-	// can't describe a different set than the rows it accompanies.
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, filter db.TeamMemberFilter, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+	where, whereArgs := memberListWhere(teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID, filter)
+
+	// The filtered total, on the same FROM and WHERE as the page below so the
+	// count can't describe a different set than the rows it accompanies.
 	var total int
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM memberships m
 		JOIN users u ON u.id = m.user_id
-		WHERE m.team_id = ?
-	`, teamID).Scan(&total); err != nil {
+		WHERE `+where, whereArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count team members: %w", err)
 	}
 	if opts.CountOnly {
@@ -745,9 +746,9 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		SELECT m.user_id, COALESCE(u.display_name, ''), m.role
 		FROM memberships m
 		JOIN users u ON u.id = m.user_id
-		WHERE m.team_id = ?
+		WHERE ` + where + `
 		ORDER BY COALESCE(u.display_name, ''), m.user_id`
-	args := []any{teamID}
+	args := whereArgs
 	if opts.Limit > 0 {
 		query += `
 		LIMIT ? OFFSET ?`
@@ -841,6 +842,39 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		}
 	}
 	return out, total, nil
+}
+
+// memberListWhere renders ListMembers' WHERE clause and its args, which the
+// count and the page both run so the total describes the rows it accompanies.
+// A search matches the display name, or an identity handle through EXISTS over
+// the binding the row's enrichment reads: keyed by the same host and
+// workspace, so a member matches on exactly the handles their row carries.
+func memberListWhere(teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, f db.TeamMemberFilter) (string, []any) {
+	where := "m.team_id = ?"
+	args := []any{teamID}
+	needle := strings.TrimSpace(f.Search)
+	if needle == "" {
+		return where, args
+	}
+	name, nameArgs := db.SQLiteSearch(needle, "u.display_name")
+	gh, ghArgs := db.SQLiteSearch(needle, "gh.login")
+	jira, jiraArgs := db.SQLiteSearch(needle, "j.account_id")
+	linear, linearArgs := db.SQLiteSearch(needle, "l.display_name")
+	where += ` AND (` + name + `
+		OR EXISTS (SELECT 1 FROM user_github_identities gh
+			WHERE gh.user_id = m.user_id AND gh.github_base_url = ? AND ` + gh + `)
+		OR EXISTS (SELECT 1 FROM user_jira_identities j
+			WHERE j.user_id = m.user_id AND j.jira_base_url = ? AND ` + jira + `)
+		OR EXISTS (SELECT 1 FROM user_linear_identities l
+			WHERE l.user_id = m.user_id AND l.workspace_id = ? AND ` + linear + `))`
+	args = append(args, nameArgs...)
+	args = append(args, db.EffectiveGitHubHost(githubBaseURL))
+	args = append(args, ghArgs...)
+	args = append(args, db.NormalizeJiraHost(jiraBaseURL))
+	args = append(args, jiraArgs...)
+	args = append(args, linearWorkspaceID)
+	args = append(args, linearArgs...)
+	return where, args
 }
 
 // queryIdentityMap runs a (user_id, value) query and returns the user_id →

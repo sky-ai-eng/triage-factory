@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -39,7 +40,12 @@ func newOrgMembershipsStore(app, admin queryer) db.OrgMembershipsStore {
 
 var _ db.OrgMembershipsStore = (*orgMembershipsStore)(nil)
 
-func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts db.ListOpts) ([]domain.OrgMember, int, error) {
+func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, filter db.OrgMemberFilter, opts db.ListOpts) ([]domain.OrgMember, int, error) {
+	where, args, err := s.listWhere(ctx, orgID, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	// 1. Core roster on the app pool (RLS-gated). display_name is nullable —
 	//    COALESCE renders the empty string, matching GetDisplayName's "".
 	//    The count runs on the same pool and predicate as the page, so
@@ -49,8 +55,7 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 		SELECT COUNT(*)
 		FROM org_memberships om
 		JOIN users u ON u.id = om.user_id
-		WHERE om.org_id = $1
-	`, orgID).Scan(&total); err != nil {
+		WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count org members: %w", err)
 	}
 	if opts.CountOnly {
@@ -60,13 +65,12 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 		SELECT om.user_id::text, COALESCE(u.display_name, ''), om.role::text
 		FROM org_memberships om
 		JOIN users u ON u.id = om.user_id
-		WHERE om.org_id = $1
+		WHERE ` + where + `
 		ORDER BY COALESCE(u.display_name, ''), om.user_id`
-	args := []any{orgID}
 	if opts.Limit > 0 {
-		query += `
-		LIMIT $2 OFFSET $3`
 		args = append(args, opts.Limit, opts.Offset)
+		query += fmt.Sprintf(`
+		LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 	}
 	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -134,6 +138,65 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 		}
 	}
 	return out, total, nil
+}
+
+// listWhere renders ListWithIdentity's WHERE clause and its args, which the
+// count and the page both run so the total describes the rows it accompanies.
+//
+// The email half of a search cannot be a subquery in that clause: the clause
+// runs on the app pool, and user_identities has no app-pool grant. So the
+// members whose verified address matches are resolved first, on the admin pool
+// and scoped to this org by its memberships, and the clause matches their ids
+// beside the display name.
+func (s *orgMembershipsStore) listWhere(ctx context.Context, orgID string, f db.OrgMemberFilter) (string, []any, error) {
+	where := "om.org_id = $1"
+	args := []any{orgID}
+	if f.ExcludingTeamID != "" {
+		args = append(args, f.ExcludingTeamID)
+		where += fmt.Sprintf(` AND NOT EXISTS (
+			SELECT 1 FROM memberships x WHERE x.team_id = $%d AND x.user_id = om.user_id)`, len(args))
+	}
+	needle := strings.TrimSpace(f.Search)
+	if needle == "" {
+		return where, args, nil
+	}
+	var name string
+	name, args = db.PostgresSearch(needle, args, "u.display_name")
+	if !f.SearchEmails {
+		return where + " AND " + name, args, nil
+	}
+	ids, err := s.memberIDsWithVerifiedEmailMatching(ctx, orgID, needle)
+	if err != nil {
+		return "", nil, err
+	}
+	args = append(args, pgUUIDArray(ids))
+	return where + fmt.Sprintf(" AND (%s OR om.user_id = ANY($%d))", name, len(args)), args, nil
+}
+
+// memberIDsWithVerifiedEmailMatching returns the ids of orgID's members holding
+// a verified sign-in address that carries needle. Admin pool: user_identities
+// is readable nowhere else, and the org_memberships join keeps the answer to
+// this org's members.
+func (s *orgMembershipsStore) memberIDsWithVerifiedEmailMatching(ctx context.Context, orgID, needle string) ([]string, error) {
+	clause, args := db.PostgresSearch(needle, []any{orgID}, "i.email")
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT om.user_id::text
+		FROM org_memberships om
+		JOIN user_identities i ON i.user_id = om.user_id
+		WHERE om.org_id = $1 AND i.email_verified AND `+clause, args...)
+	if err != nil {
+		return nil, fmt.Errorf("match org member emails: %w", err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan org member email match: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // identityMap runs a (user_id, value) admin-pool query and returns the

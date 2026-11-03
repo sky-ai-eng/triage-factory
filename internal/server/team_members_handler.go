@@ -79,11 +79,24 @@ type teamRosterBotRow struct {
 	Autonomy    *float64 `json:"autonomy"`
 }
 
-// teamRosterListRequest is the list body: paging only. The roster has no
-// filters — a team's members are the answer, and a client that wants a subset
-// of a few dozen rows filters them in hand.
+// teamRosterListRequest is the list body: paging and a search. The rows come
+// in the roster's one order, display name then user id; there is no sort_key,
+// since no caller orders the roster any other way.
 type teamRosterListRequest struct {
 	httpx.PageRequest
+	// Search keeps a member when it is a case-insensitive substring of their
+	// display name or of an identity handle their row carries: the GitHub
+	// login on the org's GitHub host, the Jira account id on its Jira site,
+	// the Linear display name in its workspace (db.TeamMemberFilter.Search).
+	// It matches what the row shows and nothing else, so a binding on another
+	// host finds nobody.
+	Search string `json:"search"`
+}
+
+// teamRosterListFilterKey is the filter set the roster's page token is
+// fingerprinted against.
+type teamRosterListFilterKey struct {
+	Search string `json:"search"`
 }
 
 // teamRosterListResponse is the list envelope plus the team's bot.
@@ -102,8 +115,10 @@ type teamRosterListResponse struct {
 }
 
 // handleTeamRosterList returns one page of the team's members with their role
-// and identity readiness, plus the team bot beside the page. Any org member may
-// read (the memberships_select RLS gates on org access), so it gates on org
+// and identity readiness, narrowed by the body's `search`, plus the team bot
+// beside the page. The bot is reported whatever the search: it is the team's
+// one workload identity, not a row the search ranks. Any org member may read
+// (the memberships_select RLS gates on org access), so it gates on org
 // membership + team-in-org, not admin.
 //
 // It answers in both modes. {team_id} takes a uuid, or the literal "default" in
@@ -124,10 +139,10 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		return
 	}
 	var v httpx.Validation
-	// No filters, so the fingerprint is over the empty filter set — the token
-	// still can't cross to another route's list, and it gains meaning for free
-	// if this read ever takes one.
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	filter := db.TeamMemberFilter{Search: httpx.Search(&v, req.Search)}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(teamRosterListFilterKey{
+		Search: httpx.SearchKey(filter.Search),
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -147,7 +162,7 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 			return e
 		}
 		members, total, e = tx.Teams.ListMembers(r.Context(), teamID,
-			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, orgSet.LinearWorkspaceID,
+			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, orgSet.LinearWorkspaceID, filter,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e

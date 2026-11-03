@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { TaskCard } from '../components/board/TaskCard'
 import AssigneePicker from '../components/board/AssigneePicker'
 import type { Task, TeamBot, TeamMember } from '../types'
+import type { RosterSearch } from '../lib/teamRoster'
 
 // The board card harness: one TaskCard in each of its states, on a lane the
 // gallery draws by hand, each wearing the real assignee picker over a roster
@@ -32,6 +33,14 @@ const MEMBERS: TeamMember[] = PEOPLE.map(
     }) as TeamMember,
 )
 const BOT = { agent_id: 'a1', display_name: 'machinist' } as TeamBot
+
+// The gallery's roster is a fixed handful with no route behind it, so its
+// stand-in for the roster's `search` answers from the handful. The board's own
+// picker reads the team's roster route.
+const searchMembers: RosterSearch = async (needle, pageSize) => {
+  const hits = MEMBERS.filter((m) => m.display_name.toLowerCase().includes(needle.toLowerCase()))
+  return { members: hits.slice(0, pageSize), bot: BOT, totalCount: hits.length }
+}
 
 // The events the specimens carry, in the vocabulary `lib/eventDisplay` holds.
 // Two of the four tones draw colour; `good` is deliberately absent from the
@@ -88,6 +97,7 @@ export function BoardCard() {
       task={t}
       currentUserID="u1"
       members={MEMBERS}
+      searchMembers={searchMembers}
       bot={BOT}
       onClaim={async () => say(`claim ${t.id}`)}
       onUnclaim={async () => say(`unassign ${t.id}`)}

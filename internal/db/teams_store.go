@@ -7,6 +7,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// TeamMemberFilter narrows a team roster read (TeamsStore.ListMembers). The
+// zero value is the whole roster.
+type TeamMemberFilter struct {
+	// Search keeps a member when the needle is a case-insensitive literal
+	// substring of their display name or of an identity handle the roster row
+	// carries for them: the GitHub login on the org's GitHub host, the Jira
+	// account id on its Jira site, the Linear display name in its Linear
+	// workspace. A binding on another host or workspace is not on the row, so
+	// it does not match either. Empty (after trimming) is no search.
+	Search string
+}
+
 // ErrTeamMemberNotFound is returned by TeamsStore.ChangeMemberRole /
 // RemoveMember when no membership row matches (team_id, user_id) — so a stale
 // or bogus user_id surfaces as a 404 rather than a silent no-op. The handlers
@@ -394,16 +406,23 @@ type TeamsStore interface {
 	// nothing, and a member's LinearUserID is nil when they hold no binding in
 	// it.
 	//
+	// filter narrows the roster (TeamMemberFilter). The total is counted under
+	// the same filter, and the order is display name then user id whatever the
+	// filter matched.
+	//
 	// Postgres: the roster reads under the app pool (memberships_select RLS —
 	// any org member may read a team-in-org's roster); the identity enrichment
 	// reads under the admin pool (the self-only identity RLS can't express a
-	// cross-member read, scoped back to the team by a membership join).
+	// cross-member read, scoped back to the team by a membership join), and so
+	// does the half of the search that matches identity handles, for the same
+	// reason: under the app pool a peer's handle is invisible, so a search for
+	// it would quietly match nothing.
 	// SQLite is N=1 — one implicit user, enrolled on the sole team by the
 	// local tenant seed — so the same query shape answers with that single
 	// synthetic member. Local mode runs the roster's own consumers (the
 	// assignee picker, the predicate editor's variant choice), so this is a
 	// read both dialects owe an answer to.
-	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts ListOpts) ([]domain.TeamMember, int, error)
+	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, filter TeamMemberFilter, opts ListOpts) ([]domain.TeamMember, int, error)
 
 	// AddMember enrolls userID on teamID with role ("admin" | "member" |
 	// "viewer"). App pool: memberships_insert RLS gates the write to team

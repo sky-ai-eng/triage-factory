@@ -131,8 +131,11 @@ export function useMe(): {
  *  digits to low tens).
  *
  *  `bot` is the raw roster bot; a caller that OFFERS it (rather than describing
- *  it) filters through `usableBot`. */
+ *  it) filters through `usableBot`. `teamId` is the team the roster is of, ''
+ *  while it resolves or for a user on no team: a consumer with a search box
+ *  reads that team's roster with `search` rather than filtering `members`. */
 export function useTeamMembers(): {
+  teamId: string
   members: TeamMember[]
   bot: TeamBot | null
   loading: boolean
@@ -164,6 +167,7 @@ export function useTeamMembers(): {
   }, [teamId])
 
   return {
+    teamId,
     members: roster?.members ?? [],
     bot: roster?.bot ?? null,
     // Still loading while the teams cache is resolving the acting team: a
