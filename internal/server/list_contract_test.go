@@ -91,7 +91,10 @@ func TestListRoutesResolveAPage(t *testing.T) {
 			}
 			continue
 		}
-		if !writesKeyset && !strings.Contains(body, "httpx.WriteList") && !strings.Contains(body, "httpx.WriteProxyList") {
+		writesEnvelope := strings.Contains(body, "httpx.WriteList") ||
+			strings.Contains(body, "httpx.WriteProxyList") ||
+			strings.Contains(body, "httpx.WriteScannedProxyList")
+		if !writesKeyset && !writesEnvelope {
 			t.Errorf("%s (%s) resolves a page but writes no list envelope; if its shape "+
 				"genuinely cannot be the flat envelope, add it to listRouteExceptions with a reason",
 				pattern, handler)
