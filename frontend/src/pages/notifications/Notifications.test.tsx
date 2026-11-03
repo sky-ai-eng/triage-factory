@@ -8,12 +8,14 @@ import { NotificationConfirm } from '../../components/ShellNotifications'
 import { cancelInvoke } from '../../hooks/useNotificationActions'
 import { jsonBody } from '../../test/apiResponse'
 import type { NotificationItem } from '../../lib/notifications'
+import type { Facet } from '../../lib/apiClient'
 
 // What is pinned is what the page promises a reader: a row is read once it has
 // been seen, not merely rendered; a link to a row lands on it wherever it is;
-// an invoke runs once and says what it is doing; the filters count what they
-// would show; and the page states what it adds to the API's answer (who a row
-// was not sent to) without inventing anything else.
+// an invoke runs once and says what it is doing; the search, the filters and
+// the order are the server's to apply, and the filters' counts are its facets
+// node's; and the page states what it adds to the API's answer (who a row was
+// not sent to) without inventing anything else.
 
 const toasts = vi.hoisted(() => ({
   success: vi.fn(),
@@ -109,9 +111,16 @@ let getGates: Record<string, Promise<void>>
 let countGate: Promise<void>
 let countFails: boolean
 let markReadFails: boolean
+// What a facets node answers; unset, it counts the rows the status and
+// dismissed filters match, and nothing narrower.
+let facetsAnswer: { by_priority: Facet[]; by_audience: Facet[] } | null
 type Call = { url: string; method: string; body: Record<string, unknown> | null }
 let calls: Call[]
 
+// The mocked server applies the tab's filters, the resolved_at order and
+// page_size, and nothing else, so a row a search, a chip or another order
+// would leave out or move is still served as given: the page renders what the
+// list answers.
 function matches(n: NotificationItem, f: Record<string, unknown>): boolean {
   if (f.status === 'open' && n.resolved_at) return false
   if (f.status === 'resolved' && !n.resolved_at) return false
@@ -119,8 +128,29 @@ function matches(n: NotificationItem, f: Record<string, unknown>): boolean {
   return true
 }
 
-// The server's order for a sort_key, or the rows as held for none. Sorted by
-// resolution, open rows trail in either direction.
+function audienceValue(n: NotificationItem): string {
+  const a = n.audience
+  if (a.scope === 'user') return 'user'
+  if (a.scope === 'org') return `org:${a.role}`
+  return `team:${a.team_id}`
+}
+
+function counted(items: NotificationItem[], value: (n: NotificationItem) => string): Facet[] {
+  const by = new Map<string, number>()
+  for (const n of items) by.set(value(n), (by.get(value(n)) ?? 0) + 1)
+  return [...by].map(([v, count]) => ({ value: v, count }))
+}
+
+function listCalls(): Call[] {
+  return calls.filter((c) => c.url.endsWith('/notifications/list') && c.body?.page_size !== 0)
+}
+
+function facetsCalls(): Call[] {
+  return calls.filter((c) => c.url.endsWith('/notifications/facets'))
+}
+
+// The server's resolved_at order, or the rows as held for any other. Sorted
+// by resolution, open rows trail in either direction.
 function ordered(items: NotificationItem[], f: Record<string, unknown>): NotificationItem[] {
   if (f.sort_key !== 'resolved_at') return items
   const sign = f.sort_dir === 'asc' ? 1 : -1
@@ -158,6 +188,15 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       items: items.slice(0, body.page_size),
       next_page_token: '',
       total_count: items.length,
+    })
+  }
+  if (url === '/api/me/notifications/facets' || url === '/api/orgs/org-1/notifications/facets') {
+    if (facetsAnswer) return ok(facetsAnswer)
+    const from = url.startsWith('/api/orgs') ? orgRows : rows
+    const items = from.filter((n) => matches(n, body))
+    return ok({
+      by_priority: counted(items, (n) => n.priority),
+      by_audience: counted(items, audienceValue),
     })
   }
   if (url === '/api/orgs/org-1/teams/list') {
@@ -254,6 +293,7 @@ beforeEach(() => {
   countFails = false
   orgId.v = 'org-1'
   markReadFails = false
+  facetsAnswer = null
   ws.dispatch = null
   actionAnswer = () => ({ status: 200, body: { notification: null, outcome: 'Done.' } })
   for (const t of Object.values(toasts)) t.mockClear()
@@ -412,31 +452,89 @@ describe('invoke actions', () => {
 })
 
 describe('filters', () => {
-  it('counts each option against the other filter, and hides the empty ones', async () => {
-    rows = [
-      note('u', { priority: 'urgent' }),
-      note('h', {
-        priority: 'high',
-        audience: { scope: 'team', role: 'members', team_id: 'infra', user_id: null },
-      }),
-      note('h2', { priority: 'high' }),
-    ]
+  const infra = { scope: 'team' as const, role: 'members', team_id: 'infra', user_id: null }
+
+  it('counts each option from the facets node, and hides the empty ones', async () => {
+    rows = [note('u', { priority: 'urgent' }), note('h', { priority: 'high', audience: infra })]
+    facetsAnswer = {
+      by_priority: [
+        { value: 'urgent', count: 4 },
+        { value: 'high', count: 7 },
+      ],
+      by_audience: [
+        { value: 'team:infra', count: 2 },
+        { value: 'user', count: 9 },
+      ],
+    }
     await mount()
-    const filters = screen.getByRole('group', { name: 'Priority' })
-    expect(within(filters).getByRole('button', { name: /Urgent/ })).toHaveTextContent('1')
-    expect(within(filters).getByRole('button', { name: /High/ })).toHaveTextContent('2')
-    expect(within(filters).queryByRole('button', { name: /Low/ })).toBeNull()
+    const priority = screen.getByRole('group', { name: 'Priority' })
+    expect(within(priority).getByRole('button', { name: /Urgent/ })).toHaveTextContent('4')
+    expect(within(priority).getByRole('button', { name: /High/ })).toHaveTextContent('7')
+    expect(within(priority).queryByRole('button', { name: /Low/ })).toBeNull()
+    const who = screen.getByRole('group', { name: 'For' })
+    expect(within(who).getByRole('button', { name: /Infra/ })).toHaveTextContent('2')
+    expect(within(who).getByRole('button', { name: /You/ })).toHaveTextContent('9')
+    expect(within(who).queryByRole('button', { name: /Everyone/ })).toBeNull()
+    // Read under the tab's filters, and only from the node.
+    expect(facetsCalls().at(-1)?.body).toEqual({ status: 'open', dismissed: false })
+  })
+
+  it('asks the list and its counts for the options chosen, and renders what the list answers', async () => {
+    rows = [note('u', { priority: 'urgent' }), note('h', { priority: 'high', audience: infra })]
+    await mount()
 
     fireEvent.click(
       within(screen.getByRole('group', { name: 'For' })).getByRole('button', { name: /Infra/ }),
     )
-    expect(within(filters).queryByRole('button', { name: /Urgent/ })).toBeNull()
-    expect(within(filters).getByRole('button', { name: /High/ })).toHaveTextContent('1')
-    expect(screen.queryByText('title u')).toBeNull()
+    await settle()
+    expect(listCalls().at(-1)?.body).toEqual({
+      status: 'open',
+      dismissed: false,
+      team_id_in: ['infra'],
+      page_size: 200,
+    })
+    expect(facetsCalls().at(-1)?.body).toEqual({
+      status: 'open',
+      dismissed: false,
+      team_id_in: ['infra'],
+    })
+    // The server answered both rows, so both are shown: the narrowing is its.
+    expect(screen.getByText('title u')).toBeInTheDocument()
     expect(screen.getByText('title h')).toBeInTheDocument()
 
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Priority' })).getByRole('button', {
+        name: /Urgent/,
+      }),
+    )
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({
+      priority_in: ['urgent'],
+      team_id_in: ['infra'],
+    })
+
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'For' })).getByRole('button', { name: /You/ }),
+    )
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ priority_in: ['urgent'], scope_in: ['user'] })
+    expect(listCalls().at(-1)?.body).not.toHaveProperty('team_id_in')
+
     fireEvent.click(screen.getByRole('button', { name: 'clear filters' }))
-    expect(screen.getByText('title u')).toBeInTheDocument()
+    await settle()
+    expect(listCalls().at(-1)?.body).toEqual({ status: 'open', dismissed: false, page_size: 200 })
+  })
+
+  it('names an org audience by its scope and role', async () => {
+    rows = [note('a', { audience: { scope: 'org', role: 'admins', team_id: null, user_id: null } })]
+    await mount()
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'For' })).getByRole('button', {
+        name: /Org admins/,
+      }),
+    )
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ scope_in: ['org'], role_in: ['admins'] })
   })
 
   it('shows an org admin every team, with the rows they are not sent tagged', async () => {
@@ -478,6 +576,91 @@ describe('filters', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Show dismissed' }))
     await settle()
     expect(within(rowOf('title d')).getByText('dismissed')).toBeInTheDocument()
+  })
+})
+
+describe('search', () => {
+  it('reads the search from the server once typing pauses, and renders what it answers', async () => {
+    rows = [note('a', { title: 'Disk full' }), note('b', { title: 'Token expired' })]
+    await mount()
+    const before = listCalls().length
+    const box = screen.getByRole('searchbox', { name: 'Search notifications' })
+    fireEvent.change(box, { target: { value: 'd' } })
+    fireEvent.change(box, { target: { value: 'di' } })
+    fireEvent.change(box, { target: { value: ' disk ' } })
+    await settle(100)
+    expect(listCalls()).toHaveLength(before)
+
+    await settle(300)
+    expect(
+      listCalls()
+        .slice(before)
+        .map((c) => c.body?.search),
+    ).toEqual(['disk'])
+    expect(facetsCalls().at(-1)?.body).toEqual({ status: 'open', dismissed: false, search: 'disk' })
+    // The server ignored the search here, and the page shows its answer whole.
+    expect(screen.getByText('Disk full')).toBeInTheDocument()
+    expect(screen.getByText('Token expired')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'clear filters' }))
+    await settle()
+    expect(listCalls().at(-1)?.body).not.toHaveProperty('search')
+  })
+})
+
+describe('the order', () => {
+  const titles = () => screen.getAllByText(/^title [a-z]$/).map((e) => e.textContent)
+
+  it('asks the server for the order a column names, and keeps the rows in the order served', async () => {
+    rows = [note('l', { priority: 'low' }), note('u', { priority: 'urgent' })]
+    await mount()
+    expect(listCalls().at(-1)?.body).not.toHaveProperty('sort_key')
+    expect(titles()).toEqual(['title l', 'title u'])
+
+    const header = (name: RegExp) => screen.getByRole('columnheader', { name })
+    fireEvent.click(header(/PRIORITY/))
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ sort_key: 'priority', sort_dir: 'asc' })
+    expect(header(/PRIORITY/)).toHaveAttribute('aria-sort', 'ascending')
+    // The mocked server did not reorder them, and neither does the page.
+    expect(titles()).toEqual(['title l', 'title u'])
+
+    fireEvent.click(header(/PRIORITY/))
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ sort_key: 'priority', sort_dir: 'desc' })
+
+    fireEvent.click(header(/TRUE FOR/))
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ sort_key: 'first_seen_at', sort_dir: 'desc' })
+    // The counts beside the filters have no order.
+    expect(facetsCalls().at(-1)?.body).not.toHaveProperty('sort_key')
+
+    // FOR has no order on the server, so its header orders nothing.
+    const reads = listCalls().length
+    expect(header(/^FOR$/)).not.toHaveAttribute('aria-sort')
+    fireEvent.click(header(/^FOR$/))
+    await settle()
+    expect(listCalls()).toHaveLength(reads)
+  })
+
+  it('leaves an order behind on a tab with no column for it', async () => {
+    rows = [note('a'), note('d', { resolved_at: new Date().toISOString() })]
+    await mount()
+    fireEvent.click(screen.getByRole('columnheader', { name: /LAST SEEN/ }))
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ sort_key: 'last_seen_at', sort_dir: 'desc' })
+
+    fireEvent.click(screen.getByRole('tab', { name: /Resolved/ }))
+    await settle()
+    expect(listCalls().at(-1)?.body).toEqual({ status: 'resolved', page_size: 200 })
+    fireEvent.click(screen.getByRole('columnheader', { name: /RESOLVED/ }))
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ sort_key: 'resolved_at', sort_dir: 'desc' })
+
+    fireEvent.click(screen.getByRole('tab', { name: /Open/ }))
+    await settle()
+    expect(listCalls().at(-1)?.body).toMatchObject({ status: 'open' })
+    expect(listCalls().at(-1)?.body).not.toHaveProperty('sort_key')
   })
 })
 

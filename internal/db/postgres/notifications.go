@@ -329,66 +329,87 @@ END`
 const pgNotificationReadable = `n.org_id = $1 AND ` + pgNotificationNotExpired + `
 	AND (n.audience_scope <> 'user' OR n.user_id = $2::uuid)`
 
+// pgNotificationSentBase is the inbox's WHERE before the filters: the org at
+// $1, unexpired, and sent to the viewer at $2. pgNotificationReadable is the
+// All-teams list's.
+const pgNotificationSentBase = `n.org_id = $1 AND ` + pgNotificationNotExpired + ` AND ` + pgNotificationSent
+
 func (s *notificationStore) ListForViewer(ctx context.Context, orgID, userID string, f db.NotificationListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
-	if err := f.Validate(); err != nil {
-		return nil, 0, err
-	}
-	where, args := pgNotificationFilters(`n.org_id = $1 AND `+pgNotificationNotExpired+` AND `+pgNotificationSent,
-		[]any{orgID, userID}, f)
-	return s.list(ctx, where, args, db.NotificationOrderSQL(f), opts)
+	return s.list(ctx, orgID, userID, pgNotificationSentBase, f, opts)
 }
 
-func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string, f db.NotificationOrgListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
-	if err := f.Validate(); err != nil {
-		return nil, 0, err
+func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string, f db.NotificationListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+	return s.list(ctx, orgID, userID, pgNotificationReadable, f, opts)
+}
+
+func (s *notificationStore) FacetsForViewer(ctx context.Context, orgID, userID string, f db.NotificationListFilter) (db.NotificationFacets, error) {
+	return s.facets(ctx, orgID, userID, pgNotificationSentBase, f)
+}
+
+func (s *notificationStore) FacetsForOrg(ctx context.Context, orgID, userID string, f db.NotificationListFilter) (db.NotificationFacets, error) {
+	return s.facets(ctx, orgID, userID, pgNotificationReadable, f)
+}
+
+// pgNotificationFrom joins the viewer's marks, which the state filters read.
+const pgNotificationFrom = ` FROM notifications n
+		LEFT JOIN notification_marks m ON m.notification_id = n.id AND m.user_id = $2::uuid
+		WHERE `
+
+// pgNotificationWhere renders base (org at $1, viewer at $2) and f's filters
+// as one WHERE body, with its args.
+func pgNotificationWhere(orgID, userID, base string, f db.NotificationListFilter) (string, []any) {
+	clauses := append([]string{base}, db.NotificationStateClauses(f)...)
+	args := []any{orgID, userID}
+	text := func(col string, vals []string) {
+		args = append(args, vals)
+		clauses = append(clauses, fmt.Sprintf(`%s = ANY($%d::text[])`, col, len(args)))
 	}
-	where, args := pgNotificationFilters(pgNotificationReadable, []any{orgID, userID}, f.NotificationListFilter)
+	if len(f.PriorityIn) > 0 {
+		text("n.priority", pgStrings(f.PriorityIn))
+	}
+	if len(f.ScopeIn) > 0 {
+		text("n.audience_scope", pgStrings(f.ScopeIn))
+	}
+	if len(f.RoleIn) > 0 {
+		text("n.audience_role", pgStrings(f.RoleIn))
+	}
 	if len(f.TeamIDIn) > 0 {
 		// Dropping a malformed id narrows the filter; it never widens it.
 		args = append(args, pgUUIDArray(filterValidUUIDs(f.TeamIDIn)))
-		where += fmt.Sprintf(` AND n.team_id = ANY($%d::uuid[])`, len(args))
+		clauses = append(clauses, fmt.Sprintf(`n.team_id = ANY($%d::uuid[])`, len(args)))
 	}
-	return s.list(ctx, where, args, db.NotificationOrderSQL(f.NotificationListFilter), opts)
-}
-
-func pgNotificationFilters(base string, args []any, f db.NotificationListFilter) (string, []any) {
-	clauses := append([]string{base}, db.NotificationStateClauses(f)...)
-	if len(f.PriorityIn) > 0 {
-		vals := make([]string, len(f.PriorityIn))
-		for i, p := range f.PriorityIn {
-			vals[i] = string(p)
-		}
-		args = append(args, vals)
-		clauses = append(clauses, fmt.Sprintf(`n.priority = ANY($%d::text[])`, len(args)))
-	}
-	if len(f.ScopeIn) > 0 {
-		vals := make([]string, len(f.ScopeIn))
-		for i, sc := range f.ScopeIn {
-			vals[i] = string(sc)
-		}
-		args = append(args, vals)
-		clauses = append(clauses, fmt.Sprintf(`n.audience_scope = ANY($%d::text[])`, len(args)))
+	var clause string
+	if clause, args = db.PostgresSearch(f.Search, args, "n.title", "n.body"); clause != "" {
+		clauses = append(clauses, clause)
 	}
 	return strings.Join(clauses, " AND "), args
 }
 
-// list counts and pages where over the same join to the viewer's marks, in
-// the order orderBy renders.
-func (s *notificationStore) list(ctx context.Context, where string, args []any, orderBy string, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+func pgStrings[T ~string](in []T) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = string(v)
+	}
+	return out
+}
+
+// list counts and pages base and f over the same join to the viewer's marks.
+func (s *notificationStore) list(ctx context.Context, orgID, userID, base string, f db.NotificationListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+	if err := f.Validate(); err != nil {
+		return nil, 0, err
+	}
 	if err := db.RefuseNotificationKeyset(opts); err != nil {
 		return nil, 0, err
 	}
-	const from = ` FROM notifications n
-		LEFT JOIN notification_marks m ON m.notification_id = n.id AND m.user_id = $2::uuid
-		WHERE `
+	where, args := pgNotificationWhere(orgID, userID, base, f)
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+from+where, args...).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+pgNotificationFrom+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
 		return []domain.NotificationView{}, total, nil
 	}
-	query := `SELECT ` + pgNotificationViewCols + from + where + orderBy
+	query := `SELECT ` + pgNotificationViewCols + pgNotificationFrom + where + db.NotificationOrderSQL(f)
 	if opts.Limit > 0 {
 		args = append(args, opts.Limit, opts.Offset)
 		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
@@ -407,6 +428,33 @@ func (s *notificationStore) list(ctx context.Context, where string, args []any, 
 		out = append(out, v)
 	}
 	return out, total, rows.Err()
+}
+
+// facets counts each cut through list's WHERE, with the cut's own filters
+// cleared.
+func (s *notificationStore) facets(ctx context.Context, orgID, userID, base string, f db.NotificationListFilter) (db.NotificationFacets, error) {
+	if err := f.Validate(); err != nil {
+		return db.NotificationFacets{}, err
+	}
+	cut := func(f db.NotificationListFilter, value, tail string) ([]db.Facet, error) {
+		where, args := pgNotificationWhere(orgID, userID, base, f)
+		rows, err := s.q.QueryContext(ctx, `SELECT `+value+`, COUNT(*)`+pgNotificationFrom+where+tail, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return db.ScanFacets(rows)
+	}
+	var out db.NotificationFacets
+	var err error
+	if out.ByPriority, err = cut(f.WithoutPriority(), "n.priority", db.NotificationPriorityFacetSQL()); err != nil {
+		return db.NotificationFacets{}, fmt.Errorf("notification priority facets: %w", err)
+	}
+	if out.ByAudience, err = cut(f.WithoutAudience(), db.NotificationAudienceFacetSQL("n.team_id::text"), db.NotificationAudienceFacetGroupSQL); err != nil {
+		return db.NotificationFacets{}, fmt.Errorf("notification audience facets: %w", err)
+	}
+	db.SortNotificationAudienceFacets(out.ByAudience)
+	return out, nil
 }
 
 func (s *notificationStore) GetForViewer(ctx context.Context, orgID, userID, id string) (*domain.NotificationView, error) {

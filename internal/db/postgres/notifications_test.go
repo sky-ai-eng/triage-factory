@@ -147,7 +147,7 @@ func TestNotificationStore_Postgres_RLS(t *testing.T) {
 	} {
 		if err := h.WithUser(t, c.user, orgID, func(tx *sql.Tx) error {
 			s := pgstore.NewForTx(tx, pgtest.SecretKey).Notifications
-			read, _, err := s.ListForOrg(ctx, orgID, c.user, db.NotificationOrgListFilter{}, db.ListOpts{Limit: 50})
+			read, _, err := s.ListForOrg(ctx, orgID, c.user, db.NotificationListFilter{}, db.ListOpts{Limit: 50})
 			if err != nil {
 				return err
 			}
