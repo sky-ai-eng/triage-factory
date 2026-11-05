@@ -170,7 +170,18 @@ function Tag({ text, tip, alarm }: { text: string; tip: string; alarm?: boolean 
   )
 }
 
-export default function LinearSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
+type LinearSourceProps = SourceBodyProps & {
+  /** The Linear team a link names, whose board the page opens on. */
+  linkedTeamId?: string | null
+}
+
+export default function LinearSource({
+  teamId,
+  teamName,
+  isAdmin,
+  onBack,
+  linkedTeamId = null,
+}: LinearSourceProps) {
   // The org whose Linear catalog the live reads address; null while it is
   // still resolving, which holds them.
   const orgId = useActiveOrgId()
@@ -319,12 +330,19 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
   const watched = useMemo(() => teams ?? [], [teams])
   const watchedIds = useMemo(() => new Set(watched.map((t) => t.id)), [watched])
 
-  // The board's team: the picked one while it is still watched, else the
-  // first watched team.
-  const shown = useMemo(
-    () => watched.find((t) => t.id === shownId) ?? watched[0] ?? null,
-    [watched, shownId],
+  // The board's team: the one picked from the strip while it is still
+  // watched, else the one the link names, else the first watched team.
+  const linked = useMemo(
+    () => (linkedTeamId ? watched.find((t) => t.id === linkedTeamId) : undefined),
+    [watched, linkedTeamId],
   )
+  const shown = useMemo(
+    () => watched.find((t) => t.id === shownId) ?? linked ?? watched[0] ?? null,
+    [watched, shownId, linked],
+  )
+  // A link naming a Linear team this team does not watch says so until a team
+  // is picked, rather than leaving another team's board to pass for it.
+  const linkMissed = linkedTeamId !== null && teams !== null && !linked && shownId === ''
   const shownTeamId = shown?.id ?? ''
 
   useEffect(() => {
@@ -612,6 +630,11 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
         <div className="sp-mapcol">
           <p className="sp-prose">{PROSE}</p>
           {note ? <p className="sp-offnote">{note}</p> : null}
+          {linkMissed ? (
+            <p className="sp-offnote">
+              The Linear team this link is for isn’t one this team watches.
+            </p>
+          ) : null}
           <div className="sp-subhead">
             <span className="sp-subhead-t">What each state means</span>
             {watched.length > 1 ? (

@@ -109,7 +109,18 @@ function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
   }
 }
 
-export default function JiraSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
+type JiraSourceProps = SourceBodyProps & {
+  /** The jira_projects row a link names, whose board the page opens on. */
+  linkedProjectId?: string | null
+}
+
+export default function JiraSource({
+  teamId,
+  teamName,
+  isAdmin,
+  onBack,
+  linkedProjectId = null,
+}: JiraSourceProps) {
   // The org whose Jira catalog the live reads address; null while it is still
   // resolving, which holds them.
   const orgId = useActiveOrgId()
@@ -208,13 +219,21 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const watched = useMemo(() => projects ?? [], [projects])
   const watchedRefs = useMemo(() => new Set(watched.map(jiraProjectRef)), [watched])
 
-  // The board's project: the picked one while it is still watched, else the
-  // first watched project — so unwatching what is shown falls back rather
-  // than pinning a board to a project the team no longer watches.
-  const shown = useMemo(
-    () => watched.find((p) => jiraProjectRef(p) === shownRef) ?? watched[0] ?? null,
-    [watched, shownRef],
+  // The board's project: the one picked from the strip while it is still
+  // watched, else the one the link names, else the first watched project — so
+  // unwatching what is shown falls back rather than pinning a board to a
+  // project the team no longer watches.
+  const linked = useMemo(
+    () => (linkedProjectId ? watched.find((p) => p.id === linkedProjectId) : undefined),
+    [watched, linkedProjectId],
   )
+  const shown = useMemo(
+    () => watched.find((p) => jiraProjectRef(p) === shownRef) ?? linked ?? watched[0] ?? null,
+    [watched, shownRef, linked],
+  )
+  // A link naming a project this team does not watch says so until a project
+  // is picked, rather than leaving another project's board to pass for it.
+  const linkMissed = linkedProjectId !== null && projects !== null && !linked && shownRef === ''
   const shownR = shown ? jiraProjectRef(shown) : ''
   // A watched project the poll has not confirmed with Jira has no Jira id yet,
   // and so no statuses to read.
@@ -428,6 +447,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
             <p className="sp-offnote">
               {offReason} The mapping below is what is stored; a project can still be unwatched.
             </p>
+          ) : null}
+          {linkMissed ? (
+            <p className="sp-offnote">The project this link is for isn’t one this team watches.</p>
           ) : null}
           <div className="sp-subhead">
             <span className="sp-subhead-t">What each status means</span>

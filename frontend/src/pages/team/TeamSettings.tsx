@@ -179,6 +179,8 @@ export default function TeamSettings() {
   const closeSource = useCallback(() => {
     const next = new URLSearchParams(params)
     next.delete('source')
+    next.delete('project')
+    next.delete('linear_team')
     setRegion('sources')
     setParams(next)
   }, [params, setParams])
@@ -200,6 +202,12 @@ export default function TeamSettings() {
         null)
       : null
   const teamId = team?.id ?? ''
+  // A link about one Jira project or one Linear team names it as well:
+  // `?project=` is a jira_projects row id and `?linear_team=` a Linear team
+  // id, and that source opens with its board shown. Like `?team=`, these are
+  // only read: following a link records nothing for the viewer.
+  const linkedProjectId = params.get('project') || null
+  const linkedLinearTeamId = params.get('linear_team') || null
   const { roleForTeam } = useTeamRole()
   // Membership is a multi-mode idea. Local is one person who is everything, and
   // every team-member route answers 404 there — so the verbs are absent rather
@@ -498,8 +506,10 @@ export default function TeamSettings() {
     // team's set into the other's save.
     const body = { teamId, teamName: team.name, isAdmin, onBack: closeSource }
     if (source === 'github') return <GitHubSource key={teamId} {...body} />
-    if (source === 'jira') return <JiraSource key={teamId} {...body} />
-    if (source === 'linear') return <LinearSource key={teamId} {...body} />
+    if (source === 'jira')
+      return <JiraSource key={teamId} {...body} linkedProjectId={linkedProjectId} />
+    if (source === 'linear')
+      return <LinearSource key={teamId} {...body} linkedTeamId={linkedLinearTeamId} />
     return <SlackSource key={teamId} {...body} />
   }
 

@@ -597,6 +597,36 @@ describe('Jira source page', () => {
     expect(statusReads).toEqual([`${JIRA}/10010/statuses/list`, `${JIRA}/10020/statuses/list`])
   })
 
+  it('opens on the project a link names, and the strip still switches it', async () => {
+    const fetchMock = stub(SETTINGS)
+    render(<JiraSource {...BODY} linkedProjectId="reg-SKY" />)
+
+    // SKY is second in the strip, so the first board drawn being SKY's is the
+    // link's doing — and PLAT's statuses are never read for a board nobody saw.
+    await waitFor(() => expect(screen.getByText(/not armed yet/)).toBeInTheDocument())
+    const keys = Array.from(document.querySelectorAll('.sp-projkey'))
+    expect(keys[1].getAttribute('aria-selected')).toBe('true')
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
+    expect(fetchMock.mock.calls.map((c) => String(c[0])).filter(isStatusRead)).toEqual([
+      `${JIRA}/10020/statuses/list`,
+    ])
+
+    fireEvent.click(keys[0])
+    await waitFor(() => expect(keys[0].getAttribute('aria-selected')).toBe('true'))
+  })
+
+  it('says so when a link names a project the team does not watch', async () => {
+    stub(SETTINGS)
+    render(<JiraSource {...BODY} linkedProjectId="reg-GONE" />)
+    const missed = 'The project this link is for isn’t one this team watches.'
+    expect(await screen.findByText(missed)).toBeInTheDocument()
+
+    // A pick from the strip is the reader's own, so the note has nothing left
+    // to explain.
+    fireEvent.click(document.querySelectorAll('.sp-projkey')[1])
+    await waitFor(() => expect(screen.queryByText(missed)).toBeNull())
+  })
+
   it('lists the catalog with names, the watched projects first', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
@@ -995,6 +1025,32 @@ describe('Linear source page', () => {
       `${LINEAR}/${ENG}/states/list`,
       `${LINEAR}/${OPS}/states/list`,
     ])
+  })
+
+  it('opens on the Linear team a link names, and the strip still switches it', async () => {
+    const fetchMock = stub(BOTH)
+    render(<LinearSource {...BODY} linkedTeamId={OPS} />)
+
+    await waitFor(() => expect(screen.getByText('Queued')).toBeInTheDocument())
+    const keys = Array.from(document.querySelectorAll('.sp-projkey'))
+    expect(keys[1].getAttribute('aria-selected')).toBe('true')
+    expect(urls(fetchMock).filter((u) => u.endsWith('/states/list'))).toEqual([
+      `${LINEAR}/${OPS}/states/list`,
+    ])
+
+    fireEvent.click(keys[0])
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+    expect(keys[0].getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('says so when a link names a Linear team the team does not watch', async () => {
+    stub(BOTH)
+    render(<LinearSource {...BODY} linkedTeamId="team-gone" />)
+    const missed = 'The Linear team this link is for isn’t one this team watches.'
+    expect(await screen.findByText(missed)).toBeInTheDocument()
+
+    fireEvent.click(document.querySelectorAll('.sp-projkey')[1])
+    await waitFor(() => expect(screen.queryByText(missed)).toBeNull())
   })
 
   it('saves a board gesture as the four rules, state ids on the wire', async () => {

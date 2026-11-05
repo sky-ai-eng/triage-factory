@@ -41,30 +41,27 @@ func (routes) NotifyRule(ruleID string) Href {
 	return Href{route: triageRoute, query: url.Values{"notify_rule": {ruleID}}}
 }
 
-// TeamJiraRules is the Jira status rules of the team teamID names: in multi
-// mode its team page, opened on the Jira source; in local mode, whose one team
-// is configured on /settings, that page. teamID may be empty only in local
+// TeamJiraRules is team teamID's Jira status rules for the jira_projects row
+// projectID: in multi mode its team page, opened on the Jira source with that
+// project's board shown; in local mode, whose one team is configured on
+// /settings, that page, which names neither. teamID may be empty only in local
 // mode, where a row's recipient names no team.
-//
-// TODO(TFAC-1268): the link names the team but not the project, so an admin
-// lands on the team's Jira source and finds the project by hand. Needs the
-// Jira and Linear sources to read a project from their URL, and these routes
-// to carry it.
-func (routes) TeamJiraRules(teamID string) Href {
-	return Href{route: teamJiraRulesRoute, teamID: teamID}
+func (routes) TeamJiraRules(teamID, projectID string) Href {
+	return Href{route: teamJiraRulesRoute, teamID: teamID, query: url.Values{"project": {projectID}}}
 }
 
-// TeamLinearRules is the Linear rules of the team teamID names, on the same
-// pages as TeamJiraRules.
-func (routes) TeamLinearRules(teamID string) Href {
-	return Href{route: teamLinearRulesRoute, teamID: teamID}
+// TeamLinearRules is team teamID's Linear rules for the Linear team
+// linearTeamID, on the same pages as TeamJiraRules.
+func (routes) TeamLinearRules(teamID, linearTeamID string) Href {
+	return Href{route: teamLinearRulesRoute, teamID: teamID, query: url.Values{"linear_team": {linearTeamID}}}
 }
 
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
 // Either may end in the query that opens the right part of the page. A team
 // route is a page about one team: multi mode's address names it with a team
-// query parameter, and local mode's, with one team, names none.
+// query parameter, and local mode's, with one team, names none and carries
+// none of the Href's query, because its one team page reads no parameters.
 type route struct {
 	name  string
 	multi string
@@ -153,6 +150,9 @@ func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (
 				return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
 			}
 			page = h.route.local
+			if h.route.team {
+				return page, nil
+			}
 		} else if h.route.team {
 			if h.teamID == "" {
 				return "", fmt.Errorf("route %s names no team", h.route.name)
