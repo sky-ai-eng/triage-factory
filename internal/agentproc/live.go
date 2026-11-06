@@ -639,6 +639,11 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					permissionDone()
 					stream.DiscountGate(gateAt)
 				case "tool_batch":
+					// The batch's message has ended, so its row and the
+					// results held behind it go to the sink before the batch
+					// is answered, unless the stream has not read all of
+					// the message yet (ToolBatchDone).
+					deliverMessages(sink, stream.ToolBatchDone(ctl.ToolCallIDs))
 					l.handleToolBatch(ctl)
 				case "tool_batch_result":
 					l.handleToolBatchResult(ctl)
@@ -671,12 +676,7 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					}
 				}
 
-				for _, msg := range messages {
-					if err := sink.OnMessage(msg); err != nil {
-						agentprocLog.Warn("sink on-message failed", "error", err)
-						continue
-					}
-				}
+				deliverMessages(sink, messages)
 
 				if result != nil {
 					// Settled before the result is handed on, so a driver
@@ -716,6 +716,7 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 		}
 
 		if readErr != nil {
+			deliverMessages(sink, stream.Drain())
 			if readErr == io.EOF {
 				return merged, nil
 			}
@@ -763,8 +764,9 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 }
 
 // handleToolBatch answers one tool_batch with the text the caller hands the
-// model, keyed by the hook's id. Runs on the reader goroutine, where the
-// stream has already delivered the batch's results to the sink.
+// model, keyed by the hook's id. Runs on the reader goroutine. The batch's
+// message and results are in the sink by then, unless the batch was read
+// ahead of one of the message's lines (StreamState.ToolBatchDone).
 //
 // A batch that is one call that ended the run is answered with stop instead, and
 // the caller is not asked for text: there is no next request to hand it to,

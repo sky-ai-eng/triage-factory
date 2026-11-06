@@ -8,6 +8,7 @@ package agentproc
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,12 @@ import (
 // one msg ID). Thinking rides the same message as reasoning entries
 // rather than flushing as its own row.
 //
+// The message stays open across tool results. Claude Code starts each call
+// as soon as its tool_use block has streamed, so a fast call's result can
+// arrive before the message's later blocks; the results wait behind the open
+// row and are emitted after it, so one model message is one row, stored ahead
+// of its results as the native loop stores it.
+//
 // It also holds the timing marks each row's duration_ms is measured from.
 // This process watches a live stream, so both ends of every interval are
 // moments it observed directly — no row ever gets its duration by
@@ -28,6 +35,19 @@ type StreamState struct {
 	currentMsgID string
 	current      *domain.Message
 	sessionID    string // captured from the system/init event at stream start
+
+	// held is the tool result rows that arrived while current was open, in
+	// arrival order, emitted right after it. Always empty while current is
+	// nil.
+	held []*domain.Message
+
+	// currentFrom is the request mark current is measured from, read when it
+	// opened: a mark set while it streams (its own calls' results going back,
+	// a user message sent into the run) is for the next request, not this one.
+	// currentLastAt is when current's latest line arrived. Both are rolled by
+	// DiscountGate with the other marks.
+	currentFrom   time.Time
+	currentLastAt time.Time
 
 	// currentBlocks accumulates the pending message's text/image content
 	// blocks (never tool_use or thinking — those land on ToolCalls and
@@ -41,8 +61,8 @@ type StreamState struct {
 	now func() time.Time
 
 	// requestAt is when the request producing the next assistant message
-	// went out: stream start, the end of the previous assistant message, the
-	// arrival of the tool results that unblocked the model, or a user
+	// went out: stream start, the last line of the previous assistant message,
+	// the arrival of the tool results that unblocked the model, or a user
 	// message sent into a live run. Mutex-guarded because MarkRequest is
 	// called from the caller's send goroutine while ParseLine reads it on
 	// the reader goroutine; a time.Time (not unix nanos) so the interval
@@ -160,23 +180,32 @@ func (s *StreamState) DiscountGate(at time.Time) {
 		s.requestAt = s.requestAt.Add(waited)
 	}
 	s.markMu.Unlock()
+	if !s.currentFrom.IsZero() {
+		s.currentFrom = s.currentFrom.Add(waited)
+	}
+	if !s.currentLastAt.IsZero() {
+		s.currentLastAt = s.currentLastAt.Add(waited)
+	}
 	for id, dispatched := range s.toolDispatchedAt {
 		s.toolDispatchedAt[id] = dispatched.Add(waited)
 	}
 }
 
-// sinceRequest returns the milliseconds elapsed since the last request
-// mark, or nil when there is no mark to measure from — nil is "not
-// measured", which every consumer must render as absent rather than zero.
-func (s *StreamState) sinceRequest() *int {
+func (s *StreamState) requestMark() time.Time {
 	s.markMu.Lock()
-	at := s.requestAt
-	s.markMu.Unlock()
-	if at.IsZero() {
-		return nil
+	defer s.markMu.Unlock()
+	return s.requestAt
+}
+
+// markRequestAtLeast never moves the mark back: a message's results can go
+// back after its last line, and the next request waits on the later of the
+// two.
+func (s *StreamState) markRequestAtLeast(at time.Time) {
+	s.markMu.Lock()
+	defer s.markMu.Unlock()
+	if s.requestAt.Before(at) {
+		s.requestAt = at
 	}
-	ms := int(s.now().Sub(at).Milliseconds())
-	return &ms
 }
 
 // SessionID returns the Claude Code session_id captured from the stream's
@@ -185,24 +214,58 @@ func (s *StreamState) sinceRequest() *int {
 // can attach to the session.
 func (s *StreamState) SessionID() string { return s.sessionID }
 
-// flush returns the accumulated assistant message (if any) and resets state.
-// A flushed message ends its own interval, so the next one is measured from
-// here rather than from the same mark all over again.
-func (s *StreamState) flush() *domain.Message {
+// flush returns the accumulated assistant message (if any) followed by the
+// tool results held behind it, and resets state. A flushed message ends its
+// own interval: the next one is measured from its last line, or from a later
+// mark (its calls' results going back) when one is set, rather than from the
+// same mark all over again or from whenever the flush happens to run.
+func (s *StreamState) flush() []*domain.Message {
 	msg := s.current
-	if msg != nil && len(s.currentBlocks) > 0 {
+	if msg == nil {
+		return nil
+	}
+	if len(s.currentBlocks) > 0 {
 		nonText := len(s.currentBlocks) > 1 || s.currentBlocks[0].Type != domain.ContentBlockText
 		if nonText {
 			msg.ContentBlocks = s.currentBlocks
 		}
 	}
+	out := append([]*domain.Message{msg}, s.held...)
+	s.markRequestAtLeast(s.currentLastAt)
 	s.current = nil
 	s.currentMsgID = ""
 	s.currentBlocks = nil
-	if msg != nil {
-		s.MarkRequest()
+	s.held = nil
+	s.currentFrom = time.Time{}
+	s.currentLastAt = time.Time{}
+	return out
+}
+
+// ToolBatchDone closes the open assistant row when it holds every call of a
+// tool batch that has just finished, and returns it with the tool results
+// held behind it. A batch finishes only after its message has ended, so this
+// is the earliest the row is known to be complete; without it the row waits
+// for the next message or the turn's result. A row missing one of the batch's
+// calls stays open, because the harness reports the batch on a different path
+// from the stream's lines and the report can overtake the line carrying that
+// call.
+func (s *StreamState) ToolBatchDone(toolCallIDs []string) []*domain.Message {
+	if s.current == nil || len(toolCallIDs) == 0 {
+		return nil
 	}
-	return msg
+	for _, id := range toolCallIDs {
+		if !slices.ContainsFunc(s.current.ToolCalls, func(tc domain.ToolCall) bool { return tc.ID == id }) {
+			return nil
+		}
+	}
+	return s.flush()
+}
+
+// Drain returns the open assistant row and the tool results held behind it,
+// for a reader whose stream ended without the turn's result. The calls those
+// results answer ran, so they are kept rather than dropped with the process.
+func (s *StreamState) Drain() []*domain.Message {
+	return s.flush()
 }
 
 // ParseLine processes one NDJSON line from claude's stream-json output.
@@ -239,24 +302,26 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 		return s.handleAssistant(raw, traceID), nil
 
 	case "user":
-		// Tool result(s) — flush any pending assistant message first. A
-		// single "user" line can carry multiple tool_result blocks (parallel
-		// tool calls from one assistant turn all resolve together), so this
-		// walks the whole content array rather than just its first entry.
-		var out []*domain.Message
-		if flushed := s.flush(); flushed != nil {
-			out = append(out, flushed)
-		}
-		out = append(out, s.parseToolResult(raw, traceID)...)
+		// Tool result(s). A single "user" line can carry multiple tool_result
+		// blocks (parallel tool calls from one assistant turn all resolve
+		// together), so this walks the whole content array rather than just
+		// its first entry. A result is no sign that the open message has
+		// ended — its later blocks may still be streaming — so while one is
+		// open the results wait behind it.
+		results := s.parseToolResult(raw, traceID)
 		// Results going back is the next request going out.
 		s.MarkRequest()
-		return out, nil
+		if s.current != nil {
+			s.held = append(s.held, results...)
+			return nil, nil
+		}
+		return results, nil
 
 	case "result":
-		var out []*domain.Message
-		if flushed := s.flush(); flushed != nil {
-			out = append(out, flushed)
-		}
+		out := s.flush()
+		// A turn queued behind this one goes out now, after the work the
+		// runtime does between a turn's last message and its result.
+		s.MarkRequest()
 		if s.observer != nil {
 			s.observer.OnTurnEnd()
 		}
@@ -290,7 +355,7 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 
 	var flushed []*domain.Message
 	if msgID != s.currentMsgID && s.current != nil {
-		flushed = append(flushed, s.flush())
+		flushed = append(flushed, s.flush()...)
 	}
 
 	if s.current == nil {
@@ -301,7 +366,9 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 			Role:           "assistant",
 			Model:          model,
 		}
+		s.currentFrom = s.requestMark()
 	}
+	s.currentLastAt = s.now()
 
 	if usage, ok := msgObj["usage"].(map[string]any); ok {
 		s.current.InputTokens = intPtr(usage, "input_tokens")
@@ -375,21 +442,25 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 	}
 
 	// Re-stamped on every line of the same message so the value settles on
-	// the arrival of its last one.
-	s.current.DurationMs = s.sinceRequest()
+	// the arrival of its last one. Nil when there is no mark to measure from:
+	// nil is "not measured", which every consumer must render as absent
+	// rather than zero.
+	s.current.DurationMs = nil
+	if !s.currentFrom.IsZero() {
+		ms := int(s.currentLastAt.Sub(s.currentFrom).Milliseconds())
+		s.current.DurationMs = &ms
+	}
 
 	// The reason the model stopped THIS turn, recorded on the turn it
 	// describes. Stamped before the flush below rather than after it, because
 	// the flush hands the row away: a row that leaves without it would carry
 	// nothing, and the harness reports the reason on the same line that ends
 	// the message. A row flushed some other way (a new message id arriving, a
-	// tool result, the terminal event) genuinely had none reported, and stays
-	// empty — "not reported" and "unknown" are the same thing.
+	// finished tool batch, the terminal event) genuinely had none reported,
+	// and stays empty — "not reported" and "unknown" are the same thing.
 	if stopReason, _ := msgObj["stop_reason"].(string); stopReason != "" {
 		s.current.StopReason = stopReason
-		if msg := s.flush(); msg != nil {
-			flushed = append(flushed, msg)
-		}
+		flushed = append(flushed, s.flush()...)
 	}
 
 	return flushed
