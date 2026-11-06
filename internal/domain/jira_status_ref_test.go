@@ -180,3 +180,30 @@ func TestStatusMatchSets(t *testing.T) {
 		t.Errorf("LinearStateMatchSets = %+v, want %+v", linear, want)
 	}
 }
+
+// TestJiraIssueDone pins which of the two rules decides: an armed rule's done
+// statuses whenever the project has them, and Jira's status category only for
+// a project no armed rule covers.
+func TestJiraIssueDone(t *testing.T) {
+	armed := []domain.JiraStatusRef{{ID: "10001", Name: "Shipped"}}
+	cases := []struct {
+		desc string
+		done []domain.JiraStatusRef
+		snap domain.JiraSnapshot
+		want bool
+	}{
+		{"armed: a done status", armed, domain.JiraSnapshot{Status: "Shipped", StatusID: "10001", StatusCategory: "done"}, true},
+		{"armed: a done-category status the rule does not name stays open", armed, domain.JiraSnapshot{Status: "Won't Do", StatusID: "10002", StatusCategory: "done"}, false},
+		{"armed: a rule's done status decides without the category", armed, domain.JiraSnapshot{Status: "Shipped", StatusID: "10001"}, true},
+		{"unarmed: the done category", nil, domain.JiraSnapshot{Status: "Closed", StatusID: "10003", StatusCategory: "done"}, true},
+		{"unarmed: another category", nil, domain.JiraSnapshot{Status: "In Review", StatusID: "10004", StatusCategory: "indeterminate"}, false},
+		{"unarmed: a snapshot with no category", nil, domain.JiraSnapshot{Status: "Done", StatusID: "10005"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := domain.JiraIssueDone(tc.done, tc.snap); got != tc.want {
+				t.Errorf("JiraIssueDone = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

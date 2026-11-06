@@ -43,7 +43,7 @@ const DefaultTerminalCheckInterval = 5 * time.Minute
 // on the refresh AFTER the one that lost the close, so one poll cycle of lag
 // is legitimate and not a violation; the grace is several cycles at any sane
 // poll cadence. What outlives it is an entity no cycle visits — an untracked
-// repo, a removed Jira project — which is exactly the case the count is for:
+// repo — which is exactly the case the count is for:
 // untracking never destroys tasks (the dismiss affordance is the answer), so
 // the entity is not enforced, and it IS counted.
 const TerminalCheckGrace = 15 * time.Minute
@@ -209,7 +209,7 @@ func (r *Router) checkTerminalInvariant(ctx context.Context, g *TerminalInvarian
 // either count returns ok=false, and the pass keeps that org's previous
 // counts rather than reporting a zero it did not establish.
 func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (activeTerminal, openOnClosed int, ok bool) {
-	doneByProject := r.jiraDoneStatusesByProject(ctx, orgID)
+	doneByProject, jiraSite := r.jiraDoneStatusesByProject(ctx, orgID)
 	doneByLinearTeam := r.linearDoneStatesByTeam(ctx, orgID)
 	candidates, err := r.entities.ListActiveTerminalCandidatesSystem(ctx, orgID, unionValues(doneByProject), linearUnion(doneByLinearTeam), TerminalCheckGrace, 0)
 	if err != nil {
@@ -222,6 +222,13 @@ func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (a
 		// Linear one done in another Linear team). The store's filters are
 		// flat unions; this is the per-project / per-team recheck that keeps
 		// a union from over-counting.
+		if candidates[i].Source == "jira" && candidates[i].Scope != jiraSite {
+			// Only the site whose rules were read is judged: without its
+			// rules an armed project's issue cannot be told from one Jira's
+			// done category decides for. An issue on another site is one no
+			// cycle reads, and with no rules read nothing is judged.
+			continue
+		}
 		if snapshotIsTerminal(candidates[i], doneByProject, doneByLinearTeam) {
 			stranded = append(stranded, candidates[i].ID)
 		}
@@ -256,11 +263,12 @@ func capIDs(ids []string) []string {
 // discovery time. GitHub reads it straight off the snapshot; Jira asks whether
 // the status is in ITS OWN project's done set (the project the entity
 // references, entities.jira_project_id), which is why the per-project map is
-// threaded here rather than collapsed to a union; Linear asks the same of
-// the entity's own Linear team (entities.linear_team_id). An entity whose
-// project or team has no configured rules is never terminal, matching the
-// tracker's behavior for one the user removed from settings while its
-// entities were still active.
+// threaded here rather than collapsed to a union, and for a project with no
+// armed rule whether Jira files the status in its done category, as the
+// tracker does (domain.JiraIssueDone); Linear asks the same of the entity's
+// own Linear team (entities.linear_team_id). A Linear entity whose team has no
+// configured rules is never terminal, matching the tracker's behavior for one
+// the user removed from settings while its entities were still active.
 func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef, doneByLinearTeam map[string][]domain.LinearStateRef) bool {
 	switch entity.Source {
 	case "github":
@@ -274,7 +282,7 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.Status == "" {
 			return false
 		}
-		return domain.ContainsStatus(doneByProject[entity.JiraProjectID], snap.StatusRef())
+		return domain.JiraIssueDone(doneByProject[entity.JiraProjectID], snap)
 	case "linear":
 		var snap domain.LinearSnapshot
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.State.IsZero() {
@@ -291,29 +299,37 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 // jiraDoneStatusesByProject reads the org's per-project done statuses on its
 // current Jira site, keyed by the project's jira_projects row — the one an
 // issue's entity references (entities.jira_project_id), which a project key
-// rename does not move — and merged across every team that tracks the
-// project. The merge is set-union in
+// rename does not move — and merged across every team that has armed the
+// project. Unarmed rules are skipped and the merge is set-union in
 // first-seen order, matching the poller's toTrackerJiraRules exactly: entities
 // are org-shared (one row per issue no matter how many teams track its
-// project), so any team's notion of "done" is what the poll would have closed
-// the shared entity on, and the checker has to read terminality the same way.
+// project), so any arming team's notion of "done" is what the poll would have
+// closed the shared entity on, and a project only watched is judged by Jira's
+// done status category there, so the checker has to read terminality the same
+// way.
 //
-// A read failure yields an empty map: no Jira entity is then treated as
-// terminal, so the pass degrades to GitHub-only rather than guessing at a
-// status vocabulary it couldn't load.
-func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) map[string][]domain.JiraStatusRef {
-	out := map[string][]domain.JiraStatusRef{}
+// site is the org's current Jira site, the one the rules were read on. It is
+// empty when the rules could not be read, and the caller then treats no Jira
+// entity as terminal, so the pass degrades to GitHub and Linear rather than
+// guessing at a status vocabulary it couldn't load: with no rules, every
+// project would read as unarmed and be judged by the category.
+func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) (out map[string][]domain.JiraStatusRef, site string) {
+	out = map[string][]domain.JiraStatusRef{}
 	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: read org settings for the jira site failed, skipping jira this pass", "org", orgID, "error", err)
-		return out
+		return out, ""
 	}
-	rules, err := r.jiraRules.ListForOrgSystem(ctx, orgID, domain.EntityScope("jira", settings))
+	site = domain.EntityScope("jira", settings)
+	rules, err := r.jiraRules.ListForOrgSystem(ctx, orgID, site)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: list jira status rules failed, skipping jira this pass", "org", orgID, "error", err)
-		return out
+		return out, ""
 	}
 	for _, rule := range rules {
+		if !rule.Armed() {
+			continue
+		}
 		seen := map[string]bool{}
 		for _, existing := range out[rule.JiraProjectID] {
 			seen[domain.JiraStatusDedupKey(existing)] = true
@@ -326,7 +342,7 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 			}
 		}
 	}
-	return out
+	return out, site
 }
 
 // linearDoneStatesByTeam is jiraDoneStatusesByProject for Linear: each Linear

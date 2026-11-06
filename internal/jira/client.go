@@ -469,6 +469,16 @@ func pathTemplate(format string) string {
 type Status struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Category is the status category Jira files the status under. Jira
+	// returns it with every status object, on Cloud and Data Center alike.
+	Category *StatusCategory `json:"statusCategory,omitempty"`
+}
+
+// StatusCategory is one of Jira's fixed status categories. Only the key is
+// read: it is the stable name ("new", "indeterminate", "done"), while the
+// display name is localized and the id is a number.
+type StatusCategory struct {
+	Key string `json:"key"`
 }
 
 // ProjectStatuses returns all unique statuses available in a project, named by

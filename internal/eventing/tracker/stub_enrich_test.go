@@ -154,7 +154,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 		{
 			name:      "non-terminal stub enriched, no events",
 			status:    "In Progress",
-			projects:  nil, // no done-members configured → never terminal
+			projects:  nil, // no armed rule, and the status carries no done category
 			wantState: "active",
 		},
 		{

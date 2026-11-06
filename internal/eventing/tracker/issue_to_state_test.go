@@ -72,3 +72,29 @@ func TestIssueToState_Reporter(t *testing.T) {
 		})
 	}
 }
+
+// TestIssueToState_StatusCategory reads the category key off the status object
+// Jira returns, and leaves it empty when the response carries none.
+func TestIssueToState_StatusCategory(t *testing.T) {
+	cases := []struct {
+		desc     string
+		status   *jiraclient.Status
+		wantName string
+		wantCat  string
+	}{
+		{"done category", &jiraclient.Status{ID: "10001", Name: "Closed", Category: &jiraclient.StatusCategory{Key: "done"}}, "Closed", "done"},
+		{"no category on the response", &jiraclient.Status{ID: "10002", Name: "Open"}, "Open", ""},
+		{"no status", nil, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			var issue jiraclient.Issue
+			issue.Key = "SKY-1"
+			issue.Fields.Status = tc.status
+			got := issueToState(issue, "https://jira.corp.com", nil).Snap
+			if got.Status != tc.wantName || got.StatusCategory != tc.wantCat {
+				t.Errorf("status = (%q, %q), want (%q, %q)", got.Status, got.StatusCategory, tc.wantName, tc.wantCat)
+			}
+		})
+	}
+}

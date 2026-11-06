@@ -382,7 +382,7 @@ untouched for a switch back.
 | Event | ID | Trigger |
 |-------|----|---------|
 | **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress), compared by id. Metadata carries `old_status_id` and `new_status_id` beside the names, and the `dedup_key` is the new status's id |
-| **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
+| **Issue Completed** | `jira:issue:completed` | The status enters one of its project's done statuses, or, in a project no team has armed, a status Jira files under its done category — see [Completion](#completion) |
 | **Issue Unreachable** | `jira:issue:unreachable` | TF will no longer follow a tracked issue — see below |
 | **Issue Body Updated** | `jira:issue:body_updated` | The complete issue description changes, including clearing it |
 | **Key Changed** | `jira:issue:key_changed` | The issue answers under a new key: it moved to another project, or its project's key was renamed — see below |
@@ -575,6 +575,36 @@ Linear teams the handler's team tracks
 (`POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list`). Linear's
 priority is matched by its label (`priority`, `new_priority`, `old_priority`),
 because its five priorities are a fixed set no workspace can rename.
+
+#### Completion
+
+An issue completes when its status enters one of the done statuses of the
+rules that armed its project, merged across every team that armed it. The
+refresh emits `completed` beside `status_changed`, and `completed` closes the
+entity and every open task on it, which ends the refresh's reads of it. An
+issue already finished when TF first reads it is closed without an event.
+
+TF also holds issues in projects no team has armed: issues a delegated run read
+or changed in a project no team tracks or only watches, and the issues of a
+project a team disarmed or stopped tracking, whose entities stay active. Each
+cycle refreshes them by id with the rest, so they emit events like any other
+issue, which reach the teams that track their project. Their project has no done
+statuses, so Jira's status category decides instead: such an issue completes
+when its status enters a status Jira files under the done category (the
+snapshot's `status_category` is `done`). Every Jira status has one of Jira's
+fixed categories, set in the issue's own workflow, so no other project's done
+statuses are borrowed. In an armed project the category is not consulted, and
+a done-category status its rules do not name is only a status change.
+
+Completion closes every open task on the entity, including tasks a team kept
+when it disarmed or stopped tracking the project. The tracking change still
+closes nothing: the issue finishing does, as it would have in an armed project.
+
+A closed issue in a project no team has armed is not followed if it reopens,
+since only an armed project has discovery to find it. Once a team arms the
+project, discovery reactivates the entity when the issue matches one of the
+project's discovery queries. An issue in such a project that is never finished
+stays tracked, and each cycle reads it.
 
 #### Identity
 
@@ -1073,6 +1103,7 @@ which it is matched on), `scope` (the org's Jira site) and
 - `id` (issue id), `key` (the entity's `source_id`), `project_id`, `project_key` (the project's key as the read spelled it), `summary`, `url`
 - `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `status`, `status_id` — compared by id
+- `status_category` — the key of the category Jira files the status under (`new`, `indeterminate` or `done`); what decides completion in a project no team has armed
 - `assignee` (display name), `assignee_account_id` — compared by account id, so a display name change is not a reassignment; by display name only against a snapshot stored before account ids were recorded
 - `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
 - `labels[]` — compared by name for `label_added` / `label_removed`

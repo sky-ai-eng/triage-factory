@@ -392,9 +392,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 }
 
 // DiffJiraSnapshots compares two Jira issue snapshots and returns per-action
-// events. doneStatuses is the configured Done.Members set — any status in
-// it is treated as terminal for the purpose of emitting
-// jira:issue:completed. A zero prev (no id, no key) is first discovery; a
+// events. doneStatuses is the Done.Members set of the armed rule covering the
+// issue's project, and an issue counts as finished for the purpose of emitting
+// jira:issue:completed the way domain.JiraIssueDone decides: in one of those
+// statuses, or, with none (no armed rule covers the project), in Jira's done
+// status category. A zero prev (no id, no key) is first discovery; a
 // stored snapshot captured before issue ids were recorded has a key and is
 // not.
 //
@@ -440,7 +442,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 // key_changed's old_project metadata), never one parsed out of an issue key.
 func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, projects JiraEventProjects, doneStatuses []domain.JiraStatusRef, comments []NewComment) []domain.Event {
 	terminal := func(snap domain.JiraSnapshot) bool {
-		return domain.ContainsStatus(doneStatuses, snap.StatusRef())
+		return domain.JiraIssueDone(doneStatuses, snap)
 	}
 	now := time.Now()
 	eid := &entityID

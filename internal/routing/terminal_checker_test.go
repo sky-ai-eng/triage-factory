@@ -533,3 +533,95 @@ func testScope(source string) string {
 	}
 	return "test-scope"
 }
+
+// TestTerminalChecker_JiraCategoryDecidesOnlyWithoutAnArmedRule: an issue in a
+// project no rule arms is terminal when Jira files its status under the done
+// category, as the poll closes it; in an armed project the team's done
+// statuses alone decide, and a watched project's rule, armed by no team, is
+// not one.
+func TestTerminalChecker_JiraCategoryDecidesOnlyWithoutAnArmedRule(t *testing.T) {
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	seedJiraDoneRules(t, database, runmode.LocalDefaultTeamID,
+		domain.JiraProjectStatusRules{
+			ProjectKey: "PROJ", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Shipped"), DoneCanonical: jiraRef("Shipped"),
+		},
+		// Watched: done statuses named, but no pickup or in-progress rule.
+		domain.JiraProjectStatusRules{
+			ProjectKey: "WATCH", DoneMembers: jiraRefs("Shipped"), DoneCanonical: jiraRef("Shipped"),
+		},
+	)
+	// Counted: an untracked project's issue in the done category, and two
+	// watched ones' (two, so a checker that read the watched rule's done
+	// statuses instead would arrive at a different count).
+	seedDivergentEntity(t, database, "jira", "OTHER-1", `{"key":"OTHER-1","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
+	seedDivergentEntity(t, database, "jira", "WATCH-1", `{"key":"WATCH-1","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
+	seedDivergentEntity(t, database, "jira", "WATCH-3", `{"key":"WATCH-3","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
+	// Not counted: the armed project's done-category status its rule does not
+	// name, an untracked issue in another category, and the watched project's
+	// rule's done status outside the done category.
+	seedDivergentEntity(t, database, "jira", "PROJ-1", `{"key":"PROJ-1","status":"Won't Do","status_category":"done"}`, domain.EventJiraIssueAssigned)
+	seedDivergentEntity(t, database, "jira", "OTHER-2", `{"key":"OTHER-2","status":"In Review","status_category":"indeterminate"}`, domain.EventJiraIssueAssigned)
+	seedDivergentEntity(t, database, "jira", "WATCH-2", `{"key":"WATCH-2","status":"Shipped","status_category":"indeterminate"}`, domain.EventJiraIssueAssigned)
+
+	if a, _, _ := r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID); a != 3 {
+		t.Errorf("count = %d, want 3 — OTHER-1, WATCH-1 and WATCH-3, judged by the category", a)
+	}
+}
+
+// failingJiraRulesStore fails the checker's Jira rules read.
+type failingJiraRulesStore struct{ dbpkg.JiraStatusRulesStore }
+
+func (failingJiraRulesStore) ListForOrgSystem(context.Context, string, string) ([]domain.JiraProjectStatusRules, error) {
+	return nil, errors.New("rules read failed")
+}
+
+// TestTerminalChecker_UnreadJiraRulesCountNoJiraEntity: with the rules
+// unread, every project would look unarmed and be judged by the category, so
+// an armed project's issue in a done-category status its rule does not name
+// would be miscounted. The pass counts no Jira entity instead, and still
+// counts the rest.
+func TestTerminalChecker_UnreadJiraRulesCountNoJiraEntity(t *testing.T) {
+	database := newTestDB(t)
+	deps := testRouterDeps(database)
+	deps.JiraRules = failingJiraRulesStore{deps.JiraRules}
+	r := newTestRouter(deps)
+	// The site is set, so it is the failed rules read, not a missing site,
+	// that keeps OTHER-1 out of the count.
+	setJiraHost(t, database)
+	seedDivergentEntity(t, database, "jira", "OTHER-1", `{"key":"OTHER-1","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
+	seedDivergentEntity(t, database, "github", "owner/repo#merged", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
+
+	a, _, ok := r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID)
+	if !ok || a != 1 {
+		t.Errorf("count = (%d, ok=%v), want (1, true) — the merged PR alone", a, ok)
+	}
+}
+
+// TestTerminalChecker_JiraEntityOnAnotherSiteIsNotJudged: an issue on a site
+// the org has left stays active until a cycle on the new site retires it, and
+// with no site at all it is never retired. No cycle reads it and its project's
+// rules are not read, so the checker does not judge it, even in the done
+// category.
+func TestTerminalChecker_JiraEntityOnAnotherSiteIsNotJudged(t *testing.T) {
+	ctx := context.Background()
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	setJiraHost(t, database)
+	st := sqlitestore.New(database)
+	e, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "old-jira.example.com", "OLD-1", "10001", dbseed.JiraIssueProject("OLD-1"), "OLD-1", "")
+	if err != nil {
+		t.Fatalf("create the old site's entity: %v", err)
+	}
+	if ok, err := st.Entities.UpdateSnapshotCASSystem(ctx, runmode.LocalDefaultOrgID, e.ID, `{"key":"OLD-1","status":"Won't Do","status_category":"done"}`, e.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+	}
+	backdatePoll(t, database, e.ID, time.Hour)
+	seedDivergentEntity(t, database, "jira", "OTHER-1", `{"key":"OTHER-1","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
+
+	if a, _, _ := r.checkOrgTerminalInvariant(ctx, runmode.LocalDefaultOrgID); a != 1 {
+		t.Errorf("count = %d, want 1 — OTHER-1 on the org's site, not OLD-1 on the one it left", a)
+	}
+}
