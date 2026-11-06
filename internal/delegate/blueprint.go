@@ -532,9 +532,10 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 // through terminateBlueprint, so a 1-step (or final-step) resume closes the
 // task on finish and leaves it open on abort.
 //
-// A non-final step that wants to advance mid-blueprint (continue) is the epic's
-// resume work and is not built here: the blueprint is terminated with a clear
-// reason rather than silently stalling in 'running'.
+// A non-final step that concludes `continue` does not advance here: the
+// blueprint is aborted with multi_step_resume_not_implemented (see
+// blueprintTerminalForResumedStepConversation), where the step path's reactor
+// would advance it.
 //
 // userID identifies the actor for audit (the user whose action resumed the
 // run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
@@ -643,7 +644,11 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 				reason = stepConversation.OutcomeReason
 			}
 			return domain.BlueprintRunStatusAborted, reason
-		default: // blueprintStepAdvance — mid-blueprint resume not implemented
+		default: // blueprintStepAdvance
+			// TODO(TFAC-1341): advance like the step path does. An SDK
+			// follow-up on a non-final step ends its blueprint here instead,
+			// so steps after it never run; ResumeBlueprintAfterResume should
+			// hand the step to reactToStepTerminal and drop this mapping.
 			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
 		}
 	case stepConversation.Status == domain.StatusFailed:
