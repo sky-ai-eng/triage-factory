@@ -368,7 +368,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		if string(body.IdP) != "null" {
 			if err := json.Unmarshal(body.IdP, &v); err != nil {
 				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-					Reason: httpx.ReasonInvalidField, Message: "idp must be a string or null", Field: "idp",
+					Reason: httpx.ReasonInvalidField, Message: "idp must be a string, or null", Field: "idp",
 				})
 				return
 			}

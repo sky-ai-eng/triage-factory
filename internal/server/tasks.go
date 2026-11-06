@@ -1782,7 +1782,7 @@ func parseSnoozeUntilPatch(shape, semantic *httpx.Validation, raw json.RawMessag
 	}
 	until, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		shape.Invalid("snooze_until", "snooze_until must be an RFC3339 timestamp or null")
+		shape.Invalid("snooze_until", "snooze_until must be an RFC3339 timestamp, or null")
 		return time.Time{}, state
 	}
 	if !until.After(time.Now()) {
