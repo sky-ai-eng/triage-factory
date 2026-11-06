@@ -38,6 +38,8 @@ import (
 // message into the same live process (the artifact nudge, see
 // driveLiveConversation); QueuedTurns is how many messages sent into it are
 // still unanswered, which at a turn boundary is whether it owes another turn.
+// Close lets the process drain what it owes before it exits, and Kill ends it
+// without the drain.
 type liveProc interface {
 	Done() <-chan struct{}
 	Result() *agentproc.Result
@@ -47,6 +49,7 @@ type liveProc interface {
 	Send(ctx context.Context, text string) error
 	QueuedTurns() int
 	Close() error
+	Kill() error
 }
 
 // liveParkContext carries the identity a park needs to snapshot the
@@ -258,6 +261,8 @@ func processSpend(proc liveProc) float64 {
 //     conversation parks open itself (hibernated), unless a turn is owed.
 //   - an IsError result → handed back for processCompletion to fail.
 //   - a turn stop_blueprint ended → its verdict, handed back to orchestrate.
+//     A turn owed behind it does not run: the people's messages it would
+//     answer go back on the queue for the resume that follows the verdict.
 //   - a turn the model ended itself → the step concludes `continue`, after
 //     the two checks the native loop makes before the same conclusion (see
 //     below), and is handed back.
@@ -354,6 +359,21 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					}
 				}
 			}
+			if r.Terminal != nil && proc.QueuedTurns() > 0 {
+				// A stop_blueprint ended a turn a person's message was queued
+				// behind. The stop is the verdict and stands, and the message
+				// is read on a resume, as if it had arrived just after the
+				// stop: its row goes back on the queue, and the wake that
+				// follows the blueprint's reaction to the verdict delivers it
+				// (wakeForUnreadInput). Killed rather than closed, because a
+				// closing process drains what it owes, and the turn it would
+				// run for the message belongs to that resume.
+				_ = proc.Kill()
+				if s.requeueOwedSteers(ctx, park, proc) {
+					return liveOutcome{fenced: true, costUSD: processSpend(proc)}
+				}
+				return liveOutcome{result: r}
+			}
 			// The step's verdict, or a turn processCompletion parks. Close the
 			// process (freeing the session) and hand the result back; the
 			// status flips only once the process is gone — so the row never
@@ -381,9 +401,20 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 // refused the row: a successor owns the conversation, and nothing more is this
 // engagement's to write.
 func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc liveProc, note string) (sent, fenced bool) {
+	// Through the send log, as a steer goes, so the turns the process owes are
+	// matched to the right sends; the nudge's entry names no row, since it is
+	// not a person's message.
+	h := s.getProc(park.conversationID)
+	if h != nil {
+		h.sends.mu.Lock()
+		defer h.sends.mu.Unlock()
+	}
 	if err := proc.Send(ctx, note); err != nil {
 		delegateLog.Warn("send the turn-end nudge failed; the turn concludes without it", "conversation", park.conversationID, "error", err)
 		return false, false
+	}
+	if h != nil {
+		h.sends.rows = append(h.sends.rows, 0)
 	}
 	return true, s.insertClaimNote(ctx, park.orgID, park.claimID, &domain.Message{
 		ConversationID: park.conversationID,
@@ -391,6 +422,39 @@ func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc live
 		Subtype:        domain.MessageSubtypeInjectionNudge,
 		Content:        note,
 	})
+}
+
+// requeueOwedSteers puts the people's messages a stopped process still owed a
+// turn back on the conversation's pending-input queue, where the wake after
+// the blueprint's reaction finds them (wakeForUnreadInput). Their rows were
+// written delivered when the process took them, and it never answered them.
+//
+// The process is dead by the time this runs, so the turns it owes are final,
+// and the send log says which of them were people's. The flip goes through the
+// claim fence; fenced is true when it was refused, and the caller then records
+// nothing, as for every other refused write. Any other failure is logged and
+// the conclusion goes ahead: the stop's verdict is not worth losing over a
+// message that is still on the transcript for a person to send again.
+func (s *Spawner) requeueOwedSteers(ctx context.Context, park liveParkContext, proc liveProc) (fenced bool) {
+	h := s.getProc(park.conversationID)
+	if h == nil || s.conversations == nil {
+		return false
+	}
+	rows := h.sends.owedSteers(proc)
+	if len(rows) == 0 {
+		return false
+	}
+	err := s.conversations.RequeueInputForClaimSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID, rows)
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused re-queueing a stopped run's unanswered messages — a successor owns this conversation; recording nothing",
+			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID)
+		return true
+	}
+	if err != nil {
+		delegateLog.Warn("re-queue the messages a stop left unanswered failed; they stay on the transcript as delivered",
+			"conversation", park.conversationID, "rows", rows, "error", err)
+	}
+	return false
 }
 
 // markConversationOpen flips a conversation's status to `open` under a race

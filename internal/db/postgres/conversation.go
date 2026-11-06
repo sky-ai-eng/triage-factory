@@ -2462,6 +2462,24 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 	})
 }
 
+func (s *conversationStore) RequeueInputForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int) error {
+	if len(ids) == 0 {
+		// Nothing to flip, so nothing to fence, as for the flush above.
+		return nil
+	}
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE messages SET delivered = false
+			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
+			  AND role = 'user' AND subtype = '' AND delivered = true AND window_state = 'active'
+		`, orgID, conversationID, pgIntArray(ids))
+		return err
+	})
+}
+
 // CompactForClaimSystem commits one compaction atomically, behind the fence —
 // see the interface doc for the full contract. The re-seq reads the queued
 // rows inside the same transaction that inserts the result row, so the

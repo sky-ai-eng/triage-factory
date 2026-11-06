@@ -457,6 +457,28 @@ func (l *LiveRun) Close() error {
 	}
 }
 
+// Kill ends the run at once: it SIGKILLs the process group without the end
+// control and the drain Close gives it. The drain finishes whatever the
+// process still has queued, so a caller that has decided a turn the process
+// owes must not run in it, because the input it carries goes elsewhere, uses
+// Kill instead. Sends are refused from the start, as they are by Close.
+// Returns the run's terminal error, if any, or a timeout error when the
+// reader goroutine is wedged (see Close).
+func (l *LiveRun) Kill() error {
+	l.closing.Store(true)
+	kill := l.killTimeout
+	if kill <= 0 {
+		kill = closeKillTimeout
+	}
+	l.cancel()
+	select {
+	case <-l.done:
+		return l.Err()
+	case <-time.After(kill):
+		return fmt.Errorf("live run kill timed out; reader goroutine may be blocked in a sink or permission handler")
+	}
+}
+
 // Done is closed when the run has fully terminated and Err/Result/
 // SessionID are final.
 func (l *LiveRun) Done() <-chan struct{} { return l.done }

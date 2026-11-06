@@ -20,6 +20,7 @@ type fakeLiveProc struct {
 	mu        sync.Mutex
 	done      chan struct{}
 	closed    bool
+	killed    bool
 	sessionID string
 	result    *agentproc.Result
 	err       error
@@ -98,6 +99,25 @@ func (f *fakeLiveProc) Close() error {
 		close(f.done)
 	}
 	return nil
+}
+
+// Kill ends the process the way Close does, without the drain, and records
+// that it was killed so a test can tell the two apart.
+func (f *fakeLiveProc) Kill() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killed = true
+	if !f.closed {
+		f.closed = true
+		close(f.done)
+	}
+	return nil
+}
+
+func (f *fakeLiveProc) wasKilled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killed
 }
 
 func (f *fakeLiveProc) wasClosed() bool {

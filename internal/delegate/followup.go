@@ -382,12 +382,8 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// conversation therefore CANNOT be in it, so this can never send one down a
 	// Claude-session resume it never had. Anything that starts registering
 	// handles from a second driver has to re-read the runtime here first.
-	if s.getProc(conversationID) != nil {
-		if err := s.Steer(ctx, conversationID, text); err != nil {
-			return err
-		}
-		s.recordSteeredMessage(ctx, orgID, conversationID, userID, text)
-		return nil
+	if h := s.getProc(conversationID); h != nil {
+		return s.steerLive(ctx, h, orgID, conversationID, userID, text)
 	}
 	// No LOCAL process. Route on the conversation's runtime and STATUS, not on
 	// whether the process happens to sit in this pod's memory — using the local
@@ -413,13 +409,36 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// the controller is local-only, so an active run absent from this (sole)
 	// process's registry is a genuine race → ErrNoLiveProcess.
 	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
+		return s.steerLive(ctx, s.getProc(conversationID), orgID, conversationID, userID, text)
+	}
+	return s.queueFollowUp(ctx, orgID, *conv, userID, text)
+}
+
+// steerLive hands text to the conversation's live process and records the row
+// the steer itself never writes. h is the process's handle when it is in this
+// pod's registry, and nil when the process is on another executor.
+//
+// With a handle, the send and the record happen under the handle's send log,
+// and the row's id joins the log. A stop_blueprint that ends the turn this
+// message was queued behind leaves it unanswered, and the driver reads the log
+// to find the row and put it back on the queue (requeueOwedSteers). Holding
+// the log across both steps is what lets that read trust it: a message the
+// process has counted always has its row by the time the driver looks.
+func (s *Spawner) steerLive(ctx context.Context, h *liveRunHandle, orgID, conversationID, userID, text string) error {
+	if h == nil {
 		if err := s.Steer(ctx, conversationID, text); err != nil {
 			return err
 		}
 		s.recordSteeredMessage(ctx, orgID, conversationID, userID, text)
 		return nil
 	}
-	return s.queueFollowUp(ctx, orgID, *conv, userID, text)
+	h.sends.mu.Lock()
+	defer h.sends.mu.Unlock()
+	if err := s.Steer(ctx, conversationID, text); err != nil {
+		return err
+	}
+	h.sends.rows = append(h.sends.rows, s.recordSteeredMessage(ctx, orgID, conversationID, userID, text))
+	return nil
 }
 
 // recordSteeredMessage writes the transcript row for a message a live SDK
@@ -435,12 +454,15 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 // also why an insert failure logs instead of surfacing: failing the request
 // would tell the user a message the agent is already acting on didn't send.
 //
-// The row is delivered (nothing will come back to drain it) and attributed to
-// the sender, same as pendingUserInput; the DB-assigned id is stamped before
-// the broadcast because the client dedups and orders by id.
-func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationID, userID, text string) {
+// The row is delivered (the process has it, and nothing drains a live SDK
+// conversation's queue) and attributed to the sender, same as
+// pendingUserInput; the DB-assigned id is stamped before the broadcast because
+// the client dedups and orders by id. The id is returned, 0 when nothing was
+// recorded, so a stop that leaves the message unanswered can put this row back
+// on the queue.
+func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationID, userID, text string) int {
 	if s.tx == nil {
-		return
+		return 0
 	}
 	// Detached from the request's cancellation (values kept): the message is
 	// already in front of the agent, so a requester who hung up or timed out
@@ -457,9 +479,10 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationI
 		return nil
 	}); err != nil {
 		delegateLog.Warn("record steered user message failed; the message itself was already delivered", "conversation", conversationID, "error", err)
-		return
+		return 0
 	}
 	s.broadcastMessage(orgID, conversationID, msg)
+	return msg.ID
 }
 
 // queueFollowUp is the follow-up path: it records the user's message as an
@@ -565,14 +588,101 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	}
 
 	if flipped {
-		s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
-		s.recordResumeTaskEvent(ctx, orgID, userID, conv)
-		// Same-process fast path (local): the wake is a ~ms in-process
-		// dispatcher nudge. Cross-pod there is no wake nudge by design — the
-		// claiming executor's own scan-interval backstop picks the row up.
-		s.wakeDispatcher()
+		s.announceWake(ctx, orgID, userID, conv)
 	}
 	return nil
+}
+
+// announceWake is what follows a wake that flipped conv back to the queue: the
+// status push the views refetch on, the resume on the task's timeline
+// (attributed to userID, whose message the wake is for), and the dispatcher
+// nudge.
+func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv domain.Conversation) {
+	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
+	s.recordResumeTaskEvent(ctx, orgID, userID, conv)
+	// Same-process fast path (local): the wake is a ~ms in-process
+	// dispatcher nudge. Cross-pod there is no wake nudge by design — the
+	// claiming executor's own scan-interval backstop picks the row up.
+	s.wakeDispatcher()
+}
+
+// wakeForUnreadInput wakes a conversation that concluded with a person's
+// message it never read, so the message resumes it exactly as one sent a
+// moment after the conclusion would.
+//
+// A conclusion takes a conversation out of the claim queue whatever input it
+// holds, and a message can arrive too late for the turn that concluded to see
+// it. The ending that leaves one behind is stop_blueprint: the native loop
+// drains its queue before each model call and exits on the stop without
+// draining again, and the SDK driver puts the messages a stopped process never
+// answered back on the queue (requeueOwedSteers). The stop is honoured rather
+// than cancelled, as an ordinary ending is by late input, because a stop is a
+// deliberate verdict and a message that happens to land with it ("thanks",
+// say) must not throw it away. The message is read after it: an abort's
+// blueprint re-opens with the resume, and a finish's message is a follow-up
+// on finished work.
+//
+// It is the follow-up path's own wake, gate and flip included, and it runs
+// once the blueprint has reacted to the verdict. Before that the step is
+// handed off, and the gate and the flip both refuse it (blueprintFollowUpBlock,
+// MarkQueuedForResume). The dispatch defers it past its own teardown, which
+// is also what keeps the claim this wake makes from overlapping the cleanup
+// of the engagement that concluded.
+//
+// Only a conversation whose latest disposition is a verdict is woken. One
+// parked since (a follow-up a person or TF stopped keeps its earlier
+// conclusion stamp) leaves its unread input for the next message, as any
+// stopped conversation does, and one parked with no verdict is claimable by
+// the queue without a wake.
+func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID string) {
+	if s.conversations == nil || s.pendingInput == nil || s.tx == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil {
+		if err != nil {
+			delegateLog.Warn("check a concluded conversation for unread input failed; a message sent before its conclusion waits for the next one",
+				"conversation", conversationID, "org_id", orgID, "error", err)
+		}
+		return
+	}
+	if !conv.Concluded() || conv.ParkReason != "" {
+		return
+	}
+	_, userID, ok, err := s.pendingInput.Peek(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read a concluded conversation's unread input failed; a message sent before its conclusion waits for the next one",
+			"conversation", conversationID, "org_id", orgID, "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if block := s.followUpBlock(ctx, orgID, conv); block != "" {
+		delegateLog.Warn("a person's message is unread on a concluded conversation no wake may reach; it waits for the next message",
+			"conversation", conversationID, "org_id", orgID, "block", block)
+		return
+	}
+	var flipped bool
+	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+		var wErr error
+		flipped, wErr = s.wakeParked(ctx, ts, orgID, *conv)
+		return wErr
+	})
+	if errors.Is(err, errWakeRefused) {
+		delegateLog.Warn("the wake for a concluded conversation's unread message was refused after the gate passed; it waits for the next message",
+			"conversation", conversationID, "org_id", orgID)
+		return
+	}
+	if err != nil {
+		delegateLog.Warn("wake a concluded conversation for its unread message failed; it waits for the next message",
+			"conversation", conversationID, "org_id", orgID, "error", err)
+		return
+	}
+	if flipped {
+		s.announceWake(ctx, orgID, userID, *conv)
+	}
 }
 
 // pendingUserInput builds the one row an input to a conversation takes: an
@@ -604,7 +714,10 @@ func pendingUserInput(conversationID, userID, text string) *domain.Message {
 //
 // Runtime-conditional, and the native loop's drain is the whole of it: the loop
 // folds every undelivered row into the window before each model call, so from
-// the claim to the conclusion, writing the row is delivering it.
+// the claim to the conclusion, writing the row is delivering it. A row the loop
+// never reaches because the conversation concluded first (a stop_blueprint
+// ends it with no further call) is read on the resume the dispatch wakes for it
+// once the blueprint has reacted (wakeForUnreadInput).
 //
 // The SDK has no such drain. Its undelivered rows are read by exactly one
 // thing, the resume dispatch, and that resumes a Claude session by id. A queued

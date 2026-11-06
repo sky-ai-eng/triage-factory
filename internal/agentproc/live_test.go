@@ -108,6 +108,41 @@ func TestLiveRunClose_ReturnsErrWhenDrained(t *testing.T) {
 	}
 }
 
+// recordingWriteCloser stands in for the wrapper's stdin pipe and keeps what
+// was written to it.
+type recordingWriteCloser struct{ written []byte }
+
+func (w *recordingWriteCloser) Write(p []byte) (int, error) {
+	w.written = append(w.written, p...)
+	return len(p), nil
+}
+func (w *recordingWriteCloser) Close() error { return nil }
+
+// TestLiveRunKill_SkipsTheDrain: Kill SIGKILLs at once, with no end control
+// for the wrapper to drain on, so a turn the process owes never starts; and a
+// send after it is refused as one after Close is.
+func TestLiveRunKill_SkipsTheDrain(t *testing.T) {
+	stdin := &recordingWriteCloser{}
+	lr := &LiveRun{
+		stdin:        stdin,
+		done:         make(chan struct{}),
+		ready:        make(chan struct{}),
+		drainTimeout: time.Hour,
+		killTimeout:  time.Second,
+	}
+	lr.cancel = func() { close(lr.done) }
+
+	if err := lr.Kill(); err != nil {
+		t.Fatalf("Kill returned %v, want nil", err)
+	}
+	if len(stdin.written) != 0 {
+		t.Errorf("Kill wrote %q to the wrapper, want nothing (no end control, no drain)", stdin.written)
+	}
+	if err := lr.Send(context.Background(), "late"); !errors.Is(err, ErrRunClosing) {
+		t.Errorf("Send after Kill = %v, want ErrRunClosing", err)
+	}
+}
+
 // TestConsumeStreamInteractive_InterruptMarksResult pins the reader-side
 // interrupt labeling: the wrapper's control/interrupted ack marks the NEXT
 // result as Interrupted (the SDK has no native subtype for interrupts — the

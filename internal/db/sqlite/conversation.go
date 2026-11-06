@@ -1700,6 +1700,39 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 	})
 }
 
+func (s *conversationStore) RequeueInputForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		for start := 0; start < len(ids); start += inListChunkSize {
+			end := min(start+inListChunkSize, len(ids))
+			chunk := ids[start:end]
+			placeholders := make([]string, len(chunk))
+			args := make([]any, 0, len(chunk)+1)
+			args = append(args, conversationID)
+			for i, id := range chunk {
+				placeholders[i] = "?"
+				args = append(args, id)
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET delivered = 0
+				WHERE conversation_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
+				  AND role = 'user' AND subtype = '' AND delivered = 1 AND window_state = 'active'
+			`, args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	if err := db.ValidateConversationEnding(status); err != nil {
 		return nil, err

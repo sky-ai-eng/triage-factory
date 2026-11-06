@@ -1217,6 +1217,39 @@ func TestRun_BeforeToolCallGateDeniesInBand(t *testing.T) {
 	}
 }
 
+// TestRun_AStopStandsOverInputThatArrivesWithIt: a person's message that lands
+// while the call producing a stop_blueprint streams does not cancel the stop
+// the way it cancels an ordinary ending. The stop is the verdict, the loop
+// makes no further call, and the message stays undelivered for the resume the
+// delegate wakes once the blueprint has reacted.
+func TestRun_AStopStandsOverInputThatArrivesWithIt(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{
+			calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{
+				"type": "abort", "reason": "needs a human", "summary": "looked into it",
+			}}},
+			onCall: func() {
+				_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+					ConversationID: "conv", Role: "user",
+					Content: "thanks", Delivered: boolPtr(false),
+				})
+			},
+		},
+		{text: "should never run"},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultConcluded || got.Outcome != domain.ConversationOutcomeAbort || p.calls != 1 {
+		t.Fatalf("result = %+v after %d calls, want the abort concluded on the one call", got, p.calls)
+	}
+	late := tr.find(func(m domain.Message) bool { return m.Content == "thanks" })
+	if late == nil || (late.Delivered != nil && *late.Delivered) {
+		t.Errorf("the message that arrived with the stop = %+v, want it still pending", late)
+	}
+}
+
 func TestRun_StopBlueprintTerminatesOnlyAsItsMessagesOnlyCall(t *testing.T) {
 	t.Run("stop_blueprint alone terminates and its summary becomes the run's result", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))

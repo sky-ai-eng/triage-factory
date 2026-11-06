@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -240,6 +241,42 @@ type liveRunHandle struct {
 	// boundary is whether the next tool batch hands the agent the
 	// conversation's staged notes (stageNoteAtToolBoundary arms it).
 	boundary *toolBoundary
+	// sends is every message sent into the process after its opening, in
+	// order; see sendLog.
+	sends sendLog
+}
+
+// sendLog records, in send order, each message sent into one live process
+// after its opening: the transcript row a person's steered message was
+// recorded as, or 0 for the driver's nudge (which is not a person's) and for a
+// steer whose row failed to record.
+//
+// It exists for the stop that leaves turns owed. The process answers its
+// sends one turn each, in order, so the turns it still owes are its newest
+// sends, and the log says which of those were people's messages and where
+// their rows are. Its lock is held across each send and the recording of its
+// row, and taken by the driver to read the owed sends, so that read never
+// lands between a send the process counted and the row that records it.
+type sendLog struct {
+	mu   sync.Mutex
+	rows []int
+}
+
+// owedSteers returns the rows of the people's messages among the sends proc
+// still owes a turn, oldest first. It holds the lock for the read, so every
+// send proc has counted has its entry by then. Called on a process that can
+// take no more sends, so the count it reads is final.
+func (l *sendLog) owedSteers(proc liveProc) []int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	owed := min(proc.QueuedTurns(), len(l.rows))
+	var rows []int
+	for _, id := range l.rows[len(l.rows)-owed:] {
+		if id != 0 {
+			rows = append(rows, id)
+		}
+	}
+	return rows
 }
 
 // registerProc records a run's live process handle so control ops can

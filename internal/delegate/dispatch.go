@@ -584,6 +584,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	orgID := conv.OrgID
 	startTime := time.Now()
 
+	// Deferred first so it runs last, once the reactor has acted on whatever
+	// this engagement concluded (the step path's and the SDK resume's alike)
+	// and every per-conversation teardown below has run, so the claim it may
+	// make never overlaps them.
+	defer s.wakeForUnreadInput(ctx, orgID, conv.ID)
+
 	// The engagement's trace root. It ends at agent-live rather than here, so
 	// the deferred call is the deregister plus the backstop for a claim that
 	// never reached the agent at all.

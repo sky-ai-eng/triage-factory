@@ -1072,6 +1072,24 @@ type ConversationStore interface {
 	// value could name.
 	MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error
 
+	// RequeueInputForClaimSystem puts a person's messages back on the
+	// conversation's pending-input queue: each named row that is a delivered
+	// message of the queue's own shape (role 'user', blank subtype, active)
+	// flips undelivered, so the next claim that resumes the conversation
+	// delivers it again. Any other id, a row of another conversation
+	// included, is left alone.
+	//
+	// The SDK writes a message it steered into a live process as delivered,
+	// and this is the undo for one the process took and never answered: a
+	// stop_blueprint ending the turn the message was queued behind. Fenced,
+	// because only the engagement holding the claim knows which of its
+	// messages went unanswered, and a zombie's late flip would hand its
+	// successor input the successor's own process already read.
+	//
+	// Exempt from the returned-row rule: a batch flip, like the drain flush
+	// above.
+	RequeueInputForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int) error
+
 	// CompactForClaimSystem commits one compaction atomically: optionally
 	// insert the reconstructed reply row (forced inactive — it is history the
 	// moment it exists, never part of any assembly), insert the result row,
