@@ -1126,7 +1126,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		branch = "" // explicit null → clear
 	} else if err := json.Unmarshal(req.BaseBranch, &branch); err != nil {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: "base_branch must be a string or null", Field: "base_branch",
+			Reason: httpx.ReasonInvalidField, Message: "base_branch must be a string, or null", Field: "base_branch",
 		})
 		return
 	}

@@ -271,7 +271,7 @@ func scopePredicateField(bad, unproc *httpx.Validation, raw json.RawMessage, eve
 		return nil, true
 	}
 	if !strings.HasPrefix(trimmed, "{") {
-		bad.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object or null")
+		bad.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object, or null")
 		return nil, true
 	}
 	canonical, err := events.ValidatePredicateEdit(eventType, trimmed, prior)

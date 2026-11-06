@@ -220,7 +220,7 @@ func resolveUserSettingsPatch(w http.ResponseWriter, req userSettingsFields) (ap
 			at, err := time.Parse(time.RFC3339, value)
 			switch {
 			case err != nil:
-				shape.Invalid(overviewSeenAtField, overviewSeenAtField+" must be an RFC3339 timestamp or null")
+				shape.Invalid(overviewSeenAtField, overviewSeenAtField+" must be an RFC3339 timestamp, or null")
 			case at.After(time.Now().Add(overviewSeenSkew)):
 				semantic.OutOfRange(overviewSeenAtField, fmt.Sprintf(
 					"%s must not be more than %s ahead of the server's clock", overviewSeenAtField, overviewSeenSkew))

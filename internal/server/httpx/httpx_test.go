@@ -99,6 +99,11 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		ByKey  map[string]Deep   `json:"by_key"`
 		Labels map[string]string `json:"labels"`
 		ByID   map[int]string    `json:"by_id"`
+		Ns     []int             `json:"ns"`
+		NN     [][]int           `json:"nn"`
+		Small  int8              `json:"small"`
+		U      uint              `json:"u"`
+		Low    float32           `json:"low"`
 		Bytes  []byte            `json:"bytes"`
 		On     *bool             `json:"on"`
 		Ratio  float64           `json:"ratio"`
@@ -113,7 +118,25 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		wantMessage string
 	}{
 		{`{"page_size": "x"}`, "page_size", "page_size must be a whole number"},
-		{`{"page_size": 1.5}`, "page_size", "page_size must be a whole number"},
+		// An integer refuses a number for its range, or for being written
+		// with a decimal point or exponent even when it is whole.
+		{`{"page_size": 99999999999999999999}`, "page_size", "page_size must be a whole number from -9223372036854775808 to 9223372036854775807"},
+		{`{"page_size": 1e3}`, "page_size", "page_size must be a whole number written without a decimal point or exponent"},
+		{`{"page_size": 1.0}`, "page_size", "page_size must be a whole number written without a decimal point or exponent"},
+		{`{"page_size": 1.5}`, "page_size", "page_size must be a whole number written without a decimal point or exponent"},
+		{`{"small": 200}`, "small", "small must be a whole number from -128 to 127"},
+		{`{"u": -1}`, "u", "u must be a non-negative whole number written without a minus sign"},
+		{`{"u": -0}`, "u", "u must be a non-negative whole number written without a minus sign"},
+		{`{"u": 18446744073709551616}`, "u", "u must be a non-negative whole number no greater than 18446744073709551615"},
+		{`{"u": 1e3}`, "u", "u must be a non-negative whole number written without a decimal point or exponent"},
+		{`{"ns": [1, 1e3]}`, "ns", "ns must be an array of whole numbers written without a decimal point or exponent"},
+		{`{"nn": [[1.5]]}`, "nn", "nn must be an array of arrays of whole numbers written without a decimal point or exponent"},
+		// A key that is not a JSON number gets no rule, whitespace included.
+		{`{"by_id": {"1 ": "x"}}`, "by_id", "by_id must be an object of strings whose keys are whole numbers"},
+		{`{"by_id": {"99999999999999999999": "x"}}`, "by_id", "by_id must be an object of strings whose keys are whole numbers from -9223372036854775808 to 9223372036854775807"},
+		// A float refuses a number only for its range.
+		{`{"ratio": 1e400}`, "ratio", "ratio must be a number from -1.7976931348623157e+308 to 1.7976931348623157e+308"},
+		{`{"low": 1e39}`, "low", "low must be a number from -3.4028235e+38 to 3.4028235e+38"},
 		{`{"page_token": 7}`, "page_token", "page_token must be a string"},
 		{`{"statuses": "x"}`, "statuses", "statuses must be an array of strings"},
 		// A bad element reports the list's type, not the element's.
