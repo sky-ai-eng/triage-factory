@@ -432,7 +432,12 @@ type JiraSnapshot struct {
 	// it is. Empty on snapshots captured before the field existed, and on any
 	// response without one — every comparison falls back to the name there.
 	StatusID string `json:"status_id,omitempty"`
-	Assignee string `json:"assignee"` // display name (UI surfaces)
+	// StatusCategory is the key of the category Jira files the status under:
+	// "new", "indeterminate" or "done" (JiraStatusCategoryDone). The category
+	// is part of the status in the issue's own workflow. Empty on snapshots
+	// captured before it was recorded, and on a response without one.
+	StatusCategory string `json:"status_category,omitempty"`
+	Assignee       string `json:"assignee"` // display name (UI surfaces)
 	// AssigneeAccountID is the Atlassian stable identifier — accountId
 	// on Cloud, legacy key on Server / DC. Captured alongside the
 	// display name in issueToState so the assignee_in matcher has a
@@ -492,6 +497,22 @@ type JiraSnapshot struct {
 // against a rule's members through JiraStatusRef.SameStatus.
 func (s JiraSnapshot) StatusRef() JiraStatusRef {
 	return JiraStatusRef{ID: s.StatusID, Name: s.Status}
+}
+
+// JiraStatusCategoryDone is the key of Jira's done status category.
+const JiraStatusCategoryDone = "done"
+
+// JiraIssueDone reports whether the issue snap describes is finished. done is
+// the done statuses of the armed rule covering the issue's project, and when
+// it holds any it decides alone: the team that armed the project named the
+// statuses that mean done in its workflow. With none, no armed rule covers
+// the project, and Jira's status category decides, since it is part of the
+// issue's own status rather than borrowed from another project's rule.
+func JiraIssueDone(done []JiraStatusRef, snap JiraSnapshot) bool {
+	if len(done) == 0 {
+		return snap.StatusCategory == JiraStatusCategoryDone
+	}
+	return ContainsStatus(done, snap.StatusRef())
 }
 
 // HasAssignee reports whether the issue is assigned. Either field counts, so a

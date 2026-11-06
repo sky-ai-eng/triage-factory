@@ -377,6 +377,8 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		return ` OR (source = '` + source + `' AND (` + strings.Join(matches, " OR ") + `))`
 	}
 	jiraArm := sourceArm("jira", "->>'status_id'", "->>'status'", domain.JiraStatusMatchSets(jiraDone))
+	args = append(args, domain.JiraStatusCategoryDone)
+	jiraArm += ` OR (source = 'jira' AND snapshot_json->>'status_category' = $` + strconv.Itoa(len(args)) + `)`
 	linearArm := sourceArm("linear", "->'state'->>'id'", "->'state'->>'name'", domain.LinearStateMatchSets(linearDone))
 	limitClause := ""
 	if limit > 0 {

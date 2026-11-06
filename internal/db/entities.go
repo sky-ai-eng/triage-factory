@@ -484,8 +484,8 @@ type EntityStore interface {
 	// flipped, so it is polled forever and its tasks never clear). Normal
 	// operation returns nothing: the snapshot and the state flip land
 	// together, and a lost close is re-owed by the next refresh, so a row
-	// here means an entity nothing polls any more — an untracked repo, a
-	// removed Jira project — or an enforcement path that failed.
+	// here means an entity nothing polls any more — an untracked repo — or
+	// an enforcement path that failed.
 	//
 	// The two extra predicates are what separate a violation from work in
 	// flight. A close is owed on the refresh AFTER the one that lost it, so
@@ -507,8 +507,10 @@ type EntityStore interface {
 	//     re-checks each row against its own project's set. Union membership
 	//     alone would over-close (a status that is done in one project but
 	//     live in another), which is why the decision stays with the caller
-	//     and this is only a narrowing read. An empty jiraDone excludes Jira
-	//     entirely.
+	//     and this is only a narrowing read. A Jira row whose snapshot files
+	//     its status under Jira's done category (status_category, by which an
+	//     issue in a project no armed rule covers finishes) is returned
+	//     whatever jiraDone holds, so an empty jiraDone returns only those.
 	//
 	//     A ref matches the way JiraStatusRef.SameStatus compares, which is
 	//     the caller's recheck: a ref with an id matches a snapshot whose

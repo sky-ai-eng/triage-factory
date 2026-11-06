@@ -76,7 +76,8 @@ type EntitySeeder struct {
 //   - ListActive filters on the documented predicates.
 //   - ListActiveTerminalCandidatesSystem surfaces active entities whose
 //     stored snapshot reads terminal (github exactly, jira against the
-//     caller's done-status union), unpolled past the grace, with no
+//     caller's done-status union or Jira's done status category), unpolled
+//     past the grace, with no
 //     terminating close ready, leased or parked — and nothing else.
 //   - Descriptions dedupes the input id list and only returns ids
 //     whose description is non-empty.
@@ -1032,6 +1033,11 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// none, so the name decides.
 		jiraOtherDone := seedSnap("PROJ-tc-other-done", "jira", `{"key":"PROJ-tc-other-done","status":"Done","status_id":"10099"}`)
 		jiraWontDo := seedSnap("PROJ-tc-wontdo", "jira", `{"key":"PROJ-tc-wontdo","status":"Won't Do","status_id":"10077"}`)
+		// The category arm: a status no done ref names that Jira files under
+		// its done category, which is how an issue in a project no armed rule
+		// covers finishes, and one filed under another category.
+		jiraCategoryDone := seedSnap("PROJ-tc-category", "jira", `{"key":"PROJ-tc-category","status":"Released","status_id":"10050","status_category":"done"}`)
+		jiraCategoryLive := seedSnap("PROJ-tc-category-live", "jira", `{"key":"PROJ-tc-category-live","status":"In Review","status_id":"10051","status_category":"indeterminate"}`)
 		// The Linear arm, one shape per half: a done state reached by its id
 		// (renamed since the rule captured it), one reached by its name (the
 		// rule's ref carries no id), and a live state that matches neither.
@@ -1069,7 +1075,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// Every row but the freshly polled one was last polled an hour ago,
 		// well past a fifteen-minute grace.
-		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, jiraOtherDone, jiraWontDo, linearByID, linearByName, linearLive, linearOtherDone, linearNoID, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
+		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, jiraOtherDone, jiraWontDo, jiraCategoryDone, jiraCategoryLive, linearByID, linearByName, linearLive, linearOtherDone, linearNoID, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
 			seed.BackdatePoll(t, id, time.Hour)
 		}
 		const grace = 15 * time.Minute
@@ -1094,6 +1100,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{linearByID, "a Linear issue whose done state was renamed, matched by id"},
 			{linearByName, "a Linear issue in a done state named by a ref with no id, matched by name"},
 			{jiraWontDo, "a Jira issue in a status a ref with no id names, matched by name though the snapshot has an id"},
+			{jiraCategoryDone, "a Jira issue in a status no done ref names that Jira files under its done category"},
 			{linearNoID, "a Linear issue whose snapshot state has no id, matched by the done ref's name"},
 			{closeDone, "an entity whose close row is done — the close it carried did not land"},
 			{closeCancelled, "an entity whose only close row is cancelled — it holds no key"},
@@ -1108,6 +1115,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{open, "an open PR"},
 			{noSnapshot, "an entity with no stored snapshot"},
 			{jiraLive, "a Jira issue in a live status"},
+			{jiraCategoryLive, "a Jira issue in a status no done ref names, filed under a category other than done"},
 			{linearLive, "a Linear issue in a live state"},
 			{jiraOtherDone, "a Jira issue in another status that shares a done ref's name; its id says it is not that status"},
 			{linearOtherDone, "a Linear issue in another state that shares a done ref's name; its id says it is not that state"},
@@ -1139,17 +1147,24 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Error("an entity polled past the grace did not surface")
 		}
 
-		// No configured done statuses means no Jira or Linear row can be
-		// terminal — and must not become a syntax error on the way to saying
-		// so.
+		// No configured done statuses means no Linear row can be terminal,
+		// and a Jira row only by its status category — and must not become a
+		// syntax error on the way to saying so.
 		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, nil, grace, 0)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem(no done statuses): %v", err)
 		}
+		categoryOnly := false
 		for _, e := range got {
-			if e.Source == "jira" || e.Source == "linear" {
+			switch {
+			case e.ID == jiraCategoryDone:
+				categoryOnly = true
+			case e.Source == "jira" || e.Source == "linear":
 				t.Errorf("%s entity %s surfaced with no configured done statuses", e.Source, e.ID)
 			}
+		}
+		if !categoryOnly {
+			t.Error("with no configured done statuses, the Jira issue in the done category did not surface")
 		}
 		// Each source's set narrows only that source: Linear's done states do
 		// not reach a Jira row, and the reverse.
@@ -1160,7 +1175,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		linearOnly := map[string]bool{}
 		for _, e := range got {
 			linearOnly[e.ID] = true
-			if e.Source == "jira" {
+			if e.Source == "jira" && e.ID != jiraCategoryDone {
 				t.Errorf("jira entity %s surfaced from a Linear-only done set", e.ID)
 			}
 		}

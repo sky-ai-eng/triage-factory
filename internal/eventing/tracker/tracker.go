@@ -1878,9 +1878,10 @@ func jiraProjectIDValid(id string) bool {
 type JiraRules []JiraProjectRules
 
 // ForProject returns the rules for the jira_projects row jiraProjectID, or nil
-// when no configured project is that row. Callers should degrade gracefully
-// on a nil return — typically by treating the event as "no rules configured"
-// (no terminal check, log a warning).
+// when no armed project is that row. Callers should degrade gracefully on a
+// nil return: no pickup discovery, and no done statuses of the project's own,
+// so Jira's done status category decides whether the issue is finished
+// (doneMembers).
 func (r JiraRules) ForProject(jiraProjectID string) *JiraProjectRules {
 	if jiraProjectID == "" {
 		return nil
@@ -1913,19 +1914,20 @@ func (r JiraRules) AllDoneMembers() []domain.JiraStatusRef {
 }
 
 // doneMembers resolves the Done.Members of the project whose registry row is
-// jiraProjectID. Returns nil when the project isn't in the configured rule
-// set — typically because the user removed the project from Settings while
-// its entities are still active in the DB (entities aren't auto-deleted on
-// settings change). Nil matches jiraCycle.terminal (which returns false on
-// unknown project) so discovery's "should I mark this entity closed" and the
-// diff layer's "did this transition complete it" stay consistent.
+// jiraProjectID. Returns nil when no armed rule covers the project: it is
+// untracked, only watched, or was disarmed while its entities are still
+// active (entities aren't auto-deleted on settings change). jiraCycle.terminal
+// and DiffJiraSnapshots both decide through domain.JiraIssueDone, which reads
+// nil as "Jira's done status category decides", so discovery's "should I mark
+// this entity closed" and the diff layer's "did this transition complete it"
+// stay consistent.
 //
-// An earlier version fell back to the union of every configured
-// project's done members, but that misclassifies entities from removed
-// projects whose status happens to coincide with another project's
-// "done" word (e.g. OLD-1 transitioning to "Resolved" when NEW project
-// also uses "Resolved" as Done) — emits a spurious jira:issue:completed
-// for an entity whose actual workflow has nothing to do with NEW's.
+// A project with no armed rule does not borrow another project's done
+// members: a status that is done in one workflow can be live in another (OLD-1
+// transitioning to "Resolved" when the NEW project uses "Resolved" as Done),
+// and completing on it would emit jira:issue:completed for an entity whose
+// workflow has nothing to do with NEW's. The category comes from the issue's
+// own workflow.
 func (r JiraRules) doneMembers(jiraProjectID string) []domain.JiraStatusRef {
 	if rule := r.ForProject(jiraProjectID); rule != nil {
 		return rule.DoneMembers
@@ -1954,18 +1956,14 @@ type jiraCycle struct {
 	rows       map[string]*domain.JiraProject
 }
 
-// terminal reports whether snap sits in one of the done statuses of the
-// project whose registry row is jiraProjectID. An issue in a project no rule
-// configures is never terminal.
-//
-// TODO(TFAC-1313): so an entity in a project no rule arms never closes, and
-// every cycle's refresh reads it until its issue becomes unreadable or moves.
+// terminal reports whether snap is finished in the project whose registry row
+// is jiraProjectID: in one of the done statuses of the armed rule covering it,
+// or, with no armed rule, in Jira's done status category
+// (domain.JiraIssueDone). The fallback is what lets an entity in a project no
+// rule arms close, since the refresh reads every active entity on the site
+// each cycle and would otherwise read it for as long as its issue exists.
 func (c *jiraCycle) terminal(jiraProjectID string, snap domain.JiraSnapshot) bool {
-	rule := c.projects.ForProject(jiraProjectID)
-	if rule == nil {
-		return false
-	}
-	return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
+	return domain.JiraIssueDone(c.projects.doneMembers(jiraProjectID), snap)
 }
 
 // registerJiraProject returns the registry row of the project a fresh read
@@ -2024,8 +2022,9 @@ func (t *Tracker) jiraProjectRow(ctx context.Context, c *jiraCycle, id string) *
 // projects is the team's full per-project rule set; the tracker dispatches
 // discovery JQL per project and looks up terminal-status sets by the registry
 // row of the issue's project (domain.Entity.JiraProjectID). Tickets in a
-// project with no rule degrade silently — no terminal check, no pickup
-// discovery.
+// project with no armed rule are still refreshed, with no pickup discovery,
+// and finish when Jira puts their status in its done category
+// (jiraCycle.terminal).
 //
 // Actor identity flows through the snapshot (assignee_account_id,
 // reporter_account_id) and predicate matching happens downstream against
@@ -2613,9 +2612,8 @@ func (t *Tracker) applyJiraIssue(ctx context.Context, c *jiraCycle, e domain.Ent
 		newSnap.BodyHash = prev.BodyHash
 	}
 
-	// Per-project Done.Members for the issue's project. Nil when the issue is
-	// in a project that's no longer configured: nothing reads as terminal
-	// there.
+	// Per-project Done.Members for the issue's project. Nil when no armed rule
+	// covers it, and Jira's done status category decides there.
 	comments := t.jiraNewComments(ctx, c, *prev, &newSnap, state.Comments)
 	evts := DiffJiraSnapshots(*prev, newSnap, e.ID, projects, c.projects.doneMembers(current.ID), comments)
 
@@ -3379,9 +3377,11 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.
 	if p := issue.Fields.Project; p != nil {
 		snap.ProjectID, snap.ProjectKey, projectName = p.ID, p.Key, p.Name
 	}
-	if issue.Fields.Status != nil {
-		snap.Status = issue.Fields.Status.Name
-		snap.StatusID = issue.Fields.Status.ID
+	if st := issue.Fields.Status; st != nil {
+		snap.Status, snap.StatusID = st.Name, st.ID
+		if st.Category != nil {
+			snap.StatusCategory = st.Category.Key
+		}
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
