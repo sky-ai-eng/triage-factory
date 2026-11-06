@@ -10,11 +10,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -156,6 +158,111 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 		t.Errorf("current_step_index = %d, want 1", br.CurrentStepIndex)
 	}
 }
+
+// TestFollowUp_AnSDKResumeDecidesItsBlueprintLikeAFreshStep drives a stopped
+// step's follow-up along the SDK resume path's own tail: the follow-up wakes
+// the step, processCompletion records the resumed turn's verdict under the
+// resume's claim, and reactToResumedStep — what dispatchResumeClaim calls
+// next — moves the blueprint. A `continue` on a step with more after it
+// advances to the next step and leaves the blueprint running, as the step path
+// does; on the final step it completes the blueprint and closes the task; an
+// abort aborts with the reason stop_blueprint gave.
+//
+// The blueprint is event-triggered and a person replies, so the advance also
+// pins attribution: the next step carries the blueprint's own trigger and no
+// creator, not the replying user.
+func TestFollowUp_AnSDKResumeDecidesItsBlueprintLikeAFreshStep(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	cases := []struct {
+		name       string
+		steps      int
+		turn       *agentproc.Result
+		wantStatus domain.BlueprintRunStatus
+		wantQueued []int
+		wantIndex  int
+		wantReason string
+		wantClosed bool
+	}{
+		{"continue mid-blueprint advances", 3, res("Fixed the flaky test."), domain.BlueprintRunStatusRunning, []int{1}, 1, "", false},
+		{"continue on the final step completes", 1, res("Done."), domain.BlueprintRunStatusCompleted, nil, 0, "", true},
+		{"abort mid-blueprint aborts", 3, stopped(domain.ConversationOutcomeAbort, "needs a human", "looked"), domain.BlueprintRunStatusAborted, nil, 0, "needs a human", false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			s, database, brID, taskID, convID := reactorFixture(t, fmt.Sprintf("sdk-resume-%d", i), tc.steps, "open", "")
+			giveConversationResumeState(t, database, convID)
+			if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL WHERE id = ?`, convID); err != nil {
+				t.Fatalf("make the step event-triggered: %v", err)
+			}
+			if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+				t.Fatalf("SendMessage: %v", err)
+			}
+			claimID := holderClaimFor(t, s, org, convID)
+			conv := loadConversation(t, s, convID)
+			if _, fenced := s.processCompletion(ctx, org, convID, brID, claimID, loadTask(t, s, taskID), tc.turn,
+				t.TempDir(), nil, "sess-"+convID, "manual", runmode.LocalDefaultUserID); fenced {
+				t.Fatal("processCompletion reported fenced under a live claim")
+			}
+
+			s.reactToResumedStep(ctx, org, conv)
+
+			br := mustGetRun(t, s, org, brID)
+			if br.Status != tc.wantStatus || br.CurrentStepIndex != tc.wantIndex || br.AbortReason != tc.wantReason {
+				t.Errorf("blueprint = (status %q, step %d, abort reason %q), want (%q, %d, %q)",
+					br.Status, br.CurrentStepIndex, br.AbortReason, tc.wantStatus, tc.wantIndex, tc.wantReason)
+			}
+			if q := queuedStepConversations(t, database, brID); fmt.Sprint(q) != fmt.Sprint(tc.wantQueued) {
+				t.Errorf("queued step conversations = %v, want %v", q, tc.wantQueued)
+			}
+			if closed := readTaskStatus(t, database, taskID) == "done"; closed != tc.wantClosed {
+				t.Errorf("task closed = %v, want %v", closed, tc.wantClosed)
+			}
+			if len(tc.wantQueued) > 0 {
+				var trigger string
+				var creator sql.NullString
+				if err := database.QueryRow(`SELECT trigger_type, creator_user_id FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&trigger, &creator); err != nil {
+					t.Fatalf("read the next step: %v", err)
+				}
+				if trigger != "event" || creator.Valid {
+					t.Errorf("next step attribution = (trigger %q, creator %v), want the blueprint's own (event, none)", trigger, creator)
+				}
+			}
+		})
+	}
+}
+
+// TestDispatchResumeClaim_AnEarlyFailureEndsItsBlueprint pins the resume
+// path's deferred re-finalize: a resume that fails before its turn runs (here
+// a row missing its session) records the step failed, and the defer takes that
+// ending to the reactor, which fails the blueprint rather than leaving it
+// stranded `running` on a step that will never conclude.
+func TestDispatchResumeClaim_AnEarlyFailureEndsItsBlueprint(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	s, database, brID, taskID, convID := reactorFixture(t, "sdk-resume-early", 3, "open", "")
+	giveConversationResumeState(t, database, convID)
+	if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	conv := loadConversation(t, s, convID)
+	conv.OrgID = org
+	conv.ClaimID = holderClaimFor(t, s, org, convID)
+	conv.SessionID = "" // the claimed row the resume path refuses to drive
+
+	s.dispatchResumeClaim(ctx, conv, ptrTask(loadTask(t, s, taskID)), "keep going", runmode.LocalDefaultUserID)
+
+	if st := storedStatus(t, database, convID); st != domain.StatusFailed {
+		t.Fatalf("step status = %q, want failed", st)
+	}
+	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusFailed {
+		t.Errorf("blueprint status = %q, want failed — the defer must carry the step's failure to the reactor", br.Status)
+	}
+}
+
+func ptrTask(t domain.Task) *domain.Task { return &t }
 
 // putHookStorage wraps a real blob store so a test can observe the world at the
 // exact moment a snapshot lands. Ordering is the property under test, and an

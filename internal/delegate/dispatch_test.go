@@ -504,12 +504,12 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 	})
 
 	t.Run("the resume finalizer refuses it on the same grounds", func(t *testing.T) {
-		// The other post-run orchestration path: a follow-up's conclusion
-		// finalizes through ResumeBlueprintAfterResume rather than the reactor,
-		// and it terminates blueprints too — so it carries the same re-check.
+		// A follow-up's conclusion reaches the reactor through the resume
+		// path's own door, which re-reads the step and the run first — the
+		// re-check has to survive that re-read.
 		s, database, brID, taskID, stale := stage(t, "stale-resume", "finish")
 
-		s.ResumeBlueprintAfterResume(org, stale.ID, runmode.LocalDefaultUserID)
+		s.reactToResumedStep(context.Background(), org, &stale)
 
 		if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
 			t.Errorf("blueprint status = %q, want running — step 1 is still executing", br.Status)

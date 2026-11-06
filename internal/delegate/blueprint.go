@@ -408,9 +408,8 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 // run's owning blueprint, and reports whether it landed. It is the one place
 // cancellation is spelled: from here the claim gate stops handing out this
 // blueprint's steps, and whichever path disposes of the running step finalizes
-// the blueprint 'cancelled' (reactToStepTerminal for a live step,
-// ResumeBlueprintAfterResume for a resumed one, the dispatcher's stop
-// settlement for one nobody holds).
+// the blueprint 'cancelled' (reactToStepTerminal for a step that ran, fresh or
+// resumed, the dispatcher's stop settlement for one nobody holds).
 //
 // It returns the error rather than swallowing it because what follows a failed
 // signal differs by caller: a blueprint whose signal never committed is one
@@ -510,99 +509,48 @@ func (s *Spawner) cleanupCancelledBlueprintWorktree(orgID, blueprintRunID, taskI
 	s.runBlueprintWorktreeCleanup(orgID, blueprintRunID, workspaceKey(taskID))
 }
 
-// markBlueprintRunStatusAsUser writes a blueprint_run status transition under
-// the given user's synthetic claims. Used by user-initiated CancelBlueprintRun
-// / Resume* paths that need to attribute the write to the requesting
-// user even though the blueprint's original trigger_type may have been
-// 'event'.
-func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userID, blueprintRunID string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
-	var changed bool
-	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		c, mErr := ts.Blueprints.MarkRunStatus(ctx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-		changed = c
-		return mErr
-	})
-	return changed, err
-}
-
-// ResumeBlueprintAfterResume finalizes a blueprint after one of its step
-// runs was resumed (via a user follow-up) and reached a terminal state —
-// once processCompletion reports the step is no longer parked. It reads the
-// resumed step's terminal conversations.outcome + position and routes
-// through terminateBlueprint, so a 1-step (or final-step) resume closes the
-// task on finish and leaves it open on abort.
+// reactToResumedStep hands a resumed step's ending to the blueprint reactor.
+// dispatchResumeClaim drives an SDK follow-up outside the step path, so this
+// is where it reaches reactToStepTerminal, the one place a step's ending moves
+// its blueprint: a `continue` on a non-final step advances to the next step,
+// finish and abort terminate, a failed step fails the blueprint, a cancel
+// behind the step cancels it, and a step that parked again with no verdict
+// leaves it running for the next resume. A blueprint that is not running (a
+// follow-up on a finished one) is left as it is.
 //
-// A non-final step that concludes `continue` does not advance here: the
-// blueprint is aborted with multi_step_resume_not_implemented (see
-// blueprintTerminalForResumedStepConversation), where the step path's reactor
-// would advance it.
-//
-// userID identifies the actor for audit (the user whose action resumed the
-// run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
-// extract it from JWT claims.
-func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID string) {
-	cr, stepIdx, err := s.blueprints.GetRunForConversationSystem(context.Background(), orgID, stepConversationID)
-	if err != nil || cr == nil {
+// conv is the claimed conversation. The step is re-read for the ending the
+// engagement wrote, and carries the claim's attribution onto the reactor the
+// way the step path does, so the next step is credited to the blueprint's
+// original trigger rather than to the person who replied.
+func (s *Spawner) reactToResumedStep(ctx context.Context, orgID string, conv *domain.Conversation) {
+	if conv.BlueprintRunID == "" {
 		return
 	}
-	if cr.Status != domain.BlueprintRunStatusRunning {
+	ctx = context.WithoutCancel(ctx)
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
+	if err != nil || br == nil {
+		blueprintLog.Warn("resume finalize: read blueprint_run failed; the stranded-run replay is the backstop",
+			"blueprint_run", conv.BlueprintRunID, "step_conversation", conv.ID, "error", err)
 		return
 	}
-	// reactToStepTerminal's far-side re-check, on the path a resumed step
-	// finalizes through instead. Same reason it has one: this terminates the
-	// blueprint, and doing that on a step the sequence has moved past kills a
-	// run whose current step is still executing.
-	if !isCurrentBlueprintStep(cr, stepIdx) {
-		blueprintLog.Error("resume finalize: terminal from a step the blueprint has moved past; ignoring it (no transition)",
-			"blueprint_run", cr.ID, "step_conversation", stepConversationID, "step", stepIdx, "current_step", cr.CurrentStepIndex)
-		return
-	}
-
-	stepConversation, err := s.conversations.GetSystem(context.Background(), orgID, stepConversationID)
+	stepConversation, err := s.conversations.GetSystem(ctx, orgID, conv.ID)
 	if err != nil || stepConversation == nil {
-		blueprintLog.Warn("read step conversation failed", "step_conversation", stepConversationID, "error", err)
+		blueprintLog.Warn("resume finalize: read step conversation failed; the stranded-run replay is the backstop",
+			"blueprint_run", br.ID, "step_conversation", conv.ID, "error", err)
 		return
 	}
-	// Still dormant after the resume (went open again with no verdict) → the
-	// blueprint stays running; the next resume drives finalization. Unless a
-	// cancel is behind the park: a cancelled resume parks `open` rather than
-	// recording a verdict of its own, so cancel_requested is what tells the
-	// two apart — the same ordering reactToStepTerminal uses, and for the same
-	// reason.
-	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() && !cr.CancelRequested {
-		return
-	}
-
-	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
-	if err != nil || task == nil {
-		blueprintLog.Warn("load task for blueprint_run failed", "blueprint_run", cr.ID, "error", err)
-		_, _ = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.BlueprintRunStatusFailed, "resume_task_load_failed", stepIdx)
-		return
-	}
-	cfg := runConfig{orgID: orgID}
-
-	// A cancel raised against this blueprint decides its terminal regardless of
-	// how the resumed step ended — including the `open` park a cancelled resume
-	// leaves behind, which the mapping below would otherwise read as an
-	// unexpected status and fail the blueprint over.
-	if cr.CancelRequested {
-		s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-			domain.BlueprintRunStatusCancelled, "cancelled", stepIdx, false)
-		return
-	}
-
-	isFinal := finalBlueprintStep(cr, stepIdx)
-
-	status, reason := blueprintTerminalForResumedStepConversation(stepConversation, isFinal)
-	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		status, reason, stepIdx, false)
+	stepConversation.OrgID = orgID
+	stepConversation.TriggerType = conv.TriggerType
+	stepConversation.CreatorUserID = conv.CreatorUserID
+	stepConversation.Model = conv.Model
+	s.reactToStepTerminal(ctx, orgID, br, *stepConversation, runConfig{orgID: orgID}, br.StartedAt)
 }
 
 // finalBlueprintStep reports whether stepIdx is br's last step (and therefore
 // its only one for N=1), read off the plan frozen at mint (br.StepPlan), not
-// the live steps, so a mid-flight edit cannot change a resumed run's terminal
-// disposition. True when the index or plan cannot be resolved, so an unknown
-// position never advances into the unbuilt mid-blueprint resume.
+// the live steps, so a mid-flight edit cannot change what a step is told. True
+// when the index or plan cannot be resolved: with no plan naming a later step,
+// there is none for this one to hand off to.
 func finalBlueprintStep(br *domain.BlueprintRun, stepIdx *int) bool {
 	if stepIdx == nil || len(br.StepPlan) == 0 {
 		return true
@@ -623,39 +571,6 @@ func (s *Spawner) resumedStepIsFinal(ctx context.Context, orgID string, conv *do
 		return true
 	}
 	return finalBlueprintStep(br, conv.BlueprintStepIndex)
-}
-
-// blueprintTerminalForResumedStepConversation maps a resumed step
-// conversation's ending + position to the blueprint's terminal status.
-// Mirrors reactToStepTerminal's disposition, for the resume path: a recorded
-// verdict routes through blueprintDecisionForStepConversation
-// (finish/advance/abort), and a failure maps to the matching blueprint
-// terminal.
-func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
-	switch {
-	case stepConversation.Concluded():
-		decision, abortReason := blueprintDecisionForStepConversation(stepConversation.Outcome, isFinal)
-		switch decision {
-		case blueprintStepFinish:
-			return domain.BlueprintRunStatusCompleted, ""
-		case blueprintStepAbort:
-			reason := abortReason
-			if reason == "" {
-				reason = stepConversation.OutcomeReason
-			}
-			return domain.BlueprintRunStatusAborted, reason
-		default: // blueprintStepAdvance
-			// TODO(TFAC-1341): advance like the step path does. An SDK
-			// follow-up on a non-final step ends its blueprint here instead,
-			// so steps after it never run; ResumeBlueprintAfterResume should
-			// hand the step to reactToStepTerminal and drop this mapping.
-			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
-		}
-	case stepConversation.Status == domain.StatusFailed:
-		return domain.BlueprintRunStatusFailed, "step " + stepConversation.Status
-	default:
-		return domain.BlueprintRunStatusFailed, "step ended with status " + stepConversation.Status
-	}
 }
 
 // taskHasUnresolvedDeliverables reports whether any conversation on the task holds
