@@ -170,7 +170,21 @@ function Tag({ text, tip, alarm }: { text: string; tip: string; alarm?: boolean 
   )
 }
 
-export default function LinearSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
+type LinearSourceProps = SourceBodyProps & {
+  /** The Linear team the URL names, whose board is shown. */
+  linkedTeamId?: string | null
+  /** Moves the URL's Linear team to a pick from the strip; null takes it out. */
+  onShowTeam?: (id: string | null) => void
+}
+
+export default function LinearSource({
+  teamId,
+  teamName,
+  isAdmin,
+  onBack,
+  linkedTeamId = null,
+  onShowTeam,
+}: LinearSourceProps) {
   // The org whose Linear catalog the live reads address; null while it is
   // still resolving, which holds them.
   const orgId = useActiveOrgId()
@@ -319,11 +333,27 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
   const watched = useMemo(() => teams ?? [], [teams])
   const watchedIds = useMemo(() => new Set(watched.map((t) => t.id)), [watched])
 
-  // The board's team: the picked one while it is still watched, else the
-  // first watched team.
+  // The board's team: the one the URL names, else the one picked from the
+  // strip, else the first watched team, each only while it is still watched.
+  // A pick moves the URL's team as well, so the local pick decides only where
+  // nothing wires the URL.
+  const linked = useMemo(
+    () => (linkedTeamId ? watched.find((t) => t.id === linkedTeamId) : undefined),
+    [watched, linkedTeamId],
+  )
   const shown = useMemo(
-    () => watched.find((t) => t.id === shownId) ?? watched[0] ?? null,
-    [watched, shownId],
+    () => linked ?? watched.find((t) => t.id === shownId) ?? watched[0] ?? null,
+    [watched, shownId, linked],
+  )
+  // A URL naming a Linear team this team does not watch says so above
+  // whichever board is drawn, which the strip or the board's note names.
+  const linkMissed = linkedTeamId !== null && teams !== null && !linked
+  const pick = useCallback(
+    (id: string) => {
+      setShownId(id)
+      onShowTeam?.(id)
+    },
+    [onShowTeam],
   )
   const shownTeamId = shown?.id ?? ''
 
@@ -499,9 +529,12 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                 .map((c) => unmappedLinearTeam(c.id, c.key, c.name)),
             )
           : teams.filter((t) => !picked.has(t.id))
+      // Unwatching the team the URL names takes it out of the URL: the reader
+      // did that here, so there is no link left to explain.
+      if (actionId !== 'watch' && linked && picked.has(linked.id)) onShowTeam?.(null)
       persist(next)
     },
-    [teams, catalog, watchedIds, persist],
+    [teams, catalog, watchedIds, persist, linked, onShowTeam],
   )
 
   // A board gesture, mapped back onto the four stored rules and saved. The
@@ -612,6 +645,11 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
         <div className="sp-mapcol">
           <p className="sp-prose">{PROSE}</p>
           {note ? <p className="sp-offnote">{note}</p> : null}
+          {linkMissed ? (
+            <p className="sp-offnote">
+              The Linear team this link is for isn’t one this team watches.
+            </p>
+          ) : null}
           <div className="sp-subhead">
             <span className="sp-subhead-t">What each state means</span>
             {watched.length > 1 ? (
@@ -631,7 +669,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                       data-unarmed={armed || alarm ? undefined : ''}
                       data-alarm={alarm ? '' : undefined}
                       title={alarm ? 'needs attention' : armed ? undefined : 'states not mapped'}
-                      onClick={() => setShownId(t.id)}
+                      onClick={() => pick(t.id)}
                     >
                       {t.key}
                     </button>
