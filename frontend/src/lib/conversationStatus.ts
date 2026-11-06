@@ -264,7 +264,6 @@ export const PARK_REASON_LABELS: Record<string, string> = {
   stalled: 'stalled',
   upstream_unavailable: 'Paused: provider unavailable',
   sandbox_lost: 'its sandbox stopped too many times — send a message to try again',
-  invalid_envelope: 'its completion envelope never validated — send a message to try again',
 }
 
 // parkReasonLabel is the gloss for one park reason. An unrecognized code

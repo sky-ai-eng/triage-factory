@@ -1,13 +1,12 @@
 // Prompt resolution + composition (mission text, the run's per-run tail, and
-// the composed agent framework prompt), plus parsing of the agent's terminal
-// completion JSON envelope and the small string utilities the prompt
-// path needs (extra-tools merging, owner/repo splitting).
+// the composed agent framework prompt), the classification of an SDK turn-end
+// into its step's verdict, and the small string utilities the prompt path
+// needs (extra-tools merging, owner/repo splitting).
 
 package delegate
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -402,143 +401,91 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 	return skills.NormalizeToolList(promptAllowedTools + "," + agentTools)
 }
 
-type agentResult struct {
-	// Outcome is the single terminal vocabulary (continue|finish|abort).
-	// See domain.ConversationOutcome and the completion block in
-	// internal/agentprompt.
-	Outcome string `json:"outcome"`
-	// Summary is the natural-language "what I did" — required on a
-	// finish/continue. Maps to conversations.result_summary.
-	Summary string `json:"summary"`
-	// Reason is the natural-language "why I stopped / what a human needs
-	// to do" — required on (and only meaningful for) an abort outcome. Maps
-	// to conversations.outcome_reason, kept distinct from Summary.
-	Reason string `json:"reason"`
+// turnVerdict is the verdict a turn-end gives its step: the outcome
+// (continue|finish|abort, domain.ConversationOutcome), the account of the work
+// that becomes conversations.result_summary, and the reason that becomes
+// conversations.outcome_reason.
+type turnVerdict struct {
+	Outcome domain.ConversationOutcome
+	Summary string
+	Reason  string
 }
 
-// isValid reports whether the envelope is a recognized conclusion carrying its
-// required companion field: finish/continue need a non-empty summary; abort
-// needs a non-empty reason (abort is the agent's *voluntary* "I'm functioning
-// but choosing to stop" decision, so the why is exactly the thing worth
-// collecting — involuntary death is the separate `failed` status). Any other
-// outcome token, or a recognized one missing its companion, is not a valid
-// conclusion — it's an invalid attempt the driver re-prompts to fix.
-func (r *agentResult) isValid() bool {
-	switch domain.ConversationOutcome(r.Outcome) {
-	case domain.ConversationOutcomeContinue, domain.ConversationOutcomeFinish:
-		return r.Summary != ""
-	case domain.ConversationOutcomeAbort:
-		return r.Reason != ""
+// turnClass is the two-way classification of an SDK turn that ended neither in
+// an error nor by interruption.
+type turnClass int
+
+const (
+	// turnParked — the model did not finish its reply: the turn's stop reason
+	// is something other than an end of turn (a refusal, the output limit, a
+	// reason this build does not recognize). The run parks where a person can
+	// see it, and their next message wakes it.
+	turnParked turnClass = iota
+	// turnConcluded — the step has its verdict.
+	turnConcluded
+)
+
+// classifyTurn sorts an SDK turn-end under the native runtime's turn-end
+// contract. A turn stop_blueprint ended (agentproc.Result.Terminal) concludes
+// on the outcome, reason and summary the call recorded, whatever text came
+// after it; the handler refuses a call missing any of them. Any other turn
+// concludes `continue`, with its final text as the summary, when the model
+// ended its reply itself (sdkTurnFinished), and parks otherwise.
+//
+// `continue` is what ending a turn means on every step: "my part is done".
+// Only blueprintDecisionForStepConversation knows whether a part being done
+// ends the task, and it resolves `continue` on a final or single step to a
+// structural finish. Ending the whole task early, or aborting, is the
+// deliberate act, and it goes through stop_blueprint.
+func classifyTurn(r *agentproc.Result) (turnClass, turnVerdict) {
+	if t := r.Terminal; t != nil {
+		return turnConcluded, turnVerdict{Outcome: t.Outcome, Summary: t.Summary, Reason: t.Reason}
+	}
+	if !sdkTurnFinished(r.StopReason) {
+		return turnParked, turnVerdict{}
+	}
+	return turnConcluded, turnVerdict{Outcome: domain.ConversationOutcomeContinue, Summary: strings.TrimSpace(r.Result)}
+}
+
+// sdkTurnFinished reports whether an SDK turn's stop reason says the model
+// ended its reply itself, the one reason a turn may conclude on. An allowlist,
+// for the reason the native loop's classifyStop is one: under a
+// conclude-by-default rule a refusal, a reply cut off at the output limit, and
+// a reason nobody has classified yet all read as "the model finished", and a
+// blueprint advances on nothing.
+//
+// The spelling is the Messages API's, which is what the SDK reports. Empty is
+// a result that carried no reason, read as an end of turn, as the native loop
+// reads one.
+func sdkTurnFinished(stopReason string) bool {
+	switch stopReason {
+	case "", "end_turn":
+		return true
 	default:
 		return false
 	}
 }
 
-// turnClass is the three-way classification of an agent turn-end: the run is
-// either concluded (valid), made a malformed conclusion attempt (invalid), or
-// did neither (none — prose / nothing, i.e. an open run).
-type turnClass int
-
-const (
-	// turnNone — no envelope attempt at all: prose, nothing, or unrelated
-	// JSON with no `outcome` key. The run is open: not concluded, not
-	// executing, no claim about why it stopped.
-	turnNone turnClass = iota
-	// turnInvalid — the output IS an envelope attempt (a JSON object carrying
-	// an `outcome` key, or clearly envelope-shaped output that won't parse)
-	// but it fails validation: malformed JSON, an unrecognized outcome, or a
-	// recognized outcome missing its required companion. The driver re-prompts
-	// to fix, then fails on exhaustion.
-	turnInvalid
-	// turnValid — a recognized conclusion with its required companion field.
-	turnValid
-)
-
-// classifyAgentResult sorts the agent's final message text into the three
-// turn-end buckets. It looks for the agent's intended completion envelope — the
-// first brace-delimited JSON object that decodes AND carries an `outcome` key
-// (envelopeObject) — tolerating leading prose, trailing text, markdown fences,
-// and nested objects. If such an object is found it's valid or invalid per
-// isValid; if none decodes but the text still carries an `"outcome"` key (a
-// malformed object that wouldn't parse) it's an invalid attempt the driver
-// re-prompts; anything else — prose, an empty or unrelated JSON object — is
-// none, and the run is open. The parsed result is returned only for valid.
-//
-// Known limitation: the malformed-envelope fallback is a substring check for
-// the quoted `"outcome"` token, so prose that literally contains it with no
-// real envelope is treated as a (malformed) attempt and re-prompted once. The
-// contract is "ONLY a JSON object," so that's a rare violation the re-prompt
-// corrects.
-func classifyAgentResult(text string) (turnClass, *agentResult) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return turnNone, nil
+// stopReasonParkNotice is the transcript's record of a turn the model did not
+// finish, so a person reading the run sees why it is waiting on them and what
+// wakes it.
+func stopReasonParkNotice(stopReason string) string {
+	var cause string
+	switch stopReason {
+	case "refusal":
+		cause = "the model declined to produce it"
+	case "max_tokens":
+		cause = "it reached the output token limit"
+	case "model_context_window_exceeded":
+		cause = "it ran out of context window"
+	case "tool_use":
+		cause = "the turn ended on a tool call rather than a finished reply"
+	default:
+		cause = "of a stop reason this build does not recognize"
 	}
-	if candidate, ok := envelopeObject(text); ok {
-		var result agentResult
-		_ = json.Unmarshal([]byte(candidate), &result) // envelopeObject already decoded it
-		if result.isValid() {
-			return turnValid, &result
-		}
-		return turnInvalid, nil // a parseable envelope attempt that fails validation
-	}
-	// No decodable object carried an `outcome`. If the text is nonetheless
-	// clearly an envelope attempt that didn't parse (a malformed object with an
-	// "outcome" key), treat it as invalid so the driver re-prompts; otherwise
-	// it's prose / unrelated JSON and the run is open.
-	if looksMalformedEnvelope(text) {
-		return turnInvalid, nil
-	}
-	return turnNone, nil
-}
-
-// envelopeObject returns the agent's intended completion envelope: the first
-// brace-delimited JSON object in text that decodes AND carries an `outcome`
-// key, as an exactly-bounded span re-parseable with json.Unmarshal. A streaming
-// json.Decoder started at each `{` consumes one balanced object and ignores the
-// rest, so this tolerates leading prose, a trailing ``` fence, text after the
-// JSON, and nested objects — cases the cruder first-{-to-last-} span could not
-// (e.g. "Config {x} done. {\"outcome\":\"finish\",...}"). Objects without an
-// `outcome` key (a stray prose `{...}`, an object nested in the envelope,
-// `{}`) are skipped. Returns ok=false when no such object exists.
-func envelopeObject(text string) (string, bool) {
-	for i := 0; i < len(text); i++ {
-		if text[i] != '{' {
-			continue
-		}
-		dec := json.NewDecoder(strings.NewReader(text[i:]))
-		var probe map[string]any
-		if dec.Decode(&probe) != nil {
-			continue // not a JSON object starting at this brace
-		}
-		if _, hasOutcome := probe["outcome"]; !hasOutcome {
-			continue // a JSON object, but not the envelope
-		}
-		return text[i : i+int(dec.InputOffset())], true
-	}
-	return "", false
-}
-
-// looksMalformedEnvelope reports whether text is clearly an envelope attempt
-// that no extraction could parse — the heuristic is the presence of the
-// `"outcome"` JSON key. Prose rarely carries that exact token, so a positive
-// here means "the agent tried to emit an envelope and botched the JSON," which
-// the driver re-prompts rather than treating as an open run.
-func looksMalformedEnvelope(text string) bool {
-	return strings.Contains(text, `"outcome"`)
-}
-
-// classifyTurn sorts a turn-end into the three buckets. A turn a TF tool
-// ended (agentproc.Result.Terminal) is a conclusion carrying the outcome,
-// reason and summary the call recorded, whatever text came after it: the call
-// was the agent's verdict, and stop_blueprint's handler refuses one missing
-// what that outcome requires. Every other turn is classified from its final
-// text (classifyAgentResult).
-func classifyTurn(r *agentproc.Result) (turnClass, *agentResult) {
-	if t := r.Terminal; t != nil {
-		return turnValid, &agentResult{Outcome: string(t.Outcome), Summary: t.Summary, Reason: t.Reason}
-	}
-	return classifyAgentResult(r.Result)
+	return fmt.Sprintf("<system-note>\nThis run paused: the model's last reply stopped because %s (stop reason %q), "+
+		"so it was not read as a finished turn. The work so far is intact; send a message to pick it back up.\n"+
+		"</system-note>", cause, stopReason)
 }
 
 func parseOwnerRepo(s string) (string, string) {

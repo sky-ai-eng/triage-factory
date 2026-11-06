@@ -32,7 +32,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), nil, "", "event", "")
+		res("opened a PR"), t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
@@ -55,7 +55,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to rotate the token"}`),
+		stopped(domain.ConversationOutcomeAbort, "needs a human to rotate the token", "looked into it"),
 		t.TempDir(), nil, "", "event", "")
 
 	if parked {
@@ -79,7 +79,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), nil, "", "event", "")
+		stopped(domain.ConversationOutcomeFinish, "nothing more to do", "shipped it"), t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")

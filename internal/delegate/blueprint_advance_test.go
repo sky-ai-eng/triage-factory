@@ -68,9 +68,9 @@ func TestBlueprintDecisionForStepConversation(t *testing.T) {
 		{"abort non-final aborts", "abort", false, blueprintStepAbort, ""},
 		{"abort final aborts", "abort", true, blueprintStepAbort, ""},
 
-		// A missing outcome (empty === NULL) is the floor after the
-		// outcome gate exhausted its retries: ambiguous mid-blueprint →
-		// abort no-outcome; unambiguous on the final step → finish.
+		// A missing outcome (empty === NULL), a conclusion recorded with no
+		// outcome token: ambiguous mid-blueprint → abort no-outcome;
+		// unambiguous on the final step → finish.
 		{"missing non-final aborts no-outcome", "", false, blueprintStepAbort, "no-outcome"},
 		{"missing final finishes", "", true, blueprintStepFinish, ""},
 
@@ -99,6 +99,34 @@ func TestBlueprintDecisionForStepConversation(t *testing.T) {
 	}
 }
 
+// TestFinalBlueprintStep pins the position read both the resume finalizer and
+// the SDK resume's turn-end nudge rely on: only the frozen plan's last index
+// is final, and a position that cannot be read counts as final.
+func TestFinalBlueprintStep(t *testing.T) {
+	idx := func(i int) *int { return &i }
+	plan := []domain.BlueprintPlanStep{{StepIndex: 0}, {StepIndex: 1}, {StepIndex: 2}}
+	cases := []struct {
+		name string
+		plan []domain.BlueprintPlanStep
+		step *int
+		want bool
+	}{
+		{"first of three", plan, idx(0), false},
+		{"middle of three", plan, idx(1), false},
+		{"last of three", plan, idx(2), true},
+		{"only step", plan[:1], idx(0), true},
+		{"no step index", plan, nil, true},
+		{"no frozen plan", nil, idx(0), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := finalBlueprintStep(&domain.BlueprintRun{StepPlan: tc.plan}, tc.step); got != tc.want {
+				t.Errorf("finalBlueprintStep = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue: a
 // blueprint step that emits continue without queuing any external action keeps
 // continue and completes normally, leaving the orchestrator to advance to the
@@ -110,7 +138,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
+		res("did step work"), cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
 	if conv.Outcome != "continue" {
@@ -150,7 +178,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	// No session id → the gate can't (and needn't) retry; the staged file plus
 	// a valid continue outcome already satisfy it.
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, nil), "", "event", "")
+		res("did step work"), cwd, runMirror(s, task, conversationID, blueprintRunID, cwd, nil), "", "event", "")
 
 	// Raw column read rather than a store method: this test is about
 	// processCompletion's write side (file ingestion + blueprint_run_id

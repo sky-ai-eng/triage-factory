@@ -26,13 +26,11 @@ const (
 	blockHarnessNativeScratch = "harness/native-scratch.txt"
 
 	// invariant
-	blockVerbLinkedContext   = "verbs/linked-context.txt"
-	blockVerbWorkspace       = "verbs/workspace.txt"
-	blockVerbTeamKnowledge   = "verbs/team-knowledge.txt"
-	blockVerbMemory          = "verbs/memory.txt"
-	blockGuardrailsCommon    = "guardrails/common.txt"
-	blockCompletionSDKJSON   = "completion/sdk-json.txt"
-	blockCompletionSDKNonTrm = "completion/nonterminal-sdk.txt"
+	blockVerbLinkedContext = "verbs/linked-context.txt"
+	blockVerbWorkspace     = "verbs/workspace.txt"
+	blockVerbTeamKnowledge = "verbs/team-knowledge.txt"
+	blockVerbMemory        = "verbs/memory.txt"
+	blockGuardrailsCommon  = "guardrails/common.txt"
 
 	// The native counterparts of the sections above. They are separate files
 	// rather than arms of the same file because the two runtimes are different
@@ -46,8 +44,14 @@ const (
 	blockVerbTeamKnowledgeNv = "verbs/team-knowledge-native.txt"
 	blockVerbMemoryNv        = "verbs/memory-native.txt"
 	blockGuardrailsCommonNv  = "guardrails/common-native.txt"
-	blockCompletionNative    = "completion/native-blueprint.txt"
-	blockCompletionNativeNT  = "completion/nonterminal-native.txt"
+
+	// Shared by both runtimes, which conclude a run the same way: a turn that
+	// ends with no tool calls is the step's part done, and stop_blueprint is
+	// the one deliberate other ending. The text names the tool bare; the SDK
+	// serves it as mcp__tf__stop_blueprint, which the model connects to that
+	// name.
+	blockCompletion            = "completion/blueprint.txt"
+	blockCompletionNonTerminal = "completion/nonterminal.txt"
 
 	// Native-only today, but nothing in either file is runtime-specific: the
 	// SDK gets this material from Claude Code's own base system prompt, which
@@ -127,7 +131,7 @@ func machinistBlocks(spec Spec) ([]string, error) {
 		isolationFor(spec.Mode),
 		blockHarnessSDKScratch,
 		blockVerbMemory,
-		blockCompletionSDKJSON,
+		blockCompletion,
 	}, nil
 }
 
@@ -164,18 +168,6 @@ func nativeMachinistBlocks(spec Spec) ([]string, error) {
 		isolationFor(spec.Mode),
 		blockHarnessNativeScratch,
 		blockVerbMemoryNv,
-		blockCompletionNative,
+		blockCompletion,
 	}, nil
-}
-
-// nonTerminalBlock returns the completion-contract addendum for a non-terminal
-// blueprint step under spec's runtime, or "" when that runtime has none yet.
-// It is a separate selection rather than a manifest section because the SDK
-// delivers it on its own channel (--append-system-prompt), at a different
-// point in the prompt, from the composed framework text.
-func nonTerminalBlock(spec Spec) string {
-	if spec.Runtime == RuntimeNative {
-		return blockCompletionNativeNT
-	}
-	return blockCompletionSDKNonTrm
 }

@@ -1,5 +1,5 @@
 <blueprint-nonterminal>
-You are one step inside a multi-step workflow, and this is not the final step. Other Machinists will run the steps after you, working in this same workspace.
+You are one step inside a multi-step workflow, and this is not the final step. Other agents will run the steps after you, working in this same workspace.
 
 That barely changes how you finish. Stopping normally — a message with no tool calls — hands off to the step that comes next; it does not end the task. So finish the way you otherwise would: when your part is done, write a plain, specific account of it and stop.
 

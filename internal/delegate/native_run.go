@@ -297,7 +297,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// Every tool call is a chance the agent just wrote its memory
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
-			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg),
+			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg.appendSysPrompt == ""),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -457,7 +457,7 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// follows this one.
 		nonTerminal := ""
 		if cfg.appendSysPrompt != "" {
-			nonTerminal = agentprompt.NonTerminalCompletion(nativeSpec())
+			nonTerminal = agentprompt.NonTerminalCompletion()
 		}
 
 		// The native blocks name the in-jail paths and the `tfac` applet
@@ -664,7 +664,10 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // against a GitHub, Jira or Linear entity, the shape whose whole point is to
 // leave something behind. A non-terminal step is excluded because a later
 // step owns the blueprint's terminal external action, which is what its
-// addendum tells it.
+// addendum tells it. finalStep says which this is.
+//
+// Both runtimes ask it: the native loop as its ShouldStopAfterTurn hook, and
+// the SDK driver through turnEndNudge.
 //
 // Asking twice about the same silence would be badgering — the model already
 // answered. Asking again after a human has intervened is not: the premise
@@ -673,8 +676,8 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // it reads that from the transcript rather than remembering it, which is
 // what makes the behavior identical whether the engagement is the first or a
 // crash's successor.
-func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domain.Task, cfg runConfig) func(context.Context, int, string) string {
-	expects := cfg.appendSysPrompt == "" && (task.EntitySource == "github" || task.EntitySource == "jira" || task.EntitySource == "linear")
+func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domain.Task, finalStep bool) func(context.Context, int, string) string {
+	expects := finalStep && (task.EntitySource == "github" || task.EntitySource == "jira" || task.EntitySource == "linear")
 	if !expects || s.artifacts == nil || s.deliverables == nil {
 		return nil
 	}
@@ -734,6 +737,15 @@ func askedAboutArtifactAlready(rows []domain.Message) bool {
 		}
 	}
 	return false
+}
+
+// turnEndNudge adapts the would-stop hook to the SDK driver's shape, which
+// passes no turn count or final text: the hook reads neither. Nil for nil.
+func turnEndNudge(hook func(context.Context, int, string) string) func(context.Context) string {
+	if hook == nil {
+		return nil
+	}
+	return func(ctx context.Context) string { return hook(ctx, 0, "") }
 }
 
 // The per-command bash memory budget, as a policy rather than a knob: a cap,

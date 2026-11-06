@@ -47,7 +47,7 @@ func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
 	if got, want := nativeSystemPrompt(), agentprompt.Build(nativeSpec()); got != want {
 		t.Errorf("block 1 is not the composed blocks alone;\ngot  %.200q\nwant %.200q", got, want)
 	}
-	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion(nativeSpec()))
+	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
 	if addendum == "" {
 		t.Fatal("the native handoff addendum is empty; this test would pass vacuously")
 	}

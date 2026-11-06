@@ -221,10 +221,9 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 // (awaitingDrivingSQL, whatever a hand-back's wait) under a blueprint nobody
 // called off, on either of the two columns blueprintDrivableSQL checks, or is
 // the current step of a running blueprint nobody called off that has given it
-// an answer (settled, or parked on an invalid envelope) the blueprint has not
-// acted on yet. That last arm is a blueprint between two steps: its next step
-// has no conversation yet, and the work on the task is not over until the
-// blueprint has advanced or ended. A conversation parked on a person, and a
+// an answer (settled) the blueprint has not acted on yet. That last arm is a
+// blueprint between two steps: its next step has no conversation yet, and the
+// work on the task is not over until the blueprint has advanced or ended. A conversation parked on a person, and a
 // concluded or failed one its blueprint has moved past, are not working. An
 // event close holds while one of the task's conversations is
 // (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
@@ -238,7 +237,7 @@ var workingConversationSQL = `r.parent_conversation_id IS NULL
 	               SELECT 1 FROM blueprint_runs br_w
 	               WHERE br_w.org_id = r.org_id AND br_w.id = r.blueprint_run_id
 	                 AND (br_w.cancel_requested OR br_w.status = 'cancelled')))
-	       OR ((` + db.SettledConversationSQL("r") + ` OR ` + db.ParkedOnInvalidEnvelopeSQL("r") + `)
+	       OR (` + db.SettledConversationSQL("r") + `
 	           AND EXISTS (
 	               SELECT 1 FROM blueprint_runs br_s
 	               WHERE br_s.org_id = r.org_id AND br_s.id = r.blueprint_run_id
@@ -1298,7 +1297,7 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 		FROM blueprint_runs br
 		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
 		WHERE br.status = 'running'
-		  AND (`+db.SettledConversationSQL("r")+` OR `+db.ParkedOnInvalidEnvelopeSQL("r")+`)
+		  AND `+db.SettledConversationSQL("r")+`
 		  AND COALESCE(r.completed_at, r.parked_at, r.started_at) <= now() - make_interval(secs => $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl

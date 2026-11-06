@@ -20,9 +20,7 @@
 //
 // Both runLiveAndDrive call sites (the initial run and the resume) drive
 // through this same streaming-input path — direct spawns and gVisor-jailed
-// runs alike (the sandbox's bidirectional stdio channel is validated
-// end-to-end, so runOneShot is a vestigial fallback, not the production
-// sandbox path). What differs by call site is which permission handler answers
+// runs alike. What differs by call site is which permission handler answers
 // the prompt: an unjailed spawn gets this file's BrowserPermissionHandler; a
 // gVisor-jailed one gets AutoApprovePermissionHandler instead — see
 // run.go/resume.go for the agentproc.WillSandbox() branch.

@@ -126,7 +126,7 @@ var workingConversationSQL = `r.parent_conversation_id IS NULL
 	               SELECT 1 FROM blueprint_runs br_w
 	               WHERE br_w.id = r.blueprint_run_id
 	                 AND (br_w.cancel_requested = 1 OR br_w.status = 'cancelled')))
-	       OR ((` + db.SettledConversationSQL("r") + ` OR ` + db.ParkedOnInvalidEnvelopeSQL("r") + `)
+	       OR (` + db.SettledConversationSQL("r") + `
 	           AND EXISTS (
 	               SELECT 1 FROM blueprint_runs br_s
 	               WHERE br_s.id = r.blueprint_run_id
@@ -1575,7 +1575,7 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 		FROM blueprint_runs br
 		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
 		WHERE br.status = 'running'
-		  AND (`+db.SettledConversationSQL("r")+` OR `+db.ParkedOnInvalidEnvelopeSQL("r")+`)
+		  AND `+db.SettledConversationSQL("r")+`
 		  AND COALESCE(r.completed_at, r.parked_at, r.started_at) <= ?
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl

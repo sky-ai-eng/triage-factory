@@ -161,28 +161,37 @@ func (s *Spawner) leaveOnLostJail(ctx context.Context, park liveParkContext, pri
 // that follows is this engagement's to write. Any other failure is logged and
 // the park still lands.
 func (s *Spawner) insertClaimStopNote(ctx context.Context, orgID, conversationID, claimID, creatorUserID, note string) (fenced bool) {
-	if s.conversations == nil {
-		return false // test fixture with no DB wired
-	}
-	msg := &domain.Message{
+	return s.insertClaimNote(ctx, orgID, claimID, &domain.Message{
 		ConversationID: conversationID,
 		UserID:         creatorUserID,
 		Role:           "user",
 		Subtype:        domain.MessageSubtypeStopNote,
 		Content:        note,
+	})
+}
+
+// insertClaimNote writes a delivered row the machinery authored (msg) through
+// the claim fence and broadcasts it. fenced is true when the fence refused it:
+// a successor owns the conversation, and nothing more is this engagement's to
+// write. Any other failure is logged, and the caller carries on without the
+// row.
+func (s *Spawner) insertClaimNote(ctx context.Context, orgID, claimID string, msg *domain.Message) (fenced bool) {
+	if s.conversations == nil {
+		return false // test fixture with no DB wired
 	}
 	id, err := s.conversations.InsertMessageForClaimSystem(context.WithoutCancel(ctx), orgID, claimID, msg)
 	if errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Error("claim fence refused the stop note — a successor owns this conversation; recording nothing",
-			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
+		delegateLog.Error("claim fence refused a note row — a successor owns this conversation; recording nothing",
+			"conversation", msg.ConversationID, "subtype", msg.Subtype, "claim_id", claimID, "org_id", orgID)
 		return true
 	}
 	if err != nil {
-		delegateLog.Warn("record stop note failed; the park still lands", "conversation", conversationID, "error", err)
+		delegateLog.Warn("record a note row failed; carrying on without it",
+			"conversation", msg.ConversationID, "subtype", msg.Subtype, "error", err)
 		return false
 	}
 	msg.ID = int(id)
-	s.broadcastMessage(orgID, conversationID, msg)
+	s.broadcastMessage(orgID, msg.ConversationID, msg)
 	return false
 }
 

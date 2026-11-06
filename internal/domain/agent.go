@@ -5,23 +5,23 @@ import (
 	"time"
 )
 
-// ConversationOutcome is the single terminal vocabulary an agent emits in its
-// completion envelope (the `outcome` field). It replaces the dual-channel
-// design where single-step conversations used a completion `status` and
-// blueprint steps used a separate per-step verdict CLI:
+// ConversationOutcome is the single terminal vocabulary a step's verdict is
+// recorded in, on both runtimes:
 //
-//   - ConversationOutcomeContinue → hand off to the next blueprint stage. Non-terminal
-//     steps only; the overwhelmingly common, correct choice when a step's
-//     part is done.
+//   - ConversationOutcomeContinue → the step's part is done. What a turn the
+//     model ends on its own concludes with, on every step; the blueprint
+//     orchestrator hands off to the next step, or on a final or single step
+//     resolves it to a finish.
 //   - ConversationOutcomeFinish   → end the whole blueprint successfully and close the
-//     task. On a single/terminal step this is normal completion.
+//     task. The stop_blueprint tool's "finish".
 //   - ConversationOutcomeAbort    → stop; leave the task open for a human. Carries a
-//     natural-language `reason` (the old `unsolvable` folds into this).
+//     natural-language reason. The stop_blueprint tool's "abort".
 //
-// A turn that ends without one of these (prose / nothing) is not an outcome at
-// all — the conversation is left `open` (not concluded, not executing); see
-// internal/delegate. conversations.outcome persists the parsed value; the blueprint
-// orchestrator's step advancement and the later queue work read it.
+// A turn that stops without the model finishing it (a refusal, a reply cut
+// off, an interrupt) is not an outcome at all — the conversation is left
+// `open` (not concluded, not executing). conversations.outcome persists the
+// value; the blueprint orchestrator's step advancement and the later queue
+// work read it.
 type ConversationOutcome string
 
 const (
@@ -70,9 +70,7 @@ const (
 	ConversationFailureCrash ConversationFailureKind = "crash"
 	// ConversationFailureNoResult — the runtime ended without a usable
 	// result: a clean exit that never produced a result event, or a resume
-	// that produced no completion. An envelope that stays invalid is not
-	// this: the transcript is whole, so it parks the conversation
-	// (ParkReasonInvalidEnvelope) and aborts the blueprint instead.
+	// that produced no completion.
 	ConversationFailureNoResult ConversationFailureKind = "no_result"
 	// ConversationFailureAgentError — the agent itself reported an error
 	// result (IsError terminal).
@@ -470,16 +468,15 @@ type Conversation struct {
 	WorktreePath  string
 	ResultSummary string
 
-	// Outcome is the step's verdict: the parsed completion envelope
-	// `outcome` (ConversationOutcome vocabulary), persisted with the park that
-	// records it. Empty string === SQL NULL: no verdict yet, an infra-error
-	// conversation (status='failed'), or a blueprint step whose outcome gate
-	// exhausted its retries without a valid envelope. The orchestrator reads
-	// this to advance.
+	// Outcome is the step's verdict (ConversationOutcome vocabulary),
+	// persisted with the park that records it. Empty string === SQL NULL: no
+	// verdict yet, or an infra-error conversation (status='failed'). The
+	// orchestrator reads this to advance.
 	Outcome string
 	// OutcomeReason is the natural-language "why I stopped / what a human
-	// needs to do" populated only on an abort outcome. Distinct from
-	// ResultSummary (the always-present "what I did"). Empty === NULL.
+	// needs to do": the reason a stop_blueprint call gave, for either ending.
+	// Distinct from ResultSummary (the always-present "what I did"). Empty ===
+	// NULL.
 	OutcomeReason string
 	// FailureKind is the machine-readable failure discriminator
 	// (ConversationFailureKind vocabulary) for a status='failed' conversation —

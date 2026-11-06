@@ -324,13 +324,9 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 // intent is what records who asked, and every path that delivers a stop —
 // the local cancel, the cross-pod signal, the renewal, an idle turn-end that
 // happens to land first — reaches this write. The derivation is one CASE so a
-// further kind of stop is one more arm.
-//
-// The same intent cancels park.WithdrawVerdict: a stop that wins the reason
-// is the park the row records, and a stop never withdraws a verdict. Every
-// SET expression reads the row as it stood before the write, so the stop
-// columns cleared below are still the pending intent where the withdrawal
-// reads them.
+// further kind of stop is one more arm. Every SET expression reads the row as
+// it stood before the write, so the stop columns cleared below are still the
+// pending intent where the reason reads them.
 func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
 	// not. Spelled as an extra clause rather than two queries.
@@ -348,15 +344,12 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF($2, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary),
-		    outcome = CASE WHEN $6 AND stop_requested_at IS NULL THEN NULL ELSE outcome END,
-		    outcome_reason = CASE WHEN $6 AND stop_requested_at IS NULL THEN NULL ELSE outcome_reason END,
-		    completed_at = CASE WHEN $6 AND stop_requested_at IS NULL THEN NULL ELSE completed_at END,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
 		    stop_requested_reason = NULL
 		WHERE org_id = $4 AND id = $5
 		  AND `+db.UnsettledConversationSQL("conversations")+reparkGuard+`
-	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID, park.WithdrawVerdict)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID)
 	if err != nil {
 		return false, err
 	}
@@ -453,7 +446,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			WHERE org_id = $1 AND id = $2
 			  AND ended_at IS NULL
 			  AND status = 'open' AND NOT $3::boolean
-			  AND ((completed_at IS NULL AND NOT `+db.ParkedOnInvalidEnvelopeSQL("conversations")+`)
+			  AND (completed_at IS NULL
 			       OR NOT tf.blueprint_run_is_running(
 			                conversations.blueprint_run_id, conversations.org_id))
 		`, orgID, conversationID, calledOff)

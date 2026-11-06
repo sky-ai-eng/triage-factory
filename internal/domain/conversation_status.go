@@ -151,16 +151,6 @@ func (c *Conversation) Concluded() bool {
 	return c.Status == StatusOpen && c.CompletedAt != nil
 }
 
-// ParkedOnInvalidEnvelope reports whether the conversation parked on a
-// completion envelope that never validated. Never concluded — the park
-// withdraws any verdict an earlier engagement left (db.ParkInvalidEnvelope) —
-// and not settled (a person's message continues it), but like a concluded
-// step it has given its blueprint an answer to act on: the abort. The SQL
-// spelling is db.ParkedOnInvalidEnvelopeSQL.
-func (c *Conversation) ParkedOnInvalidEnvelope() bool {
-	return c.Status == StatusOpen && c.ParkReason == ParkReasonInvalidEnvelope
-}
-
 // Settled reports whether the conversation takes no more work on its own:
 // failed, or concluded. A follow-up may still wake a concluded one.
 func (c *Conversation) Settled() bool {
@@ -234,13 +224,6 @@ const (
 	// this one waits for a person, because a run whose jail keeps dying is
 	// most likely repeating what killed it. A message resumes it.
 	ParkReasonSandboxLost ParkReason = "sandbox_lost"
-	// ParkReasonInvalidEnvelope — the agent's completion envelope was still
-	// invalid after every re-prompt the driver allows. The transcript is
-	// whole, so nothing failed; the agent broke the workflow's contract, and
-	// the blueprint aborts on it (the blueprint reactors read this reason to
-	// do so). A message resumes it, and on a task still open re-opens the
-	// blueprint so the next valid verdict finalizes it.
-	ParkReasonInvalidEnvelope ParkReason = "invalid_envelope"
 )
 
 // AllParkReasons returns the park_reason vocabulary. Same discipline as
@@ -263,7 +246,6 @@ func AllParkReasons() []ParkReason {
 		ParkReasonStalled,
 		ParkReasonUpstreamUnavailable,
 		ParkReasonSandboxLost,
-		ParkReasonInvalidEnvelope,
 	}
 }
 
@@ -276,7 +258,7 @@ func IsParkReason(reason string) bool {
 	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
-		ParkReasonUpstreamUnavailable, ParkReasonSandboxLost, ParkReasonInvalidEnvelope:
+		ParkReasonUpstreamUnavailable, ParkReasonSandboxLost:
 		return true
 	}
 	return false

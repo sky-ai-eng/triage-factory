@@ -38,13 +38,6 @@ const (
 	blueprintStepAbort
 )
 
-// invalidEnvelopeAbortReason is the abort reason a blueprint terminates with
-// when its current step parked on a completion envelope that never validated
-// (domain.ParkReasonInvalidEnvelope). Aborted rather than failed: the runtime
-// under the agent did not die, the task stays open for a person, and a
-// message on the step re-opens the blueprint while it does.
-const invalidEnvelopeAbortReason = "invalid-envelope"
-
 // blueprintDecisionForStepConversation maps a completed step RUN's terminal outcome +
 // the step's position to the orchestrator's next move. runOutcome is the step
 // run's conversations.outcome — the step itself (a blueprint_steps row) carries
@@ -71,11 +64,11 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 	case domain.ConversationOutcomeAbort:
 		return blueprintStepAbort, ""
 	case "":
-		// Missing outcome (empty string === SQL NULL). On the final step
-		// (and therefore N=1) a missing outcome is unambiguous → finish,
-		// exactly like a single-prompt run. On a non-final step it means
-		// the outcome gate exhausted its retries without a usable hand-off;
-		// abort with "no-outcome" rather than guess at advancement.
+		// Missing outcome (empty string === SQL NULL): a conclusion recorded
+		// without an outcome token. On the final step (and therefore N=1) it
+		// is unambiguous → finish, exactly like a single-prompt run. On a
+		// non-final step there is no usable hand-off; abort with "no-outcome"
+		// rather than guess at advancement.
 		if isFinal {
 			return blueprintStepFinish, ""
 		}
@@ -369,7 +362,7 @@ func prNumberFromRef(ref string) (int, bool) {
 // step, and they only do that if one package owns both.
 func nonterminalStepSysPrompt(i, total int) string {
 	if i < total-1 {
-		return agentprompt.NonTerminalCompletion(machinistSpec())
+		return agentprompt.NonTerminalCompletion()
 	}
 	return ""
 }
@@ -539,9 +532,10 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 // through terminateBlueprint, so a 1-step (or final-step) resume closes the
 // task on finish and leaves it open on abort.
 //
-// A non-final step that wants to advance mid-blueprint (continue) is the epic's
-// resume work and is not built here: the blueprint is terminated with a clear
-// reason rather than silently stalling in 'running'.
+// A non-final step that concludes `continue` does not advance here: the
+// blueprint is aborted with multi_step_resume_not_implemented (see
+// blueprintTerminalForResumedStepConversation), where the step path's reactor
+// would advance it.
 //
 // userID identifies the actor for audit (the user whose action resumed the
 // run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
@@ -574,10 +568,8 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 	// cancel is behind the park: a cancelled resume parks `open` rather than
 	// recording a verdict of its own, so cancel_requested is what tells the
 	// two apart — the same ordering reactToStepTerminal uses, and for the same
-	// reason. Nor when the park is an envelope that never validated, which is
-	// an answer the blueprint acts on.
-	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() &&
-		!stepConversation.ParkedOnInvalidEnvelope() && !cr.CancelRequested {
+	// reason.
+	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() && !cr.CancelRequested {
 		return
 	}
 
@@ -599,31 +591,48 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 		return
 	}
 
-	// isFinal = this is the last step (and therefore the only step for N=1).
-	// Read off the plan frozen at mint (cr.StepPlan), not the live steps, so a
-	// mid-flight edit can't change a resumed run's terminal disposition.
-	// Defaults to true when the index or plan can't be resolved, so an unknown
-	// position never advances into the unbuilt mid-blueprint resume.
-	isFinal := true
-	if stepIdx != nil && len(cr.StepPlan) > 0 {
-		isFinal = *stepIdx >= len(cr.StepPlan)-1
-	}
+	isFinal := finalBlueprintStep(cr, stepIdx)
 
 	status, reason := blueprintTerminalForResumedStepConversation(stepConversation, isFinal)
 	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		status, reason, stepIdx, false)
 }
 
+// finalBlueprintStep reports whether stepIdx is br's last step (and therefore
+// its only one for N=1), read off the plan frozen at mint (br.StepPlan), not
+// the live steps, so a mid-flight edit cannot change a resumed run's terminal
+// disposition. True when the index or plan cannot be resolved, so an unknown
+// position never advances into the unbuilt mid-blueprint resume.
+func finalBlueprintStep(br *domain.BlueprintRun, stepIdx *int) bool {
+	if stepIdx == nil || len(br.StepPlan) == 0 {
+		return true
+	}
+	return *stepIdx >= len(br.StepPlan)-1
+}
+
+// resumedStepIsFinal is finalBlueprintStep for a conversation a resume is
+// about to drive, read from its blueprint run: the resume path holds no plan
+// of its own. True when there is no blueprint run to read, or the read fails,
+// for the reason finalBlueprintStep gives.
+func (s *Spawner) resumedStepIsFinal(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+	if s.blueprints == nil || conv.BlueprintRunID == "" {
+		return true
+	}
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
+	if err != nil || br == nil {
+		return true
+	}
+	return finalBlueprintStep(br, conv.BlueprintStepIndex)
+}
+
 // blueprintTerminalForResumedStepConversation maps a resumed step
 // conversation's ending + position to the blueprint's terminal status.
 // Mirrors reactToStepTerminal's disposition, for the resume path: a recorded
 // verdict routes through blueprintDecisionForStepConversation
-// (finish/advance/abort), an envelope that never validated aborts, and a
-// failure maps to the matching blueprint terminal.
+// (finish/advance/abort), and a failure maps to the matching blueprint
+// terminal.
 func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
 	switch {
-	case stepConversation.ParkedOnInvalidEnvelope():
-		return domain.BlueprintRunStatusAborted, invalidEnvelopeAbortReason
 	case stepConversation.Concluded():
 		decision, abortReason := blueprintDecisionForStepConversation(stepConversation.Outcome, isFinal)
 		switch decision {
@@ -635,7 +644,11 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 				reason = stepConversation.OutcomeReason
 			}
 			return domain.BlueprintRunStatusAborted, reason
-		default: // blueprintStepAdvance — mid-blueprint resume not implemented
+		default: // blueprintStepAdvance
+			// TODO(TFAC-1341): advance like the step path does. An SDK
+			// follow-up on a non-final step ends its blueprint here instead,
+			// so steps after it never run; ResumeBlueprintAfterResume should
+			// hand the step to reactToStepTerminal and drop this mapping.
 			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
 		}
 	case stepConversation.Status == domain.StatusFailed:

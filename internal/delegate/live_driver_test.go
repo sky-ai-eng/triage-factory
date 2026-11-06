@@ -24,14 +24,17 @@ type fakeLiveProc struct {
 	result    *agentproc.Result
 	err       error
 	sendCount int
+	// sendErr is what Send answers, so a test can model a process that will
+	// not take a message.
+	sendErr error
 	// queued is what QueuedTurns answers: the turns the process still owes.
 	// A test stages it to model a message steered in while the turn ran —
 	// the real process counts its own sends against its results, which a
 	// fake fed results by hand cannot.
 	queued int
 	// onSend fires (with the 1-based send count) after each Send so a test can
-	// feed the next turn's result onto the results channel — the way the driver
-	// drives the invalid-envelope re-prompt loop.
+	// feed the next turn's result onto the results channel — the turn a nudge
+	// the driver sent produces.
 	onSend func(count int)
 	// onClose fires inside Close, before done is closed, so a test can pin
 	// what the world looks like at the moment the driver lets go of the
@@ -60,6 +63,11 @@ func (f *fakeLiveProc) owe(n int) {
 
 func (f *fakeLiveProc) Send(_ context.Context, _ string) error {
 	f.mu.Lock()
+	if f.sendErr != nil {
+		err := f.sendErr
+		f.mu.Unlock()
+		return err
+	}
 	f.sendCount++
 	n := f.sendCount
 	hook := f.onSend
@@ -112,17 +120,17 @@ func (f *fakeLiveProc) exit(result *agentproc.Result, err error) {
 	}
 }
 
-// TestDriveLiveConversation_TerminalResultClosesAndReturns: a turn-terminal result
-// closes the process (freeing the session for the gate's resume) and is
-// handed back for processCompletion — no hibernation.
+// TestDriveLiveConversation_TerminalResultClosesAndReturns: a turn the model
+// ended itself closes the process (freeing the session for the gate's resume)
+// and is handed back for processCompletion to conclude — no hibernation.
 func TestDriveLiveConversation_TerminalResultClosesAndReturns(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	want := &agentproc.Result{StopReason: "end_turn", Result: "Done."}
 	results <- want
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want %+v", out.result, want)
@@ -136,26 +144,29 @@ func TestDriveLiveConversation_TerminalResultClosesAndReturns(t *testing.T) {
 }
 
 // TestDriveLiveConversation_AStopIsTheConclusion: a turn stop_blueprint ended
-// concludes on the call, whatever its final text: text that would read as a
-// malformed envelope is not re-prompted, and the process closes and the
-// result goes back for processCompletion.
+// concludes on the call, as it does natively: the would-stop hook is not
+// asked, and the process closes and the result goes back for
+// processCompletion.
 func TestDriveLiveConversation_AStopIsTheConclusion(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
 	want := &agentproc.Result{
-		Result:   `{"outcome": "stopped"}`,
-		Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "blocked", Summary: "tried"},
+		StopReason: "tool_use",
+		Result:     "Stopping here.",
+		Terminal:   &agentproc.Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "blocked", Summary: "tried"},
 	}
 	results <- want
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nudge)
 
 	if out.result != want || out.hibernated {
 		t.Errorf("outcome = %+v, want the stopped turn's result handed back, not a park", out)
 	}
-	if n := proc.sends(); n != 0 {
-		t.Errorf("driver sent %d corrections, want none: the call is the verdict", n)
+	if asked != 0 || proc.sends() != 0 {
+		t.Errorf("nudge asked %d times, %d sends; a stop is the verdict and asks nothing", asked, proc.sends())
 	}
 	if !proc.wasClosed() {
 		t.Error("expected the process closed after the stopped turn")
@@ -171,7 +182,7 @@ func TestDriveLiveConversation_CtxCancelReturnsErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	out := s.driveLiveConversation(ctx, liveParkContext{}, proc, make(chan *agentproc.Result))
+	out := s.driveLiveConversation(ctx, liveParkContext{}, proc, make(chan *agentproc.Result), nil)
 
 	if out.err == nil {
 		t.Error("expected a ctx error on cancel")
@@ -191,10 +202,10 @@ func TestDriveLiveConversation_CtxCancelReturnsErr(t *testing.T) {
 func TestDriveLiveConversation_ProcessExitCarriesResult(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"exited"}`}
+	want := &agentproc.Result{StopReason: "end_turn", Result: "exited"}
 	proc.exit(want, nil) // process already gone, Done() closed, with a result set
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result))
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result), nil)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want %+v", out.result, want)
@@ -213,7 +224,7 @@ func TestDriveLiveConversation_ProcessExitCarriesErr(t *testing.T) {
 	wantErr := errors.New("agent runtime exited with error")
 	proc.exit(nil, wantErr)
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result))
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result), nil)
 
 	if out.result != nil {
 		t.Errorf("result = %+v, want nil on a crash exit", out.result)
@@ -223,60 +234,71 @@ func TestDriveLiveConversation_ProcessExitCarriesErr(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_NoneClosesAndHandsBack: a turn that ends with no
-// conclusion (prose) and nothing queued behind it closes the process and hands
-// the result back for processCompletion to park — the driver does not keep the
-// process for a message that has not arrived. A second result left on the
-// channel proves it: the driver returned on the prose and never read it.
-func TestDriveLiveConversation_NoneClosesAndHandsBack(t *testing.T) {
+// TestDriveLiveConversation_AnUnfinishedTurnClosesAndHandsBack: a turn whose
+// stop reason is not an end of turn, with nothing queued behind it, closes the
+// process and hands the result back for processCompletion to park — the
+// driver does not keep the process for a message that has not arrived, and
+// asks the would-stop hook nothing, since the turn is not concluding. A second
+// result left on the channel proves it: the driver returned on the refusal and
+// never read it.
+func TestDriveLiveConversation_AnUnfinishedTurnClosesAndHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
-	prose := &agentproc.Result{Result: "Some prose with no completion envelope at all."}
-	results <- prose
-	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	refused := &agentproc.Result{StopReason: "refusal"}
+	results <- refused
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "done"}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nudge)
 
-	if out.result != prose {
-		t.Errorf("result = %+v, want the no-conclusion turn handed back", out.result)
+	if out.result != refused {
+		t.Errorf("result = %+v, want the unfinished turn handed back", out.result)
 	}
 	if out.hibernated {
-		t.Error("a no-conclusion turn is parked by processCompletion, not by the driver")
+		t.Error("an unfinished turn is parked by processCompletion, not by the driver")
 	}
 	if !proc.wasClosed() {
-		t.Error("a no-conclusion turn with nothing queued must close the process")
+		t.Error("an unfinished turn with nothing queued must close the process")
 	}
 	if len(results) != 1 {
 		t.Errorf("results left = %d, want 1 (the driver must not read past the turn it returned)", len(results))
 	}
-	if proc.sends() != 0 {
-		t.Errorf("sends = %d, want 0 (a no-conclusion turn is not re-prompted)", proc.sends())
+	if asked != 0 || proc.sends() != 0 {
+		t.Errorf("nudge asked %d times, %d sends; a turn that is not concluding asks nothing", asked, proc.sends())
 	}
 }
 
 // TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd: a message steered in
 // while the turn ran is queued by the process and starts the next turn, so a
-// no-conclusion end with a turn still owed is not a park — the driver stays
-// on the same process, under the same claim, and reads the turn the steer
-// produces. Delivering prose first and a valid conclusion second proves it:
-// the conclusion is only reachable by staying past the prose.
+// turn the model ended with a turn still owed does not conclude — the model
+// has not seen the message — and the driver stays on the same process, under
+// the same claim, and reads the turn the steer produces. The would-stop hook
+// is not asked either: the steer comes first, as the native loop's recheck
+// puts it. Delivering prose first and a stop second proves it: the stop is
+// only reachable by staying past the prose.
 func TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	proc.owe(1)
 	results := make(chan *agentproc.Result, 8)
-	results <- &agentproc.Result{Result: "Some prose; the steered turn runs next."}
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "Some prose; the steered turn runs next."}
+	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
 	results <- want
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nudge)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
 	}
 	if out.hibernated {
 		t.Error("a turn end with a turn still owed must not park")
+	}
+	if asked != 0 {
+		t.Errorf("nudge asked %d times; the queued turn comes first", asked)
 	}
 }
 
@@ -289,10 +311,10 @@ func TestDriveLiveConversation_QueuedTurnOutlivesThePause(t *testing.T) {
 	proc.owe(1)
 	results := make(chan *agentproc.Result, 8)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
 	results <- want
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
@@ -302,59 +324,119 @@ func TestDriveLiveConversation_QueuedTurnOutlivesThePause(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack: an envelope-shaped but
-// invalid conclusion is re-prompted to fix, up to maxCompletionRetries. When
-// the bound is exhausted the driver hands the (still invalid) result back —
-// keeping the totals the live process folded — rather than dropping them on a
-// bare error; processCompletion parks it and the reactor aborts the blueprint
-// (see TestProcessCompletion_InvalidEnvelopeParksOpenWithNoVerdict). Each
-// correction here produces
-// another invalid turn, so the bound is exhausted.
-func TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
+// TestDriveLiveConversation_NudgeKeepsTheRunGoing: a turn the model ended
+// itself is first put to the would-stop hook. A note it returns is sent into
+// the process and the driver reads the turn that answers it, and that turn is
+// the conclusion: the hook is not asked again in the same engagement, even
+// one that would ask again (its note failed to record, say).
+func TestDriveLiveConversation_NudgeKeepsTheRunGoing(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
-	invalid := &agentproc.Result{Result: `{"outcome":"frobnicate"}`}
-	proc.onSend = func(int) { results <- invalid } // every correction yields another invalid turn
-	results <- invalid                             // the initial invalid turn
+	answered := &agentproc.Result{StopReason: "end_turn", Result: "No artifact was needed: the PR was already merged."}
+	proc.onSend = func(int) { results <- answered }
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "Looked into it."}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nudge)
 
-	if out.err != nil {
-		t.Fatalf("expected the unfixed result handed back, got err %v", out.err)
+	if out.result != answered {
+		t.Errorf("result = %+v, want the turn that answered the nudge", out.result)
 	}
-	if out.result != invalid {
-		t.Errorf("result = %+v, want the unfixed invalid result for processCompletion to park", out.result)
-	}
-	if proc.sends() != maxCompletionRetries {
-		t.Errorf("sends = %d, want %d (one correction per retry)", proc.sends(), maxCompletionRetries)
+	if asked != 1 || proc.sends() != 1 {
+		t.Errorf("nudge asked %d times with %d sends, want 1 and 1", asked, proc.sends())
 	}
 	if !proc.wasClosed() {
-		t.Error("expected the process closed after exhausting re-prompts")
+		t.Error("expected the process closed after the conclusion")
 	}
 }
 
-// TestDriveLiveConversation_InvalidThenValidReturns: an invalid conclusion is re-prompted
-// once and the corrected turn is a valid conclusion → the driver returns it
-// (no failure).
-func TestDriveLiveConversation_InvalidThenValidReturns(t *testing.T) {
+// TestDriveLiveConversation_ANudgeTheProcessRefusesConcludes: a note the
+// process will not take does not hold up the conclusion — the turn concludes
+// as it would have with nothing to ask.
+func TestDriveLiveConversation_ANudgeTheProcessRefusesConcludes(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
+	proc.sendErr = agentproc.ErrRunClosing
+	results := make(chan *agentproc.Result, 1)
+	want := &agentproc.Result{StopReason: "end_turn", Result: "Looked into it."}
+	results <- want
+
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results,
+		func(context.Context) string { return "did you mean to?" })
+
+	if out.result != want || out.fenced {
+		t.Errorf("outcome = %+v, want the turn concluded on", out)
+	}
+}
+
+// TestDriveLiveConversation_TheNudgeIsRecordedUnderTheClaim: the note the
+// driver sends lands on the transcript as a nudge row under the engagement's
+// claim, which is what the hook reads back to know it has asked.
+func TestDriveLiveConversation_TheNudgeIsRecordedUnderTheClaim(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-nudge", "sess-nudge", "/tmp/wt-nudge")
+	claimID := markEngaged(t, database, "r-nudge")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	proc := newFakeLiveProc("sess-nudge")
 	results := make(chan *agentproc.Result, 8)
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"fixed"}`}
-	proc.onSend = func(int) { results <- want } // the correction lands a valid conclusion
-	results <- &agentproc.Result{Result: `{"outcome":"finish"}`}
-
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
-
-	if out.err != nil {
-		t.Fatalf("expected success after one correction, got err %v", out.err)
+	answered := &agentproc.Result{StopReason: "end_turn", Result: "answered"}
+	proc.onSend = func(int) { results <- answered }
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "first"}
+	sent := false
+	nudge := func(context.Context) string {
+		if sent {
+			return ""
+		}
+		sent = true
+		return artifactNudgeNote
 	}
-	if out.result != want {
-		t.Errorf("result = %+v, want the corrected valid conclusion", out.result)
+	park := liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-nudge", claimID: claimID}
+
+	if out := s.driveLiveConversation(context.Background(), park, proc, results, nudge); out.result != answered {
+		t.Fatalf("result = %+v, want the turn that answered the nudge", out.result)
 	}
-	if proc.sends() != 1 {
-		t.Errorf("sends = %d, want 1 (corrected on the first re-prompt)", proc.sends())
+	var subtype, content string
+	var rowClaim sql.NullString
+	if err := database.QueryRow(`SELECT subtype, content, claim_id FROM messages WHERE conversation_id = 'r-nudge' AND role = 'user' ORDER BY id DESC LIMIT 1`).Scan(&subtype, &content, &rowClaim); err != nil {
+		t.Fatalf("read the nudge row: %v", err)
+	}
+	if subtype != domain.MessageSubtypeInjectionNudge || content != artifactNudgeNote || rowClaim.String != claimID {
+		t.Errorf("nudge row = (subtype %q, claim %q, content %.40q), want the nudge under claim %s", subtype, rowClaim.String, content, claimID)
+	}
+}
+
+// TestDriveLiveConversation_AFencedNudgeEndsTheEngagement: when the claim
+// fence refuses the nudge row, a successor owns the conversation, so the
+// driver closes the process and reports the engagement fenced rather than
+// reading the turn the note would produce or handing back a verdict.
+func TestDriveLiveConversation_AFencedNudgeEndsTheEngagement(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-nudge-fenced", "sess-nudge-fenced", "/tmp/wt-nudge-fenced")
+	claimID := markEngaged(t, database, "r-nudge-fenced")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
+
+	proc := newFakeLiveProc("sess-nudge-fenced")
+	results := make(chan *agentproc.Result, 8)
+	proc.onSend = func(int) { results <- &agentproc.Result{StopReason: "end_turn", Result: "answered"} }
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "first"}
+	park := liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-nudge-fenced", claimID: claimID}
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results,
+		func(context.Context) string { return artifactNudgeNote })
+
+	if !out.fenced || out.result != nil || out.hibernated {
+		t.Errorf("outcome = %+v, want fenced with no result and no park", out)
+	}
+	if stub.inserts != 1 {
+		t.Errorf("fenced inserts = %d, want 1 (the nudge row)", stub.inserts)
+	}
+	if !proc.wasClosed() {
+		t.Error("expected the process closed once the fence refused the nudge")
 	}
 }
 
@@ -371,7 +453,7 @@ func activeClaimState(t *testing.T, database *sql.DB, claimID string) (live bool
 }
 
 // TestDriveLiveConversation_NoneLeavesTheClaimForCompletion pins the order the
-// fix depends on: a no-conclusion turn does NOT park from inside the driver.
+// fix depends on: an unfinished turn does NOT park from inside the driver.
 // The process is closed and the result handed back with the engagement's claim
 // still live, and processCompletion parks — so the claim is released only
 // after the process that wrote under it is gone. A park written here, with
@@ -389,7 +471,7 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 	}
 	proc := newFakeLiveProc("sess-none")
 	results := make(chan *agentproc.Result, 8)
-	none := &agentproc.Result{Result: "prose, no completion envelope"}
+	none := &agentproc.Result{StopReason: "refusal"}
 	results <- none
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none",
@@ -397,9 +479,9 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
-	out := s.driveLiveConversation(context.Background(), park, proc, results)
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
 	if out.result != none {
-		t.Fatalf("result = %+v, want the no-conclusion turn handed back", out.result)
+		t.Fatalf("result = %+v, want the unfinished turn handed back", out.result)
 	}
 	if !proc.wasClosed() {
 		t.Error("the process must be closed before the result is handed back")
@@ -443,14 +525,14 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 
 	results := make(chan *agentproc.Result, 8)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "done"}
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause",
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
-	out := s.driveLiveConversation(context.Background(), park, proc, results)
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
 	if !out.hibernated {
 		t.Fatalf("a pause with nothing queued should park open (hibernated), got %+v", out)
 	}
@@ -482,7 +564,7 @@ func TestDriveLiveConversation_ErrorWithoutInterruptStaysTerminal(t *testing.T) 
 	r := &agentproc.Result{IsError: true, Subtype: "error_during_execution"}
 	results <- r
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-err"}, proc, results)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-err"}, proc, results, nil)
 	if out.result != r {
 		t.Fatalf("expected the error result back, got %+v", out)
 	}
@@ -500,7 +582,7 @@ func TestDriveLiveConversation_ErrorWithoutInterruptStaysTerminal(t *testing.T) 
 // process's newest running total.
 func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 	pause := &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true, CostUSD: 0.25, DurationMs: 1000, NumTurns: 15}
-	conclusion := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`, Subtype: "success", CostUSD: 0.75, DurationMs: 1500, NumTurns: 20}
+	conclusion := &agentproc.Result{Result: "done", StopReason: "end_turn", Subtype: "success", CostUSD: 0.75, DurationMs: 1500, NumTurns: 20}
 	merged := agentproc.MergeResult(pause, conclusion)
 	if !merged.IsError || !merged.Interrupted {
 		t.Fatal("precondition: MergeResult keeps IsError/Interrupted sticky across turns")
@@ -511,7 +593,7 @@ func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 		t.Errorf("disposition must come from the classified turn: IsError=%v Interrupted=%v", got.IsError, got.Interrupted)
 	}
 	if got.Subtype != "success" || got.Result != conclusion.Result {
-		t.Errorf("classified turn's envelope/subtype must survive the fold: %+v", got)
+		t.Errorf("classified turn's text/subtype must survive the fold: %+v", got)
 	}
 	if got.CostUSD != 0.75 || got.DurationMs != 1500 || got.NumTurns != 20 {
 		t.Errorf("accounting must be the process's running total: cost=%v dur=%v turns=%v", got.CostUSD, got.DurationMs, got.NumTurns)
@@ -551,7 +633,7 @@ func TestDriveLiveConversation_PausedParkSettlesProcessSpend(t *testing.T) {
 
 	results := make(chan *agentproc.Result, 1)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	out := s.driveLiveConversation(context.Background(), park, proc, results)
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
 
 	if !out.hibernated {
 		t.Fatalf("expected hibernation, got %+v", out)
@@ -602,7 +684,7 @@ func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 
 	results := make(chan *agentproc.Result, 1)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	out := s.driveLiveConversation(context.Background(), park, proc, results)
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
 
 	if !out.fenced {
 		t.Fatalf("expected the fenced park to report fenced, got %+v", out)

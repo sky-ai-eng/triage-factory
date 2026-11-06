@@ -71,7 +71,7 @@ Agents are taught in the envelope (SKY-148) that the only legitimate terminal st
 
 This framing is essential because it gives the circuit breaker a clean signal — an agent running out of ideas should explicitly give up rather than loop forever on ambiguous failures. Don't soften this language.
 
-Note the distinction between `task_unsolvable` (voluntary, agent-declared) and `failed` (involuntary, spawner-assigned when the runtime under the run dies). Both count toward the breaker, but they're kept as distinct statuses because they have different debugging paths (`failed` usually means our env is broken; `task_unsolvable` means the agent genuinely can't). A run whose envelope never validates is neither: its blueprint aborts and the conversation parks `open` for a person.
+Note the distinction between `task_unsolvable` (voluntary, agent-declared) and `failed` (involuntary, spawner-assigned when the runtime under the run dies). Both count toward the breaker, but they're kept as distinct statuses because they have different debugging paths (`failed` usually means our env is broken; `task_unsolvable` means the agent genuinely can't). A turn the model did not finish (a refusal, a reply cut off at the output limit) is neither: it records no verdict, and the conversation parks `open` for a person.
 
 ### 7. `prompt_bindings` is untouched; `prompt_triggers` is new
 
@@ -215,15 +215,15 @@ You can land 140, 141, 142 in any order relative to each other — all three are
 
 ## Agent return contract (for SKY-141 and SKY-148 in particular)
 
-Current contract (in `internal/agentprompt/blocks/completion/`):
+Current contract (in `internal/agentprompt/blocks/completion/`), the same on both runtimes:
 
-```json
-{ "outcome": "finish", "summary": "..." }
-```
+- A turn the model ends itself — a final message with no tool calls — concludes the step with outcome `continue`, the final message as its summary. On a final or single step the blueprint resolves `continue` to a finish.
+- The `stop_blueprint` tool (`mcp__tf__stop_blueprint` on the SDK) is the one deliberate other ending: `type` `finish` ends the whole blueprint and closes the task, `abort` stops and leaves the task open. Both carry a `reason` and a `summary`. It ends the run only as the only tool call in its message.
+- A turn that stops without the model finishing it (a refusal, the output limit, an unrecognized stop reason) records no verdict: the conversation parks `open` with a note saying why, for a person to pick back up.
 
-`outcome` is `finish` or `abort` (an abort carries a `reason`), plus `continue` on a non-final blueprint step. The verdict is recorded on the step's conversation and acted on by its blueprint run; the conversation itself parks `open`. The `failed` state is never returned by the agent — it's set by the spawner when the runtime under the agent dies. An envelope still invalid after the spawner's re-prompts is a workflow fault rather than a runtime one: the blueprint run aborts (`abort_reason` `invalid-envelope`, the task stays open) and the conversation parks `open` with `park_reason` `invalid_envelope` and no verdict, so a person can ask it to try again.
+The verdict is recorded on the step's conversation and acted on by its blueprint run; the conversation itself parks `open`. The `failed` state is never returned by the agent — it's set by the spawner when the runtime under the agent dies.
 
-After SKY-141: the agent is required to have written its run memory on disk **before** returning its completion JSON — at the fixed path `./_tfac/memory.md`, which the executor mirrors into `conversation_memory` after every tool call that changes it, with a final read at park, at conclusion and on failure. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
+After SKY-141: the agent is required to have written its run memory on disk **before** it finishes — at the fixed path `./_tfac/memory.md`, which the executor mirrors into `conversation_memory` after every tool call that changes it, with a final read at park, at conclusion and on failure. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
 
 ---
 

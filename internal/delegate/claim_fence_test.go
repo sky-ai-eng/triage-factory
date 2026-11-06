@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -295,11 +296,12 @@ func (e *executorFencedStore) SetExecutorSystem(context.Context, string, string,
 	return nil, nil
 }
 
-// TestProcessCompletion_IdleParkFenceTripReportsFenced: a no-conclusion turn
-// parks the run, and that park now carries the claim. When it is refused the
-// disposition is fenced — the caller must not advance the blueprint behind a
-// run somebody else is driving — while parked stays true so the workspace the
-// successor may be running in is left alone.
+// TestProcessCompletion_IdleParkFenceTripReportsFenced: a turn the model did
+// not finish parks the run with a note saying why, and both writes carry the
+// claim. When the note is refused the disposition is fenced — the caller must
+// not advance the blueprint behind a run somebody else is driving, and no park
+// follows — while parked stays true so the workspace the successor may be
+// running in is left alone.
 func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-idle-park")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
@@ -307,15 +309,15 @@ func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
-		res("just thinking out loud, no envelope here"), t.TempDir(), nil, "", "event", "")
+		&agentproc.Result{StopReason: "refusal"}, t.TempDir(), nil, "", "event", "")
 	if !fenced {
-		t.Fatal("a refused idle park reported unfenced; the caller would react to a run it no longer owns")
+		t.Fatal("a refused park note reported unfenced; the caller would react to a run it no longer owns")
 	}
 	if !parked {
 		t.Error("processCompletion(idle park, fenced) = parked false; the workspace would be torn down under a successor")
 	}
-	if stub.cancels != 1 {
-		t.Errorf("fenced idle park attempted %d times, want 1", stub.cancels)
+	if stub.inserts != 1 || stub.cancels != 0 {
+		t.Errorf("fenced park wrote %d notes and attempted %d parks, want the one refused note and no park", stub.inserts, stub.cancels)
 	}
 
 	var status string
@@ -339,7 +341,7 @@ func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
-		res(`{"outcome":"finish","summary":"done"}`), t.TempDir(), nil, "", "event", "")
+		res("done"), t.TempDir(), nil, "", "event", "")
 	if !fenced {
 		t.Fatal("processCompletion did not report the fence trip; the caller would react to a run it no longer owns")
 	}
@@ -381,7 +383,7 @@ func TestProcessCompletion_SelfFencedLeaseRecordsNothing(t *testing.T) {
 
 	parked, fenced := s.processCompletion(ctx, runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
-		res(`{"outcome":"finish","summary":"done"}`), t.TempDir(), nil, "", "event", "")
+		res("done"), t.TempDir(), nil, "", "event", "")
 	if !fenced {
 		t.Fatal("a self-fenced completion reported unfenced; the caller would advance the blueprint off a result nobody owns")
 	}
