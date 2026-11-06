@@ -328,6 +328,7 @@ func TestNotificationList_Filters(t *testing.T) {
 		{"unknown priority", map[string]any{"priority_in": []string{"high", "medium"}}, httpx.ReasonInvalidField, "priority_in"},
 		{"unknown scope", map[string]any{"scope_in": []string{"everyone"}}, httpx.ReasonInvalidField, "scope_in"},
 		{"wrong type", map[string]any{"unread": "yes"}, httpx.ReasonInvalidField, "unread"},
+		{"wrong-typed page_size", map[string]any{"page_size": "x"}, httpx.ReasonInvalidField, "page_size"},
 		{"unknown field", map[string]any{"team_id_in": []string{runmode.LocalDefaultTeamID}}, httpx.ReasonUnknownField, "team_id_in"},
 		{"page too large", map[string]any{"page_size": httpx.MaxPageSize + 1}, httpx.ReasonOutOfRange, "page_size"},
 	} {
