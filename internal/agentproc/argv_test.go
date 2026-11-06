@@ -22,7 +22,7 @@ func TestBuildArgs_InitialInvocation(t *testing.T) {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--allowedTools", "Read,Write",
-		"--disallowedTools", "AskUserQuestion,Agent",
+		"--disallowedTools", "AskUserQuestion",
 		"--max-turns", "100",
 	}
 	if !slices.Equal(got, want) {
@@ -108,9 +108,9 @@ func TestBuildArgs_ToolBatchNotesFlag(t *testing.T) {
 	}
 }
 
-func TestBuildArgs_DisallowsAskUserQuestionAndAgent(t *testing.T) {
-	// AskUserQuestion and Agent are removed from the model's context on every
-	// path, not just left off the allowlist: one-shot, interactive, and resume
+func TestBuildArgs_DisallowsAskUserQuestion(t *testing.T) {
+	// AskUserQuestion is removed from the model's context on every path,
+	// not just left off the allowlist: one-shot, interactive, and resume
 	// all carry the flag, and it never depends on caller-supplied fields.
 	cases := map[string]RunOptions{
 		"one-shot":    {Message: "hi"},
@@ -123,8 +123,8 @@ func TestBuildArgs_DisallowsAskUserQuestionAndAgent(t *testing.T) {
 		if idx < 0 || idx+1 >= len(got) {
 			t.Fatalf("%s: expected --disallowedTools flag: %v", name, got)
 		}
-		if got[idx+1] != "AskUserQuestion,Agent" {
-			t.Errorf("%s: --disallowedTools value = %q, want AskUserQuestion,Agent", name, got[idx+1])
+		if got[idx+1] != "AskUserQuestion" {
+			t.Errorf("%s: --disallowedTools value = %q, want AskUserQuestion", name, got[idx+1])
 		}
 	}
 }

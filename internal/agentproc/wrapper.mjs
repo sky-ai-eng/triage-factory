@@ -452,9 +452,25 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   // tool_use block. Each one emits a tool_started naming the call, so its
   // result is timed from when it ran. Nothing answers it and the hook never
   // waits: anything it held up would be the call it reports on. A subagent's
-  // calls (agent_id set) are skipped, as in PostToolBatch.
+  // calls (agent_id set) are not reported, as in PostToolBatch.
+  //
+  // The same hook denies a subagent every TF tool. A subagent inherits its
+  // parent's MCP servers, and Claude Code has no way to leave one tool out,
+  // but a TF tool acts for the run itself: its handler is handed the
+  // conversation's identity, and stop_blueprint ends the run only from a batch
+  // of the main thread's.
   const onToolStarted = async (input, toolUseID) => {
-    if (closing || input?.agent_id) return {}
+    if (closing) return {}
+    if (input?.agent_id) {
+      if (typeof input.tool_name !== "string" || !input.tool_name.startsWith("mcp__tf__")) return {}
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "This tool is for the main agent only; a subagent cannot call it.",
+        },
+      }
+    }
     const id = typeof toolUseID === "string" && toolUseID !== "" ? toolUseID : input?.tool_use_id
     if (typeof id === "string" && id !== "") {
       emit({ type: "control", subtype: "tool_started", tool_call_id: id })

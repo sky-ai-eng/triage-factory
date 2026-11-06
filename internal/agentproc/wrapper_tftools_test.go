@@ -262,3 +262,26 @@ func TestWrapperTFToolsBatchStopEndsTheTurn(t *testing.T) {
 		t.Errorf("hook returned %v without a stop, want only the reply's context", out)
 	}
 }
+
+// TestWrapperDeniesSubagentsTFTools: the PreToolUse hook denies a subagent's
+// call to a TF tool, and leaves a subagent's other calls alone with nothing
+// reported for either.
+func TestWrapperDeniesSubagentsTFTools(t *testing.T) {
+	w := startTFToolsWrapper(t, `
+      const pre = options.hooks.PreToolUse[0].hooks[0]
+      const signal = new AbortController().signal
+      const call = (name, id) => ({ hook_event_name: "PreToolUse", tool_name: name, tool_input: {}, tool_use_id: id, agent_id: "sub-1" })
+      yield { type: "stub_pre", output: await pre(call("mcp__tf__record_call", "toolu_TF"), "toolu_TF", { signal }) }
+      yield { type: "stub_pre", output: await pre(call("Bash", "toolu_BASH"), "toolu_BASH", { signal }) }`, "--tf-tools", tfToolsFlagValue)
+
+	denied := w.next()
+	out, _ := denied["output"].(map[string]any)
+	specific, _ := out["hookSpecificOutput"].(map[string]any)
+	if denied["type"] != "stub_pre" || specific["hookEventName"] != "PreToolUse" || specific["permissionDecision"] != "deny" || specific["permissionDecisionReason"] == nil {
+		t.Fatalf("a subagent's TF tool call got %v, want a PreToolUse deny with a reason (stderr: %s)", denied, w.stderr.String())
+	}
+	other := w.next()
+	if out, ok := other["output"].(map[string]any); other["type"] != "stub_pre" || !ok || len(out) != 0 {
+		t.Errorf("a subagent's Bash call got %v, want nothing, and no tool_started before it", other)
+	}
+}

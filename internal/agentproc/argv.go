@@ -15,10 +15,7 @@ import "strconv"
 // whose "allow" hands the question back with no answers attached. A run that
 // needs a decision from a person gets it through the permission prompt or a
 // follow-up message, never a question tool.
-//
-// Agent is removed for parity with the native runtime, which has no
-// subagents, and because current models gain little from them in this harness.
-const disallowedTools = "AskUserQuestion,Agent"
+const disallowedTools = "AskUserQuestion"
 
 // settingSources is the --setting-sources value of an SDK spawn: the
 // settings files at the run's cwd, and never the operator's own. Left unset,
