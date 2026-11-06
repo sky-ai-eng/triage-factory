@@ -55,6 +55,11 @@ func TestDecodeTargets_EveryFaultIsReportable(t *testing.T) {
 	}
 	var paths []string
 	for _, p := range imports {
+		// A package that failed to list has no imports to read, and would
+		// drop out of the scan unnoticed.
+		for _, e := range p.Errors {
+			t.Fatalf("list %s: %v", p.PkgPath, e)
+		}
 		if _, ok := p.Imports[httpxPath]; ok {
 			paths = append(paths, p.PkgPath)
 		}
@@ -78,10 +83,12 @@ func TestDecodeTargets_FixtureFindings(t *testing.T) {
 		got = append(got, f.describe())
 	}
 	want := []string{
+		"again.when is a time.Time, which decodes itself through UnmarshalJSON",
 		"at is a time.Time, which decodes itself through UnmarshalJSON",
 		"blob is a byte slice, which refuses a string that is not base64 without naming its field",
 		"by_ref has keys of type decodetargets.textRef, which decodes itself through UnmarshalText",
 		"count takes the ,string option",
+		"items is a type parameter, whose fields cannot be checked here; decode into a concrete type",
 		"items.when is a time.Time, which decodes itself through UnmarshalJSON",
 		"n is a json.Number, which refuses a string that is not a number without naming its field",
 		"ref is a decodetargets.textRef, which decodes itself through UnmarshalText",
@@ -146,10 +153,6 @@ func scanDecodeTargets(t *testing.T, dir string, paths ...string) (int, []decode
 						pos, fn.Name(), pkg.TypesInfo.TypeOf(call.Args[arg]))
 					return true
 				}
-				if _, generic := ptr.Elem().(*types.TypeParam); generic {
-					t.Errorf("%s: %s decodes into a type parameter, whose fields cannot be checked here", pos, fn.Name())
-					return true
-				}
 				targets++
 				target := fmt.Sprintf("%s (%s)", pos, types.TypeString(ptr.Elem(), types.RelativeTo(pkg.Types)))
 				walkDecodeTarget(ptr.Elem(), "", map[types.Type]bool{}, func(path, reason string) {
@@ -172,6 +175,12 @@ func walkDecodeTarget(t types.Type, path string, seen map[types.Type]bool, repor
 		report(path, "is a json.Number, which refuses a string that is not a number without naming its field")
 		return
 	}
+	// A type parameter's underlying type is its constraint, an interface,
+	// so it is told apart before one.
+	if _, generic := t.(*types.TypeParam); generic {
+		report(path, "is a type parameter, whose fields cannot be checked here; decode into a concrete type")
+		return
+	}
 	if _, iface := t.Underlying().(*types.Interface); iface {
 		return
 	}
@@ -179,10 +188,13 @@ func walkDecodeTarget(t types.Type, path string, seen map[types.Type]bool, repor
 		report(path, fmt.Sprintf("is a %s, which decodes itself through %s", qualifiedName(t), method))
 		return
 	}
+	// seen holds the types on the current path, so a recursive type ends
+	// while a type reached at two paths is checked at both.
 	if seen[t] {
 		return
 	}
 	seen[t] = true
+	defer delete(seen, t)
 	switch u := t.Underlying().(type) {
 	case *types.Pointer:
 		walkDecodeTarget(u.Elem(), path, seen, report)

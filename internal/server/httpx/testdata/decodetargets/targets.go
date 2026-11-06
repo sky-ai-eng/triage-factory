@@ -40,6 +40,7 @@ type body struct {
 	Ref    textRef         `json:"ref"`
 	Count  int             `json:"count,string"`
 	Items  []item          `json:"items"`
+	Again  []item          `json:"again"`
 	ByRef  map[textRef]int `json:"by_ref"`
 	Raw    json.RawMessage `json:"raw"`
 	Blob   []byte          `json:"blob"`
@@ -49,7 +50,17 @@ type body struct {
 	quiet  time.Time
 }
 
+// decodeList decodes a body whose element type is a type parameter, which
+// the scan cannot see through.
+func decodeList[T any](w http.ResponseWriter, r *http.Request) {
+	var v struct {
+		Items []T `json:"items"`
+	}
+	httpx.DecodeJSONStrict(w, r, &v)
+}
+
 func handle(w http.ResponseWriter, r *http.Request) {
+	decodeList[string](w, r)
 	var b body
 	if !httpx.DecodeJSONStrict(w, r, &b) {
 		return

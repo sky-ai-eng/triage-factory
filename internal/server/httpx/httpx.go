@@ -329,8 +329,8 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 	}
 	// A request body declares only fields whose faults encoding/json names
 	// (TestDecodeTargets_EveryFaultIsReportable refuses the rest), so a
-	// failure that reaches here is the body's as a whole: malformed JSON, or
-	// the wrong kind of value at the top.
+	// failure that reaches here is the body's as a whole: malformed JSON, the
+	// wrong kind of value at the top, or a body that could not be read.
 	WriteErrors(w, http.StatusBadRequest, ErrorItem{
 		Reason: ReasonInvalidBody, Message: "invalid request body",
 	})
