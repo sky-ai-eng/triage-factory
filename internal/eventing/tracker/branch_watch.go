@@ -31,8 +31,10 @@ type basePR struct {
 	nodeID string
 	// head and base are the pull request's current head and base branch: the
 	// refresh's this cycle, the listing's, or the stored snapshot's, in that
-	// order. base differs from the branch the pull request is grouped under
-	// in the cycle that sees it retargeted.
+	// order. The pull request is grouped under base rather than the stored
+	// snapshot's: GitHub retargets the pull requests on a branch deleted
+	// after its merge, so in the cycle that sees the retarget the stored base
+	// can name a branch that no longer exists.
 	head, base string
 }
 
@@ -77,8 +79,9 @@ type baseWatchScope struct {
 // no pull request. Branches no open pull request in the org
 // targets lose their row, whichever pass sees it.
 //
-// The base is the stored snapshot's base_ref; open is every open pull request
-// the cycle knows, and a pull request the refresh found terminal is left out.
+// The base is the pull request's current one (basePR.base); open is every
+// open pull request the cycle knows, and a pull request the refresh found
+// terminal is left out.
 // A pull request in a repository no pass is handed (one no team tracks any
 // more) is left to the sweep. Failures are logged and leave the stored tip, so
 // the move is processed again next cycle, except a compare that has kept
@@ -105,7 +108,7 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 			}
 			pr.head, pr.base = cmp.Or(snap.HeadSHA, pr.head), cmp.Or(snap.BaseRef, pr.base)
 		}
-		ref := domain.BranchRef{RepositoryID: c.entity.RepositoryID, Branch: c.snap.BaseRef}
+		ref := domain.BranchRef{RepositoryID: c.entity.RepositoryID, Branch: pr.base}
 		bases[ref] = append(bases[ref], pr)
 	}
 	targeted := make([]domain.BranchRef, 0, len(bases))

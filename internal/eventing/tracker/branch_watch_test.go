@@ -50,6 +50,9 @@ type watchWorld struct {
 	// refFails makes main's ref read answer 404, as GitHub does to a
 	// credential that cannot read the repository's contents.
 	refFails bool
+	// deletedRefReads counts the ref reads of stack, a branch GitHub has
+	// deleted, which answer 404.
+	deletedRefReads int
 	// compares maps "base...head" to a compare body, or to "404", "422" or
 	// "rate-limited".
 	compares map[string]string
@@ -142,6 +145,9 @@ func (w *watchWorld) serve(rw http.ResponseWriter, r *http.Request) {
 		}
 		rw.Header().Set("ETag", etag)
 		_, _ = fmt.Fprintf(rw, `{"ref":"refs/heads/main","object":{"sha":%q}}`, w.tip)
+	case path == "/repos/octo/repo/git/ref/heads/stack":
+		w.deletedRefReads++
+		http.NotFound(rw, r)
 	case strings.HasPrefix(path, "/repos/octo/repo/compare/"):
 		key := strings.TrimPrefix(path, "/repos/octo/repo/compare/")
 		w.compareReads = append(w.compareReads, key)
@@ -282,12 +288,18 @@ func (w *watchWorld) probeCount() int64 {
 // storedTip is main's branch_tips row, or nil.
 func (w *watchWorld) storedTip() *domain.BranchTip {
 	w.t.Helper()
+	return w.tipOf("main")
+}
+
+// tipOf is branch's branch_tips row, or nil.
+func (w *watchWorld) tipOf(branch string) *domain.BranchTip {
+	w.t.Helper()
 	tips, err := w.stores.PRMergeability.ListBranchTipsSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		w.t.Fatalf("ListBranchTipsSystem: %v", err)
 	}
 	for _, tip := range tips {
-		if tip.Branch == "main" {
+		if tip.Branch == branch {
 			return &tip
 		}
 	}
@@ -854,6 +866,46 @@ func TestBranchWatch_PathsReadAgainstAnotherBaseAreReadAgain(t *testing.T) {
 	}
 	if !slices.Equal(w.pathReads, []string{"PR_1"}) {
 		t.Errorf("paths read for %v, want PR_1's alone", w.pathReads)
+	}
+}
+
+// GitHub retargets the pull requests on a branch deleted after its merge. In
+// the cycle that sees the retarget, the stored snapshot still names the
+// deleted branch, as it does for as long as the refresh skips the pull
+// request. The watch takes the listing's base instead: the pull request is on
+// main, the deleted branch's ref is not read, and its tip is deleted.
+func TestBranchWatch_ARetargetedPullRequestIsWatchedOnItsNewBase(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := newWatchWorld(t)
+	e, err := w.stores.Entities.GetSystem(ctx, org, w.prs[0].ID)
+	if err != nil {
+		t.Fatalf("read PR_1: %v", err)
+	}
+	var snap domain.PRSnapshot
+	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
+		t.Fatalf("decode PR_1's snapshot: %v", err)
+	}
+	snap.BaseRef = "stack"
+	raw, _ := json.Marshal(snap)
+	if ok, err := w.stores.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, string(raw), e.PollSeq); err != nil || !ok {
+		t.Fatalf("store PR_1 on stack: ok=%v err=%v", ok, err)
+	}
+	if _, err := w.stores.PRMergeability.UpsertBranchTipSystem(ctx, org, domain.BranchTip{
+		RepositoryID: w.repoID, Branch: "stack", TipSHA: "s1", ObservedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed stack's tip: %v", err)
+	}
+
+	want := map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset}
+	if got := w.cycle(); !mapsEqual(got, want) {
+		t.Errorf("admitted %v, want main's first sight to reset every pull request on it, PR_1 included", got)
+	}
+	if w.deletedRefReads != 0 {
+		t.Errorf("stack's ref was read %d times, want none: no pull request is on it", w.deletedRefReads)
+	}
+	if tip := w.tipOf("stack"); tip != nil {
+		t.Errorf("stack's tip = %+v, want it deleted", tip)
 	}
 }
 
