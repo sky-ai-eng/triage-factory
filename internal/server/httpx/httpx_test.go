@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,6 +50,88 @@ func TestDecodeJSONStrict_RejectsTrailingData(t *testing.T) {
 			}
 			if !tc.wantAccept && rec.Code != 400 {
 				t.Errorf("DecodeJSONStrict(%q) rejected but status=%d, want 400", tc.body, rec.Code)
+			}
+		})
+	}
+}
+
+// TestDecodeJSONStrict_TypeFaultNamesTheJSONField pins that a wrong-typed
+// field is reported by its JSON name alone, however the body struct reaches
+// it. encoding/json puts the Go name of each embedded struct on the path, so
+// without the rewrite PageRequest's fields come back as
+// "PageRequest.page_size".
+func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
+	// Exported, since encoding/json cannot allocate an embedded pointer to
+	// an unexported struct.
+	type Deep struct {
+		B int `json:"b"`
+	}
+	type inner struct {
+		*Deep
+	}
+	type lane struct {
+		Statuses []string `json:"statuses"`
+		Inner    inner    `json:"inner"`
+	}
+	type Filter struct {
+		X int `json:"x"`
+	}
+	type tagged struct {
+		Y int `json:"y"`
+	}
+	type payload struct {
+		lane
+		PageRequest
+		Filter
+		tagged `json:"tagged"`
+
+		Items []inner         `json:"items"`
+		ByKey map[string]Deep `json:"by_key"`
+		// Spelled like the embedded Filter's Go name, and a JSON key all the same.
+		Collides int `json:"Filter"`
+		Count    int `json:"Count"`
+	}
+	cases := []struct {
+		body      string
+		wantField string
+	}{
+		{`{"page_size": "x"}`, "page_size"},
+		{`{"page_token": 7}`, "page_token"},
+		{`{"statuses": "x"}`, "statuses"},
+		{`{"x": "x"}`, "x"},
+		{`{"inner": {"b": "x"}}`, "inner.b"},
+		{`{"items": [{"b": "x"}]}`, "items.b"},
+		{`{"by_key": {"k": {"b": "x"}}}`, "by_key.b"},
+		{`{"tagged": {"y": "x"}}`, "tagged.y"},
+		{`{"Filter": "x"}`, "Filter"},
+		{`{"Count": "x"}`, "Count"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.body, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/", strings.NewReader(tc.body))
+			var v payload
+			if DecodeJSONStrict(rec, req, &v) {
+				t.Fatalf("DecodeJSONStrict(%s) accepted a wrong-typed field", tc.body)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var env struct {
+				Errors []ErrorItem `json:"errors"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+			}
+			if len(env.Errors) != 1 {
+				t.Fatalf("errors = %+v, want one", env.Errors)
+			}
+			got := env.Errors[0]
+			if got.Reason != ReasonInvalidField || got.Field != tc.wantField {
+				t.Errorf("error = {reason %q, field %q}, want {reason %q, field %q}", got.Reason, got.Field, ReasonInvalidField, tc.wantField)
+			}
+			if !strings.HasPrefix(got.Message, tc.wantField+" must be a ") {
+				t.Errorf("message = %q, want it to start with %q", got.Message, tc.wantField+" must be a ")
 			}
 		})
 	}

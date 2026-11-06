@@ -157,23 +157,16 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 // lists
 // --------------------------------------------------------------------
 
-// notificationListRequest is the body of POST /api/me/notifications/list. An
-// absent field does not filter. A present one filters by exactly its value,
-// so an empty list or an empty string is refused rather than read as "no
-// filter", which would answer a wider question than the caller asked.
-//
-// The filters are spelled out here and in notificationOrgListRequest rather
-// than embedded from one struct: encoding/json names a type fault inside an
-// embedded struct by the struct's Go name, which would reach the error's
-// field.
-// TODO(TFAC-1255): embed one shared filter struct once the decode error
-// names the JSON field.
+// notificationFilterRequest is the filters and sort both notification lists
+// take. An absent field does not filter. A present one filters by exactly its
+// value, so an empty list or an empty string is refused rather than read as
+// "no filter", which would answer a wider question than the caller asked.
 //
 // sort_key reorders the list (db.NotificationListSortKeys); absent is the
 // default order, priority then the latest escalation, and there is no
 // "default" value to send. sort_dir is its direction, desc when absent, and
 // is refused without a key: the default order has no direction to flip.
-type notificationListRequest struct {
+type notificationFilterRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
 	Unread     *bool    `json:"unread"`
@@ -181,7 +174,11 @@ type notificationListRequest struct {
 	ScopeIn    []string `json:"scope_in"`
 	SortKey    *string  `json:"sort_key"`
 	SortDir    *string  `json:"sort_dir"`
+}
 
+// notificationListRequest is the body of POST /api/me/notifications/list.
+type notificationListRequest struct {
+	notificationFilterRequest
 	httpx.PageRequest
 }
 
@@ -189,14 +186,8 @@ type notificationListRequest struct {
 // /api/orgs/{org_id}/notifications/list: the inbox's filters plus the teams
 // whose rows to show, in the same orders.
 type notificationOrgListRequest struct {
-	Status     *string  `json:"status"`
-	Dismissed  *bool    `json:"dismissed"`
-	Unread     *bool    `json:"unread"`
-	PriorityIn []string `json:"priority_in"`
-	ScopeIn    []string `json:"scope_in"`
-	SortKey    *string  `json:"sort_key"`
-	SortDir    *string  `json:"sort_dir"`
-	TeamIDIn   []string `json:"team_id_in"`
+	notificationFilterRequest
+	TeamIDIn []string `json:"team_id_in"`
 
 	httpx.PageRequest
 }
@@ -221,35 +212,35 @@ type notificationListFilterKey struct {
 
 // parseNotificationFilter validates the filters and the sort both lists
 // share.
-func parseNotificationFilter(v *httpx.Validation, status *string, dismissed, unread *bool, priorityIn, scopeIn []string, sortKey, sortDir *string) db.NotificationListFilter {
-	f := db.NotificationListFilter{Dismissed: dismissed, Unread: unread}
-	if status != nil {
-		switch st := domain.NotificationStatus(*status); st {
+func parseNotificationFilter(v *httpx.Validation, req notificationFilterRequest) db.NotificationListFilter {
+	f := db.NotificationListFilter{Dismissed: req.Dismissed, Unread: req.Unread}
+	if req.Status != nil {
+		switch st := domain.NotificationStatus(*req.Status); st {
 		case domain.NotificationOpen, domain.NotificationResolved:
 			f.Status = st
 		default:
 			v.Invalid("status", fmt.Sprintf("status must be %q or %q; leave it out to match both", domain.NotificationOpen, domain.NotificationResolved))
 		}
 	}
-	f.PriorityIn = parseNotificationEnums(v, "priority_in", priorityIn, domain.AllNotificationPriorities())
-	f.ScopeIn = parseNotificationEnums(v, "scope_in", scopeIn, domain.AllNotificationScopes())
-	if sortKey != nil {
-		if slices.Contains(db.NotificationListSortKeys, *sortKey) {
-			f.SortKey = *sortKey
+	f.PriorityIn = parseNotificationEnums(v, "priority_in", req.PriorityIn, domain.AllNotificationPriorities())
+	f.ScopeIn = parseNotificationEnums(v, "scope_in", req.ScopeIn, domain.AllNotificationScopes())
+	if req.SortKey != nil {
+		if slices.Contains(db.NotificationListSortKeys, *req.SortKey) {
+			f.SortKey = *req.SortKey
 		} else {
 			v.Invalid("sort_key", fmt.Sprintf("sort_key: %q is not one of %s; leave it out for the default order",
-				*sortKey, strings.Join(db.NotificationListSortKeys, ", ")))
+				*req.SortKey, strings.Join(db.NotificationListSortKeys, ", ")))
 		}
 	}
-	if sortDir != nil {
+	if req.SortDir != nil {
 		switch {
-		case !slices.Contains(db.NotificationListSortDirs, *sortDir):
+		case !slices.Contains(db.NotificationListSortDirs, *req.SortDir):
 			v.Invalid("sort_dir", fmt.Sprintf("sort_dir: %q is not one of %s",
-				*sortDir, strings.Join(db.NotificationListSortDirs, ", ")))
-		case sortKey == nil:
+				*req.SortDir, strings.Join(db.NotificationListSortDirs, ", ")))
+		case req.SortKey == nil:
 			v.Invalid("sort_dir", "sort_dir requires sort_key; the default order has no direction to flip")
 		default:
-			f.SortDir = *sortDir
+			f.SortDir = *req.SortDir
 		}
 	}
 	if f.SortKey != "" && f.SortDir == "" {
@@ -300,7 +291,7 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var v httpx.Validation
-	f := parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn, req.SortKey, req.SortDir)
+	f := parseNotificationFilter(&v, req.notificationFilterRequest)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
 		List: "inbox", OrgID: orgID,
 		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
@@ -350,7 +341,7 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 	}
 	var v httpx.Validation
 	f := db.NotificationOrgListFilter{
-		NotificationListFilter: parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn, req.SortKey, req.SortDir),
+		NotificationListFilter: parseNotificationFilter(&v, req.notificationFilterRequest),
 	}
 	if req.TeamIDIn != nil {
 		if len(req.TeamIDIn) == 0 {
