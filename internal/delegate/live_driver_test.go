@@ -408,6 +408,38 @@ func TestDriveLiveConversation_TheNudgeIsRecordedUnderTheClaim(t *testing.T) {
 	}
 }
 
+// TestDriveLiveConversation_AFencedNudgeEndsTheEngagement: when the claim
+// fence refuses the nudge row, a successor owns the conversation, so the
+// driver closes the process and reports the engagement fenced rather than
+// reading the turn the note would produce or handing back a verdict.
+func TestDriveLiveConversation_AFencedNudgeEndsTheEngagement(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-nudge-fenced", "sess-nudge-fenced", "/tmp/wt-nudge-fenced")
+	claimID := markEngaged(t, database, "r-nudge-fenced")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
+
+	proc := newFakeLiveProc("sess-nudge-fenced")
+	results := make(chan *agentproc.Result, 8)
+	proc.onSend = func(int) { results <- &agentproc.Result{StopReason: "end_turn", Result: "answered"} }
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "first"}
+	park := liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-nudge-fenced", claimID: claimID}
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results,
+		func(context.Context) string { return artifactNudgeNote })
+
+	if !out.fenced || out.result != nil || out.hibernated {
+		t.Errorf("outcome = %+v, want fenced with no result and no park", out)
+	}
+	if stub.inserts != 1 {
+		t.Errorf("fenced inserts = %d, want 1 (the nudge row)", stub.inserts)
+	}
+	if !proc.wasClosed() {
+		t.Error("expected the process closed once the fence refused the nudge")
+	}
+}
+
 // activeClaimState reads one claim's release state: whether it is still
 // live, and the outcome it released with (empty while live).
 func activeClaimState(t *testing.T, database *sql.DB, claimID string) (live bool, outcome string) {

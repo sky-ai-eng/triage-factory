@@ -957,9 +957,9 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // Returns parked: true when the turn ended dormant (open, no verdict, nothing
 // for the blueprint to act on), which is what keeps the session JSONL on disk
 // as the warm resume cache. A verdict or a failure (including a verdict that
-// produced a draft PR / pending review) returns false — the step has given the only answer it is going to, the blueprint
-// acts on it, and the deliverable is a resolvable sidecar, not a reason to keep
-// the tree warm.
+// produced a draft PR / pending review) returns false — the step has given the
+// only answer it is going to, the blueprint acts on it, and the deliverable is
+// a resolvable sidecar, not a reason to keep the tree warm.
 //
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in

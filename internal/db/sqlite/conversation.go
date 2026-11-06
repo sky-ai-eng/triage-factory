@@ -326,9 +326,10 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 // and its budgets both start at the wake, not the mint.
 //
 // It refuses a conversation whose blueprint run was called off, as the claim
-// gate does, and a concluded one whose blueprint is still running. The IMMEDIATE transaction serializes this statement
-// against the cancel and its settlement, so the guard reads the run in the
-// same statement that flips the row.
+// gate does, and a concluded one whose blueprint is still running. The
+// IMMEDIATE transaction serializes this statement against the cancel and its
+// settlement, so the guard reads the run in the same statement that flips the
+// row.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err

@@ -100,8 +100,8 @@ const (
 	// re-enables it in a click — which is why it is asked last.
 	ResumeBlockedModelNotEnabled = "model_not_enabled"
 	// ResumeBlockedStepHandedOff — the step gave its blueprint its verdict and
-	// the blueprint has not reacted yet. The one rung about TIMING rather than about the
-	// conversation: a beat later the answer changes.
+	// the blueprint has not reacted yet. The one rung about TIMING rather than
+	// about the conversation: a beat later the answer changes.
 	ResumeBlockedStepHandedOff = "step_handed_off"
 	// The boundary rungs: the task moved on and this conversation is no longer
 	// the one it is about. One per domain.EndedReason rather than a single

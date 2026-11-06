@@ -478,6 +478,8 @@ func stopReasonParkNotice(stopReason string) string {
 		cause = "it reached the output token limit"
 	case "model_context_window_exceeded":
 		cause = "it ran out of context window"
+	case "tool_use":
+		cause = "the turn ended on a tool call rather than a finished reply"
 	default:
 		cause = "of a stop reason this build does not recognize"
 	}

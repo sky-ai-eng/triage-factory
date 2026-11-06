@@ -106,10 +106,10 @@ type treeHandOff interface {
 //   - hibernated true    → the driver parked the conversation open itself
 //     (snapshot written, status flipped) after a paused turn with nothing
 //     queued behind it. The caller returns dormant, keeping the worktree.
-//   - fenced true       → a park this driver tried to write was refused: the
-//     engagement's claim is gone and a successor owns the conversation. Not
-//     hibernated, because nothing was parked; the caller records nothing at
-//     all and leaves the workspace where it is.
+//   - fenced true       → a park or nudge row this driver tried to write was
+//     refused: the engagement's claim is gone and a successor owns the
+//     conversation. Not hibernated, because nothing was parked; the caller
+//     records nothing at all and leaves the workspace where it is.
 //   - err set, no result → the process errored / was cancelled before any
 //     terminal result; the caller routes through parkConversationOpen /
 //     failConversation.
@@ -277,11 +277,11 @@ func processSpend(proc liveProc) float64 {
 // would-stop step asks. A person's message that arrived while the turn ran is
 // work the model has not seen, so the turn it owes runs first. Then nudge, the
 // would-stop hook: a note it returns is sent into the process and recorded on
-// the transcript, and the turn that answers it is the next one read. The hook
-// is asked until it has been answered once in this engagement: it reads the
-// recorded note back to know it has asked, and a note that failed to record
-// would otherwise be asked again on every turn. A stop_blueprint ending asks
-// neither, because the call is the verdict, as it is natively.
+// the transcript, and the turn that answers it is the next one read. Once a
+// note has been sent the hook is not asked again in this engagement: it reads
+// the recorded note back to know it has asked, and a note that failed to
+// record would otherwise be asked again on every turn. A stop_blueprint ending
+// asks neither, because the call is the verdict, as it is natively.
 //
 // A process that has stopped producing without ending its turn is the
 // engagement's stall watchdog's to decide (activity.go), not this loop's: the
@@ -385,28 +385,12 @@ func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc live
 		delegateLog.Warn("send the turn-end nudge failed; the turn concludes without it", "conversation", park.conversationID, "error", err)
 		return false, false
 	}
-	if s.conversations == nil {
-		return true, false // test fixture with no DB wired
-	}
-	msg := &domain.Message{
+	return true, s.insertClaimNote(ctx, park.orgID, park.claimID, &domain.Message{
 		ConversationID: park.conversationID,
 		Role:           "user",
 		Subtype:        domain.MessageSubtypeInjectionNudge,
 		Content:        note,
-	}
-	id, err := s.conversations.InsertMessageForClaimSystem(context.WithoutCancel(ctx), park.orgID, park.claimID, msg)
-	if errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Error("claim fence refused the nudge row — a successor owns this conversation; recording nothing",
-			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID)
-		return true, true
-	}
-	if err != nil {
-		delegateLog.Warn("record the turn-end nudge failed; the run goes on", "conversation", park.conversationID, "error", err)
-		return true, false
-	}
-	msg.ID = int(id)
-	s.broadcastMessage(park.orgID, park.conversationID, msg)
-	return true, false
+	})
 }
 
 // markConversationOpen flips a conversation's status to `open` under a race

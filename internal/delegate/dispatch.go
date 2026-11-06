@@ -1577,11 +1577,11 @@ func resumeParkContext(ctx context.Context, orgID string, conv *domain.Conversat
 
 // reactToStepTerminal is the blueprint state-machine reactor: given a step run
 // that has reached a terminal (or parked) state, advance the blueprint_run.
-// The post-step switch:
+// The post-step switch, read off the step conversation's stored state:
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
-// open→leave parked — now driven by the DB rather than a goroutine stack. None of those transitions touches the task's board column:
-// the delegation placed it in_progress at mint and it stays there until a
-// terminal closes it.
+// open→leave parked. None of those transitions touches the task's board
+// column: the delegation placed it in_progress at mint and it stays there
+// until a terminal closes it.
 func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversation domain.Conversation, cfg runConfig, startTime time.Time) {
 	// The reactor's writes are detached on purpose (see dispatchClaimedConversation's
 	// context split): the agent has run, so the blueprint MUST be advanced or

@@ -221,9 +221,9 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 // (awaitingDrivingSQL, whatever a hand-back's wait) under a blueprint nobody
 // called off, on either of the two columns blueprintDrivableSQL checks, or is
 // the current step of a running blueprint nobody called off that has given it
-// an answer (settled) the blueprint has not acted on yet. That last arm is a blueprint between two steps: its next step
-// has no conversation yet, and the work on the task is not over until the
-// blueprint has advanced or ended. A conversation parked on a person, and a
+// an answer (settled) the blueprint has not acted on yet. That last arm is a
+// blueprint between two steps: its next step has no conversation yet, and the
+// work on the task is not over until the blueprint has advanced or ended. A conversation parked on a person, and a
 // concluded or failed one its blueprint has moved past, are not working. An
 // event close holds while one of the task's conversations is
 // (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once

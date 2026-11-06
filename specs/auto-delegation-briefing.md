@@ -71,7 +71,7 @@ Agents are taught in the envelope (SKY-148) that the only legitimate terminal st
 
 This framing is essential because it gives the circuit breaker a clean signal — an agent running out of ideas should explicitly give up rather than loop forever on ambiguous failures. Don't soften this language.
 
-Note the distinction between `task_unsolvable` (voluntary, agent-declared) and `failed` (involuntary, spawner-assigned when the runtime under the run dies). Both count toward the breaker, but they're kept as distinct statuses because they have different debugging paths (`failed` usually means our env is broken; `task_unsolvable` means the agent genuinely can't). A run whose envelope never validates is neither: its blueprint aborts and the conversation parks `open` for a person.
+Note the distinction between `task_unsolvable` (voluntary, agent-declared) and `failed` (involuntary, spawner-assigned when the runtime under the run dies). Both count toward the breaker, but they're kept as distinct statuses because they have different debugging paths (`failed` usually means our env is broken; `task_unsolvable` means the agent genuinely can't). A turn the model did not finish (a refusal, a reply cut off at the output limit) is neither: it records no verdict, and the conversation parks `open` for a person.
 
 ### 7. `prompt_bindings` is untouched; `prompt_triggers` is new
 
