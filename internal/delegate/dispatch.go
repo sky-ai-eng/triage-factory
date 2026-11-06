@@ -1226,14 +1226,13 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 }
 
 // dispatchResumeClaim delivers a resume-by-enqueue claim's durably-recorded
-// message (TFAC-585): the delivery half of what the retired in-process resume
-// goroutine used to do end-to-end. No blueprint-step machinery runs here —
-// a resumed run isn't advancing to a new step, it's continuing its
-// current one, so this bypasses the mission/skill/plan logic entirely and
-// goes straight to ResumeWithMessage, exactly like the retired goroutine
-// did. Any executor may run this — ensureWorkspace warm-reuses the
-// worktree if this IS the executor that parked it, else cold-rehydrates
-// from the durable S3 snapshot.
+// message to an SDK conversation. A resumed step continues its current turn
+// rather than starting one, so this skips the mission/skill/plan setup a fresh
+// step does and goes straight to ResumeWithMessage; the step's ending then
+// goes to the same reactor a fresh step's does (reactToResumedStep), which is
+// what advances, finishes or ends its blueprint. Any executor may run this —
+// ensureWorkspace warm-reuses the worktree if this IS the executor that parked
+// it, else cold-rehydrates from the durable S3 snapshot.
 // ctx here is the caller's CLAIM context — the one the lease fence cancels —
 // so stepCtx below inherits the fence exactly as it inherits a shutdown.
 func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversation, task *domain.Task, agentMessage, userID string) {
@@ -1243,9 +1242,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// disposed is set once processCompletion + the inline finalize/re-park
 	// below have run. It stays false on an early failure/cancel exit,
 	// which is the only case the defer's blueprint re-finalize has to
-	// cover — mirrors the retired in-process goroutine's own
-	// disposed/defer pair exactly (see git history), just relocated to
-	// the claim path.
+	// cover.
 	//
 	// The failure exits below assign it from failConversation's fenced result, which
 	// is the second reason to skip the re-finalize and a stronger one: a
@@ -1260,14 +1257,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// An early exit (missing fields / workspace failure / cancel
 		// before processCompletion) leaves the step terminal but the
 		// blueprint un-finalized. Without this, the blueprint strands
-		// 'running' until the stranded-run replay finds it. ResumeBlueprintAfterResume
-		// is the safe single authority: a cancelled/failed step maps to a
-		// terminal blueprint (terminateBlueprint discards the snapshot); a
-		// still-parked (open) step or an already-terminal blueprint
-		// early-returns. The success path sets disposed=true, so this
-		// never doubles up.
+		// 'running' until the stranded-run replay finds it. The reactor
+		// decides it as it decides any step's ending: a failed step fails
+		// the blueprint, a cancel behind the step cancels it, and a step
+		// parked with no verdict, or a blueprint already terminal, is left
+		// as it is. The success path sets disposed=true, so this never
+		// doubles up.
 		if blueprintRunID != "" && !disposed {
-			s.ResumeBlueprintAfterResume(orgID, conv.ID, userID)
+			s.reactToResumedStep(ctx, orgID, conv)
 		}
 	}()
 
@@ -1537,7 +1534,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
-	parked, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, "manual", userID)
+	_, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, "manual", userID)
 	if fenced {
 		// A successor owns the conversation. Finalizing the blueprint off
 		// this turn's result would terminate a run someone else is driving,
@@ -1546,13 +1543,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		disposed = true
 		return
 	}
-	// The resumed step reached a terminal state (it didn't go open again)
-	// → hand back to the blueprint orchestrator to finalize.
-	if !parked {
-		s.ResumeBlueprintAfterResume(orgID, conv.ID, userID)
-	}
-	// The body owns the disposition now (re-parked, or finalized above),
-	// so the defer's re-finalize must not fire on top of it.
+	// The step's ending goes to the reactor whatever it was, as on the step
+	// path: a verdict advances or ends the blueprint, and a step that parked
+	// again with no verdict leaves it running.
+	s.reactToResumedStep(ctx, orgID, conv)
+	// The body owns the disposition now, so the defer's re-finalize must
+	// not fire on top of it.
 	disposed = true
 }
 

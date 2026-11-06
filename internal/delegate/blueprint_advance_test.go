@@ -99,9 +99,9 @@ func TestBlueprintDecisionForStepConversation(t *testing.T) {
 	}
 }
 
-// TestFinalBlueprintStep pins the position read both the resume finalizer and
-// the SDK resume's turn-end nudge rely on: only the frozen plan's last index
-// is final, and a position that cannot be read counts as final.
+// TestFinalBlueprintStep pins the position read the SDK resume's turn-end
+// nudge relies on: only the frozen plan's last index is final, and a position
+// that cannot be read counts as final.
 func TestFinalBlueprintStep(t *testing.T) {
 	idx := func(i int) *int { return &i }
 	plan := []domain.BlueprintPlanStep{{StepIndex: 0}, {StepIndex: 1}, {StepIndex: 2}}
