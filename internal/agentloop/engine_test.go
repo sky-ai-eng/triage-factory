@@ -1217,7 +1217,7 @@ func TestRun_BeforeToolCallGateDeniesInBand(t *testing.T) {
 	}
 }
 
-func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
+func TestRun_StopBlueprintTerminatesOnlyAsItsMessagesOnlyCall(t *testing.T) {
 	t.Run("stop_blueprint alone terminates and its summary becomes the run's result", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{{

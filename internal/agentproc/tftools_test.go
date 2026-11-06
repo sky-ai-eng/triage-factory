@@ -367,14 +367,14 @@ func toolBatchLine(id string, toolUseIDs ...string) string {
 	return string(b)
 }
 
-// TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun
-// pins the all-results-terminate rule on the SDK side. A batch whose only call
-// ended the run is answered with stop, without asking the caller for notes no
-// request is left to read, and the turn's result carries the ending. A batch
-// that pairs the same call with real work does not stop: its reply carries a
-// note saying so, the turn carries no ending, and the ending it held is spent,
-// so naming that call again does not stop a later batch.
-func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(t *testing.T) {
+// TestConsumeStreamInteractive_OnlyASoloEndingStopsTheTurn pins the
+// solo-call rule on the SDK side. A batch whose only call ended the run is
+// answered with stop, without asking the caller for notes no request is left
+// to read, and the turn's result carries the ending. A batch that pairs the
+// same call with real work does not stop: its reply carries a note saying so,
+// the turn carries no ending, and the ending it held is spent, so naming that
+// call again does not stop a later batch.
+func TestConsumeStreamInteractive_OnlyASoloEndingStopsTheTurn(t *testing.T) {
 	var notesAsked int
 	h := newReaderHarnessWithNotes(t,
 		func() ToolBatchNotes { notesAsked++; return ToolBatchNotes{} },

@@ -854,13 +854,11 @@ const subagentDenyReason = "This tool is for the main agent only; a subagent can
 // stop_blueprint, and checks it. It reports false, having checked nothing,
 // when no subagent made the call or the main agent made it itself.
 //
-// Claude Code runs an Agent call in the background unless the model asks
-// otherwise: the call answers at once, the main agent's turn can end while
-// the subagent works, and the subagent's report reaches the main agent in a
-// turn of its own. So the attempt reads
-// every turn until the main agent says DONE, and tells the two agents' calls
-// apart by the main session transcript, which records only the main agent's:
-// a subagent's go to a transcript of its own.
+// The attempt reads every turn until the main agent says DONE, not just the
+// first, so the subagent's report is seen in whichever turn it reaches the
+// main agent. It tells the two agents' calls apart by the main session
+// transcript, which records only the main agent's: a subagent's go to a
+// transcript of its own.
 func subagentStopAttempt(t *testing.T, attempt int) bool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
