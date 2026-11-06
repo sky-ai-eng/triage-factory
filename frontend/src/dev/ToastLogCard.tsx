@@ -22,7 +22,7 @@ const COPY: Record<ToastLevel, string[]> = {
   error: [
     'Could not claim the task.',
     'Could not move the task — please try again.',
-    'Run 7f3a21 failed: the agent exited before writing its completion envelope.',
+    'Run 7f3a21 failed: the agent exited before finishing its turn.',
   ],
 }
 

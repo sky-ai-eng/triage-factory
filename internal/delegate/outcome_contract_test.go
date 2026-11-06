@@ -2,28 +2,33 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-func res(body string) *agentproc.Result { return &agentproc.Result{Result: body} }
+// res is a turn the model ended itself, with body as its final text.
+func res(body string) *agentproc.Result {
+	return &agentproc.Result{StopReason: "end_turn", Result: body}
+}
+
+// stopped is a turn stop_blueprint ended.
+func stopped(outcome domain.ConversationOutcome, reason, summary string) *agentproc.Result {
+	return &agentproc.Result{StopReason: "tool_use", Terminal: &agentproc.Terminal{Outcome: outcome, Reason: reason, Summary: summary}}
+}
 
 // --- Position-gated contract injection ------------------------------------
 
 // nonterminalStepSysPrompt is the one position bit that reaches the agent:
-// the non-terminal fragment (offering `continue`) is injected iff the step is
-// not the last. The terminal step — and therefore the whole N=1 case — gets
-// nothing and completes via the default `finish`.
+// the handoff addendum is injected iff the step is not the last. The terminal
+// step — and therefore the whole N=1 case — gets nothing.
 func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 	// N=1: the single step is also the terminal step → no fragment.
 	if got := nonterminalStepSysPrompt(0, 1); got != "" {
-		t.Errorf("N=1 step got a non-empty fragment; the single-prompt case must see no `continue`")
+		t.Errorf("N=1 step got a non-empty fragment; the single-prompt case hands off to nothing")
 	}
 	// N=3: steps 0 and 1 are non-terminal → fragment; step 2 is terminal → none.
 	if got := nonterminalStepSysPrompt(0, 3); got == "" {
@@ -33,16 +38,14 @@ func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 		t.Errorf("non-terminal step 1/3 got no fragment")
 	}
 	if got := nonterminalStepSysPrompt(2, 3); got != "" {
-		t.Errorf("terminal step 2/3 got a fragment; the last step must see no `continue`")
+		t.Errorf("terminal step 2/3 got a fragment; the last step hands off to nothing")
 	}
 }
 
 // --- Terminal disposition (processCompletion) -----------------------------
 //
-// By the time a result reaches processCompletion it is a conclusion (or an
-// IsError result) — the live driver owns the concluded-vs-open classification
-// and the invalid-envelope re-prompt. These tests feed processCompletion
-// directly (the one-shot / resume shape) to pin how it records each outcome.
+// These tests feed processCompletion a turn-end directly, as the live driver
+// and the resume path hand it one, to pin how it records each.
 
 func loadConversation(t *testing.T, s *Spawner, conversationID string) *domain.Conversation {
 	t.Helper()
@@ -62,10 +65,12 @@ func loadTask(t *testing.T, s *Spawner, taskID string) domain.Task {
 	return *tk
 }
 
-// TestProcessCompletion_FinishRecordsOutcome: a step emitting finish persists
-// outcome=finish + status=completed. processCompletion does not close the task
-// — task disposition is the orchestrator's (terminateBlueprint).
-func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
+// TestProcessCompletion_AFinishedTurnConcludesContinue: a turn the model
+// ended itself concludes `continue`, its final text the summary and no reason
+// recorded. processCompletion does not close the task — task disposition is
+// the orchestrator's (terminateBlueprint), which resolves `continue` on a
+// final step to a finish.
+func TestProcessCompletion_AFinishedTurnConcludesContinue(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "finish")
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
@@ -73,23 +78,23 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
+		res("Shipped it."), cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
 	if !conv.Concluded() {
 		t.Errorf("conv = (status %q, completed_at %v), want concluded", conv.Status, conv.CompletedAt)
 	}
-	if conv.Outcome != "finish" {
-		t.Errorf("conv.outcome = %q, want finish", conv.Outcome)
+	if conv.Outcome != "continue" || conv.ResultSummary != "Shipped it." || conv.OutcomeReason != "" {
+		t.Errorf("conv = (outcome %q, summary %q, reason %q), want continue with the final text and no reason", conv.Outcome, conv.ResultSummary, conv.OutcomeReason)
 	}
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q; processCompletion must not close the task (terminateBlueprint does)", got)
 	}
 }
 
-// TestProcessCompletion_AbortLeavesTaskOpen: an abort persists outcome=abort +
-// the reason in outcome_reason (distinct from result_summary) and never closes
-// the task.
+// TestProcessCompletion_AbortLeavesTaskOpen: a stop_blueprint abort persists
+// outcome=abort + the reason in outcome_reason (distinct from result_summary)
+// and never closes the task.
 func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "abort")
 	stampBotClaim(t, database, taskID)
@@ -99,7 +104,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
+		stopped(domain.ConversationOutcomeAbort, "needs a human to rotate the token", "investigated the failure"),
 		cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
@@ -122,8 +127,8 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 
 // TestProcessCompletion_StopBlueprintRecordsTheCall: a turn stop_blueprint
 // ended records the call's outcome, summary and reason, a finish's reason
-// included as the native runtime records it, and the prose after the call,
-// which alone would park the run open, is not read as the verdict.
+// included as the native runtime records it, and the text after the call,
+// which alone would conclude `continue`, is not read as the verdict.
 func TestProcessCompletion_StopBlueprintRecordsTheCall(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "stop-finish")
 	stampBotClaim(t, database, taskID)
@@ -131,12 +136,10 @@ func TestProcessCompletion_StopBlueprintRecordsTheCall(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	stopped := &agentproc.Result{
-		Result:   "Ending the workflow here.",
-		Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "nothing to review", Summary: "checked the diff"},
-	}
+	stop := stopped(domain.ConversationOutcomeFinish, "nothing to review", "checked the diff")
+	stop.Result = "Ending the workflow here."
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		stopped, cwd, nil, "", "event", "")
+		stop, cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
 	if !conv.Concluded() || conv.Outcome != "finish" {
@@ -147,118 +150,36 @@ func TestProcessCompletion_StopBlueprintRecordsTheCall(t *testing.T) {
 	}
 }
 
-// TestProcessCompletion_AbortMissingReasonParksOnTheInvalidEnvelope: abort is
-// the agent's voluntary stop, so the reason is its required companion — an
-// abort without one is an invalid envelope, not a valid conclusion. The live
-// driver re-prompts it; a non-live path (resume / one-shot) that can't lands
-// here, where it parks with no recorded outcome, never a clean NULL-outcome
-// completion the orchestrator would read as finish.
-func TestProcessCompletion_AbortMissingReasonParksOnTheInvalidEnvelope(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "abort-noreason")
-	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	task := loadTask(t, s, taskID)
-	cwd := t.TempDir()
-
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, nil, "", "event", "")
-
-	conv := loadConversation(t, s, conversationID)
-	if !conv.ParkedOnInvalidEnvelope() {
-		t.Errorf("conv = (status %q, park_reason %q), want open on invalid_envelope (an abort with no reason is an invalid envelope)", conv.Status, conv.ParkReason)
-	}
-	if conv.Outcome != "" {
-		t.Errorf("conv.outcome = %q, want empty (an abort with no reason is not a valid conclusion)", conv.Outcome)
-	}
-}
-
-// TestProcessCompletion_NoConclusionParksOpen: a turn that ends with no
-// envelope at all (prose) is not a termination — the run is parked `open` (not
-// recorded as a NULL-outcome completion, which would let the orchestrator close
-// a final step). This is the disposition for a one-shot/resume turn that ends
-// without concluding (the live driver consumes this in its loop instead).
-func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "open-noconcl")
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	task := loadTask(t, s, taskID)
-	cwd := t.TempDir()
-
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`this is not a JSON envelope`), cwd, nil, "", "event", "")
-
-	if !parked {
-		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
-	}
-	conv := loadConversation(t, s, conversationID)
-	if conv.Status != "open" {
-		t.Errorf("conv.status = %q, want open (a no-conclusion turn parks open, not completed)", conv.Status)
-	}
-	if conv.Outcome != "" {
-		t.Errorf("conv.outcome = %q, want \"\" (no conclusion was recorded)", conv.Outcome)
-	}
-}
-
-// TestProcessCompletion_InvalidEnvelopeParksOpenWithNoVerdict: an envelope
-// attempt that never validated (here a `finish` with no summary) leaves the
-// transcript whole, so it is not a failure: the conversation parks `open` with
-// no verdict and the invalid_envelope reason the reactor aborts the blueprint
-// on. Never a NULL-outcome conclusion, which the reactor would read as a clean
-// finish on a final step. The live driver re-prompts this in place; when a
-// backend can't or the bound is exhausted, the unfixed result lands here
-// (TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack).
-func TestProcessCompletion_InvalidEnvelopeParksOpenWithNoVerdict(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "invalid-parks")
+// TestProcessCompletion_AnUnfinishedTurnParksOpenWithANote: a turn the model
+// did not finish (here a refusal) is not a termination — the run parks `open`
+// with no verdict, never a conclusion the orchestrator would advance on, and
+// the transcript carries a note naming the stop reason and what wakes it.
+func TestProcessCompletion_AnUnfinishedTurnParksOpenWithANote(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "open-refusal")
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"finish"}`), cwd, nil, "", "event", "")
+		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", "event", "")
 
-	if parked || fenced {
-		t.Errorf("processCompletion(invalid) = (parked %v, fenced %v), want (false, false): the step has answered and the blueprint acts on it", parked, fenced)
+	if !parked || fenced {
+		t.Errorf("processCompletion(refusal) = (parked %v, fenced %v), want (true, false): open, not terminal", parked, fenced)
 	}
 	conv := loadConversation(t, s, conversationID)
-	if conv.Status != domain.StatusOpen || conv.ParkReason != domain.ParkReasonInvalidEnvelope {
-		t.Errorf("conv = (status %q, park_reason %q), want (open, invalid_envelope)", conv.Status, conv.ParkReason)
+	if conv.Status != domain.StatusOpen || conv.Concluded() || conv.Outcome != "" {
+		t.Errorf("conv = (status %q, outcome %q, completed_at %v), want open with no verdict", conv.Status, conv.Outcome, conv.CompletedAt)
 	}
-	if conv.Concluded() || conv.Outcome != "" {
-		t.Errorf("conv = (completed_at %v, outcome %q), want no verdict recorded", conv.CompletedAt, conv.Outcome)
+	if conv.ParkReason != domain.ParkReasonIdle {
+		t.Errorf("conv.park_reason = %q, want %q", conv.ParkReason, domain.ParkReasonIdle)
 	}
-	if conv.FailureKind != "" {
-		t.Errorf("conv.failure_kind = %q, want none: the runtime did not fail", conv.FailureKind)
+	var note string
+	if err := database.QueryRow(`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ? ORDER BY id DESC LIMIT 1`,
+		conversationID, domain.MessageSubtypeStopNote).Scan(&note); err != nil {
+		t.Fatalf("read the park note: %v", err)
 	}
-}
-
-// TestInvalidEnvelope_AbortsTheBlueprintAndLeavesTheTaskOpen is the whole
-// disposition: the park above, then the reactor reading it. The blueprint
-// aborts with a reason naming the envelope, the task stays open (an abort
-// never closes it), and the conversation keeps its park with no verdict.
-func TestInvalidEnvelope_AbortsTheBlueprintAndLeavesTheTaskOpen(t *testing.T) {
-	s, database, brID, taskID, conversationID := reactorFixture(t, "invalid-abort", 1, "running", "")
-	org := runmode.LocalDefaultOrgID
-	seedLocalBotAgent(t, database)
-	stampBotClaim(t, database, taskID)
-
-	s.processCompletion(context.Background(), org, conversationID, brID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
-		res(`{"outcome":"frobnicate"}`), t.TempDir(), nil, "", "manual", runmode.LocalDefaultUserID)
-
-	stepConversation := loadConversation(t, s, conversationID)
-	stepConversation.TriggerType = "manual"
-	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
-
-	br := mustGetRun(t, s, org, brID)
-	if br.Status != domain.BlueprintRunStatusAborted || br.AbortReason != invalidEnvelopeAbortReason {
-		t.Errorf("blueprint = (%q, reason %q), want (aborted, %q)", br.Status, br.AbortReason, invalidEnvelopeAbortReason)
-	}
-	if got := readTaskStatus(t, database, taskID); got == "done" || got == "dismissed" {
-		t.Errorf("task.status = %q, want it left open for a person", got)
-	}
-	conv := loadConversation(t, s, conversationID)
-	if !conv.ParkedOnInvalidEnvelope() || conv.Concluded() || conv.Outcome != "" {
-		t.Errorf("conv = (status %q, park_reason %q, outcome %q, completed_at %v), want parked on invalid_envelope with no verdict",
-			conv.Status, conv.ParkReason, conv.Outcome, conv.CompletedAt)
+	if note != stopReasonParkNotice("refusal") {
+		t.Errorf("park note = %q, want the refusal's notice", note)
 	}
 }
 
@@ -300,111 +221,5 @@ func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
 
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q; abort must leave the task open", got)
-	}
-}
-
-// parkOnInvalidEnvelope stages the row processCompletion leaves behind for an
-// envelope that never validated: `open`, no verdict, the invalid_envelope
-// reason.
-func parkOnInvalidEnvelope(t *testing.T, database *sql.DB, conversationID string) {
-	t.Helper()
-	if _, err := database.Exec(
-		`UPDATE conversations SET status = 'open', completed_at = NULL, outcome = NULL, park_reason = ? WHERE id = ?`,
-		string(domain.ParkReasonInvalidEnvelope), conversationID); err != nil {
-		t.Fatalf("park %s on the invalid envelope: %v", conversationID, err)
-	}
-}
-
-// TestResumeBlueprintAfterResume_InvalidEnvelopeAbortsARunningBlueprint is the
-// resume path's half of the disposition: a follow-up turn on a re-opened
-// blueprint that again ends on an envelope that never validated aborts it, as
-// the first engagement's did. On a finished blueprint the same park re-drives
-// nothing: a follow-up there never changes the blueprint.
-func TestResumeBlueprintAfterResume_InvalidEnvelopeAbortsARunningBlueprint(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		blueprint domain.BlueprintRunStatus
-		want      domain.BlueprintRunStatus
-		reason    string
-	}{
-		{"running", domain.BlueprintRunStatusRunning, domain.BlueprintRunStatusAborted, invalidEnvelopeAbortReason},
-		{"finished", domain.BlueprintRunStatusCompleted, domain.BlueprintRunStatusCompleted, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, database, brID, taskID, conversationID := reactorFixture(t, "resume-invalid-"+tc.name, 1, "open", "")
-			org := runmode.LocalDefaultOrgID
-			parkOnInvalidEnvelope(t, database, conversationID)
-			if tc.blueprint != domain.BlueprintRunStatusRunning {
-				completeBlueprintRun(t, database, brID)
-			}
-			taskBefore := readTaskStatus(t, database, taskID)
-
-			s.ResumeBlueprintAfterResume(org, conversationID, runmode.LocalDefaultUserID)
-
-			br := mustGetRun(t, s, org, brID)
-			if br.Status != tc.want || br.AbortReason != tc.reason {
-				t.Errorf("blueprint = (%q, reason %q), want (%q, reason %q)", br.Status, br.AbortReason, tc.want, tc.reason)
-			}
-			if got := readTaskStatus(t, database, taskID); got != taskBefore {
-				t.Errorf("task.status = %q, want it unchanged at %q", got, taskBefore)
-			}
-		})
-	}
-}
-
-// TestInvalidEnvelope_OnAFollowUpWithdrawsTheEarlierVerdict: a follow-up on a
-// step whose blueprint will not re-open (it finished, or it aborted on a task
-// since closed) wakes a row that still carries the verdict its first
-// engagement recorded. When that follow-up ends on an envelope that never
-// validated, the row parks with no verdict, like any other invalid envelope,
-// rather than reading as concluded with the old outcome. The blueprint and
-// the task are left as they were: a follow-up there changes neither.
-func TestInvalidEnvelope_OnAFollowUpWithdrawsTheEarlierVerdict(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		outcome   string
-		blueprint domain.BlueprintRunStatus
-		closeTask bool
-	}{
-		{"finished blueprint", "finish", domain.BlueprintRunStatusCompleted, false},
-		{"aborted blueprint, task closed", "abort", domain.BlueprintRunStatusAborted, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, database, brID, taskID, conversationID := reactorFixture(t, "followup-invalid-"+string(tc.blueprint), 1, dbtest.SeedConcluded, tc.outcome)
-			org := runmode.LocalDefaultOrgID
-			ctx := context.Background()
-			if _, err := database.Exec(`UPDATE conversations SET outcome_reason = 'earlier reason' WHERE id = ?`, conversationID); err != nil {
-				t.Fatalf("stage the earlier verdict's reason: %v", err)
-			}
-			finishBlueprint(t, database, brID, string(tc.blueprint), 0)
-			if tc.closeTask {
-				if _, err := s.tasks.CloseSystem(ctx, org, taskID, "user_done", ""); err != nil {
-					t.Fatalf("close task: %v", err)
-				}
-			}
-			taskBefore := readTaskStatus(t, database, taskID)
-
-			if ok, err := s.conversations.MarkQueuedForResume(ctx, org, conversationID); err != nil || !ok {
-				t.Fatalf("wake the concluded step = (%v, %v), want (true, nil)", ok, err)
-			}
-			s.processCompletion(ctx, org, conversationID, brID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
-				res(`{"outcome":"frobnicate"}`), t.TempDir(), nil, "", "manual", runmode.LocalDefaultUserID)
-			s.ResumeBlueprintAfterResume(org, conversationID, runmode.LocalDefaultUserID)
-
-			conv := loadConversation(t, s, conversationID)
-			if !conv.ParkedOnInvalidEnvelope() || conv.Concluded() {
-				t.Errorf("conv = (status %q, park_reason %q, completed_at %v), want parked on invalid_envelope and not concluded",
-					conv.Status, conv.ParkReason, conv.CompletedAt)
-			}
-			if conv.Outcome != "" || conv.OutcomeReason != "" {
-				t.Errorf("verdict = (outcome %q, reason %q), want the earlier one withdrawn", conv.Outcome, conv.OutcomeReason)
-			}
-			if br := mustGetRun(t, s, org, brID); br.Status != tc.blueprint {
-				t.Errorf("blueprint = %q, want it left %q", br.Status, tc.blueprint)
-			}
-			if got := readTaskStatus(t, database, taskID); got != taskBefore {
-				t.Errorf("task.status = %q, want it unchanged at %q", got, taskBefore)
-			}
-		})
 	}
 }

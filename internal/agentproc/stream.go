@@ -543,12 +543,6 @@ func parseImageBlock(m map[string]any) (domain.ContentBlock, bool) {
 // Result is the terminal `result` event from a claude -p stream:
 // final accounting (cost, duration, turn count) plus the agent's
 // last message text.
-//
-// The model's stop reason is deliberately not here. It describes ONE
-// assistant turn, and an invocation is many, so it is parsed off each
-// assistant event and stored on the row that turn produced
-// (messages.stop_reason) rather than being carried out as an
-// invocation-level summary of whichever turn happened to be last.
 type Result struct {
 	IsError    bool
 	DurationMs int
@@ -597,6 +591,16 @@ type Result struct {
 	// failure.
 	Interrupted bool
 
+	// StopReason is why the model's last reply in this turn stopped, from the
+	// result event's stop_reason, in the Messages API's spelling ("end_turn",
+	// "max_tokens", "refusal", ...). Empty when the event carried none. It is
+	// what says whether the turn finished: a turn the model ended itself
+	// reads "end_turn", and anything else stopped it before it was done.
+	// Each reply's own reason is stored on the row it produced
+	// (messages.stop_reason); this is the turn's last, which is the one a
+	// turn-end is decided on.
+	StopReason string
+
 	// Terminal is the outcome a TF tool ended this turn with
 	// (tooldefs.Outcome.Terminal): the turn's last tool batch was that one
 	// call, so the reader told the wrapper to stop the turn there. Nil on
@@ -627,6 +631,7 @@ func parseResult(raw map[string]any) *Result {
 	}
 	rc.Result, _ = raw["result"].(string)
 	rc.Subtype, _ = raw["subtype"].(string)
+	rc.StopReason, _ = raw["stop_reason"].(string)
 	if s, ok := raw["api_error_status"].(float64); ok {
 		rc.APIErrorStatus = int(s)
 	}

@@ -183,7 +183,9 @@ func TestParseLine_ToolUseAndToolResult(t *testing.T) {
 
 // TestParseLine_ResultSubtypePopulated pins that the result event's
 // subtype flows into Result.Subtype — the interactive reader keys off
-// "error_during_execution" to corroborate an interrupt.
+// "error_during_execution" to corroborate an interrupt — and its stop_reason
+// into Result.StopReason, which the delegate decides whether the turn
+// finished on.
 func TestParseLine_ResultSubtypePopulated(t *testing.T) {
 	s := NewStreamState()
 	_, res := s.ParseLine([]byte(`{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"stop_reason":"end_turn","result":"ok"}`), "t")
@@ -192,6 +194,9 @@ func TestParseLine_ResultSubtypePopulated(t *testing.T) {
 	}
 	if res.Subtype != "success" {
 		t.Errorf("Result.Subtype = %q, want success", res.Subtype)
+	}
+	if res.StopReason != "end_turn" {
+		t.Errorf("Result.StopReason = %q, want end_turn", res.StopReason)
 	}
 }
 

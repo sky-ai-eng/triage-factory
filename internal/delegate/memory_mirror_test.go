@@ -379,7 +379,7 @@ func TestProcessCompletion_ConclusionFilesWhatTheLastTurnWrote(t *testing.T) {
 	writeAgentMemory(t, cwd, "what the run actually concluded")
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res(`{"outcome":"finish","summary":"done"}`), cwd, mirror, "", "event", "")
+		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", "event", "")
 	if parked || fenced {
 		t.Fatalf("processCompletion(finish) = (parked %v, fenced %v), want (false, false)", parked, fenced)
 	}

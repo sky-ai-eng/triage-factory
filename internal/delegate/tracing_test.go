@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -500,14 +501,14 @@ func TestNativeTerminalEmitsEngagementComplete(t *testing.T) {
 // fenced on this runtime as on the native one.
 func TestSDKTerminalNamesItsRuntime(t *testing.T) {
 	cases := []struct {
-		name   string
-		body   string
-		fenced bool
-		want   string
+		name       string
+		stopReason string
+		fenced     bool
+		want       string
 	}{
-		{name: "concluded", body: `{"outcome":"finish","summary":"shipped it"}`, want: "concluded_finish"},
-		{name: "terminal refused by the claim fence", body: `{"outcome":"finish","summary":"shipped it"}`, fenced: true, want: "fenced"},
-		{name: "idle park refused by the claim fence", body: "just thinking out loud, no envelope here", fenced: true, want: "fenced"},
+		{name: "concluded", stopReason: "end_turn", want: "concluded_continue"},
+		{name: "terminal refused by the claim fence", stopReason: "end_turn", fenced: true, want: "fenced"},
+		{name: "idle park refused by the claim fence", stopReason: "refusal", fenced: true, want: "fenced"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -519,7 +520,7 @@ func TestSDKTerminalNamesItsRuntime(t *testing.T) {
 			bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 			read := recordSpans(t)
-			completion := res(tc.body)
+			completion := &agentproc.Result{StopReason: tc.stopReason, Result: "shipped it"}
 			completion.CostUSD, completion.DurationMs, completion.NumTurns = 0.137, 4200, 3
 			s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, claimID,
 				loadTask(t, s, taskID), completion, t.TempDir(), nil, "", "event", "")

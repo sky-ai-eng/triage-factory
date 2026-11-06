@@ -216,14 +216,6 @@ type LiveRun struct {
 	stderr    string
 }
 
-// InteractiveSupported reports whether this host can run a LiveRun.
-// Unconditionally true; retained as the seam the delegate layer forks on
-// (runLiveAndDrive vs the one-shot runOneShot fallback) so that fallback stays
-// reachable if a future host ever needs it.
-func InteractiveSupported() bool {
-	return true
-}
-
 // RunInteractive spawns the agent in streaming-input mode and returns a
 // LiveRun the caller steers. The reader loop runs in a background
 // goroutine; the call returns as soon as the subprocess is started.

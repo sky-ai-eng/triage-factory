@@ -1,8 +1,6 @@
 // Run-memory file reading — mirrored into conversation_memory as the agent
 // writes it and read once more at termination — and the cross-run task-memory
-// materializer a fresh agent invocation reads as ambient context. (The
-// completion envelope's bounded re-prompt-to-fix lives on the live driver —
-// see live.go.)
+// materializer a fresh agent invocation reads as ambient context.
 
 package delegate
 
@@ -24,19 +22,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
-
-// maxCompletionRetries is the hard cap on how many times the live driver
-// re-prompts a run to fix an invalid completion envelope (malformed JSON, an
-// unrecognized outcome, or a recognized outcome missing its required
-// companion field) before parking it and aborting its blueprint (see
-// processCompletion). Three gives a model that fumbled the
-// contract real chances to correct without spending unbounded turns on one
-// that's ignoring it. Not a config knob because no one needs to tune it
-// per-run. A turn that ends with NO envelope attempt is not retried — the run
-// is left open (see driveLiveConversation). The live driver's results-channel buffer is
-// sized off this (resultsBufferDepth in live.go); keep that in mind if you bump
-// it.
-const maxCompletionRetries = 3
 
 // workspaceKey is the key that groups everything the conversations of one task
 // share: the run tree on disk and its workspace snapshot blob. It is the task

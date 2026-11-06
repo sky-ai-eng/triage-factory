@@ -46,8 +46,8 @@ func TestMergeResult_DispositionIsSticky(t *testing.T) {
 }
 
 // TestMergeResult_TerminalIsTheNewestTurns: how a turn ended is that turn's
-// alone, so the fold carries the newest turn's Terminal, cleared when that
-// turn had none.
+// alone, so the fold carries the newest turn's Terminal and StopReason,
+// cleared when that turn had none.
 func TestMergeResult_TerminalIsTheNewestTurns(t *testing.T) {
 	stop := &Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "blocked"}
 	if merged := MergeResult(&Result{}, &Result{Terminal: stop}); merged.Terminal != stop {
@@ -55,5 +55,8 @@ func TestMergeResult_TerminalIsTheNewestTurns(t *testing.T) {
 	}
 	if merged := MergeResult(&Result{Terminal: stop}, &Result{}); merged.Terminal != nil {
 		t.Errorf("Terminal = %+v, want none: the newest turn did not end on one", merged.Terminal)
+	}
+	if merged := MergeResult(&Result{StopReason: "refusal"}, &Result{}); merged.StopReason != "" {
+		t.Errorf("StopReason = %q, want the newest turn's (none)", merged.StopReason)
 	}
 }

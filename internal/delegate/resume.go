@@ -317,6 +317,11 @@ type ResumeOptions struct {
 	// queue if the message never reaches the agent
 	// (agentproc.RunOptions.OnOpeningUnsent); nil when it carries none.
 	openingUnsent func()
+
+	// nudge is the resumed turn's would-stop hook (liveRunSpec.nudge), built
+	// by the dispatcher, which holds the task and the step's position; nil
+	// asks nothing.
+	nudge func(context.Context) string
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -521,29 +526,24 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
-	// is interruptible/steerable), falling back to the one-shot sandbox path
-	// in multi mode. It runs under the same engagement as the claim that
-	// routed it here, so the same stall watchdog bounds it.
-	var out liveOutcome
-	if agentproc.InteractiveSupported() {
-		out = s.runLiveAndDrive(ctx, liveRunSpec{
-			park: liveParkContext{
-				orgID:          orgID,
-				conversationID: conversationID,
-				namespace:      opts.Namespace,
-				claudeCwd:      cwd,
-				claimID:        opts.claimID,
-				runtime:        domain.ConversationRuntimeSDK,
-				mirror:         opts.mirror,
-			},
-			opts:   baseOpts,
-			perms:  perms,
-			sink:   sink,
-			mirror: opts.mirror,
-		})
-	} else {
-		out = s.runOneShot(ctx, baseOpts, sink)
-	}
+	// is interruptible/steerable). It runs under the same engagement as the
+	// claim that routed it here, so the same stall watchdog bounds it.
+	out := s.runLiveAndDrive(ctx, liveRunSpec{
+		park: liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			namespace:      opts.Namespace,
+			claudeCwd:      cwd,
+			claimID:        opts.claimID,
+			runtime:        domain.ConversationRuntimeSDK,
+			mirror:         opts.mirror,
+		},
+		opts:   baseOpts,
+		perms:  perms,
+		sink:   sink,
+		mirror: opts.mirror,
+		nudge:  opts.nudge,
+	})
 
 	// A fence trip on this path — the sink's refused insert, or the driver's
 	// refused park — surfaces as an outcome with no completion, and the caller

@@ -21,7 +21,7 @@ func launchBlock(mission string) string {
 		mission,
 		runContext("Repository: owner/repo\nPR: #7", "/work", "", "tfac/SKY-9", "https://tf.example/runs/r-1", "", ""),
 		agentprompt.GitHubToolsReference(),
-		agentprompt.NonTerminalCompletion(machinistSpec()),
+		agentprompt.NonTerminalCompletion(),
 	)
 }
 
@@ -61,7 +61,7 @@ func TestResumeAppend_IsTheLaunchAppendByteForByte(t *testing.T) {
 	if !strings.Contains(resumeAppend, "review the pull request and leave a summary") {
 		t.Error("the resumed turn carries no mission")
 	}
-	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion(machinistSpec()))
+	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
 	if addendum == "" {
 		t.Fatal("the SDK runtime composes no non-terminal addendum to look for")
 	}

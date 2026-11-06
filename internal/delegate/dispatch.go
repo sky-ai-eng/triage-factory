@@ -1220,9 +1220,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	stepConversation.Model = conv.Model
 	// Same predicate reactToStepTerminal uses to leave the blueprint running: an
 	// `open` step with no verdict is dormant, not done, so its staged skill
-	// stays for the resume. A concluded one has given its answer, and so has
-	// one parked on an envelope that never validated.
-	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() && !stepConversation.ParkedOnInvalidEnvelope()
+	// stays for the resume. A concluded one has given its answer.
+	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded()
 	s.reactToStepTerminal(ctx, orgID, br, *stepConversation, cfg, startTime)
 }
 
@@ -1497,6 +1496,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		claimID:           conv.ClaimID,
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
+		nudge:             turnEndNudge(s.artifactContractNudge(orgID, conv.ID, *task, s.resumedStepIsFinal(stepCtx, orgID, conv))),
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		if leaseFenced(stepCtx) {
@@ -1579,9 +1579,7 @@ func resumeParkContext(ctx context.Context, orgID string, conv *domain.Conversat
 // that has reached a terminal (or parked) state, advance the blueprint_run.
 // The post-step switch:
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
-// parked on an invalid envelope→abort, open→leave parked — now driven by the
-// DB rather than a
-// goroutine stack. None of those transitions touches the task's board column:
+// open→leave parked — now driven by the DB rather than a goroutine stack. None of those transitions touches the task's board column:
 // the delegation placed it in_progress at mint and it stays there until a
 // terminal closes it.
 func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversation domain.Conversation, cfg runConfig, startTime time.Time) {
@@ -1632,17 +1630,6 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	if br.CancelRequested {
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusCancelled, "cancelled", &stepIdx, false)
-		return
-	}
-
-	// Parked on a completion envelope that never validated: the agent broke
-	// the workflow's contract, which is the blueprint's fault to carry, not
-	// the conversation's. Abort it, which leaves the task open for a person;
-	// the conversation stays parked with no verdict, and a message on it
-	// re-opens the blueprint while the task is open.
-	if stepConversation.ParkedOnInvalidEnvelope() {
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
-			domain.BlueprintRunStatusAborted, invalidEnvelopeAbortReason, &stepIdx, false)
 		return
 	}
 

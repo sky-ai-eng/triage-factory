@@ -44,7 +44,7 @@ type Surface string
 
 const (
 	// SurfaceMachinist is the delegated agent that executes a task's mission
-	// in an isolated worktree and terminates with a completion envelope.
+	// in an isolated worktree, as one step of a blueprint.
 	SurfaceMachinist Surface = "machinist"
 )
 

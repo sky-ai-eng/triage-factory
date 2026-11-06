@@ -86,7 +86,7 @@ func (f twoConversationTask) stageReview(t *testing.T, conversationID string) {
 // terminal step.
 func (f twoConversationTask) nudge(t *testing.T) string {
 	t.Helper()
-	check := f.spawner.artifactContractNudge(runmode.LocalDefaultOrgID, "run-2", domain.Task{EntitySource: "github"}, runConfig{})
+	check := f.spawner.artifactContractNudge(runmode.LocalDefaultOrgID, "run-2", domain.Task{EntitySource: "github"}, true)
 	if check == nil {
 		t.Fatal("a GitHub task's terminal step expects an artifact, so the check must be armed")
 	}

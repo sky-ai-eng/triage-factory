@@ -653,7 +653,7 @@ func (f stallFixture) startSDK(t *testing.T) sdkStallRun {
 		done <- f.s.driveLiveConversation(f.claimCtx, liveParkContext{
 			orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
 			runtime: domain.ConversationRuntimeSDK,
-		}, proc, make(chan *agentproc.Result))
+		}, proc, make(chan *agentproc.Result), nil)
 	}()
 	return sdkStallRun{sink: sink, proc: proc, done: done}
 }

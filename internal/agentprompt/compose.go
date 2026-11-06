@@ -121,26 +121,18 @@ func Build(spec Spec) string {
 	return static + "\n"
 }
 
-// nonTerminalCompletions is the handoff addendum per runtime, resolved once at
-// init for the same reason staticPrompts is — it is read on every non-final
-// blueprint step dispatch and never varies.
-var nonTerminalCompletions = func() map[Runtime]string {
-	out := map[Runtime]string{}
-	for _, runtime := range []Runtime{RuntimeSDK, RuntimeNative} {
-		if p := nonTerminalBlock(Spec{Runtime: runtime}); p != "" {
-			out[runtime] = block(p) + "\n"
-		}
-	}
-	return out
-}()
+// nonTerminalCompletion is the handoff addendum, resolved once at init for the
+// same reason staticPrompts is — it is read on every non-final blueprint step
+// dispatch and never varies.
+var nonTerminalCompletion = block(blockCompletionNonTerminal) + "\n"
 
 // NonTerminalCompletion returns the completion-contract addendum for a step
-// that hands off to a later blueprint step instead of concluding the run, or
-// "" when spec's runtime has no such block yet.
+// that hands off to a later blueprint step instead of concluding the run. One
+// text for both runtimes, which conclude a step the same way.
 //
-// It is exported because both runtimes deliver it on a channel of their own —
-// the SDK on --append-system-prompt, the native loop in its per-conversation
-// system block — so every caller needs the addendum by itself.
-func NonTerminalCompletion(spec Spec) string {
-	return nonTerminalCompletions[spec.Runtime]
+// It is exported because it is not part of Build's composition: both runtimes
+// carry it in the conversation's own system block rather than the shared
+// prefix, so every caller needs the addendum by itself.
+func NonTerminalCompletion() string {
+	return nonTerminalCompletion
 }

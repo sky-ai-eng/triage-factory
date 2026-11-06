@@ -1,14 +1,12 @@
 // Generic agent execution loop and the post-stream branching that turns a
-// terminal completion into the right DB state — record the parsed outcome,
+// terminal completion into the right DB state — record the step's verdict,
 // finalize the conversation row, and snapshot a voluntarily-aborted
 // conversation for resume. A queued draft PR / pending review is an async
 // sidecar deliverable that never parks the conversation — the step completes with
 // its real outcome and the orchestrator advances. Shared between the initial
-// Delegate path and the resume-with-message flow. The concluded-vs-open turn
-// classification and the
-// invalid-envelope re-prompt live on the live driver (live.go); by the time a
-// result reaches processCompletion it is a conclusion (or an IsError / crash
-// result), never an open turn-end.
+// Delegate path and the resume-with-message flow. The live driver (live.go)
+// decides which turn-end to act on; processCompletion classifies it
+// (classifyTurn) and records what it means.
 
 package delegate
 
@@ -659,31 +657,25 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		perms = s.BrowserPermissionHandler(orgID, conversationID, cfg.claimID, s.resolveAbsentAutoDeny(ctx, teamID))
 	}
 
-	// Execute as a long-lived LiveRun — both local direct runs and multi-mode
-	// gVisor-sandboxed runs drive through the streaming-input path (the
-	// sandbox's bidirectional stdio channel is validated end-to-end).
-	// runOneShot is retained only as the seam InteractiveSupported forks on,
-	// for a future host that can't support the streaming path.
-	var out liveOutcome
-	if agentproc.InteractiveSupported() {
-		out = s.runLiveAndDrive(ctx, liveRunSpec{
-			park: liveParkContext{
-				orgID:          orgID,
-				conversationID: conversationID,
-				namespace:      namespace,
-				claudeCwd:      claudeCwd,
-				claimID:        cfg.claimID,
-				runtime:        domain.ConversationRuntimeSDK,
-				mirror:         mirror,
-			},
-			opts:   baseOpts,
-			perms:  perms,
-			sink:   sink,
-			mirror: mirror,
-		})
-	} else {
-		out = s.runOneShot(ctx, baseOpts, sink)
-	}
+	// Execute as a long-lived LiveRun: TF tools, steering and interrupts all
+	// ride the streaming-input path, and a run that cannot call stop_blueprint
+	// has no way to abort.
+	out := s.runLiveAndDrive(ctx, liveRunSpec{
+		park: liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			claimID:        cfg.claimID,
+			runtime:        domain.ConversationRuntimeSDK,
+			mirror:         mirror,
+		},
+		opts:   baseOpts,
+		perms:  perms,
+		sink:   sink,
+		mirror: mirror,
+		nudge:  turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, cfg.appendSysPrompt == "")),
+	})
 
 	// Fenced out mid-stream: the claim this engagement holds was released and
 	// a successor is driving the conversation. Every branch below records
@@ -930,35 +922,25 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 	return blocks, nil
 }
 
-// processCompletion is the single disposition authority for a result, whatever
-// backend produced it (the live driver, the one-shot sandbox fallback, or a
-// resume). It classifies the turn-end and acts uniformly:
+// processCompletion is the single disposition authority for an SDK result,
+// from an initial run or a resume alike. It classifies the turn-end
+// (classifyTurn) and acts uniformly:
 //
-//   - valid conclusion → record the step's verdict, which parks the
-//     conversation `open` with the conclusion stamped (a conversation never
-//     concludes; its blueprint run, which the orchestrator advances or
-//     closes off this verdict, does). A queued review/PR is an async sidecar
-//     deliverable and changes nothing here; the step records its real outcome.
-//   - no conclusion (prose / nothing) → the run is open, not a termination:
-//     park it open (snapshot + flip + keep the warm worktree) and return.
-//     Every backend hands its no-conclusion turn here with the process
-//     already closed — the live driver included, which is what lets the flip
-//     land after the process is gone rather than under it.
-//   - invalid attempt (an envelope the driver could not get corrected, or
-//     one a backend with no re-prompt produced) → park it open with no
-//     verdict and the invalid_envelope reason. The transcript is whole, so
-//     nothing failed: the agent broke the workflow's contract, and the
-//     blueprint reactor reads the reason and aborts the blueprint, leaving
-//     the conversation for a person to ask again.
+//   - a verdict (stop_blueprint's, or `continue` on a turn the model ended
+//     itself) → record it, which parks the conversation `open` with the
+//     conclusion stamped (a conversation never concludes; its blueprint run,
+//     which the orchestrator advances or closes off this verdict, does). A
+//     queued review/PR is an async sidecar deliverable and changes nothing
+//     here; the step records its real outcome.
+//   - a turn the model did not finish (a refusal, the output limit, an
+//     unrecognized stop reason) → not a termination: write a note saying why,
+//     park it open (snapshot + flip + keep the warm worktree) and return. The
+//     live driver hands it here with the process already closed, which is
+//     what lets the flip land after the process is gone rather than under it.
 //   - IsError → record failed (a knowable error) with the totals already
 //     folded onto the result. runAgent hands an IsError result whose
 //     provider was unavailable (sdkProviderUnavailable) back to the queue
 //     before calling this; the resume path does not, and fails it here.
-//
-// Keeping the disposition here — rather than in the live driver — is what makes
-// the non-live backends honest: a one-shot/resume turn that ends open or with a
-// malformed envelope is no longer mis-recorded as a clean NULL-outcome
-// completion (which would wrongly advance/close a final step).
 //
 // blueprintRunID is the run's blueprint run (cfg.blueprintRunID for an initial
 // run, the resumed run's blueprint_run_id for a resume). It's the authoritative
@@ -974,9 +956,8 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 //
 // Returns parked: true when the turn ended dormant (open, no verdict, nothing
 // for the blueprint to act on), which is what keeps the session JSONL on disk
-// as the warm resume cache. A verdict, a failure or an invalid envelope
-// (including a verdict that produced a draft PR / pending review) returns
-// false — the step has given the only answer it is going to, the blueprint
+// as the warm resume cache. A verdict or a failure (including a verdict that
+// produced a draft PR / pending review) returns false — the step has given the only answer it is going to, the blueprint
 // acts on it, and the deliverable is a resolvable sidecar, not a reason to keep
 // the tree warm.
 //
@@ -1055,19 +1036,23 @@ func (s *Spawner) processCompletion(
 	// transient read error.
 	namespace := workspaceKey(task.ID)
 
-	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
-	// NOT a termination — the run is open. Park it open (snapshot for the
-	// cold-resume backstop, flip the status, keep the warm worktree) and skip the
-	// terminal bookkeeping below. An IsError result is always a termination, so
-	// it never takes this branch however envelope-shaped its text.
+	// Classify the turn-end up front. A turn the model did not finish (its stop
+	// reason is not an end of turn) is NOT a termination: the run parks open
+	// where a person can see it, with a note on the transcript saying why
+	// (snapshot for the cold-resume backstop, flip the status, keep the warm
+	// worktree), and the terminal bookkeeping below is skipped. An IsError
+	// result is always a termination, so it never takes this branch.
 	//
-	// A refused park is reported as fenced, not swallowed: the row belongs to
-	// a successor, so nothing here — not the terminal, not the blueprint
-	// advance the caller would run on a plain park — is this engagement's to
-	// decide. parked stays true either way, because that is what keeps the
-	// workspace on disk for whoever holds the conversation now.
-	class, parsed := classifyTurn(completion)
-	if !completion.IsError && class == turnNone {
+	// A refused note or park is reported as fenced, not swallowed: the row
+	// belongs to a successor, so nothing here — not the terminal, not the
+	// blueprint advance the caller would run on a plain park — is this
+	// engagement's to decide. parked stays true either way, because that is
+	// what keeps the workspace on disk for whoever holds the conversation now.
+	class, verdict := classifyTurn(completion)
+	if !completion.IsError && class == turnParked {
+		if s.insertClaimStopNote(ctx, orgID, conversationID, claimID, creatorUserID, stopReasonParkNotice(completion.StopReason)) {
+			return true, true
+		}
 		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -1080,41 +1065,6 @@ func (s *Spawner) processCompletion(
 			mirror:         mirror,
 		}, sessionID)
 		return true, fencedOut
-	}
-
-	// An envelope attempt that never validated. The live driver re-prompts it
-	// in place up to maxCompletionRetries; a backend that can't (one-shot,
-	// resume) or that exhausted the bound lands here. The transcript is whole,
-	// so this is not the runtime failing: it parks `open` with no verdict,
-	// snapshot first, like the no-conclusion turn above, and the reason it
-	// records is what the blueprint reactor aborts the blueprint on. Never a
-	// NULL-outcome conclusion, which the reactor would read as a clean finish
-	// on a final step. "No verdict" includes one an earlier engagement left:
-	// a follow-up on a step whose blueprint did not re-open still carries it,
-	// and the park withdraws it rather than letting the row read concluded on
-	// an outcome this turn never gave.
-	//
-	// parked comes back false: the step has given the only answer it will,
-	// and the blueprint acts on it (the resume path finalizes only on a
-	// non-park). The snapshot the park writes is the resume path.
-	if !completion.IsError && class == turnInvalid {
-		terminal = "invalid_envelope"
-		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
-			orgID:          orgID,
-			conversationID: conversationID,
-			namespace:      namespace,
-			claudeCwd:      claudeCwd,
-			claimID:        claimID,
-			reason:         db.ParkInvalidEnvelope(),
-			runtime:        domain.ConversationRuntimeSDK,
-			costUSD:        completion.CostUSD,
-			mirror:         mirror,
-		}, sessionID)
-		if fencedOut {
-			return true, true
-		}
-		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s stopped: its completion envelope never validated. Send a message to try again.", shortConversationID(conversationID)))
-		return false, false
 	}
 
 	// The agent's own memory file, one last time — the mirror has been filing
@@ -1160,16 +1110,13 @@ func (s *Spawner) processCompletion(
 		status = domain.StatusFailed
 		failureKind = domain.ConversationFailureAgentError
 		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
-	default: // turnValid — every other non-error turn parked above
-		resultSummary = parsed.Summary
-		outcome = parsed.Outcome
-		// An envelope's reason is recorded on an abort only, the one outcome
-		// the contract asks it of. A stop_blueprint call states one for
-		// either ending, and it is recorded either way, as on the native
-		// runtime.
-		if completion.Terminal != nil || domain.ConversationOutcome(parsed.Outcome) == domain.ConversationOutcomeAbort {
-			outcomeReason = parsed.Reason
-		}
+	default: // turnConcluded — every other non-error turn parked above
+		resultSummary = verdict.Summary
+		outcome = string(verdict.Outcome)
+		// stop_blueprint states a reason for either ending, and it is
+		// recorded either way, as on the native runtime. A turn that
+		// concluded on its own carries none.
+		outcomeReason = verdict.Reason
 	}
 
 	// The classification is settled; carry it onto the terminal span. A

@@ -1,9 +1,8 @@
-// Live-run execution: every run executes as a long-lived agentproc.LiveRun
-// (a streaming-input process you can message/interrupt) rather than a
-// one-shot blocking call. The driver here turns one live invocation into a
-// terminal disposition — a turn-terminal result, a park, or a process exit —
-// and feeds the shared post-stream branching (processCompletion) exactly as
-// the one-shot path did.
+// Live-run execution: every SDK run executes as a long-lived
+// agentproc.LiveRun (a streaming-input process you can message/interrupt). The
+// driver here turns one live invocation into a terminal disposition — a
+// turn-terminal result, a park, or a process exit — and feeds the post-stream
+// branching (processCompletion).
 //
 // The process lives exactly as long as its engagement's claim. A turn that
 // ends without concluding closes the process and parks the conversation,
@@ -14,14 +13,6 @@
 // parked conversation has no claim, and every transcript write an engagement
 // makes is fenced on its claim: a process left alive past its park would be
 // killed by the fence on its next word.
-//
-// Two execution backends share one disposition shape (liveOutcome): the
-// LiveRun driver (both local direct runs and multi-mode gVisor-sandboxed runs
-// drive through it — the sandbox's bidirectional stdio channel is validated
-// end-to-end) and the one-shot fallback, which runAgent and ResumeWithMessage
-// select via agentproc.InteractiveSupported(). That's unconditionally true
-// today, so the one-shot path is a vestigial seam kept for a future host that
-// can't support streaming input, not a live sandbox behavior.
 
 package delegate
 
@@ -44,9 +35,9 @@ import (
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
 // out as an interface so driveLiveConversation is unit-testable with a fake process
 // (no subprocess) — the real *agentproc.LiveRun satisfies it. Send delivers a
-// follow-up message into the same live process (used by the invalid-envelope
-// re-prompt-to-fix); QueuedTurns is how many messages sent into it are still
-// unanswered, which at a turn boundary is whether it owes another turn.
+// message into the same live process (the artifact nudge, see
+// driveLiveConversation); QueuedTurns is how many messages sent into it are
+// still unanswered, which at a turn boundary is whether it owes another turn.
 type liveProc interface {
 	Done() <-chan struct{}
 	Result() *agentproc.Result
@@ -105,14 +96,13 @@ type treeHandOff interface {
 	HandOffRunTree(ctx context.Context, root string) error
 }
 
-// liveOutcome is the disposition of one agent invocation, produced
-// identically by the LiveRun driver and the one-shot fallback so runAgent /
-// ResumeWithMessage branch on a single shape:
+// liveOutcome is the disposition of one agent invocation, the single shape
+// runAgent / ResumeWithMessage branch on:
 //
-//   - result set        → a turn produced a valid conclusion (or an IsError /
-//     crash result, or ended with no conclusion at all); the caller runs
-//     processCompletion (finalize / advance / fail-with-reason / park open).
-//     The process is already closed.
+//   - result set        → a turn produced its step's verdict, ended on a stop
+//     reason that is not an end of turn, or is an IsError / crash result; the
+//     caller runs processCompletion (finalize / advance / fail-with-reason /
+//     park open). The process is already closed.
 //   - hibernated true    → the driver parked the conversation open itself
 //     (snapshot written, status flipped) after a paused turn with nothing
 //     queued behind it. The caller returns dormant, keeping the worktree.
@@ -121,8 +111,7 @@ type treeHandOff interface {
 //     hibernated, because nothing was parked; the caller records nothing at
 //     all and leaves the workspace where it is.
 //   - err set, no result → the process errored / was cancelled before any
-//     terminal result, or the agent never corrected an invalid conclusion
-//     envelope within the bound; the caller routes through parkConversationOpen /
+//     terminal result; the caller routes through parkConversationOpen /
 //     failConversation.
 type liveOutcome struct {
 	result     *agentproc.Result
@@ -149,6 +138,10 @@ type liveRunSpec struct {
 	// mirror is on park, so the engagement's ending sees whatever the last
 	// tool call did not.
 	mirror *memoryMirror
+	// nudge is the would-stop hook (artifactContractNudge), asked before a
+	// turn concludes on its own: a non-empty note is sent into the process
+	// and the run goes on. Nil asks nothing.
+	nudge func(context.Context) string
 }
 
 // sdkTFTools are the TF tools an SDK delegation is offered. Every SDK
@@ -160,14 +153,12 @@ func sdkTFTools() []tooldefs.Tool {
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
 // driver. Each turn produces one result and the driver consumes one per loop
-// iteration; the bounded re-prompt loop is sequential (read a turn, then send
-// its correction), so only a couple of results are ever unread at once. The
-// depth is defined as maxCompletionRetries plus headroom purely as a defensive
-// lower bound — it ties the two constants together so bumping the retry bound
-// can never silently drop the buffer below the in-flight turn count and start
-// shedding live turns. (The non-blocking send only ever sheds a turn the driver
-// has already moved past; see OnResult.)
-const resultsBufferDepth = maxCompletionRetries + 5
+// iteration, and the turns it waits on beyond the first are the ones a
+// message sent into the process owes: a steer, or the nudge. So only a couple
+// of results are ever unread at once, and the depth is headroom over that.
+// (The non-blocking send only ever sheds a turn the driver has already moved
+// past; see OnResult.)
+const resultsBufferDepth = 8
 
 // runLiveAndDrive starts an interactive agent process for the run, registers
 // it in the process registry so control ops can reach it, stamps executor
@@ -182,11 +173,10 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	results := make(chan *agentproc.Result, resultsBufferDepth)
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
-		// The driver consumes a result per turn: a conclusion closes the
-		// process and returns, an invalid one is re-prompted (the next turn
-		// produces the next result), and a no-conclusion turn closes it too
-		// unless a steered turn is queued behind it (then the next turn
-		// produces the next result). A full buffer means results are
+		// The driver consumes a result per turn: a conclusion or a park
+		// closes the process and returns, unless a turn is owed behind it (a
+		// steered message, or the nudge the driver just sent), and then the
+		// next turn produces the next result. A full buffer means results are
 		// arriving faster than the driver selects them; a non-blocking send
 		// keeps the reader goroutine moving.
 		// The driver only ever acts on the result it reads next, so an overflow
@@ -215,20 +205,20 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	// the lease layer horizontal scaling adds builds on this column).
 	s.stampExecutor(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 
-	out := s.driveLiveConversation(ctx, spec.park, lr, results)
+	out := s.driveLiveConversation(ctx, spec.park, lr, results, spec.nudge)
 	// Capture the final session id / stderr off the (now-closed) process for
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()
 	out.stderr = lr.Stderr()
 	out.costUSD = processSpend(lr)
 	// The driver hands back the per-turn result it decided on; the live process
-	// folds every turn (pause turns, re-prompt corrections, the conclusion)
+	// folds every turn (pause turns, steered and nudged turns, the conclusion)
 	// into its merged Result. Take ONLY the accounting fields from that fold —
-	// disposition (IsError, Subtype, StopReason, the envelope text,
+	// disposition (IsError, Subtype, StopReason, Terminal, the final text,
 	// Interrupted) stays with the turn the driver classified. Replacing the
 	// result wholesale would let MergeResult's sticky IsError from a benign
 	// interrupted (pause) turn flip a valid conclusion into status=failed
-	// downstream — processCompletion checks IsError before the envelope.
+	// downstream — processCompletion checks IsError before the verdict.
 	if out.result != nil {
 		if merged := lr.Result(); merged != nil {
 			out.result = foldAccounting(out.result, merged)
@@ -262,18 +252,17 @@ func processSpend(proc liveProc) float64 {
 }
 
 // driveLiveConversation is the select loop that resolves a live process into a
-// disposition by classifying each turn-end into one of three buckets:
+// disposition, one turn-end at a time:
 //
-//   - valid conclusion → close the process and hand the result back for
-//     orchestration (finalize / advance / fail-with-reason).
-//   - invalid conclusion attempt (envelope-shaped but malformed / missing a
-//     required field) → re-prompt the same live process to fix it, up to
-//     maxCompletionRetries; if it never corrects, hand the result back, and
-//     processCompletion parks the conversation and aborts its blueprint.
-//   - no conclusion (prose / nothing) → the run is open: close the process
-//     and hand the result back, and processCompletion parks the conversation
-//     with a snapshot. The next message wakes a fresh claim that resumes the
-//     same session by id.
+//   - a turn our own interrupt ended → a pause: the process closes and the
+//     conversation parks open itself (hibernated), unless a turn is owed.
+//   - an IsError result → handed back for processCompletion to fail.
+//   - a turn stop_blueprint ended → its verdict, handed back to orchestrate.
+//   - a turn the model ended itself → the step concludes `continue`, after
+//     the two checks the native loop makes before the same conclusion (see
+//     below), and is handed back.
+//   - a turn that ended on any other stop reason → handed back for
+//     processCompletion to park open with a note saying why.
 //
 // A turn-end only closes the process when the process owes nothing more. A
 // message steered in while the turn ran is queued by the SDK and starts the
@@ -284,9 +273,15 @@ func processSpend(proc liveProc) float64 {
 // conversation has released its claim and the fence would kill the process
 // on its first write.
 //
-// A paused turn (our own interrupt ended it) is a turn-end like the others:
-// with nothing queued the process closes and the conversation parks open,
-// and a queued steer is read next.
+// Before a turn concludes on its own, the driver asks what the native loop's
+// would-stop step asks. A person's message that arrived while the turn ran is
+// work the model has not seen, so the turn it owes runs first. Then nudge, the
+// would-stop hook: a note it returns is sent into the process and recorded on
+// the transcript, and the turn that answers it is the next one read. The hook
+// is asked until it has been answered once in this engagement: it reads the
+// recorded note back to know it has asked, and a note that failed to record
+// would otherwise be asked again on every turn. A stop_blueprint ending asks
+// neither, because the call is the verdict, as it is natively.
 //
 // A process that has stopped producing without ending its turn is the
 // engagement's stall watchdog's to decide (activity.go), not this loop's: the
@@ -297,9 +292,9 @@ func processSpend(proc liveProc) float64 {
 //
 // Pulled out from runLiveAndDrive so it can be driven with a fake proc +
 // hand-fed channels in tests, without spawning a subprocess.
-func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result) liveOutcome {
+func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, nudge func(context.Context) string) liveOutcome {
 	tracker := s.activityFor(park.conversationID)
-	invalidAttempts := 0
+	nudged := false
 
 	for {
 		select {
@@ -332,56 +327,40 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 				}
 				return liveOutcome{hibernated: true, costUSD: park.costUSD}
 			}
-			// An IsError result (max-turns, runtime error) is terminal
-			// regardless of envelope shape — hand it back; processCompletion
-			// fails it.
+			// An IsError result (max-turns, runtime error) is terminal —
+			// hand it back; processCompletion fails it.
 			if r.IsError {
 				_ = proc.Close()
 				return liveOutcome{result: r}
 			}
-			class, _ := classifyTurn(r)
-			switch class {
-			case turnValid:
-				// A valid conclusion: an envelope, or a stop_blueprint call
-				// that ended the turn at its batch. Close the process (freeing
-				// the session) and hand it to processCompletion to orchestrate.
-				_ = proc.Close()
-				return liveOutcome{result: r}
-
-			case turnInvalid:
-				if invalidAttempts >= maxCompletionRetries {
-					// Exhausted the re-prompt bound — hand the unfixed result back.
-					// processCompletion parks it with the totals the live process
-					// folded across the correction turns, rather than dropping them
-					// on a bare error return, and the reactor aborts the blueprint.
-					_ = proc.Close()
-					return liveOutcome{result: r}
-				}
-				// An envelope attempt that didn't validate — correct it in place on
-				// the live process and wait for the next turn.
-				invalidAttempts++
-				if err := proc.Send(ctx, invalidEnvelopeCorrection()); err != nil {
-					_ = proc.Close()
-					return liveOutcome{err: fmt.Errorf("re-prompt invalid completion envelope: %w", err)}
-				}
-				tracker.touch()
-
-			case turnNone:
-				if proc.QueuedTurns() > 0 {
-					// The turn ended, but a message steered in while it ran is
-					// queued and starts the next one — the conversation is
-					// still being driven, under the same claim.
-					continue
-				}
-				// The turn ended without a conclusion and nothing is queued
-				// behind it → the run is open (not executing, not concluded).
-				// Close the process and hand the result back; processCompletion
-				// parks the conversation with a snapshot, and the status flips
-				// only once the process is gone — so the row never reads open
-				// while a process that could still write to it is alive.
-				_ = proc.Close()
-				return liveOutcome{result: r}
+			if r.Terminal == nil && proc.QueuedTurns() > 0 {
+				// A message steered in while this turn ran is queued, and the
+				// process starts its turn next — the conversation is still
+				// being driven, under the same claim. Whatever this turn was
+				// about to conclude or park on, the model has not seen it.
+				continue
 			}
+			if r.Terminal == nil && sdkTurnFinished(r.StopReason) && nudge != nil && !nudged {
+				if note := nudge(ctx); note != "" {
+					sent, fenced := s.sendNudge(ctx, park, proc, note)
+					if fenced {
+						_ = proc.Close()
+						return liveOutcome{fenced: true, costUSD: processSpend(proc)}
+					}
+					if sent {
+						nudged = true
+						tracker.touch()
+						continue
+					}
+				}
+			}
+			// The step's verdict, or a turn processCompletion parks. Close the
+			// process (freeing the session) and hand the result back; the
+			// status flips only once the process is gone — so the row never
+			// reads open while a process that could still write to it is
+			// alive.
+			_ = proc.Close()
+			return liveOutcome{result: r}
 
 		case <-proc.Done():
 			// The process exited on its own (crash, or a Close from elsewhere).
@@ -391,15 +370,43 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 	}
 }
 
-// invalidEnvelopeCorrection is the message the driver re-prompts a warm run
-// with after a malformed / incomplete completion envelope. It names exactly
-// the contract the agent owes; the agent's position-specific system prompt
-// already told it which outcomes apply, so this just demands a well-formed
-// envelope. Kept terse because it rides the same session, not a fresh prompt.
-func invalidEnvelopeCorrection() string {
-	return "Your final message was not a valid completion envelope. Reply with ONLY a JSON object " +
-		"whose \"outcome\" is one of \"continue\", \"finish\", or \"abort\", carrying a \"summary\" " +
-		"(on finish/continue) or a \"reason\" (on abort), and no other text."
+// sendNudge sends the would-stop hook's note into the live process and records
+// it on the transcript, where the hook reads it back to know it has asked
+// (askedAboutArtifactAlready). Sent before it is recorded, as a steer is: a
+// row written for a message the process never took would say the agent was
+// asked something it was not.
+//
+// sent is false when the process would not take the note; the turn then
+// concludes as it would have without one. fenced is true when the claim fence
+// refused the row: a successor owns the conversation, and nothing more is this
+// engagement's to write.
+func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc liveProc, note string) (sent, fenced bool) {
+	if err := proc.Send(ctx, note); err != nil {
+		delegateLog.Warn("send the turn-end nudge failed; the turn concludes without it", "conversation", park.conversationID, "error", err)
+		return false, false
+	}
+	if s.conversations == nil {
+		return true, false // test fixture with no DB wired
+	}
+	msg := &domain.Message{
+		ConversationID: park.conversationID,
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeInjectionNudge,
+		Content:        note,
+	}
+	id, err := s.conversations.InsertMessageForClaimSystem(context.WithoutCancel(ctx), park.orgID, park.claimID, msg)
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused the nudge row — a successor owns this conversation; recording nothing",
+			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID)
+		return true, true
+	}
+	if err != nil {
+		delegateLog.Warn("record the turn-end nudge failed; the run goes on", "conversation", park.conversationID, "error", err)
+		return true, false
+	}
+	msg.ID = int(id)
+	s.broadcastMessage(park.orgID, park.conversationID, msg)
+	return true, false
 }
 
 // markConversationOpen flips a conversation's status to `open` under a race
@@ -505,9 +512,8 @@ func (s *Spawner) parkConversationOpenFlipped(ctx context.Context, park livePark
 	// Only the idle park toasts. A deliberate stop terminates the blueprint
 	// behind it, so "resumes on the next message" would be a promise this
 	// build cannot keep — the claim gate refuses a parked step under a
-	// finished blueprint until the resume work lands. An invalid envelope is
-	// news of its own, which its caller toasts.
-	if !park.reason.Deliberate && park.reason.Reason != domain.ParkReasonInvalidEnvelope {
+	// finished blueprint until the resume work lands.
+	if !park.reason.Deliberate {
 		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
 	return false, flipped
@@ -752,24 +758,6 @@ func (s *Spawner) settleEngagementSpend(ctx context.Context, park liveParkContex
 		delegateLog.Warn("settle engagement spend at park failed; spend unrecorded",
 			"conversation", park.conversationID, "claim_id", park.claimID, "cost_usd", park.costUSD, "error", err)
 	}
-}
-
-// runOneShot wraps the blocking one-shot agentproc.Run into the shared
-// liveOutcome shape. The fallback backend for hosts where interactive runs
-// aren't supported yet (multi-mode gVisor sandbox); behavior is byte-for-byte
-// the historical one-shot path.
-func (s *Spawner) runOneShot(ctx context.Context, opts agentproc.RunOptions, sink agentproc.Sink) liveOutcome {
-	outcome, err := agentproc.Run(ctx, opts, sink)
-	out := liveOutcome{err: err}
-	if outcome != nil {
-		out.result = outcome.Result
-		out.sessionID = outcome.SessionID
-		out.stderr = outcome.Stderr
-		if outcome.Result != nil {
-			out.costUSD = outcome.Result.CostUSD
-		}
-	}
-	return out
 }
 
 // activitySink decorates a Sink so the engagement's stall tracker hears the

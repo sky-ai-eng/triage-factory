@@ -128,10 +128,8 @@ func TestBlocks_NoOrphans(t *testing.T) {
 		for _, p := range paths {
 			referenced[p] = true
 		}
-		if p := nonTerminalBlock(spec); p != "" {
-			referenced[p] = true
-		}
 	}
+	referenced[blockCompletionNonTerminal] = true
 	for _, p := range walkBlocks(t) {
 		if !referenced[p] {
 			t.Errorf("block %s is not referenced by any manifest arm or accessor", p)
@@ -178,7 +176,7 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 	prev := -1
 	for _, section := range []string{
 		block(blockIdentityMachinistNv),
-		block(blockCompletionNative),
+		block(blockCompletion),
 	} {
 		at := strings.Index(got, section)
 		if at < 0 {
@@ -189,10 +187,10 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 		}
 		prev = at
 	}
-	if !strings.HasSuffix(strings.TrimRight(got, "\n"), block(blockCompletionNative)) {
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), block(blockCompletion)) {
 		t.Error("the completion contract is not the last thing in the composition")
 	}
-	if strings.Contains(got, strings.TrimSpace(block(blockCompletionNativeNT))) {
+	if strings.Contains(got, strings.TrimSpace(block(blockCompletionNonTerminal))) {
 		t.Error("the handoff addendum is composed into the shared prefix, forking it per step")
 	}
 }
