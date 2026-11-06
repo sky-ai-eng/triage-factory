@@ -183,6 +183,77 @@ func TestLiveRunSend_MarksRequest(t *testing.T) {
 	}
 }
 
+// TestParseLine_QueuedTurnMeasuresFromTheResult pins the mark a turn queued
+// behind another is measured from: the previous turn's result, when its
+// request goes out, not the previous turn's last line or the Send that queued
+// it. What the runtime does between a turn's last message and its result
+// (a Stop hook, say) is not the next turn's thinking.
+func TestParseLine_QueuedTurnMeasuresFromTheResult(t *testing.T) {
+	c := newStreamClock()
+	s := c.state()
+
+	c.advance(time.Second)
+	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"one"}]}}`), "t")
+	// A follow-up is sent while the turn is still running.
+	c.advance(500 * time.Millisecond)
+	s.MarkRequest()
+	c.advance(8 * time.Second)
+	s.ParseLine([]byte(`{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"one"}`), "t")
+
+	c.advance(2 * time.Second)
+	msgs, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m2","stop_reason":"end_turn","content":[{"type":"text","text":"two"}]}}`), "t")
+	if len(msgs) != 1 {
+		t.Fatalf("expected the queued turn's assistant row; got %d", len(msgs))
+	}
+	if got := durationOrFail(t, "queued turn", msgs[0].DurationMs); got != 2000 {
+		t.Errorf("queued turn DurationMs = %d, want 2000 (from the previous turn's result)", got)
+	}
+}
+
+// TestPermissionGate_ExcludedFromAnOpenMessage pins the gate on the stream's
+// default shape, where no block line reports a stop reason and the message's
+// row is still open while a person answers a prompt for one of its calls. The
+// row's later lines are read after the wait, and the wait is not the model's.
+func TestPermissionGate_ExcludedFromAnOpenMessage(t *testing.T) {
+	c := newStreamClock()
+	l := &LiveRun{stdin: nopWriteCloser{}, done: make(chan struct{}), ready: make(chan struct{}), stream: c.state()}
+	sink := &captureSink{}
+
+	lines := []string{
+		`{"type":"assistant","message":{"id":"m1","stop_reason":null,"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}`,
+		`{"type":"control","subtype":"permission_request","tool_call_id":"tu1","tool_name":"Bash","input":{}}`,
+		`{"type":"assistant","message":{"id":"m1","stop_reason":null,"content":[{"type":"tool_use","id":"tu2","name":"Read","input":{}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"out"},{"type":"tool_result","tool_use_id":"tu2","content":"file"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"done"}`,
+	}
+	// 3s of model time produces the gated call, a person takes 5m to answer,
+	// and the message's second call streams 1s after that.
+	src := &lineReader{lines: lines, before: func(i int) {
+		switch i {
+		case 0:
+			c.advance(3 * time.Second)
+		case 2:
+			c.advance(time.Second)
+		case 3:
+			c.advance(2 * time.Second)
+		}
+	}}
+	perms := func(PermissionRequest) PermissionDecision {
+		c.advance(5 * time.Minute)
+		return PermissionDecision{Behavior: "allow"}
+	}
+	if _, err := l.consumeStreamInteractive(src, sink, l.stream, perms, nil, "t"); err != nil {
+		t.Fatalf("consumeStreamInteractive: %v", err)
+	}
+
+	if len(sink.messages) != 3 || sink.messages[0].Role != "assistant" || len(sink.messages[0].ToolCalls) != 2 {
+		t.Fatalf("expected one assistant row with both calls, then their results; got %d rows", len(sink.messages))
+	}
+	if got := durationOrFail(t, "assistant", sink.messages[0].DurationMs); got != 4000 {
+		t.Errorf("assistant DurationMs = %d, want 4000 (3s before the prompt and 1s after it; the 5m wait, dropped)", got)
+	}
+}
+
 // gatedRun wires a live run whose permission handler takes `waited` on the
 // test clock to answer — the human standing at the prompt. It returns the
 // rows the reader produced from `lines`, which is the real wiring

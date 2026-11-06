@@ -640,8 +640,9 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					stream.DiscountGate(gateAt)
 				case "tool_batch":
 					// The batch's message has ended, so its row and the
-					// results held behind it reach the sink before the batch
-					// is answered.
+					// results held behind it go to the sink before the batch
+					// is answered, unless the stream has not read all of
+					// the message yet (ToolBatchDone).
 					deliverMessages(sink, stream.ToolBatchDone(ctl.ToolCallIDs))
 					l.handleToolBatch(ctl)
 				case "tool_batch_result":

@@ -191,15 +191,15 @@ func (s *StreamState) DiscountGate(at time.Time) {
 	}
 }
 
-// requestMark reads the current request mark.
 func (s *StreamState) requestMark() time.Time {
 	s.markMu.Lock()
 	defer s.markMu.Unlock()
 	return s.requestAt
 }
 
-// markRequestAtLeast moves the request mark to at, unless a later mark is
-// already set.
+// markRequestAtLeast never moves the mark back: a message's results can go
+// back after its last line, and the next request waits on the later of the
+// two.
 func (s *StreamState) markRequestAtLeast(at time.Time) {
 	s.markMu.Lock()
 	defer s.markMu.Unlock()
@@ -319,6 +319,9 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 
 	case "result":
 		out := s.flush()
+		// A turn queued behind this one goes out now, after the work the
+		// runtime does between a turn's last message and its result.
+		s.MarkRequest()
 		if s.observer != nil {
 			s.observer.OnTurnEnd()
 		}
