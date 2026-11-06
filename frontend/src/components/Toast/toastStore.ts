@@ -4,6 +4,8 @@
 // need live state; most callers just do `toast.error("...")` and move on.
 
 import type { ToastLevel, ToastLogAction, ToastLogItem } from '../../ui/toastlog/ToastLog'
+import { httpErrorMessage, requestOrigin } from '../../lib/apiClient'
+import { pageNameFor } from '../../lib/pageNames'
 
 export type { ToastLevel }
 
@@ -70,6 +72,19 @@ export const toastStore = {
 
 type Opts = { action?: ToastAction }
 
+/**
+ * The way back to the page a failed request was made from, when the viewer
+ * has since left it: the error is about that page, not the one it lands on.
+ * Undefined for an error no request tagged, or one that lands where it began.
+ * A page is its path; a change of query alone is the same page.
+ */
+export function backToOrigin(err: unknown): ToastAction | undefined {
+  const from = requestOrigin(err)
+  if (from === undefined || from.split('?')[0] === window.location.pathname) return undefined
+  const name = pageNameFor(from)
+  return { label: name ? `Back to ${name}` : 'Back to the page this came from', href: from }
+}
+
 // Convenience API — the 99% surface. Body first because most toasts are
 // body-only; the optional title is second, and the rare navigation action
 // rides in the third.
@@ -82,6 +97,18 @@ export const toast = {
     push({ level: 'warning', body, title, ...opts }),
   error: (body: string, title?: string, opts?: Opts) =>
     push({ level: 'error', body, title, ...opts }),
+  /**
+   * A failed request's error: the server's message, else `fallback` (a whole
+   * sentence, as for httpErrorMessage). When the request was made on a page
+   * the viewer has since left, the toast links back to it by name.
+   */
+  failed: (err: unknown, fallback: string, title?: string) =>
+    push({
+      level: 'error',
+      body: httpErrorMessage(err, fallback),
+      title,
+      action: backToOrigin(err),
+    }),
   dismiss,
   push,
 }

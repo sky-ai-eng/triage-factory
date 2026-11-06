@@ -274,7 +274,7 @@ export default function PromptDrawer({
 
       onSaved()
     } catch (err) {
-      toast.error(httpErrorMessage(err, `Could not ${isNew ? 'create' : 'save'} the prompt.`))
+      toast.failed(err, `Could not ${isNew ? 'create' : 'save'} the prompt.`)
     } finally {
       setSaving(false)
     }
@@ -297,9 +297,7 @@ export default function PromptDrawer({
       }
       onDeleted?.()
     } catch (err) {
-      toast.error(
-        httpErrorMessage(err, `Could not ${source === 'user' ? 'delete' : 'hide'} the prompt.`),
-      )
+      toast.failed(err, `Could not ${source === 'user' ? 'delete' : 'hide'} the prompt.`)
     } finally {
       setDeleting(false)
     }

@@ -93,6 +93,23 @@ try {
 }
 ```
 
+**A failed request reported as a toast goes through `toast.failed(err,
+fallback, title?)`**, not `toast.error(httpErrorMessage(err, fallback))`. It
+is the same message, and it knows where the request was made: `apiFetch` and
+`apiJSON` tag every error they throw with the page the call started on
+(`requestOrigin`), and when the viewer has left that page by the time the
+failure lands, the toast links back to it by the name the page's header gave
+it. A toast never retries: recovery lives on the surface that sent the
+request.
+
+```ts
+try {
+  await apiFetch(`/api/tasks/${encodeURIComponent(task.id)}/claim`, { method: 'POST', body: '{}' })
+} catch (err) {
+  toast.failed(err, 'Could not claim the task.')
+}
+```
+
 A module in `lib/` whose callers render `err.message` directly wraps this once
 (`asError` in `lib/githubApp.ts`, `lib/jiraApp.ts`, `lib/teamLifecycle.ts`)
 rather than letting an `HttpError` escape.

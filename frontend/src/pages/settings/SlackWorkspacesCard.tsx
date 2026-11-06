@@ -267,7 +267,7 @@ function WorkspaceRow({
       toast.success(`${label} disconnected`)
       onRemoved()
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not disconnect the workspace.'))
+      toast.failed(e, 'Could not disconnect the workspace.')
       setBusy(false)
     }
   }
@@ -628,7 +628,7 @@ function CopyManifestButton({
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not build the manifest.'))
+      toast.failed(e, 'Could not build the manifest.')
     } finally {
       setBusy(false)
     }

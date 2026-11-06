@@ -23,7 +23,6 @@ import { useState } from 'react'
 import { toast } from '../../components/Toast/toastStore'
 import ModelAvailabilityBadge from '../../components/ModelAvailabilityBadge'
 import { refreshModelCatalog, useModelCatalog } from '../../hooks/useModelCatalog'
-import { httpErrorMessage } from '../../lib/apiClient'
 import {
   availabilityHelp,
   lacksPromptCaching,
@@ -75,7 +74,7 @@ export default function ModelAvailabilityPanel({ orgId }: { orgId: string | null
           )
       }
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'The test could not be run.'))
+      toast.failed(e, 'The test could not be run.')
     } finally {
       setTesting('')
     }

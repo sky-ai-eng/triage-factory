@@ -142,7 +142,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
       setTick((t) => t + 1)
       onDeliverableResolved?.()
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not dismiss the deliverable.'))
+      toast.failed(err, 'Could not dismiss the deliverable.')
     } finally {
       setDismissing((m) => {
         const next = { ...m }

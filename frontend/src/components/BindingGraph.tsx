@@ -18,7 +18,7 @@ import '@xyflow/react/dist/style.css'
 import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, apiListAll } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useEventSources } from '../hooks/useEventSources'
 import { sourceLabel } from '../lib/eventSources'
@@ -772,7 +772,7 @@ function BindingGraphInner({
         saveLayout(storageKeyRef.current, layout)
         fetchAll()
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not remove the event.'))
+        toast.failed(err, 'Could not remove the event.')
       }
     },
     [fetchAll],
@@ -821,7 +821,7 @@ function BindingGraphInner({
       })
       return true
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not delete the blueprint.'))
+      toast.failed(err, 'Could not delete the blueprint.')
       return false
     }
   }, [])
@@ -839,7 +839,7 @@ function BindingGraphInner({
         const body = (await res.json().catch(() => null)) as { orphaned_blueprint?: boolean } | null
         return { ok: true, orphaned: !!body?.orphaned_blueprint }
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not delete the prompt.'))
+        toast.failed(err, 'Could not delete the prompt.')
         return { ok: false, orphaned: false }
       }
     },
@@ -1251,7 +1251,7 @@ function BindingGraphInner({
           })
           fetchAll()
         } catch (err) {
-          toast.error(httpErrorMessage(err, 'Could not create the trigger.'))
+          toast.failed(err, 'Could not create the trigger.')
         }
         return
       }
@@ -1267,7 +1267,7 @@ function BindingGraphInner({
           })
           await fetchAll()
         } catch (err) {
-          toast.error(httpErrorMessage(err, 'Could not merge the blueprints.'))
+          toast.failed(err, 'Could not merge the blueprints.')
         }
       })
     },
@@ -1347,7 +1347,7 @@ function BindingGraphInner({
           const count = newOrdered.length
           toast.success(`Duplicated ${count} prompt${count === 1 ? '' : 's'}`)
         } catch (err) {
-          toast.error(httpErrorMessage(err, 'Could not duplicate the selection.'))
+          toast.failed(err, 'Could not duplicate the selection.')
         }
       })
     },
@@ -1451,7 +1451,7 @@ function BindingGraphInner({
             onTriggerDeletedRef.current?.(deleted.event_type)
           }
         } catch (err) {
-          toast.error(httpErrorMessage(err, 'Could not remove the trigger.'))
+          toast.failed(err, 'Could not remove the trigger.')
         }
       })
     },
@@ -1470,7 +1470,7 @@ function BindingGraphInner({
           })
           await fetchAll()
         } catch (err) {
-          toast.error(httpErrorMessage(err, 'Could not split the blueprint.'))
+          toast.failed(err, 'Could not split the blueprint.')
         }
       })
     },
@@ -1491,7 +1491,7 @@ function BindingGraphInner({
           body: JSON.stringify({ blueprint_id: targetBlueprintId }),
         })
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not move the trigger.'))
+        toast.failed(err, 'Could not move the trigger.')
       } finally {
         fetchAll()
       }
@@ -1514,7 +1514,7 @@ function BindingGraphInner({
         })
         toast.info('Steps after the reconnect point are now a separate blueprint.')
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not reconnect the step.'))
+        toast.failed(err, 'Could not reconnect the step.')
       } finally {
         fetchAll()
       }

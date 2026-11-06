@@ -216,7 +216,9 @@ export default function Knowledge() {
             await deleteKnowledge(ref.teamId, ref.root, ref.path)
           }
         } catch (err) {
-          toast.error(httpErrorMessage(err, 'The change could not be saved.'), ref.path)
+          // TODO(TFAC-1345): the row this commit failed for has nothing that
+          // says so once the refetch puts it back; the toast is the only report.
+          toast.failed(err, 'The change could not be saved.', ref.path)
         }
       }
       // A refetch either way: on success it reconciles the optimistic removal
@@ -240,7 +242,10 @@ export default function Knowledge() {
         )
         reload()
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'The upload could not be saved.'), 'Upload failed')
+        // TODO(TFAC-1345): the dialog closed before this ran, so the files and
+        // folder the user chose are gone; the dialog should hold them and show
+        // the failure.
+        toast.failed(err, 'The upload could not be saved.', 'Upload failed')
         // An upload can fail part-way through a batch, so the listing is the
         // only honest answer about which documents actually landed.
         reload()

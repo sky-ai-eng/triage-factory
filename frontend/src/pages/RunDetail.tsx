@@ -13,7 +13,7 @@ import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import { GlassBackdrop } from './setup/glass'
 import { toast } from '../components/Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON } from '../lib/apiClient'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
 // task + messages (live over websocket via useConversationDetail), wires the real
@@ -126,7 +126,7 @@ export default function RunDetail() {
       await apiFetch(`/api/agent/conversations/${conversation.ID}/stop`, { method: 'POST' })
       softRefresh()
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not stop the run.'))
+      toast.failed(err, 'Could not stop the run.')
     } finally {
       setStopPending(false)
     }
@@ -146,7 +146,7 @@ export default function RunDetail() {
           body: JSON.stringify({ text }),
         })
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not send the message.'))
+        toast.failed(err, 'Could not send the message.')
       }
     },
     [conversation],
@@ -163,7 +163,7 @@ export default function RunDetail() {
       await apiFetch(`/api/tasks/${conversation.TaskID}/requeue`, { method: 'POST' })
       navigate(orgHref('/board'))
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
+      toast.failed(err, 'Could not return the task to the queue.')
     }
   }, [navigate, orgHref, conversation?.TaskID])
 

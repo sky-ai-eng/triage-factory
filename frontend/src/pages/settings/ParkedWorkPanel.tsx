@@ -26,7 +26,6 @@
 import { useState } from 'react'
 import { RotateCcw, XCircle } from 'lucide-react'
 import { toast } from '../../components/Toast/toastStore'
-import { httpErrorMessage } from '../../lib/apiClient'
 import { timeAgo } from '../../lib/relativeTime'
 import type { UseParkedWork, WorkItem, WorkStatusFilter } from '../../hooks/useParkedWork'
 
@@ -130,7 +129,7 @@ export default function ParkedWorkPanel({ state }: { state: UseParkedWork }) {
         return n
       })
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not redrive those items.'))
+      toast.failed(e, 'Could not redrive those items.')
     } finally {
       markInFlight(keys, false)
     }
@@ -151,7 +150,7 @@ export default function ParkedWorkPanel({ state }: { state: UseParkedWork }) {
       setCancelling(null)
       setReason('')
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not request that cancellation.'))
+      toast.failed(e, 'Could not request that cancellation.')
     } finally {
       markInFlight([key], false)
     }

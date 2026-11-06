@@ -18,11 +18,13 @@ vi.mock('../../../lib/apiClient', async (importOriginal) => {
 })
 
 const toasts = vi.hoisted(() => ({
-  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), failed: vi.fn() },
 }))
 vi.mock('../../../components/Toast/toastStore', () => toasts)
+reportFailedThroughError(toasts.toast)
 
 import SSOSettings from './SSOSettings'
+import { reportFailedThroughError } from '../../../test/toastDouble'
 
 const SP = {
   entity_id: 'https://tf.example.com/auth/v1/sso/saml/metadata',

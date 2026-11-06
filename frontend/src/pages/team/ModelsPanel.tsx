@@ -6,7 +6,6 @@ import { providerLabel } from '../../lib/models'
 import type { TeamModelConfig, TeamModelPatch } from '../../hooks/useTeamModelConfig'
 import type { TeamUsage } from '../../hooks/useTeamUsage'
 import { effectiveModelKeys, money, spendShares } from './models'
-import { httpErrorMessage } from '../../lib/apiClient'
 import { toast } from '../../components/Toast/toastStore'
 
 // CONFIGURED MODELS, opened: which of the organization's models this team may
@@ -67,8 +66,7 @@ export default function ModelsPanel({
   }, [models, config, enabledKeys, shares])
 
   const columns: TableColumn[] = useMemo(() => {
-    const fail = (e: unknown) =>
-      toast.error(httpErrorMessage(e, 'Could not save the model change.'))
+    const fail = (e: unknown) => toast.failed(e, 'Could not save the model change.')
     // The star is the same single-select mark the Jira status columns use for a
     // primary. It cannot be cleared, only moved: an unset step has to fall back
     // to something, so exactly one model always carries it. Every row offers

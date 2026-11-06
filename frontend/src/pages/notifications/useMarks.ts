@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from '../../components/Toast/toastStore'
-import { httpErrorMessage } from '../../lib/apiClient'
 import {
   BULK_MARKS_MAX,
   dismissNotifications,
@@ -103,7 +102,7 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
       for (const id of ids) next.delete(id)
       return next
     })
-    toast.error(httpErrorMessage(e, fallback))
+    toast.failed(e, fallback)
     reloadRef.current()
   }, [])
   const readFailed = useCallback(
@@ -154,7 +153,7 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
       mark([id], { read: false })
       setNotificationMarks(id, { read: false }).catch((e) => {
         unmark(id)
-        toast.error(httpErrorMessage(e, 'Could not mark that unread.'))
+        toast.failed(e, 'Could not mark that unread.')
       })
     },
     [mark, unmark],
@@ -165,9 +164,7 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
       mark([id], { dismissed })
       setNotificationMarks(id, { dismissed }).catch((e) => {
         unmark(id)
-        toast.error(
-          httpErrorMessage(e, dismissed ? 'Could not dismiss that.' : 'Could not restore that.'),
-        )
+        toast.failed(e, dismissed ? 'Could not dismiss that.' : 'Could not restore that.')
       })
     },
     [mark, unmark],

@@ -6,7 +6,6 @@ import EventBadge from './EventBadge'
 import NotifyRuleEditor from './NotifyRuleEditor'
 import type { NotifyHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { httpErrorMessage } from '../lib/apiClient'
 import {
   getNotifyRule,
   notifyRulesListPath,
@@ -84,7 +83,7 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
         if (rule.kind === 'notify') setEditing(rule)
         else toast.error(gone)
       },
-      (err) => toast.error(httpErrorMessage(err, gone)),
+      (err) => toast.failed(err, gone),
     )
   }, [open, openRuleId])
 
@@ -110,7 +109,7 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
         await updateNotifyRule(rule.id, { enabled: !prev })
       } catch (err) {
         setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-        toast.error(httpErrorMessage(err, 'Could not toggle the notify rule.'))
+        toast.failed(err, 'Could not toggle the notify rule.')
       }
     },
     [setMine, setTeam],

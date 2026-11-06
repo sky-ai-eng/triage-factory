@@ -261,7 +261,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         }, {}),
       )
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not save the carry-over selections.'))
+      toast.failed(err, 'Could not save the carry-over selections.')
     } finally {
       if (mountedRef.current) setSaving(false)
     }

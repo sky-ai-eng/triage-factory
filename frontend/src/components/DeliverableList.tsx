@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Deliverable } from '../types'
-import { httpErrorMessage } from '../lib/apiClient'
 import { dismissDeliverable } from '../lib/deliverables'
 import { usePagedList } from '../hooks/usePagedList'
 import { toast } from './Toast/toastStore'
@@ -122,7 +121,7 @@ export default function DeliverableList({
       await load(PAGE_REQUEST)
       onResolved?.()
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not dismiss the deliverable.'))
+      toast.failed(err, 'Could not dismiss the deliverable.')
     } finally {
       setDismissing((m) => {
         const next = { ...m }

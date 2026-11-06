@@ -36,7 +36,7 @@ import {
 import { gateModelSave, offerSweepAfterConnect } from '../../../lib/modelGate'
 import ModelAvailabilityPanel from '../ModelAvailabilityPanel'
 import { noteWrittenTeam, useWriteTeam } from '../../../hooks/useTeams'
-import { apiJSON, httpErrorMessage } from '../../../lib/apiClient'
+import { apiJSON } from '../../../lib/apiClient'
 import {
   hostOf,
   normalizeBaseUrl,
@@ -1420,7 +1420,7 @@ function SkillsImport() {
         )
       }
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not import the skills.'))
+      toast.failed(err, 'Could not import the skills.')
     } finally {
       setImporting(false)
     }
@@ -1481,7 +1481,7 @@ function SkillPasteImport() {
       setContent('')
       if (fileRef.current) fileRef.current.value = ''
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not import the skill.'))
+      toast.failed(err, 'Could not import the skill.')
     } finally {
       setSubmitting(false)
     }
