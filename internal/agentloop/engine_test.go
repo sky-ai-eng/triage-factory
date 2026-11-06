@@ -1255,13 +1255,30 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		if calls := host.calls(); len(calls) != 1 || calls[0] != "write" {
 			t.Fatalf("the paired work must still run: %v", calls)
 		}
-		// The stop's own result said the run was stopping, so the next call
-		// reads a note saying it did not.
-		note := tr.find(func(m domain.Message) bool {
-			return m.Subtype == domain.MessageSubtypeInjectionSystemNote && m.Content == tooldefs.StopBlueprintNotHeededNote
-		})
-		if note == nil || !isDelivered(*note) {
-			t.Fatalf("want the not-heeded note delivered to the next call, got %+v", note)
+		// The stop is answered as not having ended the run, in its own result.
+		stop := tr.find(func(m domain.Message) bool { return m.ToolCallID == "c2" })
+		if stop == nil || !stop.IsError || stop.Content != tooldefs.StopBlueprintNotAlone {
+			t.Fatalf("the paired stop's result = %+v, want it told the run did not end", stop)
+		}
+	})
+
+	t.Run("two stops in one message do not terminate", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		stop := func(id string) domain.ToolCall {
+			return domain.ToolCall{ID: id, Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "r", "summary": "s"}}
+		}
+		p := &scriptedProvider{turns: []scriptedTurn{
+			{calls: []domain.ToolCall{stop("c1"), stop("c2")}},
+			{text: "carrying on"},
+		}}
+		got := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), testParams())
+		if got.Outcome != domain.ConversationOutcomeContinue {
+			t.Fatalf("a stop that is not its message's only call must not end the run: %+v", got)
+		}
+		for _, r := range tr.toolResults() {
+			if r.Content != tooldefs.StopBlueprintNotAlone {
+				t.Errorf("result for %s = %q, want the not-alone answer", r.ToolCallID, r.Content)
+			}
 		}
 	})
 

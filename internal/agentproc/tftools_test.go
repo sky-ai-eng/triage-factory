@@ -438,16 +438,28 @@ func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(
 	}
 }
 
-// TestBatchTerminal_AnIDLessCallKeepsTheBatchGoing: the wrapper names a call
-// with no tool_use id as "", and that call counts as one that did not end the
-// run, so a stop_blueprint beside it does not stop the batch.
-func TestBatchTerminal_AnIDLessCallKeepsTheBatchGoing(t *testing.T) {
+// TestBatchTerminal_OnlyASoloCallEndsTheRun: a batch ends the run only when it
+// is one call that recorded an ending. Beside another call it does not, even
+// one the wrapper could not identify (named "") or another ending; held still
+// reports the ending so the batch can say the stop did not take effect.
+func TestBatchTerminal_OnlyASoloCallEndsTheRun(t *testing.T) {
+	end := Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"}
 	l := &LiveRun{}
-	l.recordTerminal("toolu_A", Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"})
-	if _, stop, _ := l.batchTerminal([]string{"toolu_A", ""}); stop {
-		t.Error("a batch with an id-less call stopped the turn")
+	for _, batch := range [][]string{{"toolu_A", ""}, {"toolu_B", "toolu_C"}} {
+		for _, id := range batch {
+			if id != "" {
+				l.recordTerminal(id, end)
+			}
+		}
+		if _, stop, held := l.batchTerminal(batch); stop || !held {
+			t.Errorf("batch %v: stop=%v held=%v, want no stop with the ending held", batch, stop, held)
+		}
 	}
-	if _, stop, _ := l.batchTerminal(nil); stop {
-		t.Error("a batch naming no calls stopped the turn")
+	if _, stop, held := l.batchTerminal(nil); stop || held {
+		t.Error("a batch naming no calls stopped the turn or held an ending")
+	}
+	l.recordTerminal("toolu_D", end)
+	if got, stop, _ := l.batchTerminal([]string{"toolu_D"}); !stop || got != end {
+		t.Errorf("solo batch: stop=%v ending=%+v, want it to end the run with %+v", stop, got, end)
 	}
 }

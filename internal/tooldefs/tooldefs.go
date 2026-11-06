@@ -87,9 +87,8 @@ type Outcome struct {
 	IsError bool
 	// Terminal, when non-empty, ends the run with this outcome. Empty means
 	// the call was answered and the conversation carries on, which is what
-	// an ordinary TF tool does. Both runtimes act on it under one rule: a
-	// tool batch ends the run only when every result in it sets one, and
-	// the first of them in call order is the outcome recorded.
+	// an ordinary TF tool does. Both runtimes act on it under one rule: it
+	// ends the run only when its call is the only tool call in its message.
 	Terminal domain.ConversationOutcome
 	// Reason accompanies Terminal and is persisted as the run's
 	// outcome_reason: why the run stopped where it did.

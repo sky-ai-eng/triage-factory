@@ -598,10 +598,10 @@ type Result struct {
 	Interrupted bool
 
 	// Terminal is the outcome a TF tool ended this turn with
-	// (tooldefs.Outcome.Terminal): every call of the turn's last tool batch
-	// set one, so the reader told the wrapper to stop the turn there, and
-	// this is the first of them in call order. Nil on every other turn. Set
-	// only by the interactive reader, the one path that serves TF tools.
+	// (tooldefs.Outcome.Terminal): the turn's last tool batch was that one
+	// call, so the reader told the wrapper to stop the turn there. Nil on
+	// every other turn. Set only by the interactive reader, the one path that
+	// serves TF tools.
 	Terminal *Terminal
 }
 

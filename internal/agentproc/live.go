@@ -61,8 +61,8 @@ import (
 // waiting for it: an interrupt gives the hook up, and a reply that arrives
 // after that reaches nobody. tool_call_ids are the batch's calls, by tool_use
 // id. A reply with stop ends the turn at the batch, with no next request; it
-// is sent when every call of the batch was a TF tool whose answer ended the
-// run, and carries no context, since no request is left to read it.
+// is sent when the batch is a single TF call whose answer ended the run, and
+// carries no context, since no request is left to read it.
 //
 // A tool_call is the model calling a TF tool (RunOptions.TFTools), named
 // without its mcp__tf__ prefix. The wrapper's handler waits on the
@@ -774,7 +774,7 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 // model, keyed by the hook's id. Runs on the reader goroutine, where the
 // stream has already delivered the batch's results to the sink.
 //
-// A batch whose every call ended the run is answered with stop instead, and
+// A batch that is one call that ended the run is answered with stop instead, and
 // the caller is not asked for text: there is no next request to hand it to,
 // and text taken here would be marked delivered to a model that never reads
 // it. A batch that held an ending but did not stop carries a note saying so

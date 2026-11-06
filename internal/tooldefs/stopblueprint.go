@@ -56,17 +56,20 @@ var StopBlueprint = Tool{
 	Handler: stopBlueprint,
 }
 
-// StopBlueprintNotHeededNote is what the model reads before its next request
-// when a stop_blueprint call shared its message with other tool calls. The
-// call was answered as if the run were stopping, but a batch ends the run only
-// when every call in it does, so the run went on; without this the model would
-// take the run as over and stop working on a conversation nothing concluded.
-// Each runtime delivers it through its own channel for notes.
-const StopBlueprintNotHeededNote = `<system-note kind="stop-blueprint">` + "\n" +
-	"Your stop_blueprint call did not end the run: other tool calls ran in the same message, and a run " +
-	"ends only on a message whose every tool call ends it. If you still mean to stop, call stop_blueprint " +
-	"again as the only tool call in its message.\n" +
-	"</system-note>"
+// StopBlueprintNotAlone is what a stop_blueprint call that shared its message
+// with other tool calls is told. It ends the run only as the message's only
+// tool call; without this the model would take the run as over and stop
+// working on a conversation nothing concluded. The native loop answers the
+// call with it, since it sees the whole message before running any of it.
+const StopBlueprintNotAlone = "This stop_blueprint call did not end the run: other tool calls ran in the same " +
+	"message, and stop_blueprint ends the run only as the only tool call in its message. If you still mean to " +
+	"stop, call it again on its own."
+
+// StopBlueprintNotHeededNote carries StopBlueprintNotAlone to an SDK run, which
+// answers each call as Claude Code runs it and learns which calls shared the
+// message only once all of them are answered. It arrives with the batch's
+// results, after the call's own answer said the run was stopping.
+const StopBlueprintNotHeededNote = `<system-note kind="stop-blueprint">` + "\n" + StopBlueprintNotAlone + "\n</system-note>"
 
 // stopBlueprint acknowledges the call, or tells the model what it was
 // missing. All three arguments are enforced here rather than by the schema
