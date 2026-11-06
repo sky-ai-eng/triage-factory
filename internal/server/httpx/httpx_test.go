@@ -55,10 +55,20 @@ func TestDecodeJSONStrict_RejectsTrailingData(t *testing.T) {
 	}
 }
 
+// textRef decodes from a JSON string through UnmarshalText, though it is a
+// struct, as domain.ObjectRef does.
+type textRef struct{ s string }
+
+func (r *textRef) UnmarshalText(b []byte) error {
+	r.s = string(b)
+	return nil
+}
+
 // TestDecodeJSONStrict_TypeFaultNamesTheJSONField pins that a wrong-typed
 // field is reported by its JSON name alone, however the body struct reaches
-// it. encoding/json puts the Go name of each embedded struct on the path, so
-// without the rewrite PageRequest's fields come back as
+// it, and that the message names the JSON type the field takes rather than a
+// Go type. encoding/json puts the Go name of each embedded struct on the
+// path, so without the rewrite PageRequest's fields come back as
 // "PageRequest.page_size".
 func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 	// Exported, since encoding/json cannot allocate an embedded pointer to
@@ -85,26 +95,39 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		Filter
 		tagged `json:"tagged"`
 
-		Items []inner         `json:"items"`
-		ByKey map[string]Deep `json:"by_key"`
+		Items  []inner           `json:"items"`
+		ByKey  map[string]Deep   `json:"by_key"`
+		Labels map[string]string `json:"labels"`
+		On     *bool             `json:"on"`
+		Ratio  float64           `json:"ratio"`
+		Ref    textRef           `json:"ref"`
 		// Spelled like the embedded Filter's Go name, and a JSON key all the same.
 		Collides int `json:"Filter"`
 		Count    int `json:"Count"`
 	}
 	cases := []struct {
-		body      string
-		wantField string
+		body        string
+		wantField   string
+		wantMessage string
 	}{
-		{`{"page_size": "x"}`, "page_size"},
-		{`{"page_token": 7}`, "page_token"},
-		{`{"statuses": "x"}`, "statuses"},
-		{`{"x": "x"}`, "x"},
-		{`{"inner": {"b": "x"}}`, "inner.b"},
-		{`{"items": [{"b": "x"}]}`, "items.b"},
-		{`{"by_key": {"k": {"b": "x"}}}`, "by_key.b"},
-		{`{"tagged": {"y": "x"}}`, "tagged.y"},
-		{`{"Filter": "x"}`, "Filter"},
-		{`{"Count": "x"}`, "Count"},
+		{`{"page_size": "x"}`, "page_size", "page_size must be a whole number"},
+		{`{"page_size": 1.5}`, "page_size", "page_size must be a whole number"},
+		{`{"page_token": 7}`, "page_token", "page_token must be a string"},
+		{`{"statuses": "x"}`, "statuses", "statuses must be an array of strings"},
+		// A bad element reports the list's type, not the element's.
+		{`{"statuses": ["a", 1]}`, "statuses", "statuses must be an array of strings"},
+		{`{"x": "x"}`, "x", "x must be a whole number"},
+		{`{"inner": "x"}`, "inner", "inner must be an object"},
+		{`{"inner": {"b": "x"}}`, "inner.b", "inner.b must be a whole number"},
+		{`{"items": [{"b": "x"}]}`, "items.b", "items.b must be a whole number"},
+		{`{"by_key": {"k": {"b": "x"}}}`, "by_key.b", "by_key.b must be a whole number"},
+		{`{"labels": {"k": 1}}`, "labels", "labels must be an object of strings"},
+		{`{"tagged": {"y": "x"}}`, "tagged.y", "tagged.y must be a whole number"},
+		{`{"on": "yes"}`, "on", "on must be true or false"},
+		{`{"ratio": "x"}`, "ratio", "ratio must be a number"},
+		{`{"ref": 7}`, "ref", "ref must be a string"},
+		{`{"Filter": "x"}`, "Filter", "Filter must be a whole number"},
+		{`{"Count": "x"}`, "Count", "Count must be a whole number"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -123,15 +146,9 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 				t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
 			}
-			if len(env.Errors) != 1 {
-				t.Fatalf("errors = %+v, want one", env.Errors)
-			}
-			got := env.Errors[0]
-			if got.Reason != ReasonInvalidField || got.Field != tc.wantField {
-				t.Errorf("error = {reason %q, field %q}, want {reason %q, field %q}", got.Reason, got.Field, ReasonInvalidField, tc.wantField)
-			}
-			if !strings.HasPrefix(got.Message, tc.wantField+" must be a ") {
-				t.Errorf("message = %q, want it to start with %q", got.Message, tc.wantField+" must be a ")
+			want := ErrorItem{Reason: ReasonInvalidField, Message: tc.wantMessage, Field: tc.wantField}
+			if len(env.Errors) != 1 || env.Errors[0] != want {
+				t.Errorf("errors = %+v, want [%+v]", env.Errors, want)
 			}
 		})
 	}
