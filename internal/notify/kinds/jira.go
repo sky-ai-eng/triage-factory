@@ -59,7 +59,7 @@ var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
 				"but that status is no longer in " + workflow + issue + ". Until this is fixed, Jira doesn't " +
 				"show which tickets the team is working on. Choose an in-progress status in the team's Jira " +
 				"status rules.",
-			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(m.TeamID))},
+			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(m.TeamID, m.JiraProjectID))},
 		}
 	},
 	Resolved: func(m JiraMirror, r notify.Resolution) string {
@@ -114,8 +114,8 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 				"it is being missed. Usually a status named in a team's rules for the project no longer exists " +
 				"in Jira, or the Jira credential can no longer see the project.",
 			// Each row is for one of the arming teams, so it links to that
-			// team's rules.
-			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(to.TeamID))},
+			// team's rules for the project.
+			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(to.TeamID, p.JiraProjectID))},
 		}
 	},
 	// The occurrence is open while a team's rules arm the project, so it also
@@ -200,7 +200,7 @@ var JiraStatusDrift = notify.Condition(notify.ConditionSpec[JiraStatusRule]{
 			Body: these + " " + verb + " no longer in " + workflow + ". " + effect + " Remove " + them +
 				" from the team's Jira status rules, where the project shows " + them + " as missing, and map " +
 				"the status that replaced " + them + " if there is one.",
-			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(d.TeamID))},
+			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(d.TeamID, d.JiraProjectID))},
 		}
 	},
 	Resolved: func(d JiraStatusRule, r notify.Resolution) string {

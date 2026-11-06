@@ -507,6 +507,27 @@ func TestTaskList_StrictBody(t *testing.T) {
 			wantField:  "page_size",
 		},
 		{
+			// page_size and page_token reach the body through the embedded
+			// httpx.PageRequest and statuses through taskLaneRequest; the
+			// fault names the JSON field, not the struct it lives in.
+			name:       "wrong-typed page_size",
+			body:       map[string]any{"page_size": "x"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "page_size",
+		},
+		{
+			name:       "wrong-typed page_token",
+			body:       map[string]any{"page_token": 7},
+			wantReason: "INVALID_FIELD",
+			wantField:  "page_token",
+		},
+		{
+			name:       "wrong-typed statuses",
+			body:       map[string]any{"statuses": "x"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "statuses",
+		},
+		{
 			name:       "garbage page_token",
 			body:       map[string]any{"page_token": "not-a-token"},
 			wantReason: "INVALID_PARAM",

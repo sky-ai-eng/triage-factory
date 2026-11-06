@@ -11,11 +11,13 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -244,7 +246,7 @@ func BodyBytes(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeDecodeError(w, err)
+		writeDecodeError(w, err, nil)
 		return nil, false
 	}
 	return body, true
@@ -263,7 +265,7 @@ func decodeStrict(w http.ResponseWriter, src io.Reader, v any) bool {
 	dec := json.NewDecoder(src)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		writeDecodeError(w, err)
+		writeDecodeError(w, err, reflect.TypeOf(v))
 		return false
 	}
 	// The trailing-content check requires the next decode to hit io.EOF rather
@@ -272,7 +274,7 @@ func decodeStrict(w http.ResponseWriter, src io.Reader, v any) bool {
 	var rest json.RawMessage
 	if err := dec.Decode(&rest); err != io.EOF {
 		if maxErr := (*http.MaxBytesError)(nil); errors.As(err, &maxErr) {
-			writeDecodeError(w, err)
+			writeDecodeError(w, err, nil)
 			return false
 		}
 		WriteErrors(w, http.StatusBadRequest, ErrorItem{
@@ -285,8 +287,10 @@ func decodeStrict(w http.ResponseWriter, src io.Reader, v any) bool {
 
 // writeDecodeError maps a strict-decode failure to its envelope response:
 // the body-size cap to 413, an unknown field and a type mismatch to 400 with
-// the field named, everything else to the generic 400.
-func writeDecodeError(w http.ResponseWriter, err error) {
+// the field named, everything else to the generic 400. target is the type
+// decoded into, which names a type mismatch's field and the JSON type it
+// takes; nil where nothing was decoded.
+func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 	var maxErr *http.MaxBytesError
 	if errors.As(err, &maxErr) {
 		WriteErrors(w, http.StatusRequestEntityTooLarge, ErrorItem{
@@ -296,14 +300,21 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 		return
 	}
 	var typeErr *json.UnmarshalTypeError
-	// TODO(TFAC-1255): Field spells a field reached through an embedded
-	// struct with that struct's Go name ("PageRequest.page_size"), so every
-	// list route names page_size and page_token wrongly here.
 	if errors.As(err, &typeErr) && typeErr.Field != "" {
+		// The field's own type, not the fault's: a bad element of a list
+		// reports the list's type, which is what the caller has to send.
+		field, fieldType := jsonFieldPath(target, typeErr.Field)
+		if fieldType == nil {
+			fieldType = typeErr.Type
+		}
+		message := field + " has the wrong type"
+		if want, _ := jsonType(fieldType); want != "" {
+			message = field + " must be " + want
+		}
 		WriteErrors(w, http.StatusBadRequest, ErrorItem{
 			Reason:  ReasonInvalidField,
-			Message: fmt.Sprintf("%s must be a %s", typeErr.Field, typeErr.Type),
-			Field:   typeErr.Field,
+			Message: message,
+			Field:   field,
 		})
 		return
 	}
@@ -315,9 +326,168 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	// TODO(TFAC-1335): a field whose type has its own UnmarshalJSON (time.Time
+	// given a number) fails with that method's plain error, which carries no
+	// field, so it lands here as INVALID_BODY instead of INVALID_FIELD. No
+	// request body declares such a field yet.
 	WriteErrors(w, http.StatusBadRequest, ErrorItem{
 		Reason: ReasonInvalidBody, Message: "invalid request body",
 	})
+}
+
+// jsonFieldPath rewrites the dotted path encoding/json reports for a type
+// fault (UnmarshalTypeError.Field) into the payload's own field names. The
+// decoder puts the Go name of every embedded struct it passes through ahead
+// of the field's JSON name, so a page_size fault on a list body arrives as
+// "PageRequest.page_size". The path is resolved against the decode target's
+// type, and a segment is dropped only where it names an embedded struct at
+// that point in the type, never by its spelling: a JSON key may be
+// capitalized too. Every other segment is already a JSON name. A JSON key
+// spelled like a sibling embedded struct's Go name gives the same path as a
+// field of that struct; the last segment is read as the key, since the path
+// ends in one, and an earlier segment as the embedded struct. It also
+// returns the type of the field the path names. A path that stops resolving
+// keeps the rest of its segments as reported, and its type is nil.
+func jsonFieldPath(target reflect.Type, path string) (string, reflect.Type) {
+	segs := strings.Split(path, ".")
+	out := make([]string, 0, len(segs))
+	t := target
+	for i, seg := range segs {
+		// The path names no array index or map key, so a segment after a
+		// slice, array or map field is a field of its element.
+		for t != nil && (t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map) {
+			t = t.Elem()
+		}
+		if t == nil || t.Kind() != reflect.Struct {
+			return strings.Join(append(out, segs[i:]...), "."), nil
+		}
+		// The decoder's path ends in a JSON name, so only an earlier segment
+		// can be an embedded struct.
+		if f, ok := embeddedStructField(t, seg); ok && i < len(segs)-1 {
+			t = f.Type
+			continue
+		}
+		f, ok := jsonNamedField(t, seg)
+		if !ok {
+			return strings.Join(append(out, segs[i:]...), "."), nil
+		}
+		out = append(out, seg)
+		t = f.Type
+	}
+	return strings.Join(out, "."), t
+}
+
+var textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+
+// jsonType names the JSON type a value of t decodes from, as a client would
+// write it: one is the singular ("a whole number"), many the plural ("whole
+// numbers") an array or object of them is described with. A type that reads
+// itself from text through UnmarshalText takes a string. Both are empty for
+// an interface, or any other type with no one JSON type.
+func jsonType(t reflect.Type) (one, many string) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if reflect.PointerTo(t).Implements(textUnmarshalerType) {
+		return "a string", "strings"
+	}
+	switch t.Kind() {
+	case reflect.String:
+		return "a string", "strings"
+	case reflect.Bool:
+		return "true or false", "booleans"
+	// TODO(TFAC-1334): an integer field, signed or unsigned, also refuses
+	// whole numbers that are out of range or written as 1e3 or 1.0, and these
+	// two cases tell that caller the value is not a whole number.
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return "a whole number", "whole numbers"
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return "a non-negative whole number", "non-negative whole numbers"
+	case reflect.Float32, reflect.Float64:
+		return "a number", "numbers"
+	case reflect.Slice, reflect.Array:
+		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+			return "a base64 string", "base64 strings"
+		}
+		if _, elems := jsonType(t.Elem()); elems != "" {
+			return "an array of " + elems, "arrays"
+		}
+		return "an array", "arrays"
+	case reflect.Map:
+		one = "an object"
+		if _, values := jsonType(t.Elem()); values != "" {
+			one += " of " + values
+		}
+		// An integer key is read from the key's string, and a key that is not
+		// a whole number is a fault on the map.
+		if k := t.Key(); k.Kind() >= reflect.Int && k.Kind() <= reflect.Uintptr && !reflect.PointerTo(k).Implements(textUnmarshalerType) {
+			_, keys := jsonType(k)
+			one += " whose keys are " + keys
+		}
+		return one, "objects"
+	case reflect.Struct:
+		return "an object", "objects"
+	}
+	return "", ""
+}
+
+// embeddedStructField finds the embedded struct field of t whose Go name is
+// name.
+func embeddedStructField(t reflect.Type, name string) (reflect.StructField, bool) {
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		if sf.Name == name && isEmbeddedStruct(sf) {
+			return sf, true
+		}
+	}
+	return reflect.StructField{}, false
+}
+
+// jsonNamedField finds t's own field whose JSON name is name: its json tag's
+// name, or its Go name when the tag gives none.
+func jsonNamedField(t reflect.Type, name string) (reflect.StructField, bool) {
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		tag := sf.Tag.Get("json")
+		if tag == "-" || isEmbeddedStruct(sf) {
+			continue
+		}
+		// encoding/json decodes no unexported field but an anonymous struct,
+		// whose exported fields it can still set.
+		if !sf.IsExported() && (!sf.Anonymous || !isStruct(sf.Type)) {
+			continue
+		}
+		jsonName, _, _ := strings.Cut(tag, ",")
+		if jsonName == "" {
+			jsonName = sf.Name
+		}
+		if jsonName == name {
+			return sf, true
+		}
+	}
+	return reflect.StructField{}, false
+}
+
+// isEmbeddedStruct reports whether encoding/json reads sf's fields as its
+// parent's own: an anonymous struct (or pointer to one) with no tag name. A
+// tagged anonymous field is an ordinary field under its tag name.
+func isEmbeddedStruct(sf reflect.StructField) bool {
+	if !sf.Anonymous {
+		return false
+	}
+	tag := sf.Tag.Get("json")
+	if name, _, _ := strings.Cut(tag, ","); name != "" || tag == "-" {
+		return false
+	}
+	return isStruct(sf.Type)
+}
+
+// isStruct reports whether t is a struct or a pointer to one.
+func isStruct(t reflect.Type) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Struct
 }
 
 // unknownFieldName extracts the field from encoding/json's unknown-field

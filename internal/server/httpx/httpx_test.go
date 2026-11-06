@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -49,6 +50,111 @@ func TestDecodeJSONStrict_RejectsTrailingData(t *testing.T) {
 			}
 			if !tc.wantAccept && rec.Code != 400 {
 				t.Errorf("DecodeJSONStrict(%q) rejected but status=%d, want 400", tc.body, rec.Code)
+			}
+		})
+	}
+}
+
+// textRef decodes from a JSON string through UnmarshalText, though it is a
+// struct, as domain.ObjectRef does.
+type textRef struct{ s string }
+
+func (r *textRef) UnmarshalText(b []byte) error {
+	r.s = string(b)
+	return nil
+}
+
+// TestDecodeJSONStrict_TypeFaultNamesTheJSONField pins that a wrong-typed
+// field is reported by its JSON name alone, however the body struct reaches
+// it, and that the message names the JSON type the field takes rather than a
+// Go type. encoding/json puts the Go name of each embedded struct on the
+// path, so without the rewrite PageRequest's fields come back as
+// "PageRequest.page_size".
+func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
+	// Exported, since encoding/json cannot allocate an embedded pointer to
+	// an unexported struct.
+	type Deep struct {
+		B int `json:"b"`
+	}
+	type inner struct {
+		*Deep
+	}
+	type lane struct {
+		Statuses []string `json:"statuses"`
+		Inner    inner    `json:"inner"`
+	}
+	type Filter struct {
+		X int `json:"x"`
+	}
+	type tagged struct {
+		Ys []int `json:"ys"`
+	}
+	type payload struct {
+		lane
+		PageRequest
+		Filter
+		tagged `json:"tagged"`
+
+		Items  []inner           `json:"items"`
+		ByKey  map[string]Deep   `json:"by_key"`
+		Labels map[string]string `json:"labels"`
+		ByID   map[int]string    `json:"by_id"`
+		Bytes  []byte            `json:"bytes"`
+		On     *bool             `json:"on"`
+		Ratio  float64           `json:"ratio"`
+		Ref    textRef           `json:"ref"`
+		// Spelled like the embedded Filter's Go name, and a JSON key all the same.
+		Collides int `json:"Filter"`
+		Count    int `json:"Count"`
+	}
+	cases := []struct {
+		body        string
+		wantField   string
+		wantMessage string
+	}{
+		{`{"page_size": "x"}`, "page_size", "page_size must be a whole number"},
+		{`{"page_size": 1.5}`, "page_size", "page_size must be a whole number"},
+		{`{"page_token": 7}`, "page_token", "page_token must be a string"},
+		{`{"statuses": "x"}`, "statuses", "statuses must be an array of strings"},
+		// A bad element reports the list's type, not the element's.
+		{`{"statuses": ["a", 1]}`, "statuses", "statuses must be an array of strings"},
+		{`{"x": "x"}`, "x", "x must be a whole number"},
+		{`{"inner": "x"}`, "inner", "inner must be an object"},
+		{`{"inner": {"b": "x"}}`, "inner.b", "inner.b must be a whole number"},
+		{`{"items": [{"b": "x"}]}`, "items.b", "items.b must be a whole number"},
+		{`{"by_key": {"k": {"b": "x"}}}`, "by_key.b", "by_key.b must be a whole number"},
+		{`{"labels": {"k": 1}}`, "labels", "labels must be an object of strings"},
+		{`{"by_id": {"abc": "x"}}`, "by_id", "by_id must be an object of strings whose keys are whole numbers"},
+		{`{"bytes": 7}`, "bytes", "bytes must be a base64 string"},
+		// An unexported anonymous struct with a tag name is an ordinary field,
+		// and the bad element reports the list it is in.
+		{`{"tagged": {"ys": [1, "x"]}}`, "tagged.ys", "tagged.ys must be an array of whole numbers"},
+		{`{"on": "yes"}`, "on", "on must be true or false"},
+		{`{"ratio": "x"}`, "ratio", "ratio must be a number"},
+		{`{"ref": 7}`, "ref", "ref must be a string"},
+		{`{"Filter": "x"}`, "Filter", "Filter must be a whole number"},
+		{`{"Count": "x"}`, "Count", "Count must be a whole number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.body, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/", strings.NewReader(tc.body))
+			var v payload
+			if DecodeJSONStrict(rec, req, &v) {
+				t.Fatalf("DecodeJSONStrict(%s) accepted a wrong-typed field", tc.body)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var env struct {
+				Errors []ErrorItem `json:"errors"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+			}
+			want := ErrorItem{Reason: ReasonInvalidField, Message: tc.wantMessage, Field: tc.wantField}
+			if len(env.Errors) != 1 || env.Errors[0] != want {
+				t.Errorf("errors = %+v, want [%+v]", env.Errors, want)
 			}
 		})
 	}
