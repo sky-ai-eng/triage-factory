@@ -5,6 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -40,6 +44,39 @@ func reactAsTheDispatchDoes(t *testing.T, s *Spawner, brID, convID string) {
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 }
 
+// unreadCounter swaps the unread-at-conclusion counter for one backed by a
+// manual reader and returns a read of every series, by reason.
+func unreadCounter(t *testing.T) func() map[string]int64 {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	prev := unreadAtConclusion.Swap(newUnreadAtConclusionStats(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { unreadAtConclusion.Store(prev) })
+	return func() map[string]int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		got := map[string]int64{}
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name != "messages.unread_at_conclusion" {
+					continue
+				}
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("messages.unread_at_conclusion is %T, want an int64 sum", m.Data)
+				}
+				for _, dp := range sum.DataPoints {
+					v, _ := dp.Attributes.Value(attribute.Key("reason"))
+					got[v.AsString()] = dp.Value
+				}
+			}
+		}
+		return got
+	}
+}
+
 // TestWakeForUnreadInput_AStopStandsAndTheMessageResumesAfterIt: a message that
 // arrived as the agent stopped its blueprint leaves the stop's verdict in
 // place and then resumes the conversation, as one sent just after the stop
@@ -59,6 +96,7 @@ func TestWakeForUnreadInput_AStopStandsAndTheMessageResumesAfterIt(t *testing.T)
 	for _, runtime := range []string{domain.ConversationRuntimeNative, domain.ConversationRuntimeSDK} {
 		for _, tc := range cases {
 			t.Run(runtime+"/"+string(tc.outcome), func(t *testing.T) {
+				counted := unreadCounter(t)
 				s, database, brID, _, convID := reactorFixture(t, "unread-"+runtime+"-"+string(tc.outcome), 2, "", "")
 				if runtime == domain.ConversationRuntimeNative {
 					markNative(t, database, convID)
@@ -84,8 +122,62 @@ func TestWakeForUnreadInput_AStopStandsAndTheMessageResumesAfterIt(t *testing.T)
 				if br := mustGetRun(t, s, org, brID); br.Status != tc.wantAfter {
 					t.Errorf("blueprint status = %q, want %q", br.Status, tc.wantAfter)
 				}
+				// Neither the handed-off wake nor the one that woke it left
+				// the message behind.
+				if got := counted(); len(got) != 0 {
+					t.Errorf("unread-at-conclusion counts = %v, want none", got)
+				}
 			})
 		}
+	}
+}
+
+// TestWakeForUnreadInput_CountsTheMessageAnAdvanceLeavesUnread is the window
+// the wake cannot close: a message that lands after a non-final step's last
+// model call, before its conclusion is recorded. The reactor advances, which
+// ends the step's conversation, so the wake is refused and the message is
+// counted under the rung that refused it.
+func TestWakeForUnreadInput_CountsTheMessageAnAdvanceLeavesUnread(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	counted := unreadCounter(t)
+	s, database, brID, _, convID := reactorFixture(t, "unread-advance", 2, "", "")
+	markNative(t, database, convID)
+	concludeWithUnreadMessage(t, s, convID, domain.ConversationOutcomeContinue)
+
+	reactAsTheDispatchDoes(t, s, brID, convID)
+	s.wakeForUnreadInput(context.Background(), org, convID)
+
+	if br := mustGetRun(t, s, org, brID); br.CurrentStepIndex != 1 {
+		t.Fatalf("current_step_index = %d, want 1 — the step advanced", br.CurrentStepIndex)
+	}
+	if st := storedStatus(t, database, convID); st != domain.StatusOpen {
+		t.Errorf("stored status = %q, want open — an ended step is not woken", st)
+	}
+	got := counted()
+	if got[ResumeBlockedEndedStepAdvanced] != 1 || len(got) != 1 {
+		t.Errorf("unread-at-conclusion counts = %v, want one under %q", got, ResumeBlockedEndedStepAdvanced)
+	}
+}
+
+// Dispatcher startup creates every reason's series at zero, so the first
+// message left unread after a restart is a change increase() can see.
+func TestOpenUnreadAtConclusionSeries_CreatesEachReasonAtZero(t *testing.T) {
+	counted := unreadCounter(t)
+
+	OpenUnreadAtConclusionSeries()
+
+	got := counted()
+	want := unreadAtConclusionReasons()
+	if len(got) != len(want) {
+		t.Errorf("series = %v, want exactly %v", got, want)
+	}
+	for _, reason := range want {
+		if v, ok := got[reason]; !ok || v != 0 {
+			t.Errorf("series %q = (%d, %v), want (0, true)", reason, v, ok)
+		}
+	}
+	if _, ok := got[ResumeBlockedEndedStepAdvanced]; !ok {
+		t.Errorf("series = %v, want the advance's rung among them", got)
 	}
 }
 

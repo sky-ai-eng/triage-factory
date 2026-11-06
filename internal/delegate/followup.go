@@ -133,7 +133,12 @@ func endedFollowUpBlock(conv *domain.Conversation) string {
 	if conv.EndedAt == nil {
 		return ""
 	}
-	return "ended_" + string(conv.EndedReason)
+	return endedBlock(conv.EndedReason)
+}
+
+// endedBlock is the boundary rung's name for one ended reason.
+func endedBlock(reason domain.EndedReason) string {
+	return "ended_" + string(reason)
 }
 
 // resumableState reports whether a run with no warm process can be woken by a
@@ -634,6 +639,11 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 // conclusion stamp) leaves its unread input for the next message, as any
 // stopped conversation does, and one parked with no verdict is claimable by
 // the queue without a wake.
+//
+// A message the wake has to leave unread is counted by why
+// (recordUnreadAtConclusion). The common reason is the advance: a message that
+// lands after a non-final step's last model call but before its conclusion is
+// recorded, which the reactor's advance then ends the conversation over.
 func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID string) {
 	if s.conversations == nil || s.pendingInput == nil || s.tx == nil {
 		return
@@ -659,7 +669,15 @@ func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID 
 	if !ok {
 		return
 	}
-	if block := s.followUpBlock(ctx, orgID, conv); block != "" {
+	block := s.followUpBlock(ctx, orgID, conv)
+	if block == ResumeBlockedStepHandedOff {
+		// The blueprint has not reacted yet, so this is not the wake that
+		// follows the reaction. That one comes after it, from the dispatch or
+		// the stranded-run replay that runs the reactor.
+		return
+	}
+	if block != "" {
+		recordUnreadAtConclusion(block)
 		delegateLog.Warn("a person's message is unread on a concluded conversation no wake may reach; it waits for the next message",
 			"conversation", conversationID, "org_id", orgID, "block", block)
 		return
@@ -671,11 +689,13 @@ func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID 
 		return wErr
 	})
 	if errors.Is(err, errWakeRefused) {
+		recordUnreadAtConclusion(unreadWakeRefused)
 		delegateLog.Warn("the wake for a concluded conversation's unread message was refused after the gate passed; it waits for the next message",
 			"conversation", conversationID, "org_id", orgID)
 		return
 	}
 	if err != nil {
+		recordUnreadAtConclusion(unreadWakeFailed)
 		delegateLog.Warn("wake a concluded conversation for its unread message failed; it waits for the next message",
 			"conversation", conversationID, "org_id", orgID, "error", err)
 		return

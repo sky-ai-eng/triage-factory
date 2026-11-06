@@ -230,6 +230,23 @@ A steady `bash_budget` rate is the budget doing its job. If `ceiling` and
 `tf_sandbox_peak_memory_ratio` stays near 1, the work needs more memory than
 the limit allows: raise `TF_CLAIM_MEMORY_LIMIT_MB` on the executors.
 
+### Messages left unread
+
+A message someone sends to a run that is just finishing is read when the run
+starts again. `tf_messages_unread_at_conclusion_total` counts the messages that
+were not, because the run could not start again, by `reason`. The message stays
+on the run's transcript, and nothing reads it until someone sends another.
+
+| `reason`              | What happened                                                                                                                       |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `ended_step_advanced` | The message arrived just as a blueprint step finished, after its last reply, and the next step had already started. It has to be sent to the next step's run. |
+| `wake_refused`        | The run changed state between the check and the restart, usually because it was stopped or cancelled at the same moment.            |
+| `wake_failed`         | The restart's database write failed. The executor's logs have the error.                                                            |
+| anything else         | The reason the run's page gives for not taking messages, such as `workspace_expired` or `model_not_enabled`.                        |
+
+An occasional `ended_step_advanced` is expected. A steady rate of any reason
+means people's messages are being left unread and is worth reporting.
+
 ### Alerts
 
 The bundled Prometheus loads the rules in
