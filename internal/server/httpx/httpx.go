@@ -304,9 +304,6 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 	if errors.As(err, &typeErr) && typeErr.Field != "" {
 		// The field's own type, not the fault's: a bad element of a list
 		// reports the list's type, which is what the caller has to send.
-		// TODO(TFAC-1335): a field's ,string tag option is not read, so such
-		// a field is described by its bare type, though it takes the value
-		// as a quoted string.
 		field, fieldType := jsonFieldPath(target, typeErr.Field)
 		if fieldType == nil {
 			fieldType = typeErr.Type
@@ -330,10 +327,10 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 		})
 		return
 	}
-	// TODO(TFAC-1335): a field whose type has its own UnmarshalJSON (time.Time
-	// given a number) fails with that method's plain error, which carries no
-	// field, so it lands here as INVALID_BODY instead of INVALID_FIELD. No
-	// request body declares such a field yet.
+	// A request body declares only fields whose faults encoding/json names
+	// (TestDecodeTargets_EveryFaultIsReportable refuses the rest), so a
+	// failure that reaches here is the body's as a whole: malformed JSON, the
+	// wrong kind of value at the top, or a body that could not be read.
 	WriteErrors(w, http.StatusBadRequest, ErrorItem{
 		Reason: ReasonInvalidBody, Message: "invalid request body",
 	})
@@ -465,6 +462,9 @@ func jsonType(t reflect.Type, refused *json.UnmarshalTypeError) (one, many strin
 	case reflect.Struct:
 		return "an object", "objects"
 	}
+	// TODO(TFAC-1337): an empty interface refuses a number beyond float64's
+	// range, and with no noun here the field reads "must be an object" (or
+	// "has the wrong type") for a value of the right kind.
 	return "", ""
 }
 
