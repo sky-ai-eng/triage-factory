@@ -294,6 +294,10 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 	}
 	site := domain.EntityScope("jira", settings)
 	for _, project := range projects {
+		// TODO(TFAC-1336): a team that only watches the project passes, so its
+		// handlers, ownership and notifications see events from issues no
+		// discovery found, and completions Jira's done category decided; the
+		// gate should ask whether the team armed the project.
 		tracks, err := r.jiraRules.TracksJiraProjectSystem(ctx, teamID, site, project)
 		if err != nil {
 			routerLog.Warn("team-project gate lookup failed; undecided", "team_id", teamID, "jira_project_id", project, "error", err)
@@ -353,6 +357,8 @@ func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event
 	}
 	scope := domain.EntityScope("linear", settings)
 	for _, linearTeamID := range linearTeams {
+		// TODO(TFAC-1336): a team that only watches the Linear team passes, as
+		// for Jira above; the gate should ask whether the team armed it.
 		tracks, err := r.linearRules.TracksTeamSystem(ctx, teamID, scope, linearTeamID)
 		if err != nil {
 			routerLog.Warn("team-linear-team gate lookup failed; undecided", "team_id", teamID, "linear_team_id", linearTeamID, "error", err)
