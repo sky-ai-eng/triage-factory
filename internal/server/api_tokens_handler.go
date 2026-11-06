@@ -376,8 +376,21 @@ type apiTokenListRequest struct {
 	// OrgID narrows to one org. Empty means every org the caller holds tokens
 	// in — except under a token, whose own org is the only set it may see.
 	OrgID string `json:"org_id"`
+	// SortKey/SortDir order the list (apiTokenListSortKeys); absent is newest
+	// first. A token never used sorts last under last_used_at in both
+	// directions.
+	SortKey string `json:"sort_key"`
+	SortDir string `json:"sort_dir"`
 
 	httpx.PageRequest
+}
+
+// apiTokenListSortKeys is the list's sort_key vocabulary. Each key's own
+// direction is most recent first, which is what a reader ranking tokens by
+// either time asks for first.
+var apiTokenListSortKeys = []httpx.SortKey{
+	{Name: apitokens.SortLastUsedAt, Default: db.SortDesc},
+	{Name: apitokens.SortCreatedAt, Default: db.SortDesc},
 }
 
 // apiTokenListFilterKey is the canonicalized filter set the page token is
@@ -385,10 +398,13 @@ type apiTokenListRequest struct {
 // 1's token of another. It carries the EFFECTIVE org — the one the store is
 // asked for — so a token caller's tokens stay valid across the default.
 type apiTokenListFilterKey struct {
-	OrgID string `json:"org_id"`
+	OrgID   string `json:"org_id"`
+	SortKey string `json:"sort_key"`
+	SortDir string `json:"sort_dir"`
 }
 
-// handleAPITokenList answers the caller's own tokens, newest first.
+// handleAPITokenList answers the caller's own tokens, newest first unless the
+// body names a sort_key.
 //
 // POST /api/me/tokens/list
 //
@@ -432,8 +448,10 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(apiTokenListFilterKey{OrgID: orgFilter}), 0)
+	order := httpx.Sort(&v, req.SortKey, req.SortDir, apiTokenListSortKeys)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(apiTokenListFilterKey{
+		OrgID: orgFilter, SortKey: order.Key, SortDir: order.Dir,
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -442,7 +460,7 @@ func (s *Server) handleAPITokenList(w http.ResponseWriter, r *http.Request) {
 	if orgFilter != "" {
 		filter = &orgFilter
 	}
-	tokens, total, err := store.ListForUserSystem(r.Context(), userID, filter,
+	tokens, total, err := store.ListForUserSystem(r.Context(), userID, filter, order,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		internalError(w, "me/tokens", fmt.Errorf("list api tokens for %s: %w", userID, err))

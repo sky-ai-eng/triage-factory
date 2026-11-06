@@ -37,7 +37,7 @@ func openLocalStores(t *testing.T) (db.Stores, *sql.DB) {
 // store's live List read, or nil when it has none.
 func shippedPromptBySlug(t *testing.T, stores db.Stores, org, team, slug string) *domain.Prompt {
 	t.Helper()
-	rows, _, err := stores.Prompts.List(context.Background(), org, team, db.Unwindowed)
+	rows, _, err := stores.Prompts.List(context.Background(), org, db.PromptListFilter{TeamID: team}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("Prompts.List for %q: %v", slug, err)
 	}

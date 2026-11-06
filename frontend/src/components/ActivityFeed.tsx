@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ActivityAction, ActivityObject } from '../types'
+import { useCallback, useEffect, useState } from 'react'
+import type {
+  ActivityAction,
+  ActivityActionFacets,
+  ActivityArtifactFacets,
+  ActivityFacet,
+  ActivityObject,
+} from '../types'
+import { apiJSON } from '../lib/apiClient'
 import type { ListRequest } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
 import { ObjectRow } from './ObjectRow'
@@ -30,14 +37,17 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //
 //   - team: /api/teams/{id}/usage (team admin or org admin).
 //   - org : /api/orgs/{id}/usage, showTeam (org admin) — rows carry their teams
-//     (+ the authorizing actor on the Actions lens), with a client-side
-//     team-scope (and, on Actions, actor-scope) filter narrowing the loaded page.
+//     (+ the authorizing actor on the Actions lens), and a team filter.
 //
 // The lens is an ADDRESS, not a parameter: `${basePath}/actions/list` and
 // `${basePath}/artifacts/list` are two resources with different row shapes and
 // different filter vocabularies, and each route decodes strictly. Filters adapt
-// per lens (Actions: provider/action/time; Objects: provider/object kind/time).
-// Filter state is in-memory (v1).
+// per lens (Actions: provider/action/actor/time; Objects: provider/object
+// kind/time; the org feed adds team to both). Every filter is a field of the
+// list read: the feed renders the rows the server answers, in its order. The
+// team and actor options come from the facets node beside each list
+// (`${basePath}/{actions,artifacts}/facets`), which counts every value under
+// the other filters. Filter state is in-memory (v1).
 
 const PAGE_SIZE = 50
 
@@ -66,6 +76,14 @@ function sinceFor(range: RangeKey): string {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
 }
 
+// A picked team or actor: the id the list's filter takes, and the name it was
+// picked under, so the select keeps naming the choice when the other filters
+// leave it out of the facets.
+interface Pick {
+  id: string
+  name: string
+}
+
 interface Filters {
   provider: string
   range: RangeKey
@@ -73,6 +91,9 @@ interface Filters {
   objectKind: string
   // Actions lens:
   action: string
+  actor: Pick | null
+  // Org feed, both lenses:
+  team: Pick | null
 }
 
 const EMPTY_FILTERS: Filters = {
@@ -80,7 +101,16 @@ const EMPTY_FILTERS: Filters = {
   range: 'all',
   objectKind: 'all',
   action: 'all',
+  actor: null,
+  team: null,
 }
+
+interface FeedFacets {
+  teams: ActivityFacet[]
+  actors: ActivityFacet[]
+}
+
+const NO_FACETS: FeedFacets = { teams: [], actors: [] }
 
 type FeedRow = ActivityObject | ActivityAction
 
@@ -89,21 +119,44 @@ function listPathFor(basePath: string, mode: Mode): string {
   return `${basePath}/${mode === 'actions' ? 'actions' : 'artifacts'}/list`
 }
 
-/** filterBodyFor builds the lens's filter half of the list body. 'all' / ''
- *  selections are omitted so the backend leaves that column unfiltered — and
- *  each lens sends only ITS OWN vocabulary, since the routes decode strictly
- *  and a stray `object_kind` on the actions list is a 400. */
-function filterBodyFor(mode: Mode, f: Filters): ListRequest {
+/** facetsPathFor resolves the lens to the facets node beside its list. */
+function facetsPathFor(basePath: string, mode: Mode): string {
+  return `${basePath}/${mode === 'actions' ? 'actions' : 'artifacts'}/facets`
+}
+
+/** filterBodyFor builds the lens's filter half of the list body, which is
+ *  also the facets body. 'all' / unpicked selections are omitted so the
+ *  backend leaves that column unfiltered — and each lens sends only ITS OWN
+ *  vocabulary, since the routes decode strictly and a stray `object_kind` on
+ *  the actions list is a 400. team_id is the org feed's alone: the team feed
+ *  names its team in the path. */
+function filterBodyFor(mode: Mode, f: Filters, showTeam: boolean): ListRequest {
   const body: ListRequest = {}
   if (f.provider !== 'all') body.provider = f.provider
   if (mode === 'objects') {
     if (f.objectKind !== 'all') body.object_kind = f.objectKind
-  } else if (f.action !== 'all') {
-    body.action = f.action
+  } else {
+    if (f.action !== 'all') body.action = f.action
+    if (f.actor) body.actor = f.actor.id
   }
+  if (showTeam && f.team) body.team_id = f.team.id
   const since = sinceFor(f.range)
   if (since) body.since = since
   return body
+}
+
+/** pickOptions renders a facets cut as select options, in the order the node
+ *  serves them, keeping the current pick when the other filters have left it
+ *  out of the cut. */
+function pickOptions(
+  cut: ActivityFacet[],
+  picked: Pick | null,
+): { value: string; label: string }[] {
+  const options = cut.map((f) => ({ value: f.value, label: f.name || f.value }))
+  if (picked && !cut.some((f) => f.value === picked.id)) {
+    options.push({ value: picked.id, label: picked.name })
+  }
+  return options
 }
 
 export default function ActivityFeed({
@@ -113,13 +166,12 @@ export default function ActivityFeed({
   /** The scope prefix — `/api/orgs/{id}/usage` or `/api/teams/{id}/usage`. The
    *  lens appends its own resource segment. */
   basePath: string
-  /** Org feed: show the owning team (+ authorizing actor) per row + client-side scope filters. */
+  /** Org feed: show the owning team (+ authorizing actor) per row, and the team filter. */
   showTeam?: boolean
 }) {
   const [mode, setMode] = useState<Mode>('actions')
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
-  const [teamFilter, setTeamFilter] = useState('') // org feed only; '' = all teams
-  const [actorFilter, setActorFilter] = useState('') // org + actions only; '' = all actors
+  const [facets, setFacets] = useState<FeedFacets>(NO_FACETS)
 
   // The request the rows on screen answer. Held alongside the hook's items so
   // the feed can keep its last good content while the next request is in flight
@@ -131,31 +183,37 @@ export default function ActivityFeed({
   const [loaded, setLoaded] = useState<{ mode: Mode; key: string } | null>(null)
 
   const listPath = listPathFor(basePath, mode)
-  const filterBody = filterBodyFor(mode, filters)
+  const filterBody = filterBodyFor(mode, filters, showTeam)
   // The freshness key for the current lens + filters. (loadMore appends later
   // pages without changing it.)
   const pageKey = `${listPath}|${JSON.stringify(filterBody)}`
 
   const feed = usePagedList<FeedRow>(listPath, "Couldn't load activity.", { keyOf: feedRowKey })
-  const { items, load, loadMore, hasMore, loading, error } = feed
+  const { items, total, load, loadMore, hasMore, loading, error } = feed
 
   const setFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }))
   }, [])
 
+  // pick sets the team or actor filter from a select's value, naming it from
+  // the cut it was picked from ('' clears it).
+  const pick = useCallback(
+    (key: 'team' | 'actor', cut: ActivityFacet[], value: string) => {
+      const f = cut.find((c) => c.value === value)
+      setFilter(key, value ? { id: value, name: f?.name || value } : null)
+    },
+    [setFilter],
+  )
+
   // Switching lens is a clean slate: the filter dimensions differ per lens, so
-  // reset filters + the in-memory scopes rather than carry a stale
-  // object_kind=/action=.
+  // reset filters rather than carry a stale object_kind=/action=.
   const switchMode = useCallback((next: Mode) => {
     setMode(next)
     setFilters(EMPTY_FILTERS)
-    setTeamFilter('')
-    setActorFilter('')
   }, [])
 
-  // Page 1 (replace) on mount and whenever the lens, server-side filters, or the
-  // base path (team switch) change. The in-memory team/actor scopes are
-  // deliberately NOT dependencies — narrowing never refetches.
+  // Page 1 (replace) on mount and whenever the lens, the filters, or the base
+  // path (team switch) change.
   //
   // Deliberately does NOT blank the items first: the last good page stays on
   // screen (dimmed) until the new one lands, so toggling the lens or a filter
@@ -177,6 +235,30 @@ export default function ActivityFeed({
     }
   }, [pageKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The team and actor options, read beside the list under the same filters
+  // (each cut leaves out its own). A failed read keeps the options the selects
+  // had: the list's own read reports the failure, and a stale option answers
+  // an empty page rather than a wrong one.
+  useEffect(() => {
+    let cancelled = false
+    apiJSON<ActivityActionFacets | ActivityArtifactFacets>(facetsPathFor(basePath, mode), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(filterBody),
+    })
+      .then((res) => {
+        if (cancelled) return
+        setFacets({
+          teams: res.by_team ?? [],
+          actors: 'by_actor' in res ? (res.by_actor ?? []) : [],
+        })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [pageKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // `superseded` = the rows on screen answer an older request than the current
   // lens + filters, so paging against them would splice two views together —
   // and the hook's held page token belongs to that older request, which the
@@ -187,47 +269,15 @@ export default function ActivityFeed({
   const superseded = loaded !== null && loaded.key !== pageKey
   const stale = superseded && error === ''
 
-  // Distinct teams present in the loaded rows — the org feed's team-scope
-  // options. In-memory because the org endpoint is org-wide (no team param).
-  // An action row names one team; an object names every team that changed it.
-  const teamOptions = useMemo(() => {
-    if (!showTeam || loaded === null) return []
-    const seen = new Map<string, string>()
-    for (const r of items) {
-      for (const t of rowTeams(r)) seen.set(t.id, t.name || t.id)
-    }
-    return [...seen.entries()]
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [showTeam, loaded, items])
+  const teamOptions = pickOptions(facets.teams, filters.team)
+  const actorOptions = pickOptions(facets.actors, filters.actor)
 
-  // Distinct human actors present in the loaded action rows — the org + Actions
-  // feed's actor-scope options (mirrors the team scope). Empty on Objects (no
-  // actor) or the team feed (names unresolved there).
-  const actorOptions = useMemo(() => {
-    if (!showTeam || loaded === null || loaded.mode !== 'actions') return []
-    const seen = new Map<string, string>()
-    for (const r of items as ActivityAction[]) {
-      if (r.actor_user_id) seen.set(r.actor_user_id, r.actor_name || r.actor_user_id)
-    }
-    return [...seen.entries()]
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [showTeam, loaded, items])
+  const visible = loaded === null ? null : items
 
-  const visible = useMemo(() => {
-    if (loaded === null) return null
-    let out = items
-    if (showTeam && teamFilter) {
-      out = out.filter((r) => rowTeams(r).some((t) => t.id === teamFilter))
-    }
-    if (showTeam && loaded.mode === 'actions' && actorFilter) {
-      out = out.filter((r) => (r as ActivityAction).actor_user_id === actorFilter)
-    }
-    return out
-  }, [loaded, items, showTeam, teamFilter, actorFilter])
-
-  const count = visible?.length ?? 0
+  // The list's own total when it reports one; the rows held, marked open-ended,
+  // only when it cannot count itself.
+  const count = total ?? visible?.length ?? 0
+  const openEnded = total === null && hasMore
   // The noun follows the rows actually on screen, not the selected lens — during
   // a hold the header would otherwise count "objects" over a list of actions.
   const rowMode = loaded?.mode ?? mode
@@ -250,7 +300,7 @@ export default function ActivityFeed({
           <span className="font-mono text-sm tabular-nums text-ink-3">
             {visible === null
               ? '—'
-              : `${count}${hasMore ? '+' : ''} ${noun}${count === 1 ? '' : 's'}`}
+              : `${count}${openEnded ? '+' : ''} ${noun}${count === 1 ? '' : 's'}`}
           </span>
         </div>
       </div>
@@ -263,8 +313,8 @@ export default function ActivityFeed({
           : 'each object the runs changed, once, across runs'}
       </div>
 
-      {/* Filter bar — adapts per lens. Shared: provider + the time-range tabs.
-          Objects: object kind. Actions: action (+ org actor scope). */}
+      {/* Filter bar — adapts per lens. Shared: provider + the time-range tabs
+          (+ team on the org feed). Objects: object kind. Actions: action + actor. */}
       <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2.5">
         <FeedSelect
           label="provider"
@@ -299,23 +349,17 @@ export default function ActivityFeed({
         {showTeam && teamOptions.length > 0 && (
           <FeedSelect
             label="team"
-            value={teamFilter}
-            onChange={setTeamFilter}
-            options={[
-              { value: '', label: 'All teams' },
-              ...teamOptions.map((t) => ({ value: t.id, label: t.name })),
-            ]}
+            value={filters.team?.id ?? ''}
+            onChange={(v) => pick('team', facets.teams, v)}
+            options={[{ value: '', label: 'All teams' }, ...teamOptions]}
           />
         )}
-        {showTeam && mode === 'actions' && actorOptions.length > 0 && (
+        {mode === 'actions' && actorOptions.length > 0 && (
           <FeedSelect
             label="actor"
-            value={actorFilter}
-            onChange={setActorFilter}
-            options={[
-              { value: '', label: 'All actors' },
-              ...actorOptions.map((a) => ({ value: a.id, label: a.name })),
-            ]}
+            value={filters.actor?.id ?? ''}
+            onChange={(v) => pick('actor', facets.actors, v)}
+            options={[{ value: '', label: 'All actors' }, ...actorOptions]}
           />
         )}
         <span className="ml-auto">
@@ -356,7 +400,7 @@ export default function ActivityFeed({
                 ),
               )}
             </ul>
-            {/* "Load more" pages the server feed; the count above carries the '+' */}
+            {/* "Load more" pages the server feed; the count above is the list's total */}
             {hasMore && (
               <div className="mt-3 flex justify-center">
                 <button

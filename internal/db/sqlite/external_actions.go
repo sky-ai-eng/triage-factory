@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -147,6 +148,52 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	}
 	out, err := scanExternalActionRows(rows)
 	return out, total, err
+}
+
+// FacetsByOrgSystem is FacetsByTeam over every team: N=1, no pool split.
+func (s *externalActionStore) FacetsByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) (db.ExternalActionFacets, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.ExternalActionFacets{}, err
+	}
+	return s.facets(ctx, `org_id = ?`, []any{orgID}, opts)
+}
+
+func (s *externalActionStore) FacetsByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) (db.ExternalActionFacets, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.ExternalActionFacets{}, err
+	}
+	return s.facets(ctx, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, opts)
+}
+
+// facets groups the rows where and opts select by actor and by team, each
+// cut under the list's predicate with its own filter cleared. Each cut's rows
+// are drained before the next query runs, which the one-connection pool needs.
+func (s *externalActionStore) facets(ctx context.Context, where string, base []any, opts domain.ExternalActionListOpts) (db.ExternalActionFacets, error) {
+	cut := func(column string, opts domain.ExternalActionListOpts) ([]db.Facet, error) {
+		query, args := appendExternalActionPredicates(`
+			SELECT `+column+`, COUNT(*)
+			  FROM external_actions ea
+			 WHERE `+where+` AND `+column+` IS NOT NULL`, slices.Clip(base), opts)
+		rows, err := s.q.QueryContext(ctx, query+` GROUP BY `+column+` ORDER BY `+column, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return db.ScanFacets(rows)
+	}
+	byActor := opts
+	byActor.ActorUserID = ""
+	actors, err := cut("actor_user_id", byActor)
+	if err != nil {
+		return db.ExternalActionFacets{}, err
+	}
+	byTeam := opts
+	byTeam.TeamID = ""
+	teams, err := cut("team_id", byTeam)
+	if err != nil {
+		return db.ExternalActionFacets{}, err
+	}
+	return db.ExternalActionFacets{ByActor: actors, ByTeam: teams}, nil
 }
 
 // ListByConversation returns one conversation's actions, newest first. A detached row
@@ -328,6 +375,10 @@ func appendExternalActionPredicates(query string, args []any, opts domain.Extern
 	if opts.ActorUserID != "" {
 		query += ` AND actor_user_id = ?`
 		args = append(args, opts.ActorUserID)
+	}
+	if opts.TeamID != "" {
+		query += ` AND team_id = ?`
+		args = append(args, opts.TeamID)
 	}
 	if opts.ObjectID != "" {
 		query += ` AND (` + sqliteActionObjectIDSQL + `) = ? AND ` + db.ArtifactRowSQL()

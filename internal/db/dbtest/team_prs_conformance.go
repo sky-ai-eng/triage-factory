@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -201,6 +202,52 @@ func RunTeamPRStoreConformance(t *testing.T, mk TeamPRStoreFactory) {
 				t.Errorf("states=%v count-only total=%d, paged total=%d — the figure and the list disagree",
 					tc.states, countTotal, total)
 			}
+		}
+	})
+
+	t.Run("draft_filter_and_updated_at_order", func(t *testing.T) {
+		s, orgID, teamID, host, seed := mk(t)
+		seed.Member(t, "member-a")
+		snap := func(n int, draft bool, updated string) domain.PRSnapshot {
+			p := prSnap(n, "member-a")
+			p.IsDraft, p.UpdatedAt = draft, updated
+			return p
+		}
+		seed.PR(t, TeamPRFixture{Snapshot: snap(50, false, "2026-10-01T09:00:00Z")})
+		seed.PR(t, TeamPRFixture{Snapshot: snap(51, false, "2026-10-03T09:00:00Z")})
+		seed.PR(t, TeamPRFixture{Snapshot: snap(52, true, "2026-10-02T09:00:00Z")})
+		// No updated_at: last in either direction.
+		seed.PR(t, TeamPRFixture{Snapshot: snap(53, true, "")})
+
+		read := func(t *testing.T, f db.PRListFilter) []int {
+			t.Helper()
+			prs, total, err := s.TeamPRs(ctx, orgID, teamID, host, f, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("TeamPRs(%+v): %v", f, err)
+			}
+			if total != len(prs) {
+				t.Errorf("TeamPRs(%+v) total %d, page %d", f, total, len(prs))
+			}
+			out := make([]int, len(prs))
+			for i, p := range prs {
+				out[i] = p.Number
+			}
+			return out
+		}
+		yes, no := true, false
+		desc := db.Sort{Key: db.PRSortUpdatedAt, Dir: db.SortDesc}
+		asc := db.Sort{Key: db.PRSortUpdatedAt, Dir: db.SortAsc}
+		if got := read(t, db.PRListFilter{Draft: &yes, Sort: desc}); !slices.Equal(got, []int{52, 53}) {
+			t.Errorf("drafts newest first = %v, want [52 53]", got)
+		}
+		if got := read(t, db.PRListFilter{Draft: &no, Sort: desc}); !slices.Equal(got, []int{51, 50}) {
+			t.Errorf("ready newest first = %v, want [51 50]", got)
+		}
+		if got := read(t, db.PRListFilter{Sort: asc}); !slices.Equal(got, []int{50, 52, 51, 53}) {
+			t.Errorf("every pull request oldest first = %v, want [50 52 51 53]", got)
+		}
+		if _, _, err := s.TeamPRs(ctx, orgID, teamID, host, db.PRListFilter{Sort: db.Sort{Key: "title"}}, db.Unwindowed); !errors.Is(err, db.ErrUnknownPRSort) {
+			t.Errorf("TeamPRs(sort=title) err = %v, want db.ErrUnknownPRSort", err)
 		}
 	})
 

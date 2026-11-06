@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -21,7 +20,7 @@ import (
 // list is how a caller turns a name into the id a filter stores; the point
 // read is how it names a stored id no team member holds.
 //
-// A user's email is matched by the list's q but never returned: the people
+// A user's email is matched by the list's search but never returned: the people
 // filters need an id and a name to recognize it by, and an org member need not
 // be a member of the Linear workspace.
 // --------------------------------------------------------------------
@@ -29,18 +28,19 @@ import (
 // linearUserListRequest is the body: the text typed into the field plus the
 // standard paging pair.
 type linearUserListRequest struct {
-	// Q is matched case-insensitively against the name, the display name and
-	// the email. Empty matches every active user.
-	Q string `json:"q"`
+	// Search is matched against the name, the display name and the email as a
+	// case-insensitive literal substring (httpx.Search). Absent matches every
+	// active user. Linear applies it upstream, and each page it serves is
+	// re-checked here (readLinearScannedPage).
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
 // linearUserListFilterKey fingerprints a page token to the org, whose
-// workspace the wrapped cursor points into, and to the query, lowercased and
-// trimmed because the match is case-insensitive.
+// workspace the wrapped cursor points into, and to the search.
 type linearUserListFilterKey struct {
-	OrgID string `json:"org_id"`
-	Q     string `json:"q"`
+	OrgID  string `json:"org_id"`
+	Search string `json:"search"`
 }
 
 // linearUserJSON is one Linear user: the id the people filters store, the full
@@ -73,11 +73,12 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	q := strings.TrimSpace(req.Q)
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(linearUserListFilterKey{OrgID: orgID, Q: strings.ToLower(q)}), 0)
+		httpx.FilterFingerprint(linearUserListFilterKey{OrgID: orgID, Search: httpx.SearchKey(search)}), 0)
 	refuseLinearCountOnly(&v, page)
+	from := httpx.ScanCursorFrom(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -86,20 +87,21 @@ func (s *Server) handleLinearUsersList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	upstream, err := client.ListUsers(r.Context(), q, page.Cursor, min(page.Limit, linearPageMax))
+	users, next, err := readLinearScannedPage(from, page.Limit, search,
+		func(u linear.User) []string { return []string{u.Name, u.DisplayName, u.Email} },
+		func(after string) ([]linear.User, bool, string, error) {
+			p, err := client.ListUsers(r.Context(), search, after, linearPageMax)
+			return p.Items, p.HasNextPage, p.EndCursor, err
+		})
 	if err != nil {
 		writeLinearUpstream(w, orgID, "the workspace's Linear users", err)
 		return
 	}
-	items := make([]linearUserJSON, 0, len(upstream.Items))
-	for _, u := range upstream.Items {
+	items := make([]linearUserJSON, 0, len(users))
+	for _, u := range users {
 		items = append(items, toLinearUserJSON(u))
 	}
-	next := ""
-	if upstream.HasNextPage {
-		next = upstream.EndCursor
-	}
-	httpx.WriteProxyList(w, page, items, next)
+	httpx.WriteScannedProxyList(w, page, items, next)
 }
 
 // GET /api/orgs/{org_id}/linear/users/{linear_user_id}

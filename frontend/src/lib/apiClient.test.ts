@@ -4,6 +4,7 @@ import {
   apiFetch,
   apiJSON,
   apiList,
+  apiListFirstRows,
   httpErrorMessage,
   HttpError,
   isSSORequired,
@@ -300,5 +301,46 @@ describe('apiList', () => {
       next_page_token: '',
       total_count: 0,
     })
+  })
+})
+
+describe('apiListFirstRows', () => {
+  const page = (items: unknown[], next: string) => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    text: () =>
+      Promise.resolve(JSON.stringify({ items, next_page_token: next, total_count: null })),
+    json: () => Promise.resolve({ items, next_page_token: next, total_count: null }),
+  })
+
+  it('follows the token past a page the scan left empty, and sends the same body', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(page([], 'tok-1'))
+      .mockResolvedValueOnce(page([{ name: 'hotfix' }], 'tok-2'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const got = await apiListFirstRows<{ name: string }>('/api/repos/r1/branches/list', {
+      search: 'hot',
+      page_size: 30,
+    })
+    expect(got.items).toEqual([{ name: 'hotfix' }])
+    expect(got.next_page_token).toBe('tok-2')
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      search: 'hot',
+      page_size: 30,
+      page_token: 'tok-1',
+    })
+  })
+
+  it('stops after a bounded number of empty pages and keeps the token', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(page([], 'more'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const got = await apiListFirstRows('/api/repos/r1/branches/list', { search: 'x' })
+    expect(got.items).toEqual([])
+    expect(got.next_page_token).toBe('more')
+    expect(fetchMock).toHaveBeenCalledTimes(11)
   })
 })

@@ -2,7 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"strings"
+
+	"modernc.org/sqlite"
 )
 
 // ListOpts is the pagination window every paginated store read takes. It is
@@ -115,3 +119,96 @@ func LikeEscape(s string) string {
 	}
 	return b.String()
 }
+
+// SearchPattern renders a list's search needle as the LIKE operand that
+// matches it as a case-insensitive literal substring: lower-cased, its
+// wildcards escaped, wrapped in %. The column side must be lowered too, and
+// the clause must declare ESCAPE '\' — SQLiteSearch and PostgresSearch render
+// both halves, and a read should use them rather than this directly.
+func SearchPattern(needle string) string {
+	return "%" + LikeEscape(strings.ToLower(needle)) + "%"
+}
+
+// sqliteSearchFold is the SQL function SQLiteSearch lowers a column with.
+// SQLite's own LOWER folds only A-Z, while the needle is lowered in Go, so
+// LOWER("Überprüfung") stays "Überprüfung" and a search for "Über" (pattern
+// "%über%") would not match the text it was typed from. This function lowers
+// the column with strings.ToLower, the same fold the needle and the page
+// fingerprint take.
+const sqliteSearchFold = "tf_search_fold"
+
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction(sqliteSearchFold, 1,
+		func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			switch v := args[0].(type) {
+			case string:
+				return strings.ToLower(v), nil
+			case []byte:
+				return strings.ToLower(string(v)), nil
+			default:
+				// NULL stays NULL and fails its arm; a number is matched as
+				// the text SQLite renders it in, which has no case.
+				return v, nil
+			}
+		})
+}
+
+// SQLiteSearch renders a list's search predicate for SQLite: needle as a
+// case-insensitive literal substring of any of cols, one `?` per column. An
+// empty needle (after trimming) renders no clause and no args, so a caller
+// appends the clause only when it is non-empty.
+//
+// A NULL column simply fails its arm; no COALESCE is needed inside an OR.
+// Both dialects lower both sides and match with LIKE, rather than using a
+// dialect's own case-insensitive operator; SQLite lowers the column through
+// sqliteSearchFold, since its LOWER folds ASCII only.
+func SQLiteSearch(needle string, cols ...string) (string, []any) {
+	needle = strings.TrimSpace(needle)
+	if needle == "" || len(cols) == 0 {
+		return "", nil
+	}
+	pattern := SearchPattern(needle)
+	arms := make([]string, len(cols))
+	args := make([]any, len(cols))
+	for i, c := range cols {
+		arms[i] = sqliteSearchFold + "(" + c + ") LIKE ? ESCAPE '\\'"
+		args[i] = pattern
+	}
+	return "(" + strings.Join(arms, " OR ") + ")", args
+}
+
+// PostgresSearch is SQLiteSearch for Postgres: it appends the one pattern to
+// args and refers to it by its $n position in every arm. It returns the
+// clause and the extended args; an empty needle returns "" and args
+// unchanged.
+func PostgresSearch(needle string, args []any, cols ...string) (string, []any) {
+	needle = strings.TrimSpace(needle)
+	if needle == "" || len(cols) == 0 {
+		return "", args
+	}
+	args = append(args, SearchPattern(needle))
+	p := fmt.Sprintf("$%d", len(args))
+	arms := make([]string, len(cols))
+	for i, c := range cols {
+		arms[i] = "lower(" + c + ") LIKE " + p + " ESCAPE '\\'"
+	}
+	return "(" + strings.Join(arms, " OR ") + ")", args
+}
+
+// The two directions a list's sort_dir takes, on every list route.
+const (
+	SortAsc  = "asc"
+	SortDesc = "desc"
+)
+
+// Sort is the order a list read was asked for: one of the read's own sort keys
+// and a direction. The zero value asks for the read's default order. Every
+// impl still ends the order in its id tiebreaker, whatever the key, so equal
+// keys page in a total order.
+type Sort struct {
+	Key string
+	Dir string
+}
+
+// Desc reports whether the order runs high to low.
+func (s Sort) Desc() bool { return s.Dir == SortDesc }

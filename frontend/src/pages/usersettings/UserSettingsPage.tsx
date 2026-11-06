@@ -7,6 +7,7 @@ import { useJiraIdentity } from '../../hooks/useJiraIdentity'
 import { useTokens } from '../../hooks/useTokens'
 import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import { IDP_NAMES, idpMarkSrc } from '../../lib/idp'
+import type { ApiTokenSortKey } from '../../lib/apiTokens'
 import { captureJiraIdentityApiToken, captureJiraIdentityPat } from '../../lib/jiraIdentity'
 import { getStoredTheme, setTheme, useEffectiveTheme } from '../../lib/theme'
 import type { ApiToken, ApiTokenCreated, IdentitiesResponse, LoginMethod } from '../../types'
@@ -226,11 +227,16 @@ export default function UserSettingsPage() {
       }),
     [tok.tokens, orgName, now],
   )
-  const soonest = rows
-    .filter((r) => r.expDays !== Infinity)
-    .sort((a, b) => a.expDays - b.expDays)[0]
-  const soonDays = soonest ? soonest.expDays : null
-  const count = rows.length
+  // The next expiry is a fact about every token, so it is only stated when
+  // every token is held; with a page still unread it would be a guess.
+  const soonDays = tok.hasMore
+    ? null
+    : rows.reduce<number | null>(
+        (min, r) =>
+          r.expDays === Infinity || (min !== null && min <= r.expDays) ? min : r.expDays,
+        null,
+      )
+  const count = tok.total
 
   const cols = useMemo<TableColumn[]>(() => {
     const c: TableColumn[] = [
@@ -260,15 +266,17 @@ export default function UserSettingsPage() {
         key: 'lastUsedMin',
         label: 'LAST USED',
         align: 'end',
+        // The list route's order: most recent first on the first click, and
+        // a token never used last in both directions.
+        sortKey: 'last_used_at',
+        sortFirst: 'desc',
         render: (r) => (r.lastUsedMin == null ? 'never' : ago(r.lastUsedMin as number)),
-        sortValue: (r) => (r.lastUsedMin == null ? 1e12 : (r.lastUsedMin as number)),
         color: (r) => (r.lastUsedMin == null ? 'var(--color-ink-4)' : 'var(--color-ink-2)'),
       },
       {
         key: 'expires',
         label: 'EXPIRES',
         align: 'end',
-        sortValue: (r) => r.expDays as number,
         measure: (r) => String(r.expText),
         // The cap's part in the date is the sheet's to explain, not the row's.
         render: (r) => {
@@ -649,8 +657,17 @@ export default function UserSettingsPage() {
                 columns={cols}
                 rows={rows}
                 pageSize={6}
-                sortKey="lastUsedMin"
-                sortDir={1}
+                sort={tok.sort}
+                // The table offers only the keys its columns name, all of
+                // them the route's.
+                onSortChange={(s) => tok.setSort({ key: s.key as ApiTokenSortKey, dir: s.dir })}
+                footer={
+                  tok.hasMore ? (
+                    <button type="button" className="us-more" onClick={tok.loadMore}>
+                      Load more
+                    </button>
+                  ) : null
+                }
                 barPosition="absolute"
                 add={{ label: 'new token', onSelect: openDraft }}
                 bar={{

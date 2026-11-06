@@ -644,7 +644,10 @@ describe('the last admin', () => {
   })
 
   it('counts admins over the whole roster, not the rows the filter left showing', async () => {
-    api.apiJSON.mockImplementation((path: string) => {
+    api.apiJSON.mockImplementation((path: string, init?: RequestInit) => {
+      // The searched read answers robin alone, as the server would for "robin".
+      if (path.endsWith('/members/list') && JSON.parse(String(init?.body)).search)
+        return Promise.resolve({ items: [MEMBERS.members[0]], total_count: 1 })
       if (path.endsWith('/members/list'))
         return Promise.resolve({
           items: [
@@ -678,6 +681,62 @@ describe('the last admin', () => {
 
     await waitFor(() => expect(bar()?.textContent).toBe('1 selected'))
     expect(screen.getByText('Hold to remove')).toBeInTheDocument()
+  })
+
+  it('searches the roster on the server and shows the rows it answers', async () => {
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBe(2))
+    // The server answers dana for "zz": a match on something the page cannot
+    // see, which a filter of the page's own would drop.
+    api.apiJSON.mockImplementation((path: string) =>
+      path.endsWith('/members/list')
+        ? Promise.resolve({ items: [MEMBERS.members[1]], total_count: 1 })
+        : Promise.reject(new Error('no route: ' + path)),
+    )
+
+    fireEvent.change(screen.getByLabelText('Filter members'), { target: { value: ' zz ' } })
+
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBe(1))
+    expect(document.querySelector('.tb-row')?.textContent).toContain('dana')
+    const searched = api.apiJSON.mock.calls.filter(
+      ([path, init]) =>
+        String(path).endsWith('/members/list') &&
+        JSON.parse(String((init as RequestInit).body)).search !== undefined,
+    )
+    expect(searched).toHaveLength(1)
+    expect(searched[0][0]).toBe('/api/teams/t1/members/list')
+    expect(JSON.parse(String((searched[0][1] as RequestInit).body))).toEqual({
+      page_size: 200,
+      search: 'zz',
+    })
+  })
+
+  it('offers the org roster’s answer as teammates to add, not a filter of its own', async () => {
+    // Neither candidate's name carries the query: the server matched them on
+    // something the page cannot see, and the page offers them as given.
+    api.apiList.mockResolvedValue({
+      items: [
+        { user_id: 'u8', display_name: 'yuki', github_username: null, role: 'member' },
+        { user_id: 'u9', display_name: 'zed', github_username: null, role: 'member' },
+      ],
+      next_page_token: '',
+      total_count: 2,
+    })
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBe(2))
+
+    fireEvent.click(screen.getByRole('button', { name: /add teammate/ }))
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cas' } })
+
+    await waitFor(() =>
+      expect(api.apiList).toHaveBeenCalledWith(
+        '/api/orgs/org-1/members/list',
+        { page_size: 50, search: 'cas', excluding_team_id: 't1' },
+        expect.anything(),
+      ),
+    )
+    expect(await screen.findByRole('option', { name: /yuki/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /zed/ })).toBeInTheDocument()
   })
 
   it('draws no roster verbs at all in local mode', async () => {

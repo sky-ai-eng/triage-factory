@@ -33,14 +33,15 @@ func jiraStatusPath(key, statusID string) string {
 	return jiraProjectPath(key) + "/statuses/" + statusID
 }
 
-// TestJiraProjectsList_TokenIsFingerprintedOnQ: the search filters and pages the
-// catalog under Jira's ids with a null total, and a token continues only its own
-// search: another filter is refused, a re-spelling in case and spacing is not.
-func TestJiraProjectsList_TokenIsFingerprintedOnQ(t *testing.T) {
+// TestJiraProjectsList_TokenIsFingerprintedOnSearch: the search filters and
+// pages the catalog under Jira's ids with a null total, and a token continues
+// only its own search: another filter is refused, a re-spelling in case and
+// spacing is not.
+func TestJiraProjectsList_TokenIsFingerprintedOnSearch(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS", "DESK")
 
 	first := httpxtest.DecodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"q": "sk", "page_size": 1}))
+		map[string]any{"search": "sk", "page_size": 1}))
 	if want := []jiraProjectJSON{{JiraID: fakeJiraProjectID("SKY"), Key: "SKY", Name: "SKY Project"}}; !slices.Equal(first.Items, want) ||
 		first.NextPageToken == "" || first.TotalCount != nil {
 		t.Fatalf("page 1 = %+v (token %q, total %v), want %+v with a token and a null total", first.Items, first.NextPageToken, first.TotalCount, want)
@@ -57,26 +58,42 @@ func TestJiraProjectsList_TokenIsFingerprintedOnQ(t *testing.T) {
 
 	// OPS does not match, so the second and last page is DESK.
 	second := httpxtest.DecodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"q": "  SK  ", "page_size": 1, "page_token": first.NextPageToken}))
+		map[string]any{"search": "  SK  ", "page_size": 1, "page_token": first.NextPageToken}))
 	if got := projectKeysOf(second.Items); got != "DESK" || second.NextPageToken != "" {
 		t.Errorf("page 2 under a re-spelled filter = %s (token %q), want DESK and no token", got, second.NextPageToken)
 	}
 }
 
-// TestJiraProjectsList_StrictBody: an unknown field, a count-only read (a proxy
-// list has no total) and an out-of-range page size are each a 400 that never
-// reaches Jira.
+// TestJiraProjectsList_SearchIsLiteral: a % or an _ in the search is the
+// character itself, never a wildcard, on the catalog Data Center serves whole.
+func TestJiraProjectsList_SearchIsLiteral(t *testing.T) {
+	s, _ := newServerWithJiraCatalog(t, "A%C", "A_C", "ABC")
+	for search, want := range map[string]string{"a%c": "A%C", "a_c": "A_C", "%": "A%C", "abc": "ABC"} {
+		page := httpxtest.DecodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
+			map[string]any{"search": search}))
+		if got := projectKeysOf(page.Items); got != want {
+			t.Errorf("search %q = %s, want only %s", search, got, want)
+		}
+	}
+}
+
+// TestJiraProjectsList_StrictBody: an unknown field (the old name of the search
+// among them), a search past the cap, a count-only read (a proxy list has no
+// total) and an out-of-range page size are each a 400 that never reaches Jira.
 func TestJiraProjectsList_StrictBody(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
+	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"q": "sk"}),
+		http.StatusBadRequest, "UNKNOWN_FIELD", "q")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"query": "sk"}),
 		http.StatusBadRequest, "UNKNOWN_FIELD", "query")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"page_size": 0}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"page_size": 5000}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
-	if fake.Calls() != 0 {
-		t.Errorf("rejected body still reached Jira (%d calls)", fake.Calls())
+	assertSearchCap(t, s, jiraProjectsListPath, map[string]any{}, fake.Calls)
+	if fake.Calls() != 1 {
+		t.Errorf("rejected bodies reached Jira (%d calls, want only the search at the cap)", fake.Calls())
 	}
 }
 
@@ -178,6 +195,29 @@ func TestJiraStatusesList_TokenIsBoundToTheProject(t *testing.T) {
 	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("OPS"),
 		map[string]any{"page_size": 2, "page_token": token}),
 		http.StatusBadRequest, "INVALID_PARAM", "page_token")
+}
+
+// TestJiraStatusesList_Search: the search narrows a project's workflow by
+// status name before the window, a % or an _ in it is the character itself,
+// and a token continues only its own search.
+func TestJiraStatusesList_Search(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
+	path := jiraStatusesListPath("SKY")
+	assertSearches(t, s, path, jiraStatusName, map[string][]string{
+		"in":     {"In Progress"},
+		"ReView": {"Code Review"},
+		"o":      {"Code Review", "Done", "In Progress", "To Do"},
+		"queued": {},
+	})
+	assertTokenBoundToSearch(t, s, path, "o", "do", jiraStatusName, []string{"Done"})
+
+	fake.SetStatuses("OPS", fakeJiraStatus{ID: "20000", Name: "50% Done"}, fakeJiraStatus{ID: "20001", Name: "500 Done"},
+		fakeJiraStatus{ID: "20002", Name: "On_Hold"}, fakeJiraStatus{ID: "20003", Name: "OnXHold"})
+	assertSearches(t, s, jiraStatusesListPath("OPS"), jiraStatusName, map[string][]string{
+		"50%":     {"50% Done"},
+		"on_hold": {"On_Hold"},
+	})
+	assertSearchCap(t, s, path, map[string]any{}, fake.Calls)
 }
 
 // TestJiraStatusesList_Refusals: a project Jira cannot show is a 404, as is a

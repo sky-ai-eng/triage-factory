@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -648,6 +649,113 @@ func TestHandleEventHandlersList_RejectsBadKind(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{"kind": "banana"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// createNotifyRuleFor creates a notify rule with the given audience and
+// returns its id.
+func createNotifyRuleFor(t *testing.T, s *Server, name, audience string) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/notify", map[string]any{
+		"event_type": domain.EventGitHubPRCICheckFailed, "name": name, "audience": audience,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create notify rule %s: %d %s", name, rec.Code, rec.Body.String())
+	}
+	var got domain.EventHandler
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode notify rule %s: %v", name, err)
+	}
+	return got.ID
+}
+
+// TestHandleEventHandlersList_AudienceAndCreatorFilters: the notify panel's two
+// sections are two reads, the caller's personal rules and the team's rules,
+// and each narrows on the server.
+func TestHandleEventHandlersList_AudienceAndCreatorFilters(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	mine := createNotifyRuleFor(t, s, "mine", domain.NotifyAudienceCreator)
+	team := createNotifyRuleFor(t, s, "team", domain.NotifyAudienceTeam)
+	rule := createUserRule(t, s)
+
+	ids := func(body map[string]any) []string {
+		t.Helper()
+		body["page_size"] = 200
+		out := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", body))
+		got := make([]string, 0, len(out.Items))
+		for _, h := range out.Items {
+			got = append(got, h["id"].(string))
+		}
+		if out.Total() != len(got) {
+			t.Errorf("%v: total %d, page %d", body, out.Total(), len(got))
+		}
+		slices.Sort(got)
+		return got
+	}
+	sorted := func(in ...string) []string { slices.Sort(in); return in }
+	for _, tc := range []struct {
+		body map[string]any
+		want []string
+	}{
+		{map[string]any{"kind": "notify", "audience": "creator", "creator_user_id": runmode.LocalDefaultUserID}, []string{mine}},
+		{map[string]any{"kind": "notify", "audience": "team"}, []string{team}},
+		{map[string]any{"creator_user_id": runmode.LocalDefaultUserID}, sorted(mine, team, rule)},
+		{map[string]any{"creator_user_id": "44444444-4444-4444-4444-444444444444"}, []string{}},
+		{map[string]any{"kind": "rule", "audience": "team"}, []string{}},
+	} {
+		if got := ids(tc.body); !slices.Equal(got, tc.want) {
+			t.Errorf("%v = %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestHandleEventHandlersList_AudienceAndCreatorAreStrict: an audience outside
+// a notify rule's vocabulary and a creator that is not a user id in canonical
+// form are each a 400 naming the field, never a filter that matches nothing;
+// and a page token minted under one is refused under another.
+func TestHandleEventHandlersList_AudienceAndCreatorAreStrict(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	for _, tc := range []struct {
+		body  map[string]any
+		field string
+	}{
+		{map[string]any{"audience": "org"}, "audience"},
+		{map[string]any{"audience": "Team"}, "audience"},
+		{map[string]any{"audience": 1}, "audience"},
+		{map[string]any{"creator_user_id": "me"}, "creator_user_id"},
+		{map[string]any{"creator_user_id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"}, "creator_user_id"},
+		{map[string]any{"creator_user_id": "{" + runmode.LocalDefaultUserID + "}"}, "creator_user_id"},
+		{map[string]any{"creator": runmode.LocalDefaultUserID}, "creator"},
+	} {
+		rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/list", tc.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%v: status = %d, want 400; body=%s", tc.body, rec.Code, rec.Body.String())
+			continue
+		}
+		assertFieldError(t, rec, tc.field)
+	}
+
+	createNotifyRuleFor(t, s, "a", domain.NotifyAudienceCreator)
+	createNotifyRuleFor(t, s, "b", domain.NotifyAudienceCreator)
+	createNotifyRuleFor(t, s, "c", domain.NotifyAudienceTeam)
+	for _, tc := range []struct{ mint, reuse map[string]any }{
+		{map[string]any{"audience": "creator"}, map[string]any{"audience": "team"}},
+		{map[string]any{"kind": "notify"}, map[string]any{"kind": "notify", "creator_user_id": runmode.LocalDefaultUserID}},
+	} {
+		tc.mint["page_size"] = 1
+		first := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", tc.mint))
+		if first.NextPageToken == "" {
+			t.Fatalf("%v minted no next page token", tc.mint)
+		}
+		tc.reuse["page_size"], tc.reuse["page_token"] = 1, first.NextPageToken
+		rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/list", tc.reuse)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("token minted under %v reused under %v = %d, want 400; body=%s", tc.mint, tc.reuse, rec.Code, rec.Body.String())
+			continue
+		}
+		assertFieldError(t, rec, "page_token")
 	}
 }
 

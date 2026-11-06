@@ -123,19 +123,42 @@ type ArtifactStore interface {
 	// ListByOrgSystem is ListByTeam over every row of the org, whatever its
 	// team. Admin pool.
 	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.ObjectActivity, int, error)
+
+	// FacetsByTeam is ListByTeam's synthetic sibling: the ArtifactFacets cuts
+	// over the rows ListByTeam groups under the same opts, rendered through
+	// the same WHERE. opts' window is ignored: the cuts are bounded by the
+	// teams of the org, not by a page. App pool.
+	FacetsByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) (ArtifactFacets, error)
+
+	// FacetsByOrgSystem is FacetsByTeam over every row of the org. Admin pool.
+	FacetsByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) (ArtifactFacets, error)
 }
 
 // ArtifactListOpts filters and windows ArtifactStore.ListByTeam and
 // ListByOrgSystem. Each filter is exact-match and applies only when set.
 // They select rows, not objects: an object's ActionCount, ConversationCount,
-// TeamIDs and FirstAt count only its rows that pass them. Since and Until bound
-// occurred_at to the half-open window [Since, Until). ListOpts windows the
-// page of objects and pages by offset (RequireArtifactOffsetPage).
+// TeamIDs and FirstAt count only its rows that pass them, so TeamID keeps the
+// rows that team's runs wrote and an object several teams changed carries that
+// team alone. TeamID is compared as stored, so a caller passes the canonical
+// id. Since and Until bound occurred_at to the half-open window [Since,
+// Until). ListOpts windows the page of objects and pages by offset
+// (RequireArtifactOffsetPage).
 type ArtifactListOpts struct {
 	Provider   string
 	ObjectKind string
+	TeamID     string
 	Since      time.Time
 	Until      time.Time
 
 	ListOpts
+}
+
+// ArtifactFacets is the cuts the artifacts feeds' facets node answers, each
+// computed under the list's filters except its own.
+type ArtifactFacets struct {
+	// ByTeam is each team whose runs changed an object, and how many objects
+	// they changed: an object several teams changed counts once under each.
+	// Computed without ArtifactListOpts.TeamID. Rows with no team are in no
+	// value. By team id ascending.
+	ByTeam []Facet
 }

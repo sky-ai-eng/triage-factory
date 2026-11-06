@@ -116,6 +116,10 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 	if err != nil {
 		return nil, 0, err
 	}
+	order, err := sqlitePRSummaryOrder(f.Sort)
+	if err != nil {
+		return nil, 0, err
+	}
 	mine, args, ok := sqlitePRViewerLegs(viewer, nil)
 	if !ok {
 		return []domain.PRSummaryRow{}, 0, nil
@@ -123,7 +127,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 
 	where := `
 		WHERE e.source = 'github' AND ` + sqlitePRStateSnapshotGuard + `
-		  AND ` + mine + stateClause
+		  AND ` + mine + stateClause + sqlitePRDraftClause(f.Draft)
 
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
@@ -133,7 +137,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT ` + sqlitePRSummaryColumns + ` FROM entities e` + where + sqlitePRSummaryOrder
+	query := `SELECT ` + sqlitePRSummaryColumns + ` FROM entities e` + where + order
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)

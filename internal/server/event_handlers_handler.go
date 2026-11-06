@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -84,22 +85,34 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 // immutable (kind, blueprint_id) under a fence PATCH cannot express — which is
 // what makes them transitions rather than field writes.
 
-// eventHandlerListRequest is the body of POST /api/event-handlers/list. Kind
-// and TeamID are the old ?kind= / ?team_id= params, unchanged in meaning and
-// now validated strictly — a corrupt team filter used to be dropped, which
-// widened the read to every team.
+// eventHandlerListRequest is the body of POST /api/event-handlers/list. Each
+// field is a narrowing, validated strictly: a corrupt filter is a 400 naming
+// it, never dropped, since dropping one widens the read.
 type eventHandlerListRequest struct {
 	// Kind is "rule", "trigger", "notify", or omitted (every kind).
 	Kind   string `json:"kind"`
 	TeamID string `json:"team_id"`
+	// Audience keeps the notify rules telling "creator" (personal rules) or
+	// "team"; rules and triggers have no audience, so it leaves notify rules
+	// alone. Omitted is every audience.
+	Audience string `json:"audience"`
+	// CreatorUserID keeps the handlers one user authored, by the canonical id
+	// a row's creator_user_id carries. Omitted is every author.
+	CreatorUserID string `json:"creator_user_id"`
 
 	httpx.PageRequest
 }
 
 type eventHandlerListFilterKey struct {
-	Kind   string `json:"kind"`
-	TeamID string `json:"team_id"`
+	Kind          string `json:"kind"`
+	TeamID        string `json:"team_id"`
+	Audience      string `json:"audience"`
+	CreatorUserID string `json:"creator_user_id"`
 }
+
+// eventHandlerListAudiences is the audience filter's vocabulary: the values a
+// notify rule's audience holds.
+var eventHandlerListAudiences = []string{domain.NotifyAudienceCreator, domain.NotifyAudienceTeam}
 
 // POST /api/event-handlers/list
 func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r *http.Request) {
@@ -120,8 +133,12 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 		v.Invalid("kind", "kind must be 'rule', 'trigger', 'notify', or omitted (returns every kind)")
 	}
 	teamIDFilterField(&v, req.TeamID)
+	if req.Audience != "" && !slices.Contains(eventHandlerListAudiences, req.Audience) {
+		v.Invalid("audience", "audience must be one of: "+strings.Join(eventHandlerListAudiences, ", ")+", or omitted (every audience)")
+	}
+	httpx.CanonicalIDFilterField(&v, "creator_user_id", req.CreatorUserID, "user")
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(eventHandlerListFilterKey{
-		Kind: req.Kind, TeamID: req.TeamID,
+		Kind: req.Kind, TeamID: req.TeamID, Audience: req.Audience, CreatorUserID: req.CreatorUserID,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -130,8 +147,12 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	// The entitlement gate (TFAC-524) hides a handler bound to an event type
 	// this org isn't licensed for. It rides into the query as a filter, not a
 	// post-read trim, so the page and total_count agree about what the caller
-	// can see.
-	filter := db.EventHandlerListFilter{Kind: req.Kind, TeamID: req.TeamID, GatedEventTypes: entitlements.GatedEventTypes(orgID)}
+	// can see. audience and creator_user_id only narrow what the caller can
+	// already read.
+	filter := db.EventHandlerListFilter{
+		Kind: req.Kind, TeamID: req.TeamID, Audience: req.Audience, CreatorUserID: req.CreatorUserID,
+		GatedEventTypes: entitlements.GatedEventTypes(orgID),
+	}
 
 	var (
 		handlers []domain.EventHandler

@@ -1,14 +1,23 @@
-import { apiFetch, apiJSON, apiListAll } from './apiClient'
+import { apiFetch, apiJSON } from './apiClient'
+import type { SortDir } from './apiClient'
 import type { ApiToken, ApiTokenCreateRequest, ApiTokenCreated, ApiTokenPolicy } from '../types'
 
 // The caller's own API tokens — the headless credential surface — and the
 // org policy that binds them. Multi-mode only: every route here 404s in local,
 // and the page that mounts this never renders there.
 
-/** Every token the caller holds, across their orgs. The set is bounded (fifty
- *  per org) so it is read whole, and the table pages it client-side. */
-export function listApiTokens(): Promise<ApiToken[]> {
-  return apiListAll<ApiToken>('/api/me/tokens/list', {})
+/** The list read of every token the caller holds, across their orgs. It is
+ *  read a page at a time (usePagedList) in the order the body names. */
+export const API_TOKENS_LIST_PATH = '/api/me/tokens/list'
+
+/** The token list's `sort_key` vocabulary. A token never used sorts last
+ *  under `last_used_at` in both directions. */
+export type ApiTokenSortKey = 'last_used_at' | 'created_at'
+
+/** An order the token list is read in. */
+export interface ApiTokenSort {
+  key: ApiTokenSortKey
+  dir: SortDir
 }
 
 /** Mints one token. The response is the only place the plaintext ever exists;

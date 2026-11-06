@@ -699,7 +699,7 @@ func TestListWorkflowStates_FollowsCursorToTheEnd(t *testing.T) {
 		case "null":
 			return reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s3","name":"Done","type":"completed","position":3},{"id":"s1","name":"Todo","type":"unstarted","position":1}],"pageInfo":{"hasNextPage":true,"endCursor":"c1"}}}}}`}
 		case `"c1"`:
-			return reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s2","name":"Doing","type":"started","position":2}],"pageInfo":{"hasNextPage":false,"endCursor":"c2"}}}}}`}
+			return reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s2b","name":"Review","type":"started","position":2},{"id":"s2a","name":"Doing","type":"started","position":2}],"pageInfo":{"hasNextPage":false,"endCursor":"c2"}}}}}`}
 		}
 		t.Errorf("request %d with unexpected cursor %s", n, req.Variables["after"])
 		return reply{status: http.StatusBadRequest, body: `{}`}
@@ -713,8 +713,8 @@ func TestListWorkflowStates_FollowsCursorToTheEnd(t *testing.T) {
 	for _, st := range states {
 		ids = append(ids, st.ID)
 	}
-	if !reflect.DeepEqual(ids, []string{"s1", "s2", "s3"}) {
-		t.Errorf("states = %v, want both pages ordered by position", ids)
+	if !reflect.DeepEqual(ids, []string{"s1", "s2a", "s2b", "s3"}) {
+		t.Errorf("states = %v, want both pages ordered by position, a tie by id", ids)
 	}
 	reqs := s.requests()
 	if len(reqs) != 2 {
@@ -793,42 +793,7 @@ func TestListCommentsSince_MissingIssueIsNotFound(t *testing.T) {
 	}
 }
 
-func TestListTeamStates_OnePageInLinearsOrder(t *testing.T) {
-	s := newStub(t, scripted(reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s3","name":"Done","type":"completed","position":3},{"id":"s1","name":"Todo","type":"unstarted","position":1}],"pageInfo":{"hasNextPage":true,"endCursor":"c1"}}}}}`}))
-
-	got, err := s.client().ListTeamStates(context.Background(), "team-1", "c0", 2)
-	if err != nil {
-		t.Fatalf("ListTeamStates: %v", err)
-	}
-	want := WorkflowStatePage{
-		Items: []WorkflowState{
-			{ID: "s3", Name: "Done", Type: "completed", Position: 3},
-			{ID: "s1", Name: "Todo", Type: "unstarted", Position: 1},
-		},
-		EndCursor: "c1", HasNextPage: true,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("page = %+v, want %+v (one upstream page, unsorted)", got, want)
-	}
-	req := s.requests()[0]
-	if string(req.Variables["id"]) != `"team-1"` || string(req.Variables["after"]) != `"c0"` || string(req.Variables["first"]) != "2" {
-		t.Errorf("variables = %v", req.Variables)
-	}
-}
-
-func TestListTeamStates_PageSizeBounds(t *testing.T) {
-	s := newStub(t, scripted())
-	for _, first := range []int{0, maxPageSize + 1} {
-		if _, err := s.client().ListTeamStates(context.Background(), "team-1", "", first); err == nil {
-			t.Errorf("first=%d: want an error", first)
-		}
-	}
-	if n := len(s.requests()); n != 0 {
-		t.Errorf("requests = %d, want none for an out-of-range page", n)
-	}
-}
-
-func TestListTeamStates_InvisibleTeamIsNotFound(t *testing.T) {
+func TestListWorkflowStates_InvisibleTeamIsNotFound(t *testing.T) {
 	cases := map[string]reply{
 		"entity not found text": {status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: Team","extensions":{"code":"INVALID_INPUT"}}]}`},
 		"null team":             {body: `{"data":{"team":null}}`},
@@ -836,7 +801,7 @@ func TestListTeamStates_InvisibleTeamIsNotFound(t *testing.T) {
 	for name, rep := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := newStub(t, scripted(rep))
-			if _, err := s.client().ListTeamStates(context.Background(), "team-x", "", 10); !errors.Is(err, ErrNotFound) {
+			if _, err := s.client().ListWorkflowStates(context.Background(), "team-x"); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("err = %v, want ErrNotFound", err)
 			}
 		})

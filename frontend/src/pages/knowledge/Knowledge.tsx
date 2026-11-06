@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Table from '../../ui/table/Table'
-import type { TableRow } from '../../ui/table/Table'
+import type { TableRow, TableSort } from '../../ui/table/Table'
 import Dialog from '../../ui/dialog/Dialog'
 import { usePageHeader } from '../../contexts/ChromeContext'
 import { usePagedList } from '../../hooks/usePagedList'
@@ -99,6 +99,13 @@ const PAGE_SIZE = 200
  *  is typed into, and every keystroke changes where the files would land. */
 const PROBE_DEBOUNCE_MS = 250
 
+/** How long the search field settles before the list is read again. Each
+ *  settled needle is one read; clearing the field reads at once. */
+const SEARCH_DEBOUNCE_MS = 250
+
+/** The order the page opens in: by path, A to Z — the route's `path` key. */
+const DEFAULT_SORT: TableSort = { key: 'path', dir: 'asc' }
+
 export default function Knowledge() {
   const { teams, lastActingTeamId, loaded } = useTeams()
   const { roleForTeam } = useTeamRole()
@@ -121,7 +128,13 @@ export default function Knowledge() {
   const canWrite = isLocal || (teamId !== '' && roleForTeam(teamId) !== 'viewer')
 
   const [root, setRoot] = useState<KnowledgeRoot>('private')
-  const [filter, setFilter] = useState('')
+  // What the field holds, and the needle the list was last asked for. The
+  // search and the order are the list route's: the page holds one window of
+  // the KB, and narrowing or ranking that window would answer a question
+  // about the rows it happened to read rather than about the KB.
+  const [searchInput, setSearchInput] = useState('')
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<TableSort>(DEFAULT_SORT)
   const [viewing, setViewing] = useState<KnowledgeFile | null>(null)
   const [confirmUpload, setConfirmUpload] = useState<File[] | null>(null)
   const [uploadFolder, setUploadFolder] = useState('')
@@ -136,12 +149,24 @@ export default function Knowledge() {
 
   const reload = useCallback(() => {
     if (!teamId) return
-    void load({ root, page_size: PAGE_SIZE })
-  }, [teamId, root, load])
+    void load({
+      root,
+      ...(search ? { search } : {}),
+      sort_key: sort.key,
+      sort_dir: sort.dir,
+      page_size: PAGE_SIZE,
+    })
+  }, [teamId, root, search, sort, load])
 
   useEffect(() => {
     reload()
   }, [reload])
+
+  useEffect(() => {
+    const needle = searchInput.trim()
+    const timer = setTimeout(() => setSearch(needle), needle ? SEARCH_DEBOUNCE_MS : 0)
+    return () => clearTimeout(timer)
+  }, [searchInput])
 
   // The invalidation ping. It names the team and the root that changed, so a
   // page showing one root does not refetch when the other one is written —
@@ -157,18 +182,18 @@ export default function Knowledge() {
     ),
   )
 
-  const rows: TableRow[] = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    return list.items
-      .filter((f) => !q || f.path.toLowerCase().includes(q))
-      .map((f) => ({
+  // The rows in the order the server answered them.
+  const rows: TableRow[] = useMemo(
+    () =>
+      list.items.map((f) => ({
         id: rowID(teamId, f),
         path: f.path,
         size: fmtBytes(f.size),
         updated: f.mod_time,
         file: f,
-      }))
-  }, [list.items, filter, teamId])
+      })),
+    [list.items, teamId],
+  )
 
   const send = useCallback(
     async (action: string, ids: Array<string | number>) => {
@@ -375,6 +400,7 @@ export default function Knowledge() {
             {
               key: 'path',
               label: 'DOCUMENT',
+              sortKey: 'path',
               // The name is the way in. A row click belongs to selection —
               // that is what the checkbox column and the verbs are for — so
               // reading a document is its own control inside the cell, and it
@@ -393,29 +419,47 @@ export default function Knowledge() {
               ),
               measure: (row) => String(row.path),
             },
-            { key: 'size', label: 'SIZE', align: 'end', drop: 2 },
-            { key: 'updated', label: 'UPDATED', type: 'ago', align: 'end', drop: 1 },
+            {
+              key: 'size',
+              label: 'SIZE',
+              align: 'end',
+              drop: 2,
+              sortKey: 'size',
+              sortFirst: 'desc',
+            },
+            {
+              key: 'updated',
+              label: 'UPDATED',
+              type: 'ago',
+              align: 'end',
+              drop: 1,
+              sortKey: 'mod_time',
+              sortFirst: 'desc',
+            },
           ]}
           rows={rows}
           pageSize="auto"
-          sortKey="path"
+          sort={sort}
+          onSortChange={setSort}
           barPosition="absolute"
           emptyLabel={
             list.loading
               ? 'Loading…'
-              : root === 'private'
-                ? 'Nothing filed yet. Upload the notes your team keeps re-explaining.'
-                : 'Nothing published yet. Publish from Private to share with the organization.'
+              : search
+                ? `No documents match “${search}”.`
+                : root === 'private'
+                  ? 'Nothing filed yet. Upload the notes your team keeps re-explaining.'
+                  : 'Nothing published yet. Publish from Private to share with the organization.'
           }
           // Selection exists for the verbs, so a viewer sees neither.
           selectable={canWrite}
           headerRight={
             <input
               className="kb-filter"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="filter"
-              aria-label="Filter documents"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="search"
+              aria-label="Search documents"
             />
           }
           headerLeft={

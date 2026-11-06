@@ -23,7 +23,8 @@ func TestChannelsHandler_LocalMode404(t *testing.T) {
 		path   string
 		fn     func(http.ResponseWriter, *http.Request)
 	}{
-		{"list", http.MethodGet, "/api/slack/teams/default/channels", h.handleList},
+		{"list", http.MethodPost, "/api/slack/teams/default/channels/list", h.handleList},
+		{"facets", http.MethodPost, "/api/slack/teams/default/channels/facets", h.handleFacets},
 		{"put", http.MethodPut, "/api/slack/teams/default/channels", h.handlePut},
 		{"primary", http.MethodPost, "/api/slack/channels/C123/primary", h.handlePrimary},
 	}

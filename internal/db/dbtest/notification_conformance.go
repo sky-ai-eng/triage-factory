@@ -3,6 +3,7 @@ package dbtest
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -486,17 +487,17 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		}
 
 		f.As(t, f.Viewer, func(s db.NotificationStore) {
-			items, total, err := s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{}, db.ListOpts{Limit: 2})
+			items, total, err := s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{}, db.ListOpts{Limit: 2})
 			if err != nil || total != 4 || len(items) != 2 {
 				t.Errorf("ListForOrg page = %d items, total %d, %v; want 2 of 4", len(items), total, err)
 			}
-			items, total, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{TeamIDIn: []string{f.ArchivedTeam}}, db.ListOpts{Limit: 50})
+			items, total, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{TeamIDIn: []string{f.ArchivedTeam}}, db.ListOpts{Limit: 50})
 			if err != nil || total != 1 || items[0].ID != archived.ID {
 				t.Errorf("ListForOrg team_id_in = %v, %v; want the archived team's row", ids(items), err)
 			} else if items[0].Sent {
 				t.Errorf("ListForOrg: the archived team's row reads as sent")
 			}
-			items, _, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{}, db.ListOpts{Limit: 50})
+			items, _, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{}, db.ListOpts{Limit: 50})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -557,14 +558,12 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 			if err != nil || total != 3 || !slices.Equal(ids(items), []string{low.ID}) {
 				t.Errorf("latest resolution = %v (total %d), %v; want %s", ids(items), total, err, low.ID)
 			}
-			items, _, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{
-				NotificationListFilter: byResolution(db.NotificationSortDirAsc, ""),
-			}, db.ListOpts{Limit: 50})
+			items, _, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, byResolution(db.NotificationSortDirAsc, ""), db.ListOpts{Limit: 50})
 			if want := []string{high.ID, urgent.ID, low.ID, open.ID}; err != nil || !slices.Equal(ids(items), want) {
 				t.Errorf("ListForOrg asc = %v, %v; want %v", ids(items), err, want)
 			}
 			for name, bad := range map[string]db.NotificationListFilter{
-				"unknown key":       {SortKey: "title"},
+				"unknown key":       {SortKey: "seen_count"},
 				"unknown direction": {SortKey: db.NotificationSortResolvedAt, SortDir: "up"},
 				"direction alone":   {SortDir: db.NotificationSortDirAsc},
 			} {
@@ -573,6 +572,212 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 				}
 			}
 		})
+	})
+
+	// narrowWorld raises five rows the viewer is sent, one per audience shape,
+	// in this order, so first_seen_at and escalated_at rise from a to e.
+	type narrowWorld struct {
+		a, b, c, d, e domain.Notification
+	}
+	raiseNarrowWorld := func(t *testing.T, f NotificationFixture) narrowWorld {
+		t.Helper()
+		var w narrowWorld
+		w.a = raise(t, f, db.NotificationOccurrence{Key: "a", Priority: domain.NotificationUrgent,
+			Title: "Disk 100% full", Body: "volume a"}).Notification
+		w.b = raise(t, f, db.NotificationOccurrence{Key: "b", Priority: domain.NotificationHigh,
+			Title: "beta sync", Body: "Lagging 50_percent", Audience: domain.NotificationAudience{
+				Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleMembers, TeamID: f.Team}}).Notification
+		w.c = raise(t, f, db.NotificationOccurrence{Key: "c", Priority: domain.NotificationLow,
+			Title: "Alpha", Body: "for the team's admins", Audience: domain.NotificationAudience{
+				Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleAdmins, TeamID: f.Team}}).Notification
+		w.d = raise(t, f, db.NotificationOccurrence{Key: "d", Priority: domain.NotificationHigh,
+			Title: "gamma", Body: "100 percent", Audience: domain.NotificationAudience{
+				Scope: domain.NotificationScopeUser, UserID: f.Viewer}}).Notification
+		w.e = raise(t, f, db.NotificationOccurrence{Key: "e", Priority: domain.NotificationLow,
+			Title: "Delta", Audience: domain.NotificationAudience{
+				Scope: domain.NotificationScopeOrg, Role: domain.NotificationRoleMembers}}).Notification
+		rows := []domain.Notification{w.a, w.b, w.c, w.d, w.e}
+		for i := 1; i < len(rows); i++ {
+			if !rows[i].FirstSeenAt.After(rows[i-1].FirstSeenAt) || !rows[i].EscalatedAt.After(rows[i-1].EscalatedAt) {
+				t.Fatalf("rows raised in order share a timestamp: %+v then %+v", rows[i-1], rows[i])
+			}
+		}
+		return w
+	}
+
+	t.Run("narrowing", func(t *testing.T) {
+		f := mk(t)
+		w := raiseNarrowWorld(t, f)
+		for name, c := range map[string]struct {
+			f    db.NotificationListFilter
+			want []string
+		}{
+			"title":        {db.NotificationListFilter{Search: "ALPHA"}, []string{w.c.ID}},
+			"body":         {db.NotificationListFilter{Search: "volume"}, []string{w.a.ID}},
+			"percent":      {db.NotificationListFilter{Search: "100%"}, []string{w.a.ID}},
+			"underscore":   {db.NotificationListFilter{Search: "_percent"}, []string{w.b.ID}},
+			"no match":     {db.NotificationListFilter{Search: "nothing like it"}, []string{}},
+			"admins":       {db.NotificationListFilter{RoleIn: []domain.NotificationRole{domain.NotificationRoleAdmins}}, []string{w.a.ID, w.c.ID}},
+			"members":      {db.NotificationListFilter{RoleIn: []domain.NotificationRole{domain.NotificationRoleMembers}}, []string{w.b.ID, w.e.ID}},
+			"org admins":   {db.NotificationListFilter{ScopeIn: []domain.NotificationScope{domain.NotificationScopeOrg}, RoleIn: []domain.NotificationRole{domain.NotificationRoleAdmins}}, []string{w.a.ID}},
+			"team":         {db.NotificationListFilter{TeamIDIn: []string{f.Team}}, []string{w.b.ID, w.c.ID}},
+			"user":         {db.NotificationListFilter{ScopeIn: []domain.NotificationScope{domain.NotificationScopeUser}}, []string{w.d.ID}},
+			"search, team": {db.NotificationListFilter{Search: "a", TeamIDIn: []string{f.Team}}, []string{w.b.ID, w.c.ID}},
+		} {
+			items, total := inbox(t, f, c.f)
+			if total != len(c.want) || !slices.Equal(ids(items), c.want) {
+				t.Errorf("%s: %v (total %d); want %v", name, ids(items), total, c.want)
+			}
+		}
+		f.As(t, f.Viewer, func(s db.NotificationStore) {
+			for name, bad := range map[string]db.NotificationListFilter{
+				"role":     {RoleIn: []domain.NotificationRole{"owners"}},
+				"sort key": {SortKey: "seen_count", SortDir: db.NotificationSortDirAsc},
+				"sort dir": {SortKey: db.NotificationSortTitle, SortDir: "up"},
+				"lone dir": {SortDir: db.NotificationSortDirAsc},
+			} {
+				if _, _, err := s.ListForViewer(ctx, f.OrgID, f.Viewer, bad, db.ListOpts{Limit: 50}); !errors.Is(err, db.ErrInvalidNotificationFilter) {
+					t.Errorf("ListForViewer(bad %s) err = %v", name, err)
+				}
+				if _, err := s.FacetsForViewer(ctx, f.OrgID, f.Viewer, bad); !errors.Is(err, db.ErrInvalidNotificationFilter) {
+					t.Errorf("FacetsForViewer(bad %s) err = %v", name, err)
+				}
+			}
+			// The All-teams list takes the same filters.
+			items, total, err := s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{Search: "100%"}, db.ListOpts{Limit: 50})
+			if err != nil || total != 1 || !slices.Equal(ids(items), []string{w.a.ID}) {
+				t.Errorf("ListForOrg search = %v (total %d), %v; want the literal match", ids(items), total, err)
+			}
+		})
+	})
+
+	t.Run("order", func(t *testing.T) {
+		f := mk(t)
+		w := raiseNarrowWorld(t, f)
+		// Seen again, b is the latest last_seen_at; its first_seen_at and
+		// escalated_at stay.
+		w.b = raise(t, f, db.NotificationOccurrence{Key: "b", Priority: domain.NotificationHigh,
+			Title: "beta sync", Body: "Lagging 50_percent", Audience: domain.NotificationAudience{
+				Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleMembers, TeamID: f.Team}}).Notification
+		a, b, c, d, e := w.a.ID, w.b.ID, w.c.ID, w.d.ID, w.e.ID
+		check := func(t *testing.T, name, key, dir string, want []string) {
+			t.Helper()
+			if items, _ := inbox(t, f, db.NotificationListFilter{SortKey: key, SortDir: dir}); !slices.Equal(ids(items), want) {
+				t.Errorf("%s: %v; want %v", name, ids(items), want)
+			}
+		}
+		const asc, desc = db.NotificationSortDirAsc, db.NotificationSortDirDesc
+		// Default: priority, urgent first, then escalated_at newest first.
+		check(t, "default", "", "", []string{a, d, b, e, c})
+		// Each key's desc is its asc reversed, n.id included.
+		check(t, "priority asc", db.NotificationSortPriority, asc, []string{a, d, b, e, c})
+		check(t, "priority desc", db.NotificationSortPriority, desc, []string{c, e, b, d, a})
+		// Case-folded: "Delta" sorts between "beta sync" and "Disk 100% full".
+		check(t, "title asc", db.NotificationSortTitle, asc, []string{c, b, e, a, d})
+		check(t, "title desc", db.NotificationSortTitle, desc, []string{d, a, e, b, c})
+		check(t, "first_seen_at asc", db.NotificationSortFirstSeenAt, asc, []string{a, b, c, d, e})
+		check(t, "first_seen_at desc", db.NotificationSortFirstSeenAt, desc, []string{e, d, c, b, a})
+		check(t, "last_seen_at asc", db.NotificationSortLastSeenAt, asc, []string{a, c, d, e, b})
+		check(t, "last_seen_at desc", db.NotificationSortLastSeenAt, desc, []string{b, e, d, c, a})
+		// No direction is the key's own: urgent first, A to Z, the latest
+		// time first.
+		check(t, "priority, no dir", db.NotificationSortPriority, "", []string{a, d, b, e, c})
+		check(t, "title, no dir", db.NotificationSortTitle, "", []string{c, b, e, a, d})
+		check(t, "first_seen_at, no dir", db.NotificationSortFirstSeenAt, "", []string{e, d, c, b, a})
+		check(t, "last_seen_at, no dir", db.NotificationSortLastSeenAt, "", []string{b, e, d, c, a})
+
+		for _, key := range []string{"c", "a"} {
+			if _, err := f.Stores.Notifications.ResolveSystem(ctx, f.OrgID, domain.NotificationOriginSystem, "test.kind", key); err != nil {
+				t.Fatalf("ResolveSystem %s: %v", key, err)
+			}
+		}
+		// The open rows have no resolved_at and trail every resolved row in
+		// both directions, ordered among themselves by id.
+		open := []string{b, d, e}
+		slices.Sort(open)
+		check(t, "resolved_at asc", db.NotificationSortResolvedAt, asc, append([]string{c, a}, open...))
+		slices.Reverse(open)
+		check(t, "resolved_at desc", db.NotificationSortResolvedAt, desc, append([]string{a, c}, open...))
+		f.As(t, f.Viewer, func(s db.NotificationStore) {
+			// Paging walks the sorted order whole.
+			var walked []string
+			for offset := 0; offset < 5; offset += 2 {
+				page, total, err := s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{SortKey: db.NotificationSortTitle, SortDir: asc},
+					db.ListOpts{Limit: 2, Offset: offset})
+				if err != nil || total != 5 {
+					t.Fatalf("ListForOrg page at %d: total %d, %v", offset, total, err)
+				}
+				walked = append(walked, ids(page)...)
+			}
+			if !slices.Equal(walked, []string{c, b, e, a, d}) {
+				t.Errorf("paged title order = %v", walked)
+			}
+		})
+	})
+
+	t.Run("facets", func(t *testing.T) {
+		f := mk(t)
+		raiseNarrowWorld(t, f)
+		// Read, but not sent: on the All-teams cuts only.
+		raise(t, f, db.NotificationOccurrence{Key: "archived", Audience: domain.NotificationAudience{
+			Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleAdmins, TeamID: f.ArchivedTeam}})
+		team, archived := "team:"+f.Team, "team:"+f.ArchivedTeam
+		facets := func(t *testing.T, org bool, filter db.NotificationListFilter) db.NotificationFacets {
+			t.Helper()
+			var out db.NotificationFacets
+			f.As(t, f.Viewer, func(s db.NotificationStore) {
+				var err error
+				if org {
+					out, err = s.FacetsForOrg(ctx, f.OrgID, f.Viewer, filter)
+				} else {
+					out, err = s.FacetsForViewer(ctx, f.OrgID, f.Viewer, filter)
+				}
+				if err != nil {
+					t.Fatalf("facets(%+v): %v", filter, err)
+				}
+			})
+			return out
+		}
+		check := func(t *testing.T, name string, got, want []db.Facet) {
+			t.Helper()
+			if !slices.Equal(got, want) {
+				t.Errorf("%s = %+v; want %+v", name, got, want)
+			}
+		}
+		fc := func(value string, count int) db.Facet { return db.Facet{Value: value, Count: count} }
+		allPriorities := []db.Facet{fc("urgent", 1), fc("high", 2), fc("low", 2)}
+		allAudiences := []db.Facet{fc("org:admins", 1), fc("org:members", 1), fc(team, 2), fc("user", 1)}
+
+		got := facets(t, false, db.NotificationListFilter{})
+		check(t, "inbox by_priority", got.ByPriority, allPriorities)
+		check(t, "inbox by_audience", got.ByAudience, allAudiences)
+
+		// Each cut ignores its own filters and honours the others.
+		got = facets(t, false, db.NotificationListFilter{PriorityIn: []domain.NotificationPriority{domain.NotificationHigh}})
+		check(t, "priority-filtered by_priority", got.ByPriority, allPriorities)
+		check(t, "priority-filtered by_audience", got.ByAudience, []db.Facet{fc(team, 1), fc("user", 1)})
+		got = facets(t, false, db.NotificationListFilter{TeamIDIn: []string{f.Team}, RoleIn: []domain.NotificationRole{domain.NotificationRoleAdmins}})
+		check(t, "audience-filtered by_priority", got.ByPriority, []db.Facet{fc("low", 1)})
+		check(t, "audience-filtered by_audience", got.ByAudience, allAudiences)
+		got = facets(t, false, db.NotificationListFilter{Search: "100%"})
+		check(t, "searched by_priority", got.ByPriority, []db.Facet{fc("urgent", 1)})
+		check(t, "searched by_audience", got.ByAudience, []db.Facet{fc("org:admins", 1)})
+		// A value's count is the total its filters list.
+		if _, total := inbox(t, f, db.NotificationListFilter{TeamIDIn: []string{f.Team}}); total != 2 {
+			t.Errorf("team_id_in lists %d rows; its facet counts 2", total)
+		}
+
+		got = facets(t, false, db.NotificationListFilter{Status: domain.NotificationResolved})
+		if got.ByPriority == nil || got.ByAudience == nil || len(got.ByPriority)+len(got.ByAudience) != 0 {
+			t.Errorf("nothing resolved: facets = %#v; want empty cuts, not nil", got)
+		}
+
+		got = facets(t, true, db.NotificationListFilter{})
+		check(t, "org by_priority", got.ByPriority, []db.Facet{fc("urgent", 1), fc("high", 3), fc("low", 2)})
+		wantOrg := append([]db.Facet{}, allAudiences...)
+		wantOrg = append(wantOrg, fc(archived, 1))
+		slices.SortFunc(wantOrg, func(x, y db.Facet) int { return strings.Compare(x.Value, y.Value) })
+		check(t, "org by_audience", got.ByAudience, wantOrg)
 	})
 
 	t.Run("marks", func(t *testing.T) {

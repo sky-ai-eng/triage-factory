@@ -19,15 +19,19 @@ const (
 	ListingStatusDelisted  = "delisted"
 )
 
-// Listing sort orders accepted by ListingFilter.Sort.
+// Listing sort keys accepted by ListingFilter.SortKey.
 const (
 	ListingSortInstalls = "installs"
 	ListingSortVotes    = "votes"
 	ListingSortRecent   = "recent"
 	// ListingSortMostUsed sorts by ListingStats.TotalRuns — the run-derived
-	// usage signal (TFAC-540), alongside installs/votes/recent.
+	// usage signal, alongside installs/votes/recent.
 	ListingSortMostUsed = "used"
 )
+
+// ListingSortKeys is the browse list's sort_key vocabulary, in the order the
+// route names it.
+var ListingSortKeys = []string{ListingSortInstalls, ListingSortVotes, ListingSortRecent, ListingSortMostUsed}
 
 // ListingSnapshotSchemaVersion is the only ListingSnapshot.SchemaVersion V1
 // ever writes or reads — the single source of truth so the write side
@@ -119,16 +123,18 @@ type ListingVersion struct {
 }
 
 // ListingFilter bounds a MarketplaceStore.List browse read. Every field is
-// optional: an empty string drops that clause. Query does a name/description
-// substring match; EventType narrows to listings faceted on that event type
-// (marketplace_listing_events, sourced from events_catalog); Kind narrows to
-// ListingKindPrompt/ListingKindBlueprint. Sort is one of ListingSort* and
-// defaults to ListingSortRecent when empty.
+// optional: an empty string drops that clause. Search is a case-insensitive
+// literal substring of the name or the description; EventType narrows to
+// listings faceted on that event type (marketplace_listing_events, sourced
+// from events_catalog); Kind narrows to ListingKindPrompt/ListingKindBlueprint.
+// SortKey is one of ListingSortKeys and SortDir "asc" or "desc" (desc when
+// empty); an empty SortKey orders by ListingSortRecent, descending.
 type ListingFilter struct {
-	Query     string
+	Search    string
 	EventType string
 	Kind      string
-	Sort      string
+	SortKey   string
+	SortDir   string
 }
 
 // ListingSummary is one row of a browse list: the listing header plus

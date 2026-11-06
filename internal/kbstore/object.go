@@ -45,12 +45,12 @@ func key(orgID, teamID string, ref Ref) (string, error) {
 	return rootPrefix(orgID, teamID, ref.Root) + ref.Path, nil
 }
 
-func (s *objectKB) List(ctx context.Context, orgID, teamID string, roots []Root, pathPrefix string) ([]FileInfo, error) {
-	if err := ValidatePrefix(pathPrefix); err != nil {
+func (s *objectKB) List(ctx context.Context, orgID, teamID string, q ListQuery) ([]FileInfo, error) {
+	if err := ValidatePrefix(q.PathPrefix); err != nil {
 		return nil, err
 	}
 	out := []FileInfo{}
-	for _, root := range roots {
+	for _, root := range q.Roots {
 		if _, err := ParseRoot(string(root)); err != nil {
 			return nil, err
 		}
@@ -71,14 +71,13 @@ func (s *objectKB) List(ctx context.Context, orgID, teamID string, roots []Root,
 			if ValidatePath(path) != nil {
 				continue
 			}
-			if !underPrefix(path, pathPrefix) {
+			if !underPrefix(path, q.PathPrefix) {
 				continue
 			}
 			out = append(out, FileInfo{Root: root, Path: path, Size: o.Size, ModTime: o.ModTime})
 		}
 	}
-	sortEntries(out)
-	return out, nil
+	return narrow(out, q), nil
 }
 
 func (s *objectKB) Stat(ctx context.Context, orgID, teamID string, ref Ref) (FileInfo, error) {

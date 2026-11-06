@@ -267,6 +267,31 @@
   margin-left: 6px;
 }
 
+/* The catalog's next page, asked for from the pager's footer slot. */
+.sp-more {
+  appearance: none;
+  background: none;
+  border: 1px solid var(--color-line-1);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-2);
+  cursor: pointer;
+}
+
+.sp-more:hover {
+  border-color: var(--color-line-2);
+  color: var(--color-ink-1);
+}
+
+/* A line in the pager's footer slot that reports a state, not a control. */
+.sp-foot {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-4);
+}
+
 /* A name sharing its cell with a tag. A cell holding more than text owns its
    own type, so the name restates the table's text cell. */
 .sp-cellname {
@@ -630,6 +655,28 @@
   font-size: var(--text-secondary);
   line-height: var(--leading-prose);
   color: var(--color-alarm);
+}
+
+/* The line under a table that holds one window of a list: how much of it is
+   loaded, and the ask for the next window. */
+.sp-loadmore {
+  padding: 10px 12px 0;
+  font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.sp-loadmore button {
+  all: unset;
+  cursor: pointer;
+  color: var(--color-ink-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+
+.sp-loadmore button:disabled {
+  cursor: default;
+  color: var(--color-ink-4);
 }
 
 /* ── Reduced motion ────────────────────────────────────────────────────

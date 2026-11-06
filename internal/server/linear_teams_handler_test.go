@@ -1,7 +1,9 @@
 package server
 
 import (
+	"cmp"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
@@ -53,10 +56,11 @@ func assertOneFault(t *testing.T, rec *httptest.ResponseRecorder, status int, re
 	}
 }
 
-// TestLinearTeamsList_TokenIsFingerprintedOnQ: the search is applied upstream
-// and pages through Linear's cursor with total_count null. A token minted for
-// one search cannot page another's, and case alone does not make two searches.
-func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
+// TestLinearTeamsList_TokenIsFingerprintedOnSearch: the search is applied
+// upstream and pages through Linear's cursor with total_count null. A token
+// minted for one search cannot page another's, and case alone does not make
+// two searches.
+func TestLinearTeamsList_TokenIsFingerprintedOnSearch(t *testing.T) {
 	alphaBeta := linear.Team{ID: fixtureUUID("t2"), Key: "ABB", Name: "Alpha Beta", Private: true}
 	s, _ := newServerWithLinearCatalog(t,
 		linear.Team{ID: fixtureUUID("t1"), Key: "AAA", Name: "Alpha"},
@@ -64,29 +68,158 @@ func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
 		linear.Team{ID: fixtureUUID("t3"), Key: "ZZZ", Name: "Zed"},
 	)
 	first := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"q": "a", "page_size": 1}))
+		map[string]any{"search": "a", "page_size": 1}))
 	if got := linearTeamKeysOf(first.Items); got != "AAA" || first.NextPageToken == "" || first.TotalCount != nil {
 		t.Fatalf("page 1 = %s (token %q, total %v), want AAA with a token and a null total", got, first.NextPageToken, first.TotalCount)
 	}
 
 	rec := doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"q": "alpha", "page_size": 1, "page_token": first.NextPageToken})
+		map[string]any{"search": "alpha", "page_size": 1, "page_token": first.NextPageToken})
 	assertOneFault(t, rec, http.StatusBadRequest, "INVALID_PARAM", "page_token")
 
 	// ZZZ does not match, so the second and last page is ABB.
 	second := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"q": "A", "page_size": 1, "page_token": first.NextPageToken}))
+		map[string]any{"search": "A", "page_size": 1, "page_token": first.NextPageToken}))
 	want := linearTeamJSON{ID: alphaBeta.ID, Key: "ABB", Name: "Alpha Beta", Private: true}
 	if len(second.Items) != 1 || second.Items[0] != want || second.NextPageToken != "" {
 		t.Errorf("page 2 in another case = %+v (token %q), want only %+v", second.Items, second.NextPageToken, want)
 	}
 }
 
+// TestLinearTeamsList_SearchIsLiteral: a % or an _ in the search is the
+// character itself, even from a Linear that reads them as LIKE wildcards. A
+// row Linear matched only through the wildcard is dropped from its page, a
+// page left empty is replaced by the next one Linear serves, and no matching
+// row is lost on the walk.
+func TestLinearTeamsList_SearchIsLiteral(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t,
+		linear.Team{ID: fixtureUUID("t-abc"), Key: "ABC", Name: "Abc"},
+		linear.Team{ID: fixtureUUID("t-pct"), Key: "A%C", Name: "Percent"},
+		linear.Team{ID: fixtureUUID("t-und"), Key: "A_C", Name: "Underscore"},
+		linear.Team{ID: fixtureUUID("t-axc"), Key: "AXC", Name: "Axc"},
+	)
+	fake.SetLikeWildcards(true)
+	// One team per Linear page, so the walk crosses Linear's pages.
+	fake.SetPageCap(1)
+	if !fakeContains("ABC", "a%c", true) {
+		t.Fatal("the fake does not read % as a wildcard, so this test proves nothing")
+	}
+
+	for search, want := range map[string]string{"a%c": "A%C", "a_c": "A_C", "%": "A%C", "_": "A_C"} {
+		var got []string
+		token, pages := "", 0
+		for {
+			body := map[string]any{"search": search, "page_size": 1}
+			if token != "" {
+				body["page_token"] = token
+			}
+			page := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath, body))
+			if key := linearTeamKeysOf(page.Items); key != "" {
+				got = append(got, key)
+			}
+			pages++
+			if token = page.NextPageToken; token == "" || pages > 10 {
+				break
+			}
+		}
+		if strings.Join(got, ",") != want {
+			t.Errorf("search %q walked to %v, want only %s", search, got, want)
+		}
+	}
+
+	// Linear's first page holds only ABC, so the page served is its second.
+	before := fake.Calls()
+	first := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"search": "a%c", "page_size": 1}))
+	if got := linearTeamKeysOf(first.Items); got != "A%C" || first.NextPageToken == "" || fake.Calls()-before != 2 {
+		t.Errorf("page 1 = %s (token %q) in %d reads, want A%%C and a token in 2", got, first.NextPageToken, fake.Calls()-before)
+	}
+}
+
+// TestLinearTeamsList_SearchedReadsAreBounded: a request reads at most
+// httpx.MaxScanReads of Linear's pages past pages the literal re-check left
+// empty, and then answers an empty page whose token resumes the scan rather
+// than ending the listing early.
+func TestLinearTeamsList_SearchedReadsAreBounded(t *testing.T) {
+	teams := make([]linear.Team, 0, httpx.MaxScanReads+1)
+	for i := range httpx.MaxScanReads {
+		key := fmt.Sprintf("A%dC", i)
+		teams = append(teams, linear.Team{ID: fixtureUUID("t-" + key), Key: key, Name: key})
+	}
+	teams = append(teams, linear.Team{ID: fixtureUUID("t-pct"), Key: "A%C", Name: "Percent"})
+	s, fake := newServerWithLinearCatalog(t, teams...)
+	fake.SetLikeWildcards(true)
+	fake.SetPageCap(1)
+
+	before := fake.Calls()
+	empty := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"search": "a%c", "page_size": 1}))
+	if len(empty.Items) != 0 || empty.NextPageToken == "" {
+		t.Fatalf("bounded page = %s (token %q), want no rows and a token", linearTeamKeysOf(empty.Items), empty.NextPageToken)
+	}
+	if got := fake.Calls() - before; got != httpx.MaxScanReads {
+		t.Errorf("reads = %d, want %d", got, httpx.MaxScanReads)
+	}
+	next := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"search": "a%c", "page_size": 1, "page_token": empty.NextPageToken}))
+	if got := linearTeamKeysOf(next.Items); got != "A%C" || next.NextPageToken != "" {
+		t.Errorf("resumed page = %s (token %q), want A%%C and no token", got, next.NextPageToken)
+	}
+	// When Linear answers two teams a page, A%C is on its sixth page, inside
+	// the bound.
+	fake.SetPageCap(2)
+	page := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"search": "a%c", "page_size": 1}))
+	if got := linearTeamKeysOf(page.Items); got != "A%C" || page.NextPageToken != "" {
+		t.Errorf("Linear pages of two = %s (token %q), want A%%C and no token", got, page.NextPageToken)
+	}
+}
+
+// TestLinearTeamsList_PageSizeChangeMidWalk: the token's position counts rows
+// of an upstream page read at one size whatever page_size asks, so a walk that
+// changes page_size between pages neither repeats nor skips a team. Linear
+// reads the % as a wildcard and serves two decoys the literal re-check drops,
+// so the first page ends two matches into an upstream page, which a smaller
+// upstream read on the next request would hold only one of.
+func TestLinearTeamsList_PageSizeChangeMidWalk(t *testing.T) {
+	teams := []linear.Team{
+		{ID: fixtureUUID("x1"), Key: "ZX1", Name: "Decoy one"},
+		{ID: fixtureUUID("x2"), Key: "ZX2", Name: "Decoy two"},
+	}
+	for i := 1; i <= 6; i++ {
+		key := fmt.Sprintf("Z%%%d", i)
+		teams = append(teams, linear.Team{ID: fixtureUUID(fmt.Sprintf("t-%d", i)), Key: key, Name: fmt.Sprintf("Match %d", i)})
+	}
+	s, fake := newServerWithLinearCatalog(t, teams...)
+	fake.SetLikeWildcards(true)
+	var got []string
+	token := ""
+	for _, size := range []int{4, 1, 1, 1} {
+		body := map[string]any{"search": "z%", "page_size": size}
+		if token != "" {
+			body["page_token"] = token
+		}
+		page := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath, body))
+		for _, team := range page.Items {
+			got = append(got, team.Key)
+		}
+		if token = page.NextPageToken; token == "" {
+			break
+		}
+	}
+	if strings.Join(got, ",") != "Z%1,Z%2,Z%3,Z%4,Z%5,Z%6" {
+		t.Errorf("walk of 4 then 1s = %v, want every matching team once", got)
+	}
+}
+
 // TestLinearTeamsList_RefusedBodies: count-only has no answer on a proxy list,
-// and a field the route does not take is refused by name.
+// a search past the cap is refused, and a field the route does not take, the
+// old name of the search among them, is refused by name.
 func TestLinearTeamsList_RefusedBodies(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
 
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"q": "eng"}),
+		http.StatusBadRequest, "UNKNOWN_FIELD", "q")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"page_size": 0}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"page_size": 201}),
@@ -96,6 +229,7 @@ func TestLinearTeamsList_RefusedBodies(t *testing.T) {
 	if fake.Calls() != 0 {
 		t.Errorf("a refused body reached Linear %d times", fake.Calls())
 	}
+	assertSearchCap(t, s, linearTeamsListPath, map[string]any{}, fake.Calls)
 }
 
 // TestLinearCatalog_UpstreamFailure: a failed Linear call is a 502 on every
@@ -170,8 +304,9 @@ func TestLinearTeamGet(t *testing.T) {
 }
 
 // TestLinearStatesList_TokenIsBoundToTheTeam: a team's whole workflow pages in
-// Linear's order with each state's position, total_count null, under a token
-// that wraps a cursor into that team's workflow and cannot page another's.
+// board order, though Linear serves it in another, with each state's position,
+// total_count null, under a token that wraps an offset into that team's
+// workflow and cannot page another's.
 func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
 	first := httpxtest.DecodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
@@ -192,9 +327,50 @@ func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
 	for _, st := range linearFixtureStates {
 		want = append(want, toLinearStateJSON(st))
 	}
+	slices.SortFunc(want, func(a, b linearStateJSON) int { return cmp.Compare(a.Position, b.Position) })
 	if got := append(first.Items, second.Items...); !slices.Equal(got, want) {
 		t.Errorf("states = %+v, want %+v", got, want)
 	}
+}
+
+func linearStateName(st linearStateJSON) string { return st.Name }
+
+// TestLinearStatesList_OrderAndSearch: two states at one position are ordered
+// by id, the search narrows by name before the window and keeps board order, a
+// % or an _ in it is the character itself, and a token continues only its own
+// search.
+func TestLinearStatesList_OrderAndSearch(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	path := linearStatesListPath(linearTeamEng)
+	assertSearches(t, s, path, linearStateName, map[string][]string{
+		"in":    {"In Progress", "In Review"},
+		"O":     {"Backlog", "Todo", "In Progress", "Done"},
+		"":      {"Triage", "Backlog", "Todo", "In Progress", "In Review", "Done", "Canceled"},
+		"Ghost": {},
+	})
+	assertTokenBoundToSearch(t, s, path, "o", "in", linearStateName, []string{"Todo"})
+
+	// Two states at one position, served with the greater id first: the tie
+	// falls to the id, whatever order Linear serves them in.
+	tieA, tieB := fixtureUUID("linear-state-tie-a"), fixtureUUID("linear-state-tie-b")
+	first, second := tieA, tieB
+	if tieB < tieA {
+		first, second = tieB, tieA
+	}
+	fake.SetStates(linearTeamOps,
+		linear.WorkflowState{ID: second, Name: "Second", Type: "started", Position: 1},
+		linear.WorkflowState{ID: fixtureUUID("linear-state-pct"), Name: "50% Done", Type: "started", Position: 2},
+		linear.WorkflowState{ID: fixtureUUID("linear-state-500"), Name: "500 Done", Type: "started", Position: 3},
+		linear.WorkflowState{ID: fixtureUUID("linear-state-und"), Name: "On_Hold", Type: "started", Position: 4},
+		linear.WorkflowState{ID: fixtureUUID("linear-state-onx"), Name: "OnXHold", Type: "started", Position: 5},
+		linear.WorkflowState{ID: first, Name: "First", Type: "started", Position: 1},
+	)
+	assertSearches(t, s, linearStatesListPath(linearTeamOps), linearStateName, map[string][]string{
+		"":        {"First", "Second", "50% Done", "500 Done", "On_Hold", "OnXHold"},
+		"50%":     {"50% Done"},
+		"on_hold": {"On_Hold"},
+	})
+	assertSearchCap(t, s, path, map[string]any{}, fake.Calls)
 }
 
 // TestLinearStatesList_Refusals: a team Linear cannot show is a 404, as is a
@@ -213,6 +389,8 @@ func TestLinearStatesList_Refusals(t *testing.T) {
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"q": "done"}),
 		http.StatusBadRequest, "UNKNOWN_FIELD", "q")
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"search": 7}),
+		http.StatusBadRequest, "INVALID_FIELD", "search")
 	if fake.Calls() != before {
 		t.Errorf("a refused request reached Linear %d times", fake.Calls()-before)
 	}

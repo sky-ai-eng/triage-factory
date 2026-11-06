@@ -530,6 +530,29 @@ export interface ActivityAction {
   actor_name?: string
 }
 
+// ActivityFacet is one value of an activity facets cut: the id the list's
+// team_id or actor filter takes, how many rows (actions) or objects
+// (artifacts) carry it, and the name the list's rows show for it, empty for a
+// team or user whose row is gone. Mirrors internal/server/usage
+// activityFacetJSON.
+export interface ActivityFacet {
+  value: string
+  count: number
+  name: string
+}
+
+// The activity facets nodes beside each list
+// (POST {basePath}/actions/facets, POST {basePath}/artifacts/facets), each
+// cut ordered by name the way the select lists it.
+export interface ActivityActionFacets {
+  by_actor: ActivityFacet[]
+  by_team: ActivityFacet[]
+}
+
+export interface ActivityArtifactFacets {
+  by_team: ActivityFacet[]
+}
+
 // Message is the single snake_case transcript-row DTO shared by every
 // surface, mirroring domain.MessageDTO (internal/domain/agent.go).
 // conversation_id links the row to its owning conversation.
@@ -1185,13 +1208,13 @@ export interface SlackChannelTracker {
   is_primary: boolean
 }
 
-/** One merged row of GET/PUT /api/slack/teams/{team_id}/channels — the union
- *  of this team's tracked rows, the org's sighting registry, and live Slack
- *  candidates, deduped by channel_id (TFAC-543). `name` is empty when only a
- *  bare channel_id is known (no live/sighting resolution yet) — render the
- *  raw id rather than inventing a name. `id` is the channel's registry row —
- *  what a slack:message handler's channel_in names — absent for a live Slack
- *  channel TF holds no row for yet. */
+/** One merged row of POST /api/slack/teams/{team_id}/channels/list — the
+ *  union of this team's tracked rows, the org's sighting registry, and live
+ *  Slack candidates, deduped by channel_id. `name` is empty when only a bare
+ *  channel_id is known (no live/sighting resolution yet) — render the raw id
+ *  rather than inventing a name. `id` is the channel's registry row — what a
+ *  slack:message handler's channel_in names — absent for a live Slack channel
+ *  TF holds no row for yet. */
 export interface SlackChannelView {
   id?: string
   channel_id: string
@@ -1204,25 +1227,6 @@ export interface SlackChannelView {
   tracked_by: SlackChannelTracker[]
   last_mention_at?: string
   source: 'tracked' | 'sighting' | 'slack'
-}
-
-/** One entry in a Slack channels response's `warnings` — a tagged union: a
- *  process-level degradation (`code`, e.g. "slack_unreachable" |
- *  "slack_channels_truncated") on GET, or a per-channel PUT auto-join
- *  outcome (`channel_id` + `reason`, e.g. "invite_required" | "join_failed"). */
-export interface SlackChannelsWarning {
-  code?: string
-  channel_id?: string
-  reason?: string
-}
-
-/** GET/PUT /api/slack/teams/{team_id}/channels response. PUT's response is
- *  the post-change GET shape plus any auto-join warnings appended — callers
- *  refresh their rows straight from it rather than re-fetching. */
-export interface SlackChannelsResponse {
-  role: string
-  warnings: SlackChannelsWarning[]
-  channels: SlackChannelView[]
 }
 
 /** RepoOption is one repository as a picker offers it: the registry row id

@@ -228,7 +228,7 @@ func TestRLS_ArchivedTeamHidesItsRows(t *testing.T) {
 			for _, x := range bps {
 				all[x.ID] = true
 			}
-			prompts, _, err := st.Prompts.List(ctx, orgID, "", db.ListOpts{Limit: 200})
+			prompts, _, err := st.Prompts.List(ctx, orgID, db.PromptListFilter{}, db.ListOpts{Limit: 200})
 			if err != nil {
 				return fmt.Errorf("prompts: %w", err)
 			}

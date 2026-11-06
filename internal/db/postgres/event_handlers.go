@@ -751,6 +751,14 @@ func (s *eventHandlerStore) buildListWhere(orgID string, f db.EventHandlerListFi
 		args = append(args, f.TeamID)
 		where += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
+	if f.Audience != "" {
+		args = append(args, f.Audience)
+		where += fmt.Sprintf(" AND notify_audience = $%d", len(args))
+	}
+	if f.CreatorUserID != "" {
+		args = append(args, f.CreatorUserID)
+		where += fmt.Sprintf(" AND creator_user_id = $%d", len(args))
+	}
 	if len(f.GatedEventTypes) > 0 {
 		args = append(args, f.GatedEventTypes)
 		where += fmt.Sprintf(" AND NOT (event_type = ANY($%d))", len(args))

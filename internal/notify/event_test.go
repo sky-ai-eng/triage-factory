@@ -35,7 +35,7 @@ func testEventResolved(p EventParams, r Resolution) string {
 func eventRowsOf(t *testing.T, stores db.Stores, orgID, admin, eventType string, users ...string) []domain.Notification {
 	t.Helper()
 	ctx := context.Background()
-	views, _, err := stores.Notifications.ListForOrg(ctx, orgID, admin, db.NotificationOrgListFilter{}, db.ListOpts{Limit: 200})
+	views, _, err := stores.Notifications.ListForOrg(ctx, orgID, admin, db.NotificationListFilter{}, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("ListForOrg: %v", err)
 	}

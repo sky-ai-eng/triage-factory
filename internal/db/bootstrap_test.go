@@ -657,7 +657,7 @@ func shippedModel(t *testing.T, slug string) string {
 // store's live List read, or nil when the team has none.
 func shippedPromptBySlug(t *testing.T, stores db.Stores, org, team, slug string) *domain.Prompt {
 	t.Helper()
-	rows, _, err := stores.Prompts.List(t.Context(), org, team, db.Unwindowed)
+	rows, _, err := stores.Prompts.List(t.Context(), org, db.PromptListFilter{TeamID: team}, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("Prompts.List for %q: %v", slug, err)
 	}

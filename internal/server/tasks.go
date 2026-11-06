@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -339,10 +338,14 @@ type taskListFilterKey struct {
 	SortDir string `json:"sort_dir"`
 }
 
-// maxTaskSearchRunes caps the search needle. A needle longer than this is a
-// paste, not a search, and the cap is measured in runes so a multi-byte one
-// isn't refused for being multi-byte.
-const maxTaskSearchRunes = 200
+// taskListSortKeys is db.TaskListSortKeys as the list route's sort vocabulary.
+var taskListSortKeys = func() []httpx.SortKey {
+	keys := make([]httpx.SortKey, len(db.TaskListSortKeys))
+	for i, k := range db.TaskListSortKeys {
+		keys[i] = httpx.SortKey{Name: k, Default: db.SortDesc}
+	}
+	return keys
+}()
 
 // taskCreateRequest is the body of POST /api/tasks: the station a task is
 // wanted at, named the way the dedup index names it. dedup_key may be empty —
@@ -668,29 +671,11 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 			v.Invalid("event_types", fmt.Sprintf("unknown event type %q; see GET /api/event-types for the catalog", et))
 		}
 	}
-	// Trimmed here rather than in the store so the fingerprint, the predicate
-	// and the cap all see the same needle — " ci " and "ci" are one query.
-	filter.Search = strings.TrimSpace(req.Search)
-	if utf8.RuneCountInString(filter.Search) > maxTaskSearchRunes {
-		v.Invalid("search", fmt.Sprintf("search must be at most %d characters", maxTaskSearchRunes))
-	}
-	filter.SortKey, filter.SortDir = req.SortKey, req.SortDir
-	if filter.SortKey != "" && !slices.Contains(db.TaskListSortKeys, filter.SortKey) {
-		v.Invalid("sort_key", fmt.Sprintf("unknown sort_key %q; must be one of: %s",
-			filter.SortKey, strings.Join(db.TaskListSortKeys, ", ")))
-	}
-	if filter.SortDir != "" {
-		if !slices.Contains(db.TaskListSortDirs, filter.SortDir) {
-			v.Invalid("sort_dir", fmt.Sprintf("unknown sort_dir %q; must be one of: %s",
-				filter.SortDir, strings.Join(db.TaskListSortDirs, ", ")))
-		}
-		if filter.SortKey == "" {
-			v.Invalid("sort_dir", "sort_dir requires sort_key")
-		}
-	} else if filter.SortKey != "" {
-		// Newest / Z-A first, which is what the board's controls default to.
-		filter.SortDir = db.TaskSortDirDesc
-	}
+	filter.Search = httpx.Search(&v, req.Search)
+	// Newest / Z-A first whatever the key, which is what the board's
+	// controls default to.
+	order := httpx.Sort(&v, req.SortKey, req.SortDir, taskListSortKeys)
+	filter.SortKey, filter.SortDir = order.Key, order.Dir
 	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       filter.Statuses,
 		TeamIDs:        filter.TeamIDs,
@@ -701,12 +686,9 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		CreatedBefore:  createdBeforeKey,
 		Sources:        filter.Sources,
 		EventTypes:     filter.EventTypes,
-		// Case-folded, because the predicate is: two spellings of one needle
-		// match the same rows, so they must fingerprint as the same query
-		// rather than cost the caller its token.
-		Search:  strings.ToLower(filter.Search),
-		SortKey: filter.SortKey,
-		SortDir: filter.SortDir,
+		Search:         httpx.SearchKey(filter.Search),
+		SortKey:        filter.SortKey,
+		SortDir:        filter.SortDir,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return

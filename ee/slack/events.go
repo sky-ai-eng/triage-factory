@@ -56,7 +56,7 @@ type SlackMessageMetadata struct {
 
 // SlackMessagePredicate narrows which messages a handler fires on.
 type SlackMessagePredicate struct {
-	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, each one the team tracks, by registry id (the id field of GET /api/slack/teams/{team_id}/channels, not Slack's channel id). Empty matches every channel the team tracks."`
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these channels, each one the team tracks, by registry id (the id field of POST /api/slack/teams/{team_id}/channels/list, not Slack's channel id). Empty matches every channel the team tracks."`
 	// MentionedOnly, when true, restricts to messages that explicitly
 	// @-mentioned the bot — excluding engaged-thread follow-ups that
 	// didn't. false (the default) matches both.
@@ -198,7 +198,7 @@ func channelInFaults(ctx context.Context, tx db.TxStores, orgID, teamID string, 
 	for _, id := range added {
 		if !tracked[id] {
 			faults = append(faults, server.PredicateReferenceFault{Key: "channel_in", Message: fmt.Sprintf("channel_in: %q is not the registry id of a channel this team tracks "+
-				"(channel_in takes the id field of GET /api/slack/teams/{team_id}/channels, not Slack's channel id)", id)})
+				"(channel_in takes the id field of POST /api/slack/teams/{team_id}/channels/list, not Slack's channel id)", id)})
 		}
 	}
 	return faults, nil

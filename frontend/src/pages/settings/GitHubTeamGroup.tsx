@@ -1,15 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Section } from './primitives'
 import GitHubTeamChecklist from '../../components/GitHubTeamChecklist'
-import { apiJSON } from '../../lib/apiClient'
+import { httpErrorMessage } from '../../lib/apiClient'
 import {
   groupKey,
   identifyGroups,
+  listGitHubTeams,
   teamRef,
-  type GitHubTeamCandidate,
+  type GitHubTeamOption,
   type GitHubTeamRef,
 } from '../../lib/githubTeams'
-import type { GitHubGroup, TeamGitHubGroupsData } from './teamConfig'
+import { fetchTeamGitHubGroups, type GitHubGroup } from './teamConfig'
+
+/** How many teams one read holds. The checklist is a scrolled list, so a
+ *  typical org arrives whole and a large one is reached by the search box or
+ *  by asking for the next page. */
+const TEAM_PAGE_SIZE = 200
+
+/** How long after the last keystroke before asking for the searched list. */
+const SEARCH_DEBOUNCE_MS = 250
+
+/** The pages held, and the search they answer. */
+interface Held {
+  search: string
+  items: GitHubTeamOption[]
+  next: string
+  total: number
+}
 
 /**
  * GitHubTeamGroup is the team-scope GitHub-team → TF-team mapping field
@@ -19,12 +36,14 @@ import type { GitHubGroup, TeamGitHubGroupsData } from './teamConfig'
  * groups — so the same group serves the team Settings tab and the setup
  * wizard's team steps.
  *
- * It self-fetches the org-wide candidate list and renders the shared
- * GitHubTeamChecklist body. On first load it seeds the selection up via
+ * It reads the GitHub teams the team can map from their list route, which
+ * searches and orders them, and renders the shared GitHubTeamChecklist body
+ * over the pages it holds. On first load it seeds the selection up via
  * onLoaded: a prior saved set wins, with any mapping the server has not
- * identified by GitHub's id yet matched to its candidate (identifyGroups) so
- * a save can name it; otherwise, when includeMembership is set (the
- * onboarding default), the acting admin's own teams (`mine`) start checked.
+ * identified by GitHub's id yet matched to its team among the rows read
+ * (identifyGroups) so a save can name it; otherwise, when includeMembership
+ * is set (the onboarding default), the acting admin's own teams start checked,
+ * read with the list's `only_mine` filter.
  */
 export default function GitHubTeamGroup({
   value,
@@ -40,73 +59,122 @@ export default function GitHubTeamGroup({
   onChange: (groups: GitHubGroup[]) => void
   teamId: string
   canEdit?: boolean
-  // When true, fetch with ?include_membership=true and (absent a saved set)
-  // pre-check the admin's own teams. The Settings editor leaves it false —
-  // it shows the saved set, no personal pre-check.
+  // When true, ask the list to mark the admin's own teams and (absent a saved
+  // set) pre-check them. The Settings editor leaves it false — it shows the
+  // saved set, no personal pre-check.
   includeMembership?: boolean
   // Fired once after the first successful load with the seed selection, so
   // the container can seed its form state (and a change-detection baseline).
   onLoaded?: (groups: GitHubGroup[]) => void
-  // Bumped by the container to re-fetch the candidate list — e.g. after a
-  // Repositories save changed the tracked-owner set — WITHOUT re-seeding the
-  // selection. seededRef stays true across the refetch, so onLoaded never
-  // fires again and the user's unsaved mapping edits are preserved (a repo
-  // save must not flush in-progress GitHub-team edits in a sibling section).
+  // Bumped by the container to re-read the list — e.g. after a Repositories
+  // save changed the tracked-owner set — WITHOUT re-seeding the selection.
+  // seededRef stays true across the re-read, so onLoaded never fires again
+  // and the user's unsaved mapping edits are preserved (a repo save must not
+  // flush in-progress GitHub-team edits in a sibling section).
   refreshSignal?: number
   // The setup wizard composes this flush (no Section card, glass search +
   // filter); Settings keeps the carded default.
   bare?: boolean
 }) {
-  const [candidates, setCandidates] = useState<GitHubTeamCandidate[]>([])
+  const [held, setHeld] = useState<Held | null>(null)
+  const [credentialsMissing, setCredentialsMissing] = useState(false)
+  const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [searchError, setSearchError] = useState('')
   const seededRef = useRef(false)
   // onLoaded is held in a ref so `load` doesn't depend on it: callers pass an
   // inline closure (a new identity each render), and putting it in load's
   // deps would re-fire the fetch effect every render — an infinite loop.
   const onLoadedRef = useRef(onLoaded)
-  onLoadedRef.current = onLoaded
+  useEffect(() => {
+    onLoadedRef.current = onLoaded
+  }, [onLoaded])
 
-  const base = `/api/teams/${encodeURIComponent(teamId)}/github-groups`
+  // Which read the held pages belong to. Searches are typed faster than they
+  // resolve, so reads come back out of order; only the latest may land.
+  const readSeq = useRef(0)
+  // The search the reader is asking for now, for the reads that fire on their
+  // own schedule (a retry, a refresh): re-asking an older search would land
+  // over the newer one.
+  const wanted = useRef('')
+
+  // readPage reads one page under `q` and holds it: a first page replaces
+  // what is held, a further one appends. It resolves to null when a later
+  // read superseded it.
+  const readPage = useCallback(
+    async (q: string, pageToken = '') => {
+      const seq = ++readSeq.current
+      const page = await listGitHubTeams(teamId, {
+        search: q,
+        includeMembership,
+        pageSize: TEAM_PAGE_SIZE,
+        pageToken,
+      })
+      if (seq !== readSeq.current) return null
+      setHeld((prev) =>
+        pageToken && prev && prev.search === q
+          ? {
+              ...prev,
+              items: [...prev.items, ...page.items],
+              next: page.next_page_token,
+              total: page.total_count,
+            }
+          : { search: q, items: page.items, next: page.next_page_token, total: page.total_count },
+      )
+      setCredentialsMissing(page.credentials_missing)
+      setSearchError('')
+      return page
+    },
+    [teamId, includeMembership],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
     try {
-      const url = includeMembership ? `${base}?include_membership=true` : base
-      const data = await apiJSON<TeamGitHubGroupsData>(url)
-      const cands = data.candidates ?? []
-      setCandidates(cands)
-      // Seed once: the saved set is an explicit prior choice and wins;
-      // otherwise pre-check the admin's own teams when membership was asked
-      // for (onboarding), else nothing.
-      if (!seededRef.current) {
-        seededRef.current = true
-        const saved = data.groups ?? []
+      const seeding = !seededRef.current
+      const [page, saved] = await Promise.all([
+        readPage(wanted.current),
+        seeding ? fetchTeamGitHubGroups(teamId) : Promise.resolve(null),
+      ])
+      if (seeding) {
+        // Without the saved set there is no seed, and a save must then leave
+        // the stored mappings alone rather than replace them with nothing.
+        if (saved === null) throw new Error('saved mappings unreadable')
+        // Seed once: the saved set is an explicit prior choice and wins;
+        // otherwise pre-check the admin's own teams when membership was
+        // asked for (onboarding), else nothing.
         const seed =
           saved.length > 0
-            ? identifyGroups(saved, cands)
+            ? identifyGroups(saved, page?.items ?? [])
             : includeMembership
-              ? cands.filter((c) => c.mine).map(teamRef)
+              ? (
+                  await listGitHubTeams(teamId, {
+                    onlyMine: true,
+                    includeMembership: true,
+                    pageSize: TEAM_PAGE_SIZE,
+                  })
+                ).items.map(teamRef)
               : []
+        seededRef.current = true
         onLoadedRef.current?.(seed)
       }
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : 'Failed to load GitHub teams')
+      setLoadError(httpErrorMessage(e, 'Could not load GitHub teams.'))
     } finally {
       setLoading(false)
     }
-  }, [base, includeMembership])
+  }, [readPage, teamId, includeMembership])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  // Candidate-only refresh: when the container bumps refreshSignal, refetch
-  // the candidate list but keep the current selection. load() re-runs with
-  // seededRef already true, so its onLoaded seed is skipped — `value` (the
-  // unsaved selection) is untouched while candidates refresh. The leading
-  // guard skips the mount run, which the effect above already covers.
+  // Re-read when the container bumps refreshSignal, keeping the current
+  // selection: load() re-runs with seededRef already true, so its onLoaded
+  // seed is skipped and `value` (the unsaved selection) is untouched. The
+  // leading guard skips the mount run, which the effect above already covers.
   const refreshedOnce = useRef(false)
   useEffect(() => {
     if (!refreshedOnce.current) {
@@ -115,6 +183,33 @@ export default function GitHubTeamGroup({
     }
     void load()
   }, [refreshSignal, load])
+
+  // The first page for the search as it settles. The mount read is load()'s,
+  // so this answers changes only.
+  const searchedOnce = useRef(false)
+  useEffect(() => {
+    const q = search.trim()
+    wanted.current = q
+    if (!searchedOnce.current) {
+      searchedOnce.current = true
+      return
+    }
+    const id = setTimeout(
+      () =>
+        void readPage(q).catch((e) =>
+          setSearchError(httpErrorMessage(e, 'Could not search GitHub teams.')),
+        ),
+      q ? SEARCH_DEBOUNCE_MS : 0,
+    )
+    return () => clearTimeout(id)
+  }, [search, readPage])
+
+  const loadMore = useCallback(() => {
+    if (!held?.next) return
+    void readPage(held.search, held.next).catch((e) =>
+      setSearchError(httpErrorMessage(e, 'Could not load more GitHub teams.')),
+    )
+  }, [held, readPage])
 
   const toggle = (team: GitHubTeamRef) => {
     const k = groupKey(team)
@@ -152,7 +247,14 @@ export default function GitHubTeamGroup({
       </div>
 
       <GitHubTeamChecklist
-        candidates={candidates}
+        rows={held?.items ?? []}
+        total={held?.total ?? 0}
+        searched={!!held?.search}
+        hasMore={!!held?.next}
+        onLoadMore={loadMore}
+        search={search}
+        onSearchChange={setSearch}
+        listError={searchError}
         selected={value}
         onToggle={toggle}
         loading={loading}
@@ -160,7 +262,11 @@ export default function GitHubTeamGroup({
         onRetry={() => void load()}
         disabled={!canEdit}
         bare={bare}
-        emptyLabel="No GitHub teams found. Connect GitHub and configure repositories whose org exposes teams, then reopen this panel."
+        emptyLabel={
+          credentialsMissing
+            ? 'No GitHub credential connected to this organization reaches the owners of this team’s repositories. Reconnect GitHub, then reopen this panel.'
+            : 'No GitHub teams found. Connect GitHub and configure repositories whose org exposes teams, then reopen this panel.'
+        }
       />
 
       {/* Mirror ReposGroup's reassurance: a failed load leaves the selection

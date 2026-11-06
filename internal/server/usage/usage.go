@@ -921,6 +921,12 @@ func (h *Handler) Register(m httpx.Mounts) {
 	m.APIMutating("POST /api/teams/{team_id}/usage/actions/list", h.handleUsageTeamActions)
 	m.APIMutating("POST /api/orgs/{org_id}/usage/artifacts/list", h.handleUsageOrgArtifacts)
 	m.APIMutating("POST /api/orgs/{org_id}/usage/actions/list", h.handleUsageOrgActions)
+	// Each list's facets node, beside it at the same scope and behind the
+	// same gates: the values its team and actor selects offer.
+	m.APIMutating("POST /api/teams/{team_id}/usage/artifacts/facets", h.handleUsageTeamArtifactFacets)
+	m.APIMutating("POST /api/teams/{team_id}/usage/actions/facets", h.handleUsageTeamActionFacets)
+	m.APIMutating("POST /api/orgs/{org_id}/usage/artifacts/facets", h.handleUsageOrgArtifactFacets)
+	m.APIMutating("POST /api/orgs/{org_id}/usage/actions/facets", h.handleUsageOrgActionFacets)
 	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
 	// handlers 404 when unlicensed). The GET lists every active team + its cap
 	// for the editor (so an idle team can be pre-capped); the PUT writes one

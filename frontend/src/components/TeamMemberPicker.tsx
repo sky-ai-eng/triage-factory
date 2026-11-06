@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, UserPlus } from 'lucide-react'
-import { apiFetch, apiList, httpErrorMessage } from '../lib/apiClient'
-import { fetchTeamRoster } from '../lib/teamRoster'
+import { apiFetch, httpErrorMessage } from '../lib/apiClient'
+import { listOrgMembers } from '../lib/orgMembers'
+import type { OrgMember } from '../lib/orgMembers'
 import { TEAM_ROLE_LABELS } from '../lib/teamRoles'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
@@ -14,13 +15,6 @@ interface TeamMemberPickerProps {
   orgId: string
   teamId: string
   onAdded: () => void
-}
-
-interface OrgMemberApiRow {
-  user_id: string
-  display_name: string
-  github_username: string | null
-  role: string
 }
 
 // 'member' leads — the common add. The roster's own <select> orders these
@@ -59,7 +53,7 @@ function PickerModal({
   onClose,
 }: TeamMemberPickerProps & { onClose: () => void }) {
   // candidates: org members not yet on the team. null = still loading.
-  const [candidates, setCandidates] = useState<OrgMemberApiRow[] | null>(null)
+  const [candidates, setCandidates] = useState<OrgMember[] | null>(null)
   const [selected, setSelected] = useState('')
   const [role, setRole] = useState('member')
   const [submitting, setSubmitting] = useState(false)
@@ -70,26 +64,18 @@ function PickerModal({
   const dialogRef = useRef<HTMLDivElement>(null)
   useFocusTrap(dialogRef)
 
-  // Compute "org members not on the team" from the two rosters: the org roster
-  // (the source set) minus everyone already on the team.
+  // "Org members not on the team" is the org roster's own question
+  // (excluding_team_id), so the candidates are its answer as it gives them.
   useEffect(() => {
     let alive = true
-    Promise.all([
-      // page_size at the route max: the picker's candidate set is "org
-      // members minus team members", which needs both rosters whole. An org
-      // past 200 members would need a search-as-you-type picker rather than a
-      // longer page.
-      apiList<OrgMemberApiRow>(`/api/orgs/${encodeURIComponent(orgId)}/members/list`, {
-        page_size: 200,
-      }),
-      fetchTeamRoster(teamId),
-    ])
-      .then(([org, team]) => {
+    // page_size at the route max, since the picker is a select over one page.
+    // An org with more addable people than that needs a search-as-you-type
+    // picker rather than a longer page.
+    listOrgMembers(orgId, { excludingTeamId: teamId, pageSize: 200 })
+      .then((page) => {
         if (!alive) return
-        const onTeam = new Set(team.members.map((m) => m.user_id))
-        const addable = org.items.filter((m) => !onTeam.has(m.user_id))
-        setCandidates(addable)
-        setSelected(addable[0]?.user_id ?? '')
+        setCandidates(page.items)
+        setSelected(page.items[0]?.user_id ?? '')
       })
       .catch((e) => {
         if (alive) setError(httpErrorMessage(e, 'Could not load org members.'))

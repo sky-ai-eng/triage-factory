@@ -1,4 +1,4 @@
-import { apiJSON, apiList, HttpError, httpErrorMessage } from './apiClient'
+import { apiJSON, apiListFirstRows, HttpError, httpErrorMessage } from './apiClient'
 
 /** A person in the org's Linear workspace: Linear's user id, which a Linear
  *  predicate's people filters (assignee_in, creator_in, commenter_in) store,
@@ -27,16 +27,17 @@ export type LinearUserLookup = { ok: true; user: LinearUser } | { ok: false; err
 const usersPath = (orgId: string) => `/api/orgs/${encodeURIComponent(orgId)}/linear/users`
 
 /** searchLinearUsers lists the workspace's active users whose name, display
- *  name or email contains q. An empty list is an answer, not a failure. */
-export async function searchLinearUsers(orgId: string, q: string): Promise<LinearUserSearch> {
+ *  name or email contains `search`, matched server-side. An empty list is an
+ *  answer, not a failure. */
+export async function searchLinearUsers(orgId: string, search: string): Promise<LinearUserSearch> {
   try {
-    const page = await apiList<LinearUser>(`${usersPath(orgId)}/list`, {
-      q,
+    const page = await apiListFirstRows<LinearUser>(`${usersPath(orgId)}/list`, {
+      search,
       page_size: LINEAR_USER_SEARCH_SIZE,
     })
     return { ok: true, users: page.items }
   } catch (err) {
-    return { ok: false, error: httpErrorMessage(err, `Could not search Linear for ${q}.`) }
+    return { ok: false, error: httpErrorMessage(err, `Could not search Linear for ${search}.`) }
   }
 }
 

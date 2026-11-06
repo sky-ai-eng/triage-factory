@@ -518,8 +518,10 @@ the change. Predicates can filter on `assignee_in` and `jira_project_id_in`
   "Medium". A group is itself a label: `label_group_id` is its id and
   `label_group` its name, both empty for a label in none, and predicates filter
   on `label_group_id_in`, the ids of groups (labels the labels list marks
-  `is_group`). Switching a single-select group from one value to another emits
-  a `label_removed` and a `label_added` in the same cycle.
+  `is_group`, and serves alone when its body sends `"is_group": true`;
+  `"is_group": false` serves the labels an issue can carry, which `label_id_in`
+  and `has_label_id_in` name). Switching a single-select group from one value
+  to another emits a `label_removed` and a `label_added` in the same cycle.
   The group is read from the team's label list, once per cycle and only when one
   of the team's issues has a label change, because selecting it on every issue
   would add to the batch read's complexity. When that read fails, the snapshot
@@ -987,7 +989,7 @@ Slack support is an Enterprise, multi-mode-only feature, configured per-org from
 |-------|----|---------|
 | **Message to bot** | `slack:message` | A human addressed the TF bot in a Slack channel — either an explicit @-mention, or a follow-up in a thread the bot already owns (an *engaged thread*) |
 
-Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`, which names channels by their registry id (the `id` field of `GET /api/slack/teams/{team_id}/channels`), not by the ID Slack gives them.
+Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`, which names channels by their registry id (the `id` field of an item of `POST /api/slack/teams/{team_id}/channels/list`), not by the ID Slack gives them.
 
 A team's handlers only ever see messages from channels the team tracks, so an empty `channel_in` matches every one of them, and each entry must be a channel the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, Slack's own channel ID included, with `422 INVALID_FIELD` on `scope_predicate.channel_in`. An edit is checked only for the entries it adds, so a channel the team has since stopped tracking never blocks an edit that leaves it in place. The default trigger TF creates when a team first tracks a channel names no channels, so it fires on every channel the team tracks, including ones tracked later.
 

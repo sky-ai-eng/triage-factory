@@ -6,7 +6,7 @@ import SourceChart from '../../ui/sourcechart/SourceChart'
 import { SourceFrame, FigureRow, FilterField } from './SourceFrame'
 import { figureAt, labelAt } from './schedule'
 import type { SourceBodyProps } from './SourceFrame'
-import { apiListAll } from '../../lib/apiClient'
+import { useWebSocket } from '../../hooks/useWebSocket'
 import {
   useTeamActivity,
   activitySource,
@@ -20,12 +20,14 @@ import { fetchTeamRepos, saveTeamRepos } from '../settings/teamConfig'
 import {
   candidateKeys,
   isRetired,
+  listReachableRepos,
   refFromCandidate,
   repoRefKey,
   repoRefKeys,
   repoRefSlug,
 } from '../../lib/githubRepos'
-import type { GitHubRepo, RepoRef } from '../../lib/githubRepos'
+import type { GitHubRepo, RepoListStatus, RepoRef } from '../../lib/githubRepos'
+import type { WSEvent } from '../../types'
 
 // GitHub, as this team's event source.
 //
@@ -41,10 +43,36 @@ import type { GitHubRepo, RepoRef } from '../../lib/githubRepos'
 // for watched repositories only. FIGURES THE API DOES NOT ANSWER READ `—`: a
 // repository the team does not watch has no row in the cut, and a zero there
 // would be a claim about a repository's week.
+//
+// The table holds two reads. The team's tracked set is one resource, read
+// whole, and is the table's first section, ranked by runs. The repositories
+// the org can reach are a list route the page holds pages of: its search is
+// the route's `search` and its order is the route's, so the page never
+// narrows or reorders a page it holds. While the search box is empty the
+// catalog follows the tracked section with the repositories the team does not
+// watch; once a search is applied, the table is the route's answer to it, in
+// the route's order, each watched repository marked where it falls.
 
 const PROSE =
   'Tracked repositories spawn events this team can automate, like PRs in need of review or CI failing. ' +
   'Agents can also materialize these repos at will during a run. Changes do not apply to runs already in-flight.'
+
+/** How long after the last keystroke before asking for the searched catalog. */
+const SEARCH_DEBOUNCE_MS = 250
+
+/** How often to re-ask while the org's reachable set has never been mirrored.
+ *  The `github_repos_updated` ping is the fast path; this resolves the state
+ *  where the ping does not land (a socket that reconnected mid-refresh). */
+const DISCOVERY_POLL_MS = 4_000
+
+/** The catalog pages the page holds, and the search they answer. */
+interface Catalog {
+  search: string
+  items: GitHubRepo[]
+  next: string
+  total: number
+  status: RepoListStatus
+}
 
 /**
  * A repository's share of the team's runs: a hatched track filled to the
@@ -77,7 +105,11 @@ function runBar(row: TableRow, max: number) {
 
 export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
   const [tracked, setTracked] = useState<RepoRef[] | null>(null)
-  const [visible, setVisible] = useState<GitHubRepo[] | null>(null)
+  const [catalog, setCatalog] = useState<Catalog | null>(null)
+  const [catalogError, setCatalogError] = useState('')
+  // What the org can reach in all, from the last read with no search: the
+  // figure names it, and a searched total would be a different number.
+  const [visibleTotal, setVisibleTotal] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
 
@@ -110,22 +142,127 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
       trackedRef.current = repos
       setTracked(repos)
     })
-    // The org's whole visible estate, so an untracked repository is offerable
-    // rather than invisible. Walked to completion because the table filters
-    // client-side, so a partial set would be a filter that silently misses.
-    // Best-effort: without it the page still shows and can still unwatch what
-    // is tracked.
-    void apiListAll<GitHubRepo>('/api/github/repos/list')
-      .then((repos) => {
-        if (live) setVisible(repos)
-      })
-      .catch(() => {
-        if (live) setVisible(null)
-      })
     return () => {
       live = false
     }
   }, [teamId])
+
+  // Which catalog read the held state belongs to. Searches are typed faster
+  // than they resolve, and the discovery poll and the websocket ping fire on
+  // their own schedule, so reads come back out of order; only the latest one
+  // may touch state.
+  const readSeq = useRef(0)
+  // The search the reader is asking for now, for the reads that fire on
+  // their own schedule: re-asking an older search would let it land over the
+  // newer one.
+  const wanted = useRef('')
+
+  // How many rows of which search the reader holds, for a refresh that
+  // re-reads them all.
+  const held = useRef({ search: '', count: 0 })
+  useEffect(() => {
+    held.current = { search: catalog?.search ?? '', count: catalog?.items.length ?? 0 }
+  }, [catalog])
+
+  // Best-effort: without the catalog the page still shows and can still
+  // unwatch what is tracked.
+  const readCatalog = useCallback(async (search: string, pageToken = '') => {
+    const seq = ++readSeq.current
+    try {
+      const page = await listReachableRepos(search, pageToken)
+      if (seq !== readSeq.current) return
+      setCatalogError('')
+      setCatalog((prev) =>
+        pageToken && prev && prev.search === search
+          ? {
+              ...prev,
+              items: [...prev.items, ...page.items],
+              next: page.next_page_token,
+              total: page.total_count,
+              status: page.status,
+            }
+          : {
+              search,
+              items: page.items,
+              next: page.next_page_token,
+              total: page.total_count,
+              status: page.status,
+            },
+      )
+      if (!search && page.status === 'ready') setVisibleTotal(page.total_count)
+    } catch {
+      if (seq !== readSeq.current) return
+      // A further page that failed keeps what is on screen; a first page that
+      // failed has nothing true to show for its search.
+      if (!pageToken) setCatalog(null)
+      setCatalogError(
+        search ? 'Could not search the repositories this organization can reach.' : '',
+      )
+    }
+  }, [])
+
+  // The first page for the search as it settles. An empty search is asked at
+  // once — it is the mount read, and clearing the box should not wait.
+  useEffect(() => {
+    const search = filter.trim()
+    wanted.current = search
+    const id = setTimeout(() => void readCatalog(search), search ? SEARCH_DEBOUNCE_MS : 0)
+    return () => clearTimeout(id)
+  }, [filter, readCatalog])
+
+  // A refresh of the search the reader is asking for now. It reads as many
+  // pages as they hold of it and replaces them in one step, so a refresh does
+  // not take back the rows "show more" loaded. A failed refresh keeps what is
+  // on screen.
+  const refreshCatalog = useCallback(async () => {
+    const search = wanted.current
+    const depth = held.current.search === search ? held.current.count : 0
+    const seq = ++readSeq.current
+    try {
+      let page = await listReachableRepos(search)
+      let items = page.items
+      while (page.next_page_token && items.length < depth) {
+        if (seq !== readSeq.current) return
+        page = await listReachableRepos(search, page.next_page_token)
+        items = [...items, ...page.items]
+      }
+      if (seq !== readSeq.current) return
+      setCatalogError('')
+      setCatalog({
+        search,
+        items,
+        next: page.next_page_token,
+        total: page.total_count,
+        status: page.status,
+      })
+      if (!search && page.status === 'ready') setVisibleTotal(page.total_count)
+    } catch {
+      // The rows on screen are the last good answer; the next refresh retries.
+    }
+  }, [])
+
+  // The server refreshes the reachable set out of band and says so with a
+  // payload-free ping; re-reading on it is what turns "discovering" into
+  // repositories without a reload.
+  useWebSocket(
+    useCallback(
+      (event: WSEvent) => {
+        if (event.type === 'github_repos_updated') void refreshCatalog()
+      },
+      [refreshCatalog],
+    ),
+  )
+
+  const discovering = catalog?.status === 'discovering'
+  useEffect(() => {
+    if (!discovering) return
+    const id = setInterval(() => void refreshCatalog(), DISCOVERY_POLL_MS)
+    return () => clearInterval(id)
+  }, [discovering, refreshCatalog])
+
+  const loadMore = useCallback(() => {
+    if (catalog?.next) void readCatalog(catalog.search, catalog.next)
+  }, [catalog, readCatalog])
 
   // refsByRow maps each row id to its repository, so a verb can name what it
   // selected.
@@ -134,39 +271,49 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
     refsByRow: Map<string, RepoRef>
   } => {
     if (!tracked) return { rows: [], refsByRow: new Map() }
-    // A row is keyed by its repository's selection key, so a visible
+    // A row is keyed by its repository's selection key, so a reachable
     // repository and the tracked entry that names it — by registry id or
     // GitHub id — are one row. A name alone pairs nothing a server id could.
     const trackedByKey = new Map(tracked.flatMap((r) => repoRefKeys(r).map((k) => [k, r] as const)))
-    const entries: { key: string; name: string; ref: RepoRef; on: boolean }[] = []
+    type Entry = { key: string; name: string; ref: RepoRef; on: boolean }
+    const listed: Entry[] = []
     const seen = new Set<string>()
-    for (const c of visible ?? []) {
+    for (const c of catalog?.items ?? []) {
       const hit = candidateKeys(c).find((k) => trackedByKey.has(k))
       const ref = hit ? trackedByKey.get(hit)! : refFromCandidate(c)
       const key = repoRefKey(ref)
       if (seen.has(key)) continue
       seen.add(key)
-      entries.push({ key, name: c.full_name, ref, on: !!hit })
+      listed.push({ key, name: c.full_name, ref, on: !!hit })
     }
-    // A tracked repository the picker cannot see is still tracked — an App
-    // installation narrowed after the fact, a credential that stopped
-    // resolving, or a repository GitHub no longer serves at all (retired,
-    // its name now another repository's). Dropping it would make the page lie
-    // about what it watches.
-    for (const ref of tracked) {
-      const key = repoRefKey(ref)
-      if (!seen.has(key)) {
-        seen.add(key)
-        entries.push({ key, name: repoRefSlug(ref), ref, on: true })
-      }
+    // The cut keys a repository by its registry id, which every tracked ref
+    // carries once saved. A watched row is matched on it alone, so a
+    // repository the team does not watch never borrows a figure.
+    const unitOf = (e: Entry) => (e.on && e.ref.id ? perRepo.get(e.ref.id) : undefined)
+
+    let entries: Entry[]
+    if (catalog?.search) {
+      entries = listed
+    } else {
+      // Every tracked repository, including one the org can no longer reach —
+      // an App installation narrowed after the fact, a credential that
+      // stopped resolving, or a repository GitHub no longer serves at all
+      // (retired, its name now another repository's). Dropping it would make
+      // the page lie about what it watches. Ranked by runs, the most first;
+      // a repository nothing counts yet goes after every counted one.
+      const watched: Entry[] = tracked.map((ref) => ({
+        key: repoRefKey(ref),
+        name: repoRefSlug(ref),
+        ref,
+        on: true,
+      }))
+      const runsOf = (e: Entry) => unitOf(e)?.runs ?? -1
+      watched.sort((a, b) => runsOf(b) - runsOf(a) || a.name.localeCompare(b.name))
+      entries = watched.concat(listed.filter((e) => !e.on))
     }
-    entries.sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name))
     return {
       rows: entries.map((e) => {
-        // The cut keys a repository by its registry id, which every tracked
-        // ref carries once saved. A watched row is matched on it alone, so a
-        // repository the team does not watch never borrows a figure.
-        const unit = e.on && e.ref.id ? perRepo.get(e.ref.id) : undefined
+        const unit = unitOf(e)
         const min = minutesSince(unit?.last_event_at)
         return {
           id: e.key,
@@ -179,12 +326,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
       }),
       refsByRow: new Map(entries.map((e) => [e.key, e.ref])),
     }
-  }, [tracked, visible, perRepo])
-
-  const shown = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    return q ? rows.filter((r) => String(r.name).toLowerCase().includes(q)) : rows
-  }, [rows, filter])
+  }, [tracked, catalog, perRepo])
 
   // Every repository the table can rank against. Held at 1 so a page with no
   // run data divides by something.
@@ -215,9 +357,6 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
         label: 'RUNS',
         width: '168px',
         render: (r) => runBar(r, maxRuns),
-        // Runs rank the watched set; a repository nothing counts sorts after
-        // every watched one, which is also the order before the node answers.
-        sortValue: (r) => -((r.runs as number | null) ?? (r.tracked ? 0 : -1)),
       },
       {
         key: 'last',
@@ -270,6 +409,13 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   )
 
   const trackedCount = tracked ? tracked.length : null
+  const trackedLabel =
+    visibleTotal !== null
+      ? `tracked of ${visibleTotal} visible`
+      : discovering
+        ? 'tracked · discovering repositories'
+        : 'tracked'
+  const remaining = catalog && catalog.next ? catalog.total - catalog.items.length : 0
 
   return (
     <SourceFrame
@@ -288,10 +434,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
           {/* Keyed on the load, so the figures roll when the answer arrives
               rather than rolling to nothing and then jumping. */}
           <div className="sp-figrows" key={tracked ? 'on' : 'off'}>
-            <FigureRow
-              label={visible ? `tracked of ${visible.length} visible` : 'tracked'}
-              at={labelAt(0)}
-            >
+            <FigureRow label={trackedLabel} at={labelAt(0)}>
               <Odometer value={trackedCount} at={figureAt(0)} label={`${trackedCount ?? 0}`} />
             </FigureRow>
             <FigureRow label="events in 7 days" at={labelAt(1)}>
@@ -332,20 +475,41 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
         <div className="sp-right">
           <div className="sp-tablewrap">
             {error ? <p className="sp-error">{error}</p> : null}
+            {catalogError ? <p className="sp-error">{catalogError}</p> : null}
             <Table
               label="REPOSITORIES"
               build={!!tracked}
               columns={columns}
-              rows={shown}
+              rows={rows}
               pageSize="auto"
-              sortKey="runs"
-              sortDir={1}
+              // The order given: the tracked section's, then the list route's.
+              // No column names a sortKey, so no header reorders it.
+              sort={null}
               barPosition="absolute"
-              emptyLabel={tracked ? 'no repositories' : 'loading…'}
+              emptyLabel={
+                !tracked
+                  ? 'loading…'
+                  : catalog?.search
+                    ? 'no repositories match'
+                    : discovering
+                      ? 'discovering repositories…'
+                      : 'no repositories'
+              }
               // Selection exists for the verbs, so it goes with them.
               selectable={isAdmin}
               headerRight={
-                <FilterField value={filter} onChange={setFilter} label="Filter repositories" />
+                <FilterField value={filter} onChange={setFilter} label="Search repositories" />
+              }
+              footer={
+                remaining > 0 ? (
+                  <button type="button" className="sp-more" onClick={loadMore}>
+                    {remaining} more · show them
+                  </button>
+                ) : discovering ? (
+                  <span className="sp-foot">
+                    discovering the repositories this organization can reach…
+                  </span>
+                ) : null
               }
               actions={
                 isAdmin

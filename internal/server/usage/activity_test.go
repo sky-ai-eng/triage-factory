@@ -18,12 +18,13 @@ import (
 )
 
 // TestResolveArtifactActivityFilters is a Docker-free unit test for the
-// artifacts feeds' body validation: the pass-through filters, the time window
-// (RFC3339 / YYYY-MM-DD, unbounded by default, inverted rejected), and the
-// closed vocabularies, each fault naming its field.
+// artifacts feeds' body validation: the pass-through filters (team_id in
+// canonical form), the time window (RFC3339 / YYYY-MM-DD, unbounded by
+// default, inverted rejected), and the closed vocabularies, each fault naming
+// its field.
 func TestResolveArtifactActivityFilters(t *testing.T) {
 	var v httpx.Validation
-	opts := resolveArtifactActivityFilters(&v, artifactActivityListRequest{})
+	opts := resolveArtifactActivityFilters(&v, artifactActivityFilters{})
 	if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 		t.Fatal("empty body was rejected")
 	}
@@ -32,14 +33,15 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 	}
 
 	v = httpx.Validation{}
-	opts = resolveArtifactActivityFilters(&v, artifactActivityListRequest{
-		Provider: "github", ObjectKind: domain.ObjectKindBranch,
+	team := "22222222-2222-2222-2222-222222222222"
+	opts = resolveArtifactActivityFilters(&v, artifactActivityFilters{
+		Provider: "github", ObjectKind: domain.ObjectKindBranch, TeamID: team,
 		Since: "2026-06-01", Until: "2026-06-30T12:00:00Z",
 	})
 	if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 		t.Fatal("valid body was rejected")
 	}
-	if opts.Provider != "github" || opts.ObjectKind != domain.ObjectKindBranch {
+	if opts.Provider != "github" || opts.ObjectKind != domain.ObjectKindBranch || opts.TeamID != team {
 		t.Errorf("filters not parsed: %+v", opts)
 	}
 	if !opts.Since.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) || !opts.Until.Equal(time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)) {
@@ -47,17 +49,19 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 	}
 
 	for name, tc := range map[string]struct {
-		req   artifactActivityListRequest
+		req   artifactActivityFilters
 		field string
 	}{
-		"unknown_provider":    {artifactActivityListRequest{Provider: "gitlab"}, "provider"},
-		"unknown_object_kind": {artifactActivityListRequest{ObjectKind: "pull_requests"}, "object_kind"},
-		"plural_object_kind":  {artifactActivityListRequest{ObjectKind: domain.ObjectKindIssue + "s"}, "object_kind"},
-		"padded_object_kind":  {artifactActivityListRequest{ObjectKind: " " + domain.ObjectKindBranch}, "object_kind"},
-		"padded_provider":     {artifactActivityListRequest{Provider: "github "}, "provider"},
-		"bad_since":           {artifactActivityListRequest{Since: "yesterday"}, "since"},
-		"bad_until":           {artifactActivityListRequest{Until: "tomorrow"}, "until"},
-		"inverted_window":     {artifactActivityListRequest{Since: "2026-06-30", Until: "2026-06-01"}, "since"},
+		"unknown_provider":    {artifactActivityFilters{Provider: "gitlab"}, "provider"},
+		"unknown_object_kind": {artifactActivityFilters{ObjectKind: "pull_requests"}, "object_kind"},
+		"plural_object_kind":  {artifactActivityFilters{ObjectKind: domain.ObjectKindIssue + "s"}, "object_kind"},
+		"padded_object_kind":  {artifactActivityFilters{ObjectKind: " " + domain.ObjectKindBranch}, "object_kind"},
+		"padded_provider":     {artifactActivityFilters{Provider: "github "}, "provider"},
+		"bad_since":           {artifactActivityFilters{Since: "yesterday"}, "since"},
+		"bad_until":           {artifactActivityFilters{Until: "tomorrow"}, "until"},
+		"inverted_window":     {artifactActivityFilters{Since: "2026-06-30", Until: "2026-06-01"}, "since"},
+		"bad_team_id":         {artifactActivityFilters{TeamID: "platform"}, "team_id"},
+		"uppercase_team_id":   {artifactActivityFilters{TeamID: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"}, "team_id"},
 	} {
 		var v httpx.Validation
 		resolveArtifactActivityFilters(&v, tc.req)
@@ -74,14 +78,14 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 	// Every value the ledger can store is accepted.
 	for _, kind := range domain.ObjectKinds() {
 		var v httpx.Validation
-		resolveArtifactActivityFilters(&v, artifactActivityListRequest{ObjectKind: kind})
+		resolveArtifactActivityFilters(&v, artifactActivityFilters{ObjectKind: kind})
 		if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 			t.Errorf("object_kind=%q rejected", kind)
 		}
 	}
 	for _, provider := range domain.Providers() {
 		var v httpx.Validation
-		resolveArtifactActivityFilters(&v, artifactActivityListRequest{Provider: provider})
+		resolveArtifactActivityFilters(&v, artifactActivityFilters{Provider: provider})
 		if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 			t.Errorf("provider=%q rejected", provider)
 		}
@@ -89,11 +93,11 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 }
 
 // TestResolveActionActivityFilters mirrors the artifacts test for the actions
-// feed: provider and the time window are identical; object_kind becomes
-// action/actor.
+// feed: provider, team_id and the time window are identical; object_kind
+// becomes action/actor.
 func TestResolveActionActivityFilters(t *testing.T) {
 	var v httpx.Validation
-	opts := resolveActionActivityFilters(&v, actionActivityListRequest{})
+	opts := resolveActionActivityFilters(&v, actionActivityFilters{})
 	if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 		t.Fatal("empty body was rejected")
 	}
@@ -102,36 +106,47 @@ func TestResolveActionActivityFilters(t *testing.T) {
 	}
 
 	actor := "11111111-1111-1111-1111-111111111111"
+	team := "22222222-2222-2222-2222-222222222222"
 	v = httpx.Validation{}
-	opts = resolveActionActivityFilters(&v, actionActivityListRequest{
-		Provider: "github", Action: domain.ExternalActionTypes()[0], Actor: actor,
+	opts = resolveActionActivityFilters(&v, actionActivityFilters{
+		Provider: "github", Action: domain.ExternalActionTypes()[0], Actor: actor, TeamID: team,
 		Since: "2026-06-01", Until: "2026-06-30",
 	})
 	if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 		t.Fatal("valid body was rejected")
 	}
-	if opts.Provider != "github" || opts.ActorUserID != actor {
+	if opts.Provider != "github" || opts.ActorUserID != actor || opts.TeamID != team {
 		t.Errorf("filters not parsed: %+v", opts)
 	}
 
-	for name, req := range map[string]actionActivityListRequest{
-		"unknown_provider": {Provider: "gitlab"},
-		"unknown_action":   {Action: "pr_openedd"},
-		"bad_actor":        {Actor: "not-a-uuid"},
-		"uppercase_actor":  {Actor: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"},
-		"bad_since":        {Since: "yesterday"},
-		"inverted_window":  {Since: "2026-06-30", Until: "2026-06-01"},
+	for name, tc := range map[string]struct {
+		req   actionActivityFilters
+		field string
+	}{
+		"unknown_provider": {actionActivityFilters{Provider: "gitlab"}, "provider"},
+		"unknown_action":   {actionActivityFilters{Action: "pr_openedd"}, "action"},
+		"bad_actor":        {actionActivityFilters{Actor: "not-a-uuid"}, "actor"},
+		"uppercase_actor":  {actionActivityFilters{Actor: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"}, "actor"},
+		"bad_team_id":      {actionActivityFilters{TeamID: "platform"}, "team_id"},
+		"braced_team_id":   {actionActivityFilters{TeamID: "{" + team + "}"}, "team_id"},
+		"bad_since":        {actionActivityFilters{Since: "yesterday"}, "since"},
+		"inverted_window":  {actionActivityFilters{Since: "2026-06-30", Until: "2026-06-01"}, "since"},
 	} {
 		var v httpx.Validation
-		resolveActionActivityFilters(&v, req)
-		if !v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
+		resolveActionActivityFilters(&v, tc.req)
+		rec := httptest.NewRecorder()
+		if !v.Flush(rec, http.StatusBadRequest) {
 			t.Errorf("%s: expected a validation error, got none", name)
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), `"field":"`+tc.field+`"`) {
+			t.Errorf("%s: error does not name %q: %s", name, tc.field, rec.Body.String())
 		}
 	}
 	// Every action type the writers store must be accepted.
 	for _, action := range domain.ExternalActionTypes() {
 		var v httpx.Validation
-		resolveActionActivityFilters(&v, actionActivityListRequest{Action: action})
+		resolveActionActivityFilters(&v, actionActivityFilters{Action: action})
 		if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 			t.Errorf("action=%q rejected", action)
 		}

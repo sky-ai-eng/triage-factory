@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -77,16 +78,35 @@ func knowledgeFileToJSON(f kbstore.FileInfo) knowledgeFileJSON {
 // root narrows to one root; absent means every root the caller may read, which
 // is what the page's combined tree renders. path_prefix narrows to a folder,
 // matched by segment — "notes" selects notes/ and everything under it, never a
-// sibling named notes-archive.
+// sibling named notes-archive. search keeps the entries whose path carries it,
+// case-insensitively and literally (httpx.Search), so a folder name finds what
+// is filed under it. sort_key/sort_dir order the answer
+// (knowledgeListSortKeys); absent is root, then path.
 type knowledgeListRequest struct {
 	Root       string `json:"root"`
 	PathPrefix string `json:"path_prefix"`
+	Search     string `json:"search"`
+	SortKey    string `json:"sort_key"`
+	SortDir    string `json:"sort_dir"`
 	httpx.PageRequest
 }
 
 type knowledgeListFilters struct {
 	Root       string `json:"root"`
 	PathPrefix string `json:"path_prefix"`
+	Search     string `json:"search"`
+	SortKey    string `json:"sort_key"`
+	SortDir    string `json:"sort_dir"`
+}
+
+// knowledgeListSortKeys is the KB list's sort_key vocabulary, named for the
+// entry fields each orders by. A path reads A to Z first; a size or a time
+// reads largest and newest first, which is what a reader ranking by either is
+// looking for.
+var knowledgeListSortKeys = []httpx.SortKey{
+	{Name: string(kbstore.SortPath), Default: db.SortAsc},
+	{Name: string(kbstore.SortSize), Default: db.SortDesc},
+	{Name: string(kbstore.SortModTime), Default: db.SortDesc},
 }
 
 // handleTeamKnowledgeList returns one page of the team's KB entries.
@@ -124,9 +144,14 @@ func (s *Server) handleTeamKnowledgeList(w http.ResponseWriter, r *http.Request)
 	if err := kbstore.ValidatePrefix(req.PathPrefix); err != nil {
 		v.Invalid("path_prefix", err.Error())
 	}
+	search := httpx.Search(&v, req.Search)
+	order := httpx.Sort(&v, req.SortKey, req.SortDir, knowledgeListSortKeys)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(knowledgeListFilters{
 		Root:       req.Root,
 		PathPrefix: req.PathPrefix,
+		Search:     httpx.SearchKey(search),
+		SortKey:    order.Key,
+		SortDir:    order.Dir,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -140,7 +165,14 @@ func (s *Server) handleTeamKnowledgeList(w http.ResponseWriter, r *http.Request)
 		roots = intersectRoots(roots, kbstore.Root(req.Root))
 	}
 
-	entries, err := s.knowledge().List(r.Context(), orgID, teamID, roots, req.PathPrefix)
+	// The store searches and orders the whole listing, so the window below
+	// cuts the answer to the question asked rather than a page of another.
+	entries, err := s.knowledge().List(r.Context(), orgID, teamID, kbstore.ListQuery{
+		Roots:      roots,
+		PathPrefix: req.PathPrefix,
+		Search:     search,
+		Sort:       kbstore.Sort{Key: kbstore.SortKey(order.Key), Desc: order.Desc()},
+	})
 	if err != nil {
 		internalError(w, "teams/kb", err)
 		return

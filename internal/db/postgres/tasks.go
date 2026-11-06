@@ -393,15 +393,9 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 		args = append(args, f.EventTypes)
 		clauses = append(clauses, fmt.Sprintf("t.event_type = ANY($%d)", len(args)))
 	}
-	if term := strings.TrimSpace(f.Search); term != "" {
-		// The SQLite mirror explains the shape; lower()+LIKE rather than
-		// ILIKE so both dialects fold case through the same expression.
-		args = append(args, "%"+db.LikeEscape(strings.ToLower(term))+"%")
-		p := fmt.Sprintf("$%d", len(args))
-		clauses = append(clauses, fmt.Sprintf(`(lower(e.title) LIKE %[1]s ESCAPE '\'
-		            OR lower(e.source_id) LIKE %[1]s ESCAPE '\'
-		            OR lower(t.ai_summary) LIKE %[1]s ESCAPE '\'
-		            OR lower(t.event_type) LIKE %[1]s ESCAPE '\')`, p))
+	var search string
+	if search, args = db.PostgresSearch(f.Search, args, "e.title", "e.source_id", "t.ai_summary", "t.event_type"); search != "" {
+		clauses = append(clauses, search)
 	}
 	if len(f.Sources) > 0 {
 		args = append(args, f.Sources)

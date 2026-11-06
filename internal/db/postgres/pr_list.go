@@ -53,11 +53,44 @@ func pgPRStateClause(states []string) (string, error) {
 	return "\n\t\t  AND (" + strings.Join(arms, " OR ") + ")", nil
 }
 
-// pgPRSummaryOrder is the total order both arms page by. The id tiebreaker is
-// required, not decorative: without it, rows sharing a last_polled_at drop and
-// repeat across offset pages.
-const pgPRSummaryOrder = `
-	ORDER BY e.last_polled_at DESC NULLS LAST, e.id`
+// pgPRDraftClause renders the draft filter as a trailing AND, or "" when it is
+// unset. Fixed SQL: the flag selects a fragment rather than binding a value.
+// A snapshot with no is_draft is not a draft, as PRSummaryFromSnapshot reads
+// it.
+func pgPRDraftClause(draft *bool) string {
+	switch {
+	case draft == nil:
+		return ""
+	case *draft:
+		return "\n\t\t  AND e.snapshot_json ->> 'is_draft' = 'true'"
+	default:
+		return "\n\t\t  AND coalesce(e.snapshot_json ->> 'is_draft', 'false') <> 'true'"
+	}
+}
+
+// pgPRSummaryOrder renders the total order both arms page by, for the sort
+// the filter names (db.PRListFilter.Sort). The id tiebreaker is required,
+// not decorative: without it, rows sharing a key drop and repeat across
+// offset pages. updated_at is compared as text under the C collation, which
+// is its time order for the RFC 3339 spelling GitHub returns, and an empty
+// or missing one sorts last in both directions. An unknown key is refused,
+// never read as the default.
+func pgPRSummaryOrder(sort db.Sort) (string, error) {
+	switch sort.Key {
+	case "":
+		return `
+	ORDER BY e.last_polled_at DESC NULLS LAST, e.id`, nil
+	case db.PRSortUpdatedAt:
+		dir := "ASC"
+		if sort.Desc() {
+			dir = "DESC"
+		}
+		return `
+	ORDER BY NULLIF(e.snapshot_json ->> 'updated_at', '') COLLATE "C" ` + dir + ` NULLS LAST, e.id`, nil
+	default:
+		return "", fmt.Errorf("%w: %q", db.ErrUnknownPRSort, sort.Key)
+	}
+}
 
 // pgPRSummaryColumns is the select list pgScanPRSummaries reads: the entity
 // id the row is addressed by, and the snapshot the rest of the row projects.

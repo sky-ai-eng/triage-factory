@@ -156,6 +156,16 @@ export type ListRequest = Record<string, unknown> & {
   page_token?: string
 }
 
+/** One value of a facets node's cut and how many rows carry it — the shape
+ *  every `POST /…/facets` node answers each of its named cuts in. */
+export interface Facet {
+  value: string
+  count: number
+}
+
+/** The two directions a list route's `sort_dir` takes. */
+export type SortDir = 'asc' | 'desc'
+
 /** apiList calls a `POST /api/<resource>/list` read and normalizes the
  *  envelope, so callers never guard for a missing field.
  *
@@ -177,6 +187,28 @@ export async function apiList<T>(
   options: ApiFetchOptions = {},
 ): Promise<ListPage<T>> {
   return listPage(await apiJSON<Partial<ListPage<T>>>(path, listInit(body, options)))
+}
+
+/** How many further pages `apiListFirstRows` follows past empty ones. */
+const MAX_EMPTY_PAGES = 10
+
+/** apiListFirstRows reads a list's first page that holds a row. A scanned
+ *  proxy list (a branch search, a Linear search) narrows rows its upstream
+ *  cannot, and answers an empty page with a token when the upstream pages one
+ *  request read held no match and more remain; a surface that shows one page
+ *  follows that token rather than report no match. It stops after
+ *  MAX_EMPTY_PAGES and answers the empty page it reached, token included, so a
+ *  caller can still say there is more. */
+export async function apiListFirstRows<T>(
+  path: string,
+  body: ListRequest,
+  options: ApiFetchOptions = {},
+): Promise<ListPage<T>> {
+  let page = await apiList<T>(path, body, options)
+  for (let i = 0; i < MAX_EMPTY_PAGES && page.items.length === 0 && page.next_page_token; i++) {
+    page = await apiList<T>(path, { ...body, page_token: page.next_page_token }, options)
+  }
+  return page
 }
 
 /** apiListAt is `apiList`, also answering the server's clock when it answered
@@ -214,30 +246,39 @@ function listPage<T>(page: Partial<ListPage<T>>): ListPage<T> {
 }
 
 /** The most rows `apiListAll` will collect before it gives up. A declared
- *  ceiling, not a guess: past a couple of thousand options a client-side filter
- *  is the wrong affordance and a server-side search is the right one. Expressed
- *  in rows rather than pages so a caller that has to use a smaller page (an
- *  upstream-capped proxy list) gets the same bound. */
+ *  ceiling, not a guess: a set larger than this is not one a client can answer
+ *  a question about whole. Expressed in rows rather than pages so a caller that
+ *  has to use a smaller page (an upstream-capped proxy list) gets the same
+ *  bound. */
 const MAX_ROWS_TO_WALK = 2000
 
 /** apiListAll walks a `POST /…/list` read to completion and returns every row.
  *
- *  **Use it only where a surface genuinely needs the whole set**, which in
- *  practice means one thing: a consumer that filters or reasons over the
- *  options CLIENT-side. A partial load there is not a shorter list — it is a
- *  search that silently misses, a coverage check that answers "none" about a
- *  row on page three, a reorder that submits a partial order. Any surface that
- *  renders rows for reading wants `usePagedList` instead, so the reader sees a
- *  page and asks for the next one.
+ *  **It has exactly two uses**, and every caller is one of them:
+ *
+ *  - **A coverage check**: a question about the whole set rather than a view of
+ *    it — which statuses no rule maps yet, whether any handler still covers an
+ *    event type, which selected entries a team no longer tracks, which
+ *    deliverables an artifact already names, whether every edge a graph draws
+ *    lands on a node it read, every step of the blueprints a picker shows. A
+ *    partial load answers "none" about a row on page three.
+ *  - **A full reorder**: a write that must name the caller's entire visible set,
+ *    such as a drag-to-reorder that submits the new order, or a PUT that
+ *    replaces the whole tracked set. A partial load submits a partial set.
+ *
+ *  It is never how a surface filters, searches or sorts. Those are fields on
+ *  the list route (`search`, `sort_key`/`sort_dir`, the route's filters), and a
+ *  count beside a list is its facets node: a client narrowing the rows it
+ *  holds answers a different question from the one on screen. A surface that
+ *  renders rows for reading wants `usePagedList`, so the reader sees a page and
+ *  asks for the next one.
  *
  *  It walks with the server's own tokens, never a computed offset, and
  *  **throws** rather than returning a short set once the walk passes
- *  `MAX_ROWS_TO_WALK`. Throwing is the point: the ceiling exists to bound a
- *  runaway, so reaching it means the caller's premise — that this set fits in
- *  memory and can be reasoned over whole — is false. Returning the rows it
- *  managed to collect alongside a flag put the burden on every caller to notice
- *  and say so, and no caller did; an exception lands on the error path each one
- *  already has, and turns a quietly wrong answer into a visible failure.
+ *  `MAX_ROWS_TO_WALK`. Throwing is the point: reaching the ceiling means the
+ *  caller's premise — that this set fits in memory and can be reasoned over
+ *  whole — is false, and an exception lands on the error path each caller
+ *  already has instead of a quietly wrong answer.
  *
  *  `pageSize` exists for the routes that declare a smaller maximum than the
  *  standard 200 — a proxy list capped at its upstream's own page size, where

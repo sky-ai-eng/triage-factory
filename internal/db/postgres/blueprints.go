@@ -70,6 +70,10 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 		                       AND NOT (h.event_type = ANY(` + gated + `)))
 		  )`
 	}
+	var clause string
+	if clause, args = db.PostgresSearch(f.Search, args, "blueprints.name"); clause != "" {
+		where += " AND " + clause
+	}
 
 	var total int
 	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM blueprints`+where, args...).Scan(&total); err != nil {
@@ -289,6 +293,11 @@ func listBlueprintSteps(ctx context.Context, q queryer, orgID, blueprintID strin
 	return out, rows.Err()
 }
 
+// pgStepNameExpr is a step's name, which is the name of the prompt it runs. A
+// scalar subquery rather than a join, so the step list's row set and its count
+// stay one row per step whatever the search.
+const pgStepNameExpr = `(SELECT p.name FROM prompts p WHERE p.org_id = bs.org_id AND p.id = bs.step_prompt_id)`
+
 // ListAllSteps returns every step of teamID's request-facing blueprints in one
 // read. The blueprints join mirrors List's gate (hidden = FALSE, deleted_at IS
 // NULL, optional team_id) so the canvas's bulk steps fetch lines up exactly with
@@ -306,6 +315,10 @@ func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.Bl
 	if len(f.BlueprintIDs) > 0 {
 		args = append(args, f.BlueprintIDs)
 		where += fmt.Sprintf(" AND bs.blueprint_id = ANY($%d)", len(args))
+	}
+	var clause string
+	if clause, args = db.PostgresSearch(f.Search, args, pgStepNameExpr); clause != "" {
+		where += " AND " + clause
 	}
 
 	var total int

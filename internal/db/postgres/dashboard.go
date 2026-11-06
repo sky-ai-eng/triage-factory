@@ -110,6 +110,10 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 	if err != nil {
 		return nil, 0, err
 	}
+	order, err := pgPRSummaryOrder(f.Sort)
+	if err != nil {
+		return nil, 0, err
+	}
 	mine, args, ok := pgPRViewerLegs(viewer, []any{orgID})
 	if !ok {
 		return []domain.PRSummaryRow{}, 0, nil
@@ -117,7 +121,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 
 	where := `
 		WHERE e.org_id = $1 AND e.source = 'github' AND e.snapshot_json IS NOT NULL
-		  AND ` + mine + stateClause
+		  AND ` + mine + stateClause + pgPRDraftClause(f.Draft)
 
 	var total int
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities e`+where, args...).Scan(&total); err != nil {
@@ -127,7 +131,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID string, viewer db.PRView
 		return []domain.PRSummaryRow{}, total, nil
 	}
 
-	query := `SELECT ` + pgPRSummaryColumns + ` FROM entities e` + where + pgPRSummaryOrder
+	query := `SELECT ` + pgPRSummaryColumns + ` FROM entities e` + where + order
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
 		args = append(args, opts.Limit, opts.Offset)

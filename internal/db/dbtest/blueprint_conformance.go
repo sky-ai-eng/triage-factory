@@ -3,6 +3,8 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -841,6 +843,76 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 		if firstStep[0] == secondStep[0] {
 			t.Errorf("both step pages returned %+v; pages must partition the set", firstStep[0])
+		}
+	})
+
+	t.Run("List_SearchMatchesName", func(t *testing.T) {
+		// Search is a case-insensitive literal substring of the name, inside
+		// the query, so the total counts the matches.
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		full := seedBlueprint(t, store, orgID, teamID, "Zqx 100% done")
+		many := seedBlueprint(t, store, orgID, teamID, "Zqx 1000 widgets")
+		seedBlueprint(t, store, orgID, teamID, "Zqy review")
+		for _, tc := range []struct {
+			search string
+			want   []string
+		}{
+			{"ZQX", []string{full, many}},
+			// A % is a literal percent sign, not a LIKE wildcard: "100%"
+			// would otherwise also match "1000".
+			{"100%", []string{full}},
+			{"zqz", nil},
+		} {
+			list, total, err := store.List(ctx, orgID, db.BlueprintListFilter{TeamID: teamID, Search: tc.search}, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatalf("List(search=%q): %v", tc.search, err)
+			}
+			got := make([]string, len(list))
+			for i, b := range list {
+				got[i] = b.ID
+			}
+			sort.Strings(got)
+			want := append([]string(nil), tc.want...)
+			sort.Strings(want)
+			if !slices.Equal(got, want) || total != len(want) {
+				t.Errorf("List(search=%q) = %v (total %d), want %v", tc.search, got, total, want)
+			}
+		}
+	})
+
+	t.Run("ListAllSteps_SearchMatchesStepPromptName", func(t *testing.T) {
+		// A step is named by its prompt, so search matches the prompt's name
+		// and answers the steps that run it.
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp := seedBlueprint(t, store, orgID, teamID, "Searched steps")
+		full, many, other := seedPrompt(t, "zqstep-100%"), seedPrompt(t, "zqstep-1000"), seedPrompt(t, "zqother")
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{full, many, other}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		for _, tc := range []struct {
+			search string
+			want   []string
+		}{
+			{"ZQSTEP", []string{full, many}},
+			{"100%", []string{full}},
+			{"zqnone", nil},
+		} {
+			steps, total, err := store.ListAllSteps(ctx, orgID,
+				db.BlueprintStepListFilter{TeamID: teamID, Search: tc.search}, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatalf("ListAllSteps(search=%q): %v", tc.search, err)
+			}
+			got := make([]string, len(steps))
+			for i, st := range steps {
+				got[i] = st.StepPromptID
+			}
+			// Step order is (blueprint, step_index), which is the order the
+			// prompts were placed in.
+			if !slices.Equal(got, tc.want) || total != len(tc.want) {
+				t.Errorf("ListAllSteps(search=%q) = %v (total %d), want %v", tc.search, got, total, tc.want)
+			}
 		}
 	})
 

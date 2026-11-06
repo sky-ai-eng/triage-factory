@@ -329,7 +329,7 @@ func TestNotificationList_Filters(t *testing.T) {
 		{"unknown scope", map[string]any{"scope_in": []string{"everyone"}}, httpx.ReasonInvalidField, "scope_in"},
 		{"wrong type", map[string]any{"unread": "yes"}, httpx.ReasonInvalidField, "unread"},
 		{"wrong-typed page_size", map[string]any{"page_size": "x"}, httpx.ReasonInvalidField, "page_size"},
-		{"unknown field", map[string]any{"team_id_in": []string{runmode.LocalDefaultTeamID}}, httpx.ReasonUnknownField, "team_id_in"},
+		{"unknown field", map[string]any{"q": "fixable"}, httpx.ReasonUnknownField, "q"},
 		{"page too large", map[string]any{"page_size": httpx.MaxPageSize + 1}, httpx.ReasonOutOfRange, "page_size"},
 	} {
 		t.Run("refuses "+c.name, func(t *testing.T) {
@@ -395,7 +395,7 @@ func TestNotificationList_Sort(t *testing.T) {
 		body  map[string]any
 		field string
 	}{
-		{"unknown sort_key", map[string]any{"sort_key": "title"}, "sort_key"},
+		{"unknown sort_key", map[string]any{"sort_key": "seen_count"}, "sort_key"},
 		{"empty sort_key", map[string]any{"sort_key": ""}, "sort_key"},
 		{"unknown sort_dir", map[string]any{"sort_key": "resolved_at", "sort_dir": "up"}, "sort_dir"},
 		{"sort_dir alone", map[string]any{"sort_dir": "asc"}, "sort_dir"},

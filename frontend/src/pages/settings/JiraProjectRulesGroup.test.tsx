@@ -105,6 +105,24 @@ describe('JiraProjectRulesGroup · watching', () => {
     expect(screen.getByText('Operations')).toBeInTheDocument()
   })
 
+  it('sends the search to the server and offers every candidate it answers', async () => {
+    const user = userEvent.setup()
+    // The stub answers the whole catalog whatever the search: the server
+    // narrows, so the group offers what it is given.
+    const fetchMock = stubFetch()
+    render(<Harness />)
+    await screen.findByText('Sky Platform')
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search Jira projects' }), 'sky')
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        PROJECTS_LIST,
+        expect.objectContaining({ body: JSON.stringify({ search: 'sky', page_size: 100 }) }),
+      ),
+    )
+    expect(screen.getByText('Operations')).toBeInTheDocument()
+  })
+
   it('watches a project in one click, with no mapping', async () => {
     const user = userEvent.setup()
     render(<Harness />)

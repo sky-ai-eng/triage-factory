@@ -23,6 +23,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The picker and the team-repos write gate both read the reachable-repo mirror.
@@ -517,7 +519,7 @@ func TestPickerRejectsATokenFromAnotherFilter(t *testing.T) {
 		t.Fatalf("first page = total %d, next token %q; want 3 and a token with a page size of one", first.TotalCount, first.NextPageToken)
 	}
 	spent := gh.userRepos.Load()
-	filtered := fetchPickerPage(t, srv, map[string]any{"q": "cli"})
+	filtered := fetchPickerPage(t, srv, map[string]any{"search": "cli"})
 	if filtered.TotalCount != 1 || len(filtered.Items) != 1 {
 		t.Errorf("filtered page = %d items / total %d; want 1 and 1 — the total is what the filter matches",
 			len(filtered.Items), filtered.TotalCount)
@@ -526,10 +528,49 @@ func TestPickerRejectsATokenFromAnotherFilter(t *testing.T) {
 		t.Errorf("%d upstream requests after a filtered read; want the %d the refresh spent", got, spent)
 	}
 	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{
-		"q": "cli", "page_token": first.NextPageToken,
+		"search": "cli", "page_token": first.NextPageToken,
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("token reused under a different filter = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidParam, "page_token")
+
+	// The fingerprint folds the needle as the predicate does: a token minted
+	// under one spelling pages under another.
+	acme := fetchPickerPage(t, srv, map[string]any{"page_size": 1, "search": "acme"})
+	if acme.NextPageToken == "" {
+		t.Fatal("search acme page 1 has no next_page_token; want one")
+	}
+	if next := fetchPickerPage(t, srv, map[string]any{"page_size": 1, "search": " ACME ", "page_token": acme.NextPageToken}); len(next.Items) != 1 {
+		t.Errorf("respelled search page 2 = %+v; want one item", next.Items)
+	}
+}
+
+// TestPickerRefusesABadSearch: the search is capped at 200 characters, and the
+// field it replaced is refused rather than ignored, so a stale caller learns
+// its narrowing was not applied.
+func TestPickerRefusesABadSearch(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	gh := newCountingPATGitHub(t, "acme/api")
+	seedPATOrg(t, srv, gh.URL)
+	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
+
+	for _, tc := range []struct {
+		body          map[string]any
+		reason, field string
+	}{
+		{map[string]any{"search": strings.Repeat("a", httpx.MaxSearchRunes+1)}, httpx.ReasonInvalidField, "search"},
+		{map[string]any{"q": "acme"}, httpx.ReasonUnknownField, "q"},
+	} {
+		rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", tc.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%v = %d, want 400; body=%s", tc.body, rec.Code, rec.Body.String())
+		}
+		httpxtest.AssertFirstError(t, rec, tc.reason, tc.field)
+	}
+	if page := fetchPickerPage(t, srv, map[string]any{"search": strings.Repeat("a", httpx.MaxSearchRunes)}); len(page.Items) != 0 {
+		t.Errorf("a search at the cap matched %+v; want nothing", page.Items)
 	}
 }
 

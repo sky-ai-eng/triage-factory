@@ -356,6 +356,127 @@ describe('Table — the draft page', () => {
   })
 })
 
+describe('Table — the caller narrows', () => {
+  it('holds an Enter pressed while the answer is pending, and takes the answer for what was typed', async () => {
+    const onAdd = vi.fn()
+    const user = userEvent.setup()
+    const addProps = (options: Array<{ id: string; name: string }>, pending: boolean) => ({
+      label: 'add teammate',
+      options,
+      pending,
+      onQuery: vi.fn(),
+      onAdd,
+    })
+    const { rerender } = render(<Table columns={COLS} rows={ROWS} add={addProps([], false)} />)
+
+    await user.click(screen.getByRole('button', { name: /add teammate/ }))
+    const field = screen.getByRole('combobox')
+    rerender(
+      <Table columns={COLS} rows={ROWS} add={addProps([{ id: 'a', name: 'alice' }], false)} />,
+    )
+    await user.type(field, 'alex')
+    // The caller is still answering "alex"; alice is "ali"'s answer.
+    rerender(
+      <Table columns={COLS} rows={ROWS} add={addProps([{ id: 'a', name: 'alice' }], true)} />,
+    )
+    await user.keyboard('{Enter}')
+    rerender(
+      <Table columns={COLS} rows={ROWS} add={addProps([{ id: 'x', name: 'alex' }], false)} />,
+    )
+
+    await user.keyboard('{Escape}')
+    expect(onAdd).toHaveBeenCalledTimes(1)
+    expect(onAdd.mock.calls[0][0].name).toBe('alex')
+  })
+
+  it('hands the query to onQuery and offers the options as given', async () => {
+    const onQuery = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <Table
+        columns={COLS}
+        rows={ROWS}
+        add={{
+          label: 'add teammate',
+          // Neither name contains the query: the server matched them on
+          // something the table cannot see, and the table must not second-guess it.
+          options: [
+            { id: 'd', name: 'dara' },
+            { id: 'e', name: 'devi' },
+          ],
+          onQuery,
+          onAdd: vi.fn(),
+        }}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /add teammate/ }))
+    const field = screen.getByRole('combobox')
+    await user.type(field, 'ex')
+    expect(onQuery).not.toHaveBeenCalled()
+    await user.type(field, 'a')
+    expect(onQuery).toHaveBeenLastCalledWith('exa')
+    expect(screen.getByRole('option', { name: /dara/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /devi/ })).toBeInTheDocument()
+
+    await user.clear(field)
+    expect(onQuery).toHaveBeenLastCalledWith('')
+  })
+})
+
+describe('Table — server-sorted', () => {
+  const SORT_COLS = [
+    { key: 'name', label: 'NAME', sortKey: 'name' },
+    { key: 'role', label: 'ROLE' },
+  ]
+  const UNORDERED = [
+    { id: 'z', name: 'zed', role: 'member' },
+    { id: 'a', name: 'amy', role: 'admin' },
+  ]
+
+  it('renders rows in the order given and calls back on a header click', async () => {
+    const onSortChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <Table
+        columns={SORT_COLS}
+        rows={UNORDERED}
+        selectable={false}
+        sort={{ key: 'name', dir: 'desc' }}
+        onSortChange={onSortChange}
+      />,
+    )
+
+    const cells = screen.getAllByText(/^(zed|amy)$/).map((el) => el.textContent)
+    expect(cells).toEqual(['zed', 'amy'])
+
+    const name = screen.getByRole('columnheader', { name: /NAME/ })
+    expect(name).toHaveAttribute('aria-sort', 'descending')
+    await user.click(name)
+    expect(onSortChange).toHaveBeenCalledWith({ key: 'name', dir: 'asc' })
+    // Still in the order given: the caller re-reads, the table does not reorder.
+    expect(screen.getAllByText(/^(zed|amy)$/).map((el) => el.textContent)).toEqual(['zed', 'amy'])
+  })
+
+  it('does not sort a column that names no sort_key', async () => {
+    const onSortChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <Table
+        columns={SORT_COLS}
+        rows={UNORDERED}
+        selectable={false}
+        sort={null}
+        onSortChange={onSortChange}
+      />,
+    )
+    const role = screen.getByRole('columnheader', { name: /ROLE/ })
+    expect(role).not.toHaveAttribute('aria-sort')
+    await user.click(role)
+    expect(onSortChange).not.toHaveBeenCalled()
+  })
+})
+
 describe('Table — what is owed gets sent', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())

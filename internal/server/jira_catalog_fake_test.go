@@ -240,6 +240,13 @@ func (f *jiraCatalogFake) SetIssueTypes(project string, types ...fakeJiraStatus)
 	f.issueTypes[project] = types
 }
 
+// SetPriorities replaces the instance's priorities.
+func (f *jiraCatalogFake) SetPriorities(priorities ...fakeJiraStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.priorities = priorities
+}
+
 // SetPrioritiesFailing makes the priorities read fail while the rest of the
 // instance keeps answering.
 func (f *jiraCatalogFake) SetPrioritiesFailing() {

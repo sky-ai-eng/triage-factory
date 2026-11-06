@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -38,20 +37,21 @@ import (
 // --------------------------------------------------------------------
 
 // githubRepoListRequest is the body of POST /api/github/repos/list: the
-// server-side search the picker used to do in the browser, plus the paging pair.
+// picker's search, plus the paging pair.
 type githubRepoListRequest struct {
-	// Q is a case-insensitive substring matched against the slug, the
-	// description and the language. Empty matches everything.
-	Q string `json:"q"`
+	// Search is a case-insensitive literal substring matched against the
+	// slug, the description and the language (httpx.Search: trimmed, empty
+	// is absent, at most 200 characters).
+	Search string `json:"search"`
 	httpx.PageRequest
 }
 
 // githubRepoListFilterKey is the canonicalized filter set the page token is
-// fingerprinted against. Canonicalized to lowercase-and-trimmed because that is
-// what the store matches on, so two spellings of one query are one query and a
-// token minted under either addresses the same result set.
+// fingerprinted against: the needle through httpx.SearchKey, so two spellings
+// of one query are one query and a token minted under either addresses the
+// same result set.
 type githubRepoListFilterKey struct {
-	Q string `json:"q"`
+	Search string `json:"search"`
 }
 
 // Readiness discriminator for the picker list. A first-ever open has nothing to
@@ -119,9 +119,10 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(req.Q))
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(githubRepoListFilterKey{Q: q}), 0)
+	search := httpx.Search(&v, req.Search)
+	page := httpx.ResolvePage(&v, req.PageRequest,
+		httpx.FilterFingerprint(githubRepoListFilterKey{Search: httpx.SearchKey(search)}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -180,7 +181,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, host, class, q,
+	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, host, class, search,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		reposLog.Error("list reachable repos failed", "org", orgID, "error", err)
@@ -1164,17 +1165,21 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 // this feeds is a type-to-filter box, not a browse.
 const maxBranchPageSize = 100
 
+// branchPagesTTL is how long one of GitHub's branch pages answers the branch
+// list. A branch pushed or deleted on GitHub shows up within it.
+const branchPagesTTL = time.Minute
+
 // branchListRequest is the body of POST /api/repos/{id}/branches/list.
-// Q is the same substring filter the old ?q= carried, moved to a body field
-// with its semantics unchanged.
 type branchListRequest struct {
-	Q string `json:"q"`
+	// Search is a case-insensitive literal substring of the branch name
+	// (httpx.Search: trimmed, empty is absent, at most 200 characters).
+	Search string `json:"search"`
 
 	httpx.PageRequest
 }
 
 type branchListFilterKey struct {
-	Q string `json:"q"`
+	Search string `json:"search"`
 }
 
 // branchJSON is one row. It is an object rather than a bare string so the
@@ -1189,9 +1194,10 @@ type branchJSON struct {
 // (TFAC-559): a non-admin member can only list branches for a repo their own
 // team tracks.
 //
-// It is a proxy list: the rows come from GitHub, which reports no total for
-// this read, so total_count is null and next_page_token wraps the upstream
-// page cursor. See httpx.WriteProxyList.
+// It is a scanned proxy list: the rows come from GitHub, which reports no
+// total for this read and takes no search, so total_count is null, the needle
+// is matched here, and the page is filled from as many of GitHub's pages as it
+// takes (httpx.ScanUpstream). See httpx.WriteScannedProxyList.
 //
 // POST /api/repos/{id}/branches/list
 func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
@@ -1211,13 +1217,13 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
+	search := httpx.Search(&v, req.Search)
 	page := httpx.ResolvePage(&v, req.PageRequest,
-		httpx.FilterFingerprint(branchListFilterKey{Q: req.Q}), maxBranchPageSize)
-	upstreamPage, ok := upstreamPageFromCursor(&v, page.Cursor)
+		httpx.FilterFingerprint(branchListFilterKey{Search: httpx.SearchKey(search)}), maxBranchPageSize)
+	from := httpx.ScanCursorFrom(&v, page)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	_ = ok // the fault, if any, is already recorded on v
 
 	// The upstream call is name-shaped — GitHub has no idea what a registry id
 	// is — so the id resolves to a row here and the row supplies the name. That
@@ -1257,46 +1263,41 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	branches, rawCount, err := client.ListBranchesPage(r.Context(), owner, repo, req.Q, page.Limit, upstreamPage)
+	// GitHub's pages are read at its own largest size whatever the caller's
+	// page_size, so a cursor's page number means the same page on every
+	// request of a walk. Each page is held for branchPagesTTL: a search scans
+	// the same pages for every needle typed, and a repository with thousands
+	// of branches would otherwise cost dozens of GitHub calls per keystroke.
+	branches, next, err := httpx.ScanUpstream(from, page.Limit,
+		func(b ghclient.Branch) bool { return httpx.SearchMatches(search, b.Name) },
+		func(upstream string) ([]ghclient.Branch, string, error) {
+			n := 1
+			if upstream != "" {
+				var err error
+				if n, err = strconv.Atoi(upstream); err != nil || n < 1 {
+					return nil, "", fmt.Errorf("branch cursor %q is not a page number", upstream)
+				}
+			}
+			key := orgID + "|" + row.ID + "|" + strconv.Itoa(n)
+			rows, err := s.branchPages.Get(r.Context(), key, func(ctx context.Context) ([]ghclient.Branch, bool, error) {
+				rows, err := client.ListBranchesPage(ctx, owner, repo, maxBranchPageSize, n)
+				return rows, true, err
+			})
+			if err != nil || len(rows) < maxBranchPageSize {
+				return rows, "", err
+			}
+			return rows, strconv.Itoa(n + 1), nil
+		})
 	if err != nil {
 		reposLog.Warn("fetch branches failed", "org", orgID, "owner", owner, "repo", repo, "error", err)
 		httpx.WriteUpstreamUnavailable(w, "failed to fetch branches from GitHub", err)
 		return
 	}
-
 	out := make([]branchJSON, len(branches))
 	for i, b := range branches {
 		out[i] = branchJSON{Name: b.Name}
 	}
-	// "Is there more" is decided by the RAW upstream page, not by how many
-	// rows survived the filter: a full upstream page means GitHub has more to
-	// give even when none of it matched `q`, and stopping on a short filtered
-	// page would end the walk at the first unlucky page.
-	next := ""
-	if rawCount == page.Limit {
-		next = strconv.Itoa(upstreamPage + 1)
-	}
-	httpx.WriteProxyList(w, page, out, next)
-}
-
-// upstreamPageFromCursor decodes the page-number cursor the proxy lists carry.
-// An empty cursor is the first page. Anything else must be a positive integer
-// — the token is opaque and only this server mints one, so a value that isn't
-// is a tampered or stale token, not a page.
-func upstreamPageFromCursor(v *httpx.Validation, cursor string) (int, bool) {
-	if cursor == "" {
-		return 1, true
-	}
-	n, err := strconv.Atoi(cursor)
-	if err != nil || n < 1 {
-		v.Add(httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidParam,
-			Message: "page_token is not a valid page token",
-			Field:   "page_token",
-		})
-		return 1, false
-	}
-	return n, true
+	httpx.WriteScannedProxyList(w, page, out, next)
 }
 
 // Repo *tracking* selection is per-team: writes go through

@@ -321,80 +321,97 @@ func (s *notificationStore) DeleteRetiredSystem(ctx context.Context, now time.Ti
 	return res.RowsAffected()
 }
 
+// sqliteNotificationSentBase is the inbox's WHERE before the filters: readable
+// and sent. sqliteNotificationReadable alone is the All-teams list's.
+const sqliteNotificationSentBase = sqliteNotificationReadable + ` AND ` + sqliteNotificationSent
+
 func (s *notificationStore) ListForViewer(ctx context.Context, orgID, userID string, f db.NotificationListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
-	if err := f.Validate(); err != nil {
-		return nil, 0, err
-	}
-	where, args, err := sqliteNotificationFilters(sqliteNotificationReadable+` AND `+sqliteNotificationSent,
-		[]any{orgID, time.Now().UTC(), userID}, f)
-	if err != nil {
-		return nil, 0, err
-	}
-	return s.list(ctx, orgID, userID, where, args, db.NotificationOrderSQL(f), opts)
+	return s.list(ctx, orgID, userID, sqliteNotificationSentBase, f, opts)
 }
 
-func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string, f db.NotificationOrgListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
-	if err := f.Validate(); err != nil {
-		return nil, 0, err
-	}
-	where, args, err := sqliteNotificationFilters(sqliteNotificationReadable,
-		[]any{orgID, time.Now().UTC(), userID}, f.NotificationListFilter)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(f.TeamIDIn) > 0 {
-		teams, err := json.Marshal(f.TeamIDIn)
-		if err != nil {
-			return nil, 0, err
-		}
-		where += ` AND n.team_id IN (SELECT value FROM json_each(?))`
-		args = append(args, string(teams))
-	}
-	return s.list(ctx, orgID, userID, where, args, db.NotificationOrderSQL(f.NotificationListFilter), opts)
+func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string, f db.NotificationListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+	return s.list(ctx, orgID, userID, sqliteNotificationReadable, f, opts)
 }
 
-func sqliteNotificationFilters(base string, args []any, f db.NotificationListFilter) (string, []any, error) {
+func (s *notificationStore) FacetsForViewer(ctx context.Context, orgID, userID string, f db.NotificationListFilter) (db.NotificationFacets, error) {
+	return s.facets(ctx, orgID, userID, sqliteNotificationSentBase, f)
+}
+
+func (s *notificationStore) FacetsForOrg(ctx context.Context, orgID, userID string, f db.NotificationListFilter) (db.NotificationFacets, error) {
+	return s.facets(ctx, orgID, userID, sqliteNotificationReadable, f)
+}
+
+// sqliteNotificationFrom joins the viewer's marks, which the state filters
+// read; its one placeholder, the viewer, precedes the WHERE's.
+const sqliteNotificationFrom = ` FROM notifications n
+		LEFT JOIN notification_marks m ON m.notification_id = n.id AND m.user_id = ?
+		WHERE `
+
+// sqliteNotificationWhere renders base (sqliteNotificationReadable's binds:
+// org, now, viewer) and f's filters as one WHERE body, with every arg the
+// statement binds from sqliteNotificationFrom on.
+func sqliteNotificationWhere(orgID, userID, base string, f db.NotificationListFilter) (string, []any, error) {
 	clauses := append([]string{base}, db.NotificationStateClauses(f)...)
-	if len(f.PriorityIn) > 0 {
-		vals, err := json.Marshal(f.PriorityIn)
+	args := []any{userID, orgID, time.Now().UTC(), userID}
+	in := func(col string, vals any) error {
+		b, err := json.Marshal(vals)
 		if err != nil {
+			return err
+		}
+		clauses = append(clauses, col+` IN (SELECT value FROM json_each(?))`)
+		args = append(args, string(b))
+		return nil
+	}
+	if len(f.PriorityIn) > 0 {
+		if err := in("n.priority", f.PriorityIn); err != nil {
 			return "", nil, err
 		}
-		clauses = append(clauses, `n.priority IN (SELECT value FROM json_each(?))`)
-		args = append(args, string(vals))
 	}
 	if len(f.ScopeIn) > 0 {
-		vals, err := json.Marshal(f.ScopeIn)
-		if err != nil {
+		if err := in("n.audience_scope", f.ScopeIn); err != nil {
 			return "", nil, err
 		}
-		clauses = append(clauses, `n.audience_scope IN (SELECT value FROM json_each(?))`)
-		args = append(args, string(vals))
+	}
+	if len(f.RoleIn) > 0 {
+		if err := in("n.audience_role", f.RoleIn); err != nil {
+			return "", nil, err
+		}
+	}
+	if len(f.TeamIDIn) > 0 {
+		if err := in("n.team_id", f.TeamIDIn); err != nil {
+			return "", nil, err
+		}
+	}
+	if clause, searchArgs := db.SQLiteSearch(f.Search, "n.title", "n.body"); clause != "" {
+		clauses = append(clauses, clause)
+		args = append(args, searchArgs...)
 	}
 	return strings.Join(clauses, " AND "), args, nil
 }
 
-// list counts and pages where over the same join to the viewer's marks,
-// whose placeholder precedes where's, in the order orderBy renders.
-func (s *notificationStore) list(ctx context.Context, orgID, userID, where string, args []any, orderBy string, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+// list counts and pages base and f over the same join to the viewer's marks.
+func (s *notificationStore) list(ctx context.Context, orgID, userID, base string, f db.NotificationListFilter, opts db.ListOpts) ([]domain.NotificationView, int, error) {
+	if err := f.Validate(); err != nil {
+		return nil, 0, err
+	}
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
 	if err := db.RefuseNotificationKeyset(opts); err != nil {
 		return nil, 0, err
 	}
-	const from = ` FROM notifications n
-		LEFT JOIN notification_marks m ON m.notification_id = n.id AND m.user_id = ?
-		WHERE `
-	args = append([]any{userID}, args...)
+	where, args, err := sqliteNotificationWhere(orgID, userID, base, f)
+	if err != nil {
+		return nil, 0, err
+	}
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+from+where, args...).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+sqliteNotificationFrom+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
 		return []domain.NotificationView{}, total, nil
 	}
-	query := `SELECT ` + sqliteNotificationViewCols + from + where + orderBy
+	query := `SELECT ` + sqliteNotificationViewCols + sqliteNotificationFrom + where + db.NotificationOrderSQL(f)
 	if opts.Limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)
@@ -413,6 +430,39 @@ func (s *notificationStore) list(ctx context.Context, orgID, userID, where strin
 		out = append(out, v)
 	}
 	return out, total, rows.Err()
+}
+
+// facets counts each cut through list's WHERE, with the cut's own filters
+// cleared.
+func (s *notificationStore) facets(ctx context.Context, orgID, userID, base string, f db.NotificationListFilter) (db.NotificationFacets, error) {
+	if err := f.Validate(); err != nil {
+		return db.NotificationFacets{}, err
+	}
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.NotificationFacets{}, err
+	}
+	cut := func(f db.NotificationListFilter, value, tail string) ([]db.Facet, error) {
+		where, args, err := sqliteNotificationWhere(orgID, userID, base, f)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := s.q.QueryContext(ctx, `SELECT `+value+`, COUNT(*)`+sqliteNotificationFrom+where+tail, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return db.ScanFacets(rows)
+	}
+	var out db.NotificationFacets
+	var err error
+	if out.ByPriority, err = cut(f.WithoutPriority(), "n.priority", db.NotificationPriorityFacetSQL()); err != nil {
+		return db.NotificationFacets{}, fmt.Errorf("notification priority facets: %w", err)
+	}
+	if out.ByAudience, err = cut(f.WithoutAudience(), db.NotificationAudienceFacetSQL("n.team_id"), db.NotificationAudienceFacetGroupSQL); err != nil {
+		return db.NotificationFacets{}, fmt.Errorf("notification audience facets: %w", err)
+	}
+	db.SortNotificationAudienceFacets(out.ByAudience)
+	return out, nil
 }
 
 func (s *notificationStore) GetForViewer(ctx context.Context, orgID, userID, id string) (*domain.NotificationView, error) {

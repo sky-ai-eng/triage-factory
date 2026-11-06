@@ -112,11 +112,20 @@ type NotificationStore interface {
 
 	// ListForViewer is the inbox: rows the viewer is sent ("is sent" — no
 	// org-admin read-through on team rows, no archived teams, no expired
-	// notices). Ordered by priority, escalated_at desc, id. Offset paging only.
+	// notices), in NotificationOrderSQL's order for f's sort. Offset paging
+	// only.
 	ListForViewer(ctx context.Context, orgID, userID string, f NotificationListFilter, opts ListOpts) ([]domain.NotificationView, int, error)
 
 	// ListForOrg is the org admin's view: every row the viewer may read.
-	ListForOrg(ctx context.Context, orgID, userID string, f NotificationOrgListFilter, opts ListOpts) ([]domain.NotificationView, int, error)
+	ListForOrg(ctx context.Context, orgID, userID string, f NotificationListFilter, opts ListOpts) ([]domain.NotificationView, int, error)
+
+	// FacetsForViewer is ListForViewer's synthetic sibling: its cuts over the
+	// rows the viewer is sent, each rendered through ListForViewer's own WHERE
+	// without the cut's own filters. f's sort is ignored.
+	FacetsForViewer(ctx context.Context, orgID, userID string, f NotificationListFilter) (NotificationFacets, error)
+
+	// FacetsForOrg is ListForOrg's synthetic sibling, on the same terms.
+	FacetsForOrg(ctx context.Context, orgID, userID string, f NotificationListFilter) (NotificationFacets, error)
 
 	// GetForViewer returns a row the viewer may read, or (nil, nil).
 	GetForViewer(ctx context.Context, orgID, userID, id string) (*domain.NotificationView, error)
@@ -279,8 +288,19 @@ func compactJSON(raw json.RawMessage, empty string) (json.RawMessage, error) {
 }
 
 // The notification-list sort vocabulary: the keys a reader may order a list
-// by, and the two directions.
+// by, and the two directions. Each key names a value the page shows.
 const (
+	// NotificationSortPriority orders by rank. Ascending is urgent, high,
+	// low, and within a priority the latest escalation first: the default
+	// order.
+	NotificationSortPriority = "priority"
+	// NotificationSortTitle orders by the title, case-folded.
+	NotificationSortTitle       = "title"
+	NotificationSortFirstSeenAt = "first_seen_at"
+	// NotificationSortLastSeenAt is never NULL, so it needs no placement.
+	NotificationSortLastSeenAt = "last_seen_at"
+	// NotificationSortResolvedAt puts a row with no resolved_at (an open one)
+	// after every resolved row, in both directions.
 	NotificationSortResolvedAt = "resolved_at"
 
 	NotificationSortDirAsc  = "asc"
@@ -290,21 +310,43 @@ const (
 // NotificationListSortKeys is the full vocabulary NotificationListFilter.SortKey
 // accepts. Empty is not a member: absent is how a caller asks for the default
 // order, so there is no "default" spelling to collide with a real key.
-var NotificationListSortKeys = []string{NotificationSortResolvedAt}
+var NotificationListSortKeys = []string{
+	NotificationSortPriority, NotificationSortTitle, NotificationSortFirstSeenAt,
+	NotificationSortLastSeenAt, NotificationSortResolvedAt,
+}
 
 // NotificationListSortDirs is the full vocabulary NotificationListFilter.SortDir
 // accepts.
 var NotificationListSortDirs = []string{NotificationSortDirAsc, NotificationSortDirDesc}
 
+// NotificationSortDefaultDir is the direction key orders in when SortDir is
+// empty: urgent first, A to Z, and the latest time first.
+func NotificationSortDefaultDir(key string) string {
+	switch key {
+	case NotificationSortPriority, NotificationSortTitle:
+		return NotificationSortDirAsc
+	}
+	return NotificationSortDirDesc
+}
+
 // NotificationListFilter: a zero field, including an empty slice, does not
 // filter. An empty SortKey is the default order, and SortDir is SortKey's
-// direction, desc when empty.
+// direction, NotificationSortDefaultDir when empty. The facets reads ignore
+// both.
+//
+// Search is a case-insensitive literal substring of the row's title or body,
+// trimmed by the caller; empty does not filter. The audience filters are
+// ScopeIn, RoleIn and TeamIDIn: a user row has no role and no team, so a
+// RoleIn or TeamIDIn leaves it out, and only a team row has a team.
 type NotificationListFilter struct {
 	Status     domain.NotificationStatus
 	Dismissed  *bool
 	Unread     *bool
 	PriorityIn []domain.NotificationPriority
 	ScopeIn    []domain.NotificationScope
+	RoleIn     []domain.NotificationRole
+	TeamIDIn   []string
+	Search     string
 	SortKey    string
 	SortDir    string
 }
@@ -334,12 +376,38 @@ func (f NotificationListFilter) Validate() error {
 			return fmt.Errorf("%w: scope %q is not one of %v", ErrInvalidNotificationFilter, s, domain.AllNotificationScopes())
 		}
 	}
+	for _, r := range f.RoleIn {
+		if !slices.Contains(domain.AllNotificationRoles(), r) {
+			return fmt.Errorf("%w: role %q is not one of %v", ErrInvalidNotificationFilter, r, domain.AllNotificationRoles())
+		}
+	}
 	return nil
 }
 
-type NotificationOrgListFilter struct {
-	NotificationListFilter
-	TeamIDIn []string
+// WithoutPriority is f with its priority filter cleared: what the by_priority
+// cut counts under, so the cut offers every priority the other filters leave.
+func (f NotificationListFilter) WithoutPriority() NotificationListFilter {
+	f.PriorityIn = nil
+	return f
+}
+
+// WithoutAudience is f with its audience filters cleared: what the
+// by_audience cut counts under.
+func (f NotificationListFilter) WithoutAudience() NotificationListFilter {
+	f.ScopeIn, f.RoleIn, f.TeamIDIn = nil, nil, nil
+	return f
+}
+
+// NotificationFacets is a notification list's two cuts: how many rows the
+// list's filters match at each priority, and at each audience. Each cut is
+// counted without its own filters, so a reader narrowed to one priority is
+// still offered the others. A value no row carries is absent.
+type NotificationFacets struct {
+	// ByPriority holds the priorities present, urgent first.
+	ByPriority []Facet
+	// ByAudience holds the audiences present as NotificationAudienceFacetSQL
+	// spells them, in the byte order of that spelling.
+	ByAudience []Facet
 }
 
 type NotificationMarksPatch struct {
@@ -395,21 +463,72 @@ func notOrSQL(want bool, expr string) string {
 }
 
 // NotificationOrderSQL renders f's order. The default is priority, then the
-// latest escalation. Sorted by resolved_at, an open row trails every resolved
+// latest escalation. A sort key's order ends in n.id in the sort's own
+// direction, so desc is the exact reverse of asc and offset pages never drop
+// or repeat a row. Sorted by resolved_at, an open row trails every resolved
 // one in both directions: the leading IS NULL term orders false before true in
 // both dialects, where a bare NULL's position would differ between them by
 // direction.
 func NotificationOrderSQL(f NotificationListFilter) string {
-	switch f.SortKey {
-	case NotificationSortResolvedAt:
-		dir := ` DESC`
-		if f.SortDir == NotificationSortDirAsc {
-			dir = ` ASC`
-		}
-		return ` ORDER BY (n.resolved_at IS NULL), n.resolved_at` + dir + `, n.id` + dir
-	default:
-		return ` ORDER BY ` + NotificationPriorityRankSQL("n.priority") + ` DESC, n.escalated_at DESC, n.id DESC`
+	rank := NotificationPriorityRankSQL("n.priority")
+	dir := f.SortDir
+	if dir == "" {
+		dir = NotificationSortDefaultDir(f.SortKey)
 	}
+	// d is the sort's direction and r its reverse.
+	d, r := ` ASC`, ` DESC`
+	if dir == NotificationSortDirDesc {
+		d, r = r, d
+	}
+	switch f.SortKey {
+	case NotificationSortPriority:
+		// Ascending is the default order: the highest rank first.
+		return ` ORDER BY ` + rank + r + `, n.escalated_at` + r + `, n.id` + r
+	case NotificationSortTitle:
+		// Case-folded, because SQLite compares bytes, which puts every
+		// capital before every lower-case letter.
+		return ` ORDER BY LOWER(n.title)` + d + `, n.id` + d
+	case NotificationSortFirstSeenAt:
+		return ` ORDER BY n.first_seen_at` + d + `, n.id` + d
+	case NotificationSortLastSeenAt:
+		return ` ORDER BY n.last_seen_at` + d + `, n.id` + d
+	case NotificationSortResolvedAt:
+		return ` ORDER BY (n.resolved_at IS NULL), n.resolved_at` + d + `, n.id` + d
+	default:
+		return ` ORDER BY ` + rank + ` DESC, n.escalated_at DESC, n.id DESC`
+	}
+}
+
+// NotificationAudienceFacetSQL renders a row's by_audience value: "user" for
+// a user row, "org:admins" or "org:members" for an org row, and
+// "team:<team id>" for a team row whichever its role. Each names the list
+// filters that select exactly its rows: scope_in [user]; scope_in [org] with
+// role_in [admins] or [members]; team_id_in [<team id>]. teamID is the
+// dialect's spelling of n.team_id as text.
+func NotificationAudienceFacetSQL(teamID string) string {
+	return `CASE n.audience_scope
+		WHEN 'user' THEN 'user'
+		WHEN 'org' THEN 'org:' || n.audience_role
+		ELSE 'team:' || ` + teamID + `
+	END`
+}
+
+// NotificationAudienceFacetGroupSQL groups the by_audience cut, whose SELECT
+// is NotificationAudienceFacetSQL and its count. The cut is ordered by
+// SortNotificationAudienceFacets rather than by SQL.
+const NotificationAudienceFacetGroupSQL = ` GROUP BY 1`
+
+// SortNotificationAudienceFacets orders the by_audience cut by its values'
+// bytes. It runs in Go because a Postgres text ORDER BY follows the
+// database's collation, and the two dialects must answer in one order.
+func SortNotificationAudienceFacets(f []Facet) {
+	slices.SortFunc(f, func(a, b Facet) int { return strings.Compare(a.Value, b.Value) })
+}
+
+// NotificationPriorityFacetSQL is the by_priority cut's grouping and order,
+// urgent first, over a SELECT of n.priority and its count.
+func NotificationPriorityFacetSQL() string {
+	return ` GROUP BY n.priority ORDER BY ` + NotificationPriorityRankSQL("n.priority") + ` DESC`
 }
 
 // NotificationPriorityRankSQL renders NotificationPriority.Rank over expr.

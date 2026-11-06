@@ -48,6 +48,7 @@ type fakeChannelsSlack struct {
 	info         map[string]map[string]string
 	infoFailCode map[string]string
 	infoCalls    int
+	listCalls    int // conversations.list requests answered
 }
 
 func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
@@ -66,6 +67,7 @@ func newFakeChannelsSlack(t *testing.T) *fakeChannelsSlack {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/conversations.list"):
 			f.mu.Lock()
+			f.listCalls++
 			fail := f.failList[token]
 			chans := f.public[token]
 			nextCursor := ""
@@ -301,6 +303,27 @@ func decodeChannels(t *testing.T, rec *httptest.ResponseRecorder) channelsRespon
 	return out
 }
 
+// listReq is a POST .../channels/list request with body.
+func (r *slackChannelsRig) listReq(callerID, orgID, teamID string, body any) *http.Request {
+	r.t.Helper()
+	return r.req(http.MethodPost, "/api/slack/teams/"+teamID+"/channels/list", callerID, orgID, teamID, body)
+}
+
+// facetsReq is a POST .../channels/facets request with body.
+func (r *slackChannelsRig) facetsReq(callerID, orgID, teamID string, body any) *http.Request {
+	r.t.Helper()
+	return r.req(http.MethodPost, "/api/slack/teams/"+teamID+"/channels/facets", callerID, orgID, teamID, body)
+}
+
+func decodeChannelList(t *testing.T, rec *httptest.ResponseRecorder) channelsListResponse {
+	t.Helper()
+	var out channelsListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode channels list %q: %v", rec.Body.String(), err)
+	}
+	return out
+}
+
 // ---------- authz matrix ----------
 
 func TestChannelsHandler_EntitlementGate(t *testing.T) {
@@ -308,20 +331,20 @@ func TestChannelsHandler_EntitlementGate(t *testing.T) {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-gate")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
+	r.hdl.handleList(rec, r.listReq(owner, orgID, teamID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("licensed org: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 
 	entitlements.RegisterProvider(entitlements.Static())
 	rec2 := httptest.NewRecorder()
-	r.hdl.handleList(rec2, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
+	r.hdl.handleList(rec2, r.listReq(owner, orgID, teamID, map[string]any{}))
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("unlicensed org: status = %d, want 404", rec2.Code)
 	}
 }
 
-func TestChannelsHandler_NonTeamMember_GET_404(t *testing.T) {
+func TestChannelsHandler_NonTeamMember_List_404(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, _, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-nonmember")
 	outsider := pgtest.SeedUser(t, r.h, "chan-nonmember-outsider")
@@ -330,31 +353,31 @@ func TestChannelsHandler_NonTeamMember_GET_404(t *testing.T) {
 	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, outsider, orgID)
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", outsider, orgID, teamID, nil))
+	r.hdl.handleList(rec, r.listReq(outsider, orgID, teamID, map[string]any{}))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (non-team-member); body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestChannelsHandler_MemberGET_OK_WithRole(t *testing.T) {
+func TestChannelsHandler_MemberList_OK_WithRole(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-member-ok")
 	member := pgtest.SeedUser(t, r.h, "chan-member-ok-member")
 	pgtest.AddOrgMember(t, r.h, member, orgID, teamID, "member", "member")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", member, orgID, teamID, nil))
+	r.hdl.handleList(rec, r.listReq(member, orgID, teamID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
-	got := decodeChannels(t, rec)
+	got := decodeChannelList(t, rec)
 	if got.Role != "member" {
 		t.Errorf("role = %q, want member", got.Role)
 	}
 
 	rec2 := httptest.NewRecorder()
-	r.hdl.handleList(rec2, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
-	got2 := decodeChannels(t, rec2)
+	r.hdl.handleList(rec2, r.listReq(owner, orgID, teamID, map[string]any{}))
+	got2 := decodeChannelList(t, rec2)
 	if got2.Role != "admin" {
 		t.Errorf("owner role = %q, want admin", got2.Role)
 	}
@@ -668,10 +691,10 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 	// The primary must still be team2 — the refused reassignment must not
 	// have partially applied.
 	list := httptest.NewRecorder()
-	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/teams/"+team2+"/channels", owner, orgID, team2, nil))
-	got := decodeChannels(t, list)
-	if len(got.Channels) != 1 || !got.Channels[0].IsPrimary {
-		t.Fatalf("team2's view after the refused reassignment = %+v; want still primary", got.Channels)
+	r.hdl.handleList(list, r.listReq(owner, orgID, team2, map[string]any{}))
+	got := decodeChannelList(t, list)
+	if len(got.Items) != 1 || !got.Items[0].IsPrimary {
+		t.Fatalf("team2's view after the refused reassignment = %+v; want still primary", got.Items)
 	}
 }
 
@@ -962,10 +985,10 @@ func TestChannelsHandler_Primary_SecondTeamNonPrimary_ThenUntrackPromotesOldest(
 	}
 
 	rec4 := httptest.NewRecorder()
-	r.hdl.handleList(rec4, r.req(http.MethodGet, "/api/slack/teams/"+team2+"/channels", admin2, orgID, team2, nil))
-	got4 := decodeChannels(t, rec4)
-	if len(got4.Channels) != 1 || !got4.Channels[0].IsPrimary {
-		t.Fatalf("team2's view after team1 untracks = %+v; want promoted to primary", got4.Channels)
+	r.hdl.handleList(rec4, r.listReq(admin2, orgID, team2, map[string]any{}))
+	got4 := decodeChannelList(t, rec4)
+	if len(got4.Items) != 1 || !got4.Items[0].IsPrimary {
+		t.Fatalf("team2's view after team1 untracks = %+v; want promoted to primary", got4.Items)
 	}
 }
 
@@ -994,10 +1017,10 @@ func TestChannelsHandler_Primary_ReassignHappyPath(t *testing.T) {
 	}
 
 	list := httptest.NewRecorder()
-	r.hdl.handleList(list, r.req(http.MethodGet, "/api/slack/teams/"+team2+"/channels", owner, orgID, team2, nil))
-	got := decodeChannels(t, list)
-	if len(got.Channels) != 1 || !got.Channels[0].IsPrimary {
-		t.Fatalf("team2's view after reassign = %+v; want primary", got.Channels)
+	r.hdl.handleList(list, r.listReq(owner, orgID, team2, map[string]any{}))
+	got := decodeChannelList(t, list)
+	if len(got.Items) != 1 || !got.Items[0].IsPrimary {
+		t.Fatalf("team2's view after reassign = %+v; want primary", got.Items)
 	}
 }
 
@@ -1050,13 +1073,13 @@ func TestChannelsHandler_Merge_DedupPrecedence(t *testing.T) {
 	)
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
+	r.hdl.handleList(rec, r.listReq(owner, orgID, teamID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
 	}
-	got := decodeChannels(t, rec)
+	got := decodeChannelList(t, rec)
 	byID := map[string]channelView{}
-	for _, c := range got.Channels {
+	for _, c := range got.Items {
 		byID[c.ChannelID] = c
 	}
 	if c1, ok := byID["C1"]; !ok || c1.Source != "tracked" {
@@ -1073,7 +1096,8 @@ func TestChannelsHandler_Merge_DedupPrecedence(t *testing.T) {
 // TestChannelsHandler_Merge_SlackUnreachable_Warning: with Slack's listing
 // down, a save keeping the channels the team already tracks still lands, since
 // nothing it adds needs asking Slack about; a save adding a channel is a 502
-// and changes nothing; and GET still lists the tracked channel, with a warning.
+// and changes nothing; and the list still lists the tracked channel, with a
+// warning.
 func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-unreachable")
@@ -1110,10 +1134,10 @@ func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
-	got := decodeChannels(t, rec)
-	if len(got.Channels) != 1 || got.Channels[0].ChannelID != "C1" {
-		t.Errorf("channels = %+v; want tracked C1 still returned despite the Slack outage", got.Channels)
+	r.hdl.handleList(rec, r.listReq(owner, orgID, teamID, map[string]any{}))
+	got := decodeChannelList(t, rec)
+	if len(got.Items) != 1 || got.Items[0].ChannelID != "C1" {
+		t.Errorf("channels = %+v; want tracked C1 still returned despite the Slack outage", got.Items)
 	}
 	foundWarning := false
 	for _, w := range got.Warnings {
@@ -1128,7 +1152,7 @@ func TestChannelsHandler_Merge_SlackUnreachable_Warning(t *testing.T) {
 
 // TestChannelsHandler_Merge_ChannelsTruncated_Warning: the live-candidate
 // enumeration hits slackConversationsListCap while Slack still had more
-// pages — GET must surface a distinct warning (never silently under-report
+// pages — the list must surface a distinct warning (never silently under-report
 // the live view as if it were exhaustive).
 func TestChannelsHandler_Merge_ChannelsTruncated_Warning(t *testing.T) {
 	withLoweredCap(t, 1)
@@ -1145,11 +1169,11 @@ func TestChannelsHandler_Merge_ChannelsTruncated_Warning(t *testing.T) {
 	r.fake.setMoreAvailable("xoxb-trunc")
 
 	rec := httptest.NewRecorder()
-	r.hdl.handleList(rec, r.req(http.MethodGet, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID, nil))
+	r.hdl.handleList(rec, r.listReq(owner, orgID, teamID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
 	}
-	got := decodeChannels(t, rec)
+	got := decodeChannelList(t, rec)
 	found := false
 	for _, w := range got.Warnings {
 		if w.Code == "slack_channels_truncated" {

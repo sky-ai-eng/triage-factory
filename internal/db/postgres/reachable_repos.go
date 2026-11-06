@@ -343,7 +343,7 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, h
 	return out, total, rows.Err()
 }
 
-func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, q string, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
+func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, needle string, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	if !class.Known() {
 		return nil, 0, fmt.Errorf("list reachable repositories: unknown credential class %q", class)
 	}
@@ -355,12 +355,9 @@ func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, ho
 	}
 	where := ` WHERE r.org_id = $1 AND r.credential_class = $2 AND ` + reachableOnHost("r", "$3")
 	args := []any{orgID, string(class), host}
-	if term := strings.TrimSpace(q); term != "" {
-		args = append(args, "%"+db.LikeEscape(strings.ToLower(term))+"%")
-		p := fmt.Sprintf("$%d", len(args))
-		where += fmt.Sprintf(` AND (lower(r.owner || '/' || r.repo) LIKE %[1]s ESCAPE '\'
-		            OR lower(r.description) LIKE %[1]s ESCAPE '\'
-		            OR lower(r.language) LIKE %[1]s ESCAPE '\')`, p)
+	var search string
+	if search, args = db.PostgresSearch(needle, args, "r.owner || '/' || r.repo", "r.description", "r.language"); search != "" {
+		where += " AND " + search
 	}
 
 	var total int

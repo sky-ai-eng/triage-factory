@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Table from '../../ui/table/Table'
-import type { TableColumn, TableRow } from '../../ui/table/Table'
+import type { TableColumn, TableRow, TableSort } from '../../ui/table/Table'
 import { ago, minutesSince } from '../../ui/table/cells'
 import { Odometer } from '../../ui/odometer/Odometer'
 import SourceChart from '../../ui/sourcechart/SourceChart'
 import { SourceFrame, FigureRow, FilterField } from './SourceFrame'
 import { figureAt, labelAt } from './schedule'
 import type { SourceBodyProps } from './SourceFrame'
-import { apiFetch, apiJSON } from '../../lib/apiClient'
+import { apiFetch } from '../../lib/apiClient'
+import type { Facet } from '../../lib/apiClient'
+import { usePagedList } from '../../hooks/usePagedList'
 import {
   useTeamActivity,
   activitySource,
@@ -15,7 +17,13 @@ import {
   sinceParts,
   sinceLabel,
 } from '../../hooks/useTeamActivity'
-import type { SlackChannelsResponse, SlackChannelView } from '../../types'
+import {
+  fetchTeamSlackChannelFacets,
+  fetchTeamTrackedSlackChannels,
+  slackChannelsListPath,
+} from '../settings/teamConfig'
+import type { SlackChannelFacets } from '../settings/teamConfig'
+import type { SlackChannelView } from '../../types'
 
 // Slack, as this team's event source.
 //
@@ -37,6 +45,11 @@ import type { SlackChannelsResponse, SlackChannelView } from '../../types'
 // is N=1, where the org-wide count is the team's and both render. Became
 // tasks is task-scoped and always real. Nothing polls Slack (push), so
 // `since last poll` is a dash by construction, not by omission.
+//
+// The table reads the channel list a page at a time, searched and ordered by
+// the server, and the watched / primary figures come from the list's facets
+// node: the page holds one window of the channels, so a count or a filter over
+// it would answer about that window.
 
 const PROSE =
   'A mention of the factory in a watched channel becomes a task for whichever team is primary there. ' +
@@ -63,8 +76,23 @@ function ownerOf(c: SlackChannelView): { kind: OwnerKind; text: string } {
     : { kind: 'unwatched', text: '' }
 }
 
-/** The star column's order: ours, then the ones nobody owns, then the rest. */
-const OWNER_ORDER: Record<OwnerKind, number> = { ours: 0, none: 1, theirs: 2, unwatched: 3 }
+/** How many channels one read of the list asks for. */
+const PAGE = 50
+
+/** How long typing settles before the search is sent. */
+const SEARCH_DEBOUNCE_MS = 250
+
+/** The order the page opens on: the star's own ranking — ours, nobody's,
+ *  theirs, unwatched — which is the list's `primary` key. */
+const OPENING_SORT: TableSort = { key: 'primary', dir: 'asc' }
+
+/** How many channels a facet cut counts under `value`; a value no channel
+ *  carries is absent from the cut. */
+function facetCount(cut: Facet[], value: string): number {
+  return cut.find((f) => f.value === value)?.count ?? 0
+}
+
+const channelKey = (c: SlackChannelView) => c.channel_id
 
 /**
  * The primary mark. Drawn rather than typed: a text star inherits its font's
@@ -85,9 +113,12 @@ function star(row: TableRow) {
 }
 
 export default function SlackSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
-  const [channels, setChannels] = useState<SlackChannelView[] | null>(null)
-  const [error, setError] = useState('')
+  const [saveError, setSaveError] = useState('')
   const [filter, setFilter] = useState('')
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<TableSort>(OPENING_SORT)
+  const [loaded, setLoaded] = useState(false)
+  const [facets, setFacets] = useState<SlackChannelFacets | null>(null)
 
   // Two windows of the same node: figures read seven days, the chart a
   // fortnight. See the header comment for which of Slack's figures can
@@ -97,31 +128,51 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
   const flow = activitySource(activity7, 'slack')
   const poll = sinceParts(flow?.last_poll_at ?? null)
 
-  // What the next set-replace is computed from, so two verbs inside one undo
-  // window do not each write from the same stale set.
-  const trackedRef = useRef<string[]>([])
+  // 404 is the honest answer here as well as an error: Slack is an EE surface
+  // and local mode has none. Either way there is nothing to list, and a failed
+  // read must not read as "watches nothing".
+  const paged = usePagedList<SlackChannelView>(
+    slackChannelsListPath(teamId),
+    'Could not read this team’s channels.',
+    { keyOf: channelKey },
+  )
+  const { load } = paged
 
-  const load = useCallback(() => {
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(filter.trim()), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(t)
+  }, [filter])
+
+  const query = useMemo(
+    () => ({
+      ...(search ? { search } : {}),
+      sort_key: sort.key,
+      sort_dir: sort.dir,
+      page_size: PAGE,
+    }),
+    [search, sort],
+  )
+
+  useEffect(() => {
     if (!teamId) return
-    void apiJSON<SlackChannelsResponse>(`/api/slack/teams/${encodeURIComponent(teamId)}/channels`)
-      .then((d) => {
-        const list = d.channels ?? []
-        trackedRef.current = list.filter((c) => c.tracked).map((c) => c.channel_id)
-        setChannels(list)
-      })
-      .catch(() => {
-        // 404 is the honest answer here as well as an error: Slack is an EE
-        // surface and local mode has none. Either way there is nothing to
-        // list, and a failed read must not read as "watches nothing".
-        setError('Could not read this team’s channels.')
-      })
+    void load(query).then(() => setLoaded(true))
+  }, [teamId, load, query])
+
+  const loadFacets = useCallback(() => {
+    if (!teamId) return
+    void fetchTeamSlackChannelFacets(teamId).then(setFacets)
   }, [teamId])
 
-  useEffect(load, [load])
+  useEffect(loadFacets, [loadFacets])
+
+  // Every verb's write, in the order the verbs fired. Each one reads the
+  // tracked set when it runs rather than when the page loaded, so a verb
+  // never writes back a set an earlier one has already changed.
+  const writes = useRef<Promise<void>>(Promise.resolve())
 
   const rows: TableRow[] = useMemo(
     () =>
-      (channels ?? []).map((c) => {
+      paged.items.map((c) => {
         const min = minutesSince(c.last_mention_at)
         const owner = ownerOf(c)
         return {
@@ -137,13 +188,8 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
           lastMin: min,
         }
       }),
-    [channels],
+    [paged.items],
   )
-
-  const shown = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    return q ? rows.filter((r) => String(r.name).toLowerCase().includes(q)) : rows
-  }, [rows, filter])
 
   const columns: TableColumn[] = useMemo(
     () => [
@@ -154,11 +200,12 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         label: '',
         width: '16px',
         render: star,
-        sortValue: (r) => OWNER_ORDER[r.ownerKind as OwnerKind],
+        sortKey: 'primary',
       },
       {
         key: 'name',
         label: 'CHANNEL',
+        sortKey: 'name',
         color: (r) => (r.watched ? 'var(--color-ink-1)' : 'var(--color-ink-4)'),
       },
       {
@@ -179,7 +226,6 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         align: 'end',
         drop: 2,
         render: (r) => r.mentions ?? '—',
-        sortValue: (r) => -(r.mentions ?? 0),
         // A dash means not applicable; a zero means zero. Nothing counts these
         // in a window today, so every row is the first — but the rule is written
         // out so the column is right the moment one does.
@@ -194,7 +240,8 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         align: 'end',
         drop: 1,
         render: (r) => r.last ?? '—',
-        sortValue: (r) => (r.lastMin === null ? Number.MAX_SAFE_INTEGER : r.lastMin),
+        sortKey: 'last_mention_at',
+        sortFirst: 'desc',
         color: (r) =>
           r.last
             ? 'var(--color-ink-4)'
@@ -207,20 +254,24 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
   const commit = useCallback(
     (actionId: string, ids: Array<string | number>) => {
       const picked = [...new Set(ids.map(String))]
+      const put = (channelIds: string[]) =>
+        apiFetch(`/api/slack/teams/${encodeURIComponent(teamId)}/channels`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel_ids: channelIds }),
+        })
       const run = async () => {
+        // The save replaces the whole tracked set, so it is computed from all
+        // of it; a failed read must not be written back as "tracks nothing".
+        const tracked = await fetchTeamTrackedSlackChannels(teamId)
+        if (tracked === null) throw new Error('tracked channels unreadable')
+        const current = tracked.map((c) => c.channel_id)
         if (actionId === 'primary') {
           // The backend promotes an existing tracker, so a channel has to be
           // tracked before it can be claimed. One set-replace, then one
           // promotion per channel.
-          const missing = picked.filter((id) => !trackedRef.current.includes(id))
-          if (missing.length) {
-            trackedRef.current = trackedRef.current.concat(missing)
-            await apiFetch(`/api/slack/teams/${encodeURIComponent(teamId)}/channels`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ channel_ids: trackedRef.current }),
-            })
-          }
+          const missing = picked.filter((id) => !current.includes(id))
+          if (missing.length) await put(current.concat(missing))
           for (const id of picked) {
             await apiFetch(`/api/slack/channels/${encodeURIComponent(id)}/primary`, {
               method: 'POST',
@@ -230,32 +281,32 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
           }
         } else {
           const on = new Set(picked)
-          trackedRef.current =
+          await put(
             actionId === 'watch'
-              ? trackedRef.current.concat(picked.filter((id) => !trackedRef.current.includes(id)))
-              : trackedRef.current.filter((id) => !on.has(id))
-          await apiFetch(`/api/slack/teams/${encodeURIComponent(teamId)}/channels`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ channel_ids: trackedRef.current }),
-          })
+              ? current.concat(picked.filter((id) => !current.includes(id)))
+              : current.filter((id) => !on.has(id)),
+          )
         }
-        // Re-read rather than patch: the PUT can auto-join, and who is primary
-        // where is the server's answer, not a guess this page can make.
-        load()
       }
-      void run().catch(() => setError('Could not save the watched channels.'))
+      writes.current = writes.current
+        .then(run)
+        .catch(() => setSaveError('Could not save the watched channels.'))
+        // Re-read rather than patch: the PUT can auto-join, and who is primary
+        // where is the server's answer, not a guess this page can make. The
+        // reread keeps the pages "load more" reached.
+        .then(() => {
+          void load(query, { keepDepth: true })
+          loadFacets()
+        })
     },
-    [teamId, load],
+    [teamId, load, query, loadFacets],
   )
 
-  const watched = channels ? channels.filter((c) => c.tracked).length : null
-  const primaryHere = channels ? channels.filter((c) => c.is_primary).length : null
-  const orphaned = channels
-    ? channels.filter(
-        (c) => (c.tracked_by ?? []).length > 0 && !(c.tracked_by ?? []).some((t) => t.is_primary),
-      ).length
-    : null
+  const visible = facets ? facets.tracked.reduce((n, f) => n + f.count, 0) : null
+  const watched = facets ? facetCount(facets.tracked, 'true') : null
+  const primaryHere = facets ? facetCount(facets.primary, 'this_team') : null
+  const orphaned = facets ? facetCount(facets.primary, 'no_primary') : null
+  const error = saveError || paged.error
 
   return (
     <SourceFrame
@@ -273,9 +324,9 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
             {PROSE}
           </p>
 
-          <div className="sp-figrows" data-tight key={channels ? 'on' : 'off'}>
+          <div className="sp-figrows" data-tight key={facets ? 'on' : 'off'}>
             <FigureRow
-              label={channels ? `watched of ${channels.length} visible` : 'watched'}
+              label={visible !== null ? `watched of ${visible} visible` : 'watched'}
               at={labelAt(0)}
             >
               <Odometer value={watched} at={figureAt(0)} label={`${watched ?? 0}`} />
@@ -324,19 +375,18 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
             {error ? <p className="sp-error">{error}</p> : null}
             <Table
               label="CHANNELS"
-              build={!!channels}
+              build={loaded}
               columns={columns}
-              rows={shown}
+              rows={rows}
               pageSize="auto"
               // The design opens on MENTIONS · 7D. Nothing counts them yet, so
-              // that sort is inert and the rows would land in whatever order
-              // the API returned; the star's own ranking — ours, nobody's,
-              // theirs, untracked — is the page's argument and has data behind
-              // it. Move this back to `n` when the count ships.
-              sortKey="star"
-              sortDir={1}
+              // the list has no key to order them by; the star's own ranking —
+              // ours, nobody's, theirs, untracked — is the page's argument and
+              // has data behind it. Open on the count when it ships.
+              sort={sort}
+              onSortChange={setSort}
               barPosition="absolute"
-              emptyLabel={channels ? 'no channels' : 'loading…'}
+              emptyLabel={loaded ? 'no channels' : 'loading…'}
               selectable={isAdmin}
               headerRight={
                 <FilterField value={filter} onChange={setFilter} label="Filter channels" />
@@ -389,6 +439,18 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
               bar={isAdmin ? {} : null}
               onCommit={isAdmin ? (id, ids) => commit(id, ids) : null}
             />
+            {paged.hasMore ? (
+              <div className="sp-loadmore">
+                {paged.items.length} of {paged.total ?? paged.items.length} ·{' '}
+                <button
+                  type="button"
+                  disabled={paged.loading}
+                  onClick={() => void paged.loadMore()}
+                >
+                  load more
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

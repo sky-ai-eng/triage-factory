@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { Task, TeamBot, TeamMember } from '../../types'
+import type { RosterSearch } from '../../lib/teamRoster'
+import { useSearchAnswer } from '../../hooks/useSearchAnswer'
 import './assignee-picker.css'
 
 // AssigneePicker — the design language document's picker, on the board's
@@ -16,9 +18,10 @@ import './assignee-picker.css'
 // along them. The page recedes behind it, and the card in hand lifts above
 // the recede (task-card.css).
 //
-// It never scrolls. Past the browse threshold it filters: five rows, always,
-// just a different five. A scroll container needs a bounded height, which is
-// a rectangle, which is the panel this treatment exists to avoid.
+// It never scrolls. Past the browse threshold it searches: five rows, always,
+// just a different five — the team's matches for what is typed, as the roster
+// route finds and orders them. A scroll container needs a bounded height,
+// which is a rectangle, which is the panel this treatment exists to avoid.
 //
 // One measurement is taken from the DOM rather than hardcoded, and it is
 // load-bearing: the stem terminates exactly at the FARTHEST option's tick, so
@@ -55,27 +58,12 @@ interface Entry {
 
 const UNASSIGN: Entry = { key: 'none', name: 'Unassign', kind: 'none' }
 
-function rank(
-  roster: Entry[],
-  q: string,
-  defaults: Entry[],
-): { list: Entry[]; rest: number; browse: boolean } {
-  // Small roster: show everyone, no filter, nothing hidden.
-  if (roster.length <= BROWSE_MAX) return { list: roster, rest: 0, browse: true }
-  // Empty query is not "the first five alphabetically" — it is the five you
-  // actually pick: the agent, yourself, the first of the rest, and the escape
-  // hatch.
-  if (!q.trim()) return { list: defaults, rest: roster.length - defaults.length, browse: false }
-  const n = q.trim().toLowerCase()
-  const starts: Entry[] = []
-  const has: Entry[] = []
-  for (const e of roster) {
-    const l = e.name.toLowerCase()
-    if (l.startsWith(n) || l.split(/[\s·]+/).some((w) => w.startsWith(n))) starts.push(e)
-    else if (l.includes(n)) has.push(e)
-  }
-  const all = starts.concat(has)
-  return { list: all.slice(0, SHOWN), rest: Math.max(0, all.length - SHOWN), browse: false }
+// The entry a roster row becomes. The viewer's own row is "me", because
+// picking it claims rather than reassigns.
+function entryOf(m: TeamMember, currentUserID: string): Entry {
+  if (m.is_current_user || m.user_id === currentUserID)
+    return { key: 'me', name: m.display_name || m.github_username || 'Me', kind: 'me' }
+  return { key: m.user_id, name: m.display_name || m.github_username || m.user_id, kind: 'user' }
 }
 
 function initials(e: Entry | null): string {
@@ -167,7 +155,12 @@ const scaleOf = (a: HTMLElement) =>
 interface Props {
   task: Task
   currentUserID: string
+  // The roster as the host read it, unsearched: what the empty query and a
+  // browsable team show.
   members: TeamMember[]
+  // What a typed query asks. The picker shows the rows it answers, in the
+  // order it answers them, and never narrows `members` itself.
+  searchMembers: RosterSearch
   bot: TeamBot | null
   onClaim: (task: Task) => Promise<void>
   onUnclaim: (task: Task) => Promise<void>
@@ -184,6 +177,7 @@ export default function AssigneePicker({
   task,
   currentUserID,
   members,
+  searchMembers,
   bot,
   onClaim,
   onUnclaim,
@@ -236,11 +230,7 @@ export default function AssigneePicker({
   roster.push({ key: 'me', name: meName, kind: 'me' })
   for (const m of members) {
     if (m.is_current_user || m.user_id === currentUserID) continue
-    roster.push({
-      key: m.user_id,
-      name: m.display_name || m.github_username || m.user_id,
-      kind: 'user',
-    })
+    roster.push(entryOf(m, currentUserID))
   }
   // Who holds it, as the mark and the marked row. The holder must be a
   // roster entry, not just a value compared against one: an agent claim with
@@ -272,9 +262,33 @@ export default function AssigneePicker({
   }
 
   roster.push(UNASSIGN)
-  const defaults = [...roster.slice(0, SHOWN - 1), UNASSIGN]
 
-  const { list, rest, browse } = rank(roster, q, defaults)
+  // A query is the roster route's: what is typed goes out as its `search`, and
+  // the rows that come back are the list, in the order they came. Asked for
+  // five, so the count beside them is the route's total, not a page's length.
+  const read = useCallback(
+    (needle: string, signal: AbortSignal) => searchMembers(needle, SHOWN, signal),
+    [searchMembers],
+  )
+  const searched = useSearchAnswer(q, read)
+
+  let list: Entry[]
+  let rest = 0
+  // Small roster: show everyone, no filter, nothing hidden.
+  const browse = roster.length <= BROWSE_MAX
+  if (browse) {
+    list = roster
+  } else if (!searched) {
+    // Empty query is not "the first five alphabetically" — it is the five you
+    // actually pick: the agent, yourself, the first of the rest, and the
+    // escape hatch.
+    list = [...roster.slice(0, SHOWN - 1), UNASSIGN]
+    rest = roster.length - list.length
+  } else {
+    const found = searched.value?.members ?? []
+    list = found.slice(0, SHOWN).map((m) => entryOf(m, currentUserID))
+    rest = Math.max(0, (searched.value?.totalCount ?? found.length) - list.length)
+  }
 
   // A popover is positioned against the viewport, so the picker's box — which
   // everything inside it is drawn relative to — is placed over the mark's
@@ -579,8 +593,10 @@ export default function AssigneePicker({
     }
     if (e.key === 'Enter' && list.length) {
       e.preventDefault()
-      // The cursor if one is set, otherwise the best match — which is the top
-      // row, because ranking puts prefix hits first.
+      // The cursor if one is set, otherwise the best match — the top row, the
+      // route's first answer. Until the route has answered what was typed
+      // there is no best match yet, only the rows from an earlier query.
+      if (cursor < 0 && searched?.pending) return
       pick(cursor >= 0 ? list[cursor] : list[0])
     }
   }

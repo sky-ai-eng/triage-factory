@@ -88,10 +88,29 @@ type orgMemberRow struct {
 }
 
 // orgMemberListRequest is the body of POST /api/orgs/{org_id}/members/list.
-// The resource is the org's roster, which has no filters of its own.
+// The rows come in the roster's one order, display name then user id.
 type orgMemberListRequest struct {
 	httpx.PageRequest
+	// Search keeps a member when it is a case-insensitive substring of their
+	// display name or of a verified email address of theirs
+	// (db.OrgMemberFilter).
+	Search string `json:"search"`
+	// ExcludingTeamID keeps only the members who are not on this team: the
+	// people a team could add. A team id that is malformed is a 400; one that
+	// names no team in this org is a 422.
+	ExcludingTeamID string `json:"excluding_team_id"`
 }
+
+// orgMemberListFilterKey is the filter set the org roster's page token is
+// fingerprinted against.
+type orgMemberListFilterKey struct {
+	Search          string `json:"search"`
+	ExcludingTeamID string `json:"excluding_team_id"`
+}
+
+// errExcludedTeamNotInOrg is the read transaction's answer when the body's
+// excluding_team_id names no team the caller can see in this org.
+var errExcludedTeamNotInOrg = errors.New("excluding_team_id names no team in this org")
 
 // orgRoles is the closed set of org_role enum values the PATCH handler
 // accepts. Validating here keeps an invalid value from reaching the column
@@ -100,8 +119,21 @@ type orgMemberListRequest struct {
 var orgRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 
 // handleOrgMembersList returns the org's members with their role and identity
-// readiness. Any org member may read (org_memberships_select RLS), so it gates
-// on membership, not admin.
+// readiness, narrowed by the body's `search` and `excluding_team_id`. Any org
+// member may read (org_memberships_select RLS), so it gates on membership, not
+// admin.
+//
+// Membership is also all `excluding_team_id` needs. What the answer says about
+// the team it names is who is not on it, which is the complement of the team's
+// roster, and any org member may read any of the org's team rosters
+// (POST /api/teams/{team_id}/members/list, behind the same memberships_select
+// RLS this predicate reads through). The team must be in this org, checked by
+// the caller's own read of it: a team in another org and a team that does not
+// exist get the same 422, so the field discloses nothing about other orgs.
+//
+// `search` matches verified email addresses for every member. The rows never
+// carry an address: a match says that this colleague holds an address with
+// that substring, which is directory information inside one org.
 //
 // POST /api/orgs/{org_id}/members/list
 func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +153,19 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		return
 	}
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	filter := db.OrgMemberFilter{
+		Search:          httpx.Search(&v, req.Search),
+		ExcludingTeamID: req.ExcludingTeamID,
+	}
+	if filter.ExcludingTeamID != "" {
+		if _, err := uuid.Parse(filter.ExcludingTeamID); err != nil {
+			v.Invalid("excluding_team_id", fmt.Sprintf("excluding_team_id %q is not a valid team id", filter.ExcludingTeamID))
+		}
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(orgMemberListFilterKey{
+		Search:          httpx.SearchKey(filter.Search),
+		ExcludingTeamID: filter.ExcludingTeamID,
+	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -131,6 +175,15 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		total   int
 	)
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if filter.ExcludingTeamID != "" {
+			team, e := tx.Teams.Get(r.Context(), orgID, filter.ExcludingTeamID)
+			if e != nil {
+				return e
+			}
+			if team == nil {
+				return errExcludedTeamNotInOrg
+			}
+		}
 		// Identity is scoped per provider: resolve the org's GitHub/Jira hosts
 		// and Linear workspace from org_settings, then look up each member's
 		// binding under those keys — the same keys the per-user readers and
@@ -140,9 +193,16 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			return e
 		}
 		members, total, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID,
-			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, orgSet.LinearWorkspaceID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, orgSet.LinearWorkspaceID, filter,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
+		if errors.Is(err, errExcludedTeamNotInOrg) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason: httpx.ReasonCrossTeamRef, Message: err.Error(), Field: "excluding_team_id",
+			})
+			return
+		}
 		internalError(w, "org-members", err)
 		return
 	}

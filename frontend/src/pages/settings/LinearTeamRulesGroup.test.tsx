@@ -46,10 +46,8 @@ function stubFetch() {
     if (url === `${LINEAR}/teams/list`) {
       return { ok: true, status: 200, ...jsonBody({ items: CATALOG, next_page_token: '' }) }
     }
-    // Served out of board order, so a list that forgot to sort shows it.
     if (url === statesPath('team-eng')) {
-      const items = [...WORKFLOW].reverse()
-      return { ok: true, status: 200, ...jsonBody({ items, next_page_token: '' }) }
+      return { ok: true, status: 200, ...jsonBody({ items: WORKFLOW, next_page_token: '' }) }
     }
     if (url === statesPath('team-ops')) {
       return { ok: true, status: 200, ...jsonBody({ items: NO_STARTED, next_page_token: '' }) }
@@ -97,6 +95,24 @@ describe('LinearTeamRulesGroup · watching', () => {
     render(<Harness />)
     expect(await screen.findByText('Engineering')).toBeInTheDocument()
     expect(within(rowFor('Operations')).getByText('private')).toBeInTheDocument()
+  })
+
+  it('sends the search to the server and offers every team it answers', async () => {
+    const user = userEvent.setup()
+    // The stub answers the whole catalog whatever the search: the server
+    // narrows, so the group offers what it is given.
+    const fetchMock = stubFetch()
+    render(<Harness />)
+    await screen.findByText('Engineering')
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search Linear teams' }), 'eng')
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${LINEAR}/teams/list`,
+        expect.objectContaining({ body: JSON.stringify({ search: 'eng', page_size: 50 }) }),
+      ),
+    )
+    expect(screen.getByText('Operations')).toBeInTheDocument()
   })
 
   it('maps a watched team from its state types', async () => {

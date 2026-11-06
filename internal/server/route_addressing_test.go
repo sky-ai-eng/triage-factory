@@ -94,6 +94,7 @@ func TestMovedRoutes_NewPathsAnswer(t *testing.T) {
 		{http.MethodPost, "/api/orgs"},
 		{http.MethodGet, team + "/github-repos"},
 		{http.MethodGet, team + "/github-groups"},
+		{http.MethodPost, team + "/github-groups/list"},
 		{http.MethodGet, "/api/me/settings"},
 		{http.MethodPatch, "/api/me/settings"},
 		{http.MethodGet, "/api/me/usage"},

@@ -96,16 +96,16 @@ func rel(ref Ref) (string, error) {
 	return string(ref.Root) + "/" + ref.Path, nil
 }
 
-func (s *localKB) List(ctx context.Context, orgID, teamID string, roots []Root, pathPrefix string) ([]FileInfo, error) {
-	if err := ValidatePrefix(pathPrefix); err != nil {
+func (s *localKB) List(ctx context.Context, orgID, teamID string, q ListQuery) ([]FileInfo, error) {
+	if err := ValidatePrefix(q.PathPrefix); err != nil {
 		return nil, err
 	}
-	for _, root := range roots {
+	for _, root := range q.Roots {
 		if _, err := ParseRoot(string(root)); err != nil {
 			return nil, err
 		}
 	}
-	if len(roots) == 0 {
+	if len(q.Roots) == 0 {
 		return []FileInfo{}, nil
 	}
 
@@ -119,19 +119,18 @@ func (s *localKB) List(ctx context.Context, orgID, teamID string, roots []Root, 
 	defer func() { _ = kbRoot.Close() }()
 
 	out := []FileInfo{}
-	for _, root := range roots {
+	for _, root := range q.Roots {
 		entries, err := walkRoot(ctx, kbRoot, root)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
-			if underPrefix(e.Path, pathPrefix) {
+			if underPrefix(e.Path, q.PathPrefix) {
 				out = append(out, e)
 			}
 		}
 	}
-	sortEntries(out)
-	return out, nil
+	return narrow(out, q), nil
 }
 
 // walkRoot enumerates one root's regular files. A root that was never written

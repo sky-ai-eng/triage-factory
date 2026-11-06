@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 )
 
 // slackEntitlementGate is the shared local-mode-404 + entitlement-404 gate
@@ -52,7 +54,8 @@ func slackEntitlementGate(w http.ResponseWriter, r *http.Request) (orgID string,
 	return orgID, true
 }
 
-// channelsHandler serves /api/slack/teams/{team_id}/channels and
+// channelsHandler serves /api/slack/teams/{team_id}/channels (PUT),
+// /api/slack/teams/{team_id}/channels/list and /facets, and
 // /api/slack/channels/{channel_id}/primary — the channel tracking surface a
 // team's settings page builds against. Needs both the transactional store
 // runner (RLS-gated team/registry reads + the tracking write) and the
@@ -63,11 +66,60 @@ type channelsHandler struct {
 	stores db.Stores
 	az     *authz.Checker
 	client *http.Client
+	// candidates holds each org's last live enumeration of its workspaces'
+	// channels, keyed by org id, so the channel list's pages, searches and
+	// facets read Slack once per slackCandidatesTTL rather than once per
+	// request. PUT's gate reads Slack live and drops the org's entry.
+	candidates *ttlcache.Cache[slackCandidateSet]
 }
 
-// channelsWarning is one entry in a channelsResponse's Warnings — a tagged
+// slackCandidatesTTL is how long one enumeration answers the channel list. A
+// channel created or renamed in Slack shows up within it; conversations.list
+// allows a workspace about twenty calls a minute, which a reader paging and
+// searching would otherwise spend in seconds.
+const slackCandidatesTTL = time.Minute
+
+// slackCandidateSet is one org's live enumeration, as liveSlackCandidates
+// answered it, and the workspaces it enumerated.
+type slackCandidateSet struct {
+	workspaces   string
+	candidates   []slackCandidate
+	anyFailed    bool
+	anyTruncated bool
+}
+
+// slackWorkspaceKey names a set of workspaces, so an enumeration taken
+// before one was connected or disconnected is not served for the new set.
+func slackWorkspaceKey(workspaces []slackstore.Workspace) string {
+	ids := make([]string, len(workspaces))
+	for i, ws := range workspaces {
+		ids[i] = ws.WorkspaceID
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, ",")
+}
+
+// cachedSlackCandidates is liveSlackCandidates through the org's cache entry.
+// An enumeration in which a workspace failed is answered but not kept, so the
+// next read asks Slack again rather than serving the gap for a minute.
+func (h *channelsHandler) cachedSlackCandidates(ctx context.Context, orgID string, workspaces []slackstore.Workspace) ([]slackCandidate, bool, bool) {
+	key := slackWorkspaceKey(workspaces)
+	load := func(ctx context.Context) (slackCandidateSet, bool, error) {
+		candidates, failed, truncated := h.liveSlackCandidates(ctx, orgID, workspaces)
+		return slackCandidateSet{workspaces: key, candidates: candidates, anyFailed: failed, anyTruncated: truncated}, !failed, nil
+	}
+	// load never errs: a failed workspace is reported in the set.
+	set, _ := h.candidates.Get(ctx, orgID, load)
+	if set.workspaces != key {
+		h.candidates.Forget(orgID)
+		set, _ = h.candidates.Get(ctx, orgID, load)
+	}
+	return set.candidates, set.anyFailed, set.anyTruncated
+}
+
+// channelsWarning is one entry in a channels response's Warnings — a tagged
 // union serialized as a single JSON shape rather than two response fields,
-// since PUT's response is "the GET shape + warnings" (one envelope): GET
+// since the list and PUT answer warnings in one array: reading the merged set
 // only ever populates Code (a process-level degradation, e.g.
 // "slack_unreachable"); PUT's auto-join step only ever populates ChannelID
 // + Reason (a per-channel outcome, "invite_required" | "join_failed").
@@ -87,11 +139,11 @@ type trackerView struct {
 	IsPrimary bool   `json:"is_primary"`
 }
 
-// channelView is one merged row of the GET/PUT response's channels array —
-// the union of a team's tracked rows, the org's sighting registry, and live
-// Slack candidates, deduped by channel_id. ID is the channel's registry row,
-// what a slack:message handler's channel_in names; it is empty for a live
-// Slack channel TF holds no row for yet.
+// channelView is one merged row of the list's items and of PUT's channels
+// array — the union of a team's tracked rows, the org's sighting registry,
+// and live Slack candidates, deduped by channel_id. ID is the channel's
+// registry row, what a slack:message handler's channel_in names; it is empty
+// for a live Slack channel TF holds no row for yet.
 type channelView struct {
 	ID            string        `json:"id,omitempty"`
 	ChannelID     string        `json:"channel_id"`
@@ -106,46 +158,43 @@ type channelView struct {
 	Source        string        `json:"source"` // "tracked" | "sighting" | "slack"
 }
 
+// channelsResponse is PUT's answer: the team's whole merged set after the
+// save, with the auto-join outcomes appended to the warnings.
 type channelsResponse struct {
 	Role     string            `json:"role"`
 	Warnings []channelsWarning `json:"warnings"`
 	Channels []channelView     `json:"channels"`
 }
 
-// GET /api/slack/teams/{team_id}/channels — any member of the team.
-func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := slackEntitlementGate(w, r)
+// memberTeam runs the gates every read of a team's channels runs: the Slack
+// gate, the team resolved in the caller's org, and membership. A non-member of
+// an in-org team gets a 404, not an empty answer — the channel roster is
+// member-visible, not org-visible (the same non-disclosure posture as
+// VerifyTeamInOrg). role is the caller's role on the team.
+func (h *channelsHandler) memberTeam(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID, role string, ok bool) {
+	orgID, ok = slackEntitlementGate(w, r)
 	if !ok {
-		return
+		return "", "", "", "", false
 	}
-	userID := httpx.ClaimsFrom(r.Context()).Subject
+	userID = httpx.ClaimsFrom(r.Context()).Subject
 	teamID, err := h.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
 		authz.WriteResolveError(w, "slack/channels", err)
-		return
+		return "", "", "", "", false
 	}
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
-		return
+		return "", "", "", "", false
 	}
-	_, role, err := h.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	_, role, err = h.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		httpx.InternalError(w, "slack/channels", err)
-		return
+		return "", "", "", "", false
 	}
-	// A non-member of an in-org team gets a 404, not an empty list — the
-	// channel roster is member-visible, not org-visible (same non-disclosure
-	// posture as VerifyTeamInOrg above).
 	if role == "" {
 		httpx.NotFound(w, "team")
-		return
+		return "", "", "", "", false
 	}
-
-	resp, err := h.buildChannelsResponse(r.Context(), orgID, userID, teamID, role)
-	if err != nil {
-		httpx.InternalError(w, "slack/channels", err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, resp)
+	return orgID, userID, teamID, role, true
 }
 
 // putChannelsRequest is PUT's full-set replace body.
@@ -280,6 +329,9 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		joinWarnings = append(joinWarnings, h.autoJoin(r.Context(), orgID, gate.workspaces, gate.candidates, addedChannels)...)
 	}
 
+	// The auto-join changes which channels the bot is in, so the answer, and
+	// the reads after it, enumerate Slack again.
+	h.candidates.Forget(orgID)
 	resp, err := h.buildChannelsResponse(r.Context(), orgID, userID, teamID, "admin")
 	if err != nil {
 		httpx.InternalError(w, "slack/channels", err)
@@ -358,10 +410,21 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "primary set"})
 }
 
-// buildChannelsResponse reads the three sources (tracked, sighting, live
-// Slack) and merges them by channel_id — precedence tracked > sighting >
-// slack, applied by only filling a field the earlier source left unset.
+// buildChannelsResponse is PUT's answer: the whole merged set, in channel id
+// order.
 func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, userID, teamID, role string) (*channelsResponse, error) {
+	channels, warnings, err := h.mergedChannels(ctx, orgID, userID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	return &channelsResponse{Role: role, Warnings: warnings, Channels: channels}, nil
+}
+
+// mergedChannels reads the three sources (tracked, sighting, live Slack) and
+// merges them by channel_id — precedence tracked > sighting > slack, applied
+// by only filling a field the earlier source left unset. The rows come back in
+// channel id order, with the process-level warnings the live read raised.
+func (h *channelsHandler) mergedChannels(ctx context.Context, orgID, userID, teamID string) ([]channelView, []channelsWarning, error) {
 	var (
 		tracked    []slackstore.TeamChannel
 		registry   []slackstore.Channel
@@ -379,17 +442,17 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 		workspaces, e = bundle.Workspaces.ListForOrg(ctx, orgID)
 		return e
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	admin := slackstore.FromStores(h.stores)
 	trackersByChannel, err := admin.TeamChannels.ListTrackersForOrgSystem(ctx, orgID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	teamNames, err := h.teamNames(ctx, orgID, trackerTeamIDs(trackersByChannel))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	merged := map[string]*channelView{}
@@ -427,7 +490,7 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 	}
 
 	warnings := []channelsWarning{}
-	candidates, anyFailed, anyTruncated := h.liveSlackCandidates(ctx, orgID, workspaces)
+	candidates, anyFailed, anyTruncated := h.cachedSlackCandidates(ctx, orgID, workspaces)
 	if anyFailed {
 		warnings = append(warnings, channelsWarning{Code: "slack_unreachable"})
 	}
@@ -470,7 +533,7 @@ func (h *channelsHandler) buildChannelsResponse(ctx context.Context, orgID, user
 	for _, id := range order {
 		out = append(out, *merged[id])
 	}
-	return &channelsResponse{Role: role, Warnings: warnings, Channels: out}, nil
+	return out, warnings, nil
 }
 
 // teamNames resolves id->name for exactly the teams referenced in
@@ -610,13 +673,13 @@ func notVisibleMessage(channelID string) string {
 }
 
 // gateChannels checks a save against what the settings page offers, which is
-// every channel GET lists. A channel the team already tracks is kept without
-// asking Slack, so an outage, or a channel the app has since lost, never
-// locks a team out of saving the rest of its set (removals included). A
-// channel the save adds must be one a connected workspace answers for: a live
-// candidate there, or a channel the registry holds under a connected
-// workspace, which Slack delivered a mention from. Anything else is the
-// caller's mistake: a 400 naming each entry. A listing that stopped at its
+// every channel the list route lists. A channel the team already tracks is
+// kept without asking Slack, so an outage, or a channel the app has since
+// lost, never locks a team out of saving the rest of its set (removals
+// included). A channel the save adds must be one a connected workspace
+// answers for: a live candidate there, or a channel the registry holds under
+// a connected workspace, which Slack delivered a mention from. Anything else
+// is the caller's mistake: a 400 naming each entry. A listing that stopped at its
 // cap says nothing about the channels past it, so those are asked about one by
 // one (lookUpChannel). A workspace whose listing failed establishes nothing,
 // so a channel it might hold is a 502 rather than a row registered on a guess.

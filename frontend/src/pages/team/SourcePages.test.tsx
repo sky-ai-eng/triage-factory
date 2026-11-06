@@ -32,6 +32,15 @@ vi.mock('../../hooks/useEventSources', () => ({
   }),
 }))
 
+// The shared socket is not opened under test; a test that needs the server's
+// refresh ping fires it through the handler a page registered.
+const ws = vi.hoisted(() => ({ handlers: new Set<(event: { type: string }) => void>() }))
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: (handler: (event: { type: string }) => void) => {
+    ws.handlers.add(handler)
+  },
+}))
+
 vi.mock('../../contexts/OrgContext', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../contexts/OrgContext')>()
   return { ...actual, useActiveOrgId: () => 'org-1' }
@@ -95,10 +104,13 @@ function stub(payloads: Record<string, unknown>) {
       // here as the rows alone and wrapped on the way out — the reads are POSTs
       // and are matched by path like any other, since the method is about how
       // the request is framed rather than whether it writes.
+      // A payload that is already an envelope (a further page, a readiness
+      // state) goes out as written.
       const raw = payloads[path]
-      const body = path.endsWith('/list')
-        ? { items: raw, next_page_token: '', total_count: (raw as unknown[]).length }
-        : raw
+      const body =
+        path.endsWith('/list') && Array.isArray(raw)
+          ? { items: raw, next_page_token: '', total_count: raw.length }
+          : raw
       const text = JSON.stringify(body)
       // Both readers: fetchTeamSettings takes .json(), apiJSON takes .text()
       // and parses it itself so a 200 index.html cannot reach a caller as a
@@ -170,6 +182,7 @@ function commitVerb(rowText: string, verb: string | RegExp, holdMs: number) {
 
 beforeEach(() => {
   sources.state = {}
+  ws.handlers.clear()
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
@@ -254,8 +267,9 @@ describe('GitHub source page', () => {
     // never sent one.
     expect(within(rowOf('sky/planner')).getByText('0')).toBeInTheDocument()
     expect(within(rowOf('sky/planner')).getByText('—')).toBeInTheDocument()
-    // Not watched: nothing counts it, so neither column is a number.
-    expect(within(rowOf('sky/docs-site')).getAllByText('—')).toHaveLength(2)
+    // Not watched: nothing counts it, so neither column is a number. It is a
+    // catalog row, which arrives with its own read.
+    await waitFor(() => expect(within(rowOf('sky/docs-site')).getAllByText('—')).toHaveLength(2))
   })
 
   it('lists a tracked repository the picker can no longer see', async () => {
@@ -361,7 +375,171 @@ describe('GitHub source page', () => {
 
     // Selection exists for the verbs, so it goes with them.
     expect(document.querySelector('.tb-check')).toBeNull()
+    expect(await screen.findByText('tracked of 3 visible')).toBeInTheDocument()
+  })
+
+  /** The JSON bodies the page sent to the reachable list, in order. */
+  const catalogBodies = (fetchMock: ReturnType<typeof stub>) =>
+    (fetchMock.mock.calls as unknown as [string, RequestInit | undefined][])
+      .filter(([path]) => path === '/api/github/repos/list')
+      .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)
+
+  it('ranks the tracked section by runs, ahead of the catalog in its own order', async () => {
+    stub({
+      ...REPOS,
+      // r1 has three runs and r2 none (ACTIVITY), so the ranking puts the
+      // later name first.
+      '/api/teams/t1/github-repos': {
+        repos: [
+          { id: 'r2', github_id: '2', owner: 'sky', repo: 'planner' },
+          { id: 'r1', github_id: '1', owner: 'sky', repo: 'zz-runner' },
+        ],
+      },
+      // The route's order, which is not the alphabet's.
+      '/api/github/repos/list': [
+        { github_id: '3', full_name: 'sky/zeta' },
+        { github_id: '2', full_name: 'sky/planner' },
+        { github_id: '4', full_name: 'sky/alpha' },
+      ],
+      '/api/teams/t1/activity': ACTIVITY,
+    })
+    render(<GitHubSource {...BODY} />)
+    const names = () =>
+      screen
+        .getAllByRole('row')
+        .slice(1)
+        .map((r) => r.textContent ?? '')
+        .map((t) => t.match(/sky\/[a-z-]+/)?.[0])
+    await waitFor(() =>
+      expect(names()).toEqual(['sky/zz-runner', 'sky/planner', 'sky/zeta', 'sky/alpha']),
+    )
+  })
+
+  it('searches the catalog on the server and shows its answer as given', async () => {
+    const fetchMock = stub(REPOS)
+    render(<GitHubSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('sky/docs-site')).toBeInTheDocument())
+    // One page asked for, never a walk of every page.
+    expect(catalogBodies(fetchMock)).toEqual([{ search: '', page_size: 100 }])
+
+    // The server's answer to "plan" carries a repository that does not
+    // contain the needle; it is shown, because the answer is the server's.
+    const answer = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      if (String(input) !== '/api/github/repos/list') return answer(input, init)
+      const text = JSON.stringify({
+        items: [
+          { github_id: '2', full_name: 'sky/planner' },
+          { github_id: '7', full_name: 'sky/unrelated' },
+        ],
+        total_count: 2,
+        next_page_token: '',
+        status: 'ready',
+      })
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(text) })
+    })
+    fireEvent.change(screen.getByLabelText('Search repositories'), { target: { value: ' plan ' } })
+
+    await waitFor(() => expect(screen.getByText('sky/unrelated')).toBeInTheDocument())
+    expect(catalogBodies(fetchMock).at(-1)).toEqual({ search: 'plan', page_size: 100 })
+    // The table is the answer: the tracked repository the search did not
+    // match is not on it, and the one it did is, marked as watched.
+    expect(screen.queryByText('sky/agent-runner')).not.toBeInTheDocument()
+    expect(screen.getByText('sky/planner')).toBeInTheDocument()
+    // The visible figure is the org's whole reach, not the search's.
     expect(screen.getByText('tracked of 3 visible')).toBeInTheDocument()
+  })
+
+  it('reads the next catalog page with the server’s token', async () => {
+    const fetchMock = stub({
+      ...REPOS,
+      '/api/github/repos/list': {
+        items: [{ github_id: '3', full_name: 'sky/docs-site' }],
+        next_page_token: 'tok-2',
+        total_count: 2,
+        status: 'ready',
+      },
+    })
+    render(<GitHubSource {...BODY} />)
+    const more = await screen.findByRole('button', { name: '1 more · show them' })
+    fireEvent.click(more)
+    await waitFor(() =>
+      expect(catalogBodies(fetchMock).at(-1)).toEqual({
+        search: '',
+        page_size: 100,
+        page_token: 'tok-2',
+      }),
+    )
+  })
+
+  it('keeps the pages the reader loaded when the refresh ping re-reads the catalog', async () => {
+    const base = stub(REPOS)
+    const envelope = (body: Record<string, unknown>) =>
+      body.page_token
+        ? {
+            items: [{ github_id: '4', full_name: 'sky/second-page' }],
+            next_page_token: '',
+            total_count: 2,
+            status: 'ready',
+          }
+        : {
+            items: [{ github_id: '3', full_name: 'sky/docs-site' }],
+            next_page_token: 'tok-2',
+            total_count: 2,
+            status: 'ready',
+          }
+    const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+      if (String(input) !== '/api/github/repos/list') return base(input, init)
+      const env = envelope(JSON.parse(String(init?.body)))
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(env),
+        text: () => Promise.resolve(JSON.stringify(env)),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<GitHubSource {...BODY} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '1 more · show them' }))
+    await waitFor(() => expect(screen.getByText('sky/second-page')).toBeInTheDocument())
+
+    const before = catalogBodies(fetchMock).length
+    act(() => ws.handlers.forEach((h) => h({ type: 'github_repos_updated' })))
+    // Both pages are read again, and both stay on screen.
+    await waitFor(() => expect(catalogBodies(fetchMock).length).toBe(before + 2))
+    expect(catalogBodies(fetchMock).slice(before)).toEqual([
+      { search: '', page_size: 100 },
+      { search: '', page_size: 100, page_token: 'tok-2' },
+    ])
+    expect(screen.getByText('sky/docs-site')).toBeInTheDocument()
+    expect(screen.getByText('sky/second-page')).toBeInTheDocument()
+  })
+
+  it('says the reachable set is still being discovered, and re-reads on the refresh ping', async () => {
+    const fetchMock = stub({
+      ...REPOS,
+      '/api/github/repos/list': {
+        items: [],
+        next_page_token: '',
+        total_count: 0,
+        status: 'discovering',
+      },
+    })
+    render(<GitHubSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(screen.getByText('tracked · discovering repositories')).toBeInTheDocument(),
+    )
+    expect(
+      screen.getByText('discovering the repositories this organization can reach…'),
+    ).toBeInTheDocument()
+    // The tracked set still shows: discovery is about the catalog.
+    expect(screen.getByText('sky/planner')).toBeInTheDocument()
+
+    const before = catalogBodies(fetchMock).length
+    act(() => ws.handlers.forEach((h) => h({ type: 'github_repos_updated' })))
+    await waitFor(() => expect(catalogBodies(fetchMock).length).toBe(before + 1))
   })
 
   it('sends a later save only after one that registers a repository first', async () => {
@@ -818,53 +996,90 @@ describe('Jira source page', () => {
 })
 
 describe('Slack source page', () => {
-  const CHANNELS = {
-    '/api/slack/teams/t1/channels': {
-      role: 'admin',
-      warnings: [],
-      channels: [
-        {
-          channel_id: 'C1',
-          name: 'deploys',
-          workspace_id: 'W',
-          is_private: false,
-          bot_is_member: true,
-          tracked: true,
-          is_primary: true,
-          tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: true }],
-          last_mention_at: new Date(Date.now() - 4 * 60000).toISOString(),
-          source: 'tracked',
-        },
-        {
-          channel_id: 'C2',
-          name: 'oncall-platform',
-          workspace_id: 'W',
-          is_private: false,
-          bot_is_member: true,
-          tracked: true,
-          is_primary: false,
-          // Watched by somebody, owned by nobody — the one state on this page
-          // that needs a person.
-          tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: false }],
-          source: 'tracked',
-        },
-        {
-          channel_id: 'C3',
-          name: 'eng-general',
-          workspace_id: 'W',
-          is_private: false,
-          bot_is_member: false,
-          tracked: false,
-          is_primary: false,
-          tracked_by: [],
-          source: 'sighting',
-        },
-      ],
+  const LIST = '/api/slack/teams/t1/channels/list'
+  const FACETS = '/api/slack/teams/t1/channels/facets'
+  const ROWS = [
+    {
+      channel_id: 'C1',
+      name: 'deploys',
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: true,
+      tracked: true,
+      is_primary: true,
+      tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: true }],
+      last_mention_at: new Date(Date.now() - 4 * 60000).toISOString(),
+      source: 'tracked',
     },
+    {
+      channel_id: 'C2',
+      name: 'oncall-platform',
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: true,
+      tracked: true,
+      is_primary: false,
+      // Watched by somebody, owned by nobody — the one state on this page
+      // that needs a person.
+      tracked_by: [{ team_id: 't1', team_name: 'platform', is_primary: false }],
+      source: 'tracked',
+    },
+    {
+      channel_id: 'C3',
+      name: 'eng-general',
+      workspace_id: 'W',
+      is_private: false,
+      bot_is_member: false,
+      tracked: false,
+      is_primary: false,
+      tracked_by: [],
+      source: 'sighting',
+    },
+  ]
+  // What the facets node answers over ROWS: it, not the page, is where the
+  // figures come from.
+  const COUNTS = {
+    tracked: [
+      { value: 'true', count: 2 },
+      { value: 'false', count: 1 },
+    ],
+    primary: [
+      { value: 'this_team', count: 1 },
+      { value: 'no_primary', count: 1 },
+      { value: 'unwatched', count: 1 },
+    ],
   }
 
+  type Body = Record<string, unknown>
+
+  /** stubSlack answers the channel list with rows(body) for each read, the
+   *  facets node with `counts`, and everything else as `stub` does. */
+  function stubSlack(
+    rows: (body: Body) => unknown[] = () => ROWS,
+    counts: unknown = COUNTS,
+    payloads: Record<string, unknown> = {},
+  ) {
+    const base = stub({ [FACETS]: counts, ...payloads })
+    const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+      if (String(input).split('?')[0] === LIST) {
+        const items = rows(JSON.parse(String(init?.body ?? '{}')) as Body)
+        const text = JSON.stringify({ items, next_page_token: '', total_count: items.length })
+        return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(text) })
+      }
+      return base(input, init)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  /** The bodies the page sent the channel list, in order. */
+  const listBodies = (fetchMock: ReturnType<typeof stubSlack>): Body[] =>
+    fetchMock.mock.calls
+      .filter(([path]) => String(path) === LIST)
+      .map(([, init]) => JSON.parse(String(init?.body)) as Body)
+
   it('counts what it watches, what it owns, and what nobody owns', async () => {
-    stub(CHANNELS)
+    stubSlack()
     render(<SlackSource {...BODY} />)
 
     await waitFor(() => expect(screen.getByText('watched of 3 visible')).toBeInTheDocument())
@@ -873,8 +1088,30 @@ describe('Slack source page', () => {
     expect(reading(row('with no primary team'))).toBe('1')
   })
 
+  it('counts from the facets node, not from the page it holds', async () => {
+    // One row on the page; the node counts forty channels behind it.
+    stubSlack(() => [ROWS[0]], {
+      tracked: [
+        { value: 'true', count: 12 },
+        { value: 'false', count: 28 },
+      ],
+      primary: [
+        { value: 'this_team', count: 5 },
+        { value: 'no_primary', count: 3 },
+        { value: 'other_team', count: 4 },
+        { value: 'unwatched', count: 28 },
+      ],
+    })
+    render(<SlackSource {...BODY} />)
+
+    await waitFor(() => expect(screen.getByText('watched of 40 visible')).toBeInTheDocument())
+    expect(reading(row('watched of 40 visible'))).toBe('12')
+    expect(reading(row('primary here'))).toBe('5')
+    expect(reading(row('with no primary team'))).toBe('3')
+  })
+
   it('reads a last event it has and dashes the count it does not', async () => {
-    stub(CHANNELS)
+    stubSlack()
     render(<SlackSource {...BODY} />)
 
     // The registry carries a timestamp; the node has not answered here, so
@@ -884,7 +1121,7 @@ describe('Slack source page', () => {
   })
 
   it('keeps the dash where the node answers that the count is undefined', async () => {
-    stub({ ...CHANNELS, '/api/teams/t1/activity': ACTIVITY })
+    stubSlack(undefined, undefined, { '/api/teams/t1/activity': ACTIVITY })
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('watched of 3 visible')).toBeInTheDocument())
 
@@ -899,7 +1136,7 @@ describe('Slack source page', () => {
   })
 
   it('marks the primary channels and only those', async () => {
-    stub(CHANNELS)
+    stubSlack()
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())
 
@@ -912,23 +1149,17 @@ describe('Slack source page', () => {
   })
 
   it('reads another team as theirs whatever that team is called', async () => {
-    const read = CHANNELS['/api/slack/teams/t1/channels']
     // Watched here, primary on a team whose name spells what the table prints
     // for this team or for nobody.
     const ownedBy = (name: string, teamName: string) => ({
-      ...read.channels[1],
+      ...ROWS[1],
       channel_id: name,
       name,
-      tracked_by: [
-        ...read.channels[1].tracked_by,
-        { team_id: 't2', team_name: teamName, is_primary: true },
-      ],
+      tracked_by: [...ROWS[1].tracked_by, { team_id: 't2', team_name: teamName, is_primary: true }],
     })
-    stub({
-      '/api/slack/teams/t1/channels': {
-        ...read,
-        channels: [ownedBy('named-no-one', 'no one'), ownedBy('named-this-team', 'this team')],
-      },
+    stubSlack(() => [ownedBy('named-no-one', 'no one'), ownedBy('named-this-team', 'this team')], {
+      tracked: [{ value: 'true', count: 2 }],
+      primary: [{ value: 'other_team', count: 2 }],
     })
     render(<SlackSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('#named-no-one')).toBeInTheDocument())
@@ -938,6 +1169,84 @@ describe('Slack source page', () => {
     )
     expect(tones).toEqual(['theirs', 'theirs'])
     expect(reading(row('with no primary team'))).toBe('0')
+  })
+
+  it('opens on the primary order and leaves the rows in the order the server sent', async () => {
+    // Unwatched first, then ours: the opposite of the star ranking, so a page
+    // that ranked the rows it held would reorder them.
+    const fetchMock = stubSlack(() => [ROWS[2], ROWS[0]])
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())
+
+    expect(listBodies(fetchMock)[0]).toEqual({
+      sort_key: 'primary',
+      sort_dir: 'asc',
+      page_size: 50,
+    })
+    const names = screen
+      .getAllByRole('row')
+      .map((r) => r.textContent ?? '')
+      .filter((t) => t.includes('#'))
+    expect(names[0]).toContain('#eng-general')
+    expect(names[1]).toContain('#deploys')
+  })
+
+  it('sends the filter as the list search and renders every row the server answers', async () => {
+    const fetchMock = stubSlack((body) => (body.search ? [ROWS[0], ROWS[2]] : ROWS))
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#oncall-platform')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Filter channels'), { target: { value: ' deploys ' } })
+    await waitFor(() => expect(screen.queryByText('#oncall-platform')).not.toBeInTheDocument())
+
+    expect(listBodies(fetchMock).at(-1)).toEqual({
+      search: 'deploys',
+      sort_key: 'primary',
+      sort_dir: 'asc',
+      page_size: 50,
+    })
+    // #eng-general does not carry the filter's text; the server answered it,
+    // so it is on screen.
+    expect(screen.getByText('#deploys')).toBeInTheDocument()
+    expect(screen.getByText('#eng-general')).toBeInTheDocument()
+  })
+
+  it('asks the server for a column order instead of reordering the page', async () => {
+    const fetchMock = stubSlack()
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#deploys')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('columnheader', { name: 'CHANNEL' }))
+    await waitFor(() =>
+      expect(listBodies(fetchMock).at(-1)).toEqual({
+        sort_key: 'name',
+        sort_dir: 'asc',
+        page_size: 50,
+      }),
+    )
+    fireEvent.click(screen.getByRole('columnheader', { name: 'LAST EVENT' }))
+    await waitFor(() =>
+      expect(listBodies(fetchMock).at(-1)).toMatchObject({
+        sort_key: 'last_mention_at',
+        sort_dir: 'desc',
+      }),
+    )
+  })
+
+  it('watches a channel by writing the whole tracked set back with it', async () => {
+    const fetchMock = stubSlack((body) => (body.tracked === true ? [ROWS[0], ROWS[1]] : ROWS))
+    const puts = (): string[][] =>
+      fetchMock.mock.calls
+        .filter(([path, init]) => path === '/api/slack/teams/t1/channels' && init?.method === 'PUT')
+        .map(([, init]) => JSON.parse(String(init!.body)).channel_ids)
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('#eng-general')).toBeInTheDocument())
+
+    commitVerb('#eng-general', 'Watch', 300)
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]).toEqual(['C1', 'C2', 'C3'])
+    // The set it wrote back is the tracked read's, not the page's.
+    expect(listBodies(fetchMock).some((b) => b.tracked === true)).toBe(true)
   })
 })
 

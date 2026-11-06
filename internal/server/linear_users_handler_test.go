@@ -62,13 +62,13 @@ func TestLinearUsersList_FindsActiveUsersByNameDisplayNameOrEmail(t *testing.T) 
 		"":                 linearUserAda + "," + linearUserAdam + "," + linearUserBot,
 		"  adam@example  ": linearUserAdam,
 	} {
-		page := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"q": q}))
+		page := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"search": q}))
 		if got := linearUserIDsOf(page.Items); got != want {
-			t.Errorf("q %q = %s, want %s", q, got, want)
+			t.Errorf("search %q = %s, want %s", q, got, want)
 		}
 	}
 
-	rec := doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"q": "ada", "page_size": 1})
+	rec := doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"search": "ada", "page_size": 1})
 	if strings.Contains(rec.Body.String(), "example.com") {
 		t.Errorf("the list returned an email: %s", rec.Body.String())
 	}
@@ -80,23 +80,50 @@ func TestLinearUsersList_FindsActiveUsersByNameDisplayNameOrEmail(t *testing.T) 
 		t.Fatalf("page 1 total_count = %v, next_page_token = %q; want null and a token", first.TotalCount, first.NextPageToken)
 	}
 	second := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
-		map[string]any{"q": "ada", "page_size": 1, "page_token": first.NextPageToken}))
+		map[string]any{"search": "ada", "page_size": 1, "page_token": first.NextPageToken}))
 	if got := linearUserIDsOf(second.Items); got != linearUserAdam || second.NextPageToken == "" {
 		t.Fatalf("page 2 = %s (next %q), want Adam and a token", got, second.NextPageToken)
 	}
 	third := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
-		map[string]any{"q": "ada", "page_size": 1, "page_token": second.NextPageToken}))
+		map[string]any{"search": "ada", "page_size": 1, "page_token": second.NextPageToken}))
 	if want := (linearUserJSON{ID: linearUserBot, Name: "Adabot", DisplayName: "adabot", Active: true, App: true}); len(third.Items) != 1 || third.Items[0] != want || third.NextPageToken != "" {
 		t.Errorf("page 3 = %+v (next %q), want [%+v] and no token", third.Items, third.NextPageToken, want)
 	}
 
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearUsersListPath,
-		map[string]any{"q": "adam", "page_size": 1, "page_token": first.NextPageToken}),
+		map[string]any{"search": "adam", "page_size": 1, "page_token": first.NextPageToken}),
 		http.StatusBadRequest, "INVALID_PARAM", "page_token")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"page_size": 0}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
 	assertOneFault(t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"email": "ada@example.com"}),
 		http.StatusBadRequest, "UNKNOWN_FIELD", "email")
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"q": "ada"}),
+		http.StatusBadRequest, "UNKNOWN_FIELD", "q")
+}
+
+// A % or an _ in the search is the character itself, even from a Linear that
+// reads them as LIKE wildcards, over every field the search matches, the email
+// the list never returns included. A search past the cap never reaches Linear.
+func TestLinearUsersList_SearchIsLiteral(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
+	fake.SetUsers(
+		linear.User{ID: fixtureUUID("u-pct"), Name: "Per Cent", DisplayName: "100%", Email: "pc@example.com", Active: true},
+		linear.User{ID: fixtureUUID("u-zero"), Name: "Zero", DisplayName: "1000", Email: "z@example.com", Active: true},
+		linear.User{ID: fixtureUUID("u-und"), Name: "Under Score", DisplayName: "under", Email: "u_s@example.com", Active: true},
+		linear.User{ID: fixtureUUID("u-dot"), Name: "Dot", DisplayName: "dot", Email: "u.s@example.com", Active: true},
+	)
+	fake.SetLikeWildcards(true)
+	for search, want := range map[string]string{
+		"100%": fixtureUUID("u-pct"),
+		"u_s@": fixtureUUID("u-und"),
+		"%":    fixtureUUID("u-pct"),
+	} {
+		page := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"search": search}))
+		if got := linearUserIDsOf(page.Items); got != want {
+			t.Errorf("search %q = %s, want only %s", search, got, want)
+		}
+	}
+	assertSearchCap(t, s, linearUsersListPath, map[string]any{}, fake.Calls)
 }
 
 // A user is read by id, deactivated or not; an id Linear has no user for, and

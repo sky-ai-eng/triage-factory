@@ -46,6 +46,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teams"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/internal/server/work"
+	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -153,6 +154,17 @@ type Server struct {
 	// GitHub-teams discovery. Built in New from the stores, so it's never nil
 	// — handlers don't guard.
 	ghResolver ghclient.Resolver
+	// gitHubGroupListings holds each org's last listing of the GitHub teams
+	// its tracked repositories' owners have, keyed by org and host, and
+	// gitHubUserTeams each caller's own GitHub teams, keyed by org and user,
+	// so the GitHub-team checklist's pages and searches ask GitHub once per
+	// gitHubTeamsTTL rather than once per request. Built in New.
+	gitHubGroupListings *ttlcache.Cache[gitHubGroupListing]
+	gitHubUserTeams     *ttlcache.Cache[[]ghclient.UserTeam]
+	// branchPages holds GitHub's pages of a repository's branches, keyed by
+	// org, registry id and page number, so the branch list's search scans
+	// them once per branchPagesTTL rather than once per needle. Built in New.
+	branchPages *ttlcache.Cache[[]ghclient.Branch]
 	// ghTokenCache is the per-installation App-token cache backing ghResolver.
 	// Retained on the Server (not just handed to the resolver) so the paths
 	// that learn a token has died — installation.deleted,
@@ -599,6 +611,9 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s.deploymentApp = deploymentApp
 	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache,
 		ghclient.WithDeploymentApp(deploymentApp))
+	s.gitHubGroupListings = ttlcache.New[gitHubGroupListing](gitHubTeamsTTL)
+	s.gitHubUserTeams = ttlcache.New[[]ghclient.UserTeam](gitHubTeamsTTL)
+	s.branchPages = ttlcache.New[[]ghclient.Branch](branchPagesTTL)
 	// Atlassian OAuth app resolver: per-org override → the deployment app
 	// (multi) / local-supplied (local). The deployment app is read from the
 	// deployment env, and only in multi mode — local has no deployment

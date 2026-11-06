@@ -24,6 +24,19 @@ func RequirePerformedBy(performedBy string) error {
 	return nil
 }
 
+// ExternalActionFacets is the cuts the actions feeds' facets node answers,
+// each computed under the list's filters except its own. Rows with no value
+// for a cut (a system act has no actor; a dashboard toggle has no team) are in
+// none of its values. Each cut is by value ascending.
+type ExternalActionFacets struct {
+	// ByActor is each person who performed or authorized a row, and how many
+	// rows name them. Computed without ExternalActionListOpts.ActorUserID.
+	ByActor []Facet
+	// ByTeam is each team a row belongs to, and how many rows it holds.
+	// Computed without ExternalActionListOpts.TeamID.
+	ByTeam []Facet
+}
+
 // ExternalActionStore owns the external_actions table — the append-only audit
 // log of record: one row per external write TF performs under an ORG-scoped
 // credential (the org GitHub App / the org Jira service account). Capture is core
@@ -108,6 +121,16 @@ type ExternalActionStore interface {
 	// read, team_id is filtered in the WHERE clause, and the team-admin/org-admin
 	// authorization is enforced at the HTTP handler. Bounded + filtered by opts.
 	ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
+
+	// FacetsByOrgSystem is ListByOrgSystem's synthetic sibling: the
+	// ExternalActionFacets cuts over the rows ListByOrgSystem pages under the
+	// same opts, rendered through the same predicate. opts' window is
+	// ignored: the cuts are bounded by the org's people and teams, not by a
+	// page. Admin pool.
+	FacetsByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) (ExternalActionFacets, error)
+
+	// FacetsByTeam is FacetsByOrgSystem over ListByTeam's rows. App pool.
+	FacetsByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) (ExternalActionFacets, error)
 
 	// ListByConversation returns one conversation's actions, newest first —
 	// what a single conversation did to the outside world, the sibling of

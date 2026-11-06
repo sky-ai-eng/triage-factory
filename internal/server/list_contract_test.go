@@ -53,6 +53,12 @@ var listRouteExceptions = map[string]string{
 	// every paging key, and mints its next token with httpx.NextPageToken.
 	// See teamRosterListResponse.
 	"POST /api/teams/{team_id}/members/list": "team bot beside the list",
+	// Carries credentials_missing beside the list, because an empty candidate
+	// set is ambiguous between "these organizations have no teams" and "no
+	// credential reaches them". Still resolves a page, still answers every
+	// paging key, and mints its next token with httpx.NextPageToken. See
+	// teamGitHubGroupsListResponse.
+	"POST /api/teams/{team_id}/github-groups/list": "credential state beside the list",
 }
 
 func TestListRoutesResolveAPage(t *testing.T) {
@@ -85,7 +91,10 @@ func TestListRoutesResolveAPage(t *testing.T) {
 			}
 			continue
 		}
-		if !writesKeyset && !strings.Contains(body, "httpx.WriteList") && !strings.Contains(body, "httpx.WriteProxyList") {
+		writesEnvelope := strings.Contains(body, "httpx.WriteList") ||
+			strings.Contains(body, "httpx.WriteProxyList") ||
+			strings.Contains(body, "httpx.WriteScannedProxyList")
+		if !writesKeyset && !writesEnvelope {
 			t.Errorf("%s (%s) resolves a page but writes no list envelope; if its shape "+
 				"genuinely cannot be the flat envelope, add it to listRouteExceptions with a reason",
 				pattern, handler)
