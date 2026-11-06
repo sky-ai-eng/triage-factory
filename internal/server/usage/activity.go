@@ -163,10 +163,10 @@ func artifactKeys(items []domain.ObjectActivity) (entityIDs, reviewIDs []string,
 
 // handleUsageTeamArtifacts returns the objects one team's runs changed, by the
 // latest action on each first. Gate: FeatureGovernance AND (team admin OR org
-// admin). The ledger read runs under the caller's claims; the deliverables it
-// matches are read on the admin pool, bound to the team, so an org admin who
-// is on no team sees the same deliverables here that the org feed shows them.
-// The team feed carries no teams (it is one team).
+// admin). The ledger read and the deliverables it matches both run under the
+// caller's claims; the deliverables policy admits org admins, so an org admin
+// who is on no team sees the same deliverables here that the org feed shows
+// them. The team feed carries no teams (it is one team).
 //
 // POST /api/teams/{team_id}/usage/artifacts/list
 func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +201,7 @@ func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Reques
 		if !matchable {
 			return nil
 		}
-		deliverables, e = tx.Deliverables.ListArtifactMatchesByTeamSystem(r.Context(), orgID, teamID, entityIDs, reviewIDs)
+		deliverables, e = tx.Deliverables.ListArtifactMatchesByTeam(r.Context(), orgID, teamID, entityIDs, reviewIDs)
 		return e
 	}); err != nil {
 		httpx.InternalError(w, "usage", err)

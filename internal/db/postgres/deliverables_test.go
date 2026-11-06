@@ -216,8 +216,9 @@ func TestDeliverableStore_Postgres_PendingToReal(t *testing.T) {
 
 // TestDeliverableStore_Postgres_RLS_TeamScoped pins the production RLS layer:
 // a deliverable scoped to teamA is visible to teamA members (alice, bob) and
-// invisible to a same-org member of a different team (carol). Mirrors the
-// conversations team-visibility scoping. TFAC-455.
+// to an org admin on another team (dana), and invisible to a same-org plain
+// member of a different team (carol). Once teamA is archived the org admin
+// reads nothing either.
 func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -225,24 +226,28 @@ func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	bob := pgtest.SeedUser(t, h, "bob")
 	carol := pgtest.SeedUser(t, h, "carol")
+	dana := pgtest.SeedUser(t, h, "dana")
 	pgtest.AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
+	pgtest.AddOrgMember(t, h, dana, orgA, teamB, "admin", "member")
 
 	conversationID := seedPgDeliverableConversation(t, h, orgA, teamA, alice)
 	// Seed a teamA-scoped deliverable via admin (bypass RLS for setup).
-	if _, err := h.AdminDB.Exec(`
+	var deliverableID string
+	if err := h.AdminDB.QueryRow(`
 		INSERT INTO deliverables (org_id, conversation_id, team_id, provider, scope, kind, target, state, dedup_key)
 		VALUES ($1, $2, $3, 'github', 'https://github.com', 'pull_request', 'octo/repo', 'open', 'github:pull_request:octo/repo#1')
-	`, orgA, conversationID, teamA); err != nil {
+		RETURNING id
+	`, orgA, conversationID, teamA).Scan(&deliverableID); err != nil {
 		t.Fatalf("seed deliverable: %v", err)
 	}
 	ctx := context.Background()
 
-	// Alice (teamA) and bob (teamA) see it.
+	// Alice (teamA), bob (teamA) and dana (org admin, teamB) see it.
 	for _, u := range []struct {
 		name, id string
-	}{{"alice", alice}, {"bob", bob}} {
+	}{{"alice", alice}, {"bob", bob}, {"dana", dana}} {
 		err := h.WithUser(t, u.id, orgA, func(tx *sql.Tx) error {
 			rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.ListByConversation(ctx, orgA, conversationID, db.Unwindowed)
 			if err != nil {
@@ -258,37 +263,81 @@ func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 		}
 	}
 
-	// Carol (teamB, same org, different team) sees zero — deliverables_select
-	// gates on user_in_team(team_id).
+	// The point read every deliverable-id route starts with admits the org
+	// admin too.
+	if err := h.WithUser(t, dana, orgA, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.Get(ctx, orgA, deliverableID)
+		if err != nil {
+			return err
+		}
+		if got == nil {
+			t.Error("dana (org admin, teamB) Get = nil, want the teamA deliverable")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("dana Get: %v", err)
+	}
+
+	// Carol (teamB, same org, different team, no org-admin role) sees zero —
+	// deliverables_select admits team members and org admins only.
 	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.ListByConversation(ctx, orgA, conversationID, db.Unwindowed)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
+		rows, _, err := stores.Deliverables.ListByConversation(ctx, orgA, conversationID, db.Unwindowed)
 		if err != nil {
 			return err
 		}
 		if len(rows) != 0 {
 			t.Errorf("carol (different team) saw %d teamA deliverables — RLS leaked across teams", len(rows))
 		}
+		got, err := stores.Deliverables.Get(ctx, orgA, deliverableID)
+		if err != nil {
+			return err
+		}
+		if got != nil {
+			t.Errorf("carol (different team) Get = %+v, want nil", got)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("carol path: %v", err)
 	}
+
+	// Archiving teamA hides its deliverables from the org admin as well: the
+	// org-admin arm grants without membership, so it carries the archive check
+	// membership would have.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamA)
+	if err := h.WithUser(t, dana, orgA, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.Get(ctx, orgA, deliverableID)
+		if err != nil {
+			return err
+		}
+		if got != nil {
+			t.Errorf("dana (org admin) Get on an archived team's deliverable = %+v, want nil", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("dana archived path: %v", err)
+	}
 }
 
-// TestDeliverableStore_Postgres_RLS_WritePath exercises the deliverables_insert
-// policy under tf_app (the read test bypasses it via AdminDB at setup): a
+// TestDeliverableStore_Postgres_RLS_WritePath exercises the deliverables write
+// policies under tf_app (the read test bypasses them via AdminDB at setup): a
 // teamA member with write access can Upsert a teamA deliverable, but a member
 // of a different team is rejected by the WITH CHECK
-// (user_can_write_team(team_id)). Without this the write policy could be
-// misconfigured and the read-only suite would still pass. TFAC-455.
+// (user_can_write_team(team_id)), and so is an org admin on a different team,
+// who can read the row but not write it, whether the Upsert would insert a new
+// row or update the one they read. Without this the write policy could be
+// misconfigured and the read-only suite would still pass.
 func TestDeliverableStore_Postgres_RLS_WritePath(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	carol := pgtest.SeedUser(t, h, "carol")
+	dana := pgtest.SeedUser(t, h, "dana")
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
+	pgtest.AddOrgMember(t, h, dana, orgA, teamB, "admin", "member")
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates deliverables_insert, not the
@@ -323,6 +372,31 @@ func TestDeliverableStore_Postgres_RLS_WritePath(t *testing.T) {
 		return e
 	})
 	pgtest.AssertRLSViolation(t, err)
+
+	// Dana (org admin, teamB) is refused a new teamA row the same way.
+	err = h.WithUser(t, dana, orgA, func(tx *sql.Tx) error {
+		_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.Upsert(ctx, orgA, mkDeliverable("github:pull_request:octo/repo:refs/heads/c"))
+		return e
+	})
+	pgtest.AssertRLSViolation(t, err)
+
+	// And an Upsert onto alice's row, which dana can read, is refused by the
+	// update policy and leaves the row as it was.
+	merged := mkDeliverable("github:pull_request:octo/repo:refs/heads/a")
+	merged.State = domain.DeliverableStatePRMerged
+	err = h.WithUser(t, dana, orgA, func(tx *sql.Tx) error {
+		_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.Upsert(ctx, orgA, merged)
+		return e
+	})
+	pgtest.AssertRLSViolation(t, err)
+	var count int
+	var state string
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*), MAX(state) FROM deliverables WHERE team_id = $1`, teamA).Scan(&count, &state); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 || state != domain.DeliverableStatePROpen {
+		t.Errorf("after the refused writes teamA holds %d deliverables in state %q, want alice's 1, still open", count, state)
+	}
 }
 
 // TestDeliverableStore_Postgres_RLS_InsertIfAbsent runs the app-pool

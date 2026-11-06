@@ -445,11 +445,11 @@ func (s *deliverableStore) ListByConversations(ctx context.Context, orgID string
 	return scanDeliverableRows(rows)
 }
 
-// ListArtifactMatchesByTeamSystem runs on the admin pool (BYPASSRLS) behind
-// its caller's gate (see the interface); org_id and team_id stay bound.
-// idx_deliverables_entity and idx_deliverables_external_id serve the two arms.
-func (s *deliverableStore) ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
-	return listPgArtifactMatches(ctx, s.admin, `org_id = $1 AND team_id = $2::uuid`, []any{orgID, teamID}, entityIDs, reviewIDs)
+// ListArtifactMatchesByTeam runs on the app pool (RLS-active); org_id and
+// team_id stay bound. idx_deliverables_entity and idx_deliverables_external_id
+// serve the two arms.
+func (s *deliverableStore) ListArtifactMatchesByTeam(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+	return listPgArtifactMatches(ctx, s.q, `org_id = $1 AND team_id = $2::uuid`, []any{orgID, teamID}, entityIDs, reviewIDs)
 }
 
 // ListArtifactMatchesByOrgSystem is the team read over every team, on the
