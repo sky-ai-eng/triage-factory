@@ -1103,7 +1103,7 @@ which it is matched on), `scope` (the org's Jira site) and
 - `id` (issue id), `key` (the entity's `source_id`), `project_id`, `project_key` (the project's key as the read spelled it), `summary`, `url`
 - `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `status`, `status_id` — compared by id
-- `status_category` — the key of the category Jira files the status under (`new`, `indeterminate` or `done`); what decides completion in a project no team has armed. Empty on a snapshot stored before it was recorded, until its next refresh
+- `status_category` — the key of the category Jira files the status under (`new`, `indeterminate` or `done`); what decides completion in a project no team has armed
 - `assignee` (display name), `assignee_account_id` — compared by account id, so a display name change is not a reassignment; by display name only against a snapshot stored before account ids were recorded
 - `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
 - `labels[]` — compared by name for `label_added` / `label_removed`

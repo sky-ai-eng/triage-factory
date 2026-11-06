@@ -103,41 +103,44 @@ func TestRefreshJira_UnarmedStubInDoneCategoryClosesQuietly(t *testing.T) {
 	}
 }
 
-// TestRefreshJira_UnarmedDoneSnapshotWithoutCategoryIsOwedItsClose: an entity
-// already sitting in a finished status when its snapshot first gains the
-// category (one stored before the field was recorded) has no transition left
-// to diff. The refresh that records the category emits nothing, and the next
-// one finds the entity active with a terminal snapshot and owes its close.
-func TestRefreshJira_UnarmedDoneSnapshotWithoutCategoryIsOwedItsClose(t *testing.T) {
+// TestRefreshJira_UnarmedStatusMovedIntoDoneCategoryIsOwedItsClose: a Jira
+// admin moves a status into the done category while an issue sits in it. The
+// status did not change, so the diff has no transition to emit completed on;
+// the refresh that records the new category emits nothing, and the next one
+// finds the entity active with a terminal snapshot and owes its close.
+func TestRefreshJira_UnarmedStatusMovedIntoDoneCategoryIsOwedItsClose(t *testing.T) {
+	// A category change does not touch the issue, so its updated stays put.
 	const updated = "2026-06-10T10:00:00.000+0000"
 	srv := jiraPageServer(t, []string{
+		jiraCategoryPage("10002", "Closed", "indeterminate", updated),
 		jiraCategoryPage("10002", "Closed", "done", updated),
 		jiraCategoryPage("10002", "Closed", "done", updated),
 	})
 	tr, pub, stores := jiraRefreshFixture(t, srv)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-
-	ent, _ := storedJiraEntity(t, stores)
-	prior := `{"id":"10001","key":"SKY-1","summary":"Touched issue","status":"Closed","status_id":"10002","assignee":"Alice","assignee_account_id":"acc-1","updated_at":"` + updated + `"}`
-	if ok, err := stores.Entities.UpdateSnapshotCASSystem(context.Background(), runmode.LocalDefaultOrgID, ent.ID, prior, ent.PollSeq); err != nil || !ok {
-		t.Fatalf("seed a snapshot without the category: ok=%v err=%v", ok, err)
+	runCycle := func(n int) {
+		t.Helper()
+		if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, nil); err != nil {
+			t.Fatalf("RefreshJira cycle %d: %v", n, err)
+		}
 	}
 
-	if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, nil); err != nil {
-		t.Fatalf("RefreshJira cycle 1: %v", err)
+	runCycle(1)
+	if ent, _ := storedJiraEntity(t, stores); ent.State != "active" {
+		t.Fatalf("after cycle 1 the entity is %q, want active: its status is not in the done category yet", ent.State)
 	}
+
+	runCycle(2)
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
-		t.Fatalf("cycle 1 emitted %v, want none: the status did not change", eventTypes(evts))
+		t.Fatalf("cycle 2 emitted %v, want none: the status did not change", eventTypes(evts))
 	}
 	if _, snap := storedJiraEntity(t, stores); snap.StatusCategory != domain.JiraStatusCategoryDone {
-		t.Fatalf("after cycle 1 status_category = %q, want it recorded", snap.StatusCategory)
+		t.Fatalf("after cycle 2 status_category = %q, want it recorded", snap.StatusCategory)
 	}
 
-	if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, nil); err != nil {
-		t.Fatalf("RefreshJira cycle 2: %v", err)
-	}
+	runCycle(3)
 	if got := eventTypes(pub.nonSystemEvents()); len(got) != 1 || got[0] != domain.EventSystemEntityCloseOwed {
-		t.Errorf("cycle 2 emitted %v, want [%s]", got, domain.EventSystemEntityCloseOwed)
+		t.Errorf("cycle 3 emitted %v, want [%s]", got, domain.EventSystemEntityCloseOwed)
 	}
 }
 

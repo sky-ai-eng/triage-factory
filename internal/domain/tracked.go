@@ -434,8 +434,8 @@ type JiraSnapshot struct {
 	StatusID string `json:"status_id,omitempty"`
 	// StatusCategory is the key of the category Jira files the status under:
 	// "new", "indeterminate" or "done" (JiraStatusCategoryDone). The category
-	// is part of the status in the issue's own workflow. Empty on snapshots
-	// captured before it was recorded, and on a response without one.
+	// is part of the status in the issue's own workflow. Empty on a response
+	// without one.
 	StatusCategory string `json:"status_category,omitempty"`
 	Assignee       string `json:"assignee"` // display name (UI surfaces)
 	// AssigneeAccountID is the Atlassian stable identifier — accountId
