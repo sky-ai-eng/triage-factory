@@ -146,7 +146,8 @@ function parseArgs(argv) {
         // Opt into the PostToolBatch hook (valueless flag): after each
         // tool batch the wrapper asks the Go side for text to hand the
         // model before its next request. The Go side emits it only when
-        // it has something to answer with.
+        // it has something to answer with. --tf-tools wires the same hook,
+        // since Go answers there whether a batch ended the run.
         toolBatchNotes = true
         break
       case "--tf-tools":
@@ -355,34 +356,39 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   }
 
   // PostToolBatch fires once every tool call of a batch has resolved, with
-  // the model's next request waiting on it. Each one emits a tool_batch and
-  // parks on the tool_batch_reply carrying the same id; its context, when
-  // there is any, is handed to the model with the batch's results. Closing,
-  // an abort, and the drain all settle it with nothing, so a reply that
-  // never comes cannot strand the turn. A subagent's batch (agent_id set)
-  // asks nothing: its context would reach the subagent, whose summary back
-  // to the agent need not carry it.
-  if (toolBatchNotes) {
+  // the model's next request waiting on it. Each one emits a tool_batch naming
+  // the batch's calls and parks on the tool_batch_reply carrying the same id;
+  // its context, when there is any, is handed to the model with the batch's
+  // results, and its stop ends the turn here instead, which is how a TF tool
+  // ends the run. Go decides stop, so the hook is wired whenever TF tools are
+  // served, notes or not. Closing, an abort, and the drain all settle it with
+  // nothing, so a reply that never comes cannot strand the turn. A subagent's
+  // batch (agent_id set) asks nothing: its context would reach the subagent,
+  // whose summary back to the agent need not carry it, and its calls cannot
+  // end the agent's run.
+  if (toolBatchNotes || tfTools) {
     const onToolBatch = async (input, _toolUseID, { signal } = {}) => {
       if (closing || input?.agent_id) return {}
       const id = randomUUID()
-      emit({ type: "control", subtype: "tool_batch", id })
-      const context = await new Promise((resolve) => {
+      const toolCallIDs = (input?.tool_calls ?? []).map((call) => call?.tool_use_id).filter(Boolean)
+      emit({ type: "control", subtype: "tool_batch", id, tool_call_ids: toolCallIDs })
+      const reply = await new Promise((resolve) => {
         let done = false
-        const settle = (text) => {
+        const settle = (answer) => {
           if (done) return
           done = true
           pendingBatches.delete(id)
-          resolve(text)
+          resolve(answer)
         }
         pendingBatches.set(id, settle)
         if (signal) {
-          if (signal.aborted) settle("")
-          else signal.addEventListener("abort", () => settle(""), { once: true })
+          if (signal.aborted) settle({})
+          else signal.addEventListener("abort", () => settle({}), { once: true })
         }
       })
-      if (!context) return {}
-      return { hookSpecificOutput: { hookEventName: "PostToolBatch", additionalContext: context } }
+      if (reply.stop) return { continue: false, stopReason: "A Triage Factory tool ended the run." }
+      if (!reply.context) return {}
+      return { hookSpecificOutput: { hookEventName: "PostToolBatch", additionalContext: reply.context } }
     }
     options.hooks = { ...options.hooks, PostToolBatch: [{ hooks: [onToolBatch] }] }
   }
@@ -464,7 +470,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
     if (closing) return
     closing = true
     denyAllPending("run ended")
-    for (const settle of [...pendingBatches.values()]) settle("")
+    for (const settle of [...pendingBatches.values()]) settle({})
     for (const settle of [...pendingToolCalls.values()]) settle(toolResult("run ended", true))
     input.end()
   }
@@ -532,7 +538,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
         // up.
         const settle = pendingBatches.get(ctl.id)
         const context = ctl.context ?? ""
-        if (settle) settle(context)
+        if (settle) settle({ context, stop: Boolean(ctl.stop) })
         else process.stderr.write(`wrapper: no pending tool batch ${ctl.id}\n`)
         if (context) emit({ type: "control", subtype: "tool_batch_result", id: ctl.id, delivered: Boolean(settle) })
         break

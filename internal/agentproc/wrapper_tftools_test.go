@@ -214,3 +214,44 @@ func firstOf(v any) any {
 	}
 	return nil
 }
+
+// TestWrapperTFToolsBatchStopEndsTheTurn: --tf-tools alone wires the
+// PostToolBatch hook, whose tool_batch names the batch's calls by tool_use id.
+// A reply with stop returns continue: false, which ends the turn at the batch;
+// one with context alone hands it to the model as before.
+func TestWrapperTFToolsBatchStopEndsTheTurn(t *testing.T) {
+	w := startTFToolsWrapper(t, `
+      const hook = options.hooks?.PostToolBatch?.[0]?.hooks?.[0]
+      if (!hook) {
+        yield { type: "stub_hook", output: null }
+        return
+      }
+      const signal = new AbortController().signal
+      const batch = (...ids) => ({ hook_event_name: "PostToolBatch", tool_calls: ids.map((id) => ({ tool_name: "mcp__tf__record_call", tool_input: {}, tool_use_id: id })) })
+      yield { type: "stub_hook", output: await hook(batch("toolu_A", "toolu_B"), undefined, { signal }) }
+      yield { type: "stub_hook", output: await hook(batch("toolu_C"), undefined, { signal }) }`, "--tf-tools", tfToolsFlagValue)
+
+	req := w.next()
+	id, _ := req["id"].(string)
+	ids, _ := req["tool_call_ids"].([]any)
+	if req["subtype"] != "tool_batch" || id == "" || len(ids) != 2 || ids[0] != "toolu_A" || ids[1] != "toolu_B" {
+		t.Fatalf("first line = %v, want a tool_batch naming toolu_A and toolu_B", req)
+	}
+	w.send(t, map[string]any{"kind": "tool_batch_reply", "id": id, "stop": true})
+	out, _ := w.next()["output"].(map[string]any)
+	if out["continue"] != false || out["stopReason"] == nil || out["hookSpecificOutput"] != nil {
+		t.Fatalf("hook returned %v on a stop, want continue: false with a stop reason (stderr: %s)", out, w.stderr.String())
+	}
+
+	req = w.next()
+	id, _ = req["id"].(string)
+	w.send(t, map[string]any{"kind": "tool_batch_reply", "id": id, "context": "a note"})
+	if res := w.next(); res["subtype"] != "tool_batch_result" || res["delivered"] != true {
+		t.Fatalf("after a reply with context the wrapper said %v, want it delivered", res)
+	}
+	out, _ = w.next()["output"].(map[string]any)
+	specific, _ := out["hookSpecificOutput"].(map[string]any)
+	if _, stopped := out["continue"]; stopped || specific["additionalContext"] != "a note" {
+		t.Errorf("hook returned %v without a stop, want only the reply's context", out)
+	}
+}

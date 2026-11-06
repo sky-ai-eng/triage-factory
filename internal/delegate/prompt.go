@@ -528,13 +528,25 @@ func looksMalformedEnvelope(text string) bool {
 	return strings.Contains(text, `"outcome"`)
 }
 
-// parseAgentResult returns the parsed envelope iff the text is a valid
-// conclusion (a recognized outcome with its required companion field), else
-// nil. Used by the terminal-recording path (processCompletion) where only a
-// usable conclusion is acted on; the driver uses classifyAgentResult directly
-// to tell invalid attempts apart from open runs.
-func parseAgentResult(text string) *agentResult {
-	if class, result := classifyAgentResult(text); class == turnValid {
+// classifyTurn sorts a turn-end into the three buckets. A turn a TF tool
+// ended (agentproc.Result.Terminal) is a conclusion carrying the outcome,
+// reason and summary the call recorded, whatever text came after it: the call
+// was the agent's verdict, and stop_blueprint's handler refuses one missing
+// what that outcome requires. Every other turn is classified from its final
+// text (classifyAgentResult).
+func classifyTurn(r *agentproc.Result) (turnClass, *agentResult) {
+	if t := r.Terminal; t != nil {
+		return turnValid, &agentResult{Outcome: string(t.Outcome), Summary: t.Summary, Reason: t.Reason}
+	}
+	return classifyAgentResult(r.Result)
+}
+
+// parseAgentResult returns the turn's verdict iff it is a valid conclusion,
+// else nil. For a caller that acts only on a usable conclusion; the driver
+// and processCompletion use classifyTurn directly to tell invalid attempts
+// apart from open runs.
+func parseAgentResult(r *agentproc.Result) *agentResult {
+	if class, result := classifyTurn(r); class == turnValid {
 		return result
 	}
 	return nil

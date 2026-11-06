@@ -1066,7 +1066,7 @@ func (s *Spawner) processCompletion(
 	// advance the caller would run on a plain park — is this engagement's to
 	// decide. parked stays true either way, because that is what keeps the
 	// workspace on disk for whoever holds the conversation now.
-	class, parsed := classifyAgentResult(completion.Result)
+	class, parsed := classifyTurn(completion)
 	if !completion.IsError && class == turnNone {
 		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
@@ -1163,7 +1163,11 @@ func (s *Spawner) processCompletion(
 	default: // turnValid — every other non-error turn parked above
 		resultSummary = parsed.Summary
 		outcome = parsed.Outcome
-		if domain.ConversationOutcome(parsed.Outcome) == domain.ConversationOutcomeAbort {
+		// An envelope's reason is recorded on an abort only, the one outcome
+		// the contract asks it of. A stop_blueprint call states one for
+		// either ending, and it is recorded either way, as on the native
+		// runtime.
+		if completion.Terminal != nil || domain.ConversationOutcome(parsed.Outcome) == domain.ConversationOutcomeAbort {
 			outcomeReason = parsed.Reason
 		}
 	}

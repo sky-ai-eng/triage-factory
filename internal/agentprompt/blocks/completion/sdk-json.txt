@@ -13,5 +13,7 @@ Field reference:
 An abort looks like:
 {"outcome": "abort", "summary": "<what you did before stopping>", "reason": "<why you stopped / what a human must do>"}
 
+One tool also ends the run: `mcp__tf__stop_blueprint`, taking a `type` of "finish" or "abort", a `reason`, and a `summary`, all three required. Calling it ends the run on the spot with that outcome, exactly as the matching envelope would, so no envelope follows it. You never need it to finish normally; it is for stopping in the middle of your work, without first composing a final message. Make it the only tool call in its message: alongside other tool calls, those calls run and the run carries on.
+
 Do NOT include any other text in your final message. Only the JSON object.
 </completion>

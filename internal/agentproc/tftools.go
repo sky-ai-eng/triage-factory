@@ -133,6 +133,9 @@ func (l *LiveRun) handleToolCall(ctl controlLine) {
 				// or the run ended, and nobody reads the answer.
 				return
 			}
+			if out.Terminal != "" {
+				l.recordTerminal(ctl.ToolCallID, Terminal{Outcome: out.Terminal, Reason: out.Reason, Summary: out.Summary})
+			}
 			l.replyToolCall(ctl.ID, out.Content, out.IsError)
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -140,6 +143,46 @@ func (l *LiveRun) handleToolCall(ctl controlLine) {
 			}
 		}
 	}()
+}
+
+// recordTerminal keeps the ending one answered call recorded, for the
+// tool_batch that names it. A call with no tool_use id is never named by one,
+// so its ending is not kept: the batch it belongs to then cannot stop, and the
+// run goes on rather than ending on a call nothing can attribute.
+func (l *LiveRun) recordTerminal(toolUseID string, t Terminal) {
+	if toolUseID == "" {
+		return
+	}
+	l.toolCallsMu.Lock()
+	defer l.toolCallsMu.Unlock()
+	if l.terminals == nil {
+		l.terminals = map[string]Terminal{}
+	}
+	l.terminals[toolUseID] = t
+}
+
+// batchTerminal applies the rule the native loop's dispatchBatch does: a batch
+// ends the run iff every call in it recorded an ending, and the ending is the
+// first one in call order. A model that pairs stop_blueprint with real work in
+// one message gets the work done and keeps going.
+//
+// Every id the batch names is consumed whatever the answer, because an ending
+// in a batch that did not stop is discarded, as it is natively.
+func (l *LiveRun) batchTerminal(toolUseIDs []string) (Terminal, bool) {
+	l.toolCallsMu.Lock()
+	defer l.toolCallsMu.Unlock()
+	var first Terminal
+	all := len(toolUseIDs) > 0
+	for i, id := range toolUseIDs {
+		t, ok := l.terminals[id]
+		delete(l.terminals, id)
+		if !ok {
+			all = false
+		} else if i == 0 {
+			first = t
+		}
+	}
+	return first, all
 }
 
 // cancelToolCall ends the handler of one call the wrapper gave up on: the

@@ -120,6 +120,33 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	}
 }
 
+// TestProcessCompletion_StopBlueprintRecordsTheCall: a turn stop_blueprint
+// ended records the call's outcome, summary and reason, a finish's reason
+// included as the native runtime records it, and the prose after the call,
+// which alone would park the run open, is not read as the verdict.
+func TestProcessCompletion_StopBlueprintRecordsTheCall(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "stop-finish")
+	stampBotClaim(t, database, taskID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	stopped := &agentproc.Result{
+		Result:   "Ending the workflow here.",
+		Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "nothing to review", Summary: "checked the diff"},
+	}
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
+		stopped, cwd, nil, "", "event", "")
+
+	conv := loadConversation(t, s, conversationID)
+	if !conv.Concluded() || conv.Outcome != "finish" {
+		t.Fatalf("conv = (status %q, outcome %q), want concluded on finish", conv.Status, conv.Outcome)
+	}
+	if conv.ResultSummary != "checked the diff" || conv.OutcomeReason != "nothing to review" {
+		t.Errorf("conv = (summary %q, reason %q), want the call's summary and reason", conv.ResultSummary, conv.OutcomeReason)
+	}
+}
+
 // TestProcessCompletion_AbortMissingReasonParksOnTheInvalidEnvelope: abort is
 // the agent's voluntary stop, so the reason is its required companion — an
 // abort without one is an invalid envelope, not a valid conclusion. The live

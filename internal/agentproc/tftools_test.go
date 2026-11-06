@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
@@ -129,6 +130,13 @@ type readerHarness struct {
 
 func newReaderHarness(t *testing.T, tools ...tooldefs.Tool) *readerHarness {
 	t.Helper()
+	return newReaderHarnessWithNotes(t, nil, tools...)
+}
+
+// newReaderHarnessWithNotes is newReaderHarness with toolBatch answering each
+// tool_batch the reader asks the caller about.
+func newReaderHarnessWithNotes(t *testing.T, toolBatch func() ToolBatchNotes, tools ...tooldefs.Tool) *readerHarness {
+	t.Helper()
 	pr, pw := io.Pipe()
 	stdin := newSyncBuffer()
 	h := &readerHarness{
@@ -136,11 +144,12 @@ func newReaderHarness(t *testing.T, tools ...tooldefs.Tool) *readerHarness {
 		stdout: pw,
 		stdin:  stdin,
 		l: &LiveRun{
-			stdin:   captureWriteCloser{stdin},
-			ready:   make(chan struct{}),
-			done:    make(chan struct{}),
-			tfTools: tfToolsByName(tools),
-			tfRun:   tooldefs.Run{OrgID: "org", ConversationID: "conv", ClaimID: "claim"},
+			stdin:     captureWriteCloser{stdin},
+			ready:     make(chan struct{}),
+			done:      make(chan struct{}),
+			tfTools:   tfToolsByName(tools),
+			tfRun:     tooldefs.Run{OrgID: "org", ConversationID: "conv", ClaimID: "claim"},
+			toolBatch: toolBatch,
 		},
 		results: make(chan *Result, 8),
 		ended:   make(chan struct{}),
@@ -181,10 +190,15 @@ func (h *readerHarness) end() {
 
 // replies returns the tool_call_reply lines written so far.
 func (h *readerHarness) replies() []map[string]any {
+	return h.written("tool_call_reply")
+}
+
+// written returns the lines of this kind the reader has written so far.
+func (h *readerHarness) written(kind string) []map[string]any {
 	var out []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(h.stdin.String()), "\n") {
 		var m map[string]any
-		if json.Unmarshal([]byte(line), &m) == nil && m["kind"] == "tool_call_reply" {
+		if json.Unmarshal([]byte(line), &m) == nil && m["kind"] == kind {
 			out = append(out, m)
 		}
 	}
@@ -345,5 +359,75 @@ func TestConsumeStreamInteractive_ToolCallCancelEndsTheHandler(t *testing.T) {
 	}
 	if got := h.replies(); len(got) != 0 {
 		t.Errorf("cancelled calls were answered: %v", got)
+	}
+}
+
+func toolBatchLine(id string, toolUseIDs ...string) string {
+	b, _ := json.Marshal(map[string]any{"type": "control", "subtype": "tool_batch", "id": id, "tool_call_ids": toolUseIDs})
+	return string(b)
+}
+
+// TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun
+// pins the all-results-terminate rule on the SDK side. A batch whose only call
+// ended the run is answered with stop, without asking the caller for notes no
+// request is left to read, and the turn's result carries the ending. A batch
+// that pairs the same call with real work is answered as any other, the turn
+// carries no ending, and the ending it held is spent: naming that call again
+// does not stop a later batch.
+func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(t *testing.T) {
+	var notesAsked int
+	h := newReaderHarnessWithNotes(t,
+		func() ToolBatchNotes { notesAsked++; return ToolBatchNotes{} },
+		testTFTool("end", func(context.Context, tooldefs.Call) tooldefs.Outcome {
+			return tooldefs.Outcome{Content: "stopping", Terminal: domain.ConversationOutcomeAbort, Reason: "blocked", Summary: "tried"}
+		}),
+		testTFTool("work", func(context.Context, tooldefs.Call) tooldefs.Outcome {
+			return tooldefs.Outcome{Content: "done"}
+		}),
+	)
+	nextResult := func() *Result {
+		t.Helper()
+		select {
+		case r := <-h.results:
+			return r
+		case <-time.After(5 * time.Second):
+			t.Fatal("no result")
+			return nil
+		}
+	}
+
+	h.write(toolCallLine("w-1", "toolu_A", "end"))
+	h.waitReplies(1)
+	h.write(toolBatchLine("b-1", "toolu_A"))
+	h.write(resultLine)
+	r := nextResult()
+	want := Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "blocked", Summary: "tried"}
+	if r.Terminal == nil || *r.Terminal != want {
+		t.Fatalf("Terminal = %+v, want %+v", r.Terminal, want)
+	}
+	batches := h.written("tool_batch_reply")
+	if len(batches) != 1 || batches[0]["id"] != "b-1" || batches[0]["stop"] != true || batches[0]["context"] != nil {
+		t.Fatalf("tool_batch_reply = %v, want a stop for b-1 with no context", batches)
+	}
+	if notesAsked != 0 {
+		t.Errorf("notes were asked for %d times on a batch that stopped", notesAsked)
+	}
+
+	h.write(toolCallLine("w-2", "toolu_B", "end"))
+	h.write(toolCallLine("w-3", "toolu_C", "work"))
+	h.waitReplies(3)
+	h.write(toolBatchLine("b-2", "toolu_B", "toolu_C"))
+	h.write(toolBatchLine("b-3", "toolu_B"))
+	h.write(resultLine)
+	if r := nextResult(); r.Terminal != nil {
+		t.Errorf("Terminal = %+v after a batch that did real work, want none", r.Terminal)
+	}
+	for _, b := range h.written("tool_batch_reply")[1:] {
+		if b["stop"] == true {
+			t.Errorf("tool_batch_reply %v stopped the turn, want only the first batch to", b)
+		}
+	}
+	if notesAsked != 2 {
+		t.Errorf("notes asked for %d times, want once for each batch that went on", notesAsked)
 	}
 }

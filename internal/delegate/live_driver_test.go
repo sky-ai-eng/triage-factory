@@ -135,6 +135,33 @@ func TestDriveLiveConversation_TerminalResultClosesAndReturns(t *testing.T) {
 	}
 }
 
+// TestDriveLiveConversation_AStopIsTheConclusion: a turn stop_blueprint ended
+// concludes on the call, whatever its final text: text that would read as a
+// malformed envelope is not re-prompted, and the process closes and the
+// result goes back for processCompletion.
+func TestDriveLiveConversation_AStopIsTheConclusion(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	proc := newFakeLiveProc("sess")
+	results := make(chan *agentproc.Result, 1)
+	want := &agentproc.Result{
+		Result:   `{"outcome": "stopped"}`,
+		Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "blocked", Summary: "tried"},
+	}
+	results <- want
+
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
+
+	if out.result != want || out.hibernated {
+		t.Errorf("outcome = %+v, want the stopped turn's result handed back, not a park", out)
+	}
+	if n := proc.sends(); n != 0 {
+		t.Errorf("driver sent %d corrections, want none: the call is the verdict", n)
+	}
+	if !proc.wasClosed() {
+		t.Error("expected the process closed after the stopped turn")
+	}
+}
+
 // TestDriveLiveConversation_CtxCancelReturnsErr: a cancelled ctx (the hard-kill path)
 // closes the process and surfaces the ctx error so the caller routes through
 // its cancelled handling.

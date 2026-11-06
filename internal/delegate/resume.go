@@ -559,7 +559,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	outcome.StderrText = out.stderr
 	outcome.CostUSD = out.costUSD
 	if out.result != nil {
-		outcome.Result = parseAgentResult(out.result.Result)
+		outcome.Result = parseAgentResult(out.result)
 	}
 
 	if out.err != nil && out.result == nil {

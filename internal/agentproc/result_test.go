@@ -1,6 +1,10 @@
 package agentproc
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
 
 // TestMergeResult_AccountingIsRunningTotal pins the fold's reading of the
 // wire: every per-turn result carries the process's running totals, so the
@@ -38,5 +42,18 @@ func TestMergeResult_DispositionIsSticky(t *testing.T) {
 	}
 	if merged.Subtype != "error_during_execution" || merged.Result != "paused" {
 		t.Errorf("empty later fields must not blank earlier ones: subtype=%q result=%q", merged.Subtype, merged.Result)
+	}
+}
+
+// TestMergeResult_TerminalIsTheNewestTurns: how a turn ended is that turn's
+// alone, so the fold carries the newest turn's Terminal, cleared when that
+// turn had none.
+func TestMergeResult_TerminalIsTheNewestTurns(t *testing.T) {
+	stop := &Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "blocked"}
+	if merged := MergeResult(&Result{}, &Result{Terminal: stop}); merged.Terminal != stop {
+		t.Errorf("Terminal = %+v, want the newest turn's", merged.Terminal)
+	}
+	if merged := MergeResult(&Result{Terminal: stop}, &Result{}); merged.Terminal != nil {
+		t.Errorf("Terminal = %+v, want none: the newest turn did not end on one", merged.Terminal)
 	}
 }
