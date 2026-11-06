@@ -14,6 +14,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -33,11 +35,12 @@ func (s *getRunSpy) GetRunSystem(ctx context.Context, orgID, id string) (*domain
 // TestDispatch_LossBudgetSpent_FailsTheConversationWithoutRunningIt: a claim
 // whose conversation was lost as many times in a row as the budget allows is
 // the claim that ends it. It fails the conversation executor_lost through its
-// own fence, ends the run the same way, and never reaches the gates, let
-// alone the runtime.
+// own fence, ends the run the same way, tells the delegator, and never
+// reaches the gates, let alone the runtime.
 func TestDispatch_LossBudgetSpent_FailsTheConversationWithoutRunningIt(t *testing.T) {
 	f := newLaunchFixture(t, "lost")
 	org := runmode.LocalDefaultOrgID
+	rec := notifytest.Record(t)
 	spy := &getRunSpy{BlueprintStore: f.stores.Blueprints}
 	f.s.blueprints = spy
 	waker := newFakeWaker()
@@ -76,6 +79,7 @@ func TestDispatch_LossBudgetSpent_FailsTheConversationWithoutRunningIt(t *testin
 	if waker.count() == 0 {
 		t.Error("the firing worker was never woken; the task's queued firings wait on this conversation")
 	}
+	rec.Active(t, org, kinds.ConversationFailed, f.conv.ID)
 }
 
 // TestDispatch_LossBudgetFollowsTheSetting: the budget is TF_MAX_CLAIM_ATTEMPTS

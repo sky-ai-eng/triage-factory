@@ -195,6 +195,7 @@ func (s *Spawner) disposeOfLostConversation(ctx context.Context, conv *domain.Co
 		s.kickMemoryOwed(orgID, ended.ID)
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "failed")
+	s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureExecutorLost, summary)
 	if conv.BlueprintRunID != "" {
 		s.terminateBlueprint(orgID, conv.BlueprintRunID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
 			runConfig{orgID: orgID, teamID: conv.TeamID},

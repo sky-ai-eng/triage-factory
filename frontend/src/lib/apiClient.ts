@@ -162,9 +162,12 @@ export async function readJSON<T>(resp: Response, path: string): Promise<T> {
 }
 
 export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
+  // The page the call started on, read before the request's await. apiFetch
+  // tags its own errors with the same page; this tags the parse's.
   const from = currentPage()
+  const resp = await apiFetch(path, options)
   try {
-    return await readJSON<T>(await apiFetch(path, options), path)
+    return await readJSON<T>(resp, path)
   } catch (err) {
     tagOrigin(err, from)
     throw err

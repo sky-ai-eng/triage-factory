@@ -1225,7 +1225,7 @@ func (s *Spawner) processCompletion(
 		toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	case domain.StatusFailed:
 		if completeErr == nil {
-			s.noteDelegatorFailed(orgID, conversationID, failureKind, resultSummary)
+			s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
 		}
 	}
 

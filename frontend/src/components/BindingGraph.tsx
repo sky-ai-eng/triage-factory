@@ -801,9 +801,7 @@ function BindingGraphInner({
           setBoxMenu(null)
           await fetchAll()
         } catch (err) {
-          toast.error(
-            `Failed to rename blueprint: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.failed(err, 'Could not rename the blueprint.')
         }
       })
     },

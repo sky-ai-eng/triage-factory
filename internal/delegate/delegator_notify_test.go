@@ -10,17 +10,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // A run's toasts are for the person who delegated it, and nothing a run says
-// reaches the org at large.
-func TestToastConversationDelegator_ReachesOnlyTheDelegator(t *testing.T) {
+// reaches the org at large: a turn that ends toasts its delegator alone.
+func TestIdlePark_ToastsOnlyTheDelegator(t *testing.T) {
 	f := newStallFixture(t, "r-toast", activityTimings{idle: time.Hour})
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
 
-	f.s.toastConversationDelegator(runmode.LocalDefaultOrgID, f.conversationID, toast.LevelSuccess, "Run abc completed")
+	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
+		reason: db.ParkIdle(),
+	}); fenced || !flipped {
+		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
+	}
 	captured.mu.Lock()
 	defer captured.mu.Unlock()
 	var users []string
@@ -131,6 +135,25 @@ func TestPausedConversation_AnIdleParkOpensNothing(t *testing.T) {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
+}
+
+// A turn that ends while the stall watchdog's stop is pending parks stalled,
+// whatever the park asked for, and that park waits on the delegator.
+func TestPausedConversation_AnIdleParkThatLandsAStallOpensIt(t *testing.T) {
+	f := newStallFixture(t, "r-idle-stalled", activityTimings{idle: time.Hour})
+	rec := notifytest.Record(t)
+	if _, err := f.database.Exec(`UPDATE conversations SET stop_requested_at = CURRENT_TIMESTAMP, stop_requested_reason = ? WHERE id = ?`,
+		domain.ParkReasonStalled, f.conversationID); err != nil {
+		t.Fatalf("stage the pending stop: %v", err)
+	}
+
+	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
+		reason: db.ParkIdle(),
+	}); fenced || !flipped {
+		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
+	}
+	rec.Active(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused, f.conversationID)
 }
 
 // The sweep resolves and never opens: a conversation parked before anything

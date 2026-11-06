@@ -36,11 +36,12 @@ func RunPausedConversationSync(ctx context.Context, conversations db.Conversatio
 	}
 }
 
-// syncPausedConversations is one pass. It resolves and never opens: an
+// syncPausedConversations is one pass. It resolves, and opens only a
+// conversation that parked during the pass (reopenParkedDuring): an
 // occurrence whose conversation still waits is kept as it is, and one whose
 // conversation does not is resolved. So a conversation parked before anything
-// opened the kind, or whose park failed to open it, is never raised here, and
-// a pass writes nothing for a conversation that goes on waiting. An org whose
+// opened the kind, or whose park failed to open it, is not raised here, and a
+// pass writes nothing for a conversation that goes on waiting. An org whose
 // read fails is left as it is.
 func syncPausedConversations(ctx context.Context, conversations db.ConversationStore) {
 	orgs, err := kinds.ConversationPaused.OpenOrgs(ctx)
@@ -63,11 +64,12 @@ func syncPausedConversations(ctx context.Context, conversations db.ConversationS
 	}
 }
 
-// reopenParkedDuring reopens the conversations that parked while a pass was
-// between its read and its sync. Their parks opened them after the read, so
-// the sync, told to keep only what the read saw, resolved them. Anything
-// waiting now that the read did not see is one of those, or parked since,
-// where a second open is a no-op.
+// reopenParkedDuring opens the conversations that parked while a pass was
+// between its read and its sync. A park opens its own occurrence, after the
+// read, so the sync, told to keep only what the read saw, resolved it.
+// Anything waiting now that the read did not see is one of those, or parked
+// since, where a second open is a no-op; it is opened whether or not its park
+// opened it.
 func reopenParkedDuring(ctx context.Context, conversations db.ConversationStore, orgID string, before []domain.ConversationAwaitingPerson) {
 	after, err := conversations.ListAwaitingPersonSystem(ctx, orgID)
 	if err != nil {

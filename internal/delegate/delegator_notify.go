@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -16,12 +17,25 @@ import (
 // not watching when it happens. A conversation a trigger fired tells nobody;
 // the board shows how it went.
 
-// toastConversationDelegator fires a toast for the person who delegated
-// conversationID, for a site that holds only its id. toast.FireUser fires
-// nothing for a conversation a trigger fired, whose creator is empty.
-func (s *Spawner) toastConversationDelegator(orgID, conversationID string, level toast.Level, body string) {
-	if conv := s.readConversation(orgID, conversationID); conv != nil {
-		toast.FireUser(s.wsHub, orgID, conv.CreatorUserID, level, "", body)
+// announcePark tells the delegator about a park that just landed: the paused
+// notification when the row now waits on them, and a toast when the park is a
+// turn that ended. It reads the row rather than trusting the park it asked
+// for, because a stop requested in the meantime overrides the reason in the
+// store, so a turn that ends while the stall watchdog stops it parks stalled.
+//
+// Only the idle park toasts. A deliberate stop terminates the blueprint behind
+// it, so "resumes on the next message" would be a promise this build cannot
+// keep: the claim gate refuses a parked step under a finished blueprint until
+// the resume work lands.
+func (s *Spawner) announcePark(park liveParkContext) {
+	conv := s.readConversation(park.orgID, park.conversationID)
+	if conv == nil {
+		return
+	}
+	s.notePaused(park.orgID, conv)
+	if !park.reason.Deliberate {
+		toast.FireUser(s.wsHub, park.orgID, conv.CreatorUserID, toast.LevelInfo, "",
+			fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
 }
 
