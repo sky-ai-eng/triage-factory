@@ -113,8 +113,10 @@ func TestHref_Render(t *testing.T) {
 	if _, err := Routes.TeamJiraRules("", project).render(org, false, none); err == nil || !strings.Contains(err.Error(), "names no team") {
 		t.Errorf("a team route with no team in multi: err = %v; want it refused", err)
 	}
-	if _, err := Routes.TeamJiraRules(team, "").render(org, false, none); err == nil || !strings.Contains(err.Error(), "query project is empty") {
-		t.Errorf("a team route with no project in multi: err = %v; want it refused", err)
+	for _, local := range []bool{false, true} {
+		if _, err := Routes.TeamJiraRules(team, "").render(org, local, none); err == nil || !strings.Contains(err.Error(), "query project is empty") {
+			t.Errorf("a team route with no project (local=%v): err = %v; want it refused", local, err)
+		}
 	}
 	// Local mode's one user is every row's recipient, a recipient that names
 	// no team, and its page needs none.

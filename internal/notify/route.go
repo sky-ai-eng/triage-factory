@@ -144,6 +144,13 @@ func (h Href) id() string {
 func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (string, error) {
 	switch {
 	case h.route != nil:
+		// Checked in both modes, though local's team page drops the query,
+		// so a builder handed an empty id fails in local tests too.
+		for name, values := range h.query {
+			if slices.Contains(values, "") {
+				return "", fmt.Errorf("route %s: query %s is empty", h.route.name, name)
+			}
+		}
 		page := "/orgs/" + url.PathEscape(orgID) + h.route.multi
 		if local {
 			if h.route.local == "" {
@@ -165,11 +172,6 @@ func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (
 		}
 		if len(h.query) == 0 {
 			return page, nil
-		}
-		for name, values := range h.query {
-			if slices.Contains(values, "") {
-				return "", fmt.Errorf("route %s: query %s is empty", h.route.name, name)
-			}
 		}
 		sep := "?"
 		if strings.Contains(page, "?") {

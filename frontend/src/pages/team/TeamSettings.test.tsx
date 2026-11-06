@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation } from 'react-router'
 import { resetModelCatalogForTest } from '../../hooks/useModelCatalog'
 
 // The team overview's two wired verbs: the band as navigation, and the archive.
@@ -392,6 +392,56 @@ describe('a link to one team', () => {
     ).toBeInTheDocument()
     expect(document.querySelector('.sp[data-source="github"]')).toBeNull()
     expect(screen.queryByText(/platform/)).toBeNull()
+  })
+})
+
+describe('a link to one project', () => {
+  const rule = { members: [] }
+  const project = (id: string, key: string) => ({
+    id,
+    jira_id: '',
+    key,
+    pickup: rule,
+    in_progress: rule,
+    in_review: rule,
+    done: rule,
+  })
+  /** The router's query, where the test can read what the page wrote to it. */
+  function Search() {
+    return <output data-testid="search">{useLocation().search}</output>
+  }
+  const search = () => screen.getByTestId('search').textContent ?? ''
+  const selectedKey = () =>
+    document.querySelector('.sp-projkey[aria-selected="true"]')?.textContent ?? null
+
+  it('opens the Jira board it names, and keeps the URL naming what is shown', async () => {
+    const base = api.apiJSON.getMockImplementation()!
+    api.apiJSON.mockImplementation((path: string, init?: RequestInit) =>
+      path.endsWith('/settings') && !init?.method
+        ? Promise.resolve({
+            ...TEAM_SETTINGS,
+            jira_projects: [project('reg-PLAT', 'PLAT'), project('reg-SKY', 'SKY')],
+          })
+        : base(path, init),
+    )
+    render(
+      <MemoryRouter initialEntries={['/?source=jira&project=reg-SKY']}>
+        <TeamSettings />
+        <Search />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(selectedKey()).toBe('SKY'))
+
+    // A pick replaces the URL's project, so a reload or a copied link opens
+    // the board on screen.
+    fireEvent.click(screen.getByRole('tab', { name: 'PLAT' }))
+    await waitFor(() => expect(search()).toContain('project=reg-PLAT'))
+    expect(selectedKey()).toBe('PLAT')
+
+    // The project belongs to the source, so leaving the source drops it.
+    fireEvent.click(screen.getByTitle('Back to event sources'))
+    await waitFor(() => expect(search()).not.toContain('source='))
+    expect(search()).not.toContain('project=')
   })
 })
 
