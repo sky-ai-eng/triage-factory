@@ -13,19 +13,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
-// A run's toasts are for the person who delegated it. A conversation a trigger
-// fired has nobody who asked, so it toasts nobody, and nothing a run says
+// A run's toasts are for the person who delegated it, and nothing a run says
 // reaches the org at large.
-func TestToastDelegator_ReachesOnlyTheDelegator(t *testing.T) {
-	s := NewSpawner(nil, testSpawnerStores(newDelegateTestDB(t)), nil, nil, "claude-sonnet-4-5")
+func TestToastConversationDelegator_ReachesOnlyTheDelegator(t *testing.T) {
+	f := newStallFixture(t, "r-toast", activityTimings{idle: time.Hour})
 	hub, captured := capturingHub(t)
-	s.wsHub = hub
+	f.s.wsHub = hub
 
-	s.toastDelegator(runmode.LocalDefaultOrgID, "", toast.LevelSuccess, "Run abc completed")
-	if got := captured.toasts(); len(got) != 0 {
-		t.Fatalf("toasts for a run with no delegator = %q, want none", got)
-	}
-	s.toastDelegator(runmode.LocalDefaultOrgID, "user-1", toast.LevelSuccess, "Run abc completed")
+	f.s.toastConversationDelegator(runmode.LocalDefaultOrgID, f.conversationID, toast.LevelSuccess, "Run abc completed")
 	captured.mu.Lock()
 	defer captured.mu.Unlock()
 	var users []string
@@ -34,9 +29,27 @@ func TestToastDelegator_ReachesOnlyTheDelegator(t *testing.T) {
 			users = append(users, e.UserID)
 		}
 	}
-	if len(users) != 1 || users[0] != "user-1" {
-		t.Errorf("toast recipients = %q, want only the delegator user-1", users)
+	if len(users) != 1 || users[0] != runmode.LocalDefaultUserID {
+		t.Errorf("toast recipients = %q, want only the delegator %s", users, runmode.LocalDefaultUserID)
 	}
+}
+
+// A failure is told only when this engagement recorded it. A verdict that
+// settled the row first is the conversation's answer, and a lasting notice
+// saying otherwise would be false.
+func TestFailConversation_TellsTheDelegatorOnlyOfAFailureItRecorded(t *testing.T) {
+	settled := newStallFixture(t, "r-fail-settled", activityTimings{idle: time.Hour})
+	rec := notifytest.Record(t)
+	// Concluded: a verdict recorded, the shape a racing completion leaves.
+	if _, err := settled.database.Exec(`UPDATE conversations SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?`, domain.StatusOpen, settled.conversationID); err != nil {
+		t.Fatalf("settle the conversation: %v", err)
+	}
+	settled.s.failConversation(runmode.LocalDefaultOrgID, settled.conversationID, settled.task.ID, settled.claimID, "manual", "late", domain.ConversationFailureCrash)
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationFailed)
+
+	f := newStallFixture(t, "r-fail-recorded", activityTimings{idle: time.Hour})
+	f.s.failConversation(runmode.LocalDefaultOrgID, f.conversationID, f.task.ID, f.claimID, "manual", "exit 1", domain.ConversationFailureCrash)
+	rec.Active(t, runmode.LocalDefaultOrgID, kinds.ConversationFailed, f.conversationID)
 }
 
 // A failure tells the person the engagement ran for, naming the entity its
@@ -118,4 +131,62 @@ func TestPausedConversation_AnIdleParkOpensNothing(t *testing.T) {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
+}
+
+// The sweep resolves and never opens: a conversation parked before anything
+// told its delegator, or whose park failed to, is not raised by a pass.
+func TestPausedConversationSync_NeverOpensAParkNothingOpened(t *testing.T) {
+	f := newStallFixture(t, "r-told", activityTimings{idle: time.Hour})
+	rec := notifytest.Record(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	seedConversation(t, f.database, "r-untold", "", "")
+	untoldClaim := markEngaged(t, f.database, "r-untold")
+	if ok, err := f.s.conversations.ParkOpenForClaimSystem(ctx, org, "r-untold", untoldClaim, db.ParkStopped(domain.ParkReasonStalled, "")); err != nil || !ok {
+		t.Fatalf("park the untold conversation: ok=%v err=%v", ok, err)
+	}
+	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
+		orgID: org, conversationID: f.conversationID, claimID: f.claimID,
+		reason: db.ParkStopped(domain.ParkReasonStalled, ""),
+	}); fenced || !flipped {
+		t.Fatalf("park: fenced=%v flipped=%v", fenced, flipped)
+	}
+
+	syncPausedConversations(ctx, f.s.conversations)
+	open := rec.Open(org, kinds.ConversationPaused)
+	if len(open) != 1 || open[0].Key != f.conversationID || open[0].Seen != 1 {
+		t.Errorf("paused notifications = %+v, want only %s, raised once by its park", open, f.conversationID)
+	}
+}
+
+// awaitingSequence answers ListAwaitingPersonSystem from a script, one answer
+// per call, so a test can stage a park landing between a pass's two reads.
+type awaitingSequence struct {
+	db.ConversationStore
+	answers [][]domain.ConversationAwaitingPerson
+}
+
+func (a *awaitingSequence) ListAwaitingPersonSystem(context.Context, string) ([]domain.ConversationAwaitingPerson, error) {
+	next := a.answers[0]
+	a.answers = a.answers[1:]
+	return next, nil
+}
+
+// A conversation that parks after a pass's read opens its notification
+// before the pass syncs, so the sync resolves it; the pass's second read finds
+// it waiting and opens it again.
+func TestPausedConversationSync_ReopensARunThatParkedDuringThePass(t *testing.T) {
+	rec := notifytest.Record(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	parked := domain.ConversationAwaitingPerson{
+		ConversationID: "r-mid-pass", CreatorUserID: runmode.LocalDefaultUserID,
+		ParkReason: domain.ParkReasonStalled, EntitySourceID: "owner/repo#1",
+	}
+	// Open before the sync, as the park's own write would be.
+	kinds.ConversationPaused.Set(ctx, org, kinds.PausedFor(parked), true)
+
+	syncPausedConversations(ctx, &awaitingSequence{answers: [][]domain.ConversationAwaitingPerson{nil, {parked}}})
+	rec.Active(t, org, kinds.ConversationPaused, parked.ConversationID)
 }

@@ -575,7 +575,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	// Guarded — if a terminal racing path (cancel, natural completion)
 	// reached the row first, leave its status in place rather than
 	// clobbering.
-	_, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
+	marked, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
 	if errors.Is(markErr, db.ErrClaimReleased) {
 		// The release landed between the two writes. Same answer, same tail
 		// to skip; the failure row already on the transcript is the one
@@ -609,7 +609,11 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
-	s.noteDelegatorFailed(orgID, conversationID, kind, errMsg)
+	// Told only for a failure this call recorded: a racing verdict that got
+	// there first is the conversation's answer, not this one.
+	if marked {
+		s.noteDelegatorFailed(orgID, conversationID, kind, errMsg)
+	}
 	return false
 }
 

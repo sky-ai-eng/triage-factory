@@ -368,6 +368,10 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 		if s.conversations != nil {
 			if conv, gerr := s.conversations.GetSystem(bgCtx, st.OrgID, st.ConversationID); gerr == nil && conv != nil {
 				s.broadcastConversationUpdate(st.OrgID, st.ConversationID, conv.Status)
+				// A settled stop parks the conversation, possibly for a
+				// reason that waits on its delegator (a stall whose
+				// engagement was lost before it parked itself).
+				s.notePaused(st.OrgID, conv)
 			}
 		}
 		if st.BlueprintRunID == "" || s.blueprints == nil {
@@ -1124,7 +1128,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, agentproc.AgentVisibleRoot(cfg.runRoot), len(plan), nextStepName)
 
-	s.toastDelegator(orgID, conv.CreatorUserID, toast.LevelInfo, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
+	toast.FireUser(s.wsHub, orgID, conv.CreatorUserID, toast.LevelInfo, "", fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(conv.ID)))
 
 	// conv.SessionID is empty on a first claim and non-empty when this run was
@@ -2614,7 +2618,7 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
 	bgCtx := context.Background()
 	s.releaseActivity(conv.ID, conv.ClaimID)
-	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
+	failed, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",
 			"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID, "error", err)
@@ -2622,6 +2626,9 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	}
 	if err != nil {
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
+	}
+	if failed {
+		s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureUnclassified, reason)
 	}
 	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
 	if err != nil {

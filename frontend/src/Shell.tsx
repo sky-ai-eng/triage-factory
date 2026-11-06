@@ -94,10 +94,14 @@ const TITLES: Record<string, string> = {
 }
 
 /** Records what the page on screen calls itself, so a failure that lands after
- *  the viewer has left it can name it (lib/pageNames). Renders nothing. */
+ *  the viewer has left it can name it (lib/pageNames). Renders nothing.
+ *
+ *  The first render after a navigation can still carry the page it left's
+ *  header under the new path; the render after it, with the new page's own
+ *  name or none, replaces or forgets that. */
 function PageName({ pathname, name }: { pathname: string; name: string }) {
   useEffect(() => {
-    if (name) rememberPageName(pathname, name)
+    rememberPageName(pathname, name)
   }, [pathname, name])
   return null
 }

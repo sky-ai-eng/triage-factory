@@ -458,7 +458,11 @@ func (s *Spawner) markConversationOpenFlipped(ctx context.Context, park livePark
 		return false, false
 	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")
-	s.noteConversationPaused(park.orgID, park.conversationID)
+	// An idle park is a turn that ended and never waits on a person, so only
+	// a stop, or a park for a reason that may, is worth the read.
+	if park.reason.Deliberate || park.reason.Reason.AwaitsPerson() {
+		s.noteConversationPaused(park.orgID, park.conversationID)
+	}
 	return false, true
 }
 

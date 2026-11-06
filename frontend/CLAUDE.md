@@ -100,7 +100,8 @@ is the same message, and it knows where the request was made: `apiFetch` and
 (`requestOrigin`), and when the viewer has left that page by the time the
 failure lands, the toast links back to it by the name the page's header gave
 it. A toast never retries: recovery lives on the surface that sent the
-request.
+request. A toast that composes its own text around the failure passes the same
+link itself: `toast.error(text, title, { action: backToOrigin(err) })`.
 
 ```ts
 try {

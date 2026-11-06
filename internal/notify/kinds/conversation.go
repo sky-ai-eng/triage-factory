@@ -110,7 +110,10 @@ var ConversationPaused = notify.Condition(notify.ConditionSpec[PausedConversatio
 		next := "Send it a message to continue."
 		switch p.Reason {
 		case domain.ParkReasonSandboxLost:
-			cause = "The sandbox its tools run in stopped working several times in a row."
+			// A message continues it in a new sandbox, which a run that keeps
+			// running out of memory will lose the same way.
+			cause = "The sandbox its tools run in stopped working several times in a row. The run's transcript says why; " +
+				"if it ran out of memory, the deployment's operator can raise the limit before it continues."
 		case domain.ParkReasonLaunchFailed:
 			cause = "It could not start."
 			next = "Send it a message to try again."

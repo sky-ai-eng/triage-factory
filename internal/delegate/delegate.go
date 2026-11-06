@@ -560,7 +560,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// and the reactor enqueues each next step (or finalizes). No in-process
 	// for-loop holds the sequencing — blueprint_runs does
 	// (current_step_index), so a crash mid-flight is recoverable.
-	s.toastDelegator(orgID, creatorUserID, toast.LevelInfo, fmt.Sprintf("Blueprint started: %s (%s)",
+	toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelInfo, "", fmt.Sprintf("Blueprint started: %s (%s)",
 		truncateToastMsg(blueprint.Name, 60), shortConversationID(blueprintRunID)))
 
 	// The blueprint_run is live → announce the placement the bot claim already

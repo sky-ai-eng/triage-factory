@@ -1222,9 +1222,11 @@ func (s *Spawner) processCompletion(
 	}
 	switch status {
 	case domain.StatusOpen:
-		s.toastDelegator(orgID, creatorUserID, toast.LevelSuccess, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
+		toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	case domain.StatusFailed:
-		s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
+		if completeErr == nil {
+			s.noteDelegatorFailed(orgID, conversationID, failureKind, resultSummary)
+		}
 	}
 
 	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by the

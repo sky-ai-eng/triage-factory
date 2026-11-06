@@ -14,7 +14,7 @@ import { Clapperboard } from 'lucide-react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
 import TeamScopeSelect from '../components/TeamScopeSelect'
-import { toast } from '../components/Toast/toastStore'
+import { backToOrigin, toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
@@ -399,11 +399,13 @@ export default function Factory() {
           toast.error(
             `${label} is bot-claimed but the run didn't start: ${httpErrorMessage(err, 'spawn failed')}. Retry from the Board.`,
             'Delegate run failed',
+            { action: backToOrigin(err) },
           )
         } else {
           toast.error(
             `Delegate ${label}: ${httpErrorMessage(err, 'the delegation could not be started.')}`,
             'Delegation failed',
+            { action: backToOrigin(err) },
           )
         }
         return
