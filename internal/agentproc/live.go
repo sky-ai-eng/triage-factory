@@ -177,9 +177,10 @@ type LiveRun struct {
 	// toolCalls holds the cancel of each TF tool call still running, by the
 	// wrapper's id. Written by the reader and by each call's goroutine.
 	// terminals holds, by tool_use id, the ending each answered call
-	// recorded, until the tool_batch naming the call reads it. Written by the
-	// call's goroutine before its reply, so it is in place by the time the
-	// wrapper can report the batch.
+	// recorded, until a tool_batch naming the call reads it; an ending whose
+	// batch is never reported (its turn was interrupted) stays until the
+	// process ends. Written by the call's goroutine before its reply, so it
+	// is in place by the time the wrapper can report the batch.
 	toolCallsMu sync.Mutex
 	toolCalls   map[string]context.CancelFunc
 	terminals   map[string]Terminal

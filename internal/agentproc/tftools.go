@@ -148,9 +148,11 @@ func (l *LiveRun) handleToolCall(ctl controlLine) {
 // recordTerminal keeps the ending one answered call recorded, for the
 // tool_batch that names it. A call with no tool_use id is never named by one,
 // so its ending is not kept: the batch it belongs to then cannot stop, and the
-// run goes on rather than ending on a call nothing can attribute.
+// run goes on rather than ending on a call nothing can attribute. That only
+// happens if the SDK stops sending the id, so it is logged.
 func (l *LiveRun) recordTerminal(toolUseID string, t Terminal) {
 	if toolUseID == "" {
+		agentprocLog.Warn("tf tool ended the run but its call carried no tool_use id; the run goes on", "outcome", t.Outcome)
 		return
 	}
 	l.toolCallsMu.Lock()

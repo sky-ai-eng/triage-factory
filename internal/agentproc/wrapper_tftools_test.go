@@ -218,7 +218,9 @@ func firstOf(v any) any {
 // TestWrapperTFToolsBatchStopEndsTheTurn: --tf-tools alone wires the
 // PostToolBatch hook, whose tool_batch names the batch's calls by tool_use id.
 // A reply with stop returns continue: false, which ends the turn at the batch;
-// one with context alone hands it to the model as before.
+// one with context alone hands the context to the model. A call with no
+// tool_use id is still named, as "", so Go counts it as a call that did not
+// end the run.
 func TestWrapperTFToolsBatchStopEndsTheTurn(t *testing.T) {
 	w := startTFToolsWrapper(t, `
       const hook = options.hooks?.PostToolBatch?.[0]?.hooks?.[0]
@@ -229,7 +231,9 @@ func TestWrapperTFToolsBatchStopEndsTheTurn(t *testing.T) {
       const signal = new AbortController().signal
       const batch = (...ids) => ({ hook_event_name: "PostToolBatch", tool_calls: ids.map((id) => ({ tool_name: "mcp__tf__record_call", tool_input: {}, tool_use_id: id })) })
       yield { type: "stub_hook", output: await hook(batch("toolu_A", "toolu_B"), undefined, { signal }) }
-      yield { type: "stub_hook", output: await hook(batch("toolu_C"), undefined, { signal }) }`, "--tf-tools", tfToolsFlagValue)
+      const idless = batch("toolu_C")
+      idless.tool_calls.push({ tool_name: "Bash", tool_input: {} })
+      yield { type: "stub_hook", output: await hook(idless, undefined, { signal }) }`, "--tf-tools", tfToolsFlagValue)
 
 	req := w.next()
 	id, _ := req["id"].(string)
@@ -245,6 +249,9 @@ func TestWrapperTFToolsBatchStopEndsTheTurn(t *testing.T) {
 
 	req = w.next()
 	id, _ = req["id"].(string)
+	if ids, _ := req["tool_call_ids"].([]any); len(ids) != 2 || ids[0] != "toolu_C" || ids[1] != "" {
+		t.Fatalf("second tool_batch = %v, want toolu_C and the id-less call as \"\"", req)
+	}
 	w.send(t, map[string]any{"kind": "tool_batch_reply", "id": id, "context": "a note"})
 	if res := w.next(); res["subtype"] != "tool_batch_result" || res["delivered"] != true {
 		t.Fatalf("after a reply with context the wrapper said %v, want it delivered", res)

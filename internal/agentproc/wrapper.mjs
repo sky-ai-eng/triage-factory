@@ -370,7 +370,9 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
     const onToolBatch = async (input, _toolUseID, { signal } = {}) => {
       if (closing || input?.agent_id) return {}
       const id = randomUUID()
-      const toolCallIDs = (input?.tool_calls ?? []).map((call) => call?.tool_use_id).filter(Boolean)
+      // An id-less call is named as "", which Go never holds an ending for,
+      // so the batch it is in cannot stop.
+      const toolCallIDs = (input?.tool_calls ?? []).map((call) => call?.tool_use_id ?? "")
       emit({ type: "control", subtype: "tool_batch", id, tool_call_ids: toolCallIDs })
       const reply = await new Promise((resolve) => {
         let done = false

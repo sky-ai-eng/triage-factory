@@ -320,9 +320,8 @@ type ResumeOptions struct {
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
-// completion event from the resumed stream (nil if none was observed),
-// the parsed agent result JSON (nil if the completion text didn't
-// contain a parseable envelope), and captured stderr for diagnostics.
+// completion event from the resumed stream (nil if none was observed) and
+// captured stderr for diagnostics.
 //
 // ResumeWithMessage always returns a non-nil *ResumeOutcome (the same struct on
 // every path, error or not), so callers guard on Completion == nil, not on a
@@ -331,7 +330,6 @@ type ResumeOptions struct {
 // error.
 type ResumeOutcome struct {
 	Completion *agentproc.Result
-	Result     *agentResult
 	StderrText string
 	// CostUSD is what the resumed process reported spending, carried even
 	// when there is no Completion — a resume stopped mid-turn parks with it.
@@ -558,9 +556,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	outcome.Completion = out.result
 	outcome.StderrText = out.stderr
 	outcome.CostUSD = out.costUSD
-	if out.result != nil {
-		outcome.Result = parseAgentResult(out.result)
-	}
 
 	if out.err != nil && out.result == nil {
 		// The driver returns ctx.Err() directly when ctx triggered the kill

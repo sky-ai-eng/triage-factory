@@ -541,17 +541,6 @@ func classifyTurn(r *agentproc.Result) (turnClass, *agentResult) {
 	return classifyAgentResult(r.Result)
 }
 
-// parseAgentResult returns the turn's verdict iff it is a valid conclusion,
-// else nil. For a caller that acts only on a usable conclusion; the driver
-// and processCompletion use classifyTurn directly to tell invalid attempts
-// apart from open runs.
-func parseAgentResult(r *agentproc.Result) *agentResult {
-	if class, result := classifyTurn(r); class == turnValid {
-		return result
-	}
-	return nil
-}
-
 func parseOwnerRepo(s string) (string, string) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 {

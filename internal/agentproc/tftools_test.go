@@ -431,3 +431,17 @@ func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(
 		t.Errorf("notes asked for %d times, want once for each batch that went on", notesAsked)
 	}
 }
+
+// TestBatchTerminal_AnIDLessCallKeepsTheBatchGoing: the wrapper names a call
+// with no tool_use id as "", and that call counts as one that did not end the
+// run, so a stop_blueprint beside it does not stop the batch.
+func TestBatchTerminal_AnIDLessCallKeepsTheBatchGoing(t *testing.T) {
+	l := &LiveRun{}
+	l.recordTerminal("toolu_A", Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"})
+	if _, stop := l.batchTerminal([]string{"toolu_A", ""}); stop {
+		t.Error("a batch with an id-less call stopped the turn")
+	}
+	if _, stop := l.batchTerminal(nil); stop {
+		t.Error("a batch naming no calls stopped the turn")
+	}
+}
