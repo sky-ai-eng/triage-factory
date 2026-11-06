@@ -326,6 +326,10 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 		})
 		return
 	}
+	// TODO(TFAC-1335): a field whose type has its own UnmarshalJSON (time.Time
+	// given a number) fails with that method's plain error, which carries no
+	// field, so it lands here as INVALID_BODY instead of INVALID_FIELD. No
+	// request body declares such a field yet.
 	WriteErrors(w, http.StatusBadRequest, ErrorItem{
 		Reason: ReasonInvalidBody, Message: "invalid request body",
 	})
@@ -390,6 +394,9 @@ func jsonType(t reflect.Type) (one, many string) {
 	case reflect.Bool:
 		return "true or false", "booleans"
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		// TODO(TFAC-1334): an integer field also refuses whole numbers that are
+		// out of range or written as 1e3 or 1.0, and this wording tells that
+		// caller the value is not a whole number.
 		return "a whole number", "whole numbers"
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return "a non-negative whole number", "non-negative whole numbers"
