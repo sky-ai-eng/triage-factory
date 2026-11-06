@@ -109,7 +109,21 @@ function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
   }
 }
 
-export default function JiraSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
+type JiraSourceProps = SourceBodyProps & {
+  /** The jira_projects row the URL names, whose board is shown. */
+  linkedProjectId?: string | null
+  /** Moves the URL's project to a pick from the strip; null takes it out. */
+  onShowProject?: (id: string | null) => void
+}
+
+export default function JiraSource({
+  teamId,
+  teamName,
+  isAdmin,
+  onBack,
+  linkedProjectId = null,
+  onShowProject,
+}: JiraSourceProps) {
   // The org whose Jira catalog the live reads address; null while it is still
   // resolving, which holds them.
   const orgId = useActiveOrgId()
@@ -208,12 +222,29 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const watched = useMemo(() => projects ?? [], [projects])
   const watchedRefs = useMemo(() => new Set(watched.map(jiraProjectRef)), [watched])
 
-  // The board's project: the picked one while it is still watched, else the
-  // first watched project — so unwatching what is shown falls back rather
-  // than pinning a board to a project the team no longer watches.
+  // The board's project: the one the URL names, else the one picked from the
+  // strip, else the first watched project, each only while it is still
+  // watched — so unwatching what is shown falls back rather than pinning a
+  // board to a project the team no longer watches. A pick moves the URL's
+  // project, so the local pick decides only for a project added here and not
+  // saved yet, which has no registry id to put in the URL.
+  const linked = useMemo(
+    () => (linkedProjectId ? watched.find((p) => p.id === linkedProjectId) : undefined),
+    [watched, linkedProjectId],
+  )
   const shown = useMemo(
-    () => watched.find((p) => jiraProjectRef(p) === shownRef) ?? watched[0] ?? null,
-    [watched, shownRef],
+    () => linked ?? watched.find((p) => jiraProjectRef(p) === shownRef) ?? watched[0] ?? null,
+    [watched, shownRef, linked],
+  )
+  // A URL naming a project this team does not watch says so above whichever
+  // board is drawn, which the strip or the board's note names.
+  const linkMissed = linkedProjectId !== null && projects !== null && !linked
+  const pick = useCallback(
+    (p: JiraProjectConfig) => {
+      setShownRef(jiraProjectRef(p))
+      onShowProject?.(p.id ?? null)
+    },
+    [onShowProject],
   )
   const shownR = shown ? jiraProjectRef(shown) : ''
   // A watched project the poll has not confirmed with Jira has no Jira id yet,
@@ -354,9 +385,14 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
                 .map(watchedProject),
             )
           : projects.filter((p) => !picked.has(jiraProjectRef(p)))
+      // Unwatching the project the URL names takes it out of the URL: the
+      // reader did that here, so there is no link left to explain.
+      if (actionId !== 'watch' && linked && picked.has(jiraProjectRef(linked))) {
+        onShowProject?.(null)
+      }
       persist(next)
     },
-    [projects, catalog, persist],
+    [projects, catalog, persist, linked, onShowProject],
   )
 
   // A board gesture, mapped back onto the four stored rules and saved. The
@@ -429,6 +465,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
               {offReason} The mapping below is what is stored; a project can still be unwatched.
             </p>
           ) : null}
+          {linkMissed ? (
+            <p className="sp-offnote">The project this link is for isn’t one this team watches.</p>
+          ) : null}
           <div className="sp-subhead">
             <span className="sp-subhead-t">What each status means</span>
             {watched.length > 1 ? (
@@ -445,7 +484,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
                       data-on={ref === shownR ? '' : undefined}
                       data-unarmed={projectIsArmed(p) ? undefined : ''}
                       title={projectIsArmed(p) ? undefined : 'statuses not mapped'}
-                      onClick={() => setShownRef(ref)}
+                      onClick={() => pick(p)}
                     >
                       {p.key}
                     </button>

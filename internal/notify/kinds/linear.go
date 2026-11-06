@@ -55,7 +55,7 @@ var LinearMirrorFailing = notify.Condition(notify.ConditionSpec[LinearMirror]{
 				"and Linear says " + workflow + " no longer has that state" + issue + ". Until this is fixed, " +
 				"Linear doesn't show which issues the team is working on. Choose an in-progress state in the " +
 				"team's Linear rules.",
-			Actions: []notify.Action{notify.Link("Open Linear rules", notify.Routes.TeamLinearRules(m.TeamID))},
+			Actions: []notify.Action{notify.Link("Open Linear rules", notify.Routes.TeamLinearRules(m.TeamID, m.LinearTeamID))},
 		}
 	},
 	Resolved: func(m LinearMirror, r notify.Resolution) string {
