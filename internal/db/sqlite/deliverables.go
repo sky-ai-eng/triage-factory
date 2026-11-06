@@ -458,7 +458,7 @@ func (s *deliverableStore) ListByConversations(ctx context.Context, orgID string
 	return arts, nil
 }
 
-func (s *deliverableStore) ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+func (s *deliverableStore) ListArtifactMatchesByTeam(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
 	return s.listArtifactMatches(ctx, orgID, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, entityIDs, reviewIDs)
 }
 

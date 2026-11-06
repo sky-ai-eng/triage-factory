@@ -21,6 +21,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -38,7 +39,10 @@ var deliverablesLog = logging.Component("deliverables")
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
 // the server's dashboardHandler deps.
 type Handler struct {
-	tx         db.TxRunner
+	tx db.TxRunner
+	// az answers whether the caller may write the deliverable's team, which
+	// reading it does not imply (loadWritableDeliverable).
+	az         *authz.Checker
 	ws         *websocket.Hub
 	ghResolver ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by the server's
@@ -59,8 +63,8 @@ type Handler struct {
 
 // New builds the deliverables handler. spawner, reconciler and publicURL are
 // read on every request, not once here; see the Handler fields.
-func New(tx db.TxRunner, ws *websocket.Hub, ghResolver ghclient.Resolver, spawner func() *delegate.Spawner, reconciler func() *reconcile.Reconciler, publicURL func() string) *Handler {
-	return &Handler{tx: tx, ws: ws, ghResolver: ghResolver, spawner: spawner, reconciler: reconciler, publicURL: publicURL}
+func New(tx db.TxRunner, az *authz.Checker, ws *websocket.Hub, ghResolver ghclient.Resolver, spawner func() *delegate.Spawner, reconciler func() *reconcile.Reconciler, publicURL func() string) *Handler {
+	return &Handler{tx: tx, az: az, ws: ws, ghResolver: ghResolver, spawner: spawner, reconciler: reconciler, publicURL: publicURL}
 }
 
 // footerFor is the disclosure footer for content a conversation authored — the
@@ -211,10 +215,13 @@ func requireDeliverableKind(w http.ResponseWriter, art *domain.Deliverable, kind
 	return false
 }
 
-// loadDeliverable fetches a deliverable by id and 404s if missing. It is the shared
-// first step of every deliverable-id-addressed route; the caller then dispatches on
-// art.Kind (pull_request vs review). Returns ok=false (after writing the error
-// response) so callers can `if ...; !ok { return }`.
+// loadDeliverable fetches a deliverable by id under the caller's claims and 404s
+// if missing. It is the first step of every deliverable-id-addressed read, and
+// its RLS read is their visibility gate: a member of the deliverable's team or
+// an org admin sees the row. The caller then dispatches on art.Kind
+// (pull_request vs review). Returns ok=false (after writing the error response)
+// so callers can `if ...; !ok { return }`. A route that acts on the deliverable
+// starts with loadWritableDeliverable instead.
 func (ah *Handler) loadDeliverable(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (art *domain.Deliverable, ok bool) {
 	if err := ah.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -226,6 +233,33 @@ func (ah *Handler) loadDeliverable(w http.ResponseWriter, r *http.Request, orgID
 	}
 	if art == nil {
 		httpx.NotFound(w, "deliverable")
+		return nil, false
+	}
+	return art, true
+}
+
+// loadWritableDeliverable is loadDeliverable for a route that acts on the
+// deliverable. Reading a team's deliverables does not imply acting on them as
+// the team: a viewer of the team and an org admin who is not on it both read
+// the row, and neither may write it (the deliverables write policies require
+// tf.user_can_write_team). Such a caller gets a 403, since they can see the row.
+//
+// It answers before anything else the route checks, and so before any
+// upstream client is resolved: several of these routes write to GitHub before
+// the database write the RLS policies would refuse, and a refusal there would
+// come after the GitHub write had landed.
+func (ah *Handler) loadWritableDeliverable(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (*domain.Deliverable, bool) {
+	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	if !ok {
+		return nil, false
+	}
+	canWrite, err := ah.az.UserCanWriteTeam(r.Context(), userID, orgID, art.TeamID)
+	if err != nil {
+		httpx.InternalError(w, "deliverables", fmt.Errorf("team-write check for deliverable %s: %w", art.ID, err))
+		return nil, false
+	}
+	if !canWrite {
+		httpx.Forbidden(w, "acting on this deliverable requires write access to its team")
 		return nil, false
 	}
 	return art, true
@@ -460,7 +494,7 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -800,7 +834,7 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -947,7 +981,7 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -1064,7 +1098,7 @@ func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}

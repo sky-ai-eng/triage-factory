@@ -796,9 +796,9 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			}
 			return out
 		}
-		team, err := s.f.Stores.Deliverables.ListArtifactMatchesByTeamSystem(ctx, s.f.OrgID, s.f.TeamID, []string{s.pr.ID}, []string{"55"})
+		team, err := s.f.Stores.Deliverables.ListArtifactMatchesByTeam(ctx, s.f.OrgID, s.f.TeamID, []string{s.pr.ID}, []string{"55"})
 		if err != nil {
-			t.Fatalf("ListArtifactMatchesByTeamSystem: %v", err)
+			t.Fatalf("ListArtifactMatchesByTeam: %v", err)
 		}
 		if got, want := ids(team), []string{newerPR, posted, olderPR}; !slices.Equal(got, want) {
 			t.Errorf("team candidates = %v, want %v (newest first, the team's alone)", got, want)
@@ -814,7 +814,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		if err != nil || !slices.Equal(ids(reviewsOnly), []string{posted}) {
 			t.Errorf("review-only candidates = %v, %v; want %s", ids(reviewsOnly), err, posted)
 		}
-		prsOnly, err := s.f.Stores.Deliverables.ListArtifactMatchesByTeamSystem(ctx, s.f.OrgID, s.f.TeamID, []string{s.pr.ID}, nil)
+		prsOnly, err := s.f.Stores.Deliverables.ListArtifactMatchesByTeam(ctx, s.f.OrgID, s.f.TeamID, []string{s.pr.ID}, nil)
 		if err != nil || !slices.Equal(ids(prsOnly), []string{newerPR, olderPR}) {
 			t.Errorf("PR-only candidates = %v, %v; want %s, %s", ids(prsOnly), err, newerPR, olderPR)
 		}

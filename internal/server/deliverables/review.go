@@ -144,7 +144,7 @@ func (ah *Handler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -649,7 +649,7 @@ func (ah *Handler) handleReviewRefresh(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -792,7 +792,7 @@ func (ah *Handler) handleDeliverableCommentUpdate(w http.ResponseWriter, r *http
 	// The resource answers before the payload does, as on every kind-scoped
 	// write here: which deliverable this is decides whether the route applies at
 	// all.
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -872,7 +872,7 @@ func (ah *Handler) handleDeliverableCommentDelete(w http.ResponseWriter, r *http
 	}
 	commentID := r.PathValue("commentId")
 
-	art, ok := ah.loadDeliverable(w, r, orgID, userID, id)
+	art, ok := ah.loadWritableDeliverable(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}

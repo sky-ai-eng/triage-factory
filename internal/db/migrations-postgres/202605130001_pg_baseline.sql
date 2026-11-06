@@ -3030,7 +3030,10 @@ CREATE POLICY deliverables_delete ON public.deliverables FOR DELETE USING (((org
 CREATE POLICY deliverables_insert ON public.deliverables FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY deliverables_select ON public.deliverables FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+-- An org admin reads every team's deliverables, as they read every team's
+-- audit ledger. The write policies keep tf.user_can_write_team: an org admin
+-- may read a team's work but not act on it as the team.
+CREATE POLICY deliverables_select ON public.deliverables FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (tf.user_in_team(team_id) OR tf.user_is_org_admin(org_id))));
 
 
 CREATE POLICY deliverables_update ON public.deliverables FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));

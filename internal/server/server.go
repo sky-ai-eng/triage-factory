@@ -927,7 +927,7 @@ func (s *Server) routes() {
 	spawner := func() *delegate.Spawner { return s.spawner }
 	avatars.New(s.tx).Register(m)
 	blueprints.New(s.tx, s.az, spawner).Register(m)
-	deliverables.New(s.tx, s.ws, s.ghResolver, spawner,
+	deliverables.New(s.tx, s.az, s.ws, s.ghResolver, spawner,
 		func() *reconcile.Reconciler { return s.reconciler },
 		func() string {
 			if s.deployCfg == nil {

@@ -80,8 +80,9 @@ func RequireSettledVerification(verdict string) error {
 // artifact a deliverable is.
 //
 // Mirrors the conversations store for pool/RLS/scan conventions: app pool in
-// Postgres (RLS-active under tf_app, team-scoped via team_id exactly like
-// conversations), the one connection in SQLite. orgID is required on every method
+// Postgres (RLS-active under tf_app, scoped via team_id: a read admits the
+// team's members and the org's admins, a write the team's writers alone), the
+// one connection in SQLite. orgID is required on every method
 // and stays in the WHERE/INSERT clause as defense in depth alongside RLS;
 // SQLite asserts it equals runmode.LocalDefaultOrgID. See TFAC-455.
 type DeliverableStore interface {
@@ -260,8 +261,9 @@ type DeliverableStore interface {
 	// without touching the DB.
 	//
 	// Mirrors ListByConversation's pool/RLS conventions: app pool in Postgres
-	// (RLS-active, so the count is team-scoped exactly like the rows it
-	// counts — a non-member counts zero), the one connection in SQLite.
+	// (RLS-active, so the count is scoped exactly like the rows it counts — a
+	// caller deliverables_select does not admit counts zero), the one
+	// connection in SQLite.
 	// orgID stays bound as defense in depth. Detached deliverables (conversation
 	// purged → conversation_id NULL) never match and are correctly excluded.
 	CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error)
@@ -282,28 +284,22 @@ type DeliverableStore interface {
 	// bound as defense in depth. Detached deliverables (conversation_id NULL) never match.
 	ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Deliverable, error)
 
-	// ListArtifactMatchesByTeamSystem returns teamID's deliverables that can
-	// be the same object as an artifact: its pull_request deliverables about
-	// one of entityIDs and its review deliverables whose external_id is one of
+	// ListArtifactMatchesByTeam returns teamID's deliverables that can be the
+	// same object as an artifact: its pull_request deliverables about one of
+	// entityIDs and its review deliverables whose external_id is one of
 	// reviewIDs (domain.ArtifactDeliverableKeys derives both sets from the
 	// artifacts), newest first (created_at DESC, id DESC), so the match
 	// domain.ArtifactDeliverable finds first is the most recently created.
 	// Both sets empty returns nil without touching the database.
 	//
-	// Admin pool (BYPASSRLS) in Postgres. Its reader is the Usage → Objects
-	// team lens, behind that route's team-admin-or-org-admin gate: an org admin
-	// on no team reads the team's ledger there, and under the deliverables
-	// RLS policy would see its artifacts with none of their deliverables, which
-	// the org lens shows them. org_id and team_id stay bound. Identical to a
+	// App pool in Postgres (RLS-active): deliverables_select admits the
+	// team's members and the org's admins, the same callers the Usage →
+	// Objects team lens admits. org_id and team_id stay bound. Identical to a
 	// plain org read in SQLite.
-	//
-	// TODO(TFAC-1285): once deliverables_select admits org admins, this read
-	// moves to the app pool as ListArtifactMatchesByTeam and the route's gate
-	// stops being its only enforcement.
-	ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
+	ListArtifactMatchesByTeam(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
-	// ListArtifactMatchesByOrgSystem is ListArtifactMatchesByTeamSystem over
-	// every team of the org, for the org lens. Admin pool.
+	// ListArtifactMatchesByOrgSystem is ListArtifactMatchesByTeam over every
+	// team of the org, for the org lens. Admin pool.
 	ListArtifactMatchesByOrgSystem(ctx context.Context, orgID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
 	// ListNonTerminalBySystem returns every deliverable for the org whose
