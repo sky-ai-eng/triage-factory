@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 )
@@ -76,8 +77,10 @@ func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, Pat
 	}
 	var out T
 	if err := json.Unmarshal(raw, &out); err != nil {
-		want, _ := jsonType(reflect.TypeFor[T]())
-		v.Invalid(field, fmt.Sprintf("%s must be %s or null", field, want))
+		var typeErr *json.UnmarshalTypeError
+		errors.As(err, &typeErr)
+		want, _ := jsonType(reflect.TypeFor[T](), typeErr)
+		v.Invalid(field, fmt.Sprintf("%s must be %s, or null", field, want))
 		return zero, patchInvalid
 	}
 	return out, PatchSet

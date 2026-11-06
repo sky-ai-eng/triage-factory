@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -308,7 +309,7 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 			fieldType = typeErr.Type
 		}
 		message := field + " has the wrong type"
-		if want, _ := jsonType(fieldType); want != "" {
+		if want, _ := jsonType(fieldType, typeErr); want != "" {
 			message = field + " must be " + want
 		}
 		WriteErrors(w, http.StatusBadRequest, ErrorItem{
@@ -383,8 +384,10 @@ var textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
 // write it: one is the singular ("a whole number"), many the plural ("whole
 // numbers") an array or object of them is described with. A type that reads
 // itself from text through UnmarshalText takes a string. Both are empty for
-// an interface, or any other type with no one JSON type.
-func jsonType(t reflect.Type) (one, many string) {
+// an interface, or any other type with no one JSON type. refused is the type
+// fault being described, nil for none; where it refused a number for one of
+// the number types in t, that type's noun says why (see refusedNumber).
+func jsonType(t reflect.Type, refused *json.UnmarshalTypeError) (one, many string) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -396,32 +399,38 @@ func jsonType(t reflect.Type) (one, many string) {
 		return "a string", "strings"
 	case reflect.Bool:
 		return "true or false", "booleans"
-	// TODO(TFAC-1334): an integer field, signed or unsigned, also refuses
-	// whole numbers that are out of range or written as 1e3 or 1.0, and these
-	// two cases tell that caller the value is not a whole number.
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return "a whole number", "whole numbers"
+		shift := 64 - t.Bits()
+		why := refusedNumber(t, refused, true, fmt.Sprintf(" from %d to %d", int64(math.MinInt64)>>shift, int64(math.MaxInt64)>>shift))
+		return "a whole number" + why, "whole numbers" + why
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return "a non-negative whole number", "non-negative whole numbers"
+		why := refusedNumber(t, refused, true, fmt.Sprintf(" no greater than %d", uint64(math.MaxUint64)>>(64-t.Bits())))
+		return "a non-negative whole number" + why, "non-negative whole numbers" + why
 	case reflect.Float32, reflect.Float64:
-		return "a number", "numbers"
+		largest := math.MaxFloat64
+		if t.Bits() == 32 {
+			largest = math.MaxFloat32
+		}
+		why := refusedNumber(t, refused, false, fmt.Sprintf(" from %s to %s",
+			strconv.FormatFloat(-largest, 'g', -1, t.Bits()), strconv.FormatFloat(largest, 'g', -1, t.Bits())))
+		return "a number" + why, "numbers" + why
 	case reflect.Slice, reflect.Array:
 		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
 			return "a base64 string", "base64 strings"
 		}
-		if _, elems := jsonType(t.Elem()); elems != "" {
+		if _, elems := jsonType(t.Elem(), refused); elems != "" {
 			return "an array of " + elems, "arrays"
 		}
 		return "an array", "arrays"
 	case reflect.Map:
 		one = "an object"
-		if _, values := jsonType(t.Elem()); values != "" {
+		if _, values := jsonType(t.Elem(), refused); values != "" {
 			one += " of " + values
 		}
 		// An integer key is read from the key's string, and a key that is not
 		// a whole number is a fault on the map.
 		if k := t.Key(); k.Kind() >= reflect.Int && k.Kind() <= reflect.Uintptr && !reflect.PointerTo(k).Implements(textUnmarshalerType) {
-			_, keys := jsonType(k)
+			_, keys := jsonType(k, refused)
 			one += " whose keys are " + keys
 		}
 		return one, "objects"
@@ -429,6 +438,32 @@ func jsonType(t reflect.Type) (one, many string) {
 		return "an object", "objects"
 	}
 	return "", ""
+}
+
+// refusedNumber says why refused turned down a number for t, or nothing when
+// it did not. A number type refuses a JSON number for its range, given as
+// outOfRange. An integer type also refuses one written with a decimal point
+// or an exponent, even when the value is whole (1e3, 1.0), so a literal that
+// is not plain digits breaks that rule instead. A map's integer key is
+// refused as a "number" whatever the key says, so a key that is not a JSON
+// number gets no reason.
+func refusedNumber(t reflect.Type, refused *json.UnmarshalTypeError, integer bool, outOfRange string) string {
+	if refused == nil || refused.Type != t {
+		return ""
+	}
+	lit, ok := strings.CutPrefix(refused.Value, "number ")
+	if !ok || !isJSONNumber(lit) {
+		return ""
+	}
+	if integer && strings.TrimLeft(strings.TrimPrefix(lit, "-"), "0123456789") != "" {
+		return " written without a decimal point or exponent"
+	}
+	return outOfRange
+}
+
+// isJSONNumber reports whether s is a JSON number literal.
+func isJSONNumber(s string) bool {
+	return s != "" && (s[0] == '-' || '0' <= s[0] && s[0] <= '9') && json.Valid([]byte(s))
 }
 
 // embeddedStructField finds the embedded struct field of t whose Go name is
