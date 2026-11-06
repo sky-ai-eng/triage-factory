@@ -13,6 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
@@ -133,13 +135,14 @@ func TestJailLost_TheConversationGoesOnInANewCell(t *testing.T) {
 // TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson: the loss that
 // spends the jail budget does not start another cell. The conversation parks
 // sandbox_lost with a note naming what ended the last jail, its blueprint
-// keeps running, nothing claims it until someone writes, and the toast names
-// the limit a person can raise when the memory ceiling ended the last jail.
+// keeps running, nothing claims it until someone writes, and the person who
+// delegated it is told it waits for them — told, not the org: no toast.
 func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	f := newStallFixture(t, "r-jail-lost-spent", activityTimings{idle: time.Hour})
 	collect := sandboxMemoryMetrics(t)
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
+	rec := notifytest.Record(t)
 
 	reason := "the sandbox reached its 4096 MB memory limit and the kernel ended it"
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
@@ -173,8 +176,15 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	if want := jailLostNote(maxJailLosses, reason); len(notes) != 1 || notes[0] != want {
 		t.Errorf("stop notes = %q, want one: %q", notes, want)
 	}
-	if got := captured.toasts(); len(got) != 1 || !strings.Contains(got[0], "lost 3 times in a row") || !strings.Contains(got[0], "TF_CLAIM_MEMORY_LIMIT_MB") {
-		t.Errorf("toasts = %q, want one saying how many sandboxes were lost and naming TF_CLAIM_MEMORY_LIMIT_MB", got)
+	if got := captured.toasts(); len(got) != 0 {
+		t.Errorf("toasts = %q, want none: the delegator is told by a notification", got)
+	}
+	paused := rec.Open(runmode.LocalDefaultOrgID, kinds.ConversationPaused)
+	if len(paused) != 1 || paused[0].Key != f.conversationID {
+		t.Fatalf("paused notifications = %+v, want one for %s", paused, f.conversationID)
+	}
+	if p := paused[0].Params.(kinds.PausedConversation); p.UserID != runmode.LocalDefaultUserID || p.Reason != domain.ParkReasonSandboxLost {
+		t.Errorf("paused notification = %+v, want the delegator %s told of sandbox_lost", p, runmode.LocalDefaultUserID)
 	}
 	if got := counterAt(t, collect(), "conversations.sandbox_lost_parks",
 		attribute.String("memory_limit", "true"), attribute.String("org.id", runmode.LocalDefaultOrgID)); got != 1 {
@@ -189,13 +199,14 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 // A park that lands nothing is neither counted nor announced. The fence
 // held, so the engagement is not fenced, but the row had settled under it and
 // the park flipped nothing: the conversation is not paused, and an operator
-// alert or an org toast saying it is would send someone after a run that is
-// not waiting.
+// alert or a notification saying it is would send someone after a run that
+// is not waiting.
 func TestJailLost_AParkThatLandsNothingIsNotCountedOrAnnounced(t *testing.T) {
 	f := newStallFixture(t, "r-jail-lost-settled", activityTimings{idle: time.Hour})
 	collect := sandboxMemoryMetrics(t)
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
+	rec := notifytest.Record(t)
 	if _, err := f.database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, domain.StatusFailed, f.conversationID); err != nil {
 		t.Fatalf("settle the conversation: %v", err)
 	}
@@ -224,4 +235,5 @@ func TestJailLost_AParkThatLandsNothingIsNotCountedOrAnnounced(t *testing.T) {
 	if got := captured.toasts(); len(got) != 0 {
 		t.Errorf("toasts = %q, want none for a run that is not paused", got)
 	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
 }

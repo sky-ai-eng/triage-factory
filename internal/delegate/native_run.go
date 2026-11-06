@@ -1058,6 +1058,6 @@ func (s *Spawner) recordNativeResult(
 	}
 	s.updateBreakerCounter(task.ID, triggerType, domain.StatusOpen)
 	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
-	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
+	s.toastDelegator(orgID, creatorUserID, toast.LevelSuccess, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	return engagementDisposition{}
 }

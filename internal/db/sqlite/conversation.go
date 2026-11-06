@@ -1563,6 +1563,50 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	return out, rows.Err()
 }
 
+func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	reasons := domain.ParkReasonsAwaitingPerson()
+	args := make([]any, 0, len(reasons)+1)
+	args = append(args, orgID)
+	for _, r := range reasons {
+		args = append(args, string(r))
+	}
+	// A claim clears park_reason as it takes a row off its park, so a
+	// conversation someone woke leaves the set at its claim. The entity is
+	// outer-joined: its key is display only, and a task that names none still
+	// leaves its delegator waiting.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
+		FROM conversations c
+		JOIN tasks t ON t.id = c.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE c.org_id = ?
+		  AND c.status = 'open'
+		  AND c.park_reason IN (`+strings.TrimRight(strings.Repeat("?, ", len(reasons)), ", ")+`)
+		  AND c.creator_user_id IS NOT NULL
+		  AND c.ended_at IS NULL
+		  AND c.archived_at IS NULL
+		ORDER BY c.id
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ConversationAwaitingPerson
+	for rows.Next() {
+		var a domain.ConversationAwaitingPerson
+		var reason string
+		if err := rows.Scan(&a.ConversationID, &a.CreatorUserID, &reason, &a.EntitySourceID); err != nil {
+			return nil, err
+		}
+		a.ParkReason = domain.ParkReason(reason)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
 	// The eviction sweep reads this immediately before a privileged removal,
 	// and an org that cannot exist here would answer a confident `false` off

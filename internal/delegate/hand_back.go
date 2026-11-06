@@ -18,7 +18,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // handBacks owns this package's hand-back counter. Package-level because a
@@ -138,20 +137,12 @@ func (s *Spawner) leaveOnLostJail(ctx context.Context, park liveParkContext, pri
 	}
 	if !parked {
 		// Nothing was paused: the row settled under the park, or the write
-		// failed and is logged. Saying the run waits for a message, to the
-		// org or to the operator, would send someone after a run that is
-		// not waiting.
+		// failed and is logged. Saying the run waits for a message, to its
+		// delegator or to the operator, would send someone after a run that
+		// is not waiting.
 		return engagementDisposition{}
 	}
 	recordSandboxLostPark(park.orgID, lost.MemoryLimit)
-	if lost.MemoryLimit {
-		toast.Warning(s.wsHub, park.orgID, fmt.Sprintf(
-			"Run %s is paused: its sandbox was lost %d times in a row, the last time at its memory limit. Raise TF_CLAIM_MEMORY_LIMIT_MB if it legitimately needs more, then send a message to continue.",
-			shortConversationID(park.conversationID), losses))
-	} else {
-		toast.Warning(s.wsHub, park.orgID, fmt.Sprintf("Run %s is paused: its sandbox was lost %d times in a row. Send a message to continue.",
-			shortConversationID(park.conversationID), losses))
-	}
 	return engagementDisposition{}
 }
 

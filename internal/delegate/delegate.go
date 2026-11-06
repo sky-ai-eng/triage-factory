@@ -560,12 +560,8 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// and the reactor enqueues each next step (or finalizes). No in-process
 	// for-loop holds the sequencing — blueprint_runs does
 	// (current_step_index), so a crash mid-flight is recoverable.
-	verb := "Blueprint started"
-	if triggerType == "event" {
-		verb = "Auto-fired blueprint"
-	}
-	toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)",
-		verb, truncateToastMsg(blueprint.Name, 60), shortConversationID(blueprintRunID)))
+	s.toastDelegator(orgID, creatorUserID, toast.LevelInfo, fmt.Sprintf("Blueprint started: %s (%s)",
+		truncateToastMsg(blueprint.Name, 60), shortConversationID(blueprintRunID)))
 
 	// The blueprint_run is live → announce the placement the bot claim already
 	// made. This is the only board work a delegation does; nothing in the

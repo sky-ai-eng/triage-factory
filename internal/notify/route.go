@@ -56,12 +56,19 @@ func (routes) TeamLinearRules(teamID, linearTeamID string) Href {
 	return Href{route: teamLinearRulesRoute, teamID: teamID, query: url.Values{"linear_team": {linearTeamID}}}
 }
 
+// RunStation is one conversation's page: its transcript, its verdict, and the
+// composer that sends it a message.
+func (routes) RunStation(conversationID string) Href {
+	return Href{route: runStationRoute, path: map[string]string{"conversationID": conversationID}}
+}
+
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
-// Either may end in the query that opens the right part of the page. A team
-// route is a page about one team: multi mode's address names it with a team
-// query parameter, and local mode's, with one team, names none and carries
-// none of the Href's query, because its one team page reads no parameters.
+// Either may end in the query that opens the right part of the page, and
+// either may hold `:name` segments, which the Href's path fills. A team route
+// is a page about one team: multi mode's address names it with a team query
+// parameter, and local mode's, with one team, names none and carries none of
+// the Href's query, because its one team page reads no parameters.
 type route struct {
 	name  string
 	multi string
@@ -75,6 +82,7 @@ var (
 	triageRoute          = newRoute("triage", "/triage", "/triage")
 	teamJiraRulesRoute   = newTeamRoute("team_jira_rules", "/team?source=jira", "/settings")
 	teamLinearRulesRoute = newTeamRoute("team_linear_rules", "/team?source=linear", "/settings")
+	runStationRoute      = newRoute("run_station", "/runs/:conversationID", "/runs/:conversationID")
 )
 
 // routeTable is every route Routes builds. Renaming a page is an edit here and
@@ -117,7 +125,10 @@ type Href struct {
 	teamID string
 	// query is what a Routes builder names on its page; every value is
 	// required, so one the params left empty refuses the write.
-	query    url.Values
+	query url.Values
+	// path fills the route's `:name` segments; every value is required, like
+	// query's.
+	path     map[string]string
 	external string
 }
 
@@ -157,10 +168,15 @@ func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (
 				return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
 			}
 			page = h.route.local
-			if h.route.team {
-				return page, nil
-			}
-		} else if h.route.team {
+		}
+		page, err := fillPath(h.route.name, page, h.path)
+		if err != nil {
+			return "", err
+		}
+		if local && h.route.team {
+			return page, nil
+		}
+		if !local && h.route.team {
 			if h.teamID == "" {
 				return "", fmt.Errorf("route %s names no team", h.route.name)
 			}
@@ -196,6 +212,30 @@ func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (
 		return u.String(), nil
 	}
 	return "", errors.New("a link needs an address from Routes or External")
+}
+
+// fillPath replaces each `:name` segment of page's path with values[name],
+// escaped as one segment. A segment with no value, or an empty one, refuses
+// the write, as an empty query value does.
+func fillPath(routeName, page string, values map[string]string) (string, error) {
+	path, query, hasQuery := strings.Cut(page, "?")
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		name, ok := strings.CutPrefix(seg, ":")
+		if !ok {
+			continue
+		}
+		v := values[name]
+		if v == "" {
+			return "", fmt.Errorf("route %s: path %s is empty", routeName, name)
+		}
+		segs[i] = url.PathEscape(v)
+	}
+	out := strings.Join(segs, "/")
+	if hasQuery {
+		out += "?" + query
+	}
+	return out, nil
 }
 
 // configuredHosts returns the check an external address passes when it is on

@@ -6,6 +6,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/mergeability"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
@@ -214,6 +215,10 @@ func (a *App) startBrain(term int64) {
 	// deck, a retired repository): no close relation runs for those, so one
 	// sweeper resolves them.
 	go notify.RunClosedEntitySweep(brainCtx, a.stores.Notifications, notify.ClosedEntitySweepInterval)
+	// A delegated run's paused notification opens where the run parks, on
+	// whichever process parked it, and resolves here once the run leaves the
+	// park by any door.
+	go delegate.RunPausedConversationSync(brainCtx, a.stores.Conversations, delegate.DefaultPausedConversationSyncInterval)
 	// Rate-limit reading expiry: deletes every org's readings past their
 	// reset. The route already leaves them out; one sweeper is enough, and
 	// the readings themselves are written by every serving process's flusher

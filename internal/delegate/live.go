@@ -458,6 +458,7 @@ func (s *Spawner) markConversationOpenFlipped(ctx context.Context, park livePark
 		return false, false
 	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")
+	s.noteConversationPaused(park.orgID, park.conversationID)
 	return false, true
 }
 
@@ -498,7 +499,8 @@ func (s *Spawner) parkConversationOpenFlipped(ctx context.Context, park livePark
 	// build cannot keep — the claim gate refuses a parked step under a
 	// finished blueprint until the resume work lands.
 	if !park.reason.Deliberate {
-		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
+		s.toastConversationDelegator(park.orgID, park.conversationID, toast.LevelInfo,
+			fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
 	return false, flipped
 }

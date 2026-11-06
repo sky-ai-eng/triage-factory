@@ -1220,14 +1220,11 @@ func (s *Spawner) processCompletion(
 	} else {
 		s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	}
-	// Toast the terminal state. Success cases auto-hide; a failure shows as an
-	// error toast so the user notices even if they've clicked away from the
-	// runs page.
 	switch status {
 	case domain.StatusOpen:
-		toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
+		s.toastDelegator(orgID, creatorUserID, toast.LevelSuccess, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	case domain.StatusFailed:
-		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortConversationID(conversationID), truncateToastMsg(resultSummary, 160)))
+		s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
 	}
 
 	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by the
