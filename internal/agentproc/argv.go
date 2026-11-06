@@ -15,7 +15,14 @@ import "strconv"
 // whose "allow" hands the question back with no answers attached. A run that
 // needs a decision from a person gets it through the permission prompt or a
 // follow-up message, never a question tool.
-const disallowedTools = "AskUserQuestion"
+//
+// Agent is removed because a subagent inherits every MCP tool its parent
+// holds, the TF tools included, and Claude Code has no way to withhold one
+// from it. stop_blueprint in a subagent's hands would be a tool that cannot do
+// what it says: the subagent's tool batches are not the run's, so its call
+// could never end the run. With no Agent tool there is no subagent to hold it,
+// which is also the shape of a native run.
+const disallowedTools = "AskUserQuestion,Agent"
 
 // settingSources is the --setting-sources value of an SDK spawn: the
 // settings files at the run's cwd, and never the operator's own. Left unset,
