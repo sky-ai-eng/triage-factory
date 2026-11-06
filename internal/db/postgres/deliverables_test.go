@@ -217,7 +217,8 @@ func TestDeliverableStore_Postgres_PendingToReal(t *testing.T) {
 // TestDeliverableStore_Postgres_RLS_TeamScoped pins the production RLS layer:
 // a deliverable scoped to teamA is visible to teamA members (alice, bob) and
 // to an org admin on another team (dana), and invisible to a same-org plain
-// member of a different team (carol).
+// member of a different team (carol). Once teamA is archived the org admin
+// reads nothing either.
 func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -299,6 +300,23 @@ func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("carol path: %v", err)
+	}
+
+	// Archiving teamA hides its deliverables from the org admin as well: the
+	// org-admin arm grants without membership, so it carries the archive check
+	// membership would have.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamA)
+	if err := h.WithUser(t, dana, orgA, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.Get(ctx, orgA, deliverableID)
+		if err != nil {
+			return err
+		}
+		if got != nil {
+			t.Errorf("dana (org admin) Get on an archived team's deliverable = %+v, want nil", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("dana archived path: %v", err)
 	}
 }
 

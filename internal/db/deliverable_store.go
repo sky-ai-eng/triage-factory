@@ -81,8 +81,8 @@ func RequireSettledVerification(verdict string) error {
 //
 // Mirrors the conversations store for pool/RLS/scan conventions: app pool in
 // Postgres (RLS-active under tf_app, scoped via team_id: a read admits the
-// team's members and the org's admins, a write the team's writers alone), the
-// one connection in SQLite. orgID is required on every method
+// team's members and the org's admins while the team is active, a write the
+// team's writers alone), the one connection in SQLite. orgID is required on every method
 // and stays in the WHERE/INSERT clause as defense in depth alongside RLS;
 // SQLite asserts it equals runmode.LocalDefaultOrgID. See TFAC-455.
 type DeliverableStore interface {
@@ -294,8 +294,9 @@ type DeliverableStore interface {
 	//
 	// App pool in Postgres (RLS-active): deliverables_select admits the
 	// team's members and the org's admins, the same callers the Usage →
-	// Objects team lens admits. org_id and team_id stay bound. Identical to a
-	// plain org read in SQLite.
+	// Objects team lens admits, while the team is active; an archived team's
+	// deliverables read as none, like its other team-scoped rows. org_id and
+	// team_id stay bound. Identical to a plain org read in SQLite.
 	ListArtifactMatchesByTeam(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
 	// ListArtifactMatchesByOrgSystem is ListArtifactMatchesByTeam over every
