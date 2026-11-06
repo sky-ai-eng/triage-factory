@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -347,6 +348,28 @@ func TestNewDirectCommand_FiltersInheritedJSCJITKey(t *testing.T) {
 	}
 	if matches[0] != "BUN_JSC_useJIT=0" {
 		t.Errorf("got %q, want BUN_JSC_useJIT=0 (the inherited BUN_JSC_useJIT=1 must be filtered, not left to race the appended default)", matches[0])
+	}
+}
+
+// TestNewDirectCommand_DisablesBackgroundTasks pins that every spawn turns
+// Claude Code's background tasks off, with exactly one entry: an inherited
+// export, whichever way it points, is stripped rather than left to race the
+// appended value.
+func TestNewDirectCommand_DisablesBackgroundTasks(t *testing.T) {
+	t.Setenv(backgroundTasksEnvKey, "0")
+
+	cmd, err := newDirectCommand(context.Background(), RunOptions{}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("newDirectCommand: %v", err)
+	}
+	var matches []string
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, backgroundTasksEnvKey+"=") {
+			matches = append(matches, kv)
+		}
+	}
+	if want := []string{backgroundTasksEnvKey + "=1"}; !slices.Equal(matches, want) {
+		t.Errorf("background-task entries = %v, want %v", matches, want)
 	}
 }
 

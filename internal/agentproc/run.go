@@ -731,8 +731,11 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// launched TF would otherwise hand the agent's `triagefactory exec`
 	// children a marker that makes them fail closed on an absent socket they
 	// were never supposed to have.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar})
+	// backgroundTasksEnvKey is stripped and re-set the same way, so an
+	// operator's export cannot turn background tasks back on.
+	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1")
 	if opts.LocalSandbox != nil {
 		// Re-add the marker the strip above removed, deliberately: this process
 		// is not in a jail, but the child IS, and the marker is what flips the
