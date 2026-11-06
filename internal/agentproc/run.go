@@ -860,12 +860,7 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 				}
 			}
 
-			for _, msg := range messages {
-				if err := sink.OnMessage(msg); err != nil {
-					agentprocLog.Warn("sink on-message failed", "error", err)
-					continue
-				}
-			}
+			deliverMessages(sink, messages)
 
 			if result != nil {
 				return result, nil
@@ -873,10 +868,21 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 		}
 
 		if readErr != nil {
+			deliverMessages(sink, stream.Drain())
 			if readErr == io.EOF {
 				return nil, nil
 			}
 			return nil, readErr
+		}
+	}
+}
+
+// deliverMessages hands each parsed message to the sink in order. A row the
+// sink fails to store is logged and skipped; the stream goes on.
+func deliverMessages(sink Sink, messages []*domain.Message) {
+	for _, msg := range messages {
+		if err := sink.OnMessage(msg); err != nil {
+			agentprocLog.Warn("sink on-message failed", "error", err)
 		}
 	}
 }
