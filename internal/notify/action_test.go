@@ -100,18 +100,27 @@ func TestHref_Render(t *testing.T) {
 		t.Errorf("OrgSettings in local = %q, %v", got, err)
 	}
 	const team = "22222222-2222-4222-8222-222222222222"
-	if got, err := Routes.TeamJiraRules(team).render(org, false, none); err != nil || got != "/orgs/"+org+"/team?source=jira&team="+team {
+	const project = "33333333-3333-4333-8333-333333333333"
+	if got, err := Routes.TeamJiraRules(team, project).render(org, false, none); err != nil || got != "/orgs/"+org+"/team?source=jira&team="+team+"&project="+project {
 		t.Errorf("TeamJiraRules in multi = %q, %v", got, err)
 	}
-	if got, err := Routes.TeamLinearRules(team).render(org, true, none); err != nil || got != "/settings" {
-		t.Errorf("TeamLinearRules in local = %q, %v", got, err)
+	if got, err := Routes.TeamLinearRules(team, "lin-1").render(org, false, none); err != nil || got != "/orgs/"+org+"/team?source=linear&team="+team+"&linear_team=lin-1" {
+		t.Errorf("TeamLinearRules in multi = %q, %v", got, err)
 	}
-	if _, err := Routes.TeamJiraRules("").render(org, false, none); err == nil || !strings.Contains(err.Error(), "names no team") {
+	if got, err := Routes.TeamLinearRules(team, "lin-1").render(org, true, none); err != nil || got != "/settings" {
+		t.Errorf("TeamLinearRules in local = %q, %v; want /settings, which reads no parameters", got, err)
+	}
+	if _, err := Routes.TeamJiraRules("", project).render(org, false, none); err == nil || !strings.Contains(err.Error(), "names no team") {
 		t.Errorf("a team route with no team in multi: err = %v; want it refused", err)
+	}
+	for _, local := range []bool{false, true} {
+		if _, err := Routes.TeamJiraRules(team, "").render(org, local, none); err == nil || !strings.Contains(err.Error(), "query project is empty") {
+			t.Errorf("a team route with no project (local=%v): err = %v; want it refused", local, err)
+		}
 	}
 	// Local mode's one user is every row's recipient, a recipient that names
 	// no team, and its page needs none.
-	if got, err := Routes.TeamJiraRules("").render(org, true, none); err != nil || got != "/settings" {
+	if got, err := Routes.TeamJiraRules("", project).render(org, true, none); err != nil || got != "/settings" {
 		t.Errorf("a team route with no team in local = %q, %v; want /settings", got, err)
 	}
 	multiOnly := Href{route: &route{name: "multi_only", multi: "/org"}}
