@@ -60,12 +60,12 @@ func unreadCounter(t *testing.T) func() map[string]int64 {
 		got := map[string]int64{}
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
-				if m.Name != "messages.unread_at_conclusion" {
+				if m.Name != "conversations.unread_at_conclusion" {
 					continue
 				}
 				sum, ok := m.Data.(metricdata.Sum[int64])
 				if !ok {
-					t.Fatalf("messages.unread_at_conclusion is %T, want an int64 sum", m.Data)
+					t.Fatalf("conversations.unread_at_conclusion is %T, want an int64 sum", m.Data)
 				}
 				for _, dp := range sum.DataPoints {
 					v, _ := dp.Attributes.Value(attribute.Key("reason"))
@@ -160,7 +160,8 @@ func TestWakeForUnreadInput_CountsTheMessageAnAdvanceLeavesUnread(t *testing.T) 
 }
 
 // Dispatcher startup creates every reason's series at zero, so the first
-// message left unread after a restart is a change increase() can see.
+// conversation left with unread messages after a restart is a change
+// increase() can see.
 func TestOpenUnreadAtConclusionSeries_CreatesEachReasonAtZero(t *testing.T) {
 	counted := unreadCounter(t)
 
@@ -214,6 +215,46 @@ func TestWakeForUnreadInput_LeavesAStoppedFollowUpParked(t *testing.T) {
 	}
 }
 
+// TestWakeForUnreadInput_WakesAFollowUpThatParkedIdle: a follow-up on finished
+// work that parks idle, a refused or unrecognized turn for instance, keeps the
+// earlier conclusion stamp, so the claim queue does not take it up. A message
+// that landed during that turn is woken for, as after a verdict.
+func TestWakeForUnreadInput_WakesAFollowUpThatParkedIdle(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	s, database, brID, _, convID := reactorFixture(t, "unread-idle", 1, "", "")
+	markNative(t, database, convID)
+	claimID := holderClaimFor(t, s, org, convID)
+	if _, err := s.conversations.CompleteForClaimSystem(ctx, org, convID, claimID, domain.StatusOpen, 0, 0, 1, "done", "finish", "", ""); err != nil {
+		t.Fatalf("conclude: %v", err)
+	}
+	reactAsTheDispatchDoes(t, s, brID, convID)
+	if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+		t.Fatalf("follow-up: %v", err)
+	}
+	followUpClaim := holderClaimFor(t, s, org, convID)
+	// The engagement drains the follow-up, a second message lands during its
+	// turn, and the turn parks idle.
+	if _, _, _, err := s.pendingInput.Consume(ctx, org, convID); err != nil {
+		t.Fatalf("drain the follow-up: %v", err)
+	}
+	if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "and another")); err != nil {
+		t.Fatalf("queue the second message: %v", err)
+	}
+	if flipped, err := s.conversations.ParkOpenForClaimSystem(ctx, org, convID, followUpClaim, db.ParkIdle()); err != nil || !flipped {
+		t.Fatalf("park the follow-up idle = (%v, %v), want (true, nil)", flipped, err)
+	}
+
+	s.wakeForUnreadInput(ctx, org, convID)
+
+	if st := storedStatus(t, database, convID); st != "" {
+		t.Errorf("stored status = %q, want none — the second message wakes it", st)
+	}
+	if got := pendingRows(t, s, convID); len(got) != 1 || got[0].Content != "and another" {
+		t.Errorf("pending rows = %+v, want the second message queued for the resume", got)
+	}
+}
+
 // TestReplayStrandedRun_WakesForTheMessageTheStopLeftUnread: when the
 // engagement that recorded a stop died before its reactor, the stranded-run
 // replay runs the reactor in its place, and the wake that follows it.
@@ -233,15 +274,11 @@ func TestReplayStrandedRun_WakesForTheMessageTheStopLeftUnread(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt is the SDK half. A
-// person's message steered in while the turn ran is still owed a turn when a
-// stop_blueprint ends it: the driver hands the stop back as the verdict, kills
-// the process rather than letting it drain into the owed turn, and puts the
-// message's row back on the queue. A message the process had already
-// answered stays delivered.
-func TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt(t *testing.T) {
+// stopOwedFixture is a live SDK engagement whose process took two steers, the
+// first of them already answered, and owes a turn to the second.
+func stopOwedFixture(t *testing.T) (*Spawner, *fakeLiveProc, liveParkContext) {
+	t.Helper()
 	org := runmode.LocalDefaultOrgID
-	ctx := context.Background()
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-stop-owed", "sess-stop-owed", "/tmp/wt-stop-owed")
 	claimID := markEngaged(t, database, "r-stop-owed")
@@ -249,33 +286,97 @@ func TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt(t *testing.T) {
 	s.controller = &fakeController{}
 	s.registerProc(org, "r-stop-owed", &agentproc.LiveRun{})
 	for _, text := range []string{"answered", "thanks"} {
-		if err := s.SendMessage(ctx, org, "r-stop-owed", runmode.LocalDefaultUserID, text); err != nil {
+		if err := s.SendMessage(context.Background(), org, "r-stop-owed", runmode.LocalDefaultUserID, text); err != nil {
 			t.Fatalf("steer %q: %v", text, err)
 		}
 	}
-
 	proc := newFakeLiveProc("sess-stop-owed")
 	proc.owe(1)
-	results := make(chan *agentproc.Result, 1)
-	stop := &agentproc.Result{StopReason: "tool_use", Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"}}
-	results <- stop
-	park := liveParkContext{orgID: org, conversationID: "r-stop-owed", claimID: claimID}
+	return s, proc, liveParkContext{orgID: org, conversationID: "r-stop-owed", claimID: claimID}
+}
 
-	out := s.driveLiveConversation(ctx, park, proc, results, nil)
+func stopResult() *agentproc.Result {
+	return &agentproc.Result{StopReason: "tool_use", Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"}}
+}
+
+// TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt is the SDK half. A
+// person's message steered in while the turn ran is still owed a turn when a
+// stop_blueprint ends it: the driver hands the stop back as the verdict,
+// interrupts the owed turn rather than letting a close drain it, closes the
+// process once the interrupt has settled it, and puts the message's row back
+// on the queue. A message the process had already answered stays delivered.
+func TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt(t *testing.T) {
+	s, proc, park := stopOwedFixture(t)
+	results := make(chan *agentproc.Result, 2)
+	proc.onInterrupt = func() {
+		proc.owe(0)
+		results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+	}
+	stop := stopResult()
+	results <- stop
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
 
 	if out.result != stop || out.fenced || out.hibernated {
 		t.Errorf("outcome = %+v, want the stop handed back as the verdict", out)
 	}
-	if !proc.wasKilled() {
-		t.Error("the process was closed, want it killed so it cannot run the owed turn")
+	if proc.interrupts != 1 || !proc.wasClosed() || proc.wasKilled() {
+		t.Errorf("interrupts = %d, closed = %v, killed = %v; want the owed turn interrupted, then a close", proc.interrupts, proc.wasClosed(), proc.wasKilled())
 	}
 	if got := pendingRows(t, s, "r-stop-owed"); len(got) != 1 || got[0].Content != "thanks" {
 		t.Errorf("pending rows = %+v, want only the unanswered message back on the queue", got)
 	}
 }
 
-// TestDriveLiveConversation_AStopWithNothingOwedCloses: with no turn owed the
-// stop closes the process as before and touches no row.
+// TestDriveLiveConversation_AnOwedTurnTheInterruptMissesIsKilled: when the
+// interrupt settles nothing in time, the owed turn would run in a close's
+// drain, so the process is killed, and the message still goes back on the
+// queue.
+func TestDriveLiveConversation_AnOwedTurnTheInterruptMissesIsKilled(t *testing.T) {
+	s, proc, park := stopOwedFixture(t)
+	s.owedTurnAbortWaitOverride = 10 * time.Millisecond
+	results := make(chan *agentproc.Result, 1)
+	results <- stopResult()
+
+	s.driveLiveConversation(context.Background(), park, proc, results, nil)
+
+	if !proc.wasKilled() {
+		t.Error("the process was not killed, want it killed once the interrupt settled nothing")
+	}
+	if got := pendingRows(t, s, "r-stop-owed"); len(got) != 1 || got[0].Content != "thanks" {
+		t.Errorf("pending rows = %+v, want the unanswered message back on the queue", got)
+	}
+}
+
+// TestDriveLiveConversation_ASteerAfterTheChecksKeepsTheTurnEndGoing: a
+// message the process counts after the driver's first look at a finished turn,
+// but before it lets the process go, is seen when it does: the turn it owes
+// runs instead of being drained by a close.
+func TestDriveLiveConversation_ASteerAfterTheChecksKeepsTheTurnEndGoing(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	proc := newFakeLiveProc("sess")
+	reads := 0
+	proc.queuedFn = func() int {
+		reads++
+		if reads == 2 {
+			return 1 // the steer lands between the first check and the let-go
+		}
+		return 0
+	}
+	results := make(chan *agentproc.Result, 2)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "Done, I think."}
+	answered := &agentproc.Result{StopReason: "end_turn", Result: "Read your message."}
+	results <- answered
+
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
+
+	if out.result != answered {
+		t.Errorf("result = %+v, want the turn the late steer produced", out.result)
+	}
+}
+
+// TestDriveLiveConversation_AStopWithNothingOwedCloses: with no turn owed a
+// stop closes the process gracefully, with no interrupt and no kill.
 func TestDriveLiveConversation_AStopWithNothingOwedCloses(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
@@ -284,8 +385,8 @@ func TestDriveLiveConversation_AStopWithNothingOwedCloses(t *testing.T) {
 
 	s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
 
-	if !proc.wasClosed() || proc.wasKilled() {
-		t.Errorf("closed = %v, killed = %v; want a graceful close", proc.wasClosed(), proc.wasKilled())
+	if !proc.wasClosed() || proc.wasKilled() || proc.interrupts != 0 {
+		t.Errorf("closed = %v, killed = %v, interrupts = %d; want a graceful close", proc.wasClosed(), proc.wasKilled(), proc.interrupts)
 	}
 }
 
@@ -309,9 +410,7 @@ func TestSendLog_OwedSteersAreTheNewestSendsThatArePeoples(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &sendLog{rows: tc.rows}
-			proc := newFakeLiveProc("sess")
-			proc.owe(tc.owed)
-			got := l.owedSteers(proc)
+			got := l.owedSteers(tc.owed)
 			if len(got) != len(tc.want) {
 				t.Fatalf("owedSteers = %v, want %v", got, tc.want)
 			}

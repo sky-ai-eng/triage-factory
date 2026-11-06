@@ -41,8 +41,10 @@ func unreadAtConclusionReasons() []string {
 	return reasons
 }
 
-// unreadAtConclusion owns the counter of people's messages left unread on a
-// concluded conversation. Package-level and swapped atomically for the reason
+// unreadAtConclusion owns the counter of concluded conversations a wake found
+// holding a person's unread messages and could not resume. It counts the
+// conversation once per wake that finds it, however many messages are
+// waiting. Package-level and swapped atomically for the reason
 // workspaceCheckpoints is.
 var unreadAtConclusion atomic.Pointer[unreadAtConclusionStats]
 
@@ -58,8 +60,8 @@ type unreadAtConclusionStats struct {
 // error can only be a programmer error, and the API hands back a usable no-op
 // alongside it, so it is logged rather than propagated.
 func newUnreadAtConclusionStats(mp metric.MeterProvider) *unreadAtConclusionStats {
-	counter, err := mp.Meter("internal/delegate").Int64Counter("messages.unread_at_conclusion",
-		metric.WithDescription("People's messages left unread on a concluded conversation that could not be woken for them, by the reason the wake was refused."))
+	counter, err := mp.Meter("internal/delegate").Int64Counter("conversations.unread_at_conclusion",
+		metric.WithDescription("Concluded conversations a wake found holding a person's unread messages and could not resume, by the reason the wake was refused."))
 	if err != nil {
 		delegateLog.Warn("unread-at-conclusion counter setup failed", "error", err)
 	}
@@ -67,9 +69,9 @@ func newUnreadAtConclusionStats(mp metric.MeterProvider) *unreadAtConclusionStat
 }
 
 // OpenUnreadAtConclusionSeries creates every reason's series at zero, so the
-// first message left unread after a restart is a change increase() can see.
-// Called at dispatcher startup, after telemetry.Init, for the reason
-// OpenWorkspaceCheckpointSeries is.
+// first conversation left with unread messages after a restart is a change
+// increase() can see. Called at dispatcher startup, after telemetry.Init, for
+// the reason OpenWorkspaceCheckpointSeries is.
 func OpenUnreadAtConclusionSeries() {
 	stats := unreadAtConclusion.Load()
 	if stats == nil || stats.stranded == nil {

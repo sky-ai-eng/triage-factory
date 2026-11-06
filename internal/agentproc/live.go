@@ -154,6 +154,12 @@ type LiveRun struct {
 	done      chan struct{} // closed when the reader loop exits
 	ready     chan struct{} // closed when the wrapper emits control/ready
 	readyOnce sync.Once
+	// opened is closed once the opening message has been written or has
+	// failed to be. Every other send waits for it, so the process answers
+	// its opening first and the turns it owes are always its newest sends.
+	// Nil when the run has no opening (and in fixtures), which waits for
+	// nothing.
+	opened chan struct{}
 
 	// stream is the reader loop's parser, constructed here rather than
 	// inside the loop so Send can mark when a user message goes out. A run
@@ -309,12 +315,18 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	var opening func() error
 	switch {
 	case len(opts.OpeningBlocks) > 0:
-		opening = func() error { return l.SendBlocks(ctx, opts.OpeningBlocks) }
+		opening = func() error {
+			return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "blocks": opts.OpeningBlocks})
+		}
 	case opts.Message != "":
-		opening = func() error { return l.Send(ctx, opts.Message) }
+		opening = func() error {
+			return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "text": opts.Message})
+		}
 	}
 	if opening != nil {
+		l.opened = make(chan struct{})
 		go func() {
+			defer close(l.opened)
 			if err := opening(); err != nil {
 				agentprocLog.Error("initial message send failed", "error", err)
 				if opts.OnOpeningUnsent != nil {
@@ -328,10 +340,30 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 }
 
 // Send delivers a user message to the agent. It blocks until the wrapper
-// has signaled readiness (or the run finishes / ctx cancels first), and
-// refuses with ErrRunClosing once Close has begun.
+// has signaled readiness and the opening message has gone out (or the run
+// finishes / ctx cancels first), and refuses with ErrRunClosing once Close
+// has begun.
 func (l *LiveRun) Send(ctx context.Context, text string) error {
+	if err := l.awaitOpening(ctx); err != nil {
+		return err
+	}
 	return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "text": text})
+}
+
+// awaitOpening blocks until the opening message has been written, so a
+// message sent while the process starts never overtakes it.
+func (l *LiveRun) awaitOpening(ctx context.Context) error {
+	if l.opened == nil {
+		return nil
+	}
+	select {
+	case <-l.opened:
+		return nil
+	case <-l.done:
+		return fmt.Errorf("live run finished before send: %w", l.Err())
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // SendBlocks delivers a user message whose content is a block array rather
@@ -345,6 +377,9 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 func (l *LiveRun) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
 	if len(blocks) == 0 {
 		return errors.New("send blocks: no content blocks")
+	}
+	if err := l.awaitOpening(ctx); err != nil {
+		return err
 	}
 	return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "blocks": blocks})
 }

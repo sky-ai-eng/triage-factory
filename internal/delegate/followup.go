@@ -634,13 +634,19 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 // is also what keeps the claim this wake makes from overlapping the cleanup
 // of the engagement that concluded.
 //
-// Only a conversation whose latest disposition is a verdict is woken. One
-// parked since (a follow-up a person or TF stopped keeps its earlier
-// conclusion stamp) leaves its unread input for the next message, as any
-// stopped conversation does, and one parked with no verdict is claimable by
-// the queue without a wake.
+// It wakes a conversation whose latest disposition is its verdict, or an idle
+// park since: a follow-up on finished work keeps the earlier conclusion stamp
+// when it parks, which keeps it out of the claim queue too, and a message
+// that landed during the turn it parked on would otherwise wait for the next
+// one. An idle park always follows a drain in its engagement, so the claim
+// this makes reads the message first, and a second idle park has nothing left
+// to wake for. Every other park reason is left alone: a stop is a person's or
+// TF's decision the wake must not undo, and a park that waits for a person
+// after its retries are spent would only be retried into the same park. A
+// conversation parked with no verdict at all is claimable by the queue
+// without a wake.
 //
-// A message the wake has to leave unread is counted by why
+// A conversation the wake has to leave with unread messages is counted by why
 // (recordUnreadAtConclusion). The common reason is the advance: a message that
 // lands after a non-final step's last model call but before its conclusion is
 // recorded, which the reactor's advance then ends the conversation over.
@@ -657,7 +663,7 @@ func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID 
 		}
 		return
 	}
-	if !conv.Concluded() || conv.ParkReason != "" {
+	if !conv.Concluded() || (conv.ParkReason != "" && conv.ParkReason != domain.ParkReasonIdle) {
 		return
 	}
 	_, userID, ok, err := s.pendingInput.Peek(ctx, orgID, conversationID)

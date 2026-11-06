@@ -255,21 +255,19 @@ type liveRunHandle struct {
 // sends one turn each, in order, so the turns it still owes are its newest
 // sends, and the log says which of those were people's messages and where
 // their rows are. Its lock is held across each send and the recording of its
-// row, and taken by the driver to read the owed sends, so that read never
-// lands between a send the process counted and the row that records it.
+// row, and by the driver while it decides how to end the process
+// (letGoAfterTurn), so that decision never lands between a send the process
+// counted and the row that records it.
 type sendLog struct {
 	mu   sync.Mutex
 	rows []int
 }
 
-// owedSteers returns the rows of the people's messages among the sends proc
-// still owes a turn, oldest first. It holds the lock for the read, so every
-// send proc has counted has its entry by then. Called on a process that can
-// take no more sends, so the count it reads is final.
-func (l *sendLog) owedSteers(proc liveProc) []int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	owed := min(proc.QueuedTurns(), len(l.rows))
+// owedSteers returns the rows of the people's messages among the newest owed
+// sends, oldest first. The caller holds the lock, and read owed under it, so
+// every send the process has counted has its entry.
+func (l *sendLog) owedSteers(owed int) []int {
+	owed = min(owed, len(l.rows))
 	var rows []int
 	for _, id := range l.rows[len(l.rows)-owed:] {
 		if id != 0 {

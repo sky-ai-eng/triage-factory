@@ -143,6 +143,39 @@ func TestLiveRunKill_SkipsTheDrain(t *testing.T) {
 	}
 }
 
+// TestLiveRunSend_WaitsForTheOpening: a message sent while the process starts
+// is written only after the opening, so the process answers the opening first
+// and the turns it owes are always its newest sends.
+func TestLiveRunSend_WaitsForTheOpening(t *testing.T) {
+	stdin := &recordingWriteCloser{}
+	lr := &LiveRun{
+		stdin:  stdin,
+		done:   make(chan struct{}),
+		ready:  make(chan struct{}),
+		opened: make(chan struct{}),
+		stream: NewStreamState(),
+	}
+	close(lr.ready)
+	sent := make(chan error, 1)
+	go func() { sent <- lr.Send(context.Background(), "steer") }()
+
+	select {
+	case err := <-sent:
+		t.Fatalf("Send returned %v before the opening went out, want it to wait", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if len(stdin.written) != 0 {
+		t.Fatalf("wrote %q before the opening, want nothing", stdin.written)
+	}
+	close(lr.opened)
+	if err := <-sent; err != nil {
+		t.Fatalf("Send after the opening = %v, want nil", err)
+	}
+	if !strings.Contains(string(stdin.written), `"steer"`) {
+		t.Errorf("wrote %q, want the steer", stdin.written)
+	}
+}
+
 // TestConsumeStreamInteractive_InterruptMarksResult pins the reader-side
 // interrupt labeling: the wrapper's control/interrupted ack marks the NEXT
 // result as Interrupted (the SDK has no native subtype for interrupts — the

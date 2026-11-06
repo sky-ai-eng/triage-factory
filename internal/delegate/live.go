@@ -38,8 +38,8 @@ import (
 // message into the same live process (the artifact nudge, see
 // driveLiveConversation); QueuedTurns is how many messages sent into it are
 // still unanswered, which at a turn boundary is whether it owes another turn.
-// Close lets the process drain what it owes before it exits, and Kill ends it
-// without the drain.
+// Close lets the process drain what it owes before it exits, Kill ends it
+// without the drain, and Interrupt aborts the turn it is running.
 type liveProc interface {
 	Done() <-chan struct{}
 	Result() *agentproc.Result
@@ -50,6 +50,7 @@ type liveProc interface {
 	QueuedTurns() int
 	Close() error
 	Kill() error
+	Interrupt(ctx context.Context) error
 }
 
 // liveParkContext carries the identity a park needs to snapshot the
@@ -359,28 +360,13 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					}
 				}
 			}
-			if r.Terminal != nil && proc.QueuedTurns() > 0 {
-				// A stop_blueprint ended a turn a person's message was queued
-				// behind. The stop is the verdict and stands, and the message
-				// is read on a resume, as if it had arrived just after the
-				// stop: its row goes back on the queue, and the wake that
-				// follows the blueprint's reaction to the verdict delivers it
-				// (wakeForUnreadInput). Killed rather than closed, because a
-				// closing process drains what it owes, and the turn it would
-				// run for the message belongs to that resume.
-				_ = proc.Kill()
-				if s.requeueOwedSteers(ctx, park, proc) {
-					return liveOutcome{fenced: true, costUSD: processSpend(proc)}
-				}
-				return liveOutcome{result: r}
+			// The step's verdict, or a turn processCompletion parks. The
+			// process is let go of before the result is handed back, so the
+			// row never reads open while a process that could still write to
+			// it is alive.
+			if out, goOn := s.letGoAfterTurn(ctx, park, proc, results, r); !goOn {
+				return out
 			}
-			// The step's verdict, or a turn processCompletion parks. Close the
-			// process (freeing the session) and hand the result back; the
-			// status flips only once the process is gone — so the row never
-			// reads open while a process that could still write to it is
-			// alive.
-			_ = proc.Close()
-			return liveOutcome{result: r}
 
 		case <-proc.Done():
 			// The process exited on its own (crash, or a Close from elsewhere).
@@ -424,24 +410,110 @@ func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc live
 	})
 }
 
-// requeueOwedSteers puts the people's messages a stopped process still owed a
-// turn back on the conversation's pending-input queue, where the wake after
-// the blueprint's reaction finds them (wakeForUnreadInput). Their rows were
-// written delivered when the process took them, and it never answered them.
+// letGoAfterTurn ends the process behind a turn that ends the engagement: the
+// step's verdict, or a turn processCompletion parks. goOn reports instead that
+// a person's message arrived after the driver's earlier checks, so the turn the
+// process owes it is the engagement's next one.
 //
-// The process is dead by the time this runs, so the turns it owes are final,
-// and the send log says which of them were people's. The flip goes through the
-// claim fence; fenced is true when it was refused, and the caller then records
-// nothing, as for every other refused write. Any other failure is logged and
-// the conclusion goes ahead: the stop's verdict is not worth losing over a
-// message that is still on the transcript for a person to send again.
-func (s *Spawner) requeueOwedSteers(ctx context.Context, park liveParkContext, proc liveProc) (fenced bool) {
+// The decision and the ending happen under the send log, which a steer holds
+// across its send. A steer the process counted after those checks is seen
+// here, and none is counted after the decision: the log stays held until Close
+// or Kill has made the process refuse sends.
+//
+// With nothing owed the process is closed. A turn the model ended with a
+// message owed goes on, as the check above it would have had it. A
+// stop_blueprint with messages owed stands as the verdict, and the messages
+// are read on a resume, as if they had arrived just after the stop: their rows
+// go back on the queue (requeueSteers), and the wake that follows the
+// blueprint's reaction delivers them (wakeForUnreadInput). The process must
+// not answer them first, so its owed turns are stopped rather than drained
+// (stopOwedTurns).
+func (s *Spawner) letGoAfterTurn(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, r *agentproc.Result) (out liveOutcome, goOn bool) {
 	h := s.getProc(park.conversationID)
-	if h == nil || s.conversations == nil {
-		return false
+	if h != nil {
+		h.sends.mu.Lock()
+		defer h.sends.mu.Unlock()
 	}
-	rows := h.sends.owedSteers(proc)
-	if len(rows) == 0 {
+	owed := proc.QueuedTurns()
+	switch {
+	case owed == 0:
+		_ = proc.Close()
+		return liveOutcome{result: r}, false
+	case r.Terminal == nil:
+		return liveOutcome{}, true
+	}
+	var rows []int
+	if h != nil {
+		rows = h.sends.owedSteers(owed)
+	}
+	s.stopOwedTurns(ctx, proc, results)
+	if s.requeueSteers(ctx, park, rows) {
+		return liveOutcome{fenced: true, costUSD: processSpend(proc)}, false
+	}
+	return liveOutcome{result: r}, false
+}
+
+// owedTurnAbortWait bounds how long stopOwedTurns waits for its interrupts to
+// abort the turns a process owes. An abort lands within milliseconds of the
+// interrupt, while a turn the interrupt missed runs for as long as this, so it
+// is short.
+const owedTurnAbortWait = 500 * time.Millisecond
+
+// stopOwedTurns ends a process that still owes turns without letting it run
+// them, since closing it would drain them, tools included.
+//
+// Claude Code starts a queued message's turn as soon as the previous turn
+// ends, so the first owed turn is usually under way by now, and an interrupt
+// aborts it. Each owed turn is interrupted as the one before it settles, and
+// once none is owed the process is closed, which lets Claude Code write out
+// the session the resume continues. An owed turn the interrupts have not
+// settled within owedTurnAbortWait (a message Claude Code had taken for its
+// next turn but not yet started) would run in the close's drain, so the
+// process is killed instead, losing whatever of its session Claude Code had
+// not yet written.
+//
+// The session may hold the messages of the aborted turns, and the resume
+// delivers them again, so the model can read one twice. A duplicate is the
+// lesser fault: the alternative is a message the model never reads.
+func (s *Spawner) stopOwedTurns(ctx context.Context, proc liveProc, results <-chan *agentproc.Result) {
+	wait := owedTurnAbortWait
+	if s.owedTurnAbortWaitOverride > 0 {
+		wait = s.owedTurnAbortWaitOverride
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for proc.QueuedTurns() > 0 {
+		if err := proc.Interrupt(ctx); err != nil {
+			_ = proc.Kill()
+			return
+		}
+		select {
+		case <-results:
+		case <-proc.Done():
+			return
+		case <-ctx.Done():
+			_ = proc.Kill()
+			return
+		case <-deadline.C:
+			_ = proc.Kill()
+			return
+		}
+	}
+	_ = proc.Close()
+}
+
+// requeueSteers puts the people's messages a stopped process owed a turn back
+// on the conversation's pending-input queue, where the wake after the
+// blueprint's reaction finds them (wakeForUnreadInput). Their rows were written
+// delivered when the process took them, and it never answered them.
+//
+// The flip goes through the claim fence; fenced is true when it was refused,
+// and the caller then records nothing, as for every other refused write. Any
+// other failure is logged and the conclusion goes ahead: the stop's verdict is
+// not worth losing over a message that is still on the transcript for a
+// person to send again.
+func (s *Spawner) requeueSteers(ctx context.Context, park liveParkContext, rows []int) (fenced bool) {
+	if len(rows) == 0 || s.conversations == nil {
 		return false
 	}
 	err := s.conversations.RequeueInputForClaimSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID, rows)

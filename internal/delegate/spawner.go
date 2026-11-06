@@ -101,6 +101,9 @@ type Spawner struct {
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout.
 	awaitingCredentialsTimeoutOverride time.Duration
+	// owedTurnAbortWaitOverride overrides owedTurnAbortWait when > 0, so a
+	// test of an interrupt that settles nothing does not wait it out.
+	owedTurnAbortWaitOverride time.Duration
 	// awaitingCredentialsPollInterval overrides the package default poll
 	// cadence when > 0, same override shape.
 	awaitingCredentialsPollIntervalOverride time.Duration

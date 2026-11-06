@@ -41,6 +41,13 @@ type fakeLiveProc struct {
 	// what the world looks like at the moment the driver lets go of the
 	// process — the park must not have landed yet.
 	onClose func()
+	// queuedFn, when set, answers QueuedTurns in place of queued, so a test
+	// can model a count that moves between two reads.
+	queuedFn func() int
+	// interrupts counts Interrupt calls, and onInterrupt fires on each so a
+	// test can feed the result of the turn the interrupt aborted.
+	interrupts  int
+	onInterrupt func()
 }
 
 func newFakeLiveProc(sessionID string) *fakeLiveProc {
@@ -52,7 +59,26 @@ func (f *fakeLiveProc) SessionID() string         { return f.sessionID }
 func (f *fakeLiveProc) Stderr() string            { return "" }
 func (f *fakeLiveProc) Result() *agentproc.Result { f.mu.Lock(); defer f.mu.Unlock(); return f.result }
 func (f *fakeLiveProc) Err() error                { f.mu.Lock(); defer f.mu.Unlock(); return f.err }
-func (f *fakeLiveProc) QueuedTurns() int          { f.mu.Lock(); defer f.mu.Unlock(); return f.queued }
+func (f *fakeLiveProc) QueuedTurns() int {
+	f.mu.Lock()
+	fn, n := f.queuedFn, f.queued
+	f.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return n
+}
+
+func (f *fakeLiveProc) Interrupt(context.Context) error {
+	f.mu.Lock()
+	f.interrupts++
+	hook := f.onInterrupt
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return nil
+}
 
 // owe stages n turns the process still has to run, the reading a real
 // process gives while a steered message is queued behind the current turn.
