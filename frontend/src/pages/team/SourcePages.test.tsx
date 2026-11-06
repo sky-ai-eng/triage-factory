@@ -775,6 +775,72 @@ describe('Jira source page', () => {
     expect(statusReads).toEqual([`${JIRA}/10010/statuses/list`, `${JIRA}/10020/statuses/list`])
   })
 
+  /** The strip's selected key. */
+  const selectedKey = () =>
+    document.querySelector('.sp-projkey[aria-selected="true"]')?.textContent ?? null
+
+  it('shows the project the URL names, and a pick moves the URL', async () => {
+    const fetchMock = stub(SETTINGS)
+    const onShowProject = vi.fn()
+    const at = (id: string) => (
+      <JiraSource {...BODY} linkedProjectId={id} onShowProject={onShowProject} />
+    )
+    const view = render(at('reg-SKY'))
+
+    // SKY is second in the strip, so the first board drawn being SKY's is the
+    // URL's doing — and PLAT's statuses are never read for a board nobody saw.
+    await waitFor(() => expect(screen.getByText(/not armed yet/)).toBeInTheDocument())
+    expect(selectedKey()).toBe('SKY')
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
+    expect(fetchMock.mock.calls.map((c) => String(c[0])).filter(isStatusRead)).toEqual([
+      `${JIRA}/10020/statuses/list`,
+    ])
+
+    fireEvent.click(screen.getByRole('tab', { name: 'PLAT' }))
+    expect(onShowProject).toHaveBeenLastCalledWith('reg-PLAT')
+    view.rerender(at('reg-PLAT'))
+    await waitFor(() => expect(selectedKey()).toBe('PLAT'))
+
+    // A link followed after that pick decides the board, not the pick.
+    view.rerender(at('reg-SKY'))
+    await waitFor(() => expect(selectedKey()).toBe('SKY'))
+  })
+
+  it('says so while the URL names a project the team does not watch', async () => {
+    stub(SETTINGS)
+    const onShowProject = vi.fn()
+    const at = (id: string) => (
+      <JiraSource {...BODY} linkedProjectId={id} onShowProject={onShowProject} />
+    )
+    const view = render(at('reg-GONE'))
+    const missed = 'The project this link is for isn’t one this team watches.'
+    expect(await screen.findByText(missed)).toBeInTheDocument()
+    // The board drawn instead is the first, and the strip names it.
+    expect(selectedKey()).toBe('PLAT')
+
+    fireEvent.click(screen.getByRole('tab', { name: 'SKY' }))
+    expect(onShowProject).toHaveBeenLastCalledWith('reg-SKY')
+    view.rerender(at('reg-SKY'))
+    await waitFor(() => expect(screen.queryByText(missed)).toBeNull())
+  })
+
+  it('takes the project out of the URL when it is unwatched here', async () => {
+    const fetchMock = stub(SETTINGS)
+    const onShowProject = vi.fn()
+    render(<JiraSource {...BODY} linkedProjectId="reg-SKY" onShowProject={onShowProject} />)
+    await waitFor(() => expect(screen.getByText('Skyworks')).toBeInTheDocument())
+
+    commitVerb('Skyworks', /^Stop watching/, 1_200)
+    expect(onShowProject).toHaveBeenLastCalledWith(null)
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          ([, init]) => (init as RequestInit | undefined)?.method === 'PUT',
+        ),
+      ).toHaveLength(1),
+    )
+  })
+
   it('lists the catalog with names, the watched projects first', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
@@ -1304,6 +1370,45 @@ describe('Linear source page', () => {
       `${LINEAR}/${ENG}/states/list`,
       `${LINEAR}/${OPS}/states/list`,
     ])
+  })
+
+  it('shows the Linear team the URL names, and a pick moves the URL', async () => {
+    const fetchMock = stub(BOTH)
+    const onShowTeam = vi.fn()
+    const at = (id: string) => <LinearSource {...BODY} linkedTeamId={id} onShowTeam={onShowTeam} />
+    const view = render(at(OPS))
+    const selectedKey = () =>
+      document.querySelector('.sp-projkey[aria-selected="true"]')?.textContent ?? null
+
+    await waitFor(() => expect(screen.getByText('Queued')).toBeInTheDocument())
+    expect(selectedKey()).toBe('OPS')
+    expect(urls(fetchMock).filter((u) => u.endsWith('/states/list'))).toEqual([
+      `${LINEAR}/${OPS}/states/list`,
+    ])
+
+    fireEvent.click(screen.getByRole('tab', { name: 'ENG' }))
+    expect(onShowTeam).toHaveBeenLastCalledWith(ENG)
+    view.rerender(at(ENG))
+    await waitFor(() => expect(screen.getByText('Duplicate')).toBeInTheDocument())
+    expect(selectedKey()).toBe('ENG')
+
+    // A link followed after that pick decides the board, not the pick.
+    view.rerender(at(OPS))
+    await waitFor(() => expect(selectedKey()).toBe('OPS'))
+  })
+
+  it('says so while the URL names a Linear team the team does not watch', async () => {
+    stub(BOTH)
+    const onShowTeam = vi.fn()
+    const at = (id: string) => <LinearSource {...BODY} linkedTeamId={id} onShowTeam={onShowTeam} />
+    const view = render(at('team-gone'))
+    const missed = 'The Linear team this link is for isn’t one this team watches.'
+    expect(await screen.findByText(missed)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OPS' }))
+    expect(onShowTeam).toHaveBeenLastCalledWith(OPS)
+    view.rerender(at(OPS))
+    await waitFor(() => expect(screen.queryByText(missed)).toBeNull())
   })
 
   it('saves a board gesture as the four rules, state ids on the wire', async () => {

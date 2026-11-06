@@ -3,6 +3,7 @@ package httpx
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 )
 
 // The PATCH field vocabulary. A partial update has to distinguish three things
@@ -35,23 +36,23 @@ const (
 
 // PatchString reads a `string | null` PATCH field.
 func PatchString(v *Validation, raw json.RawMessage, field string) (string, PatchState) {
-	return patchValue[string](v, raw, field, "a string")
+	return patchValue[string](v, raw, field)
 }
 
 // PatchBool reads a `bool | null` PATCH field.
 func PatchBool(v *Validation, raw json.RawMessage, field string) (bool, PatchState) {
-	return patchValue[bool](v, raw, field, "true or false")
+	return patchValue[bool](v, raw, field)
 }
 
 // PatchInt reads an `integer | null` PATCH field. A fractional number is a
 // type fault, not a silent truncation.
 func PatchInt(v *Validation, raw json.RawMessage, field string) (int, PatchState) {
-	return patchValue[int](v, raw, field, "a whole number")
+	return patchValue[int](v, raw, field)
 }
 
 // PatchFloat reads a `number | null` PATCH field.
 func PatchFloat(v *Validation, raw json.RawMessage, field string) (float64, PatchState) {
-	return patchValue[float64](v, raw, field, "a number")
+	return patchValue[float64](v, raw, field)
 }
 
 // PatchStrings reads a `[]string | null` PATCH field. The list IS the value —
@@ -59,13 +60,13 @@ func PatchFloat(v *Validation, raw json.RawMessage, field string) (float64, Patc
 // what the body named, empty array included; whether an empty one is legal is
 // the field's own question, not this reader's.
 func PatchStrings(v *Validation, raw json.RawMessage, field string) ([]string, PatchState) {
-	return patchValue[[]string](v, raw, field, "an array of strings")
+	return patchValue[[]string](v, raw, field)
 }
 
 // patchValue is the shared body of the readers above: absent stays absent, the
 // literal null clears, and anything else must decode as T or it's a 400 naming
-// the field.
-func patchValue[T any](v *Validation, raw json.RawMessage, field, want string) (T, PatchState) {
+// the field, in the words the strict body decode uses for the same fault.
+func patchValue[T any](v *Validation, raw json.RawMessage, field string) (T, PatchState) {
 	var zero T
 	if raw == nil {
 		return zero, PatchAbsent
@@ -75,6 +76,7 @@ func patchValue[T any](v *Validation, raw json.RawMessage, field, want string) (
 	}
 	var out T
 	if err := json.Unmarshal(raw, &out); err != nil {
+		want, _ := jsonType(reflect.TypeFor[T]())
 		v.Invalid(field, fmt.Sprintf("%s must be %s or null", field, want))
 		return zero, patchInvalid
 	}

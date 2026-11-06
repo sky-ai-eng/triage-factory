@@ -158,9 +158,8 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 // lists and their facets
 // --------------------------------------------------------------------
 
-// notificationListRequest is the body of both lists, POST
-// /api/me/notifications/list and POST /api/orgs/{org_id}/notifications/list.
-// An absent filter does not filter. A present one filters by exactly its
+// notificationFilterRequest is the filters both lists and both facets nodes
+// take. An absent filter does not filter. A present one filters by exactly its
 // value, so an empty list or an empty string is refused rather than read as
 // "no filter", which would answer a wider question than the caller asked.
 // search is the exception: as on every list, it is trimmed, and empty after
@@ -170,19 +169,7 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 //   - scope_in, role_in, team_id_in: the audience filters. A user row has no
 //     role and no team, so role_in or team_id_in leaves it out. The
 //     by_audience facet's values each name the filters that select them.
-//   - sort_key: db.NotificationListSortKeys. Absent is the default order,
-//     priority then the latest escalation, and there is no "default" value
-//     to send, so an empty string is refused. sort_dir is its direction,
-//     the key's own (db.NotificationSortDefaultDir) when absent, and is
-//     refused without a key: the default order has no direction to flip.
-//
-// The filters are spelled out here and in notificationFacetsRequest rather
-// than embedded from one struct: encoding/json names a type fault inside an
-// embedded struct by the struct's Go name, which would reach the error's
-// field.
-// TODO(TFAC-1255): embed one shared filter struct once the decode error
-// names the JSON field.
-type notificationListRequest struct {
+type notificationFilterRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
 	Unread     *bool    `json:"unread"`
@@ -191,18 +178,22 @@ type notificationListRequest struct {
 	RoleIn     []string `json:"role_in"`
 	TeamIDIn   []string `json:"team_id_in"`
 	Search     string   `json:"search"`
-	SortKey    *string  `json:"sort_key"`
-	SortDir    *string  `json:"sort_dir"`
-
-	httpx.PageRequest
 }
 
-func (r notificationListRequest) filters() notificationFilterFields {
-	return notificationFilterFields{
-		Status: r.Status, Dismissed: r.Dismissed, Unread: r.Unread,
-		PriorityIn: r.PriorityIn, ScopeIn: r.ScopeIn, RoleIn: r.RoleIn, TeamIDIn: r.TeamIDIn,
-		Search: r.Search,
-	}
+// notificationListRequest is the body of both lists, POST
+// /api/me/notifications/list and POST /api/orgs/{org_id}/notifications/list.
+//
+//   - sort_key: db.NotificationListSortKeys. Absent is the default order,
+//     priority then the latest escalation, and there is no "default" value
+//     to send, so an empty string is refused. sort_dir is its direction,
+//     the key's own (db.NotificationSortDefaultDir) when absent, and is
+//     refused without a key: the default order has no direction to flip.
+type notificationListRequest struct {
+	notificationFilterRequest
+	SortKey *string `json:"sort_key"`
+	SortDir *string `json:"sort_dir"`
+
+	httpx.PageRequest
 }
 
 // notificationFacetsRequest is the body of both facets nodes, POST
@@ -213,36 +204,12 @@ func (r notificationListRequest) filters() notificationFilterFields {
 // the list, and a caller sending one has misread what this route answers.
 // They are json.RawMessage so presence is what is detected.
 type notificationFacetsRequest struct {
-	Status     *string  `json:"status"`
-	Dismissed  *bool    `json:"dismissed"`
-	Unread     *bool    `json:"unread"`
-	PriorityIn []string `json:"priority_in"`
-	ScopeIn    []string `json:"scope_in"`
-	RoleIn     []string `json:"role_in"`
-	TeamIDIn   []string `json:"team_id_in"`
-	Search     string   `json:"search"`
+	notificationFilterRequest
 
 	SortKey   json.RawMessage `json:"sort_key"`
 	SortDir   json.RawMessage `json:"sort_dir"`
 	PageSize  json.RawMessage `json:"page_size"`
 	PageToken json.RawMessage `json:"page_token"`
-}
-
-func (r notificationFacetsRequest) filters() notificationFilterFields {
-	return notificationFilterFields{
-		Status: r.Status, Dismissed: r.Dismissed, Unread: r.Unread,
-		PriorityIn: r.PriorityIn, ScopeIn: r.ScopeIn, RoleIn: r.RoleIn, TeamIDIn: r.TeamIDIn,
-		Search: r.Search,
-	}
-}
-
-// notificationFilterFields is the filters a list or facets body carries, as
-// decoded.
-type notificationFilterFields struct {
-	Status                                *string
-	Dismissed, Unread                     *bool
-	PriorityIn, ScopeIn, RoleIn, TeamIDIn []string
-	Search                                string
 }
 
 // notificationListSortKeys is db.NotificationListSortKeys as the lists'
@@ -306,7 +273,7 @@ type notificationListFilterKey struct {
 
 // parseNotificationFilter validates the filters the lists and the facets
 // nodes share.
-func parseNotificationFilter(v *httpx.Validation, in notificationFilterFields) db.NotificationListFilter {
+func parseNotificationFilter(v *httpx.Validation, in notificationFilterRequest) db.NotificationListFilter {
 	f := db.NotificationListFilter{Dismissed: in.Dismissed, Unread: in.Unread}
 	if in.Status != nil {
 		switch st := domain.NotificationStatus(*in.Status); st {
@@ -439,7 +406,7 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 
 // parseNotificationListRequest validates a list body's filters and order.
 func parseNotificationListRequest(v *httpx.Validation, req notificationListRequest) db.NotificationListFilter {
-	f := parseNotificationFilter(v, req.filters())
+	f := parseNotificationFilter(v, req.notificationFilterRequest)
 	f.SortKey, f.SortDir = parseNotificationSort(v, req.SortKey, req.SortDir)
 	return f
 }
@@ -550,7 +517,7 @@ func (s *Server) writeNotificationFacets(w http.ResponseWriter, r *http.Request,
 			v.Invalid(refused.field, fmt.Sprintf(refused.reason, refused.field))
 		}
 	}
-	f := parseNotificationFilter(&v, req.filters())
+	f := parseNotificationFilter(&v, req.notificationFilterRequest)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
