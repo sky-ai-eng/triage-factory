@@ -1255,6 +1255,14 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		if calls := host.calls(); len(calls) != 1 || calls[0] != "write" {
 			t.Fatalf("the paired work must still run: %v", calls)
 		}
+		// The stop's own result said the run was stopping, so the next call
+		// reads a note saying it did not.
+		note := tr.find(func(m domain.Message) bool {
+			return m.Subtype == domain.MessageSubtypeInjectionSystemNote && m.Content == tooldefs.StopBlueprintNotHeededNote
+		})
+		if note == nil || !isDelivered(*note) {
+			t.Fatalf("want the not-heeded note delivered to the next call, got %+v", note)
+		}
 	})
 
 	t.Run("a stop with no reason is corrected, not accepted", func(t *testing.T) {

@@ -371,9 +371,9 @@ func toolBatchLine(id string, toolUseIDs ...string) string {
 // pins the all-results-terminate rule on the SDK side. A batch whose only call
 // ended the run is answered with stop, without asking the caller for notes no
 // request is left to read, and the turn's result carries the ending. A batch
-// that pairs the same call with real work is answered as any other, the turn
-// carries no ending, and the ending it held is spent: naming that call again
-// does not stop a later batch.
+// that pairs the same call with real work does not stop: its reply carries a
+// note saying so, the turn carries no ending, and the ending it held is spent,
+// so naming that call again does not stop a later batch.
 func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(t *testing.T) {
 	var notesAsked int
 	h := newReaderHarnessWithNotes(t,
@@ -422,10 +422,16 @@ func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(
 	if r := nextResult(); r.Terminal != nil {
 		t.Errorf("Terminal = %+v after a batch that did real work, want none", r.Terminal)
 	}
-	for _, b := range h.written("tool_batch_reply")[1:] {
+	later := h.written("tool_batch_reply")[1:]
+	for _, b := range later {
 		if b["stop"] == true {
 			t.Errorf("tool_batch_reply %v stopped the turn, want only the first batch to", b)
 		}
+	}
+	// The mixed batch's stop said it was stopping, so its reply says it did
+	// not; the batch after it held no ending and says nothing.
+	if len(later) != 2 || later[0]["context"] != tooldefs.StopBlueprintNotHeededNote || later[1]["context"] != "" {
+		t.Errorf("later replies = %v, want the not-heeded note on b-2 alone", later)
 	}
 	if notesAsked != 2 {
 		t.Errorf("notes asked for %d times, want once for each batch that went on", notesAsked)
@@ -438,10 +444,10 @@ func TestConsumeStreamInteractive_ABatchEndsTheTurnOnlyWhenEveryCallEndedTheRun(
 func TestBatchTerminal_AnIDLessCallKeepsTheBatchGoing(t *testing.T) {
 	l := &LiveRun{}
 	l.recordTerminal("toolu_A", Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"})
-	if _, stop := l.batchTerminal([]string{"toolu_A", ""}); stop {
+	if _, stop, _ := l.batchTerminal([]string{"toolu_A", ""}); stop {
 		t.Error("a batch with an id-less call stopped the turn")
 	}
-	if _, stop := l.batchTerminal(nil); stop {
+	if _, stop, _ := l.batchTerminal(nil); stop {
 		t.Error("a batch naming no calls stopped the turn")
 	}
 }

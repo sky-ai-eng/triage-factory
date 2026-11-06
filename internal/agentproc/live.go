@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -776,9 +777,12 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 // A batch whose every call ended the run is answered with stop instead, and
 // the caller is not asked for text: there is no next request to hand it to,
 // and text taken here would be marked delivered to a model that never reads
-// it.
+// it. A batch that held an ending but did not stop carries a note saying so
+// ahead of the caller's text, since the ending call's own result said the run
+// was stopping.
 func (l *LiveRun) handleToolBatch(ctl controlLine) {
-	if t, ok := l.batchTerminal(ctl.ToolCallIDs); ok {
+	t, ends, held := l.batchTerminal(ctl.ToolCallIDs)
+	if ends {
 		if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "stop": true}); err != nil {
 			agentprocLog.Error("tool batch stop write failed", "error", err)
 			return
@@ -790,7 +794,11 @@ func (l *LiveRun) handleToolBatch(ctl controlLine) {
 	if l.toolBatch != nil {
 		notes = l.toolBatch()
 	}
-	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": notes.Text}); err != nil {
+	text := notes.Text
+	if held {
+		text = strings.TrimSpace(tooldefs.StopBlueprintNotHeededNote + "\n\n" + notes.Text)
+	}
+	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": text}); err != nil {
 		agentprocLog.Error("tool batch reply write failed", "error", err)
 		if notes.Undo != nil {
 			notes.Undo()

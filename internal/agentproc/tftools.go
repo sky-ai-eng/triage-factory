@@ -166,25 +166,28 @@ func (l *LiveRun) recordTerminal(toolUseID string, t Terminal) {
 // batchTerminal applies the rule the native loop's dispatchBatch does: a batch
 // ends the run iff every call in it recorded an ending, and the ending is the
 // first one in call order. A model that pairs stop_blueprint with real work in
-// one message gets the work done and keeps going.
+// one message gets the work done and keeps going. held reports that some call
+// in the batch recorded an ending, whether or not the batch ends the run.
 //
 // Every id the batch names is consumed whatever the answer, because an ending
 // in a batch that did not stop is discarded, as it is natively.
-func (l *LiveRun) batchTerminal(toolUseIDs []string) (Terminal, bool) {
+func (l *LiveRun) batchTerminal(toolUseIDs []string) (first Terminal, ends, held bool) {
 	l.toolCallsMu.Lock()
 	defer l.toolCallsMu.Unlock()
-	var first Terminal
-	all := len(toolUseIDs) > 0
+	ends = len(toolUseIDs) > 0
 	for i, id := range toolUseIDs {
 		t, ok := l.terminals[id]
 		delete(l.terminals, id)
 		if !ok {
-			all = false
-		} else if i == 0 {
+			ends = false
+			continue
+		}
+		held = true
+		if i == 0 {
 			first = t
 		}
 	}
-	return first, all
+	return first, ends, held
 }
 
 // cancelToolCall ends the handler of one call the wrapper gave up on: the

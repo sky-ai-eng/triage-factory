@@ -56,6 +56,18 @@ var StopBlueprint = Tool{
 	Handler: stopBlueprint,
 }
 
+// StopBlueprintNotHeededNote is what the model reads before its next request
+// when a stop_blueprint call shared its message with other tool calls. The
+// call was answered as if the run were stopping, but a batch ends the run only
+// when every call in it does, so the run went on; without this the model would
+// take the run as over and stop working on a conversation nothing concluded.
+// Each runtime delivers it through its own channel for notes.
+const StopBlueprintNotHeededNote = `<system-note kind="stop-blueprint">` + "\n" +
+	"Your stop_blueprint call did not end the run: other tool calls ran in the same message, and a run " +
+	"ends only on a message whose every tool call ends it. If you still mean to stop, call stop_blueprint " +
+	"again as the only tool call in its message.\n" +
+	"</system-note>"
+
 // stopBlueprint acknowledges the call, or tells the model what it was
 // missing. All three arguments are enforced here rather than by the schema
 // alone because a schema is advisory: a model can and does emit a call

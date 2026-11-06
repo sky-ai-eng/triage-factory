@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // fatalToolHostNotice is the result written for calls that cannot be
@@ -28,7 +29,8 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // all-results-terminate contract: the batch terminates iff EVERY result in
 // it sets a terminal outcome, so a model that pairs `stop_blueprint` with real
 // work in one message gets the work done and keeps going rather than
-// silently losing the call it made alongside.
+// silently losing the call it made alongside. A system note then tells it the
+// stop did not take effect, since the stop's own result said it had.
 //
 // position is the assembly key of the last result the batch wrote. Every call
 // is answered before this returns without an error, so it is the point in the
@@ -146,8 +148,16 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 		position = key
 	}
 
-	if terminal != nil && allTerminate {
-		return *terminal, true, position, nil
+	if terminal != nil {
+		if allTerminate {
+			return *terminal, true, position, nil
+		}
+		// The terminal call was answered as stopping and the run goes on, so
+		// the model is told before its next call. Every call is answered by
+		// now, so the note sits after the batch's results.
+		if err := e.insertPending(ctx, params, tooldefs.StopBlueprintNotHeededNote, domain.MessageSubtypeInjectionSystemNote); err != nil {
+			return Result{}, false, 0, err
+		}
 	}
 	return Result{}, false, position, nil
 }
