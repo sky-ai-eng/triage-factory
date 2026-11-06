@@ -209,7 +209,7 @@ func (r *Router) checkTerminalInvariant(ctx context.Context, g *TerminalInvarian
 // either count returns ok=false, and the pass keeps that org's previous
 // counts rather than reporting a zero it did not establish.
 func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (activeTerminal, openOnClosed int, ok bool) {
-	doneByProject, jiraRead := r.jiraDoneStatusesByProject(ctx, orgID)
+	doneByProject, jiraSite := r.jiraDoneStatusesByProject(ctx, orgID)
 	doneByLinearTeam := r.linearDoneStatesByTeam(ctx, orgID)
 	candidates, err := r.entities.ListActiveTerminalCandidatesSystem(ctx, orgID, unionValues(doneByProject), linearUnion(doneByLinearTeam), TerminalCheckGrace, 0)
 	if err != nil {
@@ -222,9 +222,11 @@ func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (a
 		// Linear one done in another Linear team). The store's filters are
 		// flat unions; this is the per-project / per-team recheck that keeps
 		// a union from over-counting.
-		if candidates[i].Source == "jira" && !jiraRead {
-			// With no rules read, an armed project's issue cannot be told
-			// from one Jira's done category decides for.
+		if candidates[i].Source == "jira" && candidates[i].Scope != jiraSite {
+			// Only the site whose rules were read is judged: without its
+			// rules an armed project's issue cannot be told from one Jira's
+			// done category decides for. An issue on another site is one no
+			// cycle reads, and with no rules read nothing is judged.
 			continue
 		}
 		if snapshotIsTerminal(candidates[i], doneByProject, doneByLinearTeam) {
@@ -306,21 +308,23 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 // done status category there, so the checker has to read terminality the same
 // way.
 //
-// ok=false means the rules could not be read, and the caller treats no Jira
+// site is the org's current Jira site, the one the rules were read on. It is
+// empty when the rules could not be read, and the caller then treats no Jira
 // entity as terminal, so the pass degrades to GitHub and Linear rather than
 // guessing at a status vocabulary it couldn't load: with no rules, every
 // project would read as unarmed and be judged by the category.
-func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) (map[string][]domain.JiraStatusRef, bool) {
-	out := map[string][]domain.JiraStatusRef{}
+func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) (out map[string][]domain.JiraStatusRef, site string) {
+	out = map[string][]domain.JiraStatusRef{}
 	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: read org settings for the jira site failed, skipping jira this pass", "org", orgID, "error", err)
-		return out, false
+		return out, ""
 	}
-	rules, err := r.jiraRules.ListForOrgSystem(ctx, orgID, domain.EntityScope("jira", settings))
+	site = domain.EntityScope("jira", settings)
+	rules, err := r.jiraRules.ListForOrgSystem(ctx, orgID, site)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: list jira status rules failed, skipping jira this pass", "org", orgID, "error", err)
-		return out, false
+		return out, ""
 	}
 	for _, rule := range rules {
 		if !rule.Armed() {
@@ -338,7 +342,7 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) (m
 			}
 		}
 	}
-	return out, true
+	return out, site
 }
 
 // linearDoneStatesByTeam is jiraDoneStatusesByProject for Linear: each Linear

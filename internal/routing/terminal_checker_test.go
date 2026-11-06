@@ -588,11 +588,40 @@ func TestTerminalChecker_UnreadJiraRulesCountNoJiraEntity(t *testing.T) {
 	deps := testRouterDeps(database)
 	deps.JiraRules = failingJiraRulesStore{deps.JiraRules}
 	r := newTestRouter(deps)
+	// The site is set, so it is the failed rules read, not a missing site,
+	// that keeps OTHER-1 out of the count.
+	setJiraHost(t, database)
 	seedDivergentEntity(t, database, "jira", "OTHER-1", `{"key":"OTHER-1","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
 	seedDivergentEntity(t, database, "github", "owner/repo#merged", `{"state":"MERGED","merged":true}`, domain.EventGitHubPRCICheckFailed)
 
 	a, _, ok := r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID)
 	if !ok || a != 1 {
 		t.Errorf("count = (%d, ok=%v), want (1, true) — the merged PR alone", a, ok)
+	}
+}
+
+// TestTerminalChecker_JiraEntityOnAnotherSiteIsNotJudged: an issue on a site
+// the org has left stays active until a cycle on the new site retires it, and
+// with no site at all it is never retired. No cycle reads it and its project's
+// rules are not read, so the checker does not judge it, even in the done
+// category.
+func TestTerminalChecker_JiraEntityOnAnotherSiteIsNotJudged(t *testing.T) {
+	ctx := context.Background()
+	database := newTestDB(t)
+	r := newCheckerRouter(t, database)
+	setJiraHost(t, database)
+	st := sqlitestore.New(database)
+	e, _, err := st.Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, "old-jira.example.com", "OLD-1", "10001", dbseed.JiraIssueProject("OLD-1"), "OLD-1", "")
+	if err != nil {
+		t.Fatalf("create the old site's entity: %v", err)
+	}
+	if ok, err := st.Entities.UpdateSnapshotCASSystem(ctx, runmode.LocalDefaultOrgID, e.ID, `{"key":"OLD-1","status":"Won't Do","status_category":"done"}`, e.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+	}
+	backdatePoll(t, database, e.ID, time.Hour)
+	seedDivergentEntity(t, database, "jira", "OTHER-1", `{"key":"OTHER-1","status":"Closed","status_category":"done"}`, domain.EventJiraIssueAssigned)
+
+	if a, _, _ := r.checkOrgTerminalInvariant(ctx, runmode.LocalDefaultOrgID); a != 1 {
+		t.Errorf("count = %d, want 1 — OTHER-1 on the org's site, not OLD-1 on the one it left", a)
 	}
 }
