@@ -342,7 +342,10 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 // "PageRequest.page_size". The path is resolved against the decode target's
 // type, and a segment is dropped only where it names an embedded struct at
 // that point in the type, never by its spelling: a JSON key may be
-// capitalized too. Every other segment is already a JSON name. It also
+// capitalized too. Every other segment is already a JSON name. A JSON key
+// spelled like a sibling embedded struct's Go name gives the same path as a
+// field of that struct; the last segment is read as the key, since the path
+// ends in one, and an earlier segment as the embedded struct. It also
 // returns the type of the field the path names. A path that stops resolving
 // keeps the rest of its segments as reported, and its type is nil.
 func jsonFieldPath(target reflect.Type, path string) (string, reflect.Type) {
@@ -393,25 +396,35 @@ func jsonType(t reflect.Type) (one, many string) {
 		return "a string", "strings"
 	case reflect.Bool:
 		return "true or false", "booleans"
+	// TODO(TFAC-1334): an integer field, signed or unsigned, also refuses
+	// whole numbers that are out of range or written as 1e3 or 1.0, and these
+	// two cases tell that caller the value is not a whole number.
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		// TODO(TFAC-1334): an integer field also refuses whole numbers that are
-		// out of range or written as 1e3 or 1.0, and this wording tells that
-		// caller the value is not a whole number.
 		return "a whole number", "whole numbers"
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return "a non-negative whole number", "non-negative whole numbers"
 	case reflect.Float32, reflect.Float64:
 		return "a number", "numbers"
 	case reflect.Slice, reflect.Array:
+		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+			return "a base64 string", "base64 strings"
+		}
 		if _, elems := jsonType(t.Elem()); elems != "" {
 			return "an array of " + elems, "arrays"
 		}
 		return "an array", "arrays"
 	case reflect.Map:
+		one = "an object"
 		if _, values := jsonType(t.Elem()); values != "" {
-			return "an object of " + values, "objects"
+			one += " of " + values
 		}
-		return "an object", "objects"
+		// An integer key is read from the key's string, and a key that is not
+		// a whole number is a fault on the map.
+		if k := t.Key(); k.Kind() >= reflect.Int && k.Kind() <= reflect.Uintptr && !reflect.PointerTo(k).Implements(textUnmarshalerType) {
+			_, keys := jsonType(k)
+			one += " whose keys are " + keys
+		}
+		return one, "objects"
 	case reflect.Struct:
 		return "an object", "objects"
 	}
@@ -436,7 +449,12 @@ func jsonNamedField(t reflect.Type, name string) (reflect.StructField, bool) {
 	for i := range t.NumField() {
 		sf := t.Field(i)
 		tag := sf.Tag.Get("json")
-		if tag == "-" || !sf.IsExported() || isEmbeddedStruct(sf) {
+		if tag == "-" || isEmbeddedStruct(sf) {
+			continue
+		}
+		// encoding/json decodes no unexported field but an anonymous struct,
+		// whose exported fields it can still set.
+		if !sf.IsExported() && (!sf.Anonymous || !isStruct(sf.Type)) {
 			continue
 		}
 		jsonName, _, _ := strings.Cut(tag, ",")
@@ -461,7 +479,11 @@ func isEmbeddedStruct(sf reflect.StructField) bool {
 	if name, _, _ := strings.Cut(tag, ","); name != "" || tag == "-" {
 		return false
 	}
-	t := sf.Type
+	return isStruct(sf.Type)
+}
+
+// isStruct reports whether t is a struct or a pointer to one.
+func isStruct(t reflect.Type) bool {
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}

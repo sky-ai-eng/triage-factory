@@ -87,7 +87,7 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		X int `json:"x"`
 	}
 	type tagged struct {
-		Y int `json:"y"`
+		Ys []int `json:"ys"`
 	}
 	type payload struct {
 		lane
@@ -98,6 +98,8 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		Items  []inner           `json:"items"`
 		ByKey  map[string]Deep   `json:"by_key"`
 		Labels map[string]string `json:"labels"`
+		ByID   map[int]string    `json:"by_id"`
+		Bytes  []byte            `json:"bytes"`
 		On     *bool             `json:"on"`
 		Ratio  float64           `json:"ratio"`
 		Ref    textRef           `json:"ref"`
@@ -122,7 +124,11 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		{`{"items": [{"b": "x"}]}`, "items.b", "items.b must be a whole number"},
 		{`{"by_key": {"k": {"b": "x"}}}`, "by_key.b", "by_key.b must be a whole number"},
 		{`{"labels": {"k": 1}}`, "labels", "labels must be an object of strings"},
-		{`{"tagged": {"y": "x"}}`, "tagged.y", "tagged.y must be a whole number"},
+		{`{"by_id": {"abc": "x"}}`, "by_id", "by_id must be an object of strings whose keys are whole numbers"},
+		{`{"bytes": 7}`, "bytes", "bytes must be a base64 string"},
+		// An unexported anonymous struct with a tag name is an ordinary field,
+		// and the bad element reports the list it is in.
+		{`{"tagged": {"ys": [1, "x"]}}`, "tagged.ys", "tagged.ys must be an array of whole numbers"},
 		{`{"on": "yes"}`, "on", "on must be true or false"},
 		{`{"ratio": "x"}`, "ratio", "ratio must be a number"},
 		{`{"ref": 7}`, "ref", "ref must be a string"},
