@@ -2480,6 +2480,18 @@ func (s *conversationStore) RequeueInputForClaimSystem(ctx context.Context, orgI
 	})
 }
 
+func (s *conversationStore) WithdrawPendingInputSystem(ctx context.Context, orgID, conversationID string, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE messages SET window_state = 'inactive'
+		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
+		  AND role = 'user' AND subtype = '' AND delivered = false AND window_state = 'active'
+	`, orgID, conversationID, pgIntArray(ids))
+	return err
+}
+
 // CompactForClaimSystem commits one compaction atomically, behind the fence —
 // see the interface doc for the full contract. The re-seq reads the queued
 // rows inside the same transaction that inserts the result row, so the

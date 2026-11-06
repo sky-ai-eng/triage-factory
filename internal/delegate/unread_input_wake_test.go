@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -132,30 +133,81 @@ func TestWakeForUnreadInput_AStopStandsAndTheMessageResumesAfterIt(t *testing.T)
 	}
 }
 
-// TestWakeForUnreadInput_CountsTheMessageAnAdvanceLeavesUnread is the window
-// the wake cannot close: a message that lands after a non-final step's last
-// model call, before its conclusion is recorded. The reactor advances, which
-// ends the step's conversation, so the wake is refused and the message is
-// counted under the rung that refused it.
-func TestWakeForUnreadInput_CountsTheMessageAnAdvanceLeavesUnread(t *testing.T) {
-	org := runmode.LocalDefaultOrgID
-	counted := unreadCounter(t)
-	s, database, brID, _, convID := reactorFixture(t, "unread-advance", 2, "", "")
+// advanceWithUnreadMessage concludes step 0 of a two-step native blueprint
+// with `continue` and a person's message still unread on it, as a message
+// landing after the step's last model call leaves it, and runs the reactor,
+// which advances to step 1. It returns step 1's conversation id.
+func advanceWithUnreadMessage(t *testing.T, suffix string) (*Spawner, *sql.DB, string, string) {
+	t.Helper()
+	s, database, brID, _, convID := reactorFixture(t, suffix, 2, "", "")
 	markNative(t, database, convID)
 	concludeWithUnreadMessage(t, s, convID, domain.ConversationOutcomeContinue)
-
 	reactAsTheDispatchDoes(t, s, brID, convID)
-	s.wakeForUnreadInput(context.Background(), org, convID)
-
-	if br := mustGetRun(t, s, org, brID); br.CurrentStepIndex != 1 {
+	if br := mustGetRun(t, s, runmode.LocalDefaultOrgID, brID); br.CurrentStepIndex != 1 {
 		t.Fatalf("current_step_index = %d, want 1 — the step advanced", br.CurrentStepIndex)
 	}
-	if st := storedStatus(t, database, convID); st != domain.StatusOpen {
-		t.Errorf("stored status = %q, want open — an ended step is not woken", st)
+	var nextID string
+	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&nextID); err != nil {
+		t.Fatalf("read step 1: %v", err)
 	}
-	got := counted()
-	if got[ResumeBlockedEndedStepAdvanced] != 1 || len(got) != 1 {
-		t.Errorf("unread-at-conclusion counts = %v, want one under %q", got, ResumeBlockedEndedStepAdvanced)
+	return s, database, convID, nextID
+}
+
+// TestWakeForUnreadInput_AnAdvancePassesTheMessageToTheNextStep: a message
+// left unread on a step its blueprint advanced past goes to the step now
+// running, under its sender's name, and leaves the ended step's transcript,
+// so it appears once, where it is read. Nothing is counted.
+func TestWakeForUnreadInput_AnAdvancePassesTheMessageToTheNextStep(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	counted := unreadCounter(t)
+	s, database, convID, nextID := advanceWithUnreadMessage(t, "unread-advance")
+	markNative(t, database, nextID)
+
+	s.wakeForUnreadInput(context.Background(), org, convID)
+
+	got := pendingRows(t, s, nextID)
+	if len(got) != 1 || got[0].Content != "thanks" || got[0].UserID != runmode.LocalDefaultUserID {
+		t.Errorf("step 1 pending rows = %+v, want the message, from its sender", got)
+	}
+	if left := pendingRows(t, s, convID); len(left) != 0 {
+		t.Errorf("step 0 pending rows = %+v, want none — the message moved on", left)
+	}
+	msgs, err := s.conversations.MessagesForConversations(context.Background(), org, []string{convID})
+	if err != nil {
+		t.Fatalf("MessagesForConversations: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Content == "thanks" {
+			t.Errorf("step 0's transcript still shows the forwarded message: %+v", m)
+		}
+	}
+	if st := storedStatus(t, database, convID); st != domain.StatusOpen {
+		t.Errorf("step 0 stored status = %q, want open — an ended step is not woken", st)
+	}
+	if c := counted(); len(c) != 0 {
+		t.Errorf("unread-at-conclusion counts = %v, want none", c)
+	}
+}
+
+// TestWakeForUnreadInput_CountsAMessageTheNextStepRefuses: when the step now
+// running cannot take the message (here an SDK step waiting for its first
+// claim, which takes no queued message), it stays on the ended step and the
+// conversation is counted under the advance.
+func TestWakeForUnreadInput_CountsAMessageTheNextStepRefuses(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	counted := unreadCounter(t)
+	s, _, convID, nextID := advanceWithUnreadMessage(t, "unread-advance-refused")
+
+	s.wakeForUnreadInput(context.Background(), org, convID)
+
+	if got := pendingRows(t, s, nextID); len(got) != 0 {
+		t.Errorf("step 1 pending rows = %+v, want none — it refused the message", got)
+	}
+	if left := pendingRows(t, s, convID); len(left) != 1 || left[0].Content != "thanks" {
+		t.Errorf("step 0 pending rows = %+v, want the message left where it was", left)
+	}
+	if c := counted(); c[ResumeBlockedEndedStepAdvanced] != 1 || len(c) != 1 {
+		t.Errorf("unread-at-conclusion counts = %v, want one under %q", c, ResumeBlockedEndedStepAdvanced)
 	}
 }
 

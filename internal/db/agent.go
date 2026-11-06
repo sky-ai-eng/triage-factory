@@ -1090,6 +1090,22 @@ type ConversationStore interface {
 	// above.
 	RequeueInputForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int) error
 
+	// WithdrawPendingInputSystem takes a person's messages off the
+	// conversation's pending-input queue: each named row that is still a
+	// queued message (role 'user', blank subtype, undelivered, active) flips
+	// inactive. An undelivered inactive row is one that never happened, so
+	// it leaves the transcript reads and the queue alike. Any other id, a row
+	// of another conversation included, is left alone.
+	//
+	// The caller is the forward of the messages a blueprint step was left
+	// with when its blueprint advanced past it: they are sent on to the step
+	// now running and withdrawn here, so each appears once, where it is read.
+	// Unfenced, because the step it withdraws from has ended and no
+	// engagement holds it.
+	//
+	// Exempt from the returned-row rule: a batch flip, like the two above.
+	WithdrawPendingInputSystem(ctx context.Context, orgID, conversationID string, ids []int) error
+
 	// CompactForClaimSystem commits one compaction atomically: optionally
 	// insert the reconstructed reply row (forced inactive — it is history the
 	// moment it exists, never part of any assembly), insert the result row,

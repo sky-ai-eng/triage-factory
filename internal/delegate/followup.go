@@ -426,7 +426,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 // With a handle, the send and the record happen under the handle's send log,
 // and the row's id joins the log. A stop_blueprint that ends the turn this
 // message was queued behind leaves it unanswered, and the driver reads the log
-// to find the row and put it back on the queue (requeueOwedSteers). Holding
+// to find the row and put it back on the queue (requeueSteers). Holding
 // the log across both steps is what lets that read trust it: a message the
 // process has counted always has its row by the time the driver looks.
 func (s *Spawner) steerLive(ctx context.Context, h *liveRunHandle, orgID, conversationID, userID, text string) error {
@@ -620,7 +620,7 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 // it. The ending that leaves one behind is stop_blueprint: the native loop
 // drains its queue before each model call and exits on the stop without
 // draining again, and the SDK driver puts the messages a stopped process never
-// answered back on the queue (requeueOwedSteers). The stop is honoured rather
+// answered back on the queue (requeueSteers). The stop is honoured rather
 // than cancelled, as an ordinary ending is by late input, because a stop is a
 // deliberate verdict and a message that happens to land with it ("thanks",
 // say) must not throw it away. The message is read after it: an abort's
@@ -646,10 +646,10 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 // conversation parked with no verdict at all is claimable by the queue
 // without a wake.
 //
-// A conversation the wake has to leave with unread messages is counted by why
-// (recordUnreadAtConclusion). The common reason is the advance: a message that
-// lands after a non-final step's last model call but before its conclusion is
-// recorded, which the reactor's advance then ends the conversation over.
+// A step the reactor's advance ended is not woken but forwarded: its messages
+// go to the step now running (forwardToCurrentStep). A conversation the wake
+// has to leave with unread messages, that one included when the step now
+// running refuses them, is counted by why (recordUnreadAtConclusion).
 func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID string) {
 	if s.conversations == nil || s.pendingInput == nil || s.tx == nil {
 		return
@@ -682,6 +682,9 @@ func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID 
 		// the stranded-run replay that runs the reactor.
 		return
 	}
+	if block == ResumeBlockedEndedStepAdvanced && s.forwardToCurrentStep(ctx, orgID, conv) {
+		return
+	}
 	if block != "" {
 		recordUnreadAtConclusion(block)
 		delegateLog.Warn("a person's message is unread on a concluded conversation no wake may reach; it waits for the next message",
@@ -709,6 +712,68 @@ func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID 
 	if flipped {
 		s.announceWake(ctx, orgID, userID, *conv)
 	}
+}
+
+// forwardToCurrentStep sends the messages a blueprint step was left with when
+// its blueprint advanced past it on to the step now running, and reports
+// whether every one of them went.
+//
+// A message that lands after a non-final step's last model call, but before
+// its conclusion is recorded, is left on a step that the advance then ends.
+// The person was writing to the run, and the run is now the next step, so
+// each message goes there as one sent to it a moment later would: through
+// SendMessage, under its sender's name, oldest first. A message the step
+// takes is withdrawn from the ended one, so it appears once, on the step that
+// reads it.
+//
+// It stops at the first message the step refuses, such as an SDK step waiting
+// for its first claim, and leaves that message and the rest where they were,
+// for the caller to count. It forwards nothing when the task's live
+// conversation is not a later step of the same blueprint run. A withdraw that
+// fails leaves a message on both steps, which is the lesser fault next to a
+// message on neither.
+func (s *Spawner) forwardToCurrentStep(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+	if conv.TaskID == "" || conv.BlueprintRunID == "" {
+		return false
+	}
+	nextID, err := s.conversations.LiveConversationIDForTaskSystem(ctx, orgID, conv.TaskID)
+	if err != nil {
+		delegateLog.Warn("find the step now running for an advanced step's unread messages failed",
+			"conversation", conv.ID, "org_id", orgID, "error", err)
+		return false
+	}
+	if nextID == "" || nextID == conv.ID {
+		return false
+	}
+	next, err := s.conversations.GetSystem(ctx, orgID, nextID)
+	if err != nil || next == nil || next.BlueprintRunID != conv.BlueprintRunID {
+		if err != nil {
+			delegateLog.Warn("read the step now running for an advanced step's unread messages failed",
+				"conversation", conv.ID, "next", nextID, "org_id", orgID, "error", err)
+		}
+		return false
+	}
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conv.ID)
+	if err != nil {
+		delegateLog.Warn("read an advanced step's unread messages failed",
+			"conversation", conv.ID, "org_id", orgID, "error", err)
+		return false
+	}
+	for _, r := range rows {
+		if r.Role != "user" || r.Subtype != "" || r.Delivered == nil || *r.Delivered {
+			continue
+		}
+		if err := s.SendMessage(ctx, orgID, nextID, r.UserID, r.Content); err != nil {
+			delegateLog.Warn("the step now running refused a message left on the step before it; it stays there",
+				"conversation", conv.ID, "next", nextID, "org_id", orgID, "error", err)
+			return false
+		}
+		if err := s.conversations.WithdrawPendingInputSystem(ctx, orgID, conv.ID, []int{r.ID}); err != nil {
+			delegateLog.Warn("withdraw a message forwarded to the next step failed; it shows on both steps",
+				"conversation", conv.ID, "next", nextID, "org_id", orgID, "error", err)
+		}
+	}
+	return true
 }
 
 // pendingUserInput builds the one row an input to a conversation takes: an
