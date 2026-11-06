@@ -93,8 +93,8 @@ func TestBuildArgs_PermissionPromptsFlag(t *testing.T) {
 	}
 }
 
-// TestBuildArgs_ToolBatchNotesFlag: the wrapper registers its PostToolBatch
-// hook only for an interactive run whose caller answers it.
+// TestBuildArgs_ToolBatchNotesFlag: --tool-batch-notes is passed only for an
+// interactive run whose caller answers a tool batch.
 func TestBuildArgs_ToolBatchNotesFlag(t *testing.T) {
 	answer := func() ToolBatchNotes { return ToolBatchNotes{} }
 	if args := BuildArgs(RunOptions{Interactive: true, OnToolBatch: answer}); !slices.Contains(args, "--tool-batch-notes") {

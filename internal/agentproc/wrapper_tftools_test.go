@@ -214,3 +214,74 @@ func firstOf(v any) any {
 	}
 	return nil
 }
+
+// TestWrapperTFToolsBatchStopEndsTheTurn: --tf-tools alone wires the
+// PostToolBatch hook, whose tool_batch names the batch's calls by tool_use id.
+// A reply with stop returns continue: false, which ends the turn at the batch;
+// one with context alone hands the context to the model. A call with no
+// tool_use id is still named, as "", so Go counts it as a call that did not
+// end the run.
+func TestWrapperTFToolsBatchStopEndsTheTurn(t *testing.T) {
+	w := startTFToolsWrapper(t, `
+      const hook = options.hooks?.PostToolBatch?.[0]?.hooks?.[0]
+      if (!hook) {
+        yield { type: "stub_hook", output: null }
+        return
+      }
+      const signal = new AbortController().signal
+      const batch = (...ids) => ({ hook_event_name: "PostToolBatch", tool_calls: ids.map((id) => ({ tool_name: "mcp__tf__record_call", tool_input: {}, tool_use_id: id })) })
+      yield { type: "stub_hook", output: await hook(batch("toolu_A", "toolu_B"), undefined, { signal }) }
+      const idless = batch("toolu_C")
+      idless.tool_calls.push({ tool_name: "Bash", tool_input: {} })
+      yield { type: "stub_hook", output: await hook(idless, undefined, { signal }) }`, "--tf-tools", tfToolsFlagValue)
+
+	req := w.next()
+	id, _ := req["id"].(string)
+	ids, _ := req["tool_call_ids"].([]any)
+	if req["subtype"] != "tool_batch" || id == "" || len(ids) != 2 || ids[0] != "toolu_A" || ids[1] != "toolu_B" {
+		t.Fatalf("first line = %v, want a tool_batch naming toolu_A and toolu_B", req)
+	}
+	w.send(t, map[string]any{"kind": "tool_batch_reply", "id": id, "stop": true})
+	out, _ := w.next()["output"].(map[string]any)
+	if out["continue"] != false || out["stopReason"] == nil || out["hookSpecificOutput"] != nil {
+		t.Fatalf("hook returned %v on a stop, want continue: false with a stop reason (stderr: %s)", out, w.stderr.String())
+	}
+
+	req = w.next()
+	id, _ = req["id"].(string)
+	if ids, _ := req["tool_call_ids"].([]any); len(ids) != 2 || ids[0] != "toolu_C" || ids[1] != "" {
+		t.Fatalf("second tool_batch = %v, want toolu_C and the id-less call as \"\"", req)
+	}
+	w.send(t, map[string]any{"kind": "tool_batch_reply", "id": id, "context": "a note"})
+	if res := w.next(); res["subtype"] != "tool_batch_result" || res["delivered"] != true {
+		t.Fatalf("after a reply with context the wrapper said %v, want it delivered", res)
+	}
+	out, _ = w.next()["output"].(map[string]any)
+	specific, _ := out["hookSpecificOutput"].(map[string]any)
+	if _, stopped := out["continue"]; stopped || specific["additionalContext"] != "a note" {
+		t.Errorf("hook returned %v without a stop, want only the reply's context", out)
+	}
+}
+
+// TestWrapperDeniesSubagentsTFTools: the PreToolUse hook denies a subagent's
+// call to a TF tool, and leaves a subagent's other calls alone with nothing
+// reported for either.
+func TestWrapperDeniesSubagentsTFTools(t *testing.T) {
+	w := startTFToolsWrapper(t, `
+      const pre = options.hooks.PreToolUse[0].hooks[0]
+      const signal = new AbortController().signal
+      const call = (name, id) => ({ hook_event_name: "PreToolUse", tool_name: name, tool_input: {}, tool_use_id: id, agent_id: "sub-1" })
+      yield { type: "stub_pre", output: await pre(call("mcp__tf__record_call", "toolu_TF"), "toolu_TF", { signal }) }
+      yield { type: "stub_pre", output: await pre(call("Bash", "toolu_BASH"), "toolu_BASH", { signal }) }`, "--tf-tools", tfToolsFlagValue)
+
+	denied := w.next()
+	out, _ := denied["output"].(map[string]any)
+	specific, _ := out["hookSpecificOutput"].(map[string]any)
+	if denied["type"] != "stub_pre" || specific["hookEventName"] != "PreToolUse" || specific["permissionDecision"] != "deny" || specific["permissionDecisionReason"] == nil {
+		t.Fatalf("a subagent's TF tool call got %v, want a PreToolUse deny with a reason (stderr: %s)", denied, w.stderr.String())
+	}
+	other := w.next()
+	if out, ok := other["output"].(map[string]any); other["type"] != "stub_pre" || !ok || len(out) != 0 {
+		t.Errorf("a subagent's Bash call got %v, want nothing, and no tool_started before it", other)
+	}
+}

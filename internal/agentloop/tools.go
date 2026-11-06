@@ -21,7 +21,7 @@ func SandboxTools() []schemas.ChatTool {
 
 // tfToolFacts are what tooldefs decides a native engagement's TF tools from.
 func tfToolFacts(hasBlueprint bool) tooldefs.Facts {
-	return tooldefs.Facts{Runtime: domain.ConversationRuntimeNative, HasBlueprint: hasBlueprint}
+	return tooldefs.Facts{HasBlueprint: hasBlueprint}
 }
 
 // tfTools returns the definitions of the TF tools this engagement is offered.

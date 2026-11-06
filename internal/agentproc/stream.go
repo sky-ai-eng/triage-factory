@@ -596,6 +596,21 @@ type Result struct {
 	// delegate driver) treat an interrupted turn as a pause, not a
 	// failure.
 	Interrupted bool
+
+	// Terminal is the outcome a TF tool ended this turn with
+	// (tooldefs.Outcome.Terminal): the turn's last tool batch was that one
+	// call, so the reader told the wrapper to stop the turn there. Nil on
+	// every other turn. Set only by the interactive reader, the one path that
+	// serves TF tools.
+	Terminal *Terminal
+}
+
+// Terminal is the ending a TF tool's call recorded, with the reason and
+// summary its handler returned beside it.
+type Terminal struct {
+	Outcome domain.ConversationOutcome
+	Reason  string
+	Summary string
 }
 
 func parseResult(raw map[string]any) *Result {

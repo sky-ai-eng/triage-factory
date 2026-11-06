@@ -1,8 +1,10 @@
 package agentproc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -600,6 +602,598 @@ wait:
 	}
 }
 
+// TestSDK_LiveSmoke_StopBlueprintEndsTheTurn pins the SDK half of
+// stop_blueprint: a stop that is the only call in its message ends the turn at
+// its batch. It proves what reading Claude Code cannot: PostToolBatch's
+// continue:false ends the turn with no further request and a success result,
+// and the turn's Result carries the ending the call recorded. Gated like the
+// other live smokes.
+func TestSDK_LiveSmoke_StopBlueprintEndsTheTurn(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	const (
+		reason  = "Live smoke: stopping on purpose."
+		summary = "Called stop_blueprint as instructed and did nothing else."
+	)
+	spy := &stopBlueprintSpy{}
+	perms := &promptRecorder{}
+	results := make(chan *Result, 8)
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: t.TempDir(),
+		Message: fmt.Sprintf("Call the mcp__tf__stop_blueprint tool exactly once, as the only tool call in your message, "+
+			"with type %q, reason %q and summary %q. Do not call any other tool and do nothing else.", "abort", reason, summary),
+		Model:          "haiku",
+		TraceID:        "live-stop-blueprint",
+		ConversationID: "conv-live-stop-blueprint",
+		ClaimID:        "claim-live-stop-blueprint",
+		TFTools:        []tooldefs.Tool{spy.tool()},
+		AllowedTools:   BuildAllowedTools(""),
+		OnResult:       func(r *Result) { results <- r },
+	}, sink, perms.handle)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	res := waitResult(t, lr, results, 150*time.Second)
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	t.Logf("result: subtype=%s is_error=%v interrupted=%v num_turns=%d terminal=%+v", res.Subtype, res.IsError, res.Interrupted, res.NumTurns, res.Terminal)
+
+	calls := spy.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("stop_blueprint was called %d times, want once; the model did not follow the prompt (calls: %+v)", len(calls), calls)
+	}
+	msgs := sink.snapshot()
+	_, raw := sessionTranscript(t, lr.SessionID())
+	sent, ok := messageCarrying(transcriptMessages(raw), calls[0].ID)
+	if !ok {
+		t.Fatalf("the session transcript carries no message with the stop's tool_use id %q", calls[0].ID)
+	}
+	if n := len(sent.Calls); n != 1 {
+		t.Fatalf("the stop shared its message with %d other calls (%+v); the prompt asked for it alone", n-1, sent.Calls)
+	}
+
+	want := Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: reason, Summary: summary}
+	if res.Terminal == nil || *res.Terminal != want {
+		t.Errorf("Result.Terminal = %+v, want %+v", res.Terminal, want)
+	}
+	if res.IsError || res.Interrupted {
+		t.Errorf("a turn a stop ended must be neither an error nor an interrupt: is_error=%v interrupted=%v subtype=%s", res.IsError, res.Interrupted, res.Subtype)
+	}
+	answered := toolResultIndex(msgs, calls[0].ID)
+	if answered < 0 {
+		t.Fatalf("no stored result answers the stop %s", calls[0].ID)
+	}
+	if later := assistantsAfter(msgs, answered); len(later) != 0 {
+		t.Errorf("%d assistant message(s) follow the stop's result, so the turn did not end at its batch: first is %q with calls %+v",
+			len(later), later[0].Content, later[0].ToolCalls)
+	}
+	if asked := perms.snapshot(); len(asked) != 0 {
+		t.Errorf("the permission handler was asked about %v; an allowlisted TF tool must never prompt", asked)
+	}
+}
+
+// TestSDK_LiveSmoke_PairedStopBlueprintGoesOn is the other half of the rule: a
+// stop that shares its message with another call does not end the turn, and
+// the model is told so with the batch's results. How the model reacts to being
+// told is its choice and is only logged; what fails the test is the mechanism
+// — the paired batch stopping the turn, or a solo stop after it not stopping
+// it. Gated like the other live smokes.
+func TestSDK_LiveSmoke_PairedStopBlueprintGoesOn(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if pairedStopAttempt(t, attempt) {
+			return
+		}
+	}
+	t.Skipf("in %d attempts the model never put stop_blueprint and Bash in one message, so no paired batch was exercised", attempts)
+}
+
+// pairedStopAttempt runs one paired-stop conversation and checks it. It reports
+// false, having checked nothing, when the model did not pair the calls.
+func pairedStopAttempt(t *testing.T, attempt int) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	const (
+		reason  = "Live smoke: paired stop."
+		summary = "Called stop_blueprint and Bash together as instructed."
+	)
+	spy := &stopBlueprintSpy{}
+	perms := &promptRecorder{}
+	results := make(chan *Result, 8)
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: t.TempDir(),
+		Message: fmt.Sprintf("In ONE single message, make exactly two tool calls in parallel: mcp__tf__stop_blueprint with "+
+			"type %q, reason %q and summary %q, and Bash with the command `echo paired`. Both calls must be in the same "+
+			"message; do not make either one on its own first. After both results come back, read the results and "+
+			"anything else you are told with them, and do whatever they tell you to do.", "abort", reason, summary),
+		Model:          "haiku",
+		TraceID:        "live-paired-stop-blueprint",
+		ConversationID: "conv-live-paired-stop-blueprint",
+		ClaimID:        "claim-live-paired-stop-blueprint",
+		TFTools:        []tooldefs.Tool{spy.tool()},
+		AllowedTools:   BuildAllowedTools(""),
+		OnResult:       func(r *Result) { results <- r },
+	}, sink, perms.handle)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	res := waitResult(t, lr, results, 150*time.Second)
+	sessionID := lr.SessionID()
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	msgs := sink.snapshot()
+
+	// Pairing is judged by the API message, not the stored rows: a call
+	// answered while the rest of its message is still streaming lands its
+	// result between that message's blocks, and the stored rows split there.
+	_, raw := sessionTranscript(t, sessionID)
+	sent := transcriptMessages(raw)
+	paired := -1
+	for i, m := range sent {
+		if m.carries(tfToolPrefix+tooldefs.StopBlueprintName) && m.carries("Bash") {
+			paired = i
+			break
+		}
+	}
+	if paired < 0 {
+		t.Logf("attempt %d: no message carries both calls; the model made: %s", attempt, describeCalls(msgs))
+		return false
+	}
+	t.Logf("attempt %d: paired message %s carries %+v", attempt, sent[paired].ID, sent[paired].Calls)
+
+	batchEnd := -1
+	rows := map[int]bool{}
+	for _, c := range sent[paired].Calls {
+		i := toolResultIndex(msgs, c.ID)
+		if i < 0 {
+			t.Fatalf("no stored result answers the paired call %s (%s)", c.ID, c.Name)
+		}
+		batchEnd = max(batchEnd, i)
+		rows[assistantCarrying(msgs, c.ID)] = true
+		if c.Name == tfToolPrefix+tooldefs.StopBlueprintName {
+			t.Logf("the paired stop's own result: %q (is_error=%v)", msgs[i].Content, msgs[i].IsError)
+		}
+	}
+	if len(rows) > 1 {
+		t.Logf("observation: the paired message is stored as %d assistant rows", len(rows))
+	}
+
+	after := assistantsAfter(msgs, batchEnd)
+	if len(after) == 0 {
+		t.Fatalf("no assistant message follows the paired batch, so it ended the turn (Result.Terminal=%+v, subtype=%s)", res.Terminal, res.Subtype)
+	}
+	for i, m := range after {
+		t.Logf("after the paired batch, assistant %d: text=%q calls=%s", i+1, m.Content, describeCalls([]*domain.Message{m}))
+	}
+	t.Logf("the session transcript carries the not-heeded note: %v", bytes.Contains(raw, []byte(tooldefs.StopBlueprintNotAlone)))
+
+	// The only ending the turn may carry is a solo stop's after the batch, and
+	// that stop must be the last thing the model did.
+	byID := map[string]tooldefs.Call{}
+	for _, c := range spy.snapshot() {
+		byID[c.ID] = c
+	}
+	var want *Terminal
+	for _, m := range sent[paired+1:] {
+		if len(m.Calls) != 1 || m.Calls[0].Name != tfToolPrefix+tooldefs.StopBlueprintName {
+			continue
+		}
+		call, ok := byID[m.Calls[0].ID]
+		if !ok {
+			t.Errorf("the solo stop %s never reached its handler", m.Calls[0].ID)
+			continue
+		}
+		ending, ends := stopEnding(call)
+		if !ends {
+			t.Logf("the model called stop_blueprint alone with arguments it refuses: %+v", call.Args)
+			continue
+		}
+		t.Logf("the model called stop_blueprint again on its own: %+v", call.Args)
+		if later := assistantsAfter(msgs, toolResultIndex(msgs, call.ID)); len(later) != 0 {
+			t.Errorf("a solo stop did not end the turn: %d assistant message(s) follow its result", len(later))
+		}
+		want = &ending
+	}
+	switch {
+	case want == nil && res.Terminal != nil:
+		t.Errorf("Result.Terminal = %+v, but no solo stop followed the paired batch", res.Terminal)
+	case want != nil && (res.Terminal == nil || *res.Terminal != *want):
+		t.Errorf("Result.Terminal = %+v, want the solo stop's %+v", res.Terminal, *want)
+	case want == nil:
+		t.Logf("observation: the model did not call stop_blueprint again; the turn ended without an ending (subtype=%s)", res.Subtype)
+	}
+	if asked := perms.snapshot(); len(asked) != 0 {
+		t.Logf("the permission handler was asked about %v", asked)
+	}
+	return true
+}
+
+// TestSDK_LiveSmoke_SubagentCannotCallTFTools pins the wrapper's PreToolUse
+// deny: a subagent inherits the tf MCP server and the --allowedTools grant
+// that names its tools, and the deny still keeps the call from running. A
+// handler that never ran is the proof the deny was decided ahead of the grant.
+// Gated like the other live smokes.
+func TestSDK_LiveSmoke_SubagentCannotCallTFTools(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if subagentStopAttempt(t, attempt) {
+			return
+		}
+	}
+	t.Skipf("in %d attempts no subagent called stop_blueprint, so the deny was never exercised", attempts)
+}
+
+// subagentDenyReason is the reason the wrapper's PreToolUse hook gives a
+// subagent's TF tool call.
+const subagentDenyReason = "This tool is for the main agent only; a subagent cannot call it."
+
+// subagentStopAttempt runs one conversation whose subagent is asked to call
+// stop_blueprint, and checks it. It reports false, having checked nothing,
+// when no subagent made the call or the main agent made it itself.
+//
+// The attempt reads every turn until the main agent says DONE, not just the
+// first, so the subagent's report is seen in whichever turn it reaches the
+// main agent. It tells the two agents' calls apart by the main session
+// transcript, which records only the main agent's: a subagent's go to a
+// transcript of its own.
+func subagentStopAttempt(t *testing.T, attempt int) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	spy := &stopBlueprintSpy{}
+	perms := &promptRecorder{}
+	results := make(chan *Result, 8)
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: t.TempDir(),
+		Message: "Use the Agent tool to start exactly one general-purpose subagent, and give it this task word for word: " +
+			`"Call the mcp__tf__stop_blueprint tool once with type abort, reason 'subagent probe' and summary 'subagent probe'. ` +
+			`Then report back exactly what the tool returned, quoting it verbatim." ` +
+			"Do not call mcp__tf__stop_blueprint yourself and do not call any tool other than Agent. " +
+			"When the subagent has reported, reply with exactly the word DONE.",
+		Model:          "haiku",
+		TraceID:        "live-subagent-tf-tool",
+		ConversationID: "conv-live-subagent-tf-tool",
+		ClaimID:        "claim-live-subagent-tf-tool",
+		TFTools:        []tooldefs.Tool{spy.tool()},
+		AllowedTools:   BuildAllowedTools("") + ",Agent",
+		OnResult:       func(r *Result) { results <- r },
+	}, sink, perms.handle)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	var turns []*Result
+	deadline := time.After(240 * time.Second)
+wait:
+	for {
+		select {
+		case r := <-results:
+			turns = append(turns, r)
+			if saidDone(sink.snapshot()) {
+				break wait
+			}
+		case <-deadline:
+			t.Logf("attempt %d: the main agent never said DONE; checking what arrived", attempt)
+			break wait
+		}
+	}
+	sessionID := lr.SessionID()
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	msgs := sink.snapshot()
+	for i, r := range turns {
+		t.Logf("attempt %d: turn %d result subtype=%s terminal=%+v", attempt, i+1, r.Subtype, r.Terminal)
+	}
+	t.Logf("attempt %d: calls made: %s", attempt, describeCalls(msgs))
+	if asked := perms.snapshot(); len(asked) != 0 {
+		t.Logf("the permission handler was asked about %v", asked)
+	}
+	if len(turns) == 0 {
+		t.Fatalf("no turn ended within the deadline (stderr: %s)", lr.Stderr())
+	}
+
+	_, raw := sessionTranscript(t, sessionID)
+	mainCalls := map[string]bool{}
+	for _, m := range transcriptMessages(raw) {
+		for _, c := range m.Calls {
+			mainCalls[c.ID] = true
+		}
+	}
+	var spawned bool
+	var subagentStops, mainStops []string
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, c := range m.ToolCalls {
+			switch {
+			case c.Name == "Agent" || c.Name == "Task":
+				spawned = spawned || mainCalls[c.ID]
+			case c.Name == tooldefs.StopBlueprintName && mainCalls[c.ID]:
+				mainStops = append(mainStops, c.ID)
+			case c.Name == tooldefs.StopBlueprintName:
+				subagentStops = append(subagentStops, c.ID)
+			}
+		}
+	}
+	if !spawned {
+		t.Logf("attempt %d: the main agent never called the Agent tool", attempt)
+		return false
+	}
+	if len(mainStops) != 0 {
+		t.Logf("attempt %d: the main agent called stop_blueprint itself (%v), so the attempt says nothing about the subagent", attempt, mainStops)
+		return false
+	}
+	if len(subagentStops) == 0 {
+		t.Logf("attempt %d: the subagent never called stop_blueprint", attempt)
+		return false
+	}
+
+	if calls := spy.snapshot(); len(calls) != 0 {
+		t.Errorf("stop_blueprint's handler ran for a subagent's call (%+v): the PreToolUse deny did not beat the --allowedTools grant", calls)
+	}
+	for i, r := range turns {
+		if r.Terminal != nil {
+			t.Errorf("turn %d's Result.Terminal = %+v; a subagent's call must not end the run", i+1, r.Terminal)
+		}
+	}
+	for _, id := range subagentStops {
+		i := toolResultIndex(msgs, id)
+		if i < 0 {
+			t.Errorf("no stored result answers the subagent's stop %s", id)
+			continue
+		}
+		t.Logf("the subagent's stop result: %q (is_error=%v)", msgs[i].Content, msgs[i].IsError)
+		if !strings.Contains(msgs[i].Content, subagentDenyReason) {
+			t.Errorf("the subagent's stop result %q does not carry the deny reason %q", msgs[i].Content, subagentDenyReason)
+		}
+	}
+	return true
+}
+
+// saidDone reports whether an assistant row's text is the word DONE.
+func saidDone(msgs []*domain.Message) bool {
+	for _, m := range msgs {
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) == "DONE" {
+			return true
+		}
+	}
+	return false
+}
+
+// transcriptMessage is one API message of a session transcript, with the tool
+// calls it carried in order. Claude Code records each block of a message as an
+// entry of its own, with any result that arrived while the message streamed
+// between them, so the entries are regrouped here by message id.
+type transcriptMessage struct {
+	ID    string
+	Calls []transcriptCall
+}
+
+// transcriptCall is a tool_use block as the transcript records it: a TF tool
+// under its MCP name.
+type transcriptCall struct {
+	ID   string
+	Name string
+}
+
+func (m transcriptMessage) carries(name string) bool {
+	for _, c := range m.Calls {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// transcriptMessages is every assistant message of a session transcript, in
+// the order each first appears.
+func transcriptMessages(raw []byte) []transcriptMessage {
+	var out []transcriptMessage
+	at := map[string]int{}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				ID      string `json:"id"`
+				Content []struct {
+					Type string `json:"type"`
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &entry) != nil || entry.Type != "assistant" || entry.Message.ID == "" {
+			continue
+		}
+		i, seen := at[entry.Message.ID]
+		if !seen {
+			i = len(out)
+			at[entry.Message.ID] = i
+			out = append(out, transcriptMessage{ID: entry.Message.ID})
+		}
+		for _, b := range entry.Message.Content {
+			if b.Type == "tool_use" && b.ID != "" {
+				out[i].Calls = append(out[i].Calls, transcriptCall{ID: b.ID, Name: b.Name})
+			}
+		}
+	}
+	return out
+}
+
+// messageCarrying is the transcript message that carries the tool_use id.
+func messageCarrying(msgs []transcriptMessage, id string) (transcriptMessage, bool) {
+	for _, m := range msgs {
+		for _, c := range m.Calls {
+			if c.ID == id {
+				return m, true
+			}
+		}
+	}
+	return transcriptMessage{}, false
+}
+
+// stopBlueprintSpy serves the real stop_blueprint and records every call it
+// answers, so a live test sees what the model sent without changing the reply.
+type stopBlueprintSpy struct {
+	mu    sync.Mutex
+	calls []tooldefs.Call
+}
+
+func (s *stopBlueprintSpy) tool() tooldefs.Tool {
+	stop := tooldefs.StopBlueprint
+	stop.Handler = func(ctx context.Context, call tooldefs.Call) tooldefs.Outcome {
+		s.mu.Lock()
+		s.calls = append(s.calls, call)
+		s.mu.Unlock()
+		return tooldefs.StopBlueprint.Handler(ctx, call)
+	}
+	return stop
+}
+
+func (s *stopBlueprintSpy) snapshot() []tooldefs.Call {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]tooldefs.Call(nil), s.calls...)
+}
+
+// promptRecorder is a PermissionHandler that denies every request and keeps
+// the name of each tool it was asked about.
+type promptRecorder struct {
+	mu    sync.Mutex
+	asked []string
+}
+
+func (p *promptRecorder) handle(req PermissionRequest) PermissionDecision {
+	p.mu.Lock()
+	p.asked = append(p.asked, req.ToolName)
+	p.mu.Unlock()
+	return PermissionDecision{Behavior: "deny", Message: "denied by test"}
+}
+
+func (p *promptRecorder) snapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.asked...)
+}
+
+// stopEnding is the ending a stop_blueprint call's arguments ask for, by the
+// tool's own rule; false for arguments the tool refuses.
+func stopEnding(call tooldefs.Call) (Terminal, bool) {
+	out := tooldefs.StopBlueprint.Handler(context.Background(), call)
+	if out.Terminal == "" {
+		return Terminal{}, false
+	}
+	return Terminal{Outcome: out.Terminal, Reason: out.Reason, Summary: out.Summary}, true
+}
+
+// waitResult blocks for the next turn's Result.
+func waitResult(t *testing.T, lr *LiveRun, results <-chan *Result, d time.Duration) *Result {
+	t.Helper()
+	select {
+	case r := <-results:
+		return r
+	case <-lr.Done():
+		select {
+		case r := <-results:
+			return r
+		default:
+		}
+		t.Fatalf("the run ended before a result: %v (stderr: %s)", lr.Err(), lr.Stderr())
+	case <-time.After(d):
+		t.Fatalf("no result within %s (stderr: %s)", d, lr.Stderr())
+	}
+	return nil
+}
+
+// assistantCarrying is the position of the assistant row that carries the
+// tool_use id, or -1.
+func assistantCarrying(msgs []*domain.Message, id string) int {
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, c := range m.ToolCalls {
+			if c.ID == id {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// toolResultIndex is the position of the stored result that answers the
+// tool_use id, or -1.
+func toolResultIndex(msgs []*domain.Message, id string) int {
+	for i, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// assistantsAfter is every assistant row stored after position i.
+func assistantsAfter(msgs []*domain.Message, i int) []*domain.Message {
+	var out []*domain.Message
+	for _, m := range msgs[i+1:] {
+		if m.Role == "assistant" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// describeCalls renders each assistant row's tool calls, one bracket per row,
+// for a log line.
+func describeCalls(msgs []*domain.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		b.WriteString("[")
+		for i, c := range m.ToolCalls {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%s %v", c.Name, c.Input)
+		}
+		b.WriteString("] ")
+	}
+	if b.Len() == 0 {
+		return "no tool calls"
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // denyAllPermissions is a PermissionHandler that denies everything —
 // suitable for smoke tests that don't expect any tool use.
 func denyAllPermissions(req PermissionRequest) PermissionDecision {
@@ -903,14 +1497,14 @@ func countAssistants(msgs []*domain.Message) int {
 	return n
 }
 
-// userEntries decodes the `type: "user"` lines of the session transcript the
-// SDK wrote for sessionID, in the order they were appended.
+// sessionTranscript is the path and contents of the session transcript the SDK
+// wrote for sessionID.
 //
 // Found by walking ~/.claude/projects for the session's own file rather than by
 // re-deriving the cwd-encoded directory name: that encoding belongs to
 // internal/worktree, which imports this package, so the test locates the file
 // by the one name it already knows.
-func userEntries(t *testing.T, sessionID string) []map[string]any {
+func sessionTranscript(t *testing.T, sessionID string) (string, []byte) {
 	t.Helper()
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -935,6 +1529,14 @@ func userEntries(t *testing.T, sessionID string) []map[string]any {
 	if err != nil {
 		t.Fatalf("read the session transcript: %v", err)
 	}
+	return found, raw
+}
+
+// userEntries decodes the `type: "user"` lines of the session transcript the
+// SDK wrote for sessionID, in the order they were appended.
+func userEntries(t *testing.T, sessionID string) []map[string]any {
+	t.Helper()
+	found, raw := sessionTranscript(t, sessionID)
 	var out []map[string]any
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {

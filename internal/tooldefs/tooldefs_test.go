@@ -4,23 +4,19 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestTFTools_OfferAcrossRuntimeAndBlueprint pins the one decision about
-// which TF tools a run gets, and that TFTool agrees with it: a name resolves
-// only where the tool was offered, and never for a name nothing defines.
-func TestTFTools_OfferAcrossRuntimeAndBlueprint(t *testing.T) {
+// TestTFTools_OfferFollowsTheBlueprint pins the one decision about which TF
+// tools a run gets, and that TFTool agrees with it: a name resolves only where
+// the tool was offered, and never for a name nothing defines.
+func TestTFTools_OfferFollowsTheBlueprint(t *testing.T) {
 	tests := []struct {
 		name  string
 		facts Facts
 		want  []string
 	}{
-		{"native with a blueprint", Facts{Runtime: domain.ConversationRuntimeNative, HasBlueprint: true}, []string{StopBlueprintName}},
-		{"native without a blueprint", Facts{Runtime: domain.ConversationRuntimeNative}, nil},
-		{"sdk with a blueprint", Facts{Runtime: domain.ConversationRuntimeSDK, HasBlueprint: true}, nil},
-		{"sdk without a blueprint", Facts{Runtime: domain.ConversationRuntimeSDK}, nil},
+		{"with a blueprint", Facts{HasBlueprint: true}, []string{StopBlueprintName}},
+		{"without a blueprint", Facts{}, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

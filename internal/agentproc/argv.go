@@ -75,8 +75,9 @@ func BuildArgs(opts RunOptions) []string {
 			args = append(args, "--permission-prompts")
 		}
 		// Opt the wrapper into the PostToolBatch hook, which asks for text
-		// to hand the model after each tool batch. Without it the wrapper
-		// registers no hook and a batch costs no round trip.
+		// to hand the model after each tool batch. --tf-tools wires the same
+		// hook; with neither, the wrapper registers none and a batch costs
+		// no round trip.
 		if opts.OnToolBatch != nil {
 			args = append(args, "--tool-batch-notes")
 		}

@@ -214,7 +214,9 @@ type RunOptions struct {
 	// TFTools are the TF tools this run is offered (tooldefs.TFTools). The
 	// wrapper serves them from an in-process MCP server, so the model sees
 	// each as mcp__tf__<name>, and every call is answered here, by the
-	// tool's handler, on a goroutine of its own. BuildArgs adds each to
+	// tool's handler, on a goroutine of its own. A batch that is a single
+	// call answered with a terminal outcome ends the turn there, and that
+	// turn's Result carries it (Result.Terminal). BuildArgs adds each to
 	// --allowedTools, so a call never prompts. Interactive-mode only: the
 	// one-shot path has no channel to answer a call on, and BuildArgs leaves
 	// them off its argv.
@@ -729,8 +731,11 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// launched TF would otherwise hand the agent's `triagefactory exec`
 	// children a marker that makes them fail closed on an absent socket they
 	// were never supposed to have.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar})
+	// backgroundTasksEnvKey is stripped and re-set the same way, so an
+	// operator's export cannot turn background tasks back on.
+	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1")
 	if opts.LocalSandbox != nil {
 		// Re-add the marker the strip above removed, deliberately: this process
 		// is not in a jail, but the child IS, and the marker is what flips the

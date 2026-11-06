@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,7 +25,7 @@ import (
 //	{"kind":"interrupt"}
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
 //	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
-//	{"kind":"tool_batch_reply","id":"<id>","context":"..."}
+//	{"kind":"tool_batch_reply","id":"<id>","context":"...","stop":true|false}
 //	{"kind":"tool_call_reply","id":"<id>","content":"...","is_error":true|false}
 //	{"kind":"end"}
 //
@@ -43,7 +44,7 @@ import (
 //	{"type":"control","subtype":"ready"}
 //	{"type":"control","subtype":"permission_request","tool_call_id":"<id>","tool_name":"...","input":{...},"title":"...","display_name":"...","description":"..."}
 //	{"type":"control","subtype":"interrupted"}
-//	{"type":"control","subtype":"tool_batch","id":"<id>"}
+//	{"type":"control","subtype":"tool_batch","id":"<id>","tool_call_ids":["<tool_use id>", ...]}
 //	{"type":"control","subtype":"tool_batch_result","id":"<id>","delivered":true|false}
 //	{"type":"control","subtype":"tool_call","id":"<id>","tool_call_id":"<tool_use id>","tool_name":"...","input":{...}}
 //	{"type":"control","subtype":"tool_call_cancel","id":"<id>"}
@@ -58,7 +59,10 @@ import (
 // context (empty for none) the model reads with the batch's results. A reply
 // with context gets a tool_batch_result saying whether the hook was still
 // waiting for it: an interrupt gives the hook up, and a reply that arrives
-// after that reaches nobody.
+// after that reaches nobody. tool_call_ids are the batch's calls, by tool_use
+// id. A reply with stop ends the turn at the batch, with no next request; it
+// is sent when the batch is a single TF call whose answer ended the run, and
+// carries no context, since no request is left to read it.
 //
 // A tool_call is the model calling a TF tool (RunOptions.TFTools), named
 // without its mcp__tf__ prefix. The wrapper's handler waits on the
@@ -173,8 +177,17 @@ type LiveRun struct {
 	runCtx  context.Context
 	// toolCalls holds the cancel of each TF tool call still running, by the
 	// wrapper's id. Written by the reader and by each call's goroutine.
+	// terminals holds, by tool_use id, the ending each answered call
+	// recorded, until a tool_batch naming the call reads it; an ending whose
+	// batch is never reported (its turn was interrupted) stays until the
+	// process ends. Written by the call's goroutine before its reply, so it
+	// is in place by the time the wrapper can report the batch.
 	toolCallsMu sync.Mutex
 	toolCalls   map[string]context.CancelFunc
+	terminals   map[string]Terminal
+	// stopped is the ending of the batch the reader last told the wrapper to
+	// stop the turn at, stamped on the turn's result. Reader goroutine only.
+	stopped *Terminal
 
 	// Close phase bounds and the TF tool call deadline; zero falls back to
 	// the package consts. Fields (not just consts) so tests can drive the
@@ -691,6 +704,9 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 						}
 						interruptPending = false
 					}
+					// The turn the last stop ended: its result is the next
+					// one, since a turn reports only at its end.
+					result.Terminal, l.stopped = l.stopped, nil
 					if merged == nil {
 						merged = result
 					} else {
@@ -757,12 +773,32 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 // handleToolBatch answers one tool_batch with the text the caller hands the
 // model, keyed by the hook's id. Runs on the reader goroutine, where the
 // stream has already delivered the batch's results to the sink.
+//
+// A batch that is one call that ended the run is answered with stop instead, and
+// the caller is not asked for text: there is no next request to hand it to,
+// and text taken here would be marked delivered to a model that never reads
+// it. A batch that held an ending but did not stop carries a note saying so
+// ahead of the caller's text, since the ending call's own result said the run
+// was stopping.
 func (l *LiveRun) handleToolBatch(ctl controlLine) {
+	t, ends, held := l.batchTerminal(ctl.ToolCallIDs)
+	if ends {
+		if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "stop": true}); err != nil {
+			agentprocLog.Error("tool batch stop write failed", "error", err)
+			return
+		}
+		l.stopped = &t
+		return
+	}
 	var notes ToolBatchNotes
 	if l.toolBatch != nil {
 		notes = l.toolBatch()
 	}
-	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": notes.Text}); err != nil {
+	text := notes.Text
+	if held {
+		text = strings.TrimSpace(tooldefs.StopBlueprintNotHeededNote + "\n\n" + notes.Text)
+	}
+	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": text}); err != nil {
 		agentprocLog.Error("tool batch reply write failed", "error", err)
 		if notes.Undo != nil {
 			notes.Undo()
@@ -813,6 +849,8 @@ type controlLine struct {
 	Description string
 	// Delivered is a tool_batch_result's answer.
 	Delivered bool
+	// ToolCallIDs are a tool_batch's calls.
+	ToolCallIDs []string
 }
 
 // parseControlLine reports whether line is a control envelope and, if
@@ -830,6 +868,7 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		DisplayName string         `json:"display_name"`
 		Description string         `json:"description"`
 		Delivered   bool           `json:"delivered"`
+		ToolCallIDs []string       `json:"tool_call_ids"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return controlLine{}, false
@@ -847,6 +886,7 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		DisplayName: raw.DisplayName,
 		Description: raw.Description,
 		Delivered:   raw.Delivered,
+		ToolCallIDs: raw.ToolCallIDs,
 	}, true
 }
 

@@ -35,5 +35,8 @@ func MergeResult(base, resume *Result) *Result {
 	if resume.Interrupted {
 		merged.Interrupted = true
 	}
+	// Terminal is the newest turn's, set or not: it describes how that turn
+	// ended, and an earlier turn's ending is not this one's.
+	merged.Terminal = resume.Terminal
 	return &merged
 }

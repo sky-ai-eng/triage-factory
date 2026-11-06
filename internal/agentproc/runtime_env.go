@@ -15,6 +15,15 @@ import (
 // by the same name before appending ours — see newDirectCommand.
 const jscJITEnvKey = "BUN_JSC_useJIT"
 
+// backgroundTasksEnvKey turns off Claude Code's background tasks on every
+// spawn. Claude Code backgrounds a subagent, or a long Bash command, without
+// being asked, and the task outlives the turn that started it. TF closes the
+// process when that turn ends the engagement, which kills the task and loses
+// its work. With it off, a subagent runs in the foreground and the turn waits
+// for it. Set to 1, after stripping any inherited copy, for the reason
+// jscJITEnvKey's comment in newDirectCommand gives.
+const backgroundTasksEnvKey = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
 // agentRuntimeEnv returns runtime-tuning env entries for the agent
 // engine process. The vendored engine is a Bun-compiled binary running
 // on JavaScriptCore, and with the JIT disabled its resident set shrinks

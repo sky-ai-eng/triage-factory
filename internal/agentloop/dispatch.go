@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
 )
 
 // fatalToolHostNotice is the result written for calls that cannot be
@@ -24,11 +25,11 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // are visible to the next tool through the shared worktree, and the wire
 // protocol allows exactly one in-flight request per engagement.
 //
-// terminated reports that a flow-control call ended the run. It follows the
-// all-results-terminate contract: the batch terminates iff EVERY result in
-// it sets a terminal outcome, so a model that pairs `stop_blueprint` with real
-// work in one message gets the work done and keeps going rather than
-// silently losing the call it made alongside.
+// terminated reports that a flow-control call ended the run. Such a call ends
+// it only as its message's only tool call. One that shares its message is
+// answered as not having ended the run, so a model that pairs `stop_blueprint`
+// with real work gets the work done, is told the stop did not take effect,
+// and keeps going rather than losing sight of the calls it made alongside.
 //
 // position is the assembly key of the last result the batch wrote. Every call
 // is answered before this returns without an error, so it is the point in the
@@ -40,7 +41,6 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // was never dispatched carries no duration.
 func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, deaths *toolHostDeaths) (result Result, terminated bool, position float64, err error) {
 	var terminal *Result
-	allTerminate := true
 	at := toolResultPositions(ownerID, len(calls))
 
 	for i, call := range calls {
@@ -52,19 +52,15 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 		// result row still lands, so the transcript stays legal and a later
 		// reader sees why the run ended.
 		if out, ran, ok := e.resolveLoopSide(ctx, call, params); ok {
+			if out.Terminal != "" && len(calls) > 1 {
+				out = tooldefs.Outcome{Content: tooldefs.StopBlueprintNotAlone, IsError: true}
+			}
 			key, err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i), &ran)
 			if err != nil {
 				return Result{}, false, 0, err
 			}
 			position = key
-			if out.Terminal == "" {
-				// Either a correction (a bad type, a missing argument) or a
-				// loop-side tool that simply did its job. Neither ends the
-				// run, so this batch is no different from one that did work.
-				allTerminate = false
-				continue
-			}
-			if terminal == nil {
+			if out.Terminal != "" {
 				terminal = &Result{
 					Kind:          ResultConcluded,
 					Outcome:       out.Terminal,
@@ -74,8 +70,6 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 			}
 			continue
 		}
-
-		allTerminate = false
 
 		// The gate. A denial becomes an is_error result in-band: the model
 		// sees why it was refused and can choose differently, which is
@@ -146,7 +140,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 		position = key
 	}
 
-	if terminal != nil && allTerminate {
+	if terminal != nil {
 		return *terminal, true, position, nil
 	}
 	return Result{}, false, position, nil

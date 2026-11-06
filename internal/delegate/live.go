@@ -155,7 +155,7 @@ type liveRunSpec struct {
 // conversation the spawner drives is a delegation, which executes a
 // blueprint, as a native one does.
 func sdkTFTools() []tooldefs.Tool {
-	return tooldefs.TFTools(tooldefs.Facts{Runtime: domain.ConversationRuntimeSDK, HasBlueprint: true})
+	return tooldefs.TFTools(tooldefs.Facts{HasBlueprint: true})
 }
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
@@ -339,11 +339,12 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 				_ = proc.Close()
 				return liveOutcome{result: r}
 			}
-			class, _ := classifyAgentResult(r.Result)
+			class, _ := classifyTurn(r)
 			switch class {
 			case turnValid:
-				// A valid conclusion. Close the process (freeing the session) and
-				// hand it to processCompletion to orchestrate.
+				// A valid conclusion: an envelope, or a stop_blueprint call
+				// that ended the turn at its batch. Close the process (freeing
+				// the session) and hand it to processCompletion to orchestrate.
 				_ = proc.Close()
 				return liveOutcome{result: r}
 
