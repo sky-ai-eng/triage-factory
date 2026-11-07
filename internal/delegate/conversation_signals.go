@@ -441,6 +441,9 @@ type AdditiveFiringRef struct {
 //     the results of its next tool batch, or as its next turn when the model
 //     ends the turn first. A turn that ends any other way, a stop_blueprint
 //     call included, leaves it staged for the conversation's next engagement.
+//     TODO(TFAC-1347): nothing starts that engagement for an event alone, so
+//     a conversation that concludes first never reads it, and the firing it
+//     replaced is gone; the conversation should be woken to read it.
 //  2. A native conversation: staged as an injection:event row, never sent as
 //     a signal. The loop reads its pending rows before every model call, and
 //     its would-stop recheck continues for this subtype, so a running loop
