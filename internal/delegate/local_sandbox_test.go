@@ -3,6 +3,7 @@ package delegate
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -60,6 +61,9 @@ func TestStartLocalSandbox_DisabledIsFreeAndNil(t *testing.T) {
 // names this run's own tree, this conversation's own gh-channel dir, and a
 // socket that is actually being served.
 func TestStartLocalSandbox_BuildsPlanAndDaemon(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the agenthost daemon a local sandbox serves is Linux-only")
+	}
 	runmode.SetForTest(t, runmode.ModeLocal)
 	runmode.SetLocalSandboxForTest(t, true)
 	paths.SetForTest(t, t.TempDir())
@@ -113,6 +117,9 @@ func TestStartLocalSandbox_BuildsPlanAndDaemon(t *testing.T) {
 // bind tracks the channel, not the conversation: a run that never provisioned
 // one must not bind a directory that doesn't exist.
 func TestStartLocalSandbox_NoGHChannelBindsNoChannelDir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the agenthost daemon a local sandbox serves is Linux-only")
+	}
 	runmode.SetForTest(t, runmode.ModeLocal)
 	runmode.SetLocalSandboxForTest(t, true)
 	paths.SetForTest(t, t.TempDir())

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,7 +36,14 @@ func closedLoopbackAddr(t *testing.T) string {
 // person a service was unreachable would hide a fault that fails the same way
 // on every attempt.
 func TestUpstreamSetupFailure_ALocalFaultIsNotAnOutage(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "toolhost.sock")
+	// Not t.TempDir(): its path carries this test's name, which puts the
+	// socket past macOS's 104-byte sun_path limit.
+	dir, err := os.MkdirTemp("", "tfsock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "toolhost.sock")
 	held, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

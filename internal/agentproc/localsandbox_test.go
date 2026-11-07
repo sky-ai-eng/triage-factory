@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -31,8 +32,15 @@ import (
 // real bubblewrap actually works is asserted where it belongs — the
 // integration test in internal/agentproc/localsandbox, which drives the real
 // binary and skips when there is none.
+//
+// Every test that builds a sandboxed spawn calls this, so it is where they
+// skip off Linux: the local sandbox is a Linux mount namespace, and elsewhere
+// localsandbox refuses every Spec without building an argv to assert on.
 func stubBwrap(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("the local sandbox (bubblewrap) is Linux-only")
+	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bwrap")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh"+"\nexit 0\n"), 0o755); err != nil {
