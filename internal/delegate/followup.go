@@ -725,7 +725,7 @@ func (s *Spawner) forwardToCurrentStep(ctx context.Context, orgID string, conv *
 		return false
 	}
 	for _, r := range rows {
-		if r.Role != "user" || r.Subtype != "" || r.Delivered == nil || *r.Delivered {
+		if !waitingMessage(r) {
 			continue
 		}
 		if err := s.SendMessage(ctx, orgID, nextID, r.UserID, r.Content); err != nil {

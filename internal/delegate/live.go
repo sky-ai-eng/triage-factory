@@ -267,8 +267,10 @@ func processSpend(proc liveProc) float64 {
 //     is waiting, which the pause does not stand over.
 //   - an IsError result → handed back for processCompletion to fail.
 //   - a turn stop_blueprint ended → its verdict, handed back to orchestrate.
-//     Input waiting for the process stays on the transcript, and the wake
-//     that follows the blueprint's reaction delivers it (wakeForUnreadInput).
+//     Input waiting for the process stays on the transcript: the wake that
+//     follows the blueprint's reaction delivers a person's message
+//     (wakeForUnreadInput), and anything else waits for the conversation's
+//     next engagement.
 //   - a turn the model ended itself → the step concludes `continue`, after
 //     the two checks the native loop makes before the same conclusion (see
 //     below), and is handed back.

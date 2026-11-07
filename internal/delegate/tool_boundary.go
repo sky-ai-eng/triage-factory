@@ -79,9 +79,10 @@ func (s *Spawner) tellTaskClosing(ctx context.Context, orgID, conversationID str
 //
 // A native loop reads the row before its next model call, which is that
 // boundary already. A live SDK process has its handle armed (toolBoundary)
-// instead, and the SDK asks for the note at its next tool batch. In both, only
-// a person's input or a new-event injection keeps a finishing turn going, so
-// any other note that lands as the model stops waits for the next resume. A
+// instead, and the SDK asks for the note at its next tool batch. In both, a
+// turn the model ends goes on only for a person's input or a new-event
+// injection, and a turn that ends on stop_blueprint goes on for neither, so a
+// note that lands as the turn ends waits for the next resume. A
 // conversation with no live process here, parked or concluded or owned by
 // another executor, reads the row on its next resume.
 func (s *Spawner) stageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, subtype, producer, body string, prov domain.NoteProvenance) bool {

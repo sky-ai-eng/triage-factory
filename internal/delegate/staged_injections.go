@@ -29,8 +29,7 @@ import (
 // StageOrDeliverAdditiveEvent falls back on for an SDK conversation:
 //
 //   - live (a warm process): the note is staged and the process's tool
-//     boundary armed, so the process reads it before its turn ends;
-//     delivered=true.
+//     boundary armed (stageNoteAtToolBoundary); delivered=true.
 //   - not live (parked / terminal-resumable / terminal): the bare body is
 //     staged under subtype for the next resume to flush; staged=true.
 //

@@ -397,8 +397,8 @@ const (
 	// intent from.
 	InjectNotDelivered InjectOutcome = iota
 	// InjectDeliveredLocal means the event was staged for the run's live
-	// process on this pod, which reads it before its turn ends — the caller
-	// should record the task_event 'injected' itself.
+	// process on this pod (stageNoteAtToolBoundary says when the process
+	// reads it) — the caller should record the task_event 'injected' itself.
 	InjectDeliveredLocal
 	// InjectDeliveredRemote means a conversation_signals row was handed to a live
 	// remote executor — the OWNER records 'injected' (or compensates with
@@ -438,9 +438,9 @@ type AdditiveFiringRef struct {
 //
 //  1. A local live process (an SDK conversation on this pod): staged for its
 //     next tool boundary (stageNoteAtToolBoundary). The process reads it with
-//     the results of its next tool batch, or as its next turn when the turn
-//     ends first, since the driver reads a waiting new-event injection before
-//     it lets the process go.
+//     the results of its next tool batch, or as its next turn when the model
+//     ends the turn first. A turn that ends any other way, a stop_blueprint
+//     call included, leaves it staged for the conversation's next engagement.
 //  2. A native conversation: staged as an injection:event row, never sent as
 //     a signal. The loop reads its pending rows before every model call, and
 //     its would-stop recheck continues for this subtype, so a running loop
