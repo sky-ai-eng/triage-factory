@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.19.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.18.1...v1.19.0) (2026-11-07)
+
+
+### Features
+
+* **api:** every list route filters, searches and sorts on the server (TFAC-1329) ([#1469](https://github.com/sky-ai-eng/triage-factory/issues/1469)) ([1df864a](https://github.com/sky-ai-eng/triage-factory/commit/1df864afdf4969ccfb6e8fb405e8cbe555ddeb7e))
+* **delegate:** SDK runs conclude like native ones (TFAC-1340) ([#1482](https://github.com/sky-ai-eng/triage-factory/issues/1482)) ([1d34011](https://github.com/sky-ai-eng/triage-factory/commit/1d3401126a03bc2390b4efaa85eac6e2f0051abc))
+* **notifications:** a failure reaches the person it is about, as a toast or a notification (TFAC-1319) ([#1487](https://github.com/sky-ai-eng/triage-factory/issues/1487)) ([29aeb7e](https://github.com/sky-ai-eng/triage-factory/commit/29aeb7e0fc2622f7ec21c5bd5dd6e46de6d55780))
+* **team:** links name the Jira project and Linear team they are about (TFAC-1268) ([#1473](https://github.com/sky-ai-eng/triage-factory/issues/1473)) ([e38c6eb](https://github.com/sky-ai-eng/triage-factory/commit/e38c6eb157664d0564aeade96d96e5114aaadeff))
+* **tooldefs:** offer stop_blueprint to SDK runs and end them on it (TFAC-1333) ([#1477](https://github.com/sky-ai-eng/triage-factory/issues/1477)) ([0ea1818](https://github.com/sky-ai-eng/triage-factory/commit/0ea1818789db42aae7614aa6d7545332d117fc0f))
+
+
+### Bug Fixes
+
+* **agentproc:** store one SDK model message as one assistant row (TFAC-1338) ([#1484](https://github.com/sky-ai-eng/triage-factory/issues/1484)) ([7e6926d](https://github.com/sky-ai-eng/triage-factory/commit/7e6926dd854b9c1c71f7f28be08c5f83d83fdad1))
+* **delegate:** a message sent as the agent stops its blueprint resumes the conversation (TFAC-1339) ([#1485](https://github.com/sky-ai-eng/triage-factory/issues/1485)) ([1b40535](https://github.com/sky-ai-eng/triage-factory/commit/1b405356ba66500a813acc637507b948f13d3e9e))
+* **delegate:** an SDK follow-up decides its blueprint through the reactor (TFAC-1341) ([#1483](https://github.com/sky-ai-eng/triage-factory/issues/1483)) ([f052273](https://github.com/sky-ai-eng/triage-factory/commit/f052273ff2a5a273c19a5be56fc26b9585bd037b))
+* **deliverables:** let org admins read every team's deliverables, and gate the write routes on team write (TFAC-1285) ([#1478](https://github.com/sky-ai-eng/triage-factory/issues/1478)) ([a191301](https://github.com/sky-ai-eng/triage-factory/commit/a1913017f9fc082a294263f0232dbdf6fb60db30))
+* **deps:** clear govulncheck's reachable findings ([#1479](https://github.com/sky-ai-eng/triage-factory/issues/1479)) ([3f3cd84](https://github.com/sky-ai-eng/triage-factory/commit/3f3cd84f61e49b976ea639152eff282788ba9578))
+* **httpx:** refuse request-body shapes whose faults name no field (TFAC-1335) ([#1481](https://github.com/sky-ai-eng/triage-factory/issues/1481)) ([4b78f52](https://github.com/sky-ai-eng/triage-factory/commit/4b78f52a1de8695475b8964597991402774c4df1))
+* **httpx:** report a wrong-typed field by its JSON name and JSON type (TFAC-1255) ([#1474](https://github.com/sky-ai-eng/triage-factory/issues/1474)) ([4ac09b1](https://github.com/sky-ai-eng/triage-factory/commit/4ac09b149bfd57fd2f7240f4a0c1dadc3134fd0b))
+* **httpx:** say why a number field refused a number (TFAC-1334) ([#1480](https://github.com/sky-ai-eng/triage-factory/issues/1480)) ([7413ec2](https://github.com/sky-ai-eng/triage-factory/commit/7413ec2b8cc90f167b1d71e4718cf17857f15caa))
+* **mergeability:** watch a retargeted pull request on its new base (TFAC-1346) ([#1486](https://github.com/sky-ai-eng/triage-factory/issues/1486)) ([5635774](https://github.com/sky-ai-eng/triage-factory/commit/5635774a8a0719c3871f5afa3038596e0e2f391f))
+* **team:** list Linear beside Jira in the event sources view ([#1490](https://github.com/sky-ai-eng/triage-factory/issues/1490)) ([9534c64](https://github.com/sky-ai-eng/triage-factory/commit/9534c64292ff1fa2fb049370151e90951bca74cb))
+* **tracker:** close a Jira issue in a project no rule arms when Jira files it as done (TFAC-1313) ([#1475](https://github.com/sky-ai-eng/triage-factory/issues/1475)) ([3c97db4](https://github.com/sky-ai-eng/triage-factory/commit/3c97db4c7cf770ddced3ba70bed5532e7cd9ef23))
+
 ## [1.18.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.18.0...v1.18.1) (2026-11-03)
 
 
