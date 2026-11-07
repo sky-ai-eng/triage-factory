@@ -355,10 +355,9 @@ func TestSendMessage_EmptyInputsRefusedForALiveProcess(t *testing.T) {
 
 // TestSendMessage_AProcessLetGoTakesNothing: once the driver has let go of a
 // live process, a message for it is not queued for that process. The
-// conversation is still in flight, so the send answers ErrNoLiveProcess, the
-// 409 that tells the client to re-read and send again, by which time the
-// conversation has parked and takes the message through the follow-up path.
-// No row is written.
+// conversation is still in flight, so the send answers ErrNoLiveProcess, a
+// 409, and writes no row. Sent again once the conversation has parked, the
+// message takes the follow-up path.
 func TestSendMessage_AProcessLetGoTakesNothing(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-letgo", "sess-letgo", "/tmp/wt-letgo")

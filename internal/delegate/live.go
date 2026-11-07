@@ -451,9 +451,9 @@ func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc 
 
 // sendWaitingInput sends the input waiting for a live process as its next
 // turn when starts finds any of it worth one: every staged note, bundled
-// ahead of the people's messages, which is how a resume composes its first
-// message. Every waiting row rides the turn once it is sent, the notes that
-// would not have started one included.
+// under the lead-in a tool batch uses, since the notes landed while the last
+// turn ran, ahead of the people's messages. Every waiting row rides the turn
+// once it is sent, the notes that would not have started one included.
 //
 // The rows are flushed, marked delivered, before the send, and put back if
 // the send fails, as notesAtToolBatch does. sent reports that the turn
@@ -474,7 +474,7 @@ func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, pr
 	}
 	var parts []string
 	if len(notes) > 0 {
-		parts = append(parts, domain.StagedInjectionBlock(notes))
+		parts = append(parts, domain.StagedInjectionBoundaryBlock(notes))
 	}
 	for _, m := range messages {
 		parts = append(parts, m.Content)

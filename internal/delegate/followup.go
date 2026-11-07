@@ -355,8 +355,8 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 //     queueForLiveProcess: the row is written as pending input and the
 //     process reads it before its turn ends.
 //   - an SDK conversation in flight with no process taking input here (still
-//     starting, or just let go) → ErrNoLiveProcess, the re-read-and-retry
-//     answer: it is about to be either live or parked.
+//     starting, or just let go) → ErrNoLiveProcess, a 409: it is about to be
+//     either live or parked, and a send after that goes through.
 //   - everything else → queueFollowUp: write the undelivered row, and (if the
 //     conversation is parked) wake a claim for it.
 //
@@ -402,8 +402,10 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// process taking input: one still being set up, whose undelivered rows a
 	// failed setup would hand to a resume it never had, or one the driver has
 	// just let go of, which is about to park. Neither can take a queued row
-	// safely, so the caller re-reads and sends again. The registry is read once
-	// more first, for a process that registered since the fast path missed.
+	// safely, so the send is refused (ErrNoLiveProcess, a 409) and the person
+	// sends the message again once the conversation has settled. The registry
+	// is read once more first, for a process that registered since the fast
+	// path missed.
 	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
 		if h := s.getProc(conversationID); h != nil {
 			if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text); queued || err != nil {

@@ -448,7 +448,8 @@ func TestDriveLiveConversation_APauseStandsOverANewEvent(t *testing.T) {
 // TestDriveLiveConversation_ANewEventIsTheNextTurn: a new-event injection
 // waiting for the process keeps a turn the model ended going, as it keeps a
 // finishing native loop going, and rides the next turn with every other
-// staged note.
+// staged note, under the lead-in that says they landed while the agent was
+// working.
 func TestDriveLiveConversation_ANewEventIsTheNextTurn(t *testing.T) {
 	s, _, proc, park := liveInputFixture(t, "r-event")
 	ctx := context.Background()
@@ -471,6 +472,8 @@ func TestDriveLiveConversation_ANewEventIsTheNextTurn(t *testing.T) {
 	sent := proc.sentTexts()
 	if len(sent) != 1 || !strings.Contains(sent[0], "a new event") || !strings.Contains(sent[0], "a pull request note") {
 		t.Errorf("sent = %q, want one turn carrying the injection and the note", sent)
+	} else if !strings.HasPrefix(sent[0], "<system-note>\nWhile you were working,") {
+		t.Errorf("sent = %q, want the notes under the lead-in for input that landed while the agent worked", sent[0])
 	}
 	if got := pendingRows(t, s, "r-event"); len(got) != 0 {
 		t.Errorf("pending rows = %+v, want everything the turn carried delivered", got)
