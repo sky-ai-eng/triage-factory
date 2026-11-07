@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { Plus, Users } from 'lucide-react'
 import * as Switch from '@radix-ui/react-switch'
-import { apiFetch, apiList, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiList } from '../lib/apiClient'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useInvites } from '../hooks/useInvites'
@@ -202,7 +202,7 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
       try {
         await revoke(id)
       } catch (e) {
-        toast.error(httpErrorMessage(e, 'Could not revoke the invite.'))
+        toast.failed(e, 'Could not revoke the invite.')
       } finally {
         setBusyId(null)
       }
@@ -218,7 +218,7 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
         setResentLinks((m) => ({ ...m, [res.id]: res.accept_url }))
         toast.success('Invite link rotated — copy the new one below.')
       } catch (e) {
-        toast.error(httpErrorMessage(e, 'Could not resend the invite.'))
+        toast.failed(e, 'Could not resend the invite.')
       } finally {
         setBusyId(null)
       }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import NotifyRulesPanel from './NotifyRulesPanel'
 import { jsonBody, listBody } from '../test/apiResponse'
+import { reportFailedThroughError } from '../test/toastDouble'
 
 // The editor is a stand-in that shows which rule it was opened on, and
 // whether the panel judged it writable.
@@ -19,8 +20,9 @@ vi.mock('../hooks/useDeploymentConfig', () => ({
 vi.mock('../hooks/useTeams', () => ({
   useTeams: () => ({ teams: [{ id: 'team-a', name: 'Infra', slug: 'infra', role: 'member' }] }),
 }))
-const toastMock = vi.hoisted(() => ({ error: vi.fn() }))
+const toastMock = vi.hoisted(() => ({ error: vi.fn(), failed: vi.fn() }))
 vi.mock('./Toast/toastStore', () => ({ toast: toastMock }))
+reportFailedThroughError(toastMock)
 
 const notifyRule = (id: string, audience: 'creator' | 'team', creator: string) => ({
   id,

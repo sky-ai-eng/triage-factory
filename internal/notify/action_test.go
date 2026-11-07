@@ -140,6 +140,19 @@ func TestHref_Render(t *testing.T) {
 	if _, err := Routes.Trigger("").render(org, false, none); err == nil || !strings.Contains(err.Error(), "query trigger is empty") {
 		t.Errorf("a Trigger naming no trigger: err = %v; want it refused", err)
 	}
+	const conv = "44444444-4444-4444-8444-444444444444"
+	if got, err := Routes.RunStation(conv).render(org, false, none); err != nil || got != "/orgs/"+org+"/runs/"+conv {
+		t.Errorf("RunStation in multi = %q, %v", got, err)
+	}
+	if got, err := Routes.RunStation(conv).render(org, true, none); err != nil || got != "/runs/"+conv {
+		t.Errorf("RunStation in local = %q, %v", got, err)
+	}
+	if got, err := Routes.RunStation("a/b").render(org, true, none); err != nil || got != "/runs/a%2Fb" {
+		t.Errorf("RunStation with a separator in its id = %q, %v; want it escaped as one segment", got, err)
+	}
+	if _, err := Routes.RunStation("").render(org, false, none); err == nil || !strings.Contains(err.Error(), "path conversationID is empty") {
+		t.Errorf("a RunStation naming no conversation: err = %v; want it refused", err)
+	}
 	withQuery := Href{route: orgSettingsRoute, query: url.Values{"source": {"jira"}}}
 	if got, err := withQuery.render(org, false, none); err != nil || got != "/orgs/"+org+"/org?tab=settings&source=jira" {
 		t.Errorf("a query on a route that has one = %q, %v; want the two joined", got, err)

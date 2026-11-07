@@ -9,7 +9,7 @@ import { useTeams } from '../hooks/useTeams'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
-import { apiJSON, apiList, apiListFirstRows, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, apiList, apiListFirstRows } from '../lib/apiClient'
 import type { RepoRef } from '../lib/githubRepos'
 import { fetchTeamRepos, saveTeamRepos } from './settings/teamConfig'
 
@@ -841,7 +841,7 @@ export default function Repos() {
       })
       setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not update the base branch.'))
+      toast.failed(err, 'Could not update the base branch.')
     }
   }
 

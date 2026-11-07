@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { Store, X } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import type { EventType } from '../types'
@@ -80,13 +80,11 @@ export default function MarketplacePublishControl({
       )
       refresh()
     } catch (err) {
-      toast.error(
-        httpErrorMessage(
-          err,
-          action === 'delist'
-            ? 'Could not delist from the marketplace.'
-            : 'Could not relist on the marketplace.',
-        ),
+      toast.failed(
+        err,
+        action === 'delist'
+          ? 'Could not delist from the marketplace.'
+          : 'Could not relist on the marketplace.',
       )
     }
   }
@@ -258,13 +256,11 @@ function PublishDialog({
       )
       onPublished()
     } catch (err) {
-      toast.error(
-        httpErrorMessage(
-          err,
-          isRepublish
-            ? 'Could not publish the update to the marketplace.'
-            : 'Could not publish to the marketplace.',
-        ),
+      toast.failed(
+        err,
+        isRepublish
+          ? 'Could not publish the update to the marketplace.'
+          : 'Could not publish to the marketplace.',
       )
     } finally {
       setSaving(false)

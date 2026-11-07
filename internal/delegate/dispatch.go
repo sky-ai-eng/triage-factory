@@ -368,6 +368,10 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 		if s.conversations != nil {
 			if conv, gerr := s.conversations.GetSystem(bgCtx, st.OrgID, st.ConversationID); gerr == nil && conv != nil {
 				s.broadcastConversationUpdate(st.OrgID, st.ConversationID, conv.Status)
+				// A settled stop parks the conversation, possibly for a
+				// reason that waits on its delegator (a stall whose
+				// engagement was lost before it parked itself).
+				s.notePaused(st.OrgID, conv)
 			}
 		}
 		if st.BlueprintRunID == "" || s.blueprints == nil {
@@ -1124,7 +1128,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, agentproc.AgentVisibleRoot(cfg.runRoot), len(plan), nextStepName)
 
-	toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
+	toast.FireUser(s.wsHub, orgID, conv.CreatorUserID, toast.LevelInfo, "", fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(conv.ID)))
 
 	// conv.SessionID is empty on a first claim and non-empty when this run was
@@ -2420,8 +2424,7 @@ func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.Blueprint
 		return s.disposeOfUnreachableUpstream(orgID, br, conv, cause)
 	}
 	s.parkWithStopNote(orgID, conv, domain.ParkReasonUpstreamUnavailable,
-		"Paused after repeated attempts: "+upstreamSetupReason(cause)+". Send a message to try again.",
-		"")
+		"Paused after repeated attempts: "+upstreamSetupReason(cause)+". Send a message to try again.")
 	return true
 }
 
@@ -2434,8 +2437,7 @@ func (s *Spawner) disposeOfUnreachableUpstream(orgID string, br *domain.Blueprin
 	reason := upstreamSetupReason(cause)
 	if br == nil || s.conversationHasWork(orgID, conv.ID) {
 		s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
-			"Paused after repeated attempts: "+reason+".",
-			fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), reason))
+			"Paused after repeated attempts: "+reason+".")
 		return true
 	}
 	s.failUnstartedStep(orgID, br, conv, reason)
@@ -2528,8 +2530,7 @@ func (s *Spawner) conversationHasWork(orgID, conversationID string) bool {
 // budget would buy nothing at all.
 func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversation, cause error) {
 	s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
-		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.SetupFailures+1, cause),
-		fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.SetupFailures+1, cause))
 }
 
 // disposeOfModelRefusal answers for a claim whose model its team may no longer
@@ -2546,8 +2547,7 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 		dispatchLog.Warn("claim refused: the model this conversation would run on is not enabled for its team; parking",
 			"conversation", conv.ID, "team", conv.TeamID, "error", cause)
 		s.parkWithStopNote(orgID, conv, domain.ParkReasonModelNotEnabled,
-			fmt.Sprintf("This conversation cannot continue: %s", cause),
-			fmt.Sprintf("Run %s is paused: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+			fmt.Sprintf("This conversation cannot continue: %s", cause))
 		return
 	}
 	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
@@ -2557,14 +2557,14 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 
 // parkWithStopNote is the park every pre-agent stop lands on: a stop note on the
 // transcript saying what happened, the waiting input settled so `open` does not
-// immediately re-claim, the park itself fenced on this claim, and the two
-// surfaces a person watching either the conversation or the board reads from.
+// immediately re-claim, the park itself fenced on this claim, the two surfaces
+// a person watching either the conversation or the board reads from, and the
+// notification for the person who delegated it, who is often watching neither.
 //
 // The note and the reason are the caller's because they are the only parts that
 // differ, and they are what a person is actually told — a park that describes
-// the wrong cause sends them to fix the wrong thing. An empty toastMsg fires no
-// toast: an upstream outage is not raised as one.
-func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note, toastMsg string) {
+// the wrong cause sends them to fix the wrong thing.
+func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note string) {
 	bgCtx := context.Background()
 	s.releaseActivity(conv.ID, conv.ClaimID)
 	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, conv.ClaimID, &domain.Message{
@@ -2596,9 +2596,7 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 		return
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
-	if toastMsg != "" {
-		toast.Error(s.wsHub, orgID, toastMsg)
-	}
+	s.noteConversationPaused(orgID, conv.ID)
 }
 
 // failClaimedConversation writes the terminal and the boundary for a claimed
@@ -2620,7 +2618,7 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
 	bgCtx := context.Background()
 	s.releaseActivity(conv.ID, conv.ClaimID)
-	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
+	failed, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",
 			"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID, "error", err)
@@ -2628,6 +2626,9 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	}
 	if err != nil {
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
+	}
+	if failed {
+		s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureUnclassified, reason)
 	}
 	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
 	if err != nil {

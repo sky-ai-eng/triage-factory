@@ -237,7 +237,7 @@ function ConnectionBlock({
     } catch (e) {
       // 409 "already registered", 503 "admin token not configured", and the
       // https-only validation 400 all surface their server message verbatim.
-      toast.error(httpErrorMessage(e, 'Could not register the SSO connection.'))
+      toast.failed(e, 'Could not register the SSO connection.')
     } finally {
       setConnecting(false)
     }
@@ -255,7 +255,7 @@ function ConnectionBlock({
       setResp(next)
       toast.success(enabled ? 'SSO enabled' : 'SSO disabled')
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not update the SSO connection.'))
+      toast.failed(e, 'Could not update the SSO connection.')
     } finally {
       setPatching(false)
     }
@@ -275,7 +275,7 @@ function ConnectionBlock({
       setResp(next)
       toast.success(`Identity provider set to ${idpLabel(idp)}`)
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not update the identity provider.'))
+      toast.failed(e, 'Could not update the identity provider.')
     } finally {
       setPatching(false)
     }
@@ -430,7 +430,7 @@ function DomainsBlock({
       setNewDomain('')
     } catch (e) {
       // 400 "must be a bare domain like example.com" surfaces verbatim.
-      toast.error(httpErrorMessage(e, 'Could not add the domain.'))
+      toast.failed(e, 'Could not add the domain.')
     } finally {
       setAdding(false)
     }
@@ -528,7 +528,7 @@ function DomainRow({
       setDomains((ds) => ds.filter((x) => x.id !== domain.id))
       toast.success(`${domain.domain} removed`)
     } catch (e) {
-      toast.error(httpErrorMessage(e, 'Could not remove the domain.'))
+      toast.failed(e, 'Could not remove the domain.')
       setBusy(false)
     }
   }
@@ -648,7 +648,7 @@ function EnforcementBlock({
       // The 409 gating messages ("enable the connection first", "sign in
       // through single sign-on … before requiring it", etc.) surface verbatim:
       // the server is the one that knows how this admin is signed in.
-      toast.error(httpErrorMessage(e, 'Could not update SSO enforcement.'))
+      toast.failed(e, 'Could not update SSO enforcement.')
     } finally {
       setToggling(false)
     }
@@ -733,7 +733,7 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
       toast.success('Break-glass principal added')
     } catch (err) {
       // 404 "no member of this organization has that verified email" surfaces verbatim.
-      toast.error(httpErrorMessage(err, 'Could not add the break-glass principal.'))
+      toast.failed(err, 'Could not add the break-glass principal.')
     } finally {
       setAdding(false)
     }
@@ -749,7 +749,7 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
     } catch (err) {
       // 409 "can't remove the last break-glass principal while SSO is required …"
       // surfaces verbatim.
-      toast.error(httpErrorMessage(err, 'Could not remove the break-glass principal.'))
+      toast.failed(err, 'Could not remove the break-glass principal.')
     }
   }
 

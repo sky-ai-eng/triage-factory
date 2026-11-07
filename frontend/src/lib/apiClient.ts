@@ -68,7 +68,41 @@ export interface ApiFetchOptions extends RequestInit {
   allow?: number[]
 }
 
+// The page each failed request was made from, keyed by the error it threw, so
+// the page travels with the error to whatever reports it without changing
+// what the error is. A failure can land after the viewer has moved on, and is
+// still about the page it came from (see `requestOrigin`).
+const requestOrigins = new WeakMap<object, string>()
+
+/** The path and query of the page the viewer is on. */
+function currentPage(): string {
+  return window.location.pathname + window.location.search
+}
+
+/** Records `from` as where `err` came from, unless something already has. */
+function tagOrigin(err: unknown, from: string) {
+  if (typeof err === 'object' && err !== null && !requestOrigins.has(err)) {
+    requestOrigins.set(err, from)
+  }
+}
+
+/** The page (path and query) a failed `apiFetch` or `apiJSON` was made from,
+ *  or undefined for an error that did not come from one. */
+export function requestOrigin(err: unknown): string | undefined {
+  return typeof err === 'object' && err !== null ? requestOrigins.get(err) : undefined
+}
+
 export async function apiFetch(path: string, options: ApiFetchOptions = {}): Promise<Response> {
+  const from = currentPage()
+  try {
+    return await send(path, options)
+  } catch (err) {
+    tagOrigin(err, from)
+    throw err
+  }
+}
+
+async function send(path: string, options: ApiFetchOptions): Promise<Response> {
   const { allow, headers, ...rest } = options
 
   const resp = await fetch(path, {
@@ -128,7 +162,16 @@ export async function readJSON<T>(resp: Response, path: string): Promise<T> {
 }
 
 export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
-  return readJSON<T>(await apiFetch(path, options), path)
+  // The page the call started on, read before the request's await. apiFetch
+  // tags its own errors with the same page; this tags the parse's.
+  const from = currentPage()
+  const resp = await apiFetch(path, options)
+  try {
+    return await readJSON<T>(resp, path)
+  } catch (err) {
+    tagOrigin(err, from)
+    throw err
+  }
 }
 
 /** The list envelope every paginated read answers with: one page of `items`,

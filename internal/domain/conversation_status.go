@@ -1,5 +1,7 @@
 package domain
 
+import "slices"
+
 // The conversation status vocabulary and its classifiers — one Go home for
 // both halves of a set of names that is otherwise spelled as bare strings in
 // Go, SQL and TypeScript. ParkReason, at the bottom, is the second such set:
@@ -262,6 +264,41 @@ func IsParkReason(reason string) bool {
 		return true
 	}
 	return false
+}
+
+// AwaitsPerson reports whether a conversation parked for r is waiting on a
+// person: nothing retries it, and it moves again only when someone sends it a
+// message or fixes what stopped it. An idle park is a turn that ended, not a
+// wait, and a stop or a blueprint's end is a park somebody, or something,
+// meant.
+func (r ParkReason) AwaitsPerson() bool {
+	return slices.Contains(ParkReasonsAwaitingPerson(), r)
+}
+
+// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits, for the store
+// reads that select on it.
+func ParkReasonsAwaitingPerson() []ParkReason {
+	return []ParkReason{
+		ParkReasonLaunchFailed,
+		ParkReasonModelNotEnabled,
+		ParkReasonStalled,
+		ParkReasonUpstreamUnavailable,
+		ParkReasonSandboxLost,
+	}
+}
+
+// ConversationAwaitingPerson is a conversation a person delegated that is
+// parked for a reason that waits on a person (ParkReason.AwaitsPerson), has
+// not ended, and is not archived.
+type ConversationAwaitingPerson struct {
+	ConversationID string
+	// CreatorUserID is the person who delegated it, never empty: a
+	// conversation a trigger fired has nobody to wait on.
+	CreatorUserID string
+	ParkReason    ParkReason
+	// EntitySourceID is the key of the entity its task is about, e.g.
+	// owner/repo#18. Display only; empty when the task names no entity.
+	EntitySourceID string
 }
 
 // IsActiveConversationStatus reports whether a conversation is in flight — claimed and setting

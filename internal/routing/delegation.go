@@ -320,6 +320,9 @@ func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *
 		if promptName == "" {
 			promptName = "prompt"
 		}
+		// TODO(TFAC-1344): this toast reaches every member of the org and names
+		// a team's prompt; a trip is a condition for the trigger's team members,
+		// resolved when a manual run on the entity completes.
 		toast.Warning(r.ws, orgID, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
 		return "", false, nil
 	}

@@ -984,7 +984,7 @@ export default function Board() {
         })
         fetchTasks()
       } catch (err) {
-        toast.error(httpErrorMessage(err, failure))
+        toast.failed(err, failure)
       }
     },
     [fetchTasks],
@@ -1004,7 +1004,7 @@ export default function Board() {
         await apiFetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
         fetchTasks()
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
+        toast.failed(err, 'Could not return the task to the queue.')
       }
     },
     [fetchTasks],
@@ -1257,7 +1257,7 @@ export default function Board() {
       // A failed status/claim/requeue mutation would otherwise leave the board
       // silently in the wrong state; surface it and let the next fetchTasks
       // reconcile.
-      toast.error(httpErrorMessage(err, 'Could not move the task — please try again.'))
+      toast.failed(err, 'Could not move the task — please try again.')
     }
   }
 
@@ -1272,7 +1272,7 @@ export default function Board() {
           body: JSON.stringify({}),
         })
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not claim the task.'))
+        toast.failed(err, 'Could not claim the task.')
       }
       fetchTasks()
     },
@@ -1303,7 +1303,7 @@ export default function Board() {
           body: JSON.stringify({ target_user_id: targetUserID }),
         })
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not reassign the task.'))
+        toast.failed(err, 'Could not reassign the task.')
       }
       fetchTasks()
     },
@@ -1360,7 +1360,7 @@ export default function Board() {
             [task.id]: httpErrorMessage(err, 'spawn failed'),
           }))
         } else {
-          toast.error(httpErrorMessage(err, 'Could not delegate the task.'))
+          toast.failed(err, 'Could not delegate the task.')
         }
       }
       fetchTasks()

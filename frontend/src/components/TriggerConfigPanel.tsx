@@ -8,7 +8,7 @@ import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON } from '../lib/apiClient'
 import { blueprintsBase, handlersBase } from '../lib/scope'
 import { useEventSources } from '../hooks/useEventSources'
 import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
@@ -127,7 +127,7 @@ export default function TriggerConfigPanel({
       onRefresh?.()
     } catch (err) {
       setEnabled(!checked)
-      toast.error(httpErrorMessage(err, 'Could not toggle the trigger.'))
+      toast.failed(err, 'Could not toggle the trigger.')
     }
   }
 
@@ -149,7 +149,7 @@ export default function TriggerConfigPanel({
       })
       onSaved()
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not save the trigger.'))
+      toast.failed(err, 'Could not save the trigger.')
     } finally {
       setSaving(false)
     }
@@ -161,7 +161,7 @@ export default function TriggerConfigPanel({
       await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, { method: 'DELETE' })
       onDeleted()
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not delete the trigger.'))
+      toast.failed(err, 'Could not delete the trigger.')
     }
   }
 

@@ -416,7 +416,7 @@ func TestPreAgentFailure_EveryReleaseStopsTheWatchdogFirst(t *testing.T) {
 			f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, nil, conv, errors.New("clone failed"))
 		}},
 		{"park", func(f stallFixture, conv domain.Conversation) {
-			f.s.parkWithStopNote(runmode.LocalDefaultOrgID, conv, domain.ParkReasonLaunchFailed, "could not start", "")
+			f.s.parkWithStopNote(runmode.LocalDefaultOrgID, conv, domain.ParkReasonLaunchFailed, "could not start")
 		}},
 		{"fail", func(f stallFixture, conv domain.Conversation) {
 			f.s.failClaimedConversation(runmode.LocalDefaultOrgID, &conv, "could not start")

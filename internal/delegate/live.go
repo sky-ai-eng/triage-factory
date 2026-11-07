@@ -19,7 +19,6 @@ package delegate
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"slices"
 	"time"
@@ -29,7 +28,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
@@ -458,6 +456,7 @@ func (s *Spawner) markConversationOpenFlipped(ctx context.Context, park livePark
 		return false, false
 	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")
+	s.announcePark(park)
 	return false, true
 }
 
@@ -492,13 +491,6 @@ func (s *Spawner) parkConversationOpenFlipped(ctx context.Context, park livePark
 	}
 	if s.leaveConversation(ctx, park, sessionID, snapshotReasonPark, release) {
 		return true, false
-	}
-	// Only the idle park toasts. A deliberate stop terminates the blueprint
-	// behind it, so "resumes on the next message" would be a promise this
-	// build cannot keep — the claim gate refuses a parked step under a
-	// finished blueprint until the resume work lands.
-	if !park.reason.Deliberate {
-		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
 	return false, flipped
 }

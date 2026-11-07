@@ -19,7 +19,7 @@
 // is member-gated on the server even though this control is not.
 
 import { useState } from 'react'
-import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
+import { apiJSON } from '../../lib/apiClient'
 import { sourceLabel } from '../../lib/eventSources'
 import {
   invalidateEventSources,
@@ -98,9 +98,7 @@ export default function EventSourcesGroup({
       // round trip back through the socket.
       invalidateEventSources(orgId)
     } catch (err) {
-      toast.error(
-        httpErrorMessage(err, `Could not turn ${sourceLabel(kind)} ${disabled ? 'off' : 'on'}.`),
-      )
+      toast.failed(err, `Could not turn ${sourceLabel(kind)} ${disabled ? 'off' : 'on'}.`)
     } finally {
       mark(kind, false)
     }

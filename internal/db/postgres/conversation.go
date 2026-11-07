@@ -650,6 +650,46 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 	return out, rows.Err()
 }
 
+func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error) {
+	reasons := domain.ParkReasonsAwaitingPerson()
+	names := make([]string, len(reasons))
+	for i, r := range reasons {
+		names[i] = string(r)
+	}
+	// A claim clears park_reason as it takes a row off its park, so a
+	// conversation someone woke leaves the set at its claim. The entity is
+	// outer-joined: its key is display only, and a task that names none still
+	// leaves its delegator waiting.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
+		FROM conversations c
+		JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
+		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
+		WHERE c.org_id = $1
+		  AND c.status = 'open'
+		  AND c.park_reason = ANY($2::text[])
+		  AND c.creator_user_id IS NOT NULL
+		  AND c.ended_at IS NULL
+		  AND c.archived_at IS NULL
+		ORDER BY c.id
+	`, orgID, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ConversationAwaitingPerson
+	for rows.Next() {
+		var a domain.ConversationAwaitingPerson
+		var reason string
+		if err := rows.Scan(&a.ConversationID, &a.CreatorUserID, &reason, &a.EntitySourceID); err != nil {
+			return nil, err
+		}
+		a.ParkReason = domain.ParkReason(reason)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error) {
 	if limit <= 0 {
 		return nil, nil

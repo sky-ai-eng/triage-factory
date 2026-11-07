@@ -9,6 +9,7 @@ import { cancelInvoke } from '../../hooks/useNotificationActions'
 import { jsonBody } from '../../test/apiResponse'
 import type { NotificationItem } from '../../lib/notifications'
 import type { Facet } from '../../lib/apiClient'
+import { reportFailedThroughError } from '../../test/toastDouble'
 
 // What is pinned is what the page promises a reader: a row is read once it has
 // been seen, not merely rendered; a link to a row lands on it wherever it is;
@@ -22,8 +23,10 @@ const toasts = vi.hoisted(() => ({
   warning: vi.fn(),
   info: vi.fn(),
   error: vi.fn(),
+  failed: vi.fn(),
 }))
 vi.mock('../../components/Toast/toastStore', () => ({ toast: toasts }))
+reportFailedThroughError(toasts)
 
 const viewer = vi.hoisted(() => ({ orgAdmin: false }))
 vi.mock('../../hooks/useOrgRole', () => ({

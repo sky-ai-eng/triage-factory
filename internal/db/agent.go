@@ -1391,6 +1391,18 @@ type ConversationStore interface {
 	// belongs to.
 	ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error)
 
+	// ListAwaitingPersonSystem returns orgID's conversations that a person
+	// delegated and that are parked waiting on a person
+	// (domain.ParkReason.AwaitsPerson): stored status `open`, not ended, not
+	// archived, ordered by id. It is the whole set, not a page, because its one
+	// caller syncs kinds.ConversationPaused from it, and a sync resolves every
+	// open occurrence the set leaves out. The set is bounded by what the org's
+	// people have delegated and left waiting.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and orgID is bound by argument.
+	ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error)
+
 	// HasActiveClaimForTaskSystem reports whether any conversation
 	// on taskID has a live claim — i.e. whether an executor is
 	// engaged on the shared workspace tree right now.

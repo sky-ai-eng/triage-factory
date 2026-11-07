@@ -90,8 +90,7 @@ func (s *Spawner) disposeOfHostRefusal(orgID string, br *domain.BlueprintRun, co
 		dispatchLog.Warn("claim refused: the pull request is not on the org's GitHub host; parking",
 			"conversation", conv.ID, "pr_host", cause.PRHost, "current_host", cause.CurrentHost)
 		s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
-			fmt.Sprintf("This conversation cannot continue: %s. A run reaches GitHub only on the org's current host.", cause),
-			fmt.Sprintf("Run %s is paused: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
+			fmt.Sprintf("This conversation cannot continue: %s. A run reaches GitHub only on the org's current host.", cause))
 		return
 	}
 	dispatchLog.Error("blueprint step refused: the pull request is not on the org's GitHub host",

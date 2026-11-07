@@ -57,7 +57,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // ErrNoActiveConversation is the answer when there is nothing to stop: the conversation
@@ -576,7 +575,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	// Guarded — if a terminal racing path (cancel, natural completion)
 	// reached the row first, leave its status in place rather than
 	// clobbering.
-	_, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
+	marked, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
 	if errors.Is(markErr, db.ErrClaimReleased) {
 		// The release landed between the two writes. Same answer, same tail
 		// to skip; the failure row already on the transcript is the one
@@ -610,17 +609,10 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
-	// Surface as an error toast so the user sees the failure even when
-	// they're not watching the runs page. A memory-limit kill gets copy that
-	// says what happened and which knob to turn instead of echoing the raw
-	// error prefix; everything else truncates the message — full stderr dumps
-	// don't fit in a toast card.
-	if kind == domain.ConversationFailureMemoryLimit {
-		toast.Error(s.wsHub, orgID, fmt.Sprintf(
-			"Run %s was stopped: it exceeded its memory limit. Raise TF_CLAIM_MEMORY_LIMIT_MB if it legitimately needs more.",
-			shortConversationID(conversationID)))
-	} else {
-		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortConversationID(conversationID), truncateToastMsg(errMsg, 160)))
+	// Told only for a failure this call recorded: a racing verdict that got
+	// there first is the conversation's answer, not this one.
+	if marked {
+		s.noteDelegatorFailed(orgID, conversationID, kind, errMsg)
 	}
 	return false
 }

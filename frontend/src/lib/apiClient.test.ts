@@ -8,6 +8,7 @@ import {
   httpErrorMessage,
   HttpError,
   isSSORequired,
+  requestOrigin,
   setSSORequiredHandler,
   setUnauthHandler,
 } from './apiClient'
@@ -342,5 +343,55 @@ describe('apiListFirstRows', () => {
     expect(got.items).toEqual([])
     expect(got.next_page_token).toBe('more')
     expect(fetchMock).toHaveBeenCalledTimes(11)
+  })
+})
+
+describe('requestOrigin', () => {
+  afterEach(() => {
+    window.history.pushState({}, '', '/')
+  })
+
+  const caught = (p: Promise<unknown>) =>
+    p.then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+  // A failure is about the page its request was made from, whichever page the
+  // viewer is on by the time it lands.
+  it('names the page a request started on, not the one it failed on', async () => {
+    let answer: (r: Response) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockReturnValue(new Promise<Response>((resolve) => (answer = resolve))),
+    )
+    window.history.pushState({}, '', '/orgs/o1/knowledge?tab=shared')
+    const pending = caught(apiFetch('/api/teams/t1/kb/files', { method: 'POST' }))
+    window.history.pushState({}, '', '/orgs/o1/board')
+    answer({ ok: false, status: 500, text: () => Promise.resolve('') } as unknown as Response)
+    const err = await pending
+    expect(err).toBeInstanceOf(HttpError)
+    expect(requestOrigin(err)).toBe('/orgs/o1/knowledge?tab=shared')
+  })
+
+  it('tags a network failure and a non-JSON body as well', async () => {
+    window.history.pushState({}, '', '/orgs/o1/repos')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    expect(requestOrigin(await caught(apiFetch('/api/repos/list')))).toBe('/orgs/o1/repos')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('<html>'),
+      } as unknown as Response),
+    )
+    expect(requestOrigin(await caught(apiJSON('/api/repos/list')))).toBe('/orgs/o1/repos')
+  })
+
+  it('is undefined for an error no request threw', () => {
+    expect(requestOrigin(new Error('local'))).toBeUndefined()
+    expect(requestOrigin('a string')).toBeUndefined()
   })
 })

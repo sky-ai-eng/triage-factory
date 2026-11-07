@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import PromptsWorkspace from './PromptsWorkspace'
 import { jsonBody } from '../test/apiResponse'
+import { reportFailedThroughError } from '../test/toastDouble'
 
 // What's under test is opening a linked trigger: the canvas and drawers are
 // stand-ins, and the config panel shows which trigger it was opened on and
@@ -25,8 +26,9 @@ vi.mock('../hooks/useTeamRole', () => ({
     loaded: true,
   }),
 }))
-const toastMock = vi.hoisted(() => ({ error: vi.fn() }))
+const toastMock = vi.hoisted(() => ({ error: vi.fn(), failed: vi.fn() }))
 vi.mock('./Toast/toastStore', () => ({ toast: toastMock }))
+reportFailedThroughError(toastMock)
 
 function stubTrigger(body: unknown, ok = true, status = 200) {
   const fetchMock = vi.fn().mockResolvedValue({ ok, status, ...jsonBody(body) })

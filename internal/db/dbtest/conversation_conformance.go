@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -5139,6 +5140,93 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskOpen {
 			t.Errorf("owed row = %+v, want org %s task %s open", owed[0], orgID, taskID)
+		}
+	})
+
+	// --- Conversations waiting on a person ---
+	//
+	// ListAwaitingPersonSystem is the set the paused-run notification is synced
+	// from, so a row it wrongly keeps is a notification that never resolves and
+	// a row it wrongly drops resolves one that should stay.
+
+	t.Run("ListAwaitingPerson_SelectsDelegatedRowsParkedForAPerson", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "awaiting")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		park := func(id string, reason domain.ParkReason) {
+			t.Helper()
+			if ok, err := HolderPark(store, ctx, orgID, id, db.ParkStopped(reason, "")); err != nil || !ok {
+				t.Fatalf("park %s for %s: ok=%v err=%v", id, reason, ok, err)
+			}
+		}
+		lost := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		park(lost, domain.ParkReasonSandboxLost)
+		stalled := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		park(stalled, domain.ParkReasonStalled)
+		// Stopped by a person: they know, and nothing waits on them.
+		stopped := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		park(stopped, domain.ParkReasonUserCancelled)
+		// A turn that ended is not a wait.
+		idle := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		if ok, err := HolderPark(store, ctx, orgID, idle, db.ParkIdle()); err != nil || !ok {
+			t.Fatalf("park idle: ok=%v err=%v", ok, err)
+		}
+		// Ended after it parked: nothing resumes it.
+		ended := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		park(ended, domain.ParkReasonLaunchFailed)
+		if _, err := store.EndConversationSystem(ctx, orgID, ended, domain.EndedRequeued); err != nil {
+			t.Fatalf("end: %v", err)
+		}
+		// A trigger fired it: nobody delegated it to wait on.
+		fired := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			TriggerType: "event", BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		park(fired, domain.ParkReasonSandboxLost)
+		// Mid-flight: not parked at all.
+		seedConversationForTaskTest(t, orgID, taskID, "", seed)
+
+		got, err := store.ListAwaitingPersonSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListAwaitingPersonSystem: %v", err)
+		}
+		want := map[string]domain.ParkReason{lost: domain.ParkReasonSandboxLost, stalled: domain.ParkReasonStalled}
+		if len(got) != len(want) {
+			t.Fatalf("awaiting = %+v, want exactly %v", got, want)
+		}
+		for i, a := range got {
+			if i > 0 && got[i-1].ConversationID >= a.ConversationID {
+				t.Errorf("rows out of id order: %s before %s", got[i-1].ConversationID, a.ConversationID)
+			}
+			if want[a.ConversationID] != a.ParkReason {
+				t.Errorf("row %+v: want reason %q", a, want[a.ConversationID])
+			}
+			if a.CreatorUserID != userID {
+				t.Errorf("row %s creator = %q, want %q", a.ConversationID, a.CreatorUserID, userID)
+			}
+			if !strings.Contains(a.EntitySourceID, "awaiting") {
+				t.Errorf("row %s entity key = %q, want the seeded entity's", a.ConversationID, a.EntitySourceID)
+			}
+		}
+
+		// Woken by a message: the resume takes it off its park, and it leaves
+		// the set.
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, lost); err != nil || !ok {
+			t.Fatalf("resume %s: ok=%v err=%v", lost, ok, err)
+		}
+		got, err = store.ListAwaitingPersonSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListAwaitingPersonSystem after a resume: %v", err)
+		}
+		if len(got) != 1 || got[0].ConversationID != stalled {
+			t.Errorf("awaiting after %s was resumed = %+v, want only %s", lost, got, stalled)
+		}
+
+		if other, err := store.ListAwaitingPersonSystem(ctx, uuid.NewString()); err == nil && len(other) != 0 {
+			t.Errorf("another org's set = %+v, want none", other)
 		}
 	})
 

@@ -9,7 +9,7 @@ import ViewOnlyBadge from './ViewOnlyBadge'
 import { useTeamRole } from '../hooks/useTeamRole'
 import { toast } from './Toast/toastStore'
 import type { EventHandler, TriggerHandler, RuleHandler } from '../types'
-import { apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, apiListAll } from '../lib/apiClient'
 import { handlersBase } from '../lib/scope'
 
 // PromptsWorkspace is the single-team prompt/auto-delegation editor: the
@@ -101,7 +101,7 @@ export default function PromptsWorkspace({
       })
       .catch((err) => {
         if (cancelled) return
-        toast.error(httpErrorMessage(err, 'Could not open the linked trigger.'))
+        toast.failed(err, 'Could not open the linked trigger.')
         linkRef.current.onTriggerOpened?.(null)
       })
     return () => {

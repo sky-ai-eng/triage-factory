@@ -5,7 +5,7 @@ import { Store, ThumbsUp, X } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useTeams, useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
 import { toast } from '../components/Toast/toastStore'
 import SearchField from '../components/SearchField'
@@ -174,7 +174,7 @@ export default function Marketplace() {
     try {
       setDetail(await apiJSON<ListingDetail>(`/api/marketplace/listings/${encodeURIComponent(id)}`))
     } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not load the listing.'))
+      toast.failed(err, 'Could not load the listing.')
       setSelectedId(null)
     } finally {
       setDetailLoading(false)
@@ -211,7 +211,7 @@ export default function Marketplace() {
           method: nextVoted ? 'PUT' : 'DELETE',
         })
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not update your vote.'))
+        toast.failed(err, 'Could not update your vote.')
         refresh()
       }
     },
@@ -718,7 +718,7 @@ function InstallControl({
         setInstalledTeamId(teamId)
         onInstalled(listing.id)
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not copy this to your team.'))
+        toast.failed(err, 'Could not copy this to your team.')
       } finally {
         setSubmitting(false)
       }

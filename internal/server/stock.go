@@ -578,9 +578,10 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 
 	// Success toast when at least one ticket applied cleanly. The frontend
 	// also shows a partial-failure warning toast if there are any failures;
-	// this one only fires on at-least-one-success.
+	// this one only fires on at-least-one-success. It is the reply to this
+	// caller's action, so it goes to this caller.
 	if applied > 0 {
-		toast.Success(s.ws, orgID, fmt.Sprintf("Carry-over applied: %d %s", applied, stockActionPastTense(action)))
+		toast.FireUser(s.ws, orgID, userID, toast.LevelSuccess, "", fmt.Sprintf("Carry-over applied: %d %s", applied, stockActionPastTense(action)))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

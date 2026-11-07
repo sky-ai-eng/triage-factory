@@ -21,7 +21,7 @@ import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
 import type { RuleHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiListAll } from '../lib/apiClient'
 import { useEventSources } from '../hooks/useEventSources'
 import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
 
@@ -99,7 +99,7 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
       })
     } catch (err) {
       setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-      toast.error(httpErrorMessage(err, 'Could not toggle the rule.'))
+      toast.failed(err, 'Could not toggle the rule.')
     }
   }, [])
 
@@ -123,7 +123,7 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
           body: JSON.stringify({ ids: reordered.map((r) => r.id) }),
         })
       } catch (err) {
-        toast.error(httpErrorMessage(err, 'Could not reorder the rules.'))
+        toast.failed(err, 'Could not reorder the rules.')
         refresh() // Revert on failure
       }
     },

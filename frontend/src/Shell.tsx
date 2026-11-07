@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import UiShell from './ui/shell/Shell'
 import type { Grant, RailCounts } from './ui/shell/routes'
@@ -12,6 +12,7 @@ import { useActiveTeam, useTeams } from './hooks/useTeams'
 import type { ShellScope } from './hooks/useShellScope'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
 import { ChromeProvider } from './contexts/ChromeContext'
+import { rememberPageName } from './lib/pageNames'
 import { NotificationConfirm, NotificationStrip } from './components/ShellNotifications'
 
 // The application frame. This file is the ADAPTER: it resolves who the viewer
@@ -90,6 +91,19 @@ const TITLES: Record<string, string> = {
   queue: 'Queue',
   notifications: 'Notifications',
   settings: 'Settings',
+}
+
+/** Records what the page on screen calls itself, so a failure that lands after
+ *  the viewer has left it can name it (lib/pageNames). Renders nothing.
+ *
+ *  The first render after a navigation can still carry the page it left's
+ *  header under the new path; the render after it, with the new page's own
+ *  name or none, replaces or forgets that. */
+function PageName({ pathname, name }: { pathname: string; name: string }) {
+  useEffect(() => {
+    rememberPageName(pathname, name)
+  }, [pathname, name])
+  return null
 }
 
 export default function Shell() {
@@ -187,6 +201,7 @@ export default function Shell() {
     <ChromeProvider>
       {({ immersive, header }) => (
         <>
+          <PageName pathname={pathname} name={header?.title ?? TITLES[route] ?? ''} />
           <UiShell
             immersive={immersive}
             offline={!connected}
