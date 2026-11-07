@@ -12,14 +12,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// fakeController records control-seam calls so the routing in SendMessage and
-// Interrupt can be asserted without spawning a live subprocess. It satisfies
-// RunController; the real inProcessController is exercised separately.
+// fakeController records control-seam calls so the routing in Interrupt can be
+// asserted without spawning a live subprocess. It satisfies RunController; the
+// real inProcessController is exercised separately.
 type fakeController struct {
 	mu                      sync.Mutex
-	steerCalls              int
-	steerConversationID     string
-	steerText               string
 	interruptCalls          int
 	interruptConversationID string
 }
@@ -32,39 +29,35 @@ func (f *fakeController) Interrupt(_ context.Context, conversationID string) err
 	return nil
 }
 
-func (f *fakeController) Steer(_ context.Context, conversationID, text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.steerCalls++
-	f.steerConversationID = conversationID
-	f.steerText = text
-	return nil
-}
-
 func (f *fakeController) Cancel(string) bool { return false }
 
-// TestSendMessage_LiveProcessRoutesToSteer: a conversation with a registered
-// live process is steered in place through the control seam — asserted via a
-// fake controller, and with no DB wired at all, which is the point of the fast
-// path.
+// TestSendMessage_LiveProcessQueuesForIt: a conversation with a registered live
+// process gets the message as its pending input — one undelivered user row,
+// attributed to the sender — and the process's tool boundary armed, so the
+// agent reads it at its next tool batch or as its next turn. Nothing is sent
+// into the process: its LiveRun here has no stdin, so a send would fail.
 //
 // It is also the test that pins the fast path's precondition. The registry is
 // written only by the SDK live driver, so a handle being present is proof the
 // conversation is an SDK one; that is why routing here without reading the
 // runtime is safe.
-func TestSendMessage_LiveProcessRoutesToSteer(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	fc := &fakeController{}
-	s.controller = fc
-	// The handle's LiveRun is never touched — the fake controller stands in for
-	// the real Steer.
+func TestSendMessage_LiveProcessQueuesForIt(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "run-live", "sess-live", "/tmp/wt-live")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
+	h := s.getProc("run-live")
+	h.boundary.take() // armed from registration; disarmed so the send's own arm shows
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "run-live", runmode.LocalDefaultUserID, "hello"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if fc.steerCalls != 1 || fc.steerConversationID != "run-live" || fc.steerText != "hello" {
-		t.Errorf("steer = {calls:%d conversationID:%q text:%q}, want {1 run-live hello}", fc.steerCalls, fc.steerConversationID, fc.steerText)
+	pending := pendingRows(t, s, "run-live")
+	if len(pending) != 1 || pending[0].Content != "hello" || pending[0].Role != "user" || pending[0].Subtype != "" || pending[0].UserID != runmode.LocalDefaultUserID {
+		t.Fatalf("the message must be queued as one undelivered user row attributed to the sender: %+v", pending)
+	}
+	if !h.boundary.take() {
+		t.Error("the process's tool boundary was not armed for the message")
 	}
 }
 
@@ -83,8 +76,6 @@ func TestSendMessage_ParkedQueuesAndWakes(t *testing.T) {
 				t.Fatalf("open: %v", err)
 			}
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-			fc := &fakeController{}
-			s.controller = fc
 			if runtime == "native" {
 				markNative(t, database, "r-open")
 			}
@@ -96,42 +87,11 @@ func TestSendMessage_ParkedQueuesAndWakes(t *testing.T) {
 			if st := storedStatus(t, database, "r-open"); st != "" {
 				t.Errorf("stored status = %q, want none — a parked conversation woken by input goes back to mid-flight, which is what makes it claimable again", st)
 			}
-			if fc.steerCalls != 0 {
-				t.Errorf("controller steer calls = %d, want 0 — nothing is live to steer", fc.steerCalls)
-			}
 			pending := pendingRows(t, s, "r-open")
 			if len(pending) != 1 || pending[0].Content != "go on" || pending[0].Role != "user" {
 				t.Fatalf("the message must be queued as one undelivered user row: %+v", pending)
 			}
 		})
-	}
-}
-
-// TestSendMessage_RunningRemoteRoutesToController pins the multi-mode fix: a
-// running run with NO process in THIS pod's registry — the shape a control pod
-// always sees, since a running run's process lives on an executor — must route
-// through the controller (which delivers over conversation_signals to the owner), NOT be
-// misread as unsteerable because the LOCAL registry missed. Before the fix this
-// fell through to the resumable check (running isn't resumable) and 409'd.
-func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-run", "sess-run", "/tmp/wt-run")
-	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-run'`); err != nil {
-		t.Fatalf("running: %v", err)
-	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fc := &fakeController{}
-	s.controller = fc
-	// Deliberately do NOT registerProc: getProc stays nil, exactly as on a control
-	// pod whose running run's process lives on an executor. The controller (real
-	// crossPodController in production) is what resolves the remote owner; here the
-	// fake stands in to assert the routing decision, not the delivery.
-
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-run", runmode.LocalDefaultUserID, "steer me"); err != nil {
-		t.Fatalf("SendMessage: %v", err)
-	}
-	if fc.steerCalls != 1 || fc.steerConversationID != "r-run" || fc.steerText != "steer me" {
-		t.Errorf("steer = {calls:%d conversationID:%q text:%q}, want {1 r-run \"steer me\"} — a running-but-remote run must route to the controller, not 409", fc.steerCalls, fc.steerConversationID, fc.steerText)
 	}
 }
 
@@ -150,15 +110,10 @@ func TestSendMessage_QueuedSDKNotSteerable(t *testing.T) {
 		t.Fatalf("queued: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fc := &fakeController{}
-	s.controller = fc
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-q", runmode.LocalDefaultUserID, "hi")
 	if !errors.Is(err, ErrConversationNotSteerable) {
 		t.Errorf("err = %v, want ErrConversationNotSteerable for a queued SDK conversation", err)
-	}
-	if fc.steerCalls != 0 {
-		t.Errorf("steer calls = %d, want 0 — a queued run has no owner to steer", fc.steerCalls)
 	}
 	if got := pendingRows(t, s, "r-q"); len(got) != 0 {
 		t.Errorf("a refused message must not leave a row behind: %+v", got)
@@ -374,55 +329,13 @@ func TestSendMessage_MissingConversationNotFound(t *testing.T) {
 	}
 }
 
-// TestSendMessage_SteerRecordsAfterDelivery: the live-steer path writes the
-// transcript row the steer itself never does — one delivered user row,
-// attributed to the sender — and writes it only once the process has taken
-// the text. A live steer injects into the process without touching the queue,
-// so without this write the steered turn would be missing from the transcript
-// entirely.
-func TestSendMessage_SteerRecordsAfterDelivery(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-rec", "sess-rec", "/tmp/wt-rec")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fc := &fakeController{}
-	s.controller = fc
-	s.registerProc(runmode.LocalDefaultOrgID, "r-rec", &agentproc.LiveRun{})
-
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-rec", runmode.LocalDefaultUserID, "hello"); err != nil {
-		t.Fatalf("SendMessage: %v", err)
-	}
-	if fc.steerCalls != 1 {
-		t.Fatalf("steer calls = %d, want 1", fc.steerCalls)
-	}
-
-	var role, userID, content string
-	var delivered bool
-	if err := database.QueryRow(`SELECT role, delivered, COALESCE(user_id, ''), content FROM messages WHERE conversation_id='r-rec'`).Scan(&role, &delivered, &userID, &content); err != nil {
-		t.Fatalf("read recorded message: %v", err)
-	}
-	if role != "user" || !delivered || userID != runmode.LocalDefaultUserID || content != "hello" {
-		t.Errorf("recorded message = {role:%q delivered:%v user:%q content:%q}, want one delivered user row attributed to the sender",
-			role, delivered, userID, content)
-	}
-	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-rec'`).Scan(&n); err != nil {
-		t.Fatalf("count messages: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("messages recorded = %d, want exactly 1", n)
-	}
-}
-
-// TestSendMessage_EmptyInputsRefusedBeforeSteer: the validation gate sits
-// ahead of the routing, so the live-steer arm refuses an empty message and an
-// empty user id exactly as the queued follow-up path does — nothing reaches
-// the process and nothing is recorded.
-func TestSendMessage_EmptyInputsRefusedBeforeSteer(t *testing.T) {
+// TestSendMessage_EmptyInputsRefusedForALiveProcess: the validation gate sits
+// ahead of the routing, so the live arm refuses an empty message and an empty
+// user id exactly as the queued follow-up path does — nothing is recorded.
+func TestSendMessage_EmptyInputsRefusedForALiveProcess(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-blank", "sess-blank", "/tmp/wt-blank")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fc := &fakeController{}
-	s.controller = fc
 	s.registerProc(runmode.LocalDefaultOrgID, "r-blank", &agentproc.LiveRun{})
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", runmode.LocalDefaultUserID, ""); err == nil {
@@ -430,9 +343,6 @@ func TestSendMessage_EmptyInputsRefusedBeforeSteer(t *testing.T) {
 	}
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", "", "hello"); err == nil {
 		t.Error("expected an error for an empty user id")
-	}
-	if fc.steerCalls != 0 {
-		t.Errorf("steer calls = %d, want 0 — a refused input must never reach the process", fc.steerCalls)
 	}
 	var n int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-blank'`).Scan(&n); err != nil {
@@ -443,48 +353,41 @@ func TestSendMessage_EmptyInputsRefusedBeforeSteer(t *testing.T) {
 	}
 }
 
-// TestSendMessage_SteerRecordSurvivesRequestCancellation: the bookkeeping
-// insert runs detached from the request's cancellation. A client that
-// disconnects (or a handler that times out) right after the controller accepts
-// the steer must not cost the transcript its only record of a turn the agent
-// is already acting on.
-func TestSendMessage_SteerRecordSurvivesRequestCancellation(t *testing.T) {
+// TestSendMessage_AProcessLetGoTakesNothing: once the driver has let go of a
+// live process, a message for it is not queued for that process. The
+// conversation is still in flight, so the send answers ErrNoLiveProcess, a
+// 409, and writes no row. Sent again once the conversation has parked, the
+// message takes the follow-up path.
+func TestSendMessage_AProcessLetGoTakesNothing(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-gone", "sess-gone", "/tmp/wt-gone")
+	seedConversation(t, database, "r-letgo", "sess-letgo", "/tmp/wt-letgo")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fc := &fakeController{}
-	s.controller = fc
-	s.registerProc(runmode.LocalDefaultOrgID, "r-gone", &agentproc.LiveRun{})
+	s.registerProc(runmode.LocalDefaultOrgID, "r-letgo", &agentproc.LiveRun{})
+	s.getProc("r-letgo").lettingGo = true
 
-	// A ctx already canceled when SendMessage runs is the post-steer
-	// disconnect at its sharpest: the fake controller (like a real steer whose
-	// delivery beat the disconnect) still accepts, and everything after it
-	// sees only the canceled ctx.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := s.SendMessage(ctx, runmode.LocalDefaultOrgID, "r-gone", runmode.LocalDefaultUserID, "keep going"); err != nil {
-		t.Fatalf("SendMessage: %v", err)
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-letgo", runmode.LocalDefaultUserID, "one more thing")
+	if !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("err = %v, want ErrNoLiveProcess", err)
 	}
-
-	var content string
-	if err := database.QueryRow(`SELECT content FROM messages WHERE conversation_id='r-gone'`).Scan(&content); err != nil {
-		t.Fatalf("read recorded message: %v", err)
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-letgo'`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
 	}
-	if content != "keep going" {
-		t.Errorf("recorded content = %q, want %q", content, "keep going")
+	if n != 0 {
+		t.Errorf("messages recorded = %d, want 0 — a message the process will not read must leave no row behind", n)
 	}
 }
 
-// TestSendMessage_RefusedSteerRecordsNothing: a running SDK run with no live
-// process anywhere — the orphaned window a restart leaves behind — refuses the
-// send with ErrNoLiveProcess and writes no transcript row. This is the window
-// where the message endpoint's old record-first ordering showed a user their
-// words in the transcript alongside the error toast for the same send.
-func TestSendMessage_RefusedSteerRecordsNothing(t *testing.T) {
+// TestSendMessage_RefusedSendRecordsNothing: a running SDK run with no live
+// process anywhere — the orphaned window a restart leaves behind, or a run
+// still being set up — refuses the send with ErrNoLiveProcess and writes no
+// transcript row, so a user never sees their words in the transcript
+// alongside the error toast for the same send.
+func TestSendMessage_RefusedSendRecordsNothing(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-orphan", "sess-orphan", "/tmp/wt-orphan")
-	// Status stays `running` (seedConversation's default) and no process is registered:
-	// the default inProcessController answers the steer with ErrNoLiveProcess.
+	// Status stays `running` (seedConversation's default) and no process is
+	// registered.
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-orphan", runmode.LocalDefaultUserID, "hello?")
@@ -496,7 +399,7 @@ func TestSendMessage_RefusedSteerRecordsNothing(t *testing.T) {
 		t.Fatalf("count messages: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("messages recorded = %d, want 0 — a refused steer must leave no row behind", n)
+		t.Errorf("messages recorded = %d, want 0 — a refused send must leave no row behind", n)
 	}
 }
 
@@ -512,23 +415,5 @@ func TestInterrupt_LiveRoutesToController(t *testing.T) {
 	}
 	if fc.interruptCalls != 1 || fc.interruptConversationID != "run-live" {
 		t.Errorf("interrupt = {calls:%d conversationID:%q}, want {1 run-live}", fc.interruptCalls, fc.interruptConversationID)
-	}
-}
-
-// TestSteerSendError_ClosingReadsAsNoLiveProcess: a process the driver is
-// closing still sits in the registry until Close returns, and refuses the
-// send. The steer reports that as ErrNoLiveProcess — the 409 that tells the
-// client to re-read the conversation, which by then has parked and takes the
-// message through the queue — and leaves every other send error as it is.
-func TestSteerSendError_ClosingReadsAsNoLiveProcess(t *testing.T) {
-	if err := steerSendError("run-closing", agentproc.ErrRunClosing); !errors.Is(err, ErrNoLiveProcess) {
-		t.Errorf("closing process: err = %v, want ErrNoLiveProcess", err)
-	}
-	if err := steerSendError("run-live", nil); err != nil {
-		t.Errorf("accepted send: err = %v, want nil", err)
-	}
-	other := errors.New("write: broken pipe")
-	if err := steerSendError("run-live", other); !errors.Is(err, other) || errors.Is(err, ErrNoLiveProcess) {
-		t.Errorf("write fault: err = %v, want the fault itself", err)
 	}
 }

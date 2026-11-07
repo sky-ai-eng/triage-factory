@@ -230,6 +230,26 @@ A steady `bash_budget` rate is the budget doing its job. If `ceiling` and
 `tf_sandbox_peak_memory_ratio` stays near 1, the work needs more memory than
 the limit allows: raise `TF_CLAIM_MEMORY_LIMIT_MB` on the executors.
 
+### Messages left unread
+
+A message someone sends to a run that is just finishing is read when the run
+starts again. When the run is a blueprint step and the next step has already
+started, the message is passed to the next step instead.
+`tf_conversations_unread_at_conclusion_total` counts the runs that
+finished with such messages unread and could not pass them on, by `reason`. A
+run is counted once however many messages are waiting. The messages stay on the
+run's transcript, and nothing reads them until someone sends another.
+
+| `reason`              | What happened                                                                                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ended_step_advanced` | The message arrived just as a blueprint step finished, after its last reply, and the next step could not take it either. It has to be sent to the next step's run. |
+| `wake_refused`        | The run changed state between the check and the restart, usually because it was stopped or cancelled at the same moment.                                       |
+| `wake_failed`         | The restart's database write failed.                                                                                                                           |
+| anything else         | The reason the run's page gives for not taking messages, such as `workspace_expired` or `model_not_enabled`.                                                   |
+
+A steady rate of any reason means people's messages are being left unread and
+is worth reporting.
+
 ### Alerts
 
 The bundled Prometheus loads the rules in

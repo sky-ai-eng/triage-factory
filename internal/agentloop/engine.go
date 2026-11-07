@@ -738,6 +738,12 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				e.Hooks.AfterToolBatch(ctx, position)
 			}
 			if terminated {
+				// No late-signal recheck, unlike the would-stop path below: a
+				// stop is a deliberate verdict, and a person's message that
+				// landed since the last drain does not cancel it. The message
+				// stays pending, and the delegate wakes the conversation for
+				// it once the blueprint has reacted to the verdict.
+				//
 				// stop_blueprint's summary argument is the account of the
 				// work; the prose in the same assistant message backs it up
 				// should a terminal outcome ever arrive without one.

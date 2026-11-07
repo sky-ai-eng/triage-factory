@@ -201,14 +201,6 @@ type LiveRun struct {
 	// into an input the wrapper is about to end.
 	closing atomic.Bool
 
-	// queuedTurns counts user messages sent in that no result has answered
-	// yet. Every Send is a turn the process owes — the SDK queues a message
-	// that arrives mid-turn and runs it as the next one — and every result
-	// settles one. Read at a turn boundary, it is how the driver tells a
-	// process with nothing left to do from one about to start a turn a
-	// steer queued while the last was running.
-	queuedTurns atomic.Int64
-
 	mu        sync.Mutex
 	termErr   error
 	result    *Result
@@ -337,8 +329,8 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 // SendBlocks delivers a user message whose content is a block array rather
 // than a string — the shape an opening turn assembled from several rows
 // takes, where the boundaries between them are part of what the model reads.
-// One message and one owed turn, on the same terms as Send: it blocks on
-// readiness and refuses with ErrRunClosing once Close has begun.
+// One message, on the same terms as Send: it blocks on readiness and refuses
+// with ErrRunClosing once Close has begun.
 //
 // An empty list is refused rather than sent: a user message with no content
 // is not a turn, and the API rejects it.
@@ -350,8 +342,8 @@ func (l *LiveRun) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
 }
 
 // sendUserMessage is the body both send verbs share: refuse once closing,
-// wait for the wrapper, count the turn the process now owes, write the
-// control, and mark the request so the wait is billed to it.
+// wait for the wrapper, write the control, and mark the request so the wait
+// is billed to it.
 func (l *LiveRun) sendUserMessage(ctx context.Context, ctl map[string]any) error {
 	if l.closing.Load() {
 		return ErrRunClosing
@@ -363,38 +355,11 @@ func (l *LiveRun) sendUserMessage(ctx context.Context, ctl map[string]any) error
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	// Counted before the write goes out, so the result answering it can
-	// never be read against a count that has not seen the send.
-	l.queuedTurns.Add(1)
 	if err := l.writeControl(ctl); err != nil {
-		l.queuedTurns.Add(-1)
 		return err
 	}
 	l.stream.MarkRequest()
 	return nil
-}
-
-// QueuedTurns reports how many user messages sent in are still unanswered by
-// a result: the turns the process owes. Zero at a turn boundary means the
-// process has nothing left to do; more means a message queued mid-turn is
-// about to start the next one.
-func (l *LiveRun) QueuedTurns() int {
-	return int(l.queuedTurns.Load())
-}
-
-// turnAnswered settles one owed turn on a result, floored at zero: the count
-// is only ever a reading of sends the reader has not yet seen answered, and a
-// result the process produced on its own is not a debt below zero.
-func (l *LiveRun) turnAnswered() {
-	for {
-		n := l.queuedTurns.Load()
-		if n <= 0 {
-			return
-		}
-		if l.queuedTurns.CompareAndSwap(n, n-1) {
-			return
-		}
-	}
 }
 
 // Interrupt stops the agent's current turn. The wrapper acknowledges
@@ -679,10 +644,6 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				deliverMessages(sink, messages)
 
 				if result != nil {
-					// Settled before the result is handed on, so a driver
-					// reading QueuedTurns off the result it just received sees
-					// this turn already paid for.
-					l.turnAnswered()
 					if interruptPending {
 						// This result closes the turn our interrupt() ended.
 						// parseResult already marks Interrupted from the SDK's

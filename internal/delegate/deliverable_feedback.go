@@ -3,8 +3,8 @@
 // review), the agent that drafted it is told — without ever blocking the
 // blueprint:
 //
-//   - Live run (a warm, steerable process): InjectDeliverableNote steers a single
-//     <system-note> into it immediately, fire-and-forget.
+//   - Live run (a warm process): InjectDeliverableNote stages a note for the
+//     process's next tool boundary, fire-and-forget.
 //   - Terminal / paused run: nothing is persisted here. The ledger is *derived*
 //     — at the next user follow-up (SendMessage), the resolved
 //     deliverables since the agent's last activity are bundled into one <system-note>
@@ -25,23 +25,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// InjectDeliverableNote delivers a single fire-and-forget <system-note> describing a
-// just-resolved deliverable to a run's LIVE process, if it has one. Returns true iff
-// a warm process was found and delivery was dispatched.
+// InjectDeliverableNote stages a note describing a just-resolved deliverable for a
+// run's LIVE process, if it has one, at the process's next tool boundary
+// (stageNoteAtToolBoundary). Returns true iff a warm process was found and the
+// stage was dispatched.
 //
 // Truly non-blocking: the only synchronous work is the cheap getProc liveness
-// gate. The actual delivery — a DB insert (the transcript row) and a write into
-// the live process's stdin, either of which can block under contention — runs on
-// a detached goroutine off context.Background(), so an HTTP resolve handler never
-// waits on it and a request cancel never tears it down. It never flips run status
-// or gates the blueprint either — resolution is an async sidecar (TFAC-379 #2).
+// gate. The stage — a DB insert — runs on a detached goroutine off
+// context.Background(), so an HTTP resolve handler never waits on it and a
+// request cancel never tears it down. It never flips run status or gates the
+// blueprint either — resolution is an async sidecar.
 //
 // A false return is NOT a lost note: a terminal/paused run has no warm process to
-// steer, and the same resolution is re-derived from the deliverable row into the
-// ledger on the run's next resume (deliverableLedgerForResume). A true return is
-// optimistic — the process found here may close before the goroutine's steer
-// lands, in which case the resolution likewise resurfaces via that ledger. We
-// deliberately do NOT wake a terminal run here (TFAC-493: "do not restart the
+// tell, and the same resolution is re-derived from the deliverable row into the
+// ledger on the run's next resume (deliverableLedgerForResume). A note the
+// process does not reach before its engagement ends (no tool batch follows it)
+// stays staged, and the next engagement's first message carries it beside the
+// ledger. We deliberately do NOT wake a terminal run here ("do not restart the
 // agent").
 //
 // The deliverable passed must carry its post-resolution State (the handlers hand us
@@ -54,68 +54,13 @@ func (s *Spawner) InjectDeliverableNote(orgID, conversationID string, a domain.D
 	if s.getProc(conversationID) == nil {
 		return false
 	}
-	s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(note), domain.NoteProducerDeliverableResolved, domain.NoteProvenance{})
-	return true
-}
-
-// deliverInjectionLive records a wrapped <system-note> as a transcript row and steers
-// it into the run's warm process, on a DETACHED goroutine. The caller must have
-// already confirmed the run is live (getProc != nil) — this is the shared live-
-// delivery core of both the deliverable-change note (InjectDeliverableNote) and the
-// generic staged-injection queue (stageOrDeliverInjection).
-//
-// Detached so the caller (an HTTP resolve handler or an eventbus subscriber)
-// returns immediately. Record + broadcast first so the live transcript shows the
-// out-of-band action as a user message (the shape the agent receives it as), then
-// steer it into the process. All best-effort: a failed record must not stop the
-// steer, and a steer that races the process closing is tolerated — the deliverable
-// note re-derives via the ledger on resume, the staged injection re-fires on the next
-// head change.
-func (s *Spawner) deliverInjectionLive(orgID, conversationID, wrapped, producer string, prov domain.NoteProvenance) {
 	go func() {
-		s.recordInjectedNote(orgID, conversationID, wrapped, producer, prov)
-		if err := s.Steer(context.Background(), conversationID, wrapped); err != nil {
-			delegateLog.Warn("deliver injection live: steer failed", "conversation", conversationID, "error", err)
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+		defer cancel()
+		s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote,
+			domain.NoteProducerDeliverableResolved, note, domain.NoteProvenance{})
 	}()
-}
-
-// recordInjectedNote persists a live-injected <system-note> as a user-role
-// messages row and broadcasts it, so the run transcript and any watching UI
-// show the human action inline. Admin pool (no JWT claims on this path) +
-// best-effort: a failure is logged, never fatal — the steer above is what the
-// agent actually consumes. Recorded as role='user' (not agent activity), so it
-// never advances the deliverable-change ledger watermark.
-//
-// Unfenced, like every other write an outside actor makes into a live run:
-// the caller is a resolve handler or an eventbus subscriber, holds no claim,
-// and is deliberately not gated on whoever is driving. The row's claim_id
-// resolves server-side to whichever engagement is active — which is the right
-// answer, because the note belongs to the turn that will read it.
-//
-// Subtype is "system_note" rather than blank, which is what a person's own
-// message carries: the row is a machine-composed record of a human action,
-// not the human's words. The transcript reads the distinction — a user row
-// outside the human set renders as a system marker instead of an operator
-// line — so the tag is what keeps this from being attributed to whoever is
-// reading the screen.
-func (s *Spawner) recordInjectedNote(orgID, conversationID, content, producer string, prov domain.NoteProvenance) {
-	if s.conversations == nil {
-		return
-	}
-	// The same metadata the staged path writes, so a reader does not have to
-	// know which way the note reached the agent to learn where it came from.
-	msg := &domain.Message{
-		ConversationID: conversationID, Role: "user", Subtype: "system_note", Content: content,
-		Metadata: domain.NoteMetadata(producer, prov),
-	}
-	id, err := s.conversations.InsertMessageSystem(context.Background(), orgID, msg)
-	if err != nil {
-		delegateLog.Warn("record injected deliverable note failed", "conversation", conversationID, "error", err)
-		return
-	}
-	msg.ID = int(id)
-	s.broadcastMessage(orgID, conversationID, msg)
+	return true
 }
 
 // deliverableLedgerForResume derives the bundled <system-note> block to prepend ahead
@@ -133,13 +78,14 @@ func (s *Spawner) recordInjectedNote(orgID, conversationID, content, producer st
 // Against the durable deliverable state this watermark only ever OVER-includes,
 // never misses — a deliberate trade (a duplicate note is harmless; a missed
 // resolution leaves the agent with a stale picture). The common over-include: a
-// deliverable resolved while the run was live got its note steered in
-// (InjectDeliverableNote), and normally the agent then emits a turn whose messages
-// advance the watermark past it, so it doesn't reappear here. But if no non-user
-// message lands after the steer — the textbook case being a human approving the
-// FINAL deliverable of a fast-finishing run, whose next turn is just the conclusion
-// — the watermark stays put and the same note is bundled again on the next
-// resume. That second copy is expected, not a bug.
+// deliverable resolved while the run was live got its note staged
+// (InjectDeliverableNote), and normally the agent reads it and emits messages
+// that advance the watermark past it, so it doesn't reappear here. But if no
+// non-user message lands after the resolution — the textbook case being a human
+// approving the FINAL deliverable of a fast-finishing run, whose next turn is just
+// the conclusion — the watermark stays put and the same resolution is bundled
+// again on the next resume, beside the staged note if the process never reached
+// it. That second copy is expected, not a bug.
 //
 // The "never miss" half is conditional on the resolution actually reaching the
 // deliverable row: a resolve handler whose best-effort state flip failed leaves the

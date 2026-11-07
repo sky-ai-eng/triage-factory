@@ -162,6 +162,9 @@ func (s *Spawner) replayStrandedRun(ctx context.Context, st db.StrandedRun) {
 		teamID: conv.TeamID,
 	}
 	s.reactToStepTerminal(ctx, st.OrgID, br, *conv, cfg, time.Now())
+	// The engagement that concluded the step died before its reactor, and with
+	// it the wake that follows the reaction.
+	s.wakeForUnreadInput(ctx, st.OrgID, conv.ID)
 }
 
 // disposeOfLostConversation fails a conversation whose engagements have been

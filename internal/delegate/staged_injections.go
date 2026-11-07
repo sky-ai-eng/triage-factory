@@ -7,8 +7,9 @@
 // An SDK conversation has them flushed — bundled into one <system-note> with
 // its first message — when its next engagement starts
 // (stagedInjectionsForEngagement, read by a resume's prepends and a launch's
-// first turn); a new-event injection for a live SDK process is steered in
-// instead (deliverInjectionLive).
+// first turn), and a live SDK process has them handed to it at its next tool
+// batch (notesAtToolBatch), or as its next turn when one of them is a
+// new-event injection and the turn ends first.
 //
 // Unlike the deliverable-change ledger (which DERIVES its terminal injections from
 // the deliverable rows, so it needs no queue), a producer here has no durable row
@@ -27,15 +28,15 @@ import (
 // conversation by its live state. It is the local arm
 // StageOrDeliverAdditiveEvent falls back on for an SDK conversation:
 //
-//   - live (a warm process): the note is wrapped and steered in immediately,
-//     fire-and-forget; delivered=true.
+//   - live (a warm process): the note is staged and the process's tool
+//     boundary armed (stageNoteAtToolBoundary); delivered=true.
 //   - not live (parked / terminal-resumable / terminal): the bare body is
 //     staged under subtype for the next resume to flush; staged=true.
 //
 // producer tags the row for audit (domain.StagedInjectionProducer*), prov
 // records the event the note was composed from, and body is the bare,
-// already-rendered line — the live path wraps one note, the flush bundles and
-// wraps the block. A blank body is a no-op.
+// already-rendered line, which the flush bundles and wraps. A blank body is a
+// no-op.
 //
 // Never flips conversation status or wakes a terminal run: a note for a
 // terminal-but-resumable conversation waits in the queue until the user's
@@ -46,15 +47,14 @@ import (
 // the additive gate needs in order to delete the row when its post-stage
 // recheck decides against delivery.
 //
-// delivered=false with staged=false is a drop: the live gate raced a closing
-// process and the durable append then failed (see stageInjection).
+// delivered=false with staged=false is a drop: the durable append failed (see
+// stageInjection).
 func (s *Spawner) stageOrDeliverInjection(ctx context.Context, orgID, conversationID, subtype, producer, body string, prov domain.NoteProvenance) (delivered, staged bool, stagedID string) {
 	if body == "" {
 		return false, false, ""
 	}
 	if s.getProc(conversationID) != nil {
-		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body), producer, prov)
-		return true, false, ""
+		return s.stageNoteAtToolBoundary(ctx, orgID, conversationID, subtype, producer, body, prov), false, ""
 	}
 	stagedID, staged = s.stageInjection(ctx, orgID, conversationID, subtype, producer, body, prov)
 	return false, staged, stagedID

@@ -1,6 +1,6 @@
 // Cross-pod run control (TFAC-585): RunController's intended second
 // implementation. When the local process registry misses a control
-// request (interrupt/steer/cancel/permission), crossPodController resolves
+// request (interrupt/cancel/permission), crossPodController resolves
 // the run's executor via claims.executor_id + instance-registry liveness,
 // inserts a row on the conversation_signals outbox, NOTIFYs tf_ctl, and waits (with
 // a bounded timeout) for the owning executor's apply loop to apply it
@@ -63,7 +63,7 @@ const instanceStaleThreshold = 15 * time.Second
 // only path" (spec §5).
 const defaultAckPollInterval = 250 * time.Millisecond
 
-// DefaultSignalAckTimeout is the interrupt/steer reply-leg timeout — how
+// DefaultSignalAckTimeout is the interrupt reply-leg timeout — how
 // long the control pod waits for the owning executor to ack before giving
 // up (504). Env-tunable via TF_SIGNAL_ACK_TIMEOUT (ParseSignalAckTimeout).
 const DefaultSignalAckTimeout = 5 * time.Second
@@ -71,7 +71,7 @@ const DefaultSignalAckTimeout = 5 * time.Second
 // DefaultPermissionAckTimeout is the permission reply-leg timeout — longer
 // than the other kinds because the browser is synchronously blocked on
 // this response (spec's reply-leg contract table). Not env-tunable
-// separately; TF_SIGNAL_ACK_TIMEOUT governs interrupt/steer only.
+// separately; TF_SIGNAL_ACK_TIMEOUT governs the interrupt only.
 const DefaultPermissionAckTimeout = 10 * time.Second
 
 // ParseSignalAckTimeout interprets the TF_SIGNAL_ACK_TIMEOUT env value.
@@ -91,7 +91,7 @@ func ParseSignalAckTimeout(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// SetSignalAckTimeout overrides the interrupt/steer reply-leg timeout.
+// SetSignalAckTimeout overrides the interrupt reply-leg timeout.
 // Tests inject a short value to drive the timeout path deterministically.
 func (s *Spawner) SetSignalAckTimeout(d time.Duration) {
 	s.mu.Lock()
@@ -99,7 +99,7 @@ func (s *Spawner) SetSignalAckTimeout(d time.Duration) {
 	s.signalAckTimeout = d
 }
 
-// signalTimeout returns the effective interrupt/steer ack timeout, falling
+// signalTimeout returns the effective interrupt ack timeout, falling
 // back to the default when unset.
 func (s *Spawner) signalTimeout() time.Duration {
 	s.mu.Lock()
@@ -155,20 +155,7 @@ func (c crossPodController) Interrupt(ctx context.Context, conversationID string
 	if !errors.Is(err, ErrNoLiveProcess) {
 		return err
 	}
-	return c.s.routeControlSignal(ctx, conversationID, domain.ConversationSignalInterrupt, "")
-}
-
-func (c crossPodController) Steer(ctx context.Context, conversationID, text string) error {
-	err := c.inProcessController.Steer(ctx, conversationID, text)
-	if !errors.Is(err, ErrNoLiveProcess) {
-		return err
-	}
-	return c.s.routeControlSignal(ctx, conversationID, domain.ConversationSignalSteer, text)
-}
-
-// steerPayload is the conversation_signals.payload shape for kind=steer.
-type steerPayload struct {
-	Text string `json:"text"`
+	return c.s.routeControlSignal(ctx, conversationID, domain.ConversationSignalInterrupt)
 }
 
 // permissionPayload is the conversation_signals.payload shape for kind=permission.
@@ -220,30 +207,22 @@ type ctlNotification struct {
 	ID   int64  `json:"id"`
 }
 
-// routeControlSignal is the shared cross-pod path for interrupt/steer: no
-// live process here, so resolve a live remote owner, insert the signal,
+// routeControlSignal is the cross-pod path for an interrupt: no live process
+// here, so resolve a live remote owner, insert the signal,
 // and wait for its ack up to the reply-leg timeout. Returns
 // ErrNoLiveProcess (409) when no live owner exists anywhere or the owner
 // acks anything other than ok — gone (lost the race) or stale (e.g. a
 // malformed payload, which should never happen same-version but must not
 // be reported as success across a rolling deploy) both count as "did not
 // apply" — ErrSignalAckTimeout (504) on a timed-out wait.
-func (s *Spawner) routeControlSignal(ctx context.Context, conversationID string, kind domain.ConversationSignalKind, text string) error {
+func (s *Spawner) routeControlSignal(ctx context.Context, conversationID string, kind domain.ConversationSignalKind) error {
 	orgID, err := s.conversations.LookupOrgForConversationSystem(ctx, conversationID)
 	if err != nil || orgID == "" {
 		return fmt.Errorf("%s run %s: %w", kind, conversationID, ErrNoLiveProcess)
 	}
-	var payload string
-	if kind == domain.ConversationSignalSteer {
-		b, merr := json.Marshal(steerPayload{Text: text})
-		if merr != nil {
-			return fmt.Errorf("%s run %s: marshal payload: %w", kind, conversationID, merr)
-		}
-		payload = string(b)
-	}
 	waitCtx, cancel := context.WithTimeout(ctx, s.signalTimeout())
 	defer cancel()
-	result, live, err := s.sendSignalAndAwaitAck(waitCtx, orgID, conversationID, kind, payload)
+	result, live, err := s.sendSignalAndAwaitAck(waitCtx, orgID, conversationID, kind, "")
 	if err != nil {
 		return fmt.Errorf("%s run %s: %w", kind, conversationID, err)
 	}
@@ -417,9 +396,9 @@ const (
 	// deferral (enqueueBusyFiring) — nothing durable exists to recover the
 	// intent from.
 	InjectNotDelivered InjectOutcome = iota
-	// InjectDeliveredLocal means the event was steered into this
-	// process's own live handle for the run — the caller should record
-	// the task_event 'injected' itself, exactly as before TFAC-585.
+	// InjectDeliveredLocal means the event was staged for the run's live
+	// process on this pod (stageNoteAtToolBoundary says when the process
+	// reads it) — the caller should record the task_event 'injected' itself.
 	InjectDeliveredLocal
 	// InjectDeliveredRemote means a conversation_signals row was handed to a live
 	// remote executor — the OWNER records 'injected' (or compensates with
@@ -457,7 +436,14 @@ type AdditiveFiringRef struct {
 //
 // Decision order:
 //
-//  1. A local live process (an SDK conversation on this pod): steered in.
+//  1. A local live process (an SDK conversation on this pod): staged for its
+//     next tool boundary (stageNoteAtToolBoundary). The process reads it with
+//     the results of its next tool batch, or as its next turn when the model
+//     ends the turn first. A turn that ends any other way, a stop_blueprint
+//     call included, leaves it staged for the conversation's next engagement.
+//     TODO(TFAC-1347): nothing starts that engagement for an event alone, so
+//     a conversation that concludes first never reads it, and the firing it
+//     replaced is gone; the conversation should be woken to read it.
 //  2. A native conversation: staged as an injection:event row, never sent as
 //     a signal. The loop reads its pending rows before every model call, and
 //     its would-stop recheck continues for this subtype, so a running loop
@@ -474,7 +460,9 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		return InjectNotDelivered
 	}
 	if s.getProc(conversationID) != nil {
-		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body), producer, prov)
+		if !s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov) {
+			return InjectNotDelivered
+		}
 		return InjectDeliveredLocal
 	}
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
@@ -664,10 +652,10 @@ func (s *Spawner) drainSignals(ctx context.Context) {
 // delivery per process. If a signal was already delivered but its ack write
 // didn't land (leaving it in the unacked scan), the next drain re-acks with
 // the same result instead of re-delivering: re-delivery is harmless for
-// cancel/interrupt/permission (idempotent), but a re-sent steer or a
-// re-injected note would reach the agent twice, and inject's gone-
-// compensation would double-enqueue a pending_firing. signalApplied is
-// pruned on a successful ack (the row then leaves the unacked scan anyway).
+// cancel/interrupt/permission (idempotent), but a re-injected note would
+// reach the agent twice, and inject's gone-compensation would double-enqueue
+// a pending_firing. signalApplied is pruned on a successful ack (the row then
+// leaves the unacked scan anyway).
 func (s *Spawner) applySignal(ctx context.Context, sig domain.ConversationSignal) {
 	if r, ok := s.signalApplied.Load(sig.ID); ok {
 		if s.ackSignal(ctx, sig.ID, r.(string)) {
@@ -688,8 +676,7 @@ func (s *Spawner) applySignal(ctx context.Context, sig domain.ConversationSignal
 // filter, so a local miss means the run is genuinely gone here, not "try
 // another pod") and returns the ack result. It must be called at most once
 // per signal per process (applySignal's signalApplied guard enforces this),
-// because steer/inject delivery and inject's gone-compensation are not
-// idempotent.
+// because inject delivery and its gone-compensation are not idempotent.
 func (s *Spawner) deliverSignal(ctx context.Context, sig domain.ConversationSignal) string {
 	local := inProcessController{s: s}
 	switch sig.Kind {
@@ -701,12 +688,11 @@ func (s *Spawner) deliverSignal(ctx context.Context, sig domain.ConversationSign
 	case domain.ConversationSignalInterrupt:
 		return ackResultForControlErr(local.Interrupt(ctx, sig.ConversationID))
 	case domain.ConversationSignalSteer:
-		var p steerPayload
-		if err := json.Unmarshal([]byte(sig.Payload), &p); err != nil {
-			delegateLog.Warn("apply steer signal: malformed payload", "signal_id", sig.ID, "error", err)
-			return domain.ConversationSignalAckStale
-		}
-		return ackResultForControlErr(local.Steer(ctx, sig.ConversationID, p.Text))
+		// Nothing a steer signal names is delivered: a person's message
+		// reaches a live process through the conversation's transcript
+		// (queueForLiveProcess), never a signal. The sender reads gone as
+		// ErrNoLiveProcess, the re-read-and-retry answer.
+		return domain.ConversationSignalAckGone
 	case domain.ConversationSignalPermission:
 		return s.deliverPermissionSignal(sig)
 	case domain.ConversationSignalInject:
@@ -717,7 +703,7 @@ func (s *Spawner) deliverSignal(ctx context.Context, sig domain.ConversationSign
 	}
 }
 
-// ackResultForControlErr maps an Interrupt/Steer error to an ack_result:
+// ackResultForControlErr maps an Interrupt error to an ack_result:
 // nil -> ok, "no live process here" -> gone, anything else -> gone too
 // (the ack vocabulary has no separate "apply error" value; the waiting
 // control pod treats gone identically to ErrNoLiveProcess/409 either way,
@@ -759,13 +745,13 @@ func (s *Spawner) deliverPermissionSignal(sig domain.ConversationSignal) string 
 	}
 }
 
-// deliverInjectSignal delivers a cross-pod additive-event injection into
-// this process's live handle for the run, recording the task_event
-// 'injected' exactly as the local path does, and returns the ack result. If
-// the run is no longer live here by apply time, it returns 'gone' AND
-// enqueues the pending_firing itself (from the payload's firing-ref fields)
-// so the additive event's intent survives — the entity-busy-style loser rule
-// the ticket specifies. Not idempotent (live delivery + the gone-path
+// deliverInjectSignal stages a cross-pod additive-event injection for this
+// process's live handle for the run, as the local path does
+// (stageNoteAtToolBoundary), records the task_event 'injected', and returns
+// the ack result. If the run is no longer live here by apply time, or the
+// stage fails, it returns 'gone' AND enqueues the pending_firing itself (from
+// the payload's firing-ref fields) so the additive event's intent survives —
+// the entity-busy-style loser rule. Not idempotent (the stage + the gone-path
 // enqueue), so applySignal guards it against re-delivery.
 func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.ConversationSignal) string {
 	var p injectPayload
@@ -777,7 +763,8 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 	// position to record, so the claim the payload carried rides whichever
 	// durable write this pod makes — see db.AgentClaimStamp.
 	claim := db.AgentClaimStamp{AgentID: p.ClaimAgentID, ActingTeamID: p.ClaimActingTeamID}
-	if s.getProc(sig.ConversationID) == nil {
+	prov := domain.NoteProvenance{EventID: p.EventID, EventType: p.EventType}
+	if s.getProc(sig.ConversationID) == nil || !s.stageNoteAtToolBoundary(ctx, sig.OrgID, sig.ConversationID, domain.MessageSubtypeInjectionEvent, p.Producer, p.Body, prov) {
 		if s.pendingFirings != nil && p.EntityID != "" && p.TaskID != "" && p.TriggerID != "" && p.TriggeringEventID != "" {
 			if _, _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID, claim); err != nil {
 				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "conversation", sig.ConversationID, "task_id", p.TaskID, "error", err)
@@ -785,7 +772,6 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 		}
 		return domain.ConversationSignalAckGone
 	}
-	s.deliverInjectionLive(sig.OrgID, sig.ConversationID, domain.WrapSystemNote(p.Body), p.Producer, domain.NoteProvenance{EventID: p.EventID, EventType: p.EventType})
 	if s.tasks != nil && p.TaskID != "" && p.TriggeringEventID != "" {
 		if _, err := s.tasks.MarkEventInjectedSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID, claim); err != nil {
 			delegateLog.Error("mark injected task_event for cross-pod inject failed", "task_id", p.TaskID, "conversation", sig.ConversationID, "error", err)

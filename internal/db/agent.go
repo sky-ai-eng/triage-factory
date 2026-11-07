@@ -611,8 +611,8 @@ type ConversationStore interface {
 	// "injection:compaction-result", "injection:memory",
 	// "injection:task-context", the staged notes' "injection:event" (a
 	// new-event injection) and "injection:system-note" (every other staged
-	// note), and "stop-note" — plus one value owned where it is written, the
-	// deliverable feedback row's "system_note".
+	// note), and "stop-note" — plus "system_note", which stored deliverable
+	// feedback rows carry.
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
@@ -1071,6 +1071,40 @@ type ConversationStore interface {
 	// rows delivered in one statement, so there is no single row a return
 	// value could name.
 	MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error
+
+	// RequeueInputForClaimSystem puts a person's messages back on the
+	// conversation's pending-input queue: each named row that is a delivered
+	// message of the queue's own shape (role 'user', blank subtype, active)
+	// flips undelivered, so the next claim that resumes the conversation
+	// delivers it again. Any other id, a row of another conversation
+	// included, is left alone.
+	//
+	// A live SDK process takes a person's waiting messages at a tool batch
+	// or as its next turn, flushed delivered first, and this is the undo for
+	// a delivery that never reached the model: the batch was given up, or the
+	// send failed. Fenced, because only the engagement holding the claim
+	// knows which of its deliveries failed, and a zombie's late flip would
+	// hand its successor input the successor's own process already read.
+	//
+	// Exempt from the returned-row rule: a batch flip, like the drain flush
+	// above.
+	RequeueInputForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int) error
+
+	// WithdrawPendingInputSystem takes a person's messages off the
+	// conversation's pending-input queue: each named row that is still a
+	// queued message (role 'user', blank subtype, undelivered, active) flips
+	// inactive. An undelivered inactive row is one that never happened, so
+	// it leaves the transcript reads and the queue alike. Any other id, a row
+	// of another conversation included, is left alone.
+	//
+	// The caller is the forward of the messages a blueprint step was left
+	// with when its blueprint advanced past it: they are sent on to the step
+	// now running and withdrawn here, so each appears once, where it is read.
+	// Unfenced, because the step it withdraws from has ended and no
+	// engagement holds it.
+	//
+	// Exempt from the returned-row rule: a batch flip, like the two above.
+	WithdrawPendingInputSystem(ctx context.Context, orgID, conversationID string, ids []int) error
 
 	// CompactForClaimSystem commits one compaction atomically: optionally
 	// insert the reconstructed reply row (forced inactive — it is history the

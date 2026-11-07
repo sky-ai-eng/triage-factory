@@ -272,19 +272,11 @@ func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 	return row, nil
 }
 
-// steerOpen / steerClose bracket a row that was drained mid-turn — input
-// that arrived while the model was working. The tag tells the model the
-// message is not a fresh instruction replacing what it was doing, which is
-// how an unwrapped user turn between tool batches would otherwise read.
-const (
-	steerOpen  = "<steer note=\"sent while you were working; keep going and respond if appropriate\">\n"
-	steerClose = "\n</steer>"
-)
-
-// wrapSteer brackets an `injection:steer` row's content. It is a function of
-// the row's own columns and nothing else — the loop stamps the subtype at
-// flush time and assembly reads it back, so two executors assembling the
-// same rows produce the same request. A steer row with no content is left
+// wrapSteer brackets an `injection:steer` row's content in the steer envelope
+// (domain.SteerOpen / domain.SteerClose). It is a function of the row's own
+// columns and nothing else — the loop stamps the subtype at flush time and
+// assembly reads it back, so two executors assembling the same rows produce
+// the same request. A steer row with no content is left
 // alone: an empty envelope would be pure noise.
 func wrapSteer(r domain.Message, content *schemas.ChatMessageContent) *schemas.ChatMessageContent {
 	if r.Subtype != domain.MessageSubtypeInjectionSteer || content == nil {
@@ -294,13 +286,13 @@ func wrapSteer(r domain.Message, content *schemas.ChatMessageContent) *schemas.C
 		if *content.ContentStr == "" {
 			return content
 		}
-		wrapped := steerOpen + *content.ContentStr + steerClose
+		wrapped := domain.SteerOpen + *content.ContentStr + domain.SteerClose
 		return &schemas.ChatMessageContent{ContentStr: &wrapped}
 	}
 	if len(content.ContentBlocks) == 0 {
 		return content
 	}
-	open, closing := steerOpen, steerClose
+	open, closing := domain.SteerOpen, domain.SteerClose
 	blocks := make([]schemas.ChatContentBlock, 0, len(content.ContentBlocks)+2)
 	blocks = append(blocks, schemas.ChatContentBlock{Type: schemas.ChatContentBlockTypeText, Text: &open})
 	blocks = append(blocks, content.ContentBlocks...)

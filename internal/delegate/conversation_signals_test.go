@@ -264,59 +264,66 @@ func TestCrossPodController_Interrupt_RoutesRemoteAndAwaitsAck(t *testing.T) {
 	}
 }
 
-// TestCrossPodController_Steer_CarriesTextInPayload: the steer signal's
-// payload round-trips the text; a "gone" ack surfaces as ErrNoLiveProcess.
-func TestCrossPodController_Steer_CarriesTextInPayload(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-remote2", "sess", "/tmp/wt")
-	dbtest.SeedActiveClaim(t, database, "r-remote2", "executor-2", 0)
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeConversationSignalStore()
-	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
-		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
-	}}
-	s.SetConversationSignals(fakeSignals, nil)
-	s.SetSignalAckTimeout(2 * time.Second)
+// TestCrossPodController_Interrupt_NonOKAckSurfacesAsNoLiveProcess: a "gone"
+// or "stale" ack (the owner lost the race, or couldn't apply the signal) must
+// surface as ErrNoLiveProcess — routeControlSignal only treats an explicit
+// "ok" as success, so no other ack_result is ever reported as a successful
+// interrupt.
+func TestCrossPodController_Interrupt_NonOKAckSurfacesAsNoLiveProcess(t *testing.T) {
+	for _, ack := range []string{domain.ConversationSignalAckGone, domain.ConversationSignalAckStale} {
+		t.Run(ack, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedConversation(t, database, "r-remote-ack", "sess", "/tmp/wt")
+			dbtest.SeedActiveClaim(t, database, "r-remote-ack", "executor-2", 0)
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+			fakeSignals := newFakeConversationSignalStore()
+			s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
+				"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
+			}}
+			s.SetConversationSignals(fakeSignals, nil)
+			s.SetSignalAckTimeout(2 * time.Second)
 
-	go func() {
-		sig := fakeSignals.findUnacked(t, "executor-2")
-		if sig.Payload == "" {
-			t.Error("steer signal payload is empty")
-		}
-		_ = fakeSignals.Ack(context.Background(), sig.ID, domain.ConversationSignalAckGone)
-	}()
+			go func() {
+				sig := fakeSignals.findUnacked(t, "executor-2")
+				_ = fakeSignals.Ack(context.Background(), sig.ID, ack)
+			}()
 
-	err := s.Steer(context.Background(), "r-remote2", "keep going")
-	if !errors.Is(err, ErrNoLiveProcess) {
-		t.Errorf("err = %v, want ErrNoLiveProcess for a gone ack", err)
+			err := s.Interrupt(context.Background(), "r-remote-ack")
+			if !errors.Is(err, ErrNoLiveProcess) {
+				t.Errorf("err = %v, want ErrNoLiveProcess for a %s ack", err, ack)
+			}
+		})
 	}
 }
 
-// TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess: a "stale"
-// ack (e.g. the owner couldn't apply the payload) must surface as
-// ErrNoLiveProcess exactly like "gone" — routeControlSignal only treats an
-// explicit "ok" as success, so no ack_result other than ok is ever silently
-// reported as a successful steer/interrupt.
-func TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess(t *testing.T) {
+// TestApplySignal_SteerReachesNoProcess: a steer signal delivers nothing,
+// even to a process live on this pod — a person's message reaches a live
+// process through the transcript — and is acked gone, which its sender reads
+// as the re-read-and-retry answer.
+func TestApplySignal_SteerReachesNoProcess(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-remote-stale", "sess", "/tmp/wt")
-	dbtest.SeedActiveClaim(t, database, "r-remote-stale", "executor-2", 0)
+	seedConversation(t, database, "r-owner-steer", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeConversationSignalStore()
-	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
-		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
-	}}
 	s.SetConversationSignals(fakeSignals, nil)
-	s.SetSignalAckTimeout(2 * time.Second)
+	s.registerProc(runmode.LocalDefaultOrgID, "r-owner-steer", &agentproc.LiveRun{})
 
-	go func() {
-		sig := fakeSignals.findUnacked(t, "executor-2")
-		_ = fakeSignals.Ack(context.Background(), sig.ID, domain.ConversationSignalAckStale)
-	}()
+	if _, err := fakeSignals.Insert(context.Background(), runmode.LocalDefaultOrgID, "r-owner-steer", domain.ConversationSignalSteer, `{"text":"keep going"}`, "me"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	sigs, _ := fakeSignals.ListUnackedForTarget(context.Background(), "me")
+	s.applySignal(context.Background(), sigs[0])
 
-	err := s.Steer(context.Background(), "r-remote-stale", "keep going")
-	if !errors.Is(err, ErrNoLiveProcess) {
-		t.Errorf("err = %v, want ErrNoLiveProcess for a stale ack", err)
+	acked, result, err := fakeSignals.AckStatus(context.Background(), sigs[0].ID)
+	if err != nil || !acked || result != domain.ConversationSignalAckGone {
+		t.Fatalf("ack = (%v,%q,%v), want (true, gone, nil)", acked, result, err)
+	}
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = 'r-owner-steer' AND content = 'keep going'`).Scan(&rows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a steer signal wrote %d transcript rows, want none", rows)
 	}
 }
 
@@ -777,6 +784,16 @@ func TestApplySignal_Inject_LiveDeliversAndRecords(t *testing.T) {
 	}
 	if kind != "injected" {
 		t.Errorf("task_events.kind = %q, want injected", kind)
+	}
+	var staged int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = 'r-owner-inj' AND subtype = ? AND delivered = 0 AND content = 'hello'`, domain.MessageSubtypeInjectionEvent).Scan(&staged); err != nil {
+		t.Fatalf("count staged rows: %v", err)
+	}
+	if staged != 1 {
+		t.Errorf("staged injection:event rows = %d, want 1 — the live process reads the injection at its tool boundary, from the transcript", staged)
+	}
+	if h := s.getProc("r-owner-inj"); h == nil || !h.boundary.take() {
+		t.Error("the live process's tool boundary was not armed for the staged injection")
 	}
 }
 

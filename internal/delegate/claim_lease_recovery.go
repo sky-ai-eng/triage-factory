@@ -414,6 +414,12 @@ func (c *leaseRecoveringConversations) MarkDeliveredForClaimSystem(ctx context.C
 	})
 }
 
+func (c *leaseRecoveringConversations) RequeueInputForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int) error {
+	return c.s.retryAfterRecovery(ctx, claimID, func() error {
+		return c.ConversationStore.RequeueInputForClaimSystem(ctx, orgID, conversationID, claimID, ids)
+	})
+}
+
 func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
 	return c.s.retryAfterRecovery(ctx, claimID, func() error {
 		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs)

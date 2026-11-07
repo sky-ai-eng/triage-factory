@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -87,8 +88,15 @@ func (h *restartableHost) count(name string) int {
 func TestSocketToolHost_MarksARequestThatNeverLeft(t *testing.T) {
 	t.Run("the peer is gone before the call", func(t *testing.T) {
 		// A unix socket, as the tool host's is: a write to one whose peer
-		// has closed fails at once rather than being buffered.
-		listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "tools.sock"))
+		// has closed fails at once rather than being buffered. Not in
+		// t.TempDir(): its path carries the test and subtest names, which put
+		// the socket past macOS's 104-byte sun_path limit.
+		dir, err := os.MkdirTemp("", "tfsock")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		listener, err := net.Listen("unix", filepath.Join(dir, "tools.sock"))
 		if err != nil {
 			t.Fatal(err)
 		}

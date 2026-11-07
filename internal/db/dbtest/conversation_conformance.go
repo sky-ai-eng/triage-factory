@@ -2143,6 +2143,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		})
 		refuse("InsertMessageForClaimSystem", err)
 		refuse("MarkDeliveredForClaimSystem", store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(ownedID)}, ""))
+		refuse("RequeueInputForClaimSystem", store.RequeueInputForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(ownedID)}))
 		_, err = store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", "")
 		refuse("CompleteForClaimSystem", err)
 		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
@@ -4811,6 +4812,115 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("bare row subtype = %+v, want the row's own subtype preserved", got)
 		} else if got.Delivered == nil || !*got.Delivered {
 			t.Errorf("bare row Delivered = %v, want true", got.Delivered)
+		}
+	})
+
+	t.Run("RequeueInput_FlipsOnlyDeliveredQueueShapedRowsOfTheConversation", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		otherConversationID := seedConversationForTest(t, orgID, seed, "running")
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-requeue", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+
+		insert := func(convID string, m domain.Message) int {
+			t.Helper()
+			m.ConversationID = convID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		delivered := true
+		inactive := domain.MessageWindowInactive
+		steered := insert(conversationID, domain.Message{Role: "user", Content: "steered", Delivered: &delivered})
+		answered := insert(conversationID, domain.Message{Role: "user", Content: "answered", Delivered: &delivered})
+		note := insert(conversationID, domain.Message{Role: "user", Subtype: "injection:nudge", Content: "note", Delivered: &delivered})
+		reply := insert(conversationID, domain.Message{Role: "assistant", Content: "reply", Delivered: &delivered})
+		withdrawn := insert(conversationID, domain.Message{Role: "user", Content: "withdrawn", Delivered: &delivered, WindowState: inactive})
+		other := insert(otherConversationID, domain.Message{Role: "user", Content: "other", Delivered: &delivered})
+
+		// Every id but `answered` is named: only `steered` has the queue's
+		// shape on this conversation.
+		if err := store.RequeueInputForClaimSystem(ctx, orgID, conversationID, claimID, []int{steered, note, reply, withdrawn, other}); err != nil {
+			t.Fatalf("RequeueInputForClaimSystem: %v", err)
+		}
+
+		deliveredByID := func(convID string) map[int]bool {
+			t.Helper()
+			msgs, err := store.MessagesForConversations(ctx, orgID, []string{convID})
+			if err != nil {
+				t.Fatalf("MessagesForConversations: %v", err)
+			}
+			out := map[int]bool{}
+			for _, m := range msgs {
+				out[m.ID] = m.Delivered != nil && *m.Delivered
+			}
+			return out
+		}
+		got := deliveredByID(conversationID)
+		want := map[int]bool{steered: false, answered: true, note: true, reply: true, withdrawn: true}
+		for id, w := range want {
+			if got[id] != w {
+				t.Errorf("row %d delivered = %v, want %v", id, got[id], w)
+			}
+		}
+		if !deliveredByID(otherConversationID)[other] {
+			t.Error("a row of another conversation flipped, want it left delivered")
+		}
+	})
+
+	t.Run("WithdrawPendingInput_HidesOnlyQueuedMessagesOfTheConversation", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+		otherConversationID := seedConversationForTest(t, orgID, seed, "open")
+
+		insert := func(convID string, m domain.Message) int {
+			t.Helper()
+			m.ConversationID = convID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		pending, delivered := false, true
+		queued := insert(conversationID, domain.Message{Role: "user", Content: "queued", Delivered: &pending})
+		kept := insert(conversationID, domain.Message{Role: "user", Content: "kept", Delivered: &pending})
+		read := insert(conversationID, domain.Message{Role: "user", Content: "read", Delivered: &delivered})
+		note := insert(conversationID, domain.Message{Role: "user", Subtype: "injection:system-note", Content: "note", Delivered: &pending})
+		other := insert(otherConversationID, domain.Message{Role: "user", Content: "other", Delivered: &pending})
+
+		// Every id but `kept` is named: only `queued` is a queued message of
+		// this conversation.
+		if err := store.WithdrawPendingInputSystem(ctx, orgID, conversationID, []int{queued, read, note, other}); err != nil {
+			t.Fatalf("WithdrawPendingInputSystem: %v", err)
+		}
+
+		visible := func(convID string) map[int]bool {
+			t.Helper()
+			msgs, err := store.MessagesForConversations(ctx, orgID, []string{convID})
+			if err != nil {
+				t.Fatalf("MessagesForConversations: %v", err)
+			}
+			out := map[int]bool{}
+			for _, m := range msgs {
+				out[m.ID] = true
+			}
+			return out
+		}
+		got := visible(conversationID)
+		for id, want := range map[int]bool{queued: false, kept: true, read: true, note: true} {
+			if got[id] != want {
+				t.Errorf("row %d visible = %v, want %v", id, got[id], want)
+			}
+		}
+		if !visible(otherConversationID)[other] {
+			t.Error("a row of another conversation was withdrawn, want it left queued")
 		}
 	})
 

@@ -199,13 +199,14 @@ func TestSDK_LiveSmoke_InteractiveInterrupt(t *testing.T) {
 	t.Logf("interrupt ok: subtype=%s is_error=%v", res.Subtype, res.IsError)
 }
 
-// TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne pins the SDK behavior
-// the live driver's turn-boundary check rests on: a message sent while a turn
-// is running is queued and run as the NEXT turn, with its own result — it is
-// neither folded into the running turn nor dropped when that turn ends. The
-// count of owed turns is sampled at each result, the same moment the driver
-// reads it: two owed after both sends, one left when the first turn's result
-// lands (the steered turn is still to come), none after the second.
+// TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne pins what the SDK does
+// with a message sent while a text-only turn is running: it is queued and run
+// as the NEXT turn, with its own result, and is not dropped when that turn
+// ends. The turn calls no tool, so it has no tool-batch boundary the message
+// could be folded in at; a message sent during a tool call is folded into the
+// running turn instead (TestSDK_LiveSmoke_SteerDuringAToolCall). TF sends
+// nothing into a running turn, for both reasons: what a turn makes of it
+// depends on where the turn is.
 func TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne(t *testing.T) {
 	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
 		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
@@ -214,24 +215,14 @@ func TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	var (
-		mu       sync.Mutex
-		owedAt   []int
-		resultsC = make(chan *Result, 8)
-	)
+	resultsC := make(chan *Result, 8)
 	sink := newLiveSink()
-	var lr *LiveRun
 	lr, err := RunInteractive(ctx, RunOptions{
-		Cwd:     t.TempDir(),
-		Message: "Count from 1 to 60, one number per line, with no other text.",
-		Model:   "haiku",
-		TraceID: "live-queued-turn",
-		OnResult: func(r *Result) {
-			mu.Lock()
-			owedAt = append(owedAt, lr.QueuedTurns())
-			mu.Unlock()
-			resultsC <- r
-		},
+		Cwd:      t.TempDir(),
+		Message:  "Count from 1 to 60, one number per line, with no other text.",
+		Model:    "haiku",
+		TraceID:  "live-queued-turn",
+		OnResult: func(r *Result) { resultsC <- r },
 	}, sink, denyAllPermissions)
 	if err != nil {
 		t.Fatalf("RunInteractive failed: %v", err)
@@ -242,9 +233,6 @@ func TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne(t *testing.T) {
 	waitSession(t, lr, 60*time.Second)
 	if err := lr.Send(ctx, "Now reply with exactly the word PONG and nothing else."); err != nil {
 		t.Fatalf("Send failed: %v", err)
-	}
-	if got := lr.QueuedTurns(); got != 2 {
-		t.Errorf("QueuedTurns with a steer queued behind the running turn = %d, want 2", got)
 	}
 
 	for i := range 2 {
@@ -262,22 +250,15 @@ func TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne(t *testing.T) {
 	if !strings.Contains(second.Content, "PONG") {
 		t.Errorf("the queued message did not produce its own turn; second assistant message = %q", second.Content)
 	}
-	mu.Lock()
-	got := append([]int(nil), owedAt...)
-	mu.Unlock()
-	if len(got) != 2 || got[0] != 1 || got[1] != 0 {
-		t.Errorf("QueuedTurns sampled at each result = %v, want [1 0]", got)
-	}
 	if err := lr.Close(); err != nil {
 		t.Logf("close returned (non-fatal): %v", err)
 	}
 }
 
 // TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt is the pause half of the
-// same contract: a message queued behind a running turn is still run when
+// same behavior: a message queued behind a running turn is still run when
 // that turn is ended by interrupt() rather than by the model — the pause ends
-// the turn, not the queue. The driver leans on this to stay with a paused
-// process that has a steer owed rather than parking it.
+// the turn, not the queue.
 func TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt(t *testing.T) {
 	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
 		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
@@ -313,7 +294,7 @@ func TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt(t *testing.T) {
 	for i := range 2 {
 		select {
 		case r := <-resultsC:
-			t.Logf("result %d: subtype=%s is_error=%v interrupted=%v owed_after=%d", i+1, r.Subtype, r.IsError, r.Interrupted, lr.QueuedTurns())
+			t.Logf("result %d: subtype=%s is_error=%v interrupted=%v", i+1, r.Subtype, r.IsError, r.Interrupted)
 			got = append(got, r)
 		case <-time.After(90 * time.Second):
 			t.Fatalf("result %d never arrived", i+1)
@@ -324,9 +305,6 @@ func TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt(t *testing.T) {
 	}
 	if got[1].Interrupted || got[1].IsError {
 		t.Errorf("second result should be the queued turn's own, got %+v", got[1])
-	}
-	if owed := lr.QueuedTurns(); owed != 0 {
-		t.Errorf("QueuedTurns after both results = %d, want 0", owed)
 	}
 	// The interrupted essay may or may not have flushed an assistant message;
 	// the queued turn's reply is the one that must be there.
@@ -346,6 +324,89 @@ func TestSDK_LiveSmoke_QueuedTurnSurvivesAnInterrupt(t *testing.T) {
 	}
 	if err := lr.Close(); err != nil {
 		t.Logf("close returned (non-fatal): %v", err)
+	}
+}
+
+// TestSDK_LiveSmoke_SteerDuringAToolCall pins what Claude Code does with a
+// message sent while one of the turn's tool calls is running: it folds the
+// message into that turn at the next tool-batch boundary, as a queued_command
+// attachment ahead of the model's next request, and the turn's one result
+// answers both sends. No second turn follows. A message sent during a
+// text-only turn (TestSDK_LiveSmoke_QueuedTurnRunsAfterTheCurrentOne) has no
+// boundary to be folded at, so it runs as its own turn instead.
+//
+// The message carries no priority, as LiveRun.Send sends it; Claude Code reads
+// that as "next", the priority the fold takes.
+//
+// Gated like the other live smokes.
+func TestSDK_LiveSmoke_SteerDuringAToolCall(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+
+	const steer = "Also include the word PINEAPPLE in your final reply."
+	resultsC := make(chan *Result, 8)
+	sink := &toolUseSink{liveSink: newLiveSink(), uses: make(chan toolUseSeen, 16), results: map[string]time.Time{}}
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd: t.TempDir(),
+		Message: "Use the Bash tool to run `sleep 15`. After you see its output, use the Bash tool to run `echo second` " +
+			"as a separate, later tool call (do not run both in one message). Then reply with the word DONE.",
+		Model:        "haiku",
+		AllowedTools: "Bash(sleep *),Bash(echo *)",
+		TraceID:      "live-steer-during-tool-call",
+		OnResult:     func(r *Result) { resultsC <- r },
+	}, sink, nil)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	// The first Bash call is the sleep. Steer once it has had time to start.
+	var sleepCall string
+	select {
+	case u := <-sink.uses:
+		sleepCall = u.id
+	case <-time.After(90 * time.Second):
+		t.Fatal("the model never called Bash")
+	}
+	time.Sleep(2 * time.Second)
+	if err := lr.Send(ctx, steer); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if sink.resultSeen(sleepCall) {
+		t.Skip("the sleep call had already returned when the steer went out, so no steer landed during a tool call")
+	}
+
+	first := waitResult(t, lr, resultsC, 150*time.Second)
+	t.Logf("result: subtype=%s num_turns=%d text=%q", first.Subtype, first.NumTurns, first.Result)
+	// A queued turn starts as soon as the one before it ends, and haiku answers
+	// a one-line message within seconds, so 30s without a result is no turn.
+	select {
+	case r := <-resultsC:
+		t.Errorf("a second result arrived (subtype=%s text=%q), so the steer ran as a turn of its own rather than folded into the running one", r.Subtype, r.Result)
+	case <-time.After(30 * time.Second):
+	}
+	sid := lr.SessionID()
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+
+	if !strings.Contains(first.Result, "PINEAPPLE") {
+		t.Errorf("the turn's final reply %q does not answer the steer", first.Result)
+	}
+	_, raw := sessionTranscript(t, sid)
+	slept, folded, next := foldPosition(raw, sleepCall, steer)
+	t.Logf("transcript lines: sleep result=%d queued_command=%d next tool call=%d", slept, folded, next)
+	switch {
+	case folded < 0:
+		t.Errorf("the session transcript has no queued_command attachment carrying the steer")
+	case slept < 0 || folded < slept:
+		t.Errorf("the steer's queued_command (line %d) is not after the sleep call's result (line %d)", folded, slept)
+	case next >= 0 && next < folded:
+		t.Errorf("the steer's queued_command (line %d) is after the model's next tool call (line %d), not ahead of the request that made it", folded, next)
 	}
 }
 
@@ -374,7 +435,7 @@ func TestSDK_LiveSmoke_InteractivePermission(t *testing.T) {
 	lr, err := RunInteractive(ctx, RunOptions{
 		Cwd:     cwd,
 		Message: "Use the Write tool to create a file named secret.txt containing the text 'hello'. Do it now without asking.",
-		Model:   "sonnet-4-6",
+		Model:   "haiku",
 		TraceID: "live-perm",
 	}, sink, handler)
 	if err != nil {
@@ -432,11 +493,13 @@ func TestSDK_LiveSmoke_AllowlistShortCircuitsHandler(t *testing.T) {
 	// Write is on the allowlist (match → allow, no callback); Bash is NOT
 	// (off-allowlist → must reach the handler). Do the Write first so the
 	// allowlist path is exercised before the agent reaches the denied Bash.
+	// The Bash command writes a file: Claude Code runs a read-only one, such
+	// as `echo`, without asking anyone, so it would never reach the handler.
 	sink := newLiveSink()
 	lr, err := RunInteractive(ctx, RunOptions{
 		Cwd:          cwd,
-		Message:      "First use the Write tool to create a file named allowed.txt containing 'hi'. After that, use the Bash tool to run `echo nope`. Do both without asking.",
-		Model:        "sonnet-4-6",
+		Message:      "First use the Write tool to create a file named allowed.txt containing 'hi'. After that, use the Bash tool to run `touch denied.txt`. Do both without asking.",
+		Model:        "haiku",
 		AllowedTools: "Write,Read,Glob,Grep",
 		TraceID:      "live-allowlist",
 	}, sink, handler)
@@ -1306,13 +1369,17 @@ func TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows(t *testing.T) {
 	// row. Spelled literally rather than assembled here: agentproc sits below
 	// the packages that own rows and assembly, and what this test is for is the
 	// wire, not the composition.
+	//
+	// Claude Code puts a <system-reminder> block of its own ahead of the
+	// message, so both questions below ask for the first block that is not one.
+	// Asked for the first block outright, the model quotes that reminder.
 	const taskContext = "<task_context>\nPull request owner/repo#7 — \"Fix the flaky poller test\"\n</task_context>"
 	envelopeOpen := domain.MemoryEnvelopeOpen(1)
 	blocks := []ContentBlock{
 		{Type: "text", Text: envelopeOpen},
 		{Type: "text", Text: "A prior conversation rewrote the poller's fixture and left the assertion alone."},
 		{Type: "text", Text: domain.MemoryEnvelopeClose},
-		{Type: "text", Text: taskContext + "\n\nBefore doing anything else: reply with the first line of the first content block you were given, verbatim, and nothing else. Use no tools."},
+		{Type: "text", Text: taskContext + "\n\nBefore doing anything else: reply with the first line of the first content block you were given that is not a <system-reminder>, verbatim, and nothing else. Use no tools."},
 	}
 
 	cwd := t.TempDir()
@@ -1374,7 +1441,7 @@ func TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows(t *testing.T) {
 	rlr, err := RunInteractive(ctx, RunOptions{
 		Cwd:       cwd,
 		SessionID: sid,
-		Message:   "Quote the first line of the very first content block of this conversation, verbatim, and nothing else. Use no tools.",
+		Message:   "Quote the first line of the very first content block of this conversation that is not a <system-reminder>, verbatim, and nothing else. Use no tools.",
 		Model:     "haiku",
 		TraceID:   "live-opening-rows-resume",
 	}, resumed, denyAllPermissions)
@@ -1596,4 +1663,94 @@ func entryText(msg map[string]any) string {
 		return b.String()
 	}
 	return ""
+}
+
+// toolUseSeen is one tool call a toolUseSink saw handed to the harness.
+type toolUseSeen struct {
+	id, name string
+}
+
+// toolUseSink is a liveSink that also observes the stream, so a test can act
+// while a tool call runs: an assistant row reaches the sink only once its
+// batch has finished, while OnToolUse fires as the call streams. It reports
+// each Bash call on uses and remembers when each call's result arrived.
+type toolUseSink struct {
+	*liveSink
+	uses chan toolUseSeen
+
+	resMu   sync.Mutex
+	results map[string]time.Time
+}
+
+func (s *toolUseSink) OnLine() {}
+
+func (s *toolUseSink) OnToolUse(id, name string) {
+	if name != "Bash" {
+		return
+	}
+	select {
+	case s.uses <- toolUseSeen{id: id, name: name}:
+	default:
+	}
+}
+
+func (s *toolUseSink) OnToolResult(id string) {
+	s.resMu.Lock()
+	s.results[id] = time.Now()
+	s.resMu.Unlock()
+}
+
+func (s *toolUseSink) OnTurnEnd() {}
+
+func (s *toolUseSink) OnPermission(string) (done func()) { return func() {} }
+
+// resultSeen reports whether the result of tool call id has arrived.
+func (s *toolUseSink) resultSeen(id string) bool {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	_, ok := s.results[id]
+	return ok
+}
+
+// foldPosition reads a session transcript for where a folded message landed:
+// the line of the tool_result answering call, the line of the queued_command
+// attachment whose prompt is text, and the line of the first tool_use after
+// that result. Each is -1 when absent.
+func foldPosition(raw []byte, call, text string) (result, folded, next int) {
+	result, folded, next = -1, -1, -1
+	for i, line := range bytes.Split(raw, []byte("\n")) {
+		var entry struct {
+			Type       string `json:"type"`
+			Attachment struct {
+				Type   string `json:"type"`
+				Prompt string `json:"prompt"`
+			} `json:"attachment"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		if entry.Type == "attachment" && entry.Attachment.Type == "queued_command" && entry.Attachment.Prompt == text && folded < 0 {
+			folded = i
+			continue
+		}
+		var blocks []struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if json.Unmarshal(entry.Message.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			switch {
+			case entry.Type == "user" && b.Type == "tool_result" && b.ToolUseID == call && result < 0:
+				result = i
+			case entry.Type == "assistant" && b.Type == "tool_use" && result >= 0 && next < 0:
+				next = i
+			}
+		}
+	}
+	return result, folded, next
 }

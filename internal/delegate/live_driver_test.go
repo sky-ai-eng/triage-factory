@@ -24,14 +24,11 @@ type fakeLiveProc struct {
 	result    *agentproc.Result
 	err       error
 	sendCount int
+	// sent is the text of every message the process took, in order.
+	sent []string
 	// sendErr is what Send answers, so a test can model a process that will
 	// not take a message.
 	sendErr error
-	// queued is what QueuedTurns answers: the turns the process still owes.
-	// A test stages it to model a message steered in while the turn ran —
-	// the real process counts its own sends against its results, which a
-	// fake fed results by hand cannot.
-	queued int
 	// onSend fires (with the 1-based send count) after each Send so a test can
 	// feed the next turn's result onto the results channel — the turn a nudge
 	// the driver sent produces.
@@ -51,17 +48,7 @@ func (f *fakeLiveProc) SessionID() string         { return f.sessionID }
 func (f *fakeLiveProc) Stderr() string            { return "" }
 func (f *fakeLiveProc) Result() *agentproc.Result { f.mu.Lock(); defer f.mu.Unlock(); return f.result }
 func (f *fakeLiveProc) Err() error                { f.mu.Lock(); defer f.mu.Unlock(); return f.err }
-func (f *fakeLiveProc) QueuedTurns() int          { f.mu.Lock(); defer f.mu.Unlock(); return f.queued }
-
-// owe stages n turns the process still has to run, the reading a real
-// process gives while a steered message is queued behind the current turn.
-func (f *fakeLiveProc) owe(n int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.queued = n
-}
-
-func (f *fakeLiveProc) Send(_ context.Context, _ string) error {
+func (f *fakeLiveProc) Send(_ context.Context, text string) error {
 	f.mu.Lock()
 	if f.sendErr != nil {
 		err := f.sendErr
@@ -69,6 +56,7 @@ func (f *fakeLiveProc) Send(_ context.Context, _ string) error {
 		return err
 	}
 	f.sendCount++
+	f.sent = append(f.sent, text)
 	n := f.sendCount
 	hook := f.onSend
 	f.mu.Unlock()
@@ -82,6 +70,12 @@ func (f *fakeLiveProc) sends() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sendCount
+}
+
+func (f *fakeLiveProc) sentTexts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
 }
 
 func (f *fakeLiveProc) Close() error {
@@ -267,60 +261,6 @@ func TestDriveLiveConversation_AnUnfinishedTurnClosesAndHandsBack(t *testing.T) 
 	}
 	if asked != 0 || proc.sends() != 0 {
 		t.Errorf("nudge asked %d times, %d sends; a turn that is not concluding asks nothing", asked, proc.sends())
-	}
-}
-
-// TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd: a message steered in
-// while the turn ran is queued by the process and starts the next turn, so a
-// turn the model ended with a turn still owed does not conclude — the model
-// has not seen the message — and the driver stays on the same process, under
-// the same claim, and reads the turn the steer produces. The would-stop hook
-// is not asked either: the steer comes first, as the native loop's recheck
-// puts it. Delivering prose first and a stop second proves it: the stop is
-// only reachable by staying past the prose.
-func TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
-	proc.owe(1)
-	results := make(chan *agentproc.Result, 8)
-	results <- &agentproc.Result{StopReason: "end_turn", Result: "Some prose; the steered turn runs next."}
-	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
-	results <- want
-	asked := 0
-	nudge := func(context.Context) string { asked++; return "did you mean to?" }
-
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nudge)
-
-	if out.result != want {
-		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
-	}
-	if out.hibernated {
-		t.Error("a turn end with a turn still owed must not park")
-	}
-	if asked != 0 {
-		t.Errorf("nudge asked %d times; the queued turn comes first", asked)
-	}
-}
-
-// TestDriveLiveConversation_QueuedTurnOutlivesThePause is the same for a
-// paused turn: an interrupt that lands with a steer queued behind it ends
-// this turn, and the process starts the queued one next.
-func TestDriveLiveConversation_QueuedTurnOutlivesThePause(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
-	proc.owe(1)
-	results := make(chan *agentproc.Result, 8)
-	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
-	results <- want
-
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
-
-	if out.result != want {
-		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
-	}
-	if out.hibernated {
-		t.Error("a pause with a turn still owed must not park")
 	}
 }
 
