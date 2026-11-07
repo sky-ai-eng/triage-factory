@@ -435,7 +435,7 @@ func TestSDK_LiveSmoke_InteractivePermission(t *testing.T) {
 	lr, err := RunInteractive(ctx, RunOptions{
 		Cwd:     cwd,
 		Message: "Use the Write tool to create a file named secret.txt containing the text 'hello'. Do it now without asking.",
-		Model:   "sonnet-4-6",
+		Model:   "haiku",
 		TraceID: "live-perm",
 	}, sink, handler)
 	if err != nil {
@@ -493,11 +493,13 @@ func TestSDK_LiveSmoke_AllowlistShortCircuitsHandler(t *testing.T) {
 	// Write is on the allowlist (match → allow, no callback); Bash is NOT
 	// (off-allowlist → must reach the handler). Do the Write first so the
 	// allowlist path is exercised before the agent reaches the denied Bash.
+	// The Bash command writes a file: Claude Code runs a read-only one, such
+	// as `echo`, without asking anyone, so it would never reach the handler.
 	sink := newLiveSink()
 	lr, err := RunInteractive(ctx, RunOptions{
 		Cwd:          cwd,
-		Message:      "First use the Write tool to create a file named allowed.txt containing 'hi'. After that, use the Bash tool to run `echo nope`. Do both without asking.",
-		Model:        "sonnet-4-6",
+		Message:      "First use the Write tool to create a file named allowed.txt containing 'hi'. After that, use the Bash tool to run `touch denied.txt`. Do both without asking.",
+		Model:        "haiku",
 		AllowedTools: "Write,Read,Glob,Grep",
 		TraceID:      "live-allowlist",
 	}, sink, handler)
@@ -1367,13 +1369,17 @@ func TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows(t *testing.T) {
 	// row. Spelled literally rather than assembled here: agentproc sits below
 	// the packages that own rows and assembly, and what this test is for is the
 	// wire, not the composition.
+	//
+	// Claude Code puts a <system-reminder> block of its own ahead of the
+	// message, so both questions below ask for the first block that is not one.
+	// Asked for the first block outright, the model quotes that reminder.
 	const taskContext = "<task_context>\nPull request owner/repo#7 — \"Fix the flaky poller test\"\n</task_context>"
 	envelopeOpen := domain.MemoryEnvelopeOpen(1)
 	blocks := []ContentBlock{
 		{Type: "text", Text: envelopeOpen},
 		{Type: "text", Text: "A prior conversation rewrote the poller's fixture and left the assertion alone."},
 		{Type: "text", Text: domain.MemoryEnvelopeClose},
-		{Type: "text", Text: taskContext + "\n\nBefore doing anything else: reply with the first line of the first content block you were given, verbatim, and nothing else. Use no tools."},
+		{Type: "text", Text: taskContext + "\n\nBefore doing anything else: reply with the first line of the first content block you were given that is not a <system-reminder>, verbatim, and nothing else. Use no tools."},
 	}
 
 	cwd := t.TempDir()
@@ -1435,7 +1441,7 @@ func TestSDK_LiveSmoke_OpeningTurnIsTheAssembledRows(t *testing.T) {
 	rlr, err := RunInteractive(ctx, RunOptions{
 		Cwd:       cwd,
 		SessionID: sid,
-		Message:   "Quote the first line of the very first content block of this conversation, verbatim, and nothing else. Use no tools.",
+		Message:   "Quote the first line of the very first content block of this conversation that is not a <system-reminder>, verbatim, and nothing else. Use no tools.",
 		Model:     "haiku",
 		TraceID:   "live-opening-rows-resume",
 	}, resumed, denyAllPermissions)
