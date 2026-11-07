@@ -197,6 +197,16 @@ func IsEndedReason(reason string) bool {
 	return false
 }
 
+// SteerOpen and SteerClose bracket a person's message that reaches the model
+// while it is working, between tool calls. The tag tells the model the message
+// is not a fresh instruction replacing what it was doing, which is how an
+// unwrapped user message between tool batches would otherwise read. Shared so
+// the message reads the same to the model whichever runtime delivers it.
+const (
+	SteerOpen  = "<steer note=\"sent while you were working; keep going and respond if appropriate\">\n"
+	SteerClose = "\n</steer>"
+)
+
 // InjectionSubtype values discriminate a `role=user` row the system wrote
 // on the agent's behalf from one a human typed. Assembly reads them (a
 // steer row renders inside a keep-working envelope); display reads them to

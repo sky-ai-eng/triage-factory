@@ -60,14 +60,9 @@ func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	markEngaged(t, database, "r-native")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-native")
-	fc := &fakeController{}
-	s.controller = fc
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-native", runmode.LocalDefaultUserID, "also check the tests"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
-	}
-	if fc.steerCalls != 0 {
-		t.Errorf("a native conversation has one input door — the messages table; controller steer calls = %d", fc.steerCalls)
 	}
 	pending := pendingRows(t, s, "r-native")
 	if len(pending) != 1 || pending[0].Content != "also check the tests" {
@@ -179,14 +174,9 @@ func TestSendMessage_NativeQueuedAppendsWithoutWaking(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-nq")
-	fc := &fakeController{}
-	s.controller = fc
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-nq", runmode.LocalDefaultUserID, "and this too"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
-	}
-	if fc.steerCalls != 0 {
-		t.Errorf("controller steer calls = %d, want 0", fc.steerCalls)
 	}
 	if got := pendingRows(t, s, "r-nq"); len(got) != 1 || got[0].Content != "and this too" {
 		t.Fatalf("the message must be queued for the coming claim: %+v", got)

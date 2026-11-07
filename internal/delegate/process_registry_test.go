@@ -55,16 +55,13 @@ func TestController_CancelRoutesToRegisteredCancel(t *testing.T) {
 	}
 }
 
-// TestController_InterruptSteerNoProcErrors guards the no-live-process
-// branch the P3 endpoints will surface as a 4xx: Interrupt/Steer error
-// rather than panic when the run has no registered handle.
-func TestController_InterruptSteerNoProcErrors(t *testing.T) {
+// TestController_InterruptNoProcErrors guards the no-live-process branch the
+// endpoints surface as a 4xx: Interrupt errors rather than panics when the
+// run has no registered handle.
+func TestController_InterruptNoProcErrors(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if err := s.Interrupt(context.Background(), "nope"); !errors.Is(err, ErrNoLiveProcess) {
 		t.Errorf("Interrupt err = %v, want ErrNoLiveProcess when no live process is registered", err)
-	}
-	if err := s.Steer(context.Background(), "nope", "hi"); !errors.Is(err, ErrNoLiveProcess) {
-		t.Errorf("Steer err = %v, want ErrNoLiveProcess when no live process is registered", err)
 	}
 }
 

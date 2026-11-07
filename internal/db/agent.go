@@ -611,8 +611,8 @@ type ConversationStore interface {
 	// "injection:compaction-result", "injection:memory",
 	// "injection:task-context", the staged notes' "injection:event" (a
 	// new-event injection) and "injection:system-note" (every other staged
-	// note), and "stop-note" — plus one value owned where it is written, the
-	// deliverable feedback row's "system_note".
+	// note), and "stop-note" — plus "system_note", which stored deliverable
+	// feedback rows carry.
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
@@ -1079,12 +1079,12 @@ type ConversationStore interface {
 	// delivers it again. Any other id, a row of another conversation
 	// included, is left alone.
 	//
-	// The SDK writes a message it steered into a live process as delivered,
-	// and this is the undo for one the process took and never answered: a
-	// stop_blueprint ending the turn the message was queued behind. Fenced,
-	// because only the engagement holding the claim knows which of its
-	// messages went unanswered, and a zombie's late flip would hand its
-	// successor input the successor's own process already read.
+	// A live SDK process takes a person's waiting messages at a tool batch
+	// or as its next turn, flushed delivered first, and this is the undo for
+	// a delivery that never reached the model: the batch was given up, or the
+	// send failed. Fenced, because only the engagement holding the claim
+	// knows which of its deliveries failed, and a zombie's late flip would
+	// hand its successor input the successor's own process already read.
 	//
 	// Exempt from the returned-row rule: a batch flip, like the drain flush
 	// above.

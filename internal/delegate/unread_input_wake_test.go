@@ -3,6 +3,8 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,8 +20,8 @@ import (
 
 // concludeWithUnreadMessage stages the moment a stop_blueprint leaves behind:
 // the step's engagement holds a claim, a person's message is on the queue
-// undelivered (where the native loop leaves it, and where the SDK driver puts
-// it back), and the engagement then records the stop's verdict.
+// undelivered (where both runtimes leave it), and the engagement then records
+// the stop's verdict.
 func concludeWithUnreadMessage(t *testing.T, s *Spawner, convID string, outcome domain.ConversationOutcome) {
 	t.Helper()
 	org := runmode.LocalDefaultOrgID
@@ -326,44 +328,189 @@ func TestReplayStrandedRun_WakesForTheMessageTheStopLeftUnread(t *testing.T) {
 	}
 }
 
-// stopOwedFixture is a live SDK engagement whose process took two steers, the
-// first of them already answered, and owes a turn to the second.
-func stopOwedFixture(t *testing.T) (*Spawner, *fakeLiveProc, liveParkContext) {
+// liveInputFixture is a live SDK engagement: a conversation with an active
+// claim and its process registered, and the identity the driver parks under.
+// The driver runs against proc, a fake standing in for the registered one.
+func liveInputFixture(t *testing.T, convID string) (*Spawner, *sql.DB, *fakeLiveProc, liveParkContext) {
 	t.Helper()
 	org := runmode.LocalDefaultOrgID
 	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-stop-owed", "sess-stop-owed", "/tmp/wt-stop-owed")
-	claimID := markEngaged(t, database, "r-stop-owed")
+	seedConversation(t, database, convID, "sess-"+convID, "/tmp/wt-"+convID)
+	claimID := markEngaged(t, database, convID)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	s.controller = &fakeController{}
-	s.registerProc(org, "r-stop-owed", &agentproc.LiveRun{})
-	for _, text := range []string{"answered", "thanks"} {
-		if err := s.SendMessage(context.Background(), org, "r-stop-owed", runmode.LocalDefaultUserID, text); err != nil {
-			t.Fatalf("steer %q: %v", text, err)
-		}
+	s.registerProc(org, convID, &agentproc.LiveRun{})
+	park := liveParkContext{
+		orgID: org, conversationID: convID, namespace: "seedbpr-" + convID, claudeCwd: "/tmp/wt-" + convID,
+		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
-	proc := newFakeLiveProc("sess-stop-owed")
-	proc.owe(1)
-	return s, proc, liveParkContext{orgID: org, conversationID: "r-stop-owed", claimID: claimID}
+	return s, database, newFakeLiveProc("sess-" + convID), park
+}
+
+// sendWhileLive sends a person's message to the conversation's live process,
+// as the message endpoint does.
+func sendWhileLive(t *testing.T, s *Spawner, convID, text string) {
+	t.Helper()
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, convID, runmode.LocalDefaultUserID, text); err != nil {
+		t.Fatalf("send %q: %v", text, err)
+	}
 }
 
 func stopResult() *agentproc.Result {
 	return &agentproc.Result{StopReason: "tool_use", Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeAbort, Reason: "r", Summary: "s"}}
 }
 
-// TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt is the SDK half. A
-// person's message steered in while the turn ran is still owed a turn when a
-// stop_blueprint ends it: the driver hands the stop back as the verdict,
-// interrupts the owed turn rather than letting a close drain it, closes the
-// process once the interrupt has settled it, and puts the message's row back
-// on the queue. A message the process had already answered stays delivered.
-func TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt(t *testing.T) {
-	s, proc, park := stopOwedFixture(t)
-	results := make(chan *agentproc.Result, 2)
-	proc.onInterrupt = func() {
-		proc.owe(0)
-		results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+// answerEachSend feeds result onto results for every message the process
+// takes, the turn that message starts. A test that expects no send sets it
+// too, so a send it did not expect ends in a wrong outcome rather than a
+// driver waiting forever for a turn nothing answers.
+func answerEachSend(proc *fakeLiveProc, results chan *agentproc.Result, result *agentproc.Result) {
+	proc.onSend = func(int) { results <- result }
+}
+
+// TestDriveLiveConversation_AWaitingMessageIsTheNextTurn: a person's message
+// sent while the turn ran, that no tool batch took, keeps a turn the model
+// ended from concluding. The driver sends it as the next turn, marks it
+// delivered, and reads the turn it starts, before the would-stop hook is
+// asked: the model has not seen it.
+func TestDriveLiveConversation_AWaitingMessageIsTheNextTurn(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-waiting")
+	sendWhileLive(t, s, "r-waiting", "also check the tests")
+	results := make(chan *agentproc.Result, 4)
+	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
+	answerEachSend(proc, results, want)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "Done, I think."}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nudge)
+
+	if out.result != want {
+		t.Errorf("result = %+v, want the conclusion of the turn the message started", out.result)
 	}
+	if got := proc.sentTexts(); len(got) != 1 || got[0] != "also check the tests" {
+		t.Errorf("sent = %q, want the waiting message as the next turn", got)
+	}
+	if asked != 0 {
+		t.Errorf("nudge asked %d times; the waiting message comes first", asked)
+	}
+	if got := pendingRows(t, s, "r-waiting"); len(got) != 0 {
+		t.Errorf("pending rows = %+v, want the message delivered", got)
+	}
+}
+
+// TestDriveLiveConversation_AWaitingMessageOutlivesThePause: an interrupt
+// that lands with a person's message waiting ends this turn, and the message
+// is the pause's next turn rather than a park.
+func TestDriveLiveConversation_AWaitingMessageOutlivesThePause(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-waiting-pause")
+	sendWhileLive(t, s, "r-waiting-pause", "do this instead")
+	results := make(chan *agentproc.Result, 4)
+	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
+	answerEachSend(proc, results, want)
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
+
+	if out.result != want || out.hibernated {
+		t.Errorf("outcome = %+v, want the conclusion of the turn the message started, not a park", out)
+	}
+	if got := proc.sentTexts(); len(got) != 1 || got[0] != "do this instead" {
+		t.Errorf("sent = %q, want the waiting message", got)
+	}
+}
+
+// TestDriveLiveConversation_APauseStandsOverANewEvent: a pause is a person
+// stopping the turn, so a new-event injection waiting for the process does not
+// start another one. The conversation parks, with the injection still staged
+// for its next engagement.
+func TestDriveLiveConversation_APauseStandsOverANewEvent(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-pause-event")
+	if !s.stageNoteAtToolBoundary(context.Background(), park.orgID, "r-pause-event", domain.MessageSubtypeInjectionEvent, "p", "a new event", domain.NoteProvenance{}) {
+		t.Fatal("the injection was not staged")
+	}
+	results := make(chan *agentproc.Result, 2)
+	answerEachSend(proc, results, &agentproc.Result{StopReason: "end_turn", Result: "answered"})
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
+
+	if !out.hibernated {
+		t.Errorf("outcome = %+v, want the pause to park", out)
+	}
+	if proc.sends() != 0 {
+		t.Errorf("sent %q, want nothing after a pause with only an event waiting", proc.sentTexts())
+	}
+	if got := pendingRows(t, s, "r-pause-event"); len(got) != 1 || got[0].Subtype != domain.MessageSubtypeInjectionEvent {
+		t.Errorf("pending rows = %+v, want the injection still staged", got)
+	}
+}
+
+// TestDriveLiveConversation_ANewEventIsTheNextTurn: a new-event injection
+// waiting for the process keeps a turn the model ended going, as it keeps a
+// finishing native loop going, and rides the next turn with every other
+// staged note.
+func TestDriveLiveConversation_ANewEventIsTheNextTurn(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-event")
+	ctx := context.Background()
+	if !s.stageNoteAtToolBoundary(ctx, park.orgID, "r-event", domain.MessageSubtypeInjectionSystemNote, "p", "a pull request note", domain.NoteProvenance{}) {
+		t.Fatal("the note was not staged")
+	}
+	if !s.stageNoteAtToolBoundary(ctx, park.orgID, "r-event", domain.MessageSubtypeInjectionEvent, "p", "a new event", domain.NoteProvenance{}) {
+		t.Fatal("the injection was not staged")
+	}
+	results := make(chan *agentproc.Result, 4)
+	want := &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
+	answerEachSend(proc, results, want)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "Done."}
+
+	out := s.driveLiveConversation(ctx, park, proc, results, nil)
+
+	if out.result != want {
+		t.Errorf("result = %+v, want the conclusion of the turn the injection started", out.result)
+	}
+	sent := proc.sentTexts()
+	if len(sent) != 1 || !strings.Contains(sent[0], "a new event") || !strings.Contains(sent[0], "a pull request note") {
+		t.Errorf("sent = %q, want one turn carrying the injection and the note", sent)
+	}
+	if got := pendingRows(t, s, "r-event"); len(got) != 0 {
+		t.Errorf("pending rows = %+v, want everything the turn carried delivered", got)
+	}
+}
+
+// TestDriveLiveConversation_ANoteAloneLetsTheTurnEnd: a staged note that is
+// information, not work, does not keep a finishing turn going. The process is
+// let go of with the note still staged for the next engagement.
+func TestDriveLiveConversation_ANoteAloneLetsTheTurnEnd(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-note")
+	if !s.stageNoteAtToolBoundary(context.Background(), park.orgID, "r-note", domain.MessageSubtypeInjectionSystemNote, "p", "a pull request note", domain.NoteProvenance{}) {
+		t.Fatal("the note was not staged")
+	}
+	results := make(chan *agentproc.Result, 2)
+	answerEachSend(proc, results, &agentproc.Result{StopReason: "end_turn", Result: "answered"})
+	turnEnd := &agentproc.Result{StopReason: "max_tokens", Result: "cut off"}
+	results <- turnEnd
+
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
+
+	if out.result != turnEnd || proc.sends() != 0 || !proc.wasClosed() {
+		t.Errorf("outcome = %+v, sends = %d, closed = %v; want the turn handed back and the process closed", out, proc.sends(), proc.wasClosed())
+	}
+	if got := pendingRows(t, s, "r-note"); len(got) != 1 {
+		t.Errorf("pending rows = %+v, want the note still staged", got)
+	}
+}
+
+// TestDriveLiveConversation_AStopLeavesAWaitingMessageUnread is the SDK half
+// of a stop with a message: the stop stands as the verdict, the process is
+// closed without the message being sent, and the message stays on the queue
+// for the wake that follows the blueprint's reaction. Once the driver has let
+// go, a message sent afterwards is refused rather than queued for a process
+// that will not read it.
+func TestDriveLiveConversation_AStopLeavesAWaitingMessageUnread(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-stop")
+	sendWhileLive(t, s, "r-stop", "thanks")
+	results := make(chan *agentproc.Result, 2)
+	answerEachSend(proc, results, &agentproc.Result{StopReason: "end_turn", Result: "answered"})
 	stop := stopResult()
 	results <- stop
 
@@ -372,105 +519,95 @@ func TestDriveLiveConversation_AStopWithAMessageOwedRequeuesIt(t *testing.T) {
 	if out.result != stop || out.fenced || out.hibernated {
 		t.Errorf("outcome = %+v, want the stop handed back as the verdict", out)
 	}
-	if proc.interrupts != 1 || !proc.wasClosed() || proc.wasKilled() {
-		t.Errorf("interrupts = %d, closed = %v, killed = %v; want the owed turn interrupted, then a close", proc.interrupts, proc.wasClosed(), proc.wasKilled())
+	if proc.sends() != 0 || !proc.wasClosed() {
+		t.Errorf("sends = %d, closed = %v; want the process closed with nothing sent", proc.sends(), proc.wasClosed())
 	}
-	if got := pendingRows(t, s, "r-stop-owed"); len(got) != 1 || got[0].Content != "thanks" {
-		t.Errorf("pending rows = %+v, want only the unanswered message back on the queue", got)
+	if got := pendingRows(t, s, "r-stop"); len(got) != 1 || got[0].Content != "thanks" {
+		t.Errorf("pending rows = %+v, want the message still queued", got)
 	}
-}
-
-// TestDriveLiveConversation_AnOwedTurnTheInterruptMissesIsKilled: when the
-// interrupt settles nothing in time, the owed turn would run in a close's
-// drain, so the process is killed, and the message still goes back on the
-// queue.
-func TestDriveLiveConversation_AnOwedTurnTheInterruptMissesIsKilled(t *testing.T) {
-	s, proc, park := stopOwedFixture(t)
-	s.owedTurnAbortWaitOverride = 10 * time.Millisecond
-	results := make(chan *agentproc.Result, 1)
-	results <- stopResult()
-
-	s.driveLiveConversation(context.Background(), park, proc, results, nil)
-
-	if !proc.wasKilled() {
-		t.Error("the process was not killed, want it killed once the interrupt settled nothing")
-	}
-	if got := pendingRows(t, s, "r-stop-owed"); len(got) != 1 || got[0].Content != "thanks" {
-		t.Errorf("pending rows = %+v, want the unanswered message back on the queue", got)
+	err := s.SendMessage(context.Background(), park.orgID, "r-stop", runmode.LocalDefaultUserID, "one more")
+	if !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("a send after the driver let go: err = %v, want ErrNoLiveProcess", err)
 	}
 }
 
-// TestDriveLiveConversation_ASteerAfterTheChecksKeepsTheTurnEndGoing: a
-// message the process counts after the driver's first look at a finished turn,
-// but before it lets the process go, is seen when it does: the turn it owes
-// runs instead of being drained by a close.
-func TestDriveLiveConversation_ASteerAfterTheChecksKeepsTheTurnEndGoing(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
-	reads := 0
-	proc.queuedFn = func() int {
-		reads++
-		if reads == 2 {
-			return 1 // the steer lands between the first check and the let-go
-		}
-		return 0
-	}
-	results := make(chan *agentproc.Result, 2)
-	results <- &agentproc.Result{StopReason: "end_turn", Result: "Done, I think."}
+// TestDriveLiveConversation_AMessageAfterTheFirstLookKeepsTheTurnGoing: a
+// message queued after the driver's first look at a finished turn, but before
+// it lets the process go, is seen when it does, and is the next turn.
+func TestDriveLiveConversation_AMessageAfterTheFirstLookKeepsTheTurnGoing(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-late")
+	results := make(chan *agentproc.Result, 4)
 	answered := &agentproc.Result{StopReason: "end_turn", Result: "Read your message."}
-	results <- answered
+	answerEachSend(proc, results, answered)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "Done, I think."}
+	// The would-stop hook runs between the first look and the let-go; the
+	// message lands while it first does.
+	sent := false
+	nudge := func(context.Context) string {
+		if !sent {
+			sent = true
+			sendWhileLive(t, s, "r-late", "wait, one more thing")
+		}
+		return ""
+	}
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nudge)
 
 	if out.result != answered {
-		t.Errorf("result = %+v, want the turn the late steer produced", out.result)
+		t.Errorf("result = %+v, want the turn the late message started", out.result)
+	}
+	if got := proc.sentTexts(); len(got) != 1 || got[0] != "wait, one more thing" {
+		t.Errorf("sent = %q, want the late message", got)
 	}
 }
 
-// TestDriveLiveConversation_AStopWithNothingOwedCloses: with no turn owed a
-// stop closes the process gracefully, with no interrupt and no kill.
-func TestDriveLiveConversation_AStopWithNothingOwedCloses(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
+// TestDriveLiveConversation_AFailedSendPutsTheMessageBack: when the process
+// will not take the turn, the message goes back on the queue and the turn
+// ends as it would have without it.
+func TestDriveLiveConversation_AFailedSendPutsTheMessageBack(t *testing.T) {
+	s, _, proc, park := liveInputFixture(t, "r-refused")
+	sendWhileLive(t, s, "r-refused", "are you there?")
+	proc.sendErr = agentproc.ErrRunClosing
 	results := make(chan *agentproc.Result, 1)
-	results <- &agentproc.Result{Terminal: &agentproc.Terminal{Outcome: domain.ConversationOutcomeFinish, Reason: "r", Summary: "s"}}
+	turnEnd := &agentproc.Result{StopReason: "max_tokens", Result: "cut off"}
+	results <- turnEnd
 
-	s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, nil)
+	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
 
-	if !proc.wasClosed() || proc.wasKilled() || proc.interrupts != 0 {
-		t.Errorf("closed = %v, killed = %v, interrupts = %d; want a graceful close", proc.wasClosed(), proc.wasKilled(), proc.interrupts)
+	if out.result != turnEnd {
+		t.Errorf("result = %+v, want the turn handed back", out.result)
+	}
+	if got := pendingRows(t, s, "r-refused"); len(got) != 1 || got[0].Content != "are you there?" {
+		t.Errorf("pending rows = %+v, want the message back on the queue", got)
 	}
 }
 
-// TestSendLog_OwedSteersAreTheNewestSendsThatArePeoples: the turns a process
-// owes are its newest sends, and only a person's steer names a row. A nudge
-// among them names none, and a steer it answered before them is not owed.
-func TestSendLog_OwedSteersAreTheNewestSendsThatArePeoples(t *testing.T) {
-	cases := []struct {
-		name string
-		rows []int
-		owed int
-		want []int
-	}{
-		{"nothing owed", []int{11, 12}, 0, nil},
-		{"the newest steer", []int{11, 12}, 1, []int{12}},
-		{"a nudge sent after the steer is the owed send", []int{11, 0}, 1, nil},
-		{"a nudge between two owed steers", []int{11, 0, 13}, 3, []int{11, 13}},
-		{"owing more than the log holds takes the whole log", []int{11}, 2, []int{11}},
-		{"a steer whose row did not record", []int{11, 0}, 2, []int{11}},
+// TestToolBoundary_APersonsMessageRidesTheNextBatch: a person's message for a
+// live process is handed to the agent at its next tool batch, in the steer
+// envelope, and marked delivered under the engagement's claim. Undoing the
+// batch, as the reader does when an interrupt gave it up first, puts the
+// message back on the queue and re-arms the boundary.
+func TestToolBoundary_APersonsMessageRidesTheNextBatch(t *testing.T) {
+	s, _, _, park := liveInputFixture(t, "r-batch")
+	s.getProc("r-batch").boundary.take() // armed from registration
+	sendWhileLive(t, s, "r-batch", "also check the tests")
+
+	batch := s.notesAtToolBatch(park.orgID, "r-batch", park.claimID)
+	if batch.Text != domain.SteerOpen+"also check the tests"+domain.SteerClose || batch.Undo == nil {
+		t.Fatalf("batch = %+v, want the message in the steer envelope with an undo", batch)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			l := &sendLog{rows: tc.rows}
-			got := l.owedSteers(tc.owed)
-			if len(got) != len(tc.want) {
-				t.Fatalf("owedSteers = %v, want %v", got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("owedSteers = %v, want %v", got, tc.want)
-				}
-			}
-		})
+	if got := pendingRows(t, s, "r-batch"); len(got) != 0 {
+		t.Errorf("pending rows = %+v, want the message delivered", got)
+	}
+	if again := s.notesAtToolBatch(park.orgID, "r-batch", park.claimID).Text; again != "" {
+		t.Errorf("the next batch handed over %q, want nothing", again)
+	}
+
+	batch.Undo()
+	if got := pendingRows(t, s, "r-batch"); len(got) != 1 || got[0].Content != "also check the tests" {
+		t.Errorf("pending rows after the undo = %+v, want the message back", got)
+	}
+	if again := s.notesAtToolBatch(park.orgID, "r-batch", park.claimID).Text; !strings.Contains(again, "also check the tests") {
+		t.Errorf("the batch after the undo handed over %q, want the message again", again)
 	}
 }

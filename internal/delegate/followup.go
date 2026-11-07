@@ -1,16 +1,15 @@
 // A user's message reaching a conversation: SendMessage is the single entry the
-// message endpoint calls, and below it there is one follow-up path. Writing an
-// undelivered row and making sure something will come back to read it is the
-// whole operation, for every runtime and every state a conversation can be
-// found in — with exactly one exception, which is what SendMessage routes on:
-// an SDK conversation being driven right now holds its session inside a live
-// process that drains no queue, so the only way to reach it is to tell that
-// process (and then record the row the steer itself never writes).
+// message endpoint calls. Writing an undelivered row and making sure something
+// will come back to read it is the whole operation, for every runtime and
+// every state a conversation can be found in. What SendMessage routes on is
+// what reads the row: an SDK conversation being driven right now has a live
+// process that reads it before its turn ends (queueForLiveProcess), and
+// everything else takes the follow-up path, which wakes a claim when nothing
+// is coming back on its own.
 //
-// Delivery-first, on every arm: a queued row is refused before it is written
-// when nothing will ever read it, and a steered message is recorded only after
-// the live process takes it. A transcript row therefore exists iff the agent
-// received the message or a claim will carry it — a refused send is the 409
+// Delivery-first, on every arm: a row is refused before it is written when
+// nothing will ever read it. A transcript row therefore exists iff the agent
+// received the message or something will carry it — a refused send is the 409
 // and nothing else, with no orphaned row behind it for watchers to read as
 // the run's latest activity.
 //
@@ -349,13 +348,15 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 }
 
 // SendMessage delivers a free-form user message to a conversation. It owns one
-// routing decision — does a live SDK process need to be told? — and hands
+// routing decision — is a live SDK process taking the message? — and hands
 // everything else to queueFollowUp:
 //
-//   - an SDK conversation with a live process, whether that process is in this
-//     pod's registry or on another executor → Steer it in place through the
-//     control seam, then record + broadcast the row the steer itself never
-//     writes (recordSteeredMessage).
+//   - an SDK conversation whose process is live in this pod's registry →
+//     queueForLiveProcess: the row is written as pending input and the
+//     process reads it before its turn ends.
+//   - an SDK conversation in flight with no process taking input here (still
+//     starting, or just let go) → ErrNoLiveProcess, the re-read-and-retry
+//     answer: it is about to be either live or parked.
 //   - everything else → queueFollowUp: write the undelivered row, and (if the
 //     conversation is parked) wake a claim for it.
 //
@@ -364,38 +365,32 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 // trigger (a follow-up is user-initiated even when the run that earned it was
 // not).
 func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID, text string) error {
-	// One validation gate for every arm, ahead of the routing: a live steer
-	// must refuse exactly the inputs a queued follow-up refuses. Checked here
-	// rather than in queueFollowUp so the steer arms can't hand a blank user
-	// turn to a live process, or deliver a message there is no actor to
-	// attribute the transcript row to.
+	// One validation gate for every arm, ahead of the routing: a message for a
+	// live process must refuse exactly the inputs a queued follow-up refuses.
+	// Checked here rather than in queueFollowUp so the live arm can't queue a
+	// blank user turn, or a message there is no actor to attribute the
+	// transcript row to.
 	if text == "" {
 		return fmt.Errorf("send: empty message")
 	}
 	if userID == "" {
 		return fmt.Errorf("send: empty user id")
 	}
-	// Fast path: the run's process is in THIS pod's registry → steer in place
-	// with no DB read. Self-selecting — it hits in local mode and on the pod that
-	// owns the process, and is a cheap miss on a multi control pod (whose
-	// steerable processes all live on executors), which the runtime + status
-	// routing below then handles.
+	// Fast path: the run's process is in THIS pod's registry, with no
+	// conversation read.
 	//
 	// Load-bearing precondition, and it is what makes skipping the runtime read
 	// safe: the registry is written in exactly one place, the SDK live driver
 	// (registerProc, called only from runLiveAndDrive in live.go). A native
-	// conversation therefore CANNOT be in it, so this can never send one down a
-	// Claude-session resume it never had. Anything that starts registering
-	// handles from a second driver has to re-read the runtime here first.
+	// conversation therefore CANNOT be in it, so this can never hand a native
+	// conversation's message to the SDK's delivery. Anything that starts
+	// registering handles from a second driver has to re-read the runtime here
+	// first.
 	if h := s.getProc(conversationID); h != nil {
-		return s.steerLive(ctx, h, orgID, conversationID, userID, text)
+		if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text); queued || err != nil {
+			return err
+		}
 	}
-	// No LOCAL process. Route on the conversation's runtime and STATUS, not on
-	// whether the process happens to sit in this pod's memory — using the local
-	// registry as the liveness gate meant a control pod saw every running run
-	// (its process on an executor) as unreachable and 409'd. GetSystem is scoped
-	// by its orgID arg, so a run in another tenant reads as absent → not
-	// steerable.
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return fmt.Errorf("load conversation: %w", err)
@@ -403,78 +398,48 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	if conv == nil {
 		return ErrConversationNotFound
 	}
-	// The one case a queued row cannot serve, and the reason the split exists at
-	// all: an SDK conversation in flight (claimed, setting up or running) holds
-	// its session inside a live process, and that process drains nothing — it has
-	// to be handed the text. s.Steer routes through the controller, which retries
-	// THIS pod's registry (covering the getProc→GetSystem race where the process
-	// just registered here) and on a miss delivers over conversation_signals to
-	// the owning executor. A run mid-setup whose owner has no process registered
-	// yet acks "gone" and degrades to a 409, never a lost message. In local mode
-	// the controller is local-only, so an active run absent from this (sole)
-	// process's registry is a genuine race → ErrNoLiveProcess.
+	// An SDK conversation in flight (claimed, setting up or running) with no
+	// process taking input: one still being set up, whose undelivered rows a
+	// failed setup would hand to a resume it never had, or one the driver has
+	// just let go of, which is about to park. Neither can take a queued row
+	// safely, so the caller re-reads and sends again. The registry is read once
+	// more first, for a process that registered since the fast path missed.
 	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
-		return s.steerLive(ctx, s.getProc(conversationID), orgID, conversationID, userID, text)
+		if h := s.getProc(conversationID); h != nil {
+			if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text); queued || err != nil {
+				return err
+			}
+		}
+		return fmt.Errorf("send to conversation %s: %w", conversationID, ErrNoLiveProcess)
 	}
 	return s.queueFollowUp(ctx, orgID, *conv, userID, text)
 }
 
-// steerLive hands text to the conversation's live process and records the row
-// the steer itself never writes. h is the process's handle when it is in this
-// pod's registry, and nil when the process is on another executor.
+// queueForLiveProcess queues a person's message for a conversation whose SDK
+// process is live here. The message is written as the conversation's pending
+// input, in the queue's own shape (pendingUserInput), and the process's tool
+// boundary is armed: the agent reads it with the results of its next tool
+// batch (notesAtToolBatch), or, when its turn ends first, as its next turn
+// (handOnOrLetGo). Nothing is sent into the running turn. Claude Code would
+// fold a message sent during a tool call into that turn, and the driver could
+// not tell the turn that answered it.
 //
-// With a handle, the send and the record happen under the handle's send log,
-// and the row's id joins the log. A stop_blueprint that ends the turn this
-// message was queued behind leaves it unanswered, and the driver reads the log
-// to find the row and put it back on the queue (requeueSteers). Holding
-// the log across both steps is what lets that read trust it: a message the
-// process has counted always has its row by the time the driver looks.
-func (s *Spawner) steerLive(ctx context.Context, h *liveRunHandle, orgID, conversationID, userID, text string) error {
-	if h == nil {
-		if err := s.Steer(ctx, conversationID, text); err != nil {
-			return err
-		}
-		s.recordSteeredMessage(ctx, orgID, conversationID, userID, text)
-		return nil
-	}
-	h.sends.mu.Lock()
-	defer h.sends.mu.Unlock()
-	if err := s.Steer(ctx, conversationID, text); err != nil {
-		return err
-	}
-	h.sends.rows = append(h.sends.rows, s.recordSteeredMessage(ctx, orgID, conversationID, userID, text))
-	return nil
-}
-
-// recordSteeredMessage writes the transcript row for a message a live SDK
-// process just took, and broadcasts it to watchers. A live steer is the one
-// delivery that writes no row of its own — the text goes into the process,
-// not the queue — so this is the only place a steered turn reaches the
-// transcript.
-//
-// After delivery on purpose. A row written before the steer outlives a
-// refusal as a message the transcript swears the agent saw, painted onto
-// every watcher's board next to the sender's own error toast. This order can
-// at worst lose the bookkeeping for a message that WAS delivered — which is
-// also why an insert failure logs instead of surfacing: failing the request
-// would tell the user a message the agent is already acting on didn't send.
-//
-// The row is delivered (the process has it, and nothing drains a live SDK
-// conversation's queue) and attributed to the sender, same as
-// pendingUserInput; the DB-assigned id is stamped before the broadcast because
-// the client dedups and orders by id. The id is returned, 0 when nothing was
-// recorded, so a stop that leaves the message unanswered can put this row back
-// on the queue.
-func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationID, userID, text string) int {
+// The write happens under the handle's input lock, which the driver holds
+// when it decides at a turn end whether the process goes on, so the decision
+// sees every message queued before it. queued is false when the driver has
+// already let go of the process, and the caller routes the message as if
+// there were no process. A failed write is returned: the row is the
+// delivery, so a message without one was not sent.
+func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, orgID, conversationID, userID, text string) (queued bool, err error) {
 	if s.tx == nil {
-		return 0
+		return false, fmt.Errorf("queue message for conversation %s: no transaction runner", conversationID)
 	}
-	// Detached from the request's cancellation (values kept): the message is
-	// already in front of the agent, so a requester who hung up or timed out
-	// right after the controller accepted the steer must not cost the
-	// transcript its only record of the turn.
-	ctx = context.WithoutCancel(ctx)
-	msg := &domain.Message{ConversationID: conversationID, UserID: userID, Role: "user", Content: text}
+	h.input.Lock()
+	defer h.input.Unlock()
+	if h.lettingGo {
+		return false, nil
+	}
+	msg := pendingUserInput(conversationID, userID, text)
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
@@ -483,11 +448,11 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationI
 		msg.ID = int(id)
 		return nil
 	}); err != nil {
-		delegateLog.Warn("record steered user message failed; the message itself was already delivered", "conversation", conversationID, "error", err)
-		return 0
+		return false, fmt.Errorf("queue message for conversation %s: %w", conversationID, err)
 	}
+	h.boundary.arm()
 	s.broadcastMessage(orgID, conversationID, msg)
-	return msg.ID
+	return true, nil
 }
 
 // queueFollowUp is the follow-up path: it records the user's message as an
@@ -580,9 +545,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 		return fmt.Errorf("queue follow-up: %w", err)
 	}
 	// Broadcast for both runtimes: the row above is the message's one
-	// transcript record — the endpoint writes nothing, and the live-steer
-	// path's recordSteeredMessage only runs when a process took the text
-	// directly instead of through this queue.
+	// transcript record; the endpoint writes nothing.
 	s.broadcastMessage(orgID, conv.ID, msg)
 
 	// A dropped wait changed the conversation's own read, which the message
@@ -619,8 +582,8 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 // holds, and a message can arrive too late for the turn that concluded to see
 // it. The ending that leaves one behind is stop_blueprint: the native loop
 // drains its queue before each model call and exits on the stop without
-// draining again, and the SDK driver puts the messages a stopped process never
-// answered back on the queue (requeueSteers). The stop is honoured rather
+// draining again, and the SDK driver lets go of a stopped process without
+// sending it the input waiting for it. The stop is honoured rather
 // than cancelled, as an ordinary ending is by late input, because a stop is a
 // deliberate verdict and a message that happens to land with it ("thanks",
 // say) must not throw it away. The message is read after it: an abort's
@@ -816,7 +779,7 @@ func pendingUserInput(conversationID, userID, text string) *domain.Message {
 // session to resume, and staging a row against it would route that claim down
 // the resume path instead of running the step's mission at all. So an unparked
 // SDK conversation takes no queued message — and its live half never reaches
-// this question, having already gone to Steer.
+// this question, having already been queued for its process.
 func drainsUndeliveredInput(conv domain.Conversation) bool {
 	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue {
 		return false
@@ -901,8 +864,8 @@ func blockedFollowUpError(block string) error {
 // UI offering an input that has no chance.
 //
 // An active conversation is steerable by a route this gate never sees — its
-// live process takes the text directly — so it answers yes without walking
-// anything. The detail read skips active rows anyway; this keeps the function
+// live process reads the message before its turn ends — so it answers yes
+// without walking anything. The detail read skips active rows anyway; this keeps the function
 // total for anyone who doesn't.
 func (s *Spawner) ResumabilityFor(ctx context.Context, orgID string, conv *domain.Conversation) (ok bool, reason string) {
 	if conv == nil {

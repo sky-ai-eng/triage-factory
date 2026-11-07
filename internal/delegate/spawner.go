@@ -101,9 +101,6 @@ type Spawner struct {
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout.
 	awaitingCredentialsTimeoutOverride time.Duration
-	// owedTurnAbortWaitOverride overrides owedTurnAbortWait when > 0, so a
-	// test of an interrupt that settles nothing does not wait it out.
-	owedTurnAbortWaitOverride time.Duration
 	// awaitingCredentialsPollInterval overrides the package default poll
 	// cadence when > 0, same override shape.
 	awaitingCredentialsPollIntervalOverride time.Duration
@@ -249,10 +246,10 @@ type Spawner struct {
 	// signalApplied tracks signal ids (int64) delivered by this process but
 	// whose ack write hasn't landed yet (id -> ack result string). A re-scan
 	// re-acks from here instead of re-delivering, giving exactly-once delivery
-	// per process for the non-idempotent kinds (steer, inject). Pruned on a
+	// per process for the non-idempotent kind (inject). Pruned on a
 	// successful ack. See applySignal.
 	signalApplied sync.Map
-	// signalAckTimeout overrides the interrupt/steer reply-leg timeout
+	// signalAckTimeout overrides the interrupt reply-leg timeout
 	// (TF_SIGNAL_ACK_TIMEOUT). Zero means use DefaultSignalAckTimeout.
 	signalAckTimeout time.Duration
 	// tx runs synthetic-claims write batches for manual runs (the
@@ -407,13 +404,13 @@ type Spawner struct {
 	// procs holds the live agent process handle for each run currently
 	// executing as a LiveRun, keyed by run id. It survives across HTTP
 	// turns because the spawner is the startup singleton, so a control op
-	// (interrupt/steer/cancel) arriving on a later request can still
+	// (interrupt/cancel) arriving on a later request can still
 	// reach the process a delegation goroutine spawned. Distinct from
 	// cancels (the hard-kill ctx) — a live run holds both a procs and a
 	// cancels entry at once. Guarded by s.mu; see the
 	// register/get/deregister accessors in process_registry.go.
 	procs map[string]*liveRunHandle
-	// controller routes the live-process control ops (interrupt, steer,
+	// controller routes the live-process control ops (interrupt,
 	// cancel-kill) to wherever the run's process lives. At N=1 it's the
 	// in-process impl that resolves the handle from procs/cancels; the
 	// seam horizontal scaling swaps for a DB-signal to the owning

@@ -2,12 +2,12 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -111,23 +111,43 @@ func TestDeliverableLedgerForResume_ExcludesPreWatermark(t *testing.T) {
 	}
 }
 
-// waitSteerCalls polls the fake controller until it has seen at least want steer
-// calls, or fails. Delivery runs on a detached goroutine (InjectDeliverableNote is
-// fire-and-forget), so the side effect is asserted by polling rather than a
-// synchronous read.
-func waitSteerCalls(t *testing.T, fc *fakeController, want int) {
+// waitStagedNotes polls until convID has at least want staged system notes,
+// or fails, and returns their contents. The stage runs on a detached goroutine
+// (InjectDeliverableNote is fire-and-forget), so the side effect is asserted by
+// polling rather than a synchronous read.
+func waitStagedNotes(t *testing.T, database *sql.DB, convID string, want int) []string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		fc.mu.Lock()
-		got := fc.steerCalls
-		fc.mu.Unlock()
-		if got >= want {
-			return
+	for {
+		notes := stagedNotes(t, database, convID)
+		if len(notes) >= want {
+			return notes
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("staged notes did not reach %d in time, have %v", want, notes)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("steerCalls did not reach %d in time", want)
+}
+
+// stagedNotes reads the contents of convID's undelivered system notes.
+func stagedNotes(t *testing.T, database *sql.DB, convID string) []string {
+	t.Helper()
+	rows, err := database.Query(`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ? AND delivered = 0 ORDER BY id`,
+		convID, domain.MessageSubtypeInjectionSystemNote)
+	if err != nil {
+		t.Fatalf("read staged notes: %v", err)
+	}
+	defer rows.Close()
+	var notes []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatalf("scan staged note: %v", err)
+		}
+		notes = append(notes, c)
+	}
+	return notes
 }
 
 // TestDeliverableLedgerForResume_FallsBackToStartedAt: a run with NO agent messages
@@ -164,60 +184,58 @@ func TestDeliverableLedgerForResume_FallsBackToStartedAt(t *testing.T) {
 	}
 }
 
-// TestInjectDeliverableNote_LiveSteersWrappedNote: resolving a deliverable on a live
-// run steers a single <system-note>-wrapped, kind-specific note into the warm
-// process (on a detached goroutine) and reports dispatched=true.
-func TestInjectDeliverableNote_LiveSteersWrappedNote(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	fc := &fakeController{}
-	s.controller = fc
+// TestInjectDeliverableNote_LiveStagesTheNoteAtTheToolBoundary: resolving a
+// deliverable on a live run stages a single kind-specific note for the warm
+// process (on a detached goroutine), arms its tool boundary, and reports
+// dispatched=true. The next tool batch hands the note to the agent wrapped in
+// <system-note>.
+func TestInjectDeliverableNote_LiveStagesTheNoteAtTheToolBoundary(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	// Register a live handle so getProc (the liveness gate) sees the run as warm.
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
+	s.getProc("run-live").boundary.take() // armed from registration
 
 	art := domain.Deliverable{Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePROpen, Target: "o/r#7"}
 	if dispatched := s.InjectDeliverableNote(runmode.LocalDefaultOrgID, "run-live", art); !dispatched {
 		t.Fatal("expected dispatched=true for a live run")
 	}
-	waitSteerCalls(t, fc, 1)
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	if fc.steerCalls != 1 || fc.steerConversationID != "run-live" {
-		t.Fatalf("steer = {calls:%d conversationID:%q}, want {1 run-live}", fc.steerCalls, fc.steerConversationID)
+	notes := waitStagedNotes(t, database, "run-live", 1)
+	if len(notes) != 1 || !strings.Contains(notes[0], "o/r#7") || !strings.Contains(notes[0], "approved") {
+		t.Fatalf("staged notes = %q, want one note naming the deliverable and its resolution", notes)
 	}
-	if !strings.Contains(fc.steerText, "<system-note>") || !strings.Contains(fc.steerText, "o/r#7") || !strings.Contains(fc.steerText, "approved") {
-		t.Errorf("steered text missing wrapper/ref/copy: %q", fc.steerText)
+	batch := s.notesAtToolBatch(runmode.LocalDefaultOrgID, "run-live", "").Text
+	if !strings.Contains(batch, "<system-note>") || !strings.Contains(batch, "o/r#7") {
+		t.Errorf("the next tool batch handed over %q, want the note wrapped in <system-note>", batch)
 	}
 }
 
 // TestInjectDeliverableNote_TerminalNoOp: with no live process, InjectDeliverableNote
-// dispatches nothing (it must not restart the agent) and reports dispatched=false
+// stages nothing (it must not restart the agent) and reports dispatched=false
 // — the resolution surfaces via the derived ledger on the next resume instead.
-// dispatched=false means no goroutine was spawned, so steerCalls stays 0.
+// dispatched=false means no goroutine was spawned, so nothing can be staged
+// later.
 func TestInjectDeliverableNote_TerminalNoOp(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	fc := &fakeController{}
-	s.controller = fc
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "run-dead", "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	art := domain.Deliverable{Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePRClosed, Target: "o/r#7"}
 	if dispatched := s.InjectDeliverableNote(runmode.LocalDefaultOrgID, "run-dead", art); dispatched {
 		t.Error("expected dispatched=false for a run with no live process")
 	}
-	// No sleep/poll needed: dispatched=false means InjectDeliverableNote returned at
-	// the getProc gate BEFORE the `go func`, so no goroutine exists to race — the
-	// steer count is deterministically 0.
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	if fc.steerCalls != 0 {
-		t.Errorf("steerCalls = %d, want 0 (terminal run must not be steered/restarted)", fc.steerCalls)
+	if notes := stagedNotes(t, database, "run-dead"); len(notes) != 0 {
+		t.Errorf("staged notes = %q, want none (a terminal run is told through the ledger)", notes)
 	}
 }
 
 // TestInjectDeliverableNote_NonResolutionStateNoOp: a non-resolution deliverable state
-// (an unresolved draft) produces no note and no steer, even on a live run.
+// (an unresolved draft) produces no note, even on a live run.
 func TestInjectDeliverableNote_NonResolutionStateNoOp(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	fc := &fakeController{}
-	s.controller = fc
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
 
 	art := domain.Deliverable{Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePRDraft, Target: "o/r#7"}
@@ -225,10 +243,8 @@ func TestInjectDeliverableNote_NonResolutionStateNoOp(t *testing.T) {
 		t.Error("expected dispatched=false for a non-resolution state")
 	}
 	// Deterministic: the empty-note guard returns before the `go func`, so no
-	// goroutine is spawned and steerCalls is 0 without any wait.
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	if fc.steerCalls != 0 {
-		t.Errorf("steerCalls = %d, want 0", fc.steerCalls)
+	// goroutine is spawned and nothing is staged without any wait.
+	if notes := stagedNotes(t, database, "run-live"); len(notes) != 0 {
+		t.Errorf("staged notes = %q, want none", notes)
 	}
 }

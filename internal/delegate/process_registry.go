@@ -4,7 +4,7 @@
 // it runs, its handle lives in s.procs, keyed by run id, so a control
 // request arriving on a later HTTP turn can reach the process the
 // delegation goroutine spawned. The RunController interface is the seam
-// between a control request (interrupt / steer / cancel) and that process:
+// between a control request (interrupt / cancel) and that process:
 // at N=1 the in-process impl resolves the handle here; horizontal scaling
 // swaps it for a DB-signal to the executor that owns the run's lease
 // (claims.executor_id), with no change at the call sites.
@@ -239,42 +239,17 @@ type liveRunHandle struct {
 	conversationID string
 	orgID          string
 	// boundary is whether the next tool batch hands the agent the
-	// conversation's staged notes (stageNoteAtToolBoundary arms it).
+	// conversation's waiting input: its staged notes and a person's messages
+	// (stageNoteAtToolBoundary and queueForLiveProcess arm it).
 	boundary *toolBoundary
-	// sends is every message sent into the process after its opening, in
-	// order; see sendLog.
-	sends sendLog
-}
-
-// sendLog records, in send order, each message sent into one live process
-// after its opening: the transcript row a person's steered message was
-// recorded as, or 0 for the driver's nudge (which is not a person's) and for a
-// steer whose row failed to record.
-//
-// It exists for the stop that leaves turns owed. The process answers its
-// sends one turn each, in order, so the turns it still owes are its newest
-// sends, and the log says which of those were people's messages and where
-// their rows are. Its lock is held across each send and the recording of its
-// row, and by the driver while it decides how to end the process
-// (letGoAfterTurn), so that decision never lands between a send the process
-// counted and the row that records it.
-type sendLog struct {
-	mu   sync.Mutex
-	rows []int
-}
-
-// owedSteers returns the rows of the people's messages among the newest owed
-// sends, oldest first. The caller holds the lock, and read owed under it, so
-// every send the process has counted has its entry.
-func (l *sendLog) owedSteers(owed int) []int {
-	owed = min(owed, len(l.rows))
-	var rows []int
-	for _, id := range l.rows[len(l.rows)-owed:] {
-		if id != 0 {
-			rows = append(rows, id)
-		}
-	}
-	return rows
+	// input is held while a person's message is queued for the process
+	// (queueForLiveProcess) and while the driver decides at a turn end whether
+	// the process takes another turn (handOnOrLetGo). Once the driver lets
+	// go, lettingGo is set under it and nothing more is queued for the
+	// process, so a message is either seen by that decision or routed as if
+	// the process were gone.
+	input     sync.Mutex
+	lettingGo bool
 }
 
 // registerProc records a run's live process handle so control ops can
@@ -283,7 +258,7 @@ func (l *sendLog) owedSteers(owed int) []int {
 //
 // The SOLE writer of s.procs, and SendMessage's fast path depends on that: a
 // registered handle is proof the conversation is an SDK one, so a message can
-// be steered into the process without re-reading the runtime. A second driver
+// be queued for the process without re-reading the runtime. A second driver
 // registering here silently breaks that.
 func (s *Spawner) registerProc(orgID, conversationID string, lr *agentproc.LiveRun) {
 	s.mu.Lock()
@@ -458,18 +433,17 @@ func (s *Spawner) awaitingCredentialsKnobs() (time.Duration, time.Duration) {
 }
 
 // RunController routes a live-process control op to wherever the run's
-// process actually lives. Interrupt and Steer drive the live process;
-// Cancel signals the hard-kill ctx. At N=1 the in-process impl resolves
-// the target from s.procs / s.cancels; horizontal scaling replaces it with
-// a DB-signal to the executor that owns the run's lease, leaving the
-// callers (the stop verb, and P3's steer endpoint) unchanged.
+// process actually lives. Interrupt drives the live process; Cancel signals
+// the hard-kill ctx. At N=1 the in-process impl resolves the target from
+// s.procs / s.cancels; horizontal scaling replaces it with a DB-signal to the
+// executor that owns the run's lease, leaving the callers (the stop verb and
+// the pause) unchanged. A person's message is not a control op: it is written
+// to the conversation's transcript, where a live process reads it
+// (queueForLiveProcess).
 type RunController interface {
 	// Interrupt stops the run's current turn, leaving the process alive
 	// for further input. Errors when the run has no live process.
 	Interrupt(ctx context.Context, conversationID string) error
-	// Steer delivers a free-form user message to a live run. Errors when
-	// the run has no live process.
-	Steer(ctx context.Context, conversationID, text string) error
 	// Cancel signals the run's process to terminate (SIGKILL via the
 	// registered ctx cancel). Reports whether a live handle was found; a
 	// false result means the run has no in-process goroutine here, and the
@@ -497,32 +471,6 @@ func (c inProcessController) Interrupt(ctx context.Context, conversationID strin
 	return h.lr.Interrupt(ctx)
 }
 
-func (c inProcessController) Steer(ctx context.Context, conversationID, text string) error {
-	h := c.s.getProc(conversationID)
-	if h == nil {
-		return fmt.Errorf("steer run %s: %w", conversationID, ErrNoLiveProcess)
-	}
-	err := h.lr.Send(ctx, text)
-	if err == nil {
-		// A turn sent into the process is activity for its engagement.
-		c.s.activityFor(conversationID).touch()
-	}
-	return steerSendError(conversationID, err)
-}
-
-// steerSendError is what a steer reports of the process's answer. A process
-// the driver is closing is one the registry still lists (the handle comes out
-// after Close returns) but that can take no more input, and to the caller
-// that is the same answer as no process at all — ErrNoLiveProcess, the
-// re-read-and-retry signal — rather than a write fault, which would report a
-// delivery that was never going to happen as an error in the sending.
-func steerSendError(conversationID string, err error) error {
-	if errors.Is(err, agentproc.ErrRunClosing) {
-		return fmt.Errorf("steer run %s: %w", conversationID, ErrNoLiveProcess)
-	}
-	return err
-}
-
 func (c inProcessController) Cancel(conversationID string) bool {
 	c.s.mu.Lock()
 	cancel, ok := c.s.cancels[conversationID]
@@ -540,10 +488,4 @@ func (c inProcessController) Cancel(conversationID string) bool {
 // horizontal-scaling swap additive.
 func (s *Spawner) Interrupt(ctx context.Context, conversationID string) error {
 	return s.getController().Interrupt(ctx, conversationID)
-}
-
-// Steer delivers a free-form user message to a live run through the
-// control seam. The P3 message endpoint calls this.
-func (s *Spawner) Steer(ctx context.Context, conversationID, text string) error {
-	return s.getController().Steer(ctx, conversationID, text)
 }

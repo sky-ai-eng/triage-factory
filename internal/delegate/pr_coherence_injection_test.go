@@ -126,17 +126,14 @@ func TestHandlePRCoherence_ParkedEntityConversationStagesAllEventKinds(t *testin
 	}
 }
 
-// TestHandlePRCoherence_LiveSDKProcessStagesWithoutSteer: a PR note is
-// information, so a conversation with a live SDK process gets it staged for
-// its next resume rather than steered into the turn it is running, and no
-// signal goes to the remote owner either.
-func TestHandlePRCoherence_LiveSDKProcessStagesWithoutSteer(t *testing.T) {
+// TestHandlePRCoherence_LiveSDKProcessStagesWithoutASignal: a PR note is
+// information, so a conversation with a live SDK process gets it staged, and
+// no signal goes to the remote owner.
+func TestHandlePRCoherence_LiveSDKProcessStagesWithoutASignal(t *testing.T) {
 	s, conversationID, taskID, source := coherenceFixture(t, domain.EventGitHubPRNewCommits, events.GitHubPRNewCommitsMetadata{
 		Repo: "o/r", PRNumber: 7, PrevHeadSHA: "old-head", HeadSHA: "new-head",
 	})
 	signals := wireLiveRemoteOwner(t, s, s.database, conversationID)
-	controller := &fakeController{}
-	s.controller = controller
 	s.registerProc(runmode.LocalDefaultOrgID, conversationID, &agentproc.LiveRun{})
 
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
@@ -147,12 +144,6 @@ func TestHandlePRCoherence_LiveSDKProcessStagesWithoutSteer(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Body, "advanced") || !strings.Contains(got[0].Body, "Re-pull") {
 		t.Errorf("staged coherence note is not actionable: %q", got[0].Body)
-	}
-	controller.mu.Lock()
-	steerCalls := controller.steerCalls
-	controller.mu.Unlock()
-	if steerCalls != 0 {
-		t.Errorf("a PR note was steered into the live process %d time(s), want 0", steerCalls)
 	}
 	if n := signals.count(); n != 0 {
 		t.Errorf("wrote %d conversation signal(s) for a PR note, want 0", n)

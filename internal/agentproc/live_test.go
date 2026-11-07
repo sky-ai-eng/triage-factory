@@ -108,74 +108,6 @@ func TestLiveRunClose_ReturnsErrWhenDrained(t *testing.T) {
 	}
 }
 
-// recordingWriteCloser stands in for the wrapper's stdin pipe and keeps what
-// was written to it.
-type recordingWriteCloser struct{ written []byte }
-
-func (w *recordingWriteCloser) Write(p []byte) (int, error) {
-	w.written = append(w.written, p...)
-	return len(p), nil
-}
-func (w *recordingWriteCloser) Close() error { return nil }
-
-// TestLiveRunKill_SkipsTheDrain: Kill SIGKILLs at once, with no end control
-// for the wrapper to drain on, so a turn the process owes never starts; and a
-// send after it is refused as one after Close is.
-func TestLiveRunKill_SkipsTheDrain(t *testing.T) {
-	stdin := &recordingWriteCloser{}
-	lr := &LiveRun{
-		stdin:        stdin,
-		done:         make(chan struct{}),
-		ready:        make(chan struct{}),
-		drainTimeout: time.Hour,
-		killTimeout:  time.Second,
-	}
-	lr.cancel = func() { close(lr.done) }
-
-	if err := lr.Kill(); err != nil {
-		t.Fatalf("Kill returned %v, want nil", err)
-	}
-	if len(stdin.written) != 0 {
-		t.Errorf("Kill wrote %q to the wrapper, want nothing (no end control, no drain)", stdin.written)
-	}
-	if err := lr.Send(context.Background(), "late"); !errors.Is(err, ErrRunClosing) {
-		t.Errorf("Send after Kill = %v, want ErrRunClosing", err)
-	}
-}
-
-// TestLiveRunSend_WaitsForTheOpening: a message sent while the process starts
-// is written only after the opening, so the process answers the opening first
-// and the turns it owes are always its newest sends.
-func TestLiveRunSend_WaitsForTheOpening(t *testing.T) {
-	stdin := &recordingWriteCloser{}
-	lr := &LiveRun{
-		stdin:  stdin,
-		done:   make(chan struct{}),
-		ready:  make(chan struct{}),
-		opened: make(chan struct{}),
-		stream: NewStreamState(),
-	}
-	close(lr.ready)
-	sent := make(chan error, 1)
-	go func() { sent <- lr.Send(context.Background(), "steer") }()
-
-	select {
-	case err := <-sent:
-		t.Fatalf("Send returned %v before the opening went out, want it to wait", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	if len(stdin.written) != 0 {
-		t.Fatalf("wrote %q before the opening, want nothing", stdin.written)
-	}
-	close(lr.opened)
-	if err := <-sent; err != nil {
-		t.Fatalf("Send after the opening = %v, want nil", err)
-	}
-	if !strings.Contains(string(stdin.written), `"steer"`) {
-		t.Errorf("wrote %q, want the steer", stdin.written)
-	}
-}
-
 // TestConsumeStreamInteractive_InterruptMarksResult pins the reader-side
 // interrupt labeling: the wrapper's control/interrupted ack marks the NEXT
 // result as Interrupted (the SDK has no native subtype for interrupts — the
@@ -235,51 +167,10 @@ func TestConsumeStreamInteractive_FoldTakesNewestRunningTotal(t *testing.T) {
 	}
 }
 
-// TestLiveRun_QueuedTurnsCountSendsAgainstResults pins the reading the driver
-// takes at a turn boundary: every Send is a turn the process owes and every
-// result settles one, so the count is exactly the turns still to come. Two
-// messages sent (the prompt and a steer that arrived mid-turn) read as two
-// owed; the first result leaves one — the steered turn the process runs next —
-// and the second leaves none. A result with nothing owed floors at zero.
-func TestLiveRun_QueuedTurnsCountSendsAgainstResults(t *testing.T) {
-	l := &LiveRun{
-		stdin:  nopWriteCloser{},
-		ready:  make(chan struct{}),
-		done:   make(chan struct{}),
-		stream: NewStreamState(),
-	}
-	close(l.ready)
-
-	for i := range 2 {
-		if err := l.Send(context.Background(), "turn"); err != nil {
-			t.Fatalf("Send %d: %v", i, err)
-		}
-	}
-	if got := l.QueuedTurns(); got != 2 {
-		t.Fatalf("QueuedTurns after two sends = %d, want 2", got)
-	}
-
-	input := strings.Join([]string{
-		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"prose"}`,
-		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"more prose"}`,
-		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"unasked"}`,
-	}, "\n") + "\n"
-	var seen []int
-	// Sampled inside the result callback — the same moment the driver reads
-	// it, off the result it was just handed.
-	_, err := l.consumeStreamInteractive(strings.NewReader(input), NoopSink{}, l.stream, nil, func(*Result) { seen = append(seen, l.QueuedTurns()) }, "t")
-	if err != nil {
-		t.Fatalf("consumeStreamInteractive: %v", err)
-	}
-	if want := []int{1, 0, 0}; !slices.Equal(seen, want) {
-		t.Errorf("QueuedTurns at each result = %v, want %v", seen, want)
-	}
-}
-
 // TestLiveRun_SendRefusedOnceClosing: from the moment Close begins, a Send is
 // refused with ErrRunClosing rather than written into an input the wrapper is
-// ending — the driver has decided this process owes nothing more, and a
-// message accepted now would be recorded as delivered and never answered.
+// ending — the driver has decided this process takes no more turns, and a
+// message accepted now would never be answered.
 func TestLiveRun_SendRefusedOnceClosing(t *testing.T) {
 	l := &LiveRun{
 		stdin:        nopWriteCloser{},
@@ -301,15 +192,11 @@ func TestLiveRun_SendRefusedOnceClosing(t *testing.T) {
 	if err := l.Send(context.Background(), "late"); !errors.Is(err, ErrRunClosing) {
 		t.Errorf("Send after Close: err = %v, want ErrRunClosing", err)
 	}
-	if got := l.QueuedTurns(); got != 0 {
-		t.Errorf("a refused send must not count as an owed turn; QueuedTurns = %d", got)
-	}
 }
 
 // TestLiveRun_SendBlocksWritesBlockContent pins the block spelling of a user
 // message: one control line carrying the blocks verbatim and no text field
-// beside them, counted as exactly one owed turn — the same debt Send takes on,
-// since a block-content message is still one turn.
+// beside them.
 func TestLiveRun_SendBlocksWritesBlockContent(t *testing.T) {
 	stdin := newSyncBuffer()
 	l := &LiveRun{
@@ -346,14 +233,11 @@ func TestLiveRun_SendBlocksWritesBlockContent(t *testing.T) {
 	if !slices.Equal(ctl.Blocks, blocks) {
 		t.Errorf("blocks = %v, want %v", ctl.Blocks, blocks)
 	}
-	if got := l.QueuedTurns(); got != 1 {
-		t.Errorf("QueuedTurns after one SendBlocks = %d, want 1", got)
-	}
 }
 
 // TestLiveRun_SendBlocksRefusesEmpty: a user message with no content is not a
 // turn (and the API rejects it), so an empty list is refused before anything
-// is written and the process is left owing nothing.
+// is written.
 func TestLiveRun_SendBlocksRefusesEmpty(t *testing.T) {
 	stdin := newSyncBuffer()
 	l := &LiveRun{
@@ -369,8 +253,5 @@ func TestLiveRun_SendBlocksRefusesEmpty(t *testing.T) {
 	}
 	if stdin.String() != "" {
 		t.Errorf("refused send still wrote %q", stdin.String())
-	}
-	if got := l.QueuedTurns(); got != 0 {
-		t.Errorf("QueuedTurns after a refused send = %d, want 0", got)
 	}
 }

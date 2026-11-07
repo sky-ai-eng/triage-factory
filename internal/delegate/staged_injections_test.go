@@ -23,44 +23,33 @@ func stageOne(t *testing.T, s *Spawner, orgID, conversationID, producer, body st
 	return delivered
 }
 
-// TestStageOrDeliverInjectionPrimitive_LiveSteers: a warm process gets the injection steered in,
-// wrapped, fire-and-forget; delivered=true and nothing is persisted.
-func TestStageOrDeliverInjectionPrimitive_LiveSteers(t *testing.T) {
+// TestStageOrDeliverInjectionPrimitive_LiveStagesAtTheToolBoundary: a warm
+// process gets the injection staged and its tool boundary armed, so its next
+// tool batch hands the note to the agent; delivered=true. Nothing is sent
+// into the running turn.
+func TestStageOrDeliverInjectionPrimitive_LiveStagesAtTheToolBoundary(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	fc := &fakeController{}
-	s.controller = fc
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
+	s.getProc("run-live").boundary.take() // armed from registration
 
 	delivered := stageOne(t, s, runmode.LocalDefaultOrgID, "run-live", domain.StagedInjectionProducerPRNewCommits, "the body")
 	if !delivered {
 		t.Fatal("expected delivered=true for a live run")
 	}
-	waitSteerCalls(t, fc, 1)
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	if !strings.Contains(fc.steerText, "<system-note>") || !strings.Contains(fc.steerText, "the body") {
-		t.Errorf("steered text missing wrapper/body: %q", fc.steerText)
-	}
-	// Live delivery must NOT persist to the queue.
-	injections, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, "run-live")
-	if err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if len(injections) != 0 {
-		t.Errorf("live delivery should not stage; flush returned %d", len(injections))
+	got := s.notesAtToolBatch(runmode.LocalDefaultOrgID, "run-live", "").Text
+	if !strings.Contains(got, "<system-note>") || !strings.Contains(got, "the body") {
+		t.Errorf("the next tool batch handed over %q, want the note wrapped in <system-note>", got)
 	}
 }
 
 // TestStageOrDeliverInjectionPrimitive_ParkedStages: with no warm process the bare body is
-// persisted to the durable queue; delivered=false and nothing is steered.
+// persisted to the durable queue; delivered=false.
 func TestStageOrDeliverInjectionPrimitive_ParkedStages(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-parked", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	fc := &fakeController{}
-	s.controller = fc
 
 	delivered := stageOne(t, s, runmode.LocalDefaultOrgID, "run-parked", domain.StagedInjectionProducerPRNewCommits, "staged body")
 	if delivered {
@@ -73,14 +62,9 @@ func TestStageOrDeliverInjectionPrimitive_ParkedStages(t *testing.T) {
 	if len(injections) != 1 || injections[0].Body != "staged body" || injections[0].Producer != domain.StagedInjectionProducerPRNewCommits {
 		t.Fatalf("want one staged injection {body:staged body}, got %+v", injections)
 	}
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	if fc.steerCalls != 0 {
-		t.Errorf("parked stage must not steer; steerCalls=%d", fc.steerCalls)
-	}
 }
 
-// TestStageOrDeliverInjectionPrimitive_BlankBodyNoOp: an empty body neither steers nor stages.
+// TestStageOrDeliverInjectionPrimitive_BlankBodyNoOp: an empty body stages nothing.
 func TestStageOrDeliverInjectionPrimitive_BlankBodyNoOp(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-blank", "sess", "/tmp/wt")

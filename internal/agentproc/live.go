@@ -154,12 +154,6 @@ type LiveRun struct {
 	done      chan struct{} // closed when the reader loop exits
 	ready     chan struct{} // closed when the wrapper emits control/ready
 	readyOnce sync.Once
-	// opened is closed once the opening message has been written or has
-	// failed to be. Every other send waits for it, so the process answers
-	// its opening first and the turns it owes are always its newest sends.
-	// Nil when the run has no opening (and in fixtures), which waits for
-	// nothing.
-	opened chan struct{}
 
 	// stream is the reader loop's parser, constructed here rather than
 	// inside the loop so Send can mark when a user message goes out. A run
@@ -206,14 +200,6 @@ type LiveRun struct {
 	// Send racing the close is refused (ErrRunClosing) instead of written
 	// into an input the wrapper is about to end.
 	closing atomic.Bool
-
-	// queuedTurns counts user messages sent in that no result has answered
-	// yet. Every Send is a turn the process owes — the SDK queues a message
-	// that arrives mid-turn and runs it as the next one — and every result
-	// settles one. Read at a turn boundary, it is how the driver tells a
-	// process with nothing left to do from one about to start a turn a
-	// steer queued while the last was running.
-	queuedTurns atomic.Int64
 
 	mu        sync.Mutex
 	termErr   error
@@ -315,18 +301,12 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	var opening func() error
 	switch {
 	case len(opts.OpeningBlocks) > 0:
-		opening = func() error {
-			return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "blocks": opts.OpeningBlocks})
-		}
+		opening = func() error { return l.SendBlocks(ctx, opts.OpeningBlocks) }
 	case opts.Message != "":
-		opening = func() error {
-			return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "text": opts.Message})
-		}
+		opening = func() error { return l.Send(ctx, opts.Message) }
 	}
 	if opening != nil {
-		l.opened = make(chan struct{})
 		go func() {
-			defer close(l.opened)
 			if err := opening(); err != nil {
 				agentprocLog.Error("initial message send failed", "error", err)
 				if opts.OnOpeningUnsent != nil {
@@ -340,37 +320,17 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 }
 
 // Send delivers a user message to the agent. It blocks until the wrapper
-// has signaled readiness and the opening message has gone out (or the run
-// finishes / ctx cancels first), and refuses with ErrRunClosing once Close
-// has begun.
+// has signaled readiness (or the run finishes / ctx cancels first), and
+// refuses with ErrRunClosing once Close has begun.
 func (l *LiveRun) Send(ctx context.Context, text string) error {
-	if err := l.awaitOpening(ctx); err != nil {
-		return err
-	}
 	return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "text": text})
-}
-
-// awaitOpening blocks until the opening message has been written, so a
-// message sent while the process starts never overtakes it.
-func (l *LiveRun) awaitOpening(ctx context.Context) error {
-	if l.opened == nil {
-		return nil
-	}
-	select {
-	case <-l.opened:
-		return nil
-	case <-l.done:
-		return fmt.Errorf("live run finished before send: %w", l.Err())
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
 // SendBlocks delivers a user message whose content is a block array rather
 // than a string — the shape an opening turn assembled from several rows
 // takes, where the boundaries between them are part of what the model reads.
-// One message and one owed turn, on the same terms as Send: it blocks on
-// readiness and refuses with ErrRunClosing once Close has begun.
+// One message, on the same terms as Send: it blocks on readiness and refuses
+// with ErrRunClosing once Close has begun.
 //
 // An empty list is refused rather than sent: a user message with no content
 // is not a turn, and the API rejects it.
@@ -378,15 +338,12 @@ func (l *LiveRun) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
 	if len(blocks) == 0 {
 		return errors.New("send blocks: no content blocks")
 	}
-	if err := l.awaitOpening(ctx); err != nil {
-		return err
-	}
 	return l.sendUserMessage(ctx, map[string]any{"kind": "user_message", "blocks": blocks})
 }
 
 // sendUserMessage is the body both send verbs share: refuse once closing,
-// wait for the wrapper, count the turn the process now owes, write the
-// control, and mark the request so the wait is billed to it.
+// wait for the wrapper, write the control, and mark the request so the wait
+// is billed to it.
 func (l *LiveRun) sendUserMessage(ctx context.Context, ctl map[string]any) error {
 	if l.closing.Load() {
 		return ErrRunClosing
@@ -398,38 +355,11 @@ func (l *LiveRun) sendUserMessage(ctx context.Context, ctl map[string]any) error
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	// Counted before the write goes out, so the result answering it can
-	// never be read against a count that has not seen the send.
-	l.queuedTurns.Add(1)
 	if err := l.writeControl(ctl); err != nil {
-		l.queuedTurns.Add(-1)
 		return err
 	}
 	l.stream.MarkRequest()
 	return nil
-}
-
-// QueuedTurns reports how many user messages sent in are still unanswered by
-// a result: the turns the process owes. Zero at a turn boundary means the
-// process has nothing left to do; more means a message queued mid-turn is
-// about to start the next one.
-func (l *LiveRun) QueuedTurns() int {
-	return int(l.queuedTurns.Load())
-}
-
-// turnAnswered settles one owed turn on a result, floored at zero: the count
-// is only ever a reading of sends the reader has not yet seen answered, and a
-// result the process produced on its own is not a debt below zero.
-func (l *LiveRun) turnAnswered() {
-	for {
-		n := l.queuedTurns.Load()
-		if n <= 0 {
-			return
-		}
-		if l.queuedTurns.CompareAndSwap(n, n-1) {
-			return
-		}
-	}
 }
 
 // Interrupt stops the agent's current turn. The wrapper acknowledges
@@ -489,28 +419,6 @@ func (l *LiveRun) Close() error {
 		return l.Err()
 	case <-time.After(kill):
 		return fmt.Errorf("live run close timed out after SIGKILL; reader goroutine may be blocked in a sink or permission handler")
-	}
-}
-
-// Kill ends the run at once: it SIGKILLs the process group without the end
-// control and the drain Close gives it. The drain finishes whatever the
-// process still has queued, so a caller that has decided a turn the process
-// owes must not run in it, because the input it carries goes elsewhere, uses
-// Kill instead. Sends are refused from the start, as they are by Close.
-// Returns the run's terminal error, if any, or a timeout error when the
-// reader goroutine is wedged (see Close).
-func (l *LiveRun) Kill() error {
-	l.closing.Store(true)
-	kill := l.killTimeout
-	if kill <= 0 {
-		kill = closeKillTimeout
-	}
-	l.cancel()
-	select {
-	case <-l.done:
-		return l.Err()
-	case <-time.After(kill):
-		return fmt.Errorf("live run kill timed out; reader goroutine may be blocked in a sink or permission handler")
 	}
 }
 
@@ -736,10 +644,6 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				deliverMessages(sink, messages)
 
 				if result != nil {
-					// Settled before the result is handed on, so a driver
-					// reading QueuedTurns off the result it just received sees
-					// this turn already paid for.
-					l.turnAnswered()
 					if interruptPending {
 						// This result closes the turn our interrupt() ended.
 						// parseResult already marks Interrupted from the SDK's

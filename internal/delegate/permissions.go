@@ -698,7 +698,7 @@ func (s *Spawner) AutoApprovePermissionHandler(conversationID string) agentproc.
 // which deregisters under the same mutex before its final drain — is
 // guaranteed to observe it. A 200-acknowledged decision is never dropped.
 // ResolvePermission answers a pending browser permission prompt, routing
-// through the same local-first / cross-pod seam as Interrupt/Steer
+// through the same local-first / cross-pod seam as Interrupt
 // (TFAC-585): resolvePermissionLocal handles the case this process holds
 // the broker entry; on a local miss where this process also holds no live
 // handle for the run at all (getProc), it resolves a live remote owner and
@@ -769,7 +769,7 @@ func (s *Spawner) resolvePermissionLocal(orgID, conversationID, toolCallID, deci
 // routePermission is ResolvePermission's cross-pod path: marshal the
 // decision onto a conversation_signals row targeting the run's live remote owner
 // and wait for the ack, up to DefaultPermissionAckTimeout (longer than
-// interrupt/steer's TF_SIGNAL_ACK_TIMEOUT — the browser is synchronously
+// the interrupt's TF_SIGNAL_ACK_TIMEOUT — the browser is synchronously
 // blocked on this response). A "gone" or "stale" ack both map to
 // ErrNoPendingPermission: gone means no live process to answer (the same
 // user-facing outcome as never having been pending), stale means the

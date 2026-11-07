@@ -86,11 +86,18 @@ func (e *Engine) hasPending(ctx context.Context, params Params) (bool, error) {
 		return false, err
 	}
 	for _, r := range pendingInOrder(rows) {
-		if IsHumanInput(r) || r.Subtype == domain.MessageSubtypeInjectionEvent {
+		if KeepsAFinishingTurnGoing(r) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// KeepsAFinishingTurnGoing reports whether a pending row is input a run must
+// read before it ends: a person's input, or a new-event injection. Exported so
+// that every runtime decides whether a finishing turn goes on by one rule.
+func KeepsAFinishingTurnGoing(r domain.Message) bool {
+	return IsHumanInput(r) || r.Subtype == domain.MessageSubtypeInjectionEvent
 }
 
 // pendingInOrder returns the undelivered rows in assembly order

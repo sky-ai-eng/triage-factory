@@ -7,12 +7,20 @@
 // The process lives exactly as long as its engagement's claim. A turn that
 // ends without concluding closes the process and parks the conversation,
 // and a follow-up wakes a fresh claim that resumes the same session by id;
-// the one thing that keeps a process alive past a turn boundary is a turn it
-// already owes — a message steered in while the last one ran, which the SDK
-// queues and starts next. Nothing is kept warm between turns, because a
+// the one thing that keeps a process alive past a turn boundary is input
+// waiting for it — a person's message or a new-event injection that arrived
+// while the last turn ran and that no tool batch took — which the driver
+// sends as the next turn. Nothing is kept warm between turns, because a
 // parked conversation has no claim, and every transcript write an engagement
 // makes is fenced on its claim: a process left alive past its park would be
 // killed by the fence on its next word.
+//
+// Nothing is sent into a running turn. Claude Code folds a message sent
+// during a tool call into the turn at its next tool batch, and queues one sent
+// during a text-only stretch as a turn of its own, so the driver could not
+// tell which turn answered a message. Input for a live process is written to
+// the transcript as pending instead, and reaches the model at the next tool
+// batch (notesAtToolBatch) or as the next turn the driver sends.
 
 package delegate
 
@@ -22,8 +30,10 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -34,12 +44,9 @@ import (
 
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
 // out as an interface so driveLiveConversation is unit-testable with a fake process
-// (no subprocess) — the real *agentproc.LiveRun satisfies it. Send delivers a
-// message into the same live process (the artifact nudge, see
-// driveLiveConversation); QueuedTurns is how many messages sent into it are
-// still unanswered, which at a turn boundary is whether it owes another turn.
-// Close lets the process drain what it owes before it exits, Kill ends it
-// without the drain, and Interrupt aborts the turn it is running.
+// (no subprocess) — the real *agentproc.LiveRun satisfies it. Send starts the
+// process's next turn, and the driver calls it only between turns (the
+// turn-end nudge, input waiting for the process).
 type liveProc interface {
 	Done() <-chan struct{}
 	Result() *agentproc.Result
@@ -47,10 +54,7 @@ type liveProc interface {
 	Stderr() string
 	Err() error
 	Send(ctx context.Context, text string) error
-	QueuedTurns() int
 	Close() error
-	Kill() error
-	Interrupt(ctx context.Context) error
 }
 
 // liveParkContext carries the identity a park needs to snapshot the
@@ -157,9 +161,9 @@ func sdkTFTools() []tooldefs.Tool {
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
 // driver. Each turn produces one result and the driver consumes one per loop
-// iteration, and the turns it waits on beyond the first are the ones a
-// message sent into the process owes: a steer, or the nudge. So only a couple
-// of results are ever unread at once, and the depth is headroom over that.
+// iteration, and the driver starts every turn after the first itself, between
+// turns: for waiting input, or the nudge. So only a couple of results are
+// ever unread at once, and the depth is headroom over that.
 // (The non-blocking send only ever sheds a turn the driver has already moved
 // past; see OnResult.)
 const resultsBufferDepth = 8
@@ -178,9 +182,9 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
 		// The driver consumes a result per turn: a conclusion or a park
-		// closes the process and returns, unless a turn is owed behind it (a
-		// steered message, or the nudge the driver just sent), and then the
-		// next turn produces the next result. A full buffer means results are
+		// closes the process and returns, unless the driver starts another
+		// turn (for input waiting for the process, or the nudge), and then
+		// that turn produces the next result. A full buffer means results are
 		// arriving faster than the driver selects them; a non-blocking send
 		// keeps the reader goroutine moving.
 		// The driver only ever acts on the result it reads next, so an overflow
@@ -194,7 +198,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	}
 	// The notes stageNoteAtToolBoundary armed ride the next tool batch.
 	spec.opts.OnToolBatch = func() agentproc.ToolBatchNotes {
-		return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID)
+		return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 	}
 	spec.opts.TFTools = sdkTFTools()
 	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
@@ -259,35 +263,37 @@ func processSpend(proc liveProc) float64 {
 // disposition, one turn-end at a time:
 //
 //   - a turn our own interrupt ended → a pause: the process closes and the
-//     conversation parks open itself (hibernated), unless a turn is owed.
+//     conversation parks open itself (hibernated), unless a person's message
+//     is waiting, which the pause does not stand over.
 //   - an IsError result → handed back for processCompletion to fail.
 //   - a turn stop_blueprint ended → its verdict, handed back to orchestrate.
-//     A turn owed behind it does not run: the people's messages it would
-//     answer go back on the queue for the resume that follows the verdict.
+//     Input waiting for the process stays on the transcript, and the wake
+//     that follows the blueprint's reaction delivers it (wakeForUnreadInput).
 //   - a turn the model ended itself → the step concludes `continue`, after
 //     the two checks the native loop makes before the same conclusion (see
 //     below), and is handed back.
 //   - a turn that ended on any other stop reason → handed back for
 //     processCompletion to park open with a note saying why.
 //
-// A turn-end only closes the process when the process owes nothing more. A
-// message steered in while the turn ran is queued by the SDK and starts the
-// next turn on its own (proc.QueuedTurns), and that turn belongs to this
-// engagement — its claim is still live — so the driver stays and reads it
-// like any other. That is the whole of what survives a turn boundary:
-// nothing is kept warm for a message that has not arrived, because a parked
-// conversation has released its claim and the fence would kill the process
-// on its first write.
+// A turn-end only closes the process when nothing that keeps a finishing turn
+// going is waiting for it (agentloop.KeepsAFinishingTurnGoing): a person's
+// message or a new-event injection that arrived while the turn ran and that
+// no tool batch took. The driver sends that input as the next turn, which
+// belongs to this engagement — its claim is still live — and reads it like
+// any other. That is the whole of what survives a turn boundary: nothing is
+// kept warm for a message that has not arrived, because a parked conversation
+// has released its claim and the fence would kill the process on its first
+// write.
 //
 // Before a turn concludes on its own, the driver asks what the native loop's
-// would-stop step asks. A person's message that arrived while the turn ran is
-// work the model has not seen, so the turn it owes runs first. Then nudge, the
-// would-stop hook: a note it returns is sent into the process and recorded on
-// the transcript, and the turn that answers it is the next one read. Once a
-// note has been sent the hook is not asked again in this engagement: it reads
-// the recorded note back to know it has asked, and a note that failed to
-// record would otherwise be asked again on every turn. A stop_blueprint ending
-// asks neither, because the call is the verdict, as it is natively.
+// would-stop step asks. Input waiting for the process is work the model has
+// not seen, so its turn runs first. Then nudge, the would-stop hook: a note it
+// returns is sent into the process and recorded on the transcript, and the
+// turn that answers it is the next one read. Once a note has been sent the
+// hook is not asked again in this engagement: it reads the recorded note back
+// to know it has asked, and a note that failed to record would otherwise be
+// asked again on every turn. A stop_blueprint ending asks neither, because the
+// call is the verdict, as it is natively.
 //
 // A process that has stopped producing without ending its turn is the
 // engagement's stall watchdog's to decide (activity.go), not this loop's: the
@@ -308,7 +314,7 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// Hard cancel: the registered ctx cancel SIGKILLed the process.
 			// Close (idempotent) and surface the ctx error so the caller routes
 			// through its cancelled path.
-			_ = proc.Close()
+			s.handOnOrLetGo(ctx, park, proc, nil)
 			return liveOutcome{err: ctx.Err()}
 
 		case r := <-results:
@@ -319,14 +325,18 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// control/interrupted ack), the same signal Claude Code's own UI
 			// uses to render Esc gracefully. The session survives an interrupt,
 			// so the conversation parks open for the composer's next message
-			// rather than failing.
+			// rather than failing. A person's message waiting for the process
+			// is what they want done next, so it is the pause's next turn; a
+			// new-event injection waits for the person's next message.
 			if r.Interrupted {
-				if proc.QueuedTurns() > 0 {
-					// The pause has a steered turn behind it, and the process
-					// starts it next.
+				next, fenced := s.handOnOrLetGo(ctx, park, proc, startsATurnAfterAPause)
+				if fenced {
+					return liveOutcome{fenced: true, costUSD: processSpend(proc)}
+				}
+				if next {
+					tracker.touch()
 					continue
 				}
-				_ = proc.Close()
 				park.costUSD = processSpend(proc)
 				if s.parkConversationOpen(ctx, park, proc.SessionID()) {
 					return liveOutcome{fenced: true, costUSD: park.costUSD}
@@ -336,21 +346,32 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// An IsError result (max-turns, runtime error) is terminal —
 			// hand it back; processCompletion fails it.
 			if r.IsError {
-				_ = proc.Close()
+				s.handOnOrLetGo(ctx, park, proc, nil)
 				return liveOutcome{result: r}
 			}
-			if r.Terminal == nil && proc.QueuedTurns() > 0 {
-				// A message steered in while this turn ran is queued, and the
-				// process starts its turn next — the conversation is still
-				// being driven, under the same claim. Whatever this turn was
-				// about to conclude or park on, the model has not seen it.
-				continue
+			// The model ended this turn, and input that arrived while it ran
+			// is waiting: it is the next turn, ahead of the nudge. Whatever
+			// this turn was about to conclude or park on, the model has not
+			// seen it.
+			starts := startsATurn
+			if r.Terminal != nil {
+				starts = nil
+			} else {
+				sent, fenced := s.sendWaitingInput(ctx, park, proc, starts)
+				if fenced {
+					s.handOnOrLetGo(ctx, park, proc, nil)
+					return liveOutcome{fenced: true, costUSD: processSpend(proc)}
+				}
+				if sent {
+					tracker.touch()
+					continue
+				}
 			}
 			if r.Terminal == nil && sdkTurnFinished(r.StopReason) && nudge != nil && !nudged {
 				if note := nudge(ctx); note != "" {
 					sent, fenced := s.sendNudge(ctx, park, proc, note)
 					if fenced {
-						_ = proc.Close()
+						s.handOnOrLetGo(ctx, park, proc, nil)
 						return liveOutcome{fenced: true, costUSD: processSpend(proc)}
 					}
 					if sent {
@@ -363,44 +384,124 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// The step's verdict, or a turn processCompletion parks. The
 			// process is let go of before the result is handed back, so the
 			// row never reads open while a process that could still write to
-			// it is alive.
-			if out, goOn := s.letGoAfterTurn(ctx, park, proc, results, r); !goOn {
-				return out
+			// it is alive. Input that arrived since the check above keeps the
+			// turn going after all.
+			next, fenced := s.handOnOrLetGo(ctx, park, proc, starts)
+			if fenced {
+				return liveOutcome{fenced: true, costUSD: processSpend(proc)}
 			}
+			if next {
+				tracker.touch()
+				continue
+			}
+			return liveOutcome{result: r}
 
 		case <-proc.Done():
 			// The process exited on its own (crash, or a Close from elsewhere).
 			// Hand back whatever terminal result was folded, else the error.
+			s.handOnOrLetGo(ctx, park, proc, nil)
 			return liveOutcome{result: proc.Result(), err: proc.Err()}
 		}
 	}
 }
 
+// startsATurn and startsATurnAfterAPause say which input waiting for a live
+// process at a turn end is worth a turn of its own. A turn the model ended
+// goes on for what a finishing native loop goes on for. A pause goes on only
+// for a person's message.
+func startsATurn(r domain.Message) bool {
+	return pendingRow(r) && agentloop.KeepsAFinishingTurnGoing(r)
+}
+
+func startsATurnAfterAPause(r domain.Message) bool {
+	return waitingMessage(r)
+}
+
+// handOnOrLetGo decides, at a turn end, whether the process takes another
+// turn. When starts finds input waiting, that input is sent as the next turn
+// and next is true. Otherwise the process is let go of: closed, with its
+// handle marked so that nothing more is queued for it. A nil starts lets go
+// without looking. fenced reports that the claim fence refused delivering the
+// input; the process is let go of then too.
+//
+// The decision is made under the handle's input lock, which queueForLiveProcess
+// holds while it writes a person's message, so a message queued before the
+// decision is seen by it and one queued after finds the process gone. The
+// process is closed after the lock is released, so a send waiting on the lock
+// is not held for the close.
+func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (next, fenced bool) {
+	h := s.getProc(park.conversationID)
+	if h != nil {
+		h.input.Lock()
+	}
+	if starts != nil {
+		next, fenced = s.sendWaitingInput(ctx, park, proc, starts)
+	}
+	if !next && h != nil {
+		h.lettingGo = true
+	}
+	if h != nil {
+		h.input.Unlock()
+	}
+	if !next {
+		_ = proc.Close()
+	}
+	return next, fenced
+}
+
+// sendWaitingInput sends the input waiting for a live process as its next
+// turn when starts finds any of it worth one: every staged note, bundled
+// ahead of the people's messages, which is how a resume composes its first
+// message. Every waiting row rides the turn once it is sent, the notes that
+// would not have started one included.
+//
+// The rows are flushed, marked delivered, before the send, and put back if
+// the send fails, as notesAtToolBatch does. sent reports that the turn
+// started. fenced reports that the claim fence refused the flush: a successor
+// owns the conversation and nothing was sent.
+func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (sent, fenced bool) {
+	rows, ok := s.waitingRows(ctx, park.orgID, park.conversationID)
+	if !ok || !slices.ContainsFunc(rows, starts) {
+		return false, false
+	}
+	messages, fenced := s.takeWaitingMessages(ctx, park.orgID, park.conversationID, park.claimID, rows)
+	if fenced {
+		return false, true
+	}
+	notes := s.flushStagedInjections(ctx, park.orgID, park.conversationID)
+	if len(messages) == 0 && len(notes) == 0 {
+		return false, false
+	}
+	var parts []string
+	if len(notes) > 0 {
+		parts = append(parts, domain.StagedInjectionBlock(notes))
+	}
+	for _, m := range messages {
+		parts = append(parts, m.Content)
+	}
+	if err := proc.Send(ctx, strings.Join(parts, db.PendingInputSeparator)); err != nil {
+		delegateLog.Warn("send the input waiting for the live process failed; it waits for the next engagement", "conversation", park.conversationID, "error", err)
+		s.restoreStagedInjections(park.orgID, park.conversationID, notes)
+		s.requeueMessages(park.orgID, park.conversationID, park.claimID, messages)
+		return false, false
+	}
+	return true, false
+}
+
 // sendNudge sends the would-stop hook's note into the live process and records
 // it on the transcript, where the hook reads it back to know it has asked
-// (askedAboutArtifactAlready). Sent before it is recorded, as a steer is: a
-// row written for a message the process never took would say the agent was
-// asked something it was not.
+// (askedAboutArtifactAlready). Sent before it is recorded: a row written for a
+// message the process never took would say the agent was asked something it
+// was not.
 //
 // sent is false when the process would not take the note; the turn then
 // concludes as it would have without one. fenced is true when the claim fence
 // refused the row: a successor owns the conversation, and nothing more is this
 // engagement's to write.
 func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc liveProc, note string) (sent, fenced bool) {
-	// Through the send log, as a steer goes, so the turns the process owes are
-	// matched to the right sends; the nudge's entry names no row, since it is
-	// not a person's message.
-	h := s.getProc(park.conversationID)
-	if h != nil {
-		h.sends.mu.Lock()
-		defer h.sends.mu.Unlock()
-	}
 	if err := proc.Send(ctx, note); err != nil {
 		delegateLog.Warn("send the turn-end nudge failed; the turn concludes without it", "conversation", park.conversationID, "error", err)
 		return false, false
-	}
-	if h != nil {
-		h.sends.rows = append(h.sends.rows, 0)
 	}
 	return true, s.insertClaimNote(ctx, park.orgID, park.claimID, &domain.Message{
 		ConversationID: park.conversationID,
@@ -408,125 +509,6 @@ func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc live
 		Subtype:        domain.MessageSubtypeInjectionNudge,
 		Content:        note,
 	})
-}
-
-// letGoAfterTurn ends the process behind a turn that ends the engagement: the
-// step's verdict, or a turn processCompletion parks. goOn reports instead that
-// a person's message arrived after the driver's earlier checks, so the turn the
-// process owes it is the engagement's next one.
-//
-// The decision and the ending happen under the send log, which a steer holds
-// across its send. A steer the process counted after those checks is seen
-// here, and none is counted after the decision: the log stays held until Close
-// or Kill has made the process refuse sends.
-//
-// With nothing owed the process is closed. A turn the model ended with a
-// message owed goes on, as the check above it would have had it. A
-// stop_blueprint with messages owed stands as the verdict, and the messages
-// are read on a resume, as if they had arrived just after the stop: their rows
-// go back on the queue (requeueSteers), and the wake that follows the
-// blueprint's reaction delivers them (wakeForUnreadInput). The process must
-// not answer them first, so its owed turns are stopped rather than drained
-// (stopOwedTurns).
-func (s *Spawner) letGoAfterTurn(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, r *agentproc.Result) (out liveOutcome, goOn bool) {
-	h := s.getProc(park.conversationID)
-	if h != nil {
-		h.sends.mu.Lock()
-		defer h.sends.mu.Unlock()
-	}
-	owed := proc.QueuedTurns()
-	switch {
-	case owed == 0:
-		_ = proc.Close()
-		return liveOutcome{result: r}, false
-	case r.Terminal == nil:
-		return liveOutcome{}, true
-	}
-	var rows []int
-	if h != nil {
-		rows = h.sends.owedSteers(owed)
-	}
-	s.stopOwedTurns(ctx, proc, results)
-	if s.requeueSteers(ctx, park, rows) {
-		return liveOutcome{fenced: true, costUSD: processSpend(proc)}, false
-	}
-	return liveOutcome{result: r}, false
-}
-
-// owedTurnAbortWait bounds how long stopOwedTurns waits for its interrupts to
-// abort the turns a process owes. An abort lands within milliseconds of the
-// interrupt, while a turn the interrupt missed runs for as long as this, so it
-// is short.
-const owedTurnAbortWait = 500 * time.Millisecond
-
-// stopOwedTurns ends a process that still owes turns without letting it run
-// them, since closing it would drain them, tools included.
-//
-// Claude Code starts a queued message's turn as soon as the previous turn
-// ends, so the first owed turn is usually under way by now, and an interrupt
-// aborts it. Each owed turn is interrupted as the one before it settles, and
-// once none is owed the process is closed, which lets Claude Code write out
-// the session the resume continues. An owed turn the interrupts have not
-// settled within owedTurnAbortWait (a message Claude Code had taken for its
-// next turn but not yet started) would run in the close's drain, so the
-// process is killed instead, losing whatever of its session Claude Code had
-// not yet written.
-//
-// The session may hold the messages of the aborted turns, and the resume
-// delivers them again, so the model can read one twice. A duplicate is the
-// lesser fault: the alternative is a message the model never reads.
-func (s *Spawner) stopOwedTurns(ctx context.Context, proc liveProc, results <-chan *agentproc.Result) {
-	wait := owedTurnAbortWait
-	if s.owedTurnAbortWaitOverride > 0 {
-		wait = s.owedTurnAbortWaitOverride
-	}
-	deadline := time.NewTimer(wait)
-	defer deadline.Stop()
-	for proc.QueuedTurns() > 0 {
-		if err := proc.Interrupt(ctx); err != nil {
-			_ = proc.Kill()
-			return
-		}
-		select {
-		case <-results:
-		case <-proc.Done():
-			return
-		case <-ctx.Done():
-			_ = proc.Kill()
-			return
-		case <-deadline.C:
-			_ = proc.Kill()
-			return
-		}
-	}
-	_ = proc.Close()
-}
-
-// requeueSteers puts the people's messages a stopped process owed a turn back
-// on the conversation's pending-input queue, where the wake after the
-// blueprint's reaction finds them (wakeForUnreadInput). Their rows were written
-// delivered when the process took them, and it never answered them.
-//
-// The flip goes through the claim fence; fenced is true when it was refused,
-// and the caller then records nothing, as for every other refused write. Any
-// other failure is logged and the conclusion goes ahead: the stop's verdict is
-// not worth losing over a message that is still on the transcript for a
-// person to send again.
-func (s *Spawner) requeueSteers(ctx context.Context, park liveParkContext, rows []int) (fenced bool) {
-	if len(rows) == 0 || s.conversations == nil {
-		return false
-	}
-	err := s.conversations.RequeueInputForClaimSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID, rows)
-	if errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Error("claim fence refused re-queueing a stopped run's unanswered messages — a successor owns this conversation; recording nothing",
-			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID)
-		return true
-	}
-	if err != nil {
-		delegateLog.Warn("re-queue the messages a stop left unanswered failed; they stay on the transcript as delivered",
-			"conversation", park.conversationID, "rows", rows, "error", err)
-	}
-	return false
 }
 
 // markConversationOpen flips a conversation's status to `open` under a race
