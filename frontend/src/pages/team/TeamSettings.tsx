@@ -107,10 +107,9 @@ const ROLE_LABELS: Record<string, string> = {
   viewer: 'Viewer — read only',
 }
 
-/** The sources that are always live, in the order the band and the card grid
- *  list them. Linear joins them once this deployment serves it; see
- *  `linearLive`. */
-const SOURCES: SourceKind[] = ['github', 'jira', 'slack']
+/** Every source, in the order the band and the card grid list them. Linear is
+ *  listed only once this deployment serves it; see `linearLive`. */
+const SOURCES: SourceKind[] = ['github', 'jira', 'linear', 'slack']
 
 /** A headline figure. `null` reads as a dash — the question has not been answered. */
 function Figure({
@@ -169,7 +168,7 @@ export default function TeamSettings() {
   const linearState = stateOf('linear')
   const linearLive = linearState !== undefined && linearState !== 'wip'
   const sources = useMemo<SourceKind[]>(
-    () => (linearLive ? [...SOURCES, 'linear'] : SOURCES),
+    () => (linearLive ? SOURCES : SOURCES.filter((s) => s !== 'linear')),
     [linearLive],
   )
   const [filter, setFilter] = useState('')
@@ -922,21 +921,6 @@ export default function TeamSettings() {
                   note={sourceOff('jira')}
                   onClick={() => openSource('jira')}
                 />
-                <SourceCard
-                  name="Slack"
-                  source="slack"
-                  state={sourceOff('slack') ? 'unavailable' : 'configured'}
-                  scope="channels this team watches"
-                  stats={[['mentions · 7d', activitySource(activity, 'slack')?.events ?? '—']]}
-                  note={sourceOff('slack')}
-                  onClick={() => openSource('slack')}
-                />
-                <SourceCard
-                  name="Schedule"
-                  state="soon"
-                  scope="coming soon"
-                  note="Runs the factory on a cadence you set, with no event to trigger it."
-                />
                 {linearLive ? (
                   <SourceCard
                     name="Linear"
@@ -958,6 +942,21 @@ export default function TeamSettings() {
                     note="Issues and cycles, for teams that track work in Linear instead of Jira."
                   />
                 )}
+                <SourceCard
+                  name="Slack"
+                  source="slack"
+                  state={sourceOff('slack') ? 'unavailable' : 'configured'}
+                  scope="channels this team watches"
+                  stats={[['mentions · 7d', activitySource(activity, 'slack')?.events ?? '—']]}
+                  note={sourceOff('slack')}
+                  onClick={() => openSource('slack')}
+                />
+                <SourceCard
+                  name="Schedule"
+                  state="soon"
+                  scope="coming soon"
+                  note="Runs the factory on a cadence you set, with no event to trigger it."
+                />
               </div>
             </div>
 
