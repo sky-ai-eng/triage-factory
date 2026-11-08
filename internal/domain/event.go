@@ -173,7 +173,7 @@ const (
 	EventSystemDelegationCompleted = "system:delegation:completed"
 	EventSystemDelegationFailed    = "system:delegation:failed"
 	EventSystemTaskAutoSuspended   = "system:task:auto_suspended"   // deprecated, per-task
-	EventSystemPromptAutoSuspended = "system:prompt:auto_suspended" // per-(entity, prompt) breaker trip
+	EventSystemPromptAutoSuspended = "system:prompt:auto_suspended" // in the catalog, never emitted
 
 	// EventSystemConversationStatus / EventSystemConversationActivity are
 	// EE-observable conversation lifecycle sentinels: bus mirrors of the two
@@ -344,7 +344,7 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemScoringCompleted, Source: "system", Category: "scoring", Label: "Scoring Complete", Description: "AI scoring finished for a task"},
 		{ID: EventSystemDelegationCompleted, Source: "system", Category: "delegation", Label: "Delegation Complete", Description: "Agent delegation run completed"},
 		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed"},
-		{ID: EventSystemPromptAutoSuspended, Source: "system", Category: "delegation", Label: "Prompt Auto-suspended", Description: "Per-(entity, prompt) breaker tripped after repeated failures"},
+		{ID: EventSystemPromptAutoSuspended, Source: "system", Category: "delegation", Label: "Prompt Auto-suspended", Description: "Not emitted. When a trigger's runs on an entity keep failing, its breaker stops it there and a notification tells the trigger's team"},
 		{ID: EventSystemConversationStatus, Source: "system", Category: "delegation", Label: "Conversation Status", Description: "A delegated conversation's status changed"},
 		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
 		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},

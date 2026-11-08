@@ -32,7 +32,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res("opened a PR"), t.TempDir(), nil, "", "event", "")
+		res("opened a PR"), t.TempDir(), nil, "", "")
 
 	if parked {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
@@ -56,7 +56,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		stopped(domain.ConversationOutcomeAbort, "needs a human to rotate the token", "looked into it"),
-		t.TempDir(), nil, "", "event", "")
+		t.TempDir(), nil, "", "")
 
 	if parked {
 		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
@@ -79,7 +79,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		stopped(domain.ConversationOutcomeFinish, "nothing more to do", "shipped it"), t.TempDir(), nil, "", "event", "")
+		stopped(domain.ConversationOutcomeFinish, "nothing more to do", "shipped it"), t.TempDir(), nil, "", "")
 
 	if parked {
 		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
@@ -103,7 +103,7 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	errored := res(`the agent runtime blew up`)
 	errored.IsError = true
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		errored, t.TempDir(), nil, "", "event", "")
+		errored, t.TempDir(), nil, "", "")
 
 	if conv := loadConversation(t, s, conversationID); conv.Status != "failed" {
 		t.Fatalf("conv status = %q, want failed", conv.Status)

@@ -202,7 +202,7 @@ func TestFollowUp_AnSDKResumeDecidesItsBlueprintLikeAFreshStep(t *testing.T) {
 			claimID := holderClaimFor(t, s, org, convID)
 			conv := loadConversation(t, s, convID)
 			if _, fenced := s.processCompletion(ctx, org, convID, brID, claimID, loadTask(t, s, taskID), tc.turn,
-				t.TempDir(), nil, "sess-"+convID, "manual", runmode.LocalDefaultUserID); fenced {
+				t.TempDir(), nil, "sess-"+convID, runmode.LocalDefaultUserID); fenced {
 				t.Fatal("processCompletion reported fenced under a live claim")
 			}
 
@@ -302,7 +302,7 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 	}})
 
 	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
-		res("done"), t.TempDir(), nil, "sess-snap-order", "event", "")
+		res("done"), t.TempDir(), nil, "sess-snap-order", "")
 
 	if puts != 1 {
 		t.Fatalf("snapshot writes = %d, want 1 — a completed terminal snapshots", puts)
@@ -342,7 +342,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	writeFile(t, filepath.Join(cwd, "_tfac", "notes", "build.log"), "the turn's work")
 
 	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
-		res("done"), cwd, nil, sessionID, "event", "")
+		res("done"), cwd, nil, sessionID, "")
 
 	// The wake a person can fire the instant the status flips.
 	if err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {

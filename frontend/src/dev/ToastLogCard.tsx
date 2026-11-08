@@ -16,9 +16,7 @@ const COPY: Record<ToastLevel, string[]> = {
     'Steps after a deleted prompt are now an untriggered blueprint.',
     'Redrove 4 of 6 — the rest were no longer parked',
   ],
-  warning: [
-    'Auto-delegation paused: Review on open tripped the breaker (3 consecutive failures on this entity)',
-  ],
+  warning: ['Applied 3 tickets; 1 failed — see inline errors'],
   error: [
     'Could not claim the task.',
     'Could not move the task — please try again.',

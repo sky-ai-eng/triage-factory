@@ -1694,10 +1694,6 @@ func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {
 	})
 }
 
-// updateBreakerCounter is a no-op: the breaker is a read over a trigger's
-// blueprint runs (db.TaskStore.BreakerStreakSystem), with no counter to move.
-func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {}
-
 // broadcastConversationUpdate stamps the run's owning org on the event so the
 // hub's per-connection scoping filter routes it only to clients
 // authed against that tenant. Every caller is inside a goroutine

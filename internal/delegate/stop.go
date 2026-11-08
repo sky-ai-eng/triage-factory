@@ -529,7 +529,7 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 }
 
 // failConversation records the infra-failure terminal for a run: guarded status flip,
-// a failure row on the transcript, the boundary stamp, breaker + broadcast.
+// a failure row on the transcript, the boundary stamp, and the broadcast.
 //
 // claimID names the engagement doing the failing, and is required: the
 // terminal goes through the claim fence and nowhere else, so an executor that
@@ -541,7 +541,7 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 // released. Nothing was written, and the caller must not go on to react to
 // the conversation's state either — the row it would read belongs to the
 // successor.
-func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, triggerType, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
+func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
 	delegateLog.Error("conversation failed", "conversation", conversationID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
@@ -562,8 +562,8 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	if errors.Is(insertErr, db.ErrClaimReleased) {
 		// Not this engagement's run to fail anymore. Everything below writes
 		// or broadcasts about a conversation a successor is driving, so the
-		// whole tail is skipped — the boundary stamp and the breaker tick
-		// among them, both of which would speak for the successor's run.
+		// whole tail is skipped — the boundary stamp among it, which would
+		// speak for the successor's run.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
 		return true
@@ -606,7 +606,6 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 		s.kickMemoryOwed(orgID, ended.ID)
 	}
 
-	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
 	// Told only for a failure this call recorded: a racing verdict that got

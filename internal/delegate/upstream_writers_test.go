@@ -228,7 +228,7 @@ func TestSDKUpstream_ARefusalOrAnUnreportedStatusStillFails(t *testing.T) {
 				t.Fatalf("load task: (%v, %v)", task, err)
 			}
 			f.s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.br.ID, f.conv.ClaimID, *task,
-				result, t.TempDir(), nil, "sess-x", "manual", runmode.LocalDefaultUserID)
+				result, t.TempDir(), nil, "sess-x", runmode.LocalDefaultUserID)
 			if st := f.storedStatus(t); st != "failed" {
 				t.Errorf("stored status = %q, want failed", st)
 			}

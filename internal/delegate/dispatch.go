@@ -1280,7 +1280,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 
 	if conv.SessionID == "" || conv.WorktreePath == "" || conv.Model == "" {
 		s.failEngagement(conv.ID, errors.New("resume: claimed conversation missing session/worktree/model"))
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", "resume: claimed conversation missing session/worktree/model", domain.ConversationFailureUnclassified)
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "resume: claimed conversation missing session/worktree/model", domain.ConversationFailureUnclassified)
 		return
 	}
 
@@ -1468,8 +1468,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror.settle(stepCtx)
 		s.failEngagement(conv.ID, errors.New("resume: session transcript did not survive"))
 		flushPendingInput()
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual",
-			"This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
 			domain.ConversationFailureSessionLost)
 		return
 	}
@@ -1535,16 +1534,16 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 	if rerr != nil {
 		mirror.settle(stepCtx)
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {
 		mirror.settle(stepCtx)
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", "resume produced no completion", domain.ConversationFailureNoResult)
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "resume produced no completion", domain.ConversationFailureNoResult)
 		return
 	}
 
-	_, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, "manual", userID)
+	_, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, userID)
 	if fenced {
 		// A successor owns the conversation. Finalizing the blueprint off
 		// this turn's result would terminate a run someone else is driving,

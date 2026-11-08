@@ -141,7 +141,7 @@ func TestStall_AnIdleParkWithASlowSnapshotFilesNoStop(t *testing.T) {
 	f.s.activityFor(f.conversationID).touch()
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		f.keyID, f.tree, "manual", runmode.LocalDefaultUserID, time.Now(),
+		f.keyID, f.tree, runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultParked}, nil)
 	if disp.fenced || disp.handedBack {
 		t.Fatalf("disposition = %+v, want the idle park to land", disp)
@@ -203,7 +203,7 @@ func TestStall_ASlowPreTerminalSnapshotWithinItsBoundCompletes(t *testing.T) {
 	f.s.activityFor(f.conversationID).touch()
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		f.keyID, f.tree, "manual", runmode.LocalDefaultUserID, time.Now(),
+		f.keyID, f.tree, runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish, ResultSummary: "done"}, nil)
 	if disp.fenced {
 		t.Fatalf("disposition = %+v, want the conclusion recorded", disp)
@@ -232,7 +232,7 @@ func TestStall_APreTerminalSnapshotPastItsBoundFailsWithoutAStall(t *testing.T) 
 	go func() {
 		done <- f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 			runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-			f.keyID, f.tree, "manual", runmode.LocalDefaultUserID, time.Now(),
+			f.keyID, f.tree, runmode.LocalDefaultUserID, time.Now(),
 			agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish, ResultSummary: "done"}, nil)
 	}()
 	select {

@@ -262,7 +262,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// from.
 		mirror.settle(ctx)
 		s.releaseActivity(conversationID, cfg.claimID)
-		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, msg, kind) {
+		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, msg, kind) {
 			return false
 		}
 		parked = true
@@ -738,7 +738,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	if out.result != nil {
 		var fenced bool
-		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, triggerType, creatorUserID)
+		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, creatorUserID)
 		return engagementDisposition{fenced: fenced}
 	}
 
@@ -976,7 +976,7 @@ func (s *Spawner) processCompletion(
 	completion *agentproc.Result,
 	claudeCwd string,
 	mirror *memoryMirror,
-	sessionID, triggerType, creatorUserID string,
+	sessionID, creatorUserID string,
 ) (parked, fenced bool) {
 	// The engagement's terminal, as a punctual span linked back to the setup
 	// that started it. This is where a run's own accounting already exists —
@@ -1186,7 +1186,7 @@ func (s *Spawner) processCompletion(
 		// A successor owns the conversation, so this result is not the run's
 		// disposition — it is the output of an engagement that lost its
 		// claim. Recording it would overwrite live work with a stale
-		// terminal, and every step below (breaker, board, toast, broadcast)
+		// terminal, and every step below (board, toast, broadcast)
 		// reports on that same overwritten row. Stop here, and park so the
 		// successor's workspace is left alone. The snapshot above already
 		// landed, harmlessly: the successor holds the claim, so nothing can
@@ -1198,8 +1198,6 @@ func (s *Spawner) processCompletion(
 	if completeErr != nil {
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", completeErr)
 	}
-
-	s.updateBreakerCounter(task.ID, triggerType, status)
 
 	// broadcastStatus prefers the row the write actually persisted over the
 	// caller's own status variable — the same value here (the write stores
