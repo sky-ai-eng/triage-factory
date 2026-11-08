@@ -54,16 +54,27 @@ vi.mock('../../hooks/useTeamRole', () => ({
 }))
 
 // The availability read, controllable per test — mocked so the real module's
-// per-org cache can't leak one test's answer into another.
-const sources = vi.hoisted(() => ({ state: {} as Record<string, string | undefined> }))
+// per-org cache can't leak one test's answer into another. `loaded: false` is
+// a read that has not resolved, or failed; once it has, `state` is its whole
+// answer, and a kind it leaves out is one the deployment does not carry.
+const sources = vi.hoisted(() => ({ loaded: true, state: {} as Record<string, string> }))
 vi.mock('../../hooks/useEventSources', () => ({
-  useEventSources: () => ({
-    sources: [],
-    loaded: true,
-    stateOf: (kind: string) => sources.state[kind],
-    canProduce: (kind: string) => sources.state[kind] === undefined,
-  }),
+  useEventSources: () => {
+    const state = sources.loaded ? sources.state : {}
+    return {
+      sources: Object.entries(state).map(([kind, s]) => ({
+        kind,
+        state: s,
+        disableable: kind !== 'github',
+      })),
+      loaded: sources.loaded,
+      stateOf: (kind: string) => (Object.hasOwn(state, kind) ? state[kind] : undefined),
+      canProduce: (kind: string) => !Object.hasOwn(state, kind) || state[kind] === 'available',
+    }
+  },
 }))
+// A multi-mode deployment's answer: every source carried, every one on.
+const SERVED = { github: 'available', jira: 'available', linear: 'available', slack: 'available' }
 
 // The viewer's teams, mutable per test; the last one they wrote to is t1.
 const PLATFORM = { id: 't1', name: 'platform', slug: 'platform' }
@@ -189,7 +200,8 @@ beforeEach(() => {
   session.present = true
   roles.team = 'admin'
   roles.org = true
-  sources.state = {}
+  sources.loaded = true
+  sources.state = { ...SERVED }
   // The catalog hook caches per org at module level; without the reset, the
   // first test's answer would be every later test's answer.
   resetModelCatalogForTest()
@@ -263,6 +275,12 @@ function renderPage() {
 
 /** The band's own EVENT SOURCES head — the opened panel names itself the same. */
 const bandHead = () => document.querySelector<HTMLElement>('.ts-panel-right .ts-panel-t')
+/** The sources the band lists, in its order. */
+const bandNames = () =>
+  Array.from(document.querySelectorAll('.ts-flow-row-n')).map((e) => e.textContent)
+/** The cards the open sources panel shows, in its order. */
+const cardNames = () =>
+  Array.from(document.querySelectorAll('.ts-srcgrid .tf-src__name')).map((e) => e.textContent)
 
 describe('the band', () => {
   it('takes a named source to its own page', async () => {
@@ -277,7 +295,7 @@ describe('the band', () => {
   })
 
   it('lets a row the org cannot reach fall through to the panel, not its page', async () => {
-    sources.state = { jira: 'disabled' }
+    sources.state = { ...SERVED, jira: 'disabled' }
     renderPage()
     await waitFor(() => expect(bandHead()).not.toBeNull())
 
@@ -298,13 +316,22 @@ describe('the band', () => {
     renderPage()
     await waitFor(() => expect(bandHead()).not.toBeNull())
 
-    fireEvent.click(screen.getByText('last 7 days · repositories, projects, channels'))
+    fireEvent.click(screen.getByText('last 7 days'))
     expect(screen.getByText('Pick a source to configure')).toBeInTheDocument()
 
     // And the head hands it back, rather than toggling twice through the cell
     // behind it and landing where it started.
     fireEvent.click(bandHead()!)
     expect(screen.queryByText('Pick a source to configure')).not.toBeInTheDocument()
+  })
+
+  it('draws one curve per row it lists', async () => {
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    const curves = document.querySelectorAll('.ts-flow-svg path')
+    expect(curves).toHaveLength(document.querySelectorAll('.ts-flow-row').length)
+    expect(curves).toHaveLength(4)
   })
 })
 
@@ -447,7 +474,7 @@ describe('a link to one project', () => {
 
 describe('the sources panel', () => {
   it('sinks a source the org cannot reach, and counts only the connected', async () => {
-    sources.state = { jira: 'unconfigured' }
+    sources.state = { ...SERVED, jira: 'unconfigured' }
     renderPage()
     await waitFor(() => expect(bandHead()).not.toBeNull())
 
@@ -459,30 +486,66 @@ describe('the sources panel', () => {
     const card = document.querySelector('.tf-src[data-state="unavailable"]')
     expect(card).not.toBeNull()
     expect(card?.getAttribute('data-clickable')).toBeNull()
-    expect(screen.getByText(/2 sources connected/)).toBeInTheDocument()
+    expect(screen.getByText(/3 sources connected/)).toBeInTheDocument()
   })
-})
 
-describe('linear', () => {
-  it('stays a coming-soon card, and no link opens it, while the source is in the works', async () => {
-    sources.state = { linear: 'wip' }
+  it('lists every source until the read resolves, with Linear live beside Jira', async () => {
+    sources.loaded = false
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    expect(bandNames()).toEqual(['GitHub', 'Jira', 'Linear', 'Slack'])
+    fireEvent.click(bandHead()!)
+    expect(cardNames()).toEqual(['GitHub', 'Jira', 'Linear', 'Slack', 'Schedule'])
+    const linear = screen.getByRole('link', { name: 'Linear' })
+    expect(linear).toHaveAttribute('data-state', 'configured')
+  })
+
+  it('leaves out a source the read does not return, and opens no link to it', async () => {
+    sources.state = { github: 'available', jira: 'available', linear: 'available' }
     render(
-      <MemoryRouter initialEntries={['/?source=linear']}>
+      <MemoryRouter initialEntries={['/?source=slack']}>
         <TeamSettings />
       </MemoryRouter>,
     )
     await waitFor(() => expect(bandHead()).not.toBeNull())
-    expect(document.querySelector('.sp[data-source="linear"]')).toBeNull()
+    expect(document.querySelector('.sp')).toBeNull()
 
+    expect(bandNames()).toEqual(['GitHub', 'Jira', 'Linear'])
     fireEvent.click(bandHead()!)
-    const card = screen.getByText('Linear').closest('.tf-src')
-    expect(card).not.toBeNull()
-    expect(within(card as HTMLElement).getByText('coming soon')).toBeInTheDocument()
+    expect(cardNames()).toEqual(['GitHub', 'Jira', 'Linear', 'Schedule'])
+    expect(screen.getByText(/^3 sources ·/)).toBeInTheDocument()
     expect(screen.getByText(/3 sources connected/)).toBeInTheDocument()
   })
 
-  it('opens like any other source once the deployment serves it', async () => {
-    sources.state = { linear: 'available' }
+  it('opens no source page for ?source=constructor', async () => {
+    render(
+      <MemoryRouter initialEntries={['/?source=constructor']}>
+        <TeamSettings />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+    expect(document.querySelector('.sp')).toBeNull()
+  })
+})
+
+describe('linear', () => {
+  it('sinks its card, as any source, while the source is in the works', async () => {
+    sources.state = { ...SERVED, linear: 'wip' }
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(bandHead()!)
+    const grid = document.querySelector<HTMLElement>('.ts-srcgrid')!
+    const card = within(grid).getByText('Linear').closest('.tf-src')
+    expect(card).toHaveAttribute('data-state', 'unavailable')
+    expect(
+      within(card as HTMLElement).getByText('Linear events aren’t supported yet.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/3 sources connected/)).toBeInTheDocument()
+  })
+
+  it('opens like any other source', async () => {
     renderPage()
     await waitFor(() => expect(bandHead()).not.toBeNull())
 
@@ -529,12 +592,13 @@ describe('the figures', () => {
     expect(figureValue('tasks · 7 days')).toBe('4')
 
     // The band: total events in the head, per-source values in the rows —
-    // slack's undefined count stays a dash — and the two stream stats.
+    // linear, which has no row, and slack's undefined count stay dashes — and
+    // the two stream stats.
     expect(document.querySelector('.ts-panel-right .ts-panel-n')?.textContent).toBe('8 events')
     const rowValues = Array.from(document.querySelectorAll('.ts-flow-row-v')).map(
       (e) => e.textContent,
     )
-    expect(rowValues).toEqual(['5', '3', '—'])
+    expect(rowValues).toEqual(['5', '3', '—', '—'])
     const stats = Array.from(document.querySelectorAll('.ts-stat-v')).map((e) => e.textContent)
     expect(stats).toEqual(['8', '4'])
 

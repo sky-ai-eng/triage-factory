@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import Table from '../../ui/table/Table'
 import type { TableCandidate, TableRow } from '../../ui/table/Table'
 import SourceCard from '../../ui/sourcecard/SourceCard'
+import type { SourceStat } from '../../ui/sourcecard/SourceCard'
 import Dialog from '../../ui/dialog/Dialog'
 import type { DialogConsequence } from '../../ui/dialog/Dialog'
 import GitHubSource from './GitHubSource'
@@ -21,7 +22,7 @@ import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
 import { useTeamActivity, activitySource } from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
-import { sourceUnavailableReason } from '../../lib/eventSources'
+import { sourceLabel, sourceUnavailableReason } from '../../lib/eventSources'
 import { useTeamUsage, fmtSpendUSD } from '../../hooks/useTeamUsage'
 import { useTeamModelConfig } from '../../hooks/useTeamModelConfig'
 import { useModelCatalog } from '../../hooks/useModelCatalog'
@@ -38,20 +39,20 @@ import type { TeamMember } from '../../types'
 import { fetchTeamRepos } from '../settings/teamConfig'
 import './team-settings.css'
 
-// Team settings — the overview, and the three source pages behind it.
+// Team settings — the overview, and the source pages behind it.
 //
-// ONE ROUTE, FOUR VIEWS. A source page is a drill-in, not a destination: the
-// rail's Team row stays lit, the crumbs grow a level, and `?source=` is what
-// makes the drill-in survive a reload and a shared link. Leaving one goes back
-// to the sources panel — up one level, which is where the cards live — rather
-// than to the roster.
+// One route serves the overview and every source page. A source page is a
+// drill-in, not a destination: the rail's Team row stays lit, the crumbs grow
+// a level, and `?source=` is what makes the drill-in survive a reload and a
+// shared link. Leaving one goes back to the sources panel — up one level,
+// which is where the cards live — rather than to the roster.
 //
 // The page is a header group and one REGION. The header group is the team's
 // title block and a two-panel band; the region below it holds one of three
 // things, and the band is what switches them:
 //
 //   roster   the default, and what the page is mostly for
-//   sources  what CONFIGURED SOURCES opens into — the five cards
+//   sources  what EVENT SOURCES opens into — a card per source
 //   models   what CONFIGURED MODELS opens into
 //
 // All three are absolutely positioned inside the region, which is why the
@@ -68,19 +69,6 @@ import './team-settings.css'
 // member count and the roster are real, and so is adding and removing people.
 
 type Region = 'roster' | 'sources' | 'models'
-
-const SOURCES_BY_KEY: Record<string, SourceKind> = {
-  github: 'github',
-  jira: 'jira',
-  slack: 'slack',
-  linear: 'linear',
-}
-const SOURCE_NAMES: Record<SourceKind, string> = {
-  github: 'GitHub',
-  jira: 'Jira',
-  slack: 'Slack',
-  linear: 'Linear',
-}
 
 // rosterMemberOf normalizes a roster row the way the roster hook holds it, so
 // the held roster and a searched page render through one row builder.
@@ -107,9 +95,50 @@ const ROLE_LABELS: Record<string, string> = {
   viewer: 'Viewer — read only',
 }
 
-/** Every source, in the order the band and the card grid list them. Linear is
- *  listed only once this deployment serves it; see `linearLive`. */
+/** The order the band and the card grid list sources in. */
 const SOURCES: SourceKind[] = ['github', 'jira', 'linear', 'slack']
+
+/** What each source's card says it watches, and which of the source's
+ *  activity counts it shows, under which label. */
+const SOURCE_CARDS: Record<
+  SourceKind,
+  { scope: string; stats: [label: string, count: 'events' | 'tasks'][] }
+> = {
+  github: {
+    scope: 'repositories this team tracks',
+    stats: [
+      ['events · 7d', 'events'],
+      ['became tasks', 'tasks'],
+    ],
+  },
+  jira: {
+    scope: 'projects this team watches',
+    stats: [
+      ['events · 7d', 'events'],
+      ['became tasks', 'tasks'],
+    ],
+  },
+  linear: {
+    scope: 'teams this team watches',
+    stats: [
+      ['events · 7d', 'events'],
+      ['became tasks', 'tasks'],
+    ],
+  },
+  slack: { scope: 'channels this team watches', stats: [['mentions · 7d', 'events']] },
+}
+
+/** The band's lines, one per source row, all meeting in one stream. */
+function flowPaths(rows: number): { d: string; opacity: number }[] {
+  return Array.from({ length: rows }, (_, i) => {
+    const step = rows > 1 ? i / (rows - 1) : 0
+    const y = rows > 1 ? 14 + 90 * step : 59
+    return {
+      d: `M8,${y} C68,${y} 78,59 136,59`,
+      opacity: Math.round((1 - 0.58 * step) * 100) / 100,
+    }
+  })
+}
 
 /** A headline figure. `null` reads as a dash — the question has not been answered. */
 function Figure({
@@ -158,23 +187,23 @@ export default function TeamSettings() {
   // Why a source cannot reach this org, per kind — null when it can, and null
   // while the read is unresolved, because greying a card on an answer we do
   // not have is worse than greying it late.
-  const { stateOf } = useEventSources()
+  const { loaded: sourcesRead, stateOf } = useEventSources()
   const sourceOff = useCallback(
     (kind: string) => sourceUnavailableReason(kind, stateOf(kind)),
     [stateOf],
   )
-  // Linear is a source once this deployment serves it: until then it is a
-  // "coming soon" card, and a `?source=linear` link opens nothing.
-  const linearState = stateOf('linear')
-  const linearLive = linearState !== undefined && linearState !== 'wip'
+  // The sources this page lists, on the same rule: every one until the read
+  // resolves, and after a failed read, which leaves it unresolved; then the
+  // ones it returned. The answer can only remove a source, and the one it
+  // removes is a source this deployment does not carry, whose page would
+  // have no routes to read.
   const sources = useMemo<SourceKind[]>(
-    () => (linearLive ? SOURCES : SOURCES.filter((s) => s !== 'linear')),
-    [linearLive],
+    () => (sourcesRead ? SOURCES.filter((k) => stateOf(k) !== undefined) : SOURCES),
+    [sourcesRead, stateOf],
   )
   const [filter, setFilter] = useState('')
   const [params, setParams] = useSearchParams()
-  const requested = SOURCES_BY_KEY[params.get('source') ?? ''] ?? null
-  const source = requested === 'linear' && !linearLive ? null : requested
+  const source = sources.find((k) => k === params.get('source')) ?? null
 
   const openSource = useCallback(
     (key: SourceKind) => {
@@ -472,7 +501,7 @@ export default function TeamSettings() {
               { name: 'Team', onClick: closeSource },
               { name: team?.name ?? 'Team', onClick: closeSource },
             ],
-            title: SOURCE_NAMES[source],
+            title: sourceLabel(source),
           }
         : { crumbs: [{ name: 'Team' }], title: team?.name ?? 'Team' },
     [team?.name, source, closeSource],
@@ -672,7 +701,7 @@ export default function TeamSettings() {
                   const line = (
                     <>
                       <span className="ts-flow-row-line">
-                        <span className="ts-flow-row-n">{SOURCE_NAMES[s]}</span>
+                        <span className="ts-flow-row-n">{sourceLabel(s)}</span>
                         <span className="ts-lead-flex" />
                         <span className="ts-flow-row-v">{events ?? '—'}</span>
                       </span>
@@ -698,17 +727,18 @@ export default function TeamSettings() {
                   )
                 })}
               </div>
-              {/* Three sources converging on one stream. Structural rather than
-                  plotted — there is no series behind it yet. */}
+              {/* One line per source in the band, all meeting in one stream.
+                  Structural rather than plotted — there is no series behind
+                  it yet. */}
               <svg
                 className="ts-flow-svg"
                 viewBox="0 0 140 118"
                 preserveAspectRatio="none"
                 aria-hidden="true"
               >
-                <path d="M8,14 C68,14 78,59 136,59" />
-                <path d="M8,59 L136,59" opacity="0.6" />
-                <path d="M8,104 C68,104 78,59 136,59" opacity="0.42" />
+                {flowPaths(sources.length).map((p) => (
+                  <path key={p.d} d={p.d} opacity={p.opacity} />
+                ))}
               </svg>
               <div className="ts-flow-stats">
                 <div className="ts-stat">
@@ -723,7 +753,7 @@ export default function TeamSettings() {
                 </div>
               </div>
             </div>
-            <span className="ts-panel-foot">last 7 days · repositories, projects, channels</span>
+            <span className="ts-panel-foot">last 7 days</span>
           </div>
         </div>
       </div>
@@ -878,8 +908,7 @@ export default function TeamSettings() {
                   <span className="ts-intro-t">Pick a source to configure</span>
                   <span className="ts-intro-p">
                     Every task this team runs starts as an event from one of these sources. Choose a
-                    source to set what it watches: which repositories send events, which Jira
-                    projects and statuses count, and which Slack channels the factory reads.
+                    source to set what it watches.
                   </span>
                 </div>
                 <div className="ts-intro-figs">
@@ -897,60 +926,23 @@ export default function TeamSettings() {
               </div>
 
               <div className="ts-srcgrid">
-                <SourceCard
-                  name="GitHub"
-                  source="github"
-                  state={sourceOff('github') ? 'unavailable' : 'configured'}
-                  scope="repositories this team tracks"
-                  stats={[
-                    ['events · 7d', activitySource(activity, 'github')?.events ?? '—'],
-                    ['became tasks', activitySource(activity, 'github')?.tasks ?? '—'],
-                  ]}
-                  note={sourceOff('github')}
-                  onClick={() => openSource('github')}
-                />
-                <SourceCard
-                  name="Jira"
-                  source="jira"
-                  state={sourceOff('jira') ? 'unavailable' : 'configured'}
-                  scope="projects this team watches"
-                  stats={[
-                    ['events · 7d', activitySource(activity, 'jira')?.events ?? '—'],
-                    ['became tasks', activitySource(activity, 'jira')?.tasks ?? '—'],
-                  ]}
-                  note={sourceOff('jira')}
-                  onClick={() => openSource('jira')}
-                />
-                {linearLive ? (
-                  <SourceCard
-                    name="Linear"
-                    source="linear"
-                    state={sourceOff('linear') ? 'unavailable' : 'configured'}
-                    scope="teams this team watches"
-                    stats={[
-                      ['events · 7d', activitySource(activity, 'linear')?.events ?? '—'],
-                      ['became tasks', activitySource(activity, 'linear')?.tasks ?? '—'],
-                    ]}
-                    note={sourceOff('linear')}
-                    onClick={() => openSource('linear')}
-                  />
-                ) : (
-                  <SourceCard
-                    name="Linear"
-                    state="soon"
-                    scope="coming soon"
-                    note="Issues and cycles, for teams that track work in Linear instead of Jira."
-                  />
-                )}
-                <SourceCard
-                  name="Slack"
-                  source="slack"
-                  state={sourceOff('slack') ? 'unavailable' : 'configured'}
-                  scope="channels this team watches"
-                  stats={[['mentions · 7d', activitySource(activity, 'slack')?.events ?? '—']]}
-                  note={sourceOff('slack')}
-                  onClick={() => openSource('slack')}
-                />
+                {sources.map((s) => {
+                  const counts = activitySource(activity, s)
+                  return (
+                    <SourceCard
+                      key={s}
+                      name={sourceLabel(s)}
+                      source={s}
+                      state={sourceOff(s) ? 'unavailable' : 'configured'}
+                      scope={SOURCE_CARDS[s].scope}
+                      stats={SOURCE_CARDS[s].stats.map(
+                        ([label, count]): SourceStat => [label, counts?.[count] ?? '—'],
+                      )}
+                      note={sourceOff(s)}
+                      onClick={() => openSource(s)}
+                    />
+                  )
+                })}
                 <SourceCard
                   name="Schedule"
                   state="soon"
