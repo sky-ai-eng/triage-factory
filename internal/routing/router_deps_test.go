@@ -26,8 +26,6 @@ import (
 func testRouterDeps(database *sql.DB) RouterDeps {
 	st := sqlitestore.New(database)
 	return RouterDeps{
-		Prompts:       st.Prompts,
-		Blueprints:    st.Blueprints,
 		Handlers:      st.EventHandlers,
 		Agents:        st.Agents,
 		TeamAgents:    st.TeamAgents,

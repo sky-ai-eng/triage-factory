@@ -97,6 +97,10 @@ func (a *App) startBrain(term int64) {
 	// that is still going once a close has held for TF_CLOSE_HOLD_TIMEOUT is
 	// stopped. One sweeper across every org, like the workers above.
 	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval, a.closeHoldTimeout)
+	// Breaker sync: resolves the tripped-breaker notifications whose breakers
+	// no longer hold — a person's run completed, the entity closed, the
+	// trigger changed — none of which reaches the gate that opened them.
+	go a.router.RunBreakerSync(brainCtx, routing.DefaultBreakerSyncInterval)
 	// Terminal-state invariant checker: read-only. Counts the entities the
 	// poll's enforcement should have closed and did not — active with a
 	// terminal snapshot, past the grace, no close in flight — and the tasks

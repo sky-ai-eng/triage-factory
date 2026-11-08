@@ -684,16 +684,6 @@ type TaskStore interface {
 	// conformance testing and same-team callers where RLS naturally holds.
 	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
 
-	// --- Breaker ---
-
-	// CountConsecutiveFailedConversations counts consecutive non-success
-	// auto-fired conversations at the tail of the conversation history for
-	// (entity_id, prompt_id), stopping at the first success: a completed
-	// blueprint run, or a conversation with no blueprint that concluded with
-	// a verdict. Chain instances count once, not once-per-step. Used by the router to check
-	// the circuit-breaker threshold.
-	CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error)
-
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// These mirror the per-method shape of the corresponding app-pool
@@ -929,8 +919,25 @@ type TaskStore interface {
 	// only when the stamp actually moved the claim — a refusal commits the
 	// fold anyway.
 	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
-	CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
+
+	// --- Breaker ---
+	//
+	// A trigger's breaker is keyed on its blueprint: every run a trigger
+	// fires is a blueprint run, and event_handlers_one_trigger_per_blueprint
+	// gives each blueprint one live trigger. It counts blueprint runs, so a
+	// run of several steps counts once.
+
+	// BreakerStreakSystem counts the failed and aborted blueprint runs of
+	// blueprintID that an event fired on entityID's tasks and that no
+	// resetting run started at or after: a completed run of the same
+	// blueprint, or a completed run a person started on the entity, of any
+	// blueprint. A person's failed run neither counts nor resets.
+	BreakerStreakSystem(ctx context.Context, orgID, entityID, blueprintID string) (domain.BreakerStreak, error)
+	// ListTrippedBreakersSystem returns every enabled, undeleted trigger in
+	// the org whose BreakerStreakSystem on an active entity has reached its
+	// breaker_threshold, ordered by trigger id then entity id.
+	ListTrippedBreakersSystem(ctx context.Context, orgID string) ([]domain.TrippedBreaker, error)
 
 	// ReassignClaimToUserSystem is ReassignClaimToUser routed through the
 	// admin pool (BYPASSRLS) in Postgres — see the doc comment on

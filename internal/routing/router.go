@@ -101,8 +101,6 @@ type EventPublisher interface {
 type Router struct {
 	// One field per RouterDeps field, which documents each. The workers'
 	// doorbells below are the router's own.
-	prompts       dbpkg.PromptStore
-	blueprints    dbpkg.BlueprintStore
 	handlers      dbpkg.EventHandlerStore
 	agents        dbpkg.AgentStore
 	teamAgents    dbpkg.TeamAgentStore
@@ -145,12 +143,6 @@ type Router struct {
 // and NewRouter refuses a RouterDeps without it, or nil-safe, and its doc says
 // what the router does without it. Production wires every field.
 type RouterDeps struct {
-	// Prompts reads the name of the prompt a tripped breaker reports in its
-	// toast. Required.
-	Prompts dbpkg.PromptStore
-	// Blueprints resolves a trigger's blueprint to its first step's prompt,
-	// which the per-(entity, prompt) breaker keys on. Required.
-	Blueprints dbpkg.BlueprintStore
 	// Handlers is the event_handlers store: the rules and triggers an event
 	// matches, and the trigger a queued firing names. Required.
 	Handlers dbpkg.EventHandlerStore
@@ -246,8 +238,6 @@ func (d RouterDeps) missing() []string {
 		name  string
 		value any
 	}{
-		{"Prompts", d.Prompts},
-		{"Blueprints", d.Blueprints},
 		{"Handlers", d.Handlers},
 		{"Tasks", d.Tasks},
 		{"Conversations", d.Conversations},
@@ -301,8 +291,6 @@ func NewRouter(deps RouterDeps) (*Router, error) {
 		return nil, fmt.Errorf("routing: RouterDeps missing required %s", strings.Join(missing, ", "))
 	}
 	return &Router{
-		prompts:       deps.Prompts,
-		blueprints:    deps.Blueprints,
 		handlers:      deps.Handlers,
 		agents:        deps.Agents,
 		teamAgents:    deps.TeamAgents,
@@ -331,25 +319,6 @@ func NewRouter(deps RouterDeps) (*Router, error) {
 		firingWake:    make(chan struct{}, 1),
 		rederiveWake:  make(chan struct{}, 1),
 	}, nil
-}
-
-// breakerPromptID resolves the prompt id the auto-delegate breaker keys on
-// for a trigger. The trigger fires a blueprint; the breaker tracks failed
-// runs per (entity, prompt), and runs are prompt-keyed, so it tracks the
-// blueprint's first step prompt — exactly the wrapped prompt for the 1-step
-// blueprints every shipped trigger uses. Returns "" when the blueprint or its
-// steps can't be resolved (CountConsecutiveFailedConversationsSystem then matches no
-// runs → breaker never trips, the safe default that doesn't block
-// auto-delegation on a transient read error).
-func (r *Router) breakerPromptID(ctx context.Context, orgID, blueprintID string) string {
-	if blueprintID == "" {
-		return ""
-	}
-	steps, err := r.blueprints.ListStepsSystem(ctx, orgID, blueprintID)
-	if err != nil || len(steps) == 0 {
-		return ""
-	}
-	return steps[0].StepPromptID
 }
 
 // autoDelegateEnabledForTeam returns the team's auto_delegate_enabled

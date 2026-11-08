@@ -296,13 +296,12 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			return
 		}
 	}
-	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(unitCtx, f.OrgID, f.EntityID, r.breakerPromptID(unitCtx, f.OrgID, trigger.BlueprintID))
+	tripped, err := r.breakerHolds(unitCtx, f.OrgID, *trigger, f.EntityID, task.EntitySourceID)
 	if err != nil {
 		requeue(workitem.OutcomeTransient, fmt.Errorf("breaker query: %w", err))
 		return
 	}
-	if failures >= breakerThreshold {
+	if tripped {
 		skip(domain.PendingFiringSkipBreakerTripped)
 		return
 	}

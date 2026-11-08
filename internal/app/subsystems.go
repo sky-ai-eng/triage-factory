@@ -465,8 +465,6 @@ func (a *App) buildRouting() error {
 	// matching triggers, runs inline close checks. It drains the durable
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
 	router, err := routing.NewRouter(routing.RouterDeps{
-		Prompts:       a.stores.Prompts,
-		Blueprints:    a.stores.Blueprints,
 		Handlers:      a.stores.EventHandlers,
 		Agents:        a.stores.Agents,
 		TeamAgents:    a.stores.TeamAgents,

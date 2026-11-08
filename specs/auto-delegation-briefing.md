@@ -98,7 +98,7 @@ When a trigger fires for an entity that **already has a live auto run**, the rou
 Two consequences if you're the agent working the run:
 
 - **Your conversation can grow mid-run.** A run isn't a snapshot of one triggering event: more same-task events (a new Slack follow-up in the thread, a re-fired CI failure) can arrive as injected user messages while you're working. Treat a later injection as the current intent.
-- **Absorbed means absorbed.** There's no separate compensation path for a folded-in event. If the run fails, that event fails with it, and the per-(entity, prompt) breaker owns repeated failure uniformly — the same posture as the original triggering event.
+- **Absorbed means absorbed.** There's no separate compensation path for a folded-in event. If the run fails, that event fails with it, and the per-(entity, trigger) breaker owns repeated failure uniformly — the same posture as the original triggering event.
 
 This replaced the old per-event-type `Additive` boolean (now deleted): absorption is one universal, task-scoped rule rather than a flag each new event type had to opt into, which also makes cross-task absorption (folding a follow-up into an _unrelated_ task's run) structurally impossible. Same task ⇒ same owning team, so no principal-boundary guard is needed. The gate lives in `internal/routing`'s `tryAutoDelegate` (`delegation.go`).
 
