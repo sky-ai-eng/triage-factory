@@ -11,21 +11,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
-// queues. Order of checks: breaker (per-(entity,prompt)) → task gate
-// (per-task, auto-only) → fire or enqueue.
+// queues. Order of checks: task gate (per-task, auto-only) → fold into the
+// task's live conversation → breaker (per-(entity, trigger)) → fire or
+// enqueue.
 //
-// Breaker is a hard skip — a tripped breaker means the user has work to
-// investigate before more conversations land on this entity-prompt pair.
-// Queueing past it would just stack stale firings the user didn't ask for. It stays
-// entity-scoped on purpose: repeated failures of one prompt against one
-// entity are the signal, whichever task carried them.
+// Breaker is a hard skip for a firing that would start or queue a run — a
+// tripped breaker means the user has work to investigate before more
+// conversations land on this entity for this trigger. Queueing past it would
+// just stack stale firings the user didn't ask for. It stays entity-scoped on
+// purpose: repeated failures of one trigger against one entity are the
+// signal, whichever task carried them. Folding the event into a conversation
+// already live on the task starts no run, so the breaker does not stand in
+// its way: that conversation is often the person's own run that would reset
+// the breaker, and the event belongs in front of it.
 //
 // The task gate is the serialization point: at most one conversation in
 // flight per task, whichever trigger it came from and whoever started it. A
@@ -133,7 +137,13 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 			// through to the normal deferral so the firing is never silently
 			// dropped.
 		}
+		if tripped, err := r.breakerGate(ctx, orgID, task, trigger, entityID); err != nil || tripped {
+			return false, err
+		}
 		return r.enqueueBusyFiring(ctx, orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
+	}
+	if tripped, err := r.breakerGate(ctx, orgID, task, trigger, entityID); err != nil || tripped {
+		return false, err
 	}
 
 	// The firing is one transaction (see BlueprintStore.CreateRunWithFirstStepSystem):
@@ -201,12 +211,13 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 // autoDelegatePreflight runs the checks every auto-fired trigger passes
 // before its firing is decided, at event time and at the post-scoring
 // re-evaluation alike: the held-close skip, the cross-team exclusive-claim
-// skip, the org agent resolution, the per-team team_agents.enabled gate, and
-// the breaker. It
-// returns the agent the firing runs as and claims for; proceed=false is a
+// skip, the org agent resolution, and the per-team team_agents.enabled gate.
+// It returns the agent the firing runs as and claims for; proceed=false is a
 // decided skip, logged where each check finds it, and a non-nil error is a
 // read that reached no verdict, which the caller retries rather than treats
-// as a decision. The breaker toast fires from here, so both callers keep it.
+// as a decision. The breaker is not among them: it bars a new run, not an
+// event folded into a live one, so each caller applies breakerGate where it
+// would start or queue a run.
 func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, actingTeamID string) (agentID string, proceed bool, err error) {
 	// An event has resolved the task and its close waits only for the work
 	// already on it, so nothing starts more.
@@ -294,40 +305,21 @@ func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *
 			}
 		}
 	}
-	// Breaker gate. trigger.BreakerThreshold is *int because the column
-	// is nullable at the schema level (rule rows have NULL); kind='trigger'
-	// rows are guaranteed non-nil by the per-kind CHECK constraint. The
-	// breaker keys on the blueprint's first step prompt (runs are prompt-
-	// keyed; for the 1-step blueprints every shipped trigger uses, that is
-	// the wrapped prompt — identical to the pre-blueprint behavior).
-	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	breakerPromptID := r.breakerPromptID(ctx, orgID, trigger.BlueprintID)
-	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, entityID, breakerPromptID)
-	if err != nil {
-		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
-		return "", false, fmt.Errorf("breaker query: %w", err)
-	}
-	if failures >= breakerThreshold {
-		routerLog.Info("breaker tripped",
-			"entity", entityID, "prompt", breakerPromptID, "failures", failures, "threshold", breakerThreshold)
-		// Look up prompt name for the toast — opportunistic, falls back to a
-		// generic message if the lookup fails since the breaker trip itself
-		// is the load-bearing signal. One toast per trip (happens rarely).
-		promptName := ""
-		if p, perr := r.prompts.GetSystem(ctx, orgID, breakerPromptID); perr == nil && p != nil {
-			promptName = p.Name
-		}
-		if promptName == "" {
-			promptName = "prompt"
-		}
-		// TODO(TFAC-1344): this toast reaches every member of the org and names
-		// a team's prompt; a trip is a condition for the trigger's team members,
-		// resolved when a manual run on the entity completes.
-		toast.Warning(r.ws, orgID, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
-		return "", false, nil
-	}
-
 	return agentID, true, nil
+}
+
+// breakerGate reports whether trigger's breaker bars a run on entityID: its
+// runs there kept failing, so it starts none there until a person's run
+// completes. A breaker that holds raises the notification that tells the
+// trigger's team (breakerHolds). A non-nil error is a read that reached no
+// verdict.
+func (r *Router) breakerGate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string) (bool, error) {
+	tripped, err := r.breakerHolds(ctx, orgID, trigger, entityID, task.EntitySourceID)
+	if err != nil {
+		routerLog.Error("breaker query failed", "entity", entityID, "trigger", trigger.ID, "error", err)
+		return false, fmt.Errorf("breaker query: %w", err)
+	}
+	return tripped, nil
 }
 
 // enqueueBusyFiring defers a valid firing onto pending_firings because the

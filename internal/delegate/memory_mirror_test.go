@@ -355,7 +355,7 @@ func TestRecordNativeResult_FailureFilesTheAgentsMemoryFile(t *testing.T) {
 
 	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID, task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, blueprintRunID: "bpr-" + conversationID, claimID: holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID)},
-		"bpr-"+conversationID, cwd, "event", "", time.Now(),
+		"bpr-"+conversationID, cwd, "", time.Now(),
 		agentloop.Result{Kind: agentloop.ResultFailed, FailureKind: domain.ConversationFailureAgentError}, mirror,
 	).fenced; fenced {
 		t.Fatal("recordNativeResult reported a fence trip on an unfenced store")
@@ -379,7 +379,7 @@ func TestProcessCompletion_ConclusionFilesWhatTheLastTurnWrote(t *testing.T) {
 	writeAgentMemory(t, cwd, "what the run actually concluded")
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", "event", "")
+		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", "")
 	if parked || fenced {
 		t.Fatalf("processCompletion(finish) = (parked %v, fenced %v), want (false, false)", parked, fenced)
 	}

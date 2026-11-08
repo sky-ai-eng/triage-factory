@@ -678,10 +678,6 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 	return eventID, nil
 }
 
-func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return s.CountConsecutiveFailedConversations(ctx, orgID, entityID, promptID)
-}
-
 func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	return s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, actingTeamID)
 }
@@ -1928,53 +1924,81 @@ func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserI
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+// breakerFailureSQL is a run, over the caller's aliases for a blueprint_runs
+// row and its task, that counts toward its trigger's breaker: event-fired,
+// failed or aborted, and with no run on the same entity that resets the
+// breaker started at or after it. The Postgres twin in
+// internal/db/postgres/tasks.go is the same predicate with the org bound on
+// every join; blueprint_runs has no org_id column here.
+func breakerFailureSQL(run, task string) string {
+	return run + `.trigger_type = 'event'
+		AND ` + run + `.status IN ('failed', 'aborted')
+		AND NOT EXISTS (
+			SELECT 1 FROM blueprint_runs ok
+			JOIN tasks okt ON okt.id = ok.task_id
+			WHERE okt.entity_id = ` + task + `.entity_id
+			  AND ok.status = 'completed'
+			  AND (ok.trigger_type = 'manual' OR ok.blueprint_id = ` + run + `.blueprint_id)
+			  AND ok.started_at >= ` + run + `.started_at)`
+}
+
+func (s *taskStore) BreakerStreakSystem(ctx context.Context, orgID, entityID, blueprintID string) (domain.BreakerStreak, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return 0, err
+		return domain.BreakerStreak{}, err
 	}
-	var count int
+	var streak domain.BreakerStreak
+	var conversationID sql.NullString
 	err := s.q.QueryRowContext(ctx, `
-		WITH recent AS (
-			SELECT
-				CASE
-					WHEN r.blueprint_run_id IS NULL THEN 'leaf'
-					ELSE 'blueprint'
-				END AS kind,
-				r.blueprint_run_id,
-				CASE WHEN cr.id IS NOT NULL THEN cr.status
-				     WHEN `+db.ConcludedConversationSQL("r")+` THEN 'completed'
-				     ELSE r.status END AS status,
-				COALESCE(cr.started_at, r.started_at) AS started_at,
-				ROW_NUMBER() OVER (
-					PARTITION BY COALESCE(r.blueprint_run_id, r.id)
-					ORDER BY r.started_at ASC
-				) AS step_rank
-			FROM conversations r
-			JOIN tasks t ON r.task_id = t.id
-			LEFT JOIN blueprint_runs cr ON cr.id = r.blueprint_run_id
-			WHERE t.entity_id = ?
-				AND (
-					(r.blueprint_run_id IS NULL AND r.prompt_id = ?)
-					OR (cr.blueprint_id = ?)
-				)
-				AND r.trigger_type = 'event'
-		),
-		dedup AS (
-			SELECT status, started_at
-			FROM recent
-			WHERE step_rank = 1
-			ORDER BY started_at DESC
-			LIMIT 20
-		)
-		SELECT COUNT(*)
-		FROM dedup
-		WHERE status IN ('failed', 'aborted')
-			AND started_at > (
-				SELECT COALESCE(MAX(started_at), '1970-01-01')
-				FROM dedup WHERE status = 'completed'
-			)
-	`, entityID, promptID, promptID).Scan(&count)
-	return count, err
+		SELECT COUNT(*) OVER (),
+		       (SELECT c.id FROM conversations c
+		         WHERE c.blueprint_run_id = br.id
+		         ORDER BY c.started_at DESC, c.id DESC LIMIT 1)
+		FROM blueprint_runs br
+		JOIN tasks t ON t.id = br.task_id
+		WHERE t.org_id = ? AND t.entity_id = ? AND br.blueprint_id = ?
+		  AND `+breakerFailureSQL("br", "t")+`
+		ORDER BY br.started_at DESC, br.id DESC
+		LIMIT 1
+	`, orgID, entityID, blueprintID).Scan(&streak.Failures, &conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.BreakerStreak{}, nil
+	}
+	if err != nil {
+		return domain.BreakerStreak{}, err
+	}
+	streak.LastConversationID = conversationID.String
+	return streak, nil
+}
+
+func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string) ([]domain.TrippedBreaker, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT h.id, t.entity_id
+		FROM event_handlers h
+		JOIN blueprint_runs br ON br.blueprint_id = h.blueprint_id
+		JOIN tasks t ON t.id = br.task_id AND t.org_id = h.org_id
+		JOIN entities e ON e.id = t.entity_id AND e.state = 'active'
+		WHERE h.org_id = ? AND h.kind = 'trigger' AND h.enabled AND h.deleted_at IS NULL
+		  AND `+breakerFailureSQL("br", "t")+`
+		GROUP BY h.id, t.entity_id, h.breaker_threshold
+		HAVING COUNT(*) >= h.breaker_threshold
+		ORDER BY h.id, t.entity_id
+	`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.TrippedBreaker
+	for rows.Next() {
+		var b domain.TrippedBreaker
+		if err := rows.Scan(&b.TriggerID, &b.EntityID); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 // --- Internal helpers ---

@@ -341,7 +341,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	_ = tools.Close()
 	stopJail()
 
-	return s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, mirror)
+	return s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, creatorUserID, startTime, result, mirror)
 }
 
 // executorChangedSince reports whether the engagement before this one ran on
@@ -802,7 +802,7 @@ func (s *Spawner) recordNativeResult(
 	orgID, conversationID string,
 	task domain.Task,
 	cfg runConfig,
-	namespace, claudeCwd, triggerType, creatorUserID string,
+	namespace, claudeCwd, creatorUserID string,
 	startTime time.Time,
 	result agentloop.Result,
 	mirror *memoryMirror,
@@ -911,7 +911,7 @@ func (s *Spawner) recordNativeResult(
 			reason = result.Err.Error()
 		}
 		s.releaseActivity(conversationID, cfg.claimID)
-		return engagementDisposition{fenced: s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, reason, result.FailureKind)}
+		return engagementDisposition{fenced: s.failConversation(orgID, conversationID, task.ID, cfg.claimID, reason, result.FailureKind)}
 
 	case agentloop.ResultUpstreamUnavailable:
 		// The provider could not serve the call through the loop's own
@@ -1056,7 +1056,6 @@ func (s *Spawner) recordNativeResult(
 	if updated != nil {
 		broadcastStatus = updated.Status
 	}
-	s.updateBreakerCounter(task.ID, triggerType, domain.StatusOpen)
 	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	return engagementDisposition{}

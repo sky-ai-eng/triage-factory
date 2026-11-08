@@ -83,7 +83,7 @@ func TestShutdown_NativeEngagementIsHandedBackAndTheNextClaimContinuesIt(t *test
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil)
+		"", "", runmode.LocalDefaultUserID, time.Now(), result, nil)
 	if !disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want handed back and unfenced", disp)
 	}
@@ -178,7 +178,7 @@ func TestShutdown_AStopPendingAtTheHandBackIsSettledByTheNextDispatcher(t *testi
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(),
+		"", "", runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil)
 	if !disp.handedBack {
 		t.Fatalf("disposition = %+v, want handed back — the shutdown reached the engagement first", disp)
@@ -211,7 +211,7 @@ func TestShutdown_AStopThatLandedFirstStillParks(t *testing.T) {
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(),
+		"", "", runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil)
 	if disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want a plain park", disp)

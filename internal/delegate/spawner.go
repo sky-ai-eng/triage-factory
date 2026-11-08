@@ -1694,14 +1694,6 @@ func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {
 	})
 }
 
-// updateBreakerCounter is a no-op stub. The breaker is now query-based
-// (see routing.Router + db.CountConsecutiveFailedConversations). Kept as a call site
-// placeholder until all callers are cleaned up.
-func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
-	// Breaker is query-based now — no per-task counter to update.
-	// See internal/routing/router.go and internal/db/tasks.go.
-}
-
 // broadcastConversationUpdate stamps the run's owning org on the event so the
 // hub's per-connection scoping filter routes it only to clients
 // authed against that tenant. Every caller is inside a goroutine

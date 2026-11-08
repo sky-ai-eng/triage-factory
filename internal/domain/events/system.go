@@ -86,7 +86,9 @@ func (p SystemDelegationFailedPredicate) Matches(m SystemDelegationFailedMetadat
 }
 
 // -----------------------------------------------------------------------------
-// system:prompt:auto_suspended — per-(entity, prompt) breaker tripped.
+// system:prompt:auto_suspended — in the catalog, never emitted. A tripped
+// breaker, which is per (entity, trigger), is the routing.breaker_tripped
+// notification.
 // -----------------------------------------------------------------------------
 
 type SystemPromptAutoSuspendedMetadata struct {

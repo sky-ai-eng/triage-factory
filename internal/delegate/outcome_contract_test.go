@@ -78,7 +78,7 @@ func TestProcessCompletion_AFinishedTurnConcludesContinue(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res("Shipped it."), cwd, nil, "", "event", "")
+		res("Shipped it."), cwd, nil, "", "")
 
 	conv := loadConversation(t, s, conversationID)
 	if !conv.Concluded() {
@@ -105,7 +105,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		stopped(domain.ConversationOutcomeAbort, "needs a human to rotate the token", "investigated the failure"),
-		cwd, nil, "", "event", "")
+		cwd, nil, "", "")
 
 	conv := loadConversation(t, s, conversationID)
 	if !conv.Concluded() {
@@ -139,7 +139,7 @@ func TestProcessCompletion_StopBlueprintRecordsTheCall(t *testing.T) {
 	stop := stopped(domain.ConversationOutcomeFinish, "nothing to review", "checked the diff")
 	stop.Result = "Ending the workflow here."
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		stop, cwd, nil, "", "event", "")
+		stop, cwd, nil, "", "")
 
 	conv := loadConversation(t, s, conversationID)
 	if !conv.Concluded() || conv.Outcome != "finish" {
@@ -161,7 +161,7 @@ func TestProcessCompletion_AnUnfinishedTurnParksOpenWithANote(t *testing.T) {
 	cwd := t.TempDir()
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", "event", "")
+		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", "")
 
 	if !parked || fenced {
 		t.Errorf("processCompletion(refusal) = (parked %v, fenced %v), want (true, false): open, not terminal", parked, fenced)

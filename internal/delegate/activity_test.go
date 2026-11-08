@@ -527,7 +527,7 @@ func TestNativeStall_ProviderWithNoFirstByteHandsBackUpstream(t *testing.T) {
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil)
+		"", "", runmode.LocalDefaultUserID, time.Now(), result, nil)
 	if !disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want handed back and unfenced", disp)
 	}
@@ -573,7 +573,7 @@ func TestNativeStall_ProviderStallAtTheEndOfTheBudgetParksUpstream(t *testing.T)
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, upstreamHandBacks: maxUpstreamHandBacks - 1},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil)
+		"", "", runmode.LocalDefaultUserID, time.Now(), result, nil)
 	if disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want a park", disp)
 	}
@@ -624,7 +624,7 @@ func TestNativeStall_BlockedToolParksStalledNotFailed(t *testing.T) {
 
 	if disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil); disp.fenced || disp.handedBack {
+		"", "", runmode.LocalDefaultUserID, time.Now(), result, nil); disp.fenced || disp.handedBack {
 		t.Fatalf("the stalled engagement reported %+v; it still holds its claim and parks", disp)
 	}
 	if got := storedStatus(t, f.database, f.conversationID); got == "failed" {

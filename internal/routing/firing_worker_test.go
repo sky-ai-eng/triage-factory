@@ -422,7 +422,7 @@ func TestFiringWorker_DisabledTrigger(t *testing.T) {
 }
 
 // TestFiringWorker_BreakerTripped: a breaker at its threshold declines the
-// firing rather than stacking another run on the entity-prompt pair.
+// firing rather than stacking another run of the trigger on the entity.
 func TestFiringWorker_BreakerTripped(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)

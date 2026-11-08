@@ -309,7 +309,7 @@ func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
-		&agentproc.Result{StopReason: "refusal"}, t.TempDir(), nil, "", "event", "")
+		&agentproc.Result{StopReason: "refusal"}, t.TempDir(), nil, "", "")
 	if !fenced {
 		t.Fatal("a refused park note reported unfenced; the caller would react to a run it no longer owns")
 	}
@@ -341,7 +341,7 @@ func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 
 	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
-		res("done"), t.TempDir(), nil, "", "event", "")
+		res("done"), t.TempDir(), nil, "", "")
 	if !fenced {
 		t.Fatal("processCompletion did not report the fence trip; the caller would react to a run it no longer owns")
 	}
@@ -383,7 +383,7 @@ func TestProcessCompletion_SelfFencedLeaseRecordsNothing(t *testing.T) {
 
 	parked, fenced := s.processCompletion(ctx, runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
-		res("done"), t.TempDir(), nil, "", "event", "")
+		res("done"), t.TempDir(), nil, "", "")
 	if !fenced {
 		t.Fatal("a self-fenced completion reported unfenced; the caller would advance the blueprint off a result nobody owns")
 	}
@@ -409,7 +409,7 @@ func TestFailConversation_FenceTripRecordsNothing(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-fail")
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
-	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "claim-1", "event", "boom", domain.ConversationFailureCrash); !fenced {
+	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "claim-1", "boom", domain.ConversationFailureCrash); !fenced {
 		t.Fatal("failConversation did not report the fence trip; the dispatcher would react to a run it no longer owns")
 	}
 
@@ -566,7 +566,7 @@ func TestRecordNativeResult_SelfFencedLeaseRecordsNothing(t *testing.T) {
 	if fenced := s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID,
 		loadTask(t, s, taskID),
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: "claim-1"},
-		"ns-"+conversationID, t.TempDir(), "event", "", time.Now(),
+		"ns-"+conversationID, t.TempDir(), "", time.Now(),
 		agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish, ResultSummary: "done"},
 		nil).fenced; !fenced {
 		t.Fatal("a self-fenced conclusion reported unfenced; the caller would advance the blueprint off a result nobody owns")

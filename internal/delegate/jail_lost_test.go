@@ -60,7 +60,7 @@ func TestJailLost_TheConversationGoesOnInANewCell(t *testing.T) {
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil)
+		"", "", runmode.LocalDefaultUserID, time.Now(), result, nil)
 	if !disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want handed back and unfenced", disp)
 	}
@@ -147,7 +147,7 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	reason := "the sandbox reached its 4096 MB memory limit and the kernel ended it"
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, jailLosses: maxJailLosses - 1},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(),
+		"", "", runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultToolHostLost, Err: &agentloop.ToolHostLostError{Reason: reason, MemoryLimit: true, Err: io.EOF}}, nil)
 	if disp.handedBack || disp.fenced {
 		t.Fatalf("disposition = %+v, want a park", disp)
@@ -213,7 +213,7 @@ func TestJailLost_AParkThatLandsNothingIsNotCountedOrAnnounced(t *testing.T) {
 
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, jailLosses: maxJailLosses - 1},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(),
+		"", "", runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultToolHostLost, Err: &agentloop.ToolHostLostError{
 			Reason: "the sandbox reached its 4096 MB memory limit and the kernel ended it", MemoryLimit: true, Err: io.EOF,
 		}}, nil)

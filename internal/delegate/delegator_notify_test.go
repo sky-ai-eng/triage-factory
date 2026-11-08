@@ -48,11 +48,11 @@ func TestFailConversation_TellsTheDelegatorOnlyOfAFailureItRecorded(t *testing.T
 	if _, err := settled.database.Exec(`UPDATE conversations SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?`, domain.StatusOpen, settled.conversationID); err != nil {
 		t.Fatalf("settle the conversation: %v", err)
 	}
-	settled.s.failConversation(runmode.LocalDefaultOrgID, settled.conversationID, settled.task.ID, settled.claimID, "manual", "late", domain.ConversationFailureCrash)
+	settled.s.failConversation(runmode.LocalDefaultOrgID, settled.conversationID, settled.task.ID, settled.claimID, "late", domain.ConversationFailureCrash)
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationFailed)
 
 	f := newStallFixture(t, "r-fail-recorded", activityTimings{idle: time.Hour})
-	f.s.failConversation(runmode.LocalDefaultOrgID, f.conversationID, f.task.ID, f.claimID, "manual", "exit 1", domain.ConversationFailureCrash)
+	f.s.failConversation(runmode.LocalDefaultOrgID, f.conversationID, f.task.ID, f.claimID, "exit 1", domain.ConversationFailureCrash)
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.ConversationFailed, f.conversationID)
 }
 

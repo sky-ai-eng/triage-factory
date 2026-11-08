@@ -98,7 +98,7 @@ func (f upstreamFixture) record(t *testing.T, upstreamHandBacks int) engagementD
 	t.Helper()
 	return f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, upstreamHandBacks: upstreamHandBacks},
-		f.namespace, f.wtPath, "manual", runmode.LocalDefaultUserID, time.Now(), f.result, nil)
+		f.namespace, f.wtPath, runmode.LocalDefaultUserID, time.Now(), f.result, nil)
 }
 
 // nextAttemptIn reads next_attempt_at as an offset from database now, on the

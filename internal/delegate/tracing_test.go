@@ -459,7 +459,7 @@ func TestNativeTerminalEmitsEngagementComplete(t *testing.T) {
 			res.CostUSD, res.DurationMs, res.NumTurns = 0.4217, 81234, 7
 			disp := s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID, task,
 				runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
-				namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(), res, nil)
+				namespace, t.TempDir(), runmode.LocalDefaultUserID, time.Now(), res, nil)
 			if disp.fenced != (tc.want == "fenced") {
 				t.Fatalf("disposition fenced = %v, but the case expects outcome %q", disp.fenced, tc.want)
 			}
@@ -523,7 +523,7 @@ func TestSDKTerminalNamesItsRuntime(t *testing.T) {
 			completion := &agentproc.Result{StopReason: tc.stopReason, Result: "shipped it"}
 			completion.CostUSD, completion.DurationMs, completion.NumTurns = 0.137, 4200, 3
 			s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, claimID,
-				loadTask(t, s, taskID), completion, t.TempDir(), nil, "", "event", "")
+				loadTask(t, s, taskID), completion, t.TempDir(), nil, "", "")
 
 			span := completionSpanFor(t, read(), conversationID)
 			if got := spanAttr(t, span, "runtime").AsString(); got != domain.ConversationRuntimeSDK {

@@ -398,7 +398,7 @@ func TestCheckpoint_AnEndingDuringASlowUploadOwnsTheRecordAndTheBlob(t *testing.
 	writeFile(t, state, "as the ending left it")
 	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		f.keyID, f.tree, "manual", runmode.LocalDefaultUserID, time.Now(),
+		f.keyID, f.tree, runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultParked, ParkNotice: "spend cap"}, nil)
 	if disp.fenced {
 		t.Fatalf("disposition = %+v, want the park to land", disp)
