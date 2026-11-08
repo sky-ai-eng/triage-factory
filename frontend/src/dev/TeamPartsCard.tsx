@@ -49,6 +49,17 @@ export function TeamPartsCard() {
           onClick={() => setAnswered('opened Jira')}
         />
         <SourceCard
+          name="Linear"
+          source="linear"
+          state="configured"
+          scope="ENG · 2 teams"
+          stats={[
+            ['events · 7d', 41],
+            ['became tasks', 6, 'warm'],
+          ]}
+          onClick={() => setAnswered('opened Linear')}
+        />
+        <SourceCard
           name="Slack"
           source="slack"
           state="unavailable"
