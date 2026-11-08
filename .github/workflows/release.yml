@@ -107,3 +107,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+
+  # Rebuild www.triagefactory.com so its releases timeline shows this
+  # release. The site reads the release list (versions and dates, not the
+  # changelog) from GitHub when it builds; a Vercel deploy hook starts that
+  # build. It runs after goreleaser so the release exists on both paths
+  # above: a release-please release and a hand-pushed tag. A failed or
+  # missing hook doesn't fail the release.
+  website:
+    needs: [goreleaser]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions: {}
+    steps:
+      - name: Trigger the website's deploy hook
+        env:
+          HOOK: ${{ secrets.WWW_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "WWW_DEPLOY_HOOK isn't set; skipping the website rebuild"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Website rebuild requested"
