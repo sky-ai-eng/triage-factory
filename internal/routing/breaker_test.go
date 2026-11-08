@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
@@ -73,8 +74,8 @@ func trippedTrigger(t *testing.T, database *sql.DB) (entityID, taskID, eventID s
 		t.Fatalf("read trigger: %v", err)
 	}
 	trigger = *got
-	// The bug this guards against keyed the breaker on the blueprint's step
-	// prompt, which only ever matched when the two shared an id.
+	// A breaker keyed on the step prompt would count these runs only if the
+	// two shared an id, so the fixture keeps them apart.
 	if trigger.BlueprintID == "p-drain-1" {
 		t.Fatalf("the trigger's blueprint shares its step prompt's id; the test needs them apart")
 	}
@@ -140,25 +141,67 @@ func TestBreaker_BelowTheThresholdNothingTrips(t *testing.T) {
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 }
 
-// TestBreaker_TheEventTimeGateTellsTheTeamToo: the preflight every event-time
-// and re-derived firing passes refuses at the breaker and raises the same
-// notification the firing worker does.
+// TestBreaker_TheEventTimeGateTellsTheTeamToo: an event-time firing on a task
+// with nothing live on it is refused at the breaker, starts no run, and raises
+// the same notification the firing worker does.
 func TestBreaker_TheEventTimeGateTellsTheTeamToo(t *testing.T) {
 	database := newTestDB(t)
 	rec := notifytest.Record(t)
 	seedLocalBot(t, database)
-	entityID, taskID, _, trigger, _ := trippedTrigger(t, database)
-	r := newTestRouter(testRouterDeps(database))
+	entityID, taskID, eventID, trigger, _ := trippedTrigger(t, database)
+	stub := &stubDelegator{db: database}
+	r := drainRouter(database, sqlitestore.New(database).PendingFirings, stub)
 	task, err := sqlitestore.New(database).Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID)
 	if err != nil || task == nil {
 		t.Fatalf("read task: %v", err)
 	}
 
-	_, proceed, err := r.autoDelegatePreflight(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, runmode.LocalDefaultTeamID)
-	if err != nil || proceed {
-		t.Fatalf("preflight = (proceed %v, %v), want a decided skip", proceed, err)
+	fired, err := r.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, eventID, runmode.LocalDefaultTeamID)
+	if err != nil || fired {
+		t.Fatalf("tryAutoDelegate = (fired %v, %v), want a decided skip", fired, err)
+	}
+	if stub.calls != 0 {
+		t.Errorf("Delegate called %d times past a tripped breaker", stub.calls)
+	}
+	if rows := firingsFor(t, database, entityID); len(rows) != 0 {
+		t.Errorf("queued %d firings past a tripped breaker, want none", len(rows))
 	}
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped, breakerKey(trigger.ID, entityID))
+}
+
+// TestBreaker_AnEventStillReachesTheTasksLiveConversation: a tripped breaker
+// bars new runs, not an event folded into the conversation already live on
+// the task — often the person's own run that would reset it.
+func TestBreaker_AnEventStillReachesTheTasksLiveConversation(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
+	for i := range 4 {
+		seedFinishedRun(t, database, task.ID, trigger.BlueprintID, "event", "failed", i)
+	}
+	streak, err := sqlitestore.New(database).Tasks.BreakerStreakSystem(context.Background(), runmode.LocalDefaultOrgID, entityID, trigger.BlueprintID)
+	if err != nil || streak.Failures < derefIntDefault(trigger.BreakerThreshold, 0) {
+		t.Fatalf("streak = %+v (%v), want the breaker holding for threshold %v", streak, err, trigger.BreakerThreshold)
+	}
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType: absorbTestEventType, EntityID: &entityID, MetadataJSON: `{"mention":"second"}`,
+		CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
+	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
+
+	injected := ""
+	if fired, err := router.tryAutoDelegateTrackingInjection(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "", &injected); err != nil || fired {
+		t.Fatalf("tryAutoDelegateTrackingInjection = (fired %v, %v), want an injection", fired, err)
+	}
+	if injected != activeConversationID || len(stub.calls) != 1 {
+		t.Errorf("injected into %q with %d calls, want the live conversation %q once", injected, len(stub.calls), activeConversationID)
+	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.BreakerTripped)
 }
 
 // TestBreaker_APersonsCompletedRunResetsIt: the sync keeps the notification

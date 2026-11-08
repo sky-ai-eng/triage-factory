@@ -173,6 +173,22 @@ func RunBreakerConformance(t *testing.T, mk BreakerFactory) {
 		}
 	})
 
+	t.Run("Only_a_run_on_the_entity_resets_it_and_an_event_run_only_of_the_blueprint", func(t *testing.T) {
+		tasks, orgID, seed := mk(t)
+		_, blueprintID, _ := seed.Trigger(t, 3)
+		_, otherBlueprintID, _ := seed.Trigger(t, 3)
+		entityID, taskID := seed.Task(t)
+		_, otherTaskID := seed.Task(t)
+		seed.Run(t, taskID, blueprintID, "event", "failed", at(0))
+		seed.Run(t, taskID, blueprintID, "event", "failed", at(1))
+		seed.Run(t, otherTaskID, otherBlueprintID, "manual", "completed", at(2))
+		seed.Run(t, otherTaskID, blueprintID, "event", "completed", at(3))
+		seed.Run(t, taskID, otherBlueprintID, "event", "completed", at(4))
+		if got := streak(t, tasks, orgID, entityID, blueprintID); got.Failures != 2 {
+			t.Errorf("streak = %+v, want both failures: a person's run on another entity, the blueprint's run on another entity, and another blueprint's event run reset nothing", got)
+		}
+	})
+
 	t.Run("Lists_each_trigger_and_entity_at_its_threshold", func(t *testing.T) {
 		tasks, orgID, seed := mk(t)
 		triggerID, blueprintID, _ := seed.Trigger(t, 2)

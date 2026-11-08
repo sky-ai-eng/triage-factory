@@ -65,8 +65,9 @@ type reDerivePlan struct {
 //
 // orgID is the scoring context — every task the scorer writes belongs to the
 // org whose runner wrote it. A trigger the walk fires is planned only after
-// the preflight the event-time path runs (autoDelegatePreflight), so a
-// re-derived firing passes exactly the gates an event-time one does.
+// the preflight the event-time path runs (autoDelegatePreflight) and the
+// breaker (breakerGate), so a re-derived firing passes exactly the gates an
+// event-time one does.
 func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (reDerivePlan, error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil {
@@ -143,6 +144,9 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		// bot switch, the breaker.
 		agentID, proceed, err := r.autoDelegatePreflight(ctx, orgID, task, trigger, task.EntityID, acting)
 		if err != nil || !proceed {
+			return false, err
+		}
+		if tripped, err := r.breakerGate(ctx, orgID, task, trigger, task.EntityID); err != nil || tripped {
 			return false, err
 		}
 		routerLog.Info("re-derive: planning a firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "team", acting)
