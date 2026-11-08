@@ -98,33 +98,18 @@ const ROLE_LABELS: Record<string, string> = {
 /** The order the band and the card grid list sources in. */
 const SOURCES: SourceKind[] = ['github', 'jira', 'linear', 'slack']
 
+type CardStat = [label: string, count: 'events' | 'tasks']
+const FLOW_STATS: CardStat[] = [
+  ['events · 7d', 'events'],
+  ['became tasks', 'tasks'],
+]
+
 /** What each source's card says it watches, and which of the source's
  *  activity counts it shows, under which label. */
-const SOURCE_CARDS: Record<
-  SourceKind,
-  { scope: string; stats: [label: string, count: 'events' | 'tasks'][] }
-> = {
-  github: {
-    scope: 'repositories this team tracks',
-    stats: [
-      ['events · 7d', 'events'],
-      ['became tasks', 'tasks'],
-    ],
-  },
-  jira: {
-    scope: 'projects this team watches',
-    stats: [
-      ['events · 7d', 'events'],
-      ['became tasks', 'tasks'],
-    ],
-  },
-  linear: {
-    scope: 'teams this team watches',
-    stats: [
-      ['events · 7d', 'events'],
-      ['became tasks', 'tasks'],
-    ],
-  },
+const SOURCE_CARDS: Record<SourceKind, { scope: string; stats: CardStat[] }> = {
+  github: { scope: 'repositories this team tracks', stats: FLOW_STATS },
+  jira: { scope: 'projects this team watches', stats: FLOW_STATS },
+  linear: { scope: 'teams this team watches', stats: FLOW_STATS },
   slack: { scope: 'channels this team watches', stats: [['mentions · 7d', 'events']] },
 }
 
