@@ -2,10 +2,12 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -137,6 +139,11 @@ func parseRefreshHint(eventName string, body []byte) (*refreshHint, error) {
 			return nil, fmt.Errorf("%s payload: %w", eventName, err)
 		}
 	}
+	// One order for every delivery, so two transactions writing overlapping
+	// marks take the rows' locks in the same order and cannot deadlock.
+	slices.SortFunc(h.targets, func(a, b domain.GitHubRefreshTarget) int {
+		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Value, b.Value))
+	})
 	return h, nil
 }
 

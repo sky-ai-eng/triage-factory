@@ -42,12 +42,13 @@ type GitHubDeliveryStore interface {
 	// caller should apply it; fresh=false means a duplicate, which is
 	// terminal for that delivery — the caller applies nothing and acks.
 	//
-	// A content delivery is recorded on the store SystemTxStores hands, in
-	// the transaction that writes its refresh marks, so the record commits
-	// only with them: if the marks fail, the delivery stays unrecorded and a
-	// redelivery applies it. A concurrent copy of the same delivery waits for
-	// that transaction, and reads as a duplicate once it commits and as fresh
-	// if it rolls back.
+	// Every delivery but an installation event is recorded on the store
+	// SystemTxStores hands, in the transaction that writes its refresh marks
+	// (none, for a delivery that names nothing to refresh), so the record
+	// commits only with them: if the marks fail, the delivery stays unrecorded
+	// and a redelivery applies it. A concurrent copy of the same delivery
+	// waits for that transaction, and reads as a duplicate once it commits and
+	// as fresh if it rolls back.
 	//
 	// An installation delivery is recorded on its own, BEFORE the caller
 	// applies it, which is what makes its side effects at-most-once. The

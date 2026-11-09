@@ -126,12 +126,14 @@ func deliveryRows(t *testing.T, s *Server) int {
 	return n
 }
 
-// serveExpectingNoStore fires the request with the receiver's four stores
-// (installation mirror, dedup table, org settings, vault) set to nil, so any
-// call on any of them panics and fails the test.
+// serveExpectingNoStore fires the request with every store the receiver
+// reaches (installation mirror, dedup table, org settings, vault, repository
+// registry, and the transaction runner the refresh marks are written through)
+// set to nil, so any call on any of them panics and fails the test.
 func serveExpectingNoStore(t *testing.T, s *Server, event, sigHeader string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	s.githubApps, s.githubDeliveries, s.orgs, s.secrets = nil, nil, nil, nil
+	s.repos, s.tx = nil, nil
 	var rec *httptest.ResponseRecorder
 	func() {
 		defer func() {
