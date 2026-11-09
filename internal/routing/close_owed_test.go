@@ -14,6 +14,7 @@ import (
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -58,6 +59,8 @@ func boolJSON(b bool) string {
 type fakeGitHub struct {
 	srv   *httptest.Server
 	state atomic.Value // "OPEN" | "MERGED"
+	// refreshes counts the batch refreshes served.
+	refreshes atomic.Int32
 }
 
 func newFakeGitHub(t *testing.T, state string) *fakeGitHub {
@@ -70,6 +73,7 @@ func newFakeGitHub(t *testing.T, state string) *fakeGitHub {
 			http.Error(w, "unexpected", http.StatusNotFound)
 			return
 		}
+		f.refreshes.Add(1)
 		state := f.state.Load().(string)
 		_, _ = w.Write([]byte(`{"data":{"nodes":[` + prNode(state, state == "MERGED") + `]}}`))
 	}))
@@ -86,12 +90,17 @@ type noopPublisher struct{}
 func (noopPublisher) Publish(context.Context, domain.Event)            {}
 func (noopPublisher) PublishPreEnqueued(context.Context, domain.Event) {}
 
-// pollGitHub runs one GitHub poll cycle against the fake.
+// pollGitHub runs one GitHub poll cycle against the fake, with the fake's
+// repository as the default team's tracked set: a pull request carrying a CI
+// task is in a tracked repository, which the poll refreshes on every cycle.
 func pollGitHub(t *testing.T, database *sql.DB, gh *fakeGitHub) {
 	t.Helper()
 	st := sqlitestore.New(database)
+	if err := dbtest.TrackRepos(context.Background(), st.Repos, st.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "octo", Repo: "repo"}}); err != nil {
+		t.Fatalf("track octo/repo: %v", err)
+	}
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Deliverables, st.ExternalActions, st.EventQueue, st.PRMergeability, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), domain.GitHubAccount{}, nil, tracker.ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 }
@@ -546,7 +555,7 @@ func TestCloseOwed_SourcePause_ClearedSnapshotIsNotTerminal(t *testing.T) {
 	t.Cleanup(srv.Close)
 	st := sqlitestore.New(database)
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Deliverables, st.ExternalActions, st.EventQueue, st.PRMergeability, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, tracker.ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 

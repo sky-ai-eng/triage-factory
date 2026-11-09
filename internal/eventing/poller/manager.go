@@ -821,6 +821,9 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	if len(repos) == 0 {
 		// Anticipated: an org that tracks nothing. Same posture as the
 		// Jira twin's unconfigured skip — an outcome, never an error.
+		// TODO(TFAC-1355): no pass runs here, so the pull requests TF holds in
+		// the org's untracked repositories are never refreshed and their
+		// leftover tasks never close on a merge.
 		span.SetAttributes(telemetry.Outcome("no_repos"))
 		conn.skip("no_repos")
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
@@ -957,6 +960,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		scoped := withoutSlugs(intersectConfigured(repos, grant, covered), contested)
 		if len(scoped) == 0 {
+			// TODO(TFAC-1355): an installation whose grant holds no tracked
+			// repository runs no pass, so the pull requests TF holds in its
+			// untracked repositories are never refreshed and their leftover
+			// tasks never close on a merge.
 			continue
 		}
 		// The grant response carries GitHub's repository id for every repo in
@@ -969,7 +976,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		m.recordRepoIDs(ctx, orgID, scope, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, resolver)
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, tracker.ReachOfGrant(grant), resolver)
 		if rerr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
@@ -1180,7 +1187,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	}
 
 	resolver := m.reviewerResolver(ctx, orgID, self, userTeams)
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, resolver)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
 		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)

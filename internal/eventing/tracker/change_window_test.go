@@ -193,7 +193,7 @@ func (r *changeWindowRig) cycle() (emitted []string, from, to time.Time) {
 	r.t.Helper()
 	before := len(r.pub.nonSystemEvents())
 	from = time.Now().UTC().Truncate(time.Second)
-	if _, _, err := r.tr.RefreshGitHub(context.Background(), changeWindowHost, r.client, domain.GitHubAccount{}, []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := r.tr.RefreshGitHub(context.Background(), changeWindowHost, r.client, domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), nil); err != nil {
 		r.t.Fatalf("RefreshGitHub: %v", err)
 	}
 	to = time.Now().UTC()

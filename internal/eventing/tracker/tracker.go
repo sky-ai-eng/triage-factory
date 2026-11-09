@@ -358,7 +358,13 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 //
 // scope is the org's GitHub host, domain.EntityScope("github", settings): the
 // namespace every pull request this cycle discovers is keyed under.
-func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, resolver ReviewerResolver) (int, string, error) {
+//
+// repos is the tracked repositories this pass lists, and reach is what
+// client's credential can read: an App installation's grant (ReachOfGrant),
+// or every repository for a personal token (ReachAll). Phase 2 refreshes only
+// the org's pull requests in repositories reach holds, so a pass never sends
+// GitHub a node id its credential cannot read (see passShare).
+func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, reach GitHubReach, resolver ReviewerResolver) (int, string, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
@@ -620,12 +626,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 	}
 
-	// Classify by snapshot state (open vs terminal) for query cost tiering.
-	// Open entities also pass through the updatedAt-gate using the discovery
-	// snapshot we already have in hand — quiet PRs (unchanged updatedAt and
-	// SHA, no in-flight CI) skip the refresh entirely. See gate.go for the
-	// safety reasoning. Terminal items always refresh because the set is
-	// small and the cheap fragment is used; gate doesn't apply.
+	// Each entity takes its share of this pass first (githubPass.share): one
+	// the pass's credential does not read is left to the pass whose credential
+	// does, and one in an untracked repository is refreshed only past
+	// staleRefreshFloor. The rest are classified by snapshot state (open vs
+	// terminal) for query cost tiering. Open entities also pass through the
+	// updatedAt-gate using the discovery snapshot we already have in hand —
+	// quiet PRs (unchanged updatedAt and SHA, no in-flight CI) skip the
+	// refresh entirely. See gate.go for the safety reasoning. Terminal items
+	// always refresh because the set is small and the cheap fragment is used;
+	// gate doesn't apply.
 	type entityWithSnap struct {
 		entity domain.Entity
 		snap   domain.PRSnapshot
@@ -640,17 +650,69 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// event-source pause cleared, which is the same situation for the same
 		// reason — the state it holds predates the tracking that resumed.
 		seed bool
+		// untracked marks an open pull request in an untracked repository,
+		// refreshed because the floor passed.
+		untracked bool
 	}
 	var openItems, terminalItems []entityWithSnap
 	skippedOpen := 0
+	// notOwn counts the pull requests this pass left alone: those its
+	// credential does not read, and those in untracked repositories it
+	// refreshed recently enough.
+	notOwn := 0
 	// open is every open pull request this cycle knows, refreshed or
 	// skipped, which is the set the mergeability probes are decided over.
 	var open []mergeabilityCandidate
+	pass := githubPass{t: t, reach: reach, handed: discovery.passRepos, tracked: discovery.tracked, untracked: map[string]*domain.Repository{}}
 
 	for _, e := range entities {
 		var snap domain.PRSnapshot
 		if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 			_ = json.Unmarshal([]byte(e.SnapshotJSON), &snap)
+		}
+		// The entity's node id finds its pull request in discovery whatever
+		// name its key spells; the stored snapshot's repo is GraphQL's
+		// nameWithOwner, which need not match the tracked name in case and goes
+		// stale on a rename. An entity without an external id yet is joined by
+		// the node id its snapshot carries.
+		nodeID := e.ExternalID
+		if nodeID == "" {
+			nodeID = snap.NodeID
+		}
+		fresh, listed := discoveredByNodeID[nodeID]
+		share := pass.share(ctx, e, listed)
+		knownOpen := func() {
+			if snap.NodeID != "" && !prSnapshotTerminal(snap) {
+				open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID, snap: snap})
+			}
+		}
+		if share == shareNone {
+			// Still an open pull request the org knows, so the branch watch
+			// keeps its base branch's tip and the probes are decided over it as
+			// over any pull request this pass skips.
+			knownOpen()
+			notOwn++
+			continue
+		}
+		// age is "time since last full refresh" — nil pointer treated as very
+		// stale so first-time skip decisions force a fetch.
+		var age time.Duration
+		if e.LastPolledAt != nil {
+			age = time.Since(*e.LastPolledAt)
+		} else {
+			age = 24 * time.Hour
+		}
+		// An open pull request in an untracked repository refreshed less than
+		// the floor ago keeps its stored snapshot. A stub in one is resolved
+		// and seeded however recently it was created: until then it has no
+		// state for the floor to keep current. One whose snapshot is already
+		// terminal is refreshed on every cycle, as every terminal item is: its
+		// entity is still active, so that refresh is what emits its close
+		// obligation.
+		if share == shareUntracked && snap.NodeID != "" && !prSnapshotTerminal(snap) && age <= staleRefreshFloor {
+			knownOpen()
+			notOwn++
+			continue
 		}
 		if snap.NodeID == "" {
 			// No stored snapshot, so no node_id either: a stub created outside
@@ -686,42 +748,25 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			terminalItems = append(terminalItems, item)
 			continue
 		}
-		open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID, snap: snap})
+		knownOpen()
 		// Open path: gate against discovery's fresh snapshot if we have one.
-		// Entities not in this cycle's discovery (rare — e.g. a PR you've
-		// stopped being a reviewer on) fall through to refresh, which is the
-		// safe default. age is "time since last full refresh" — nil pointer
-		// treated as very stale so first-time skip decisions force a fetch.
-		var age time.Duration
-		if e.LastPolledAt != nil {
-			age = time.Since(*e.LastPolledAt)
-		} else {
-			age = 24 * time.Hour
-		}
+		// Entities not in this cycle's discovery (a pull request that left its
+		// repository's open listing, one in a repository whose listing failed,
+		// or one in an untracked repository past the floor) fall through to
+		// refresh, which is the safe default.
 		sinceChange := sinceChangeSeen(snap, t.changeNow())
 		// Gate against discovery's fresh snapshot when we have one. A repo
 		// that 304'd this cycle has no fresh snapshot, but a 304 means its
 		// open-PR listing (including each PR's updated_at + head sha) is
 		// byte-identical to last cycle — so the stored snapshot IS the fresh
 		// state for gate purposes. Feed it back as `fresh` so quiet repos
-		// keep the skip optimization the REST conditional request earns.
-		//
-		// Both joins are by id. The entity's node id finds its pull request
-		// in discovery whatever name its key spells, and the repository it
-		// references (entities.repository_id) is the row a quiet listing is
-		// keyed by; the stored snapshot's repo is GraphQL's nameWithOwner,
-		// which need not match the tracked name in case and goes stale on a
-		// rename. An entity without an external id yet is joined by the
-		// node id its snapshot carries, which this branch always has.
-		nodeID := e.ExternalID
-		if nodeID == "" {
-			nodeID = snap.NodeID
+		// keep the skip optimization the REST conditional request earns. The
+		// quiet set is keyed by the registry row the entity references
+		// (entities.repository_id).
+		if !listed && quietRepos[e.RepositoryID] {
+			fresh, listed = snap, true
 		}
-		fresh, ok := discoveredByNodeID[nodeID]
-		if !ok && quietRepos[e.RepositoryID] {
-			fresh, ok = snap, true
-		}
-		if ok && shouldSkipRefresh(snap, fresh, age, sinceChange) {
+		if listed && shouldSkipRefresh(snap, fresh, age, sinceChange) {
 			// Skipped entities won't be diffed, so reconcile stale
 			// per-reviewer review_requested tasks here: for each active
 			// review_requested task whose keyed reviewer is no longer in the
@@ -767,6 +812,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			skippedOpen++
 			continue
 		}
+		item.untracked = share == shareUntracked
 		openItems = append(openItems, item)
 	}
 
@@ -775,7 +821,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// none). Debug, not Info — this is the steady-state case at the
 		// default 30s+ poll cadence and carries no actionable signal;
 		// liveness is reported independently via /readyz.
-		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen)
+		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn)
 		t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, nil)
 		t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, nil)
 		if len(entities) > 0 {
@@ -876,6 +922,15 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	for _, item := range allItems {
 		newSnap, ok := refreshed[item.nodeID]
 		if !ok {
+			if item.untracked {
+				// GitHub answered null: the pull request is gone, or this
+				// credential cannot read it. Stamping the attempt keeps it on
+				// the floor's schedule; unstamped, it would be sent again on
+				// every cycle.
+				if err := t.entities.MarkPolledSystem(context.Background(), orgID, item.entity.ID); err != nil {
+					trackerLog.WarnContext(ctx, "stamping an unread untracked pull request failed; it is sent again next cycle", "source_id", item.entity.SourceID, "error", err)
+				}
+			}
 			continue
 		}
 		// Preserve NodeID through the refresh (RefreshPRs returns map[nodeID]→snap
@@ -997,9 +1052,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// event) — a cycle that fetched fresh state but found no transitions is
 	// routine, not noteworthy. See the no-op branch above for the same call.
 	if eventsEmitted > 0 {
-		trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", len(refreshed), "events", eventsEmitted)
+		trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn, "refreshed", len(refreshed), "events", eventsEmitted)
 	} else {
-		trackerLog.Debug("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", len(refreshed), "events", eventsEmitted)
+		trackerLog.Debug("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn, "refreshed", len(refreshed), "events", eventsEmitted)
 	}
 
 	if len(entities) > 0 {
@@ -1147,8 +1202,10 @@ func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, n
 // the entity that does (learnPRNodeID). Stored stubs may carry kind pr for a
 // number that is an issue, so a pull request the read answers 404 for is asked
 // for as an issue (adoptIssueStub); an issue takes its kind and node id and is
-// not polled from then on. Caveat: a PR that is permanently unreadable
-// (deleted, or org-private after the App loses access) never gets a node_id,
+// not polled from then on. Only the pass whose credential reads the stub's
+// repository resolves it (githubPass.share), so a stub in a repository the App
+// lost access to costs nothing. Caveat: a PR that is permanently unreadable in
+// a repository the credential still reads (deleted, say) never gets a node_id,
 // so ListActiveSystem keeps returning it and it costs one GetPRBasic and one
 // issue read per cycle indefinitely. Acceptable bound until a stub-staleness /
 // dismiss affordance lands (separate ticket) — a 404 is deliberately NOT treated
@@ -1320,7 +1377,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 	quiet := map[string]bool{}
 	lastListed := map[string]time.Time{}
 	var cursors []pullsCursor
-	trackedIDs := t.trackedRepositoryIDs(ctx, scope)
+	trackedIDs, trackedRows := t.trackedRepositoryIDs(ctx, scope)
 	passRepos := make(map[string]bool, len(repos))
 	for _, name := range repos {
 		if id := trackedIDs[strings.ToLower(name)]; id != "" {
@@ -1552,7 +1609,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		span.SetStatus(codes.Error, "every listing failed")
 		span.SetAttributes(telemetry.Outcome("failed"))
 	}
-	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom, passRepos: passRepos}, discoveryErr
+	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom, passRepos: passRepos, tracked: trackedRows}, discoveryErr
 }
 
 // githubDiscovery is what discoverGitHub found.
@@ -1585,6 +1642,10 @@ type githubDiscovery struct {
 	// discovery was handed: the ones its client is for. The poller hands each
 	// App installation's pass its own.
 	passRepos map[string]bool
+	// tracked is every repository the org tracks on the host, whichever pass
+	// it is handed to, by registry row id. nil when the tracked set could not
+	// be read.
+	tracked map[string]domain.Repository
 }
 
 // discoveredPR is a pull request discovery found, with the registry row id of
@@ -1613,20 +1674,26 @@ func discoveredKey(pr ghclient.DiscoveredPR) string {
 // two reads — has no row this cycle: its listing goes out unconditionally and
 // leaves no state behind. A failed read is logged and answers nothing, which
 // costs every listing this cycle its conditional request.
-func (t *Tracker) trackedRepositoryIDs(ctx context.Context, scope string) map[string]string {
+//
+// rows is the same read keyed by registry row id, which is what tells Phase 2
+// a pull request in a tracked repository from one in a repository no team
+// tracks.
+func (t *Tracker) trackedRepositoryIDs(ctx context.Context, scope string) (ids map[string]string, rows map[string]domain.Repository) {
 	if t.repos == nil {
-		return nil
+		return nil, nil
 	}
-	rows, _, err := t.repos.ListTrackedSystem(ctx, t.orgID, scope, db.Unwindowed)
+	list, _, err := t.repos.ListTrackedSystem(ctx, t.orgID, scope, db.Unwindowed)
 	if err != nil {
 		trackerLog.ErrorContext(ctx, "read tracked repositories failed; listing every repository unconditionally", "error", err)
-		return nil
+		return nil, nil
 	}
-	ids := make(map[string]string, len(rows))
-	for _, r := range rows {
+	ids = make(map[string]string, len(list))
+	rows = make(map[string]domain.Repository, len(list))
+	for _, r := range list {
 		ids[strings.ToLower(r.Slug())] = r.ID
+		rows[r.ID] = r
 	}
-	return ids
+	return ids, rows
 }
 
 // pullsCursor is the conditional-request state one successful open-PR

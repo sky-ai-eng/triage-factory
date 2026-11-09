@@ -114,7 +114,7 @@ func TestRefreshGitHub_EnrichesSnapshotlessStub(t *testing.T) {
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			// repos=nil → no discovery; the stub is reached only via Phase-2.
-			if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
 			}
 
@@ -272,6 +272,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", ""); err != nil {
 		t.Fatalf("seed stub: %v", err)
@@ -282,7 +283,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// Cycle 1: quiet seed — no events, and the snapshot now carries the node_id.
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
@@ -294,7 +295,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 
 	// Cycle 2: the entity has a node_id now, so it takes the normal diff path —
 	// no second GetPRBasic, and the draft→ready transition emits its event.
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRReadyForReview {
