@@ -43,10 +43,11 @@ func seedGitHubPR(t *testing.T, stores dbpkg.Stores, host, repo string, number i
 }
 
 // TestRunGitHubCycleForOrg_RetiresAnotherHostsPullRequestsWithNothingTracked:
-// an org that has just moved tracks nothing on its new host, so its cycle stops
-// at the no_repos skip — and the pull requests it left on the old host still
-// retire on that cycle, with scope_changed and no request. The resolver is
-// nil, so reaching it would panic.
+// an org that has just moved tracks nothing on its new host — and the pull
+// requests it left on the old host still retire on that cycle, with
+// scope_changed and no request, ahead of every gate. The pull request it holds
+// on the new host is not retired: the cycle goes on to refresh it, and stops
+// there at the resolver, which has no credential to give.
 func TestRunGitHubCycleForOrg_RetiresAnotherHostsPullRequestsWithNothingTracked(t *testing.T) {
 	recorder := recordSpans(t)
 	database := newMigratedSQLiteForPoller(t)
@@ -62,11 +63,12 @@ func TestRunGitHubCycleForOrg_RetiresAnotherHostsPullRequestsWithNothingTracked(
 		database: database, pub: published,
 		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users,
+		resolver: &fakeResolver{err: ghclient.ErrNoGitHubCredentials},
 	}
 	m.runGitHubCycleForOrg(context.Background(), org)
 
-	if got := spanOutcome(t, recorder, "poll.github.org"); got != "no_repos" {
-		t.Errorf("span outcome = %q, want no_repos", got)
+	if got := spanOutcome(t, recorder, "poll.github.org"); got != "unconfigured" {
+		t.Errorf("span outcome = %q, want unconfigured", got)
 	}
 	evts := published.ofType(domain.EventGitHubPRUnreachable)
 	if len(evts) != 1 || evts[0].EntityID == nil || *evts[0].EntityID != stale.ID {

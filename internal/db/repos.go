@@ -380,6 +380,23 @@ type RepositoryStore interface {
 	// credential for.
 	ListTrackedSystem(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
+	// ListHeldUntrackedSystem returns every repository row on host that no
+	// team tracks and that an active GitHub pull request entity on host
+	// references, ordered like List: the untracked repositories TF still holds
+	// open work in. "Tracks" is ListTrackedSystem's reading, so a repository
+	// only an archived team tracks is listed. Retired rows are left out, as
+	// from every list. An issue entity holds nothing here, because the poller
+	// refreshes pull requests only.
+	//
+	// The GitHub poller reads it once per cycle, and only when some pass would
+	// otherwise not run: an org that tracks nothing on host, or an App
+	// installation whose grant holds no tracked repository. A pass runs for
+	// such an org or installation only when a row here is in its reach, so an
+	// org or installation that holds nothing costs no GitHub request. Unpaged:
+	// the rows are bounded by the org's active pull requests, and the poller
+	// needs every one to match against each installation's grant.
+	ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error)
+
 	// ListTrackedByTeamSystem returns one page of the repository rows on host
 	// that teamID tracks, ordered by (owner, repo, id), plus the unpaged total.
 	// It is the listing half of the gate TeamGitHubReposStore.TracksRepositorySystem

@@ -365,13 +365,45 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 // the org's pull requests in repositories reach holds, so a pass never sends
 // GitHub a node id its credential cannot read (see passShare).
 func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, reach GitHubReach, resolver ReviewerResolver) (int, string, error) {
+	return t.refreshGitHub(ctx, scope, client, self, repos, reach, resolver, false)
+}
+
+// RefreshHeldGitHub refreshes the pull requests TF holds in repositories no
+// team tracks that reach holds, as a RefreshGitHub pass refreshes the ones its
+// reach holds: an open one once its last refresh is older than
+// staleRefreshFloor, and a stub or a terminal snapshot on every call. It is
+// for a credential no RefreshGitHub pass runs under this cycle, because the
+// org tracks nothing on scope or the App installation's grant holds no tracked
+// repository; without it, the tasks left on such a pull request would never
+// close when it merges.
+//
+// It lists no repository and runs no dashboard search, so nothing new is
+// discovered, and it reports no completed poll (EmitPollComplete): what the
+// org asked TF to poll is its tracked set, and a pass over what it no longer
+// tracks is not a poll of it. A call with nothing due sends GitHub no request.
+func (t *Tracker) RefreshHeldGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, reach GitHubReach, resolver ReviewerResolver) (int, error) {
+	n, _, err := t.refreshGitHub(ctx, scope, client, self, nil, reach, resolver, true)
+	return n, err
+}
+
+// refreshGitHub is one GitHub pass. held is a RefreshHeldGitHub pass, which
+// skips discovery and reports no completed poll.
+func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, reach GitHubReach, resolver ReviewerResolver, held bool) (int, string, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	// quietRepos is the set of registry row ids whose open-PR listing
 	// returned 304 (unchanged) this cycle; their tracked entities can keep
 	// their stored snapshot through the Phase-2 gate without a refresh.
-	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, self.Login, repos)
+	// A held pass reads only the tracked set, which is what tells Phase 2 a
+	// held pull request from a tracked one.
+	var discovery githubDiscovery
+	var discoveryErr error
+	if held {
+		_, discovery.tracked = t.trackedRepositoryIDs(ctx, scope)
+	} else {
+		discovery, discoveryErr = t.discoverGitHub(ctx, scope, client, self.Login, repos)
+	}
 	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
 	// listedOK is the set of registry row ids whose open-PR listing answered
 	// 200 this cycle: a merged pull request leaves the listing, so these are
@@ -824,7 +856,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn)
 		t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, nil)
 		t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, nil)
-		if len(entities) > 0 {
+		if len(entities) > 0 && !held {
 			t.EmitPollComplete(ctx, "github", startedAt, len(entities), 0)
 		}
 		return 0, "", nil
@@ -1057,7 +1089,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		trackerLog.Debug("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn, "refreshed", len(refreshed), "events", eventsEmitted)
 	}
 
-	if len(entities) > 0 {
+	if len(entities) > 0 && !held {
 		t.EmitPollComplete(ctx, "github", startedAt, len(entities), eventsEmitted)
 	}
 

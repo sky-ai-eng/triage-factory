@@ -513,6 +513,25 @@ func (s *repoStore) ListTrackedSystem(ctx context.Context, orgID, host string, o
 	return listRepositories(ctx, s.admin, orgID, host, opts, repoTrackedByATeam)
 }
 
+// repoHeldUntracked scopes a repositories row (alias rp) to the rows no team
+// tracks that an active GitHub pull request on the row's own host references.
+// The entity probe is an index lookup on idx_entities_repository.
+const repoHeldUntracked = `NOT ` + repoTrackedByATeam + `
+	  AND EXISTS (
+	SELECT 1 FROM entities e
+	WHERE e.repository_id = rp.id
+	  AND e.org_id = rp.org_id
+	  AND e.source = 'github'
+	  AND e.scope = rp.host
+	  AND e.state = 'active'
+	  AND e.kind <> 'issue'
+)`
+
+func (s *repoStore) ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {
+	rows, _, err := listRepositories(ctx, s.admin, orgID, host, db.Unwindowed, repoHeldUntracked)
+	return rows, err
+}
+
 func (s *repoStore) ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
 	return listRepositories(ctx, s.admin, orgID, host, opts, repoTrackedByTeam, teamID)
 }

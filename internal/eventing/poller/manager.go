@@ -731,7 +731,10 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 // onto the installation that can reach each repo, and dispatches a
 // per-installation RefreshGitHub over that intersection. With no live
 // installation it falls back to the org's PAT (tier 3) over the full
-// configured set.
+// configured set. A credential that gets no such pass, because the org tracks
+// nothing or the installation's grant holds no tracked repository, runs a
+// RefreshHeldGitHub pass instead when it reads a repository TF still holds
+// pull requests in, so the tasks left on them close when they merge.
 func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// Per-org child of the cycle root — and a root in its own right when
 	// PollGitHubOnce calls this directly, which needs no special handling.
@@ -818,16 +821,37 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		githubLog.ErrorContext(ctx, "load configured repos failed", "org", orgID, "error", err)
 		return
 	}
+	// held is the untracked repositories TF still holds pull requests in, read
+	// at most once a cycle and only when a credential runs no RefreshGitHub
+	// pass: an org that tracks nothing, or an installation whose grant holds no
+	// tracked repository. A RefreshHeldGitHub pass runs under such a credential
+	// only when it reads one of them.
+	var heldRows []domain.Repository
+	heldRead := false
+	held := func() []domain.Repository {
+		if !heldRead {
+			heldRead = true
+			heldRows = m.heldUntrackedRepos(ctx, orgID, scope)
+		}
+		return heldRows
+	}
+
 	if len(repos) == 0 {
-		// Anticipated: an org that tracks nothing. Same posture as the
-		// Jira twin's unconfigured skip — an outcome, never an error.
-		// TODO(TFAC-1355): no pass runs here, so the pull requests TF holds in
-		// the org's untracked repositories are never refreshed and their
-		// leftover tasks never close on a merge.
-		span.SetAttributes(telemetry.Outcome("no_repos"))
-		conn.skip("no_repos")
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
-		return
+		if len(held()) == 0 {
+			// Anticipated: an org that tracks nothing and holds nothing. Same
+			// posture as the Jira twin's unconfigured skip — an outcome,
+			// never an error.
+			span.SetAttributes(telemetry.Outcome("no_repos"))
+			conn.skip("no_repos")
+			return
+		}
+		// An org that tracks nothing and still holds pull requests: the cycle
+		// goes on to refresh them under the credential that reads each, and
+		// is not a completed poll (refreshed stays false), because there is
+		// no tracked set to have polled. The connection state is what its
+		// requests observed, and stays as stored on a cycle with nothing due.
+		span.SetAttributes(telemetry.Outcome("held_only"))
 	}
 
 	// TFAC-571: rotate the repo list to start at this org's round-robin
@@ -855,7 +879,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// the PAT fallback. orgHasRegisteredApp is the existing Active-gated probe.
 	appActive := m.orgHasRegisteredApp(ctx, orgID)
 	if !appActive {
-		// No App, or a staged App → the PAT is the live credential.
+		// No App, or a staged App → the PAT is the live credential. With a
+		// tracked set, its pass reads every repository and so refreshes the
+		// held pull requests too; without one, only those are refreshed.
+		if len(repos) == 0 {
+			m.refreshHeldGitHubPAT(ctx, conn, orgID, scope, isLocal)
+			return
+		}
 		refreshed = m.pollGitHubPAT(ctx, conn, orgID, scope, repos, isLocal)
 		return
 	}
@@ -881,6 +911,14 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// skip: surface it and skip the cycle rather than polling as some other
 	// identity.
 	if len(installs) == 0 {
+		if len(repos) == 0 {
+			// An org that tracks nothing asked TF to poll nothing, so an App
+			// installed nowhere is no failure of this cycle's, and there is no
+			// credential to refresh what it holds under.
+			span.SetAttributes(telemetry.Outcome("no_repos"))
+			conn.skip("no_repos")
+			return
+		}
 		degraded := fmt.Errorf("github app is active but installed on no accounts on %s", scope)
 		span.SetStatus(codes.Error, "app installed on no accounts")
 		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
@@ -960,10 +998,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		scoped := withoutSlugs(intersectConfigured(repos, grant, covered), contested)
 		if len(scoped) == 0 {
-			// TODO(TFAC-1355): an installation whose grant holds no tracked
-			// repository runs no pass, so the pull requests TF holds in its
-			// untracked repositories are never refreshed and their leftover
-			// tasks never close on a merge.
+			// The grant holds no tracked repository, so no RefreshGitHub pass
+			// runs under it, and the pull requests TF holds in its untracked
+			// repositories are refreshed by a held pass instead. An
+			// installation whose grant reads none of them runs nothing.
+			if reach := tracker.ReachOfGrant(grant); reach.HoldsAny(held()) {
+				m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
+			}
 			continue
 		}
 		// The grant response carries GitHub's repository id for every repo in
@@ -1120,15 +1161,8 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string,
 }
 
 // pollGitHubPAT runs the tier-3 PAT-borrow path for an org with no live App
-// installation. The resolver returns the org's PAT client; ErrNoGitHubCredentials
-// means the org simply isn't configured for GitHub and is skipped silently.
-//
-// In local mode the poller acts as the lone local user, so it reads their
-// host-scoped GitHub binding (login and account id) + team memberships to
-// drive the user-perspective dashboard backfill, team-based review-request
-// detection and the own-PR check. Multi-mode PAT fallback has no local
-// sentinel user, so it passes no account (org-wide REST discovery doesn't need
-// one; dashboard history is local/PAT-only).
+// installation: one RefreshGitHub pass over repos under the org's PAT
+// (patPass).
 //
 // It reports whether the tracker's refresh completed without error.
 func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, repos []string, isLocal bool) bool {
@@ -1136,6 +1170,47 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	// so it records onto that caller's poll.github.org span rather than
 	// opening a child that would only ever duplicate it. A no-op span when
 	// there is no caller (tests), which needs no guard.
+	span := trace.SpanFromContext(ctx)
+
+	client, self, resolver, ok := m.patPass(ctx, conn, orgID, isLocal)
+	if !ok {
+		return false
+	}
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)
+	if rerr != nil {
+		span.SetStatus(codes.Error, "refresh")
+		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)
+		m.reportError("github", orgID, rerr)
+	}
+	var rl *ghclient.ErrRateLimited
+	errors.As(rerr, &rl)
+	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
+	return rerr == nil
+}
+
+// refreshHeldGitHubPAT is pollGitHubPAT for an org that tracks nothing on
+// scope: one RefreshHeldGitHub pass under the org's PAT, which reads every
+// repository the pull requests TF holds are in.
+func (m *Manager) refreshHeldGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, isLocal bool) {
+	client, self, resolver, ok := m.patPass(ctx, conn, orgID, isLocal)
+	if !ok {
+		return
+	}
+	m.refreshHeldGitHub(ctx, orgID, scope, client, self, tracker.ReachAll(), resolver)
+}
+
+// patPass resolves what a pass on the PAT path runs with: the org's PAT
+// client, the account it acts as, and the reviewer resolver. ok is false when
+// the cycle polls nothing; ErrNoGitHubCredentials means the org simply isn't
+// configured for GitHub and is skipped silently.
+//
+// In local mode the poller acts as the lone local user, so it reads their
+// host-scoped GitHub binding (login and account id) + team memberships to
+// drive the user-perspective dashboard backfill, team-based review-request
+// detection and the own-PR check. Multi-mode PAT fallback has no local
+// sentinel user, so it passes no account (org-wide REST discovery doesn't need
+// one; dashboard history is local/PAT-only).
+func (m *Manager) patPass(ctx context.Context, conn *cycleConnection, orgID string, isLocal bool) (*ghclient.Client, domain.GitHubAccount, tracker.ReviewerResolver, bool) {
 	span := trace.SpanFromContext(ctx)
 
 	// No target account, and none to give: the credential this path resolves is
@@ -1149,13 +1224,13 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			span.SetAttributes(telemetry.Outcome("unconfigured"))
 			conn.skip("unconfigured")
-			return false // not configured for GitHub — silent skip
+			return nil, domain.GitHubAccount{}, nil, false // not configured for GitHub — silent skip
 		}
 		conn.note(err)
 		span.SetStatus(codes.Error, "resolve pat client")
 		githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "resolve pat client failed", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
-		return false
+		return nil, domain.GitHubAccount{}, nil, false
 	}
 
 	var self domain.GitHubAccount
@@ -1170,13 +1245,13 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		if serr != nil {
 			span.SetStatus(codes.Error, "read org settings")
 			githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", serr)
-			return false
+			return nil, domain.GitHubAccount{}, nil, false
 		}
 		identity, ierr := m.users.GetGitHubIdentitySystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
 		if ierr != nil {
 			span.SetStatus(codes.Error, "read github identity")
 			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", ierr)
-			return false
+			return nil, domain.GitHubAccount{}, nil, false
 		}
 		self = domain.GitHubAccountOf(identity)
 		if teams, terr := client.ListMyTeams(ctx); terr != nil {
@@ -1186,17 +1261,32 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		}
 	}
 
-	resolver := m.reviewerResolver(ctx, orgID, self, userTeams)
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)
-	if rerr != nil {
-		span.SetStatus(codes.Error, "refresh")
-		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)
-		m.reportError("github", orgID, rerr)
+	return client, self, m.reviewerResolver(ctx, orgID, self, userTeams), true
+}
+
+// refreshHeldGitHub runs one RefreshHeldGitHub pass under client, whose
+// credential reads reach. It changes neither the org's round-robin cursor,
+// which orders the tracked set, nor whether the cycle counts as a completed
+// poll; its requests count toward the connection state like any other. A
+// failure is logged and costs the held pull requests one cycle's delay.
+func (m *Manager) refreshHeldGitHub(ctx context.Context, orgID, scope string, client *ghclient.Client, self domain.GitHubAccount, reach tracker.GitHubReach, resolver tracker.ReviewerResolver) {
+	if _, err := m.trackerForOrg(orgID).RefreshHeldGitHub(ctx, scope, client, self, reach, resolver); err != nil {
+		githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "held pull request refresh failed", "org", orgID, "error", err)
+		m.reportError("github", orgID, err)
 	}
-	var rl *ghclient.ErrRateLimited
-	errors.As(rerr, &rl)
-	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
-	return rerr == nil
+}
+
+// heldUntrackedRepos is the untracked repositories on host that TF holds
+// active pull requests in (RepositoryStore.ListHeldUntrackedSystem). A failed
+// read is logged and answers none, which costs their pull requests one
+// cycle's delay.
+func (m *Manager) heldUntrackedRepos(ctx context.Context, orgID, host string) []domain.Repository {
+	rows, err := m.repos.ListHeldUntrackedSystem(ctx, orgID, host)
+	if err != nil {
+		githubLog.WarnContext(ctx, "read untracked repositories holding pull requests failed; none is refreshed this cycle", "org", orgID, "error", err)
+		return nil
+	}
+	return rows
 }
 
 // orgHasRegisteredApp reports whether the org's live GitHub credential is a

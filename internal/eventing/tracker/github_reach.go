@@ -48,6 +48,20 @@ func ReachOfGrant(grant []ghclient.UserRepo) GitHubReach {
 	return r
 }
 
+// HoldsAny reports whether the reach holds any of repos, registry rows, by the
+// rule a pass's Phase 2 applies to each pull request's repository (holds). The
+// poller asks it before it runs a RefreshHeldGitHub pass under a credential,
+// so a credential that reads none of the repositories TF holds pull requests
+// in runs none.
+func (r GitHubReach) HoldsAny(repos []domain.Repository) bool {
+	for i := range repos {
+		if r.holds(&repos[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // passShare is how one RefreshGitHub pass treats one of the org's active pull
 // requests.
 type passShare int
