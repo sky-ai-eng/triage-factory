@@ -90,6 +90,27 @@ func (s *gitHubRefreshMarkStore) ListSystem(ctx context.Context, orgID string, l
 	return out, rows.Err()
 }
 
+func (s *gitHubRefreshMarkStore) ListMarkedOrgsSystem(ctx context.Context) ([]string, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT org_id::text
+		FROM github_refresh_marks
+		ORDER BY 1
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *gitHubRefreshMarkStore) ClearSystem(ctx context.Context, orgID string, read []domain.GitHubRefreshMark) (int, error) {
 	if len(read) == 0 {
 		return 0, nil

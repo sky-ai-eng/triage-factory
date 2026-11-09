@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -135,6 +136,18 @@ type Manager struct {
 	// it (tracker.Tracker.WithChangeClock); nil keeps it on time.Now.
 	ChangeClock func() time.Time
 
+	// RefreshMarks is the org's pending GitHub refresh marks, which the
+	// webhook receivers write. The scheduled cycle honors them, and the
+	// narrowed pass (HintGitHub) refreshes what they name between cycles.
+	// nil runs no narrowed pass and leaves the scheduled cycle to its refresh
+	// gate (tests, and any embedder that hasn't wired it).
+	RefreshMarks db.GitHubRefreshMarkStore
+
+	// TriggerScorer kicks the org's scorer after a narrowed pass emitted
+	// events, as the completed-poll notice kicks it after a scheduled cycle,
+	// so the tasks those events create are scored now. nil-safe.
+	TriggerScorer func(orgID string)
+
 	// connections persists each (org, source)'s connection state at the end
 	// of every cycle (see recordConnection). nil disables the write and the
 	// lost/restored log lines that come from it (tests that construct a
@@ -145,6 +158,23 @@ type Manager struct {
 	ghStop     chan struct{}
 	jiraStop   chan struct{}
 	linearStop chan struct{}
+
+	// passMu guards orgPasses and each entry's flags: one entry per org that
+	// has run a GitHub pass in this process, which keeps the org's scheduled
+	// cycle and its narrowed passes from overlapping (see orgPass).
+	passMu    sync.Mutex
+	orgPasses map[string]*orgPass
+
+	// knownMu guards what the scheduled cycle learns for the narrowed pass,
+	// which makes no org-wide read of its own: knownGrants is the reach of
+	// each of an org's App installations, by installation id, as its last
+	// scheduled cycle read the grant, and localTeams the local user's teams
+	// as its last listing read them. Memory only, like the cursor: a new
+	// lease holder's narrowed passes route nothing for an org until its first
+	// scheduled cycle, which runs on boot.
+	knownMu     sync.Mutex
+	knownGrants map[string]map[string]tracker.GitHubReach
+	localTeams  map[string][]string
 
 	// dueMu guards nextPoll, the scheduler clock. Each source runs ONE
 	// base-tick loop (every basePollInterval) that polls an org only once
@@ -552,6 +582,8 @@ func (m *Manager) PollAllSoon() {
 // startGitHub's scheduled cycles (or PollSoon to re-due an org) so per-org
 // cadence and the anti-stampede scheduling stay intact.
 func (m *Manager) PollGitHubOnce(ctx context.Context, orgID string) {
+	end := m.beginScheduled(orgID)
+	defer end()
 	m.runGitHubCycleForOrg(ctx, orgID)
 }
 
@@ -645,6 +677,21 @@ func (m *Manager) startGitHub() {
 			}
 		}
 	}()
+	// The refresh-mark sweep, on its own ticker: a cycle over many orgs can
+	// hold the loop above past several ticks, and a mark whose nudge was lost
+	// should wait one tick for its pass, not the length of that cycle.
+	go func() {
+		ticker := time.NewTicker(basePollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				m.sweepMarks(context.Background())
+			case <-stop:
+				return
+			}
+		}
+	}()
 
 	githubLog.Info("tracker started (per-org cadence resolved each wake)", "base_tick", basePollInterval)
 }
@@ -715,14 +762,22 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		if !m.pollDue("github", orgID, now) {
 			continue
 		}
+		// An org mid-way through a narrowed pass is left for the next wake,
+		// and stays due: waiting for it would hold up every org after it.
+		end, ok := m.tryBeginScheduled(orgID)
+		if !ok {
+			continue
+		}
 		interval := clampPollInterval(m.loadOrgSettings(ctx, orgID).GitHubPollInterval)
 		m.schedulePoll("github", orgID, now.Add(interval))
 		polled++
 		refreshManaged()
 		m.runGitHubCycleForOrg(ctx, orgID)
+		end()
 		m.stampGitHubHeartbeat()
 	}
 	m.prunePoll("github", orgIDs)
+	m.pruneKnown(orgIDs)
 }
 
 // runGitHubCycleForOrg polls one org. It resolves a GitHub client PER
@@ -821,6 +876,14 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		githubLog.ErrorContext(ctx, "load configured repos failed", "org", orgID, "error", err)
 		return
 	}
+	// The org's pending refresh marks, honored by every RefreshGitHub pass
+	// below: a pull request a mark names is refreshed whatever the gate says.
+	// A mark is cleared once a pass whose credential reads its repository
+	// completes, or when nothing will ever refresh what it names (its
+	// repository is untracked, or no installation's grant holds it); the rest
+	// wait for the next pass.
+	marks := m.readMarks(ctx, orgID, scope)
+	defer marks.commit(ctx)
 	// held is the untracked repositories TF still holds pull requests in, read
 	// at most once a cycle and only when a credential runs no RefreshGitHub
 	// pass: an org that tracks nothing, or an installation whose grant holds no
@@ -892,7 +955,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			m.refreshHeldGitHubPAT(ctx, conn, orgID, scope, isLocal)
 			return
 		}
-		refreshed = m.pollGitHubPAT(ctx, conn, orgID, scope, repos, isLocal)
+		refreshed = m.pollGitHubPAT(ctx, conn, orgID, scope, repos, isLocal, marks)
 		return
 	}
 
@@ -964,6 +1027,11 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
+	// grants is the reach of each installation whose grant this cycle read,
+	// which the narrowed passes route marked repositories by until the next
+	// cycle.
+	grants := make(map[string]tracker.GitHubReach, len(installs))
+	defer func() { m.rememberGrants(orgID, installs, grants) }()
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
@@ -983,6 +1051,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			continue
 		}
 		anyFunctional = true
+		reach := tracker.ReachOfGrant(grant)
+		grants[inst.InstallationID] = reach
 		// Rename detection, before the intersection rather than after it: a
 		// renamed repository is precisely the one the intersection can no
 		// longer see, because TF still spells it the old way and GitHub
@@ -1009,10 +1079,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			// repositories are refreshed by a held pass instead. An
 			// installation whose grant reads none of them runs nothing, and so
 			// does every installation on a cycle whose read failed.
-			if heldRows, _ := held(); len(heldRows) > 0 {
-				if reach := tracker.ReachOfGrant(grant); reach.HoldsAny(heldRows) {
-					m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
-				}
+			if heldRows, _ := held(); len(heldRows) > 0 && reach.HoldsAny(heldRows) {
+				m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
 			}
 			continue
 		}
@@ -1026,12 +1094,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		m.recordRepoIDs(ctx, orgID, scope, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, tracker.ReachOfGrant(grant), resolver)
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).WithRefreshMarks(marks.marks()).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, reach, resolver)
 		if rerr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
 		} else {
 			refreshed = true
+			marks.honorReach(reach)
 		}
 		var rl *ghclient.ErrRateLimited
 		if errors.As(rerr, &rl) {
@@ -1061,6 +1130,11 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		resumeFrom = m.firstRepoInUnreadGrants(ctx, orgID, scope, repos, covered, unresolved)
 	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rateLimitErr)
+	// Every installation's grant read and none cut short: a marked tracked
+	// repository no grant holds is one no credential of the org reads.
+	if len(unresolved) == 0 && rateLimitErr == nil {
+		marks.dropUnreached(slices.Collect(maps.Values(grants)))
+	}
 
 	// No installation produced a usable installation token (every mint/list
 	// failed). Under XOR there is no PAT behind these failures to fall back to
@@ -1173,8 +1247,10 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string,
 // installation: one RefreshGitHub pass over repos under the org's PAT
 // (patPass).
 //
-// It reports whether the tracker's refresh completed without error.
-func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, repos []string, isLocal bool) bool {
+// It reports whether the tracker's refresh completed without error, which
+// honors every one of marks on a tracked repository: the personal token reads
+// them all.
+func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, repos []string, isLocal bool, marks *markLedger) bool {
 	// The PAT path is the whole body of one branch of runGitHubCycleForOrg,
 	// so it records onto that caller's poll.github.org span rather than
 	// opening a child that would only ever duplicate it. A no-op span when
@@ -1185,11 +1261,13 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	if !ok {
 		return false
 	}
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).WithRefreshMarks(marks.marks()).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
 		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)
 		m.reportError("github", orgID, rerr)
+	} else {
+		marks.honorReach(tracker.ReachAll())
 	}
 	var rl *ghclient.ErrRateLimited
 	errors.As(rerr, &rl)
@@ -1267,6 +1345,7 @@ func (m *Manager) patPass(ctx context.Context, conn *cycleConnection, orgID stri
 			githubLog.Log(ctx, upstream.LogLevel(terr, slog.LevelWarn), "list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
 		} else {
 			userTeams = teams
+			m.rememberLocalTeams(orgID, teams)
 		}
 	}
 
@@ -1553,12 +1632,14 @@ func (m *Manager) setGitHubCursor(orgID, repo string) {
 // even be resolved this cycle so its repos were never reached (rl == nil —
 // see the unresolvedOwners handling in runGitHubCycleForOrg). Either way the
 // cursor is saved at resumeFrom so next cycle prioritizes it. Only the
-// rate-limited case additionally logs at INFO and pulls the org's next
-// scheduled poll in to rl.ResumeAt, so the cursor gets picked back up as
-// soon as the budget frees rather than waiting out a full normal poll
-// interval (which may be much longer, or — if shorter — would just hit the
-// same exhaustion again); the unresolved-installation case has no known
-// resume time, so it just waits for the org's ordinary cadence.
+// rate-limited case additionally logs at INFO and holds the org's GitHub polls
+// until rl.ResumeAt (holdPoll), so the cursor gets picked back up as soon as
+// the budget frees rather than waiting out a full normal poll interval (which
+// may be much longer, or — if shorter — would just hit the same exhaustion
+// again). It is a hold, not just the next slot, because a poll sent before the
+// reset fails again: neither a config save's PollSoon nor a narrowed pass
+// polls the org sooner. The unresolved-installation case has no known resume
+// time, so it just waits for the org's ordinary cadence.
 func (m *Manager) recordGitHubCursor(orgID, resumeFrom string, rl *ghclient.ErrRateLimited) {
 	m.setGitHubCursor(orgID, resumeFrom)
 	if rl == nil {
@@ -1566,7 +1647,7 @@ func (m *Manager) recordGitHubCursor(orgID, resumeFrom string, rl *ghclient.ErrR
 	}
 	githubLog.Info("github poll cycle interrupted by rate limit; resuming repo cursor next cycle",
 		"org", orgID, "resume_repo", resumeFrom, "resume_at", rl.ResumeAt)
-	m.schedulePoll("github", orgID, rl.ResumeAt)
+	m.holdPoll("github", orgID, rl.ResumeAt)
 }
 
 // advanceGitHubCursor applies a cycle's resume point through recordGitHubCursor,

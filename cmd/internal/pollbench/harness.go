@@ -51,6 +51,12 @@ type RunConfig struct {
 	// request changed in the last 5 minutes of the run, a count that depends
 	// on how fast the machine is. Zero is TF's default poll interval.
 	PollInterval time.Duration
+
+	// Hints has each warm cycle's changes delivered as GitHub webhook hints:
+	// a refresh mark per change, as the receiver writes one (the pushed pull
+	// request; the moved base branch), and a narrowed pass over them before
+	// the cycle's scheduled poll.
+	Hints bool
 }
 
 // defaultPollInterval is TF's default GitHub poll interval, which the bench
@@ -118,6 +124,11 @@ type Result struct {
 	// the scenario's moves and pushes did.
 	Totals Counters
 	World  WorldStats
+
+	// PollInterval is the time each warm cycle stands for, and Hints whether
+	// the run delivered its changes as hints (RunConfig.Hints).
+	PollInterval time.Duration
+	Hints        bool
 
 	// ColdCycles is how many cycles the cold sync took to complete (1 unless
 	// a rate limit forced resumption); ColdSyncWall is the summed cold-cycle
@@ -281,6 +292,8 @@ func Run(cfg RunConfig) (*Result, error) {
 	// Track the repos on the local default team: the poller enumerates the
 	// tracked set, and a registry row on its own is not tracking. The tracked
 	// set is written by registry id, so each repo is registered first.
+	// tracked is the registry row id of each repository, in ds.Repos order,
+	// which a hint's mark is written on.
 	tracked := make([]string, 0, len(ds.RepoNames()))
 	for _, name := range ds.RepoNames() {
 		owner, repo, ok := strings.Cut(name, "/")
@@ -326,7 +339,12 @@ func Run(cfg RunConfig) (*Result, error) {
 	// poll interval for every polled cycle so far. Only the poll reads it.
 	changeEpoch := time.Now()
 	var polledCycles time.Duration
-	mgr.ChangeClock = func() time.Time { return changeEpoch.Add(polledCycles * pollInterval) }
+	// A narrowed pass runs between two polls: hintAt moves the clock half an
+	// interval past the last poll while one runs, standing for a change that
+	// lands mid-interval and the hint's pass seconds after it.
+	var hintAt time.Duration
+	mgr.ChangeClock = func() time.Time { return changeEpoch.Add(polledCycles*pollInterval + hintAt) }
+	mgr.RefreshMarks = stores.GitHubRefreshMarks
 
 	// Poll-cycle errors surfaced via OnError are classified at capture: an
 	// ErrRateLimited on a run that configured a rate limit is the expected
@@ -369,6 +387,8 @@ func Run(cfg RunConfig) (*Result, error) {
 		MaxOpenPRs:         ds.MaxOpenPRs(),
 		BaseBranches:       ds.BaseBranches(),
 		ExpectedColdEvents: ds.ExpectedColdEvents(),
+		PollInterval:       pollInterval,
+		Hints:              cfg.Hints,
 	}
 
 	// measure runs one cycle's work and records what it cost. poll is false
@@ -471,19 +491,36 @@ func Run(cfg RunConfig) (*Result, error) {
 	sc := cfg.Scenario
 	for i := 1; i <= cfg.WarmCycles; i++ {
 		moves, pushes := 0, 0
+		var hints []hint
 		if sc.BaseMoves && sc.MoveEvery > 0 && i%sc.MoveEvery == 0 {
 			n := int(math.Ceil(sc.MoveRepoPct * float64(len(ds.Repos))))
 			for _, ri := range scenario.Perm(len(ds.Repos))[:min(n, len(ds.Repos))] {
 				srv.MoveBase(ri)
 				moves++
+				hints = append(hints, hint{tracked[ri], domain.BranchRefreshTarget(baseBranch)})
 			}
 		}
 		if sc.HeadPushPct > 0 {
 			n := int(math.Round(sc.HeadPushPct * float64(len(prIndex))))
 			for _, k := range scenario.Perm(len(prIndex))[:min(n, len(prIndex))] {
-				srv.PushHead(prIndex[k][0], prIndex[k][1])
+				ri, pi := prIndex[k][0], prIndex[k][1]
+				srv.PushHead(ri, pi)
 				pushes++
+				hints = append(hints, hint{tracked[ri], domain.PullRequestRefreshTarget(ds.Repos[ri].PRs[pi].Number)})
 			}
+		}
+		if cfg.Hints && len(hints) > 0 {
+			for _, h := range hints {
+				if _, err := stores.GitHubRefreshMarks.MarkSystem(ctx, orgID, h.repositoryID, h.target); err != nil {
+					return nil, fmt.Errorf("write a hint's refresh mark: %w", err)
+				}
+			}
+			res.Cycles = append(res.Cycles, measure(fmt.Sprintf("hint #%d", i), false, func() error {
+				hintAt = pollInterval / 2
+				defer func() { hintAt = 0 }()
+				mgr.RefreshMarkedGitHubOnce(ctx, orgID)
+				return nil
+			}))
 		}
 		m := measure(fmt.Sprintf("warm #%d", i), true, probe)
 		m.Moves, m.HeadPushes = moves, pushes
@@ -581,6 +618,43 @@ func Run(cfg RunConfig) (*Result, error) {
 			fmt.Sprintf("%d request(s) hit endpoints the fake server doesn't model (other)", other))
 	}
 	return res, nil
+}
+
+// hint is one refresh mark a warm cycle's change stands for.
+type hint struct {
+	repositoryID string
+	target       domain.GitHubRefreshTarget
+}
+
+// HourlyCost is what a run's warm cycles cost per simulated hour.
+type HourlyCost struct {
+	REST, GraphQL, Points float64
+}
+
+// PerHour is what the warm cycles cost per simulated hour, each standing for
+// one PollInterval: scheduled is the warm rows (each a poll and its probe
+// pass), narrowed the narrowed passes between them. Both are zero with no warm
+// cycle.
+func (r *Result) PerHour() (scheduled, narrowed HourlyCost) {
+	var warm, hinted Counters
+	n := 0
+	for _, c := range r.Cycles {
+		switch {
+		case strings.HasPrefix(c.Label, "warm"):
+			warm = countersSum(warm, c.Requests)
+			n++
+		case strings.HasPrefix(c.Label, "hint"):
+			hinted = countersSum(hinted, c.Requests)
+		}
+	}
+	if n == 0 || r.PollInterval <= 0 {
+		return HourlyCost{}, HourlyCost{}
+	}
+	scale := float64(time.Hour) / (float64(n) * float64(r.PollInterval))
+	cost := func(c Counters) HourlyCost {
+		return HourlyCost{REST: scale * float64(c.REST()), GraphQL: scale * float64(c.GraphQL), Points: scale * float64(c.Points)}
+	}
+	return cost(warm), cost(hinted)
 }
 
 // settlePasses bounds the settle row's probe passes. What is owed after the

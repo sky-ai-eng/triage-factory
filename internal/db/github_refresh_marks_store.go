@@ -39,6 +39,12 @@ type GitHubRefreshMarkStore interface {
 	// first. limit must be positive.
 	ListSystem(ctx context.Context, orgID string, limit int) ([]domain.GitHubRefreshMark, error)
 
+	// ListMarkedOrgsSystem returns the id of every org with at least one
+	// pending mark, in id order. It is the one read not bound to an org: the
+	// poll's sweep makes it to find the orgs whose marks a lost nudge left
+	// waiting, without reading each active org's marks in turn.
+	ListMarkedOrgsSystem(ctx context.Context) ([]string, error)
+
 	// ClearSystem deletes each of read that is still at the revision it was
 	// read at, and returns how many it deleted. A mark a delivery landed on
 	// after it was read is at a later revision and is kept, because the pass

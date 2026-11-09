@@ -116,35 +116,55 @@ func giveUpRecheck(n int) time.Duration {
 // success of that re-run would never be emitted before merge. The
 // floor caps the worst case at staleRefreshFloor.
 func shouldSkipRefresh(stored, fresh domain.PRSnapshot, age, sinceChange time.Duration) bool {
-	if sinceChange < changeRefreshWindow {
-		return false
+	return refreshRuleFor(stored, fresh, age, sinceChange) == refreshSkip
+}
+
+// refreshRule is why the gate refreshes an open pull request the listing
+// returned: the listing shows a change, or one of the three timer rules.
+type refreshRule string
+
+const (
+	// refreshSkip is no rule: the stored snapshot stands this cycle.
+	refreshSkip refreshRule = ""
+	// refreshChanged is a listing that shows a change against the stored
+	// snapshot, or a stored snapshot missing what the comparison needs: an
+	// updatedAt, a head, or the check runs a first full refresh fills in.
+	refreshChanged refreshRule = "changed"
+	// The timer rules, which refresh a pull request whose listing shows no
+	// change. They are the missed-hint counter's rule label.
+	refreshChangeWindow refreshRule = "change_window"
+	refreshFloor        refreshRule = "floor"
+	refreshInFlightCI   refreshRule = "in_flight_ci"
+)
+
+// timer reports whether r is one of the timer rules.
+func (r refreshRule) timer() bool {
+	return r == refreshChangeWindow || r == refreshFloor || r == refreshInFlightCI
+}
+
+// refreshRuleFor is the rule shouldSkipRefresh refreshes stored by, with its
+// arguments. A listing that shows a change is reported over a timer rule that
+// also applies, because the refresh would happen without the timer; among the
+// timers, the first in the gate's order (window, floor, in-flight CI) is
+// reported.
+func refreshRuleFor(stored, fresh domain.PRSnapshot, age, sinceChange time.Duration) refreshRule {
+	switch {
+	case stored.UpdatedAt == "" || fresh.UpdatedAt == "",
+		stored.UpdatedAt != fresh.UpdatedAt,
+		stored.HeadSHA == "" || fresh.HeadSHA == "",
+		stored.HeadSHA != fresh.HeadSHA,
+		// A fresh body also fills a missing baseline on deployed snapshots.
+		fresh.BodyHash != "" && stored.BodyHash != fresh.BodyHash,
+		stored.CheckRuns == nil:
+		return refreshChanged
+	case sinceChange < changeRefreshWindow:
+		return refreshChangeWindow
+	case age > staleRefreshFloor:
+		return refreshFloor
+	case hasInFlightCI(stored):
+		return refreshInFlightCI
 	}
-	if age > staleRefreshFloor {
-		return false
-	}
-	if stored.UpdatedAt == "" || fresh.UpdatedAt == "" {
-		return false
-	}
-	if stored.UpdatedAt != fresh.UpdatedAt {
-		return false
-	}
-	if stored.HeadSHA == "" || fresh.HeadSHA == "" {
-		return false
-	}
-	if stored.HeadSHA != fresh.HeadSHA {
-		return false
-	}
-	// A fresh body also fills a missing baseline on deployed snapshots.
-	if fresh.BodyHash != "" && stored.BodyHash != fresh.BodyHash {
-		return false
-	}
-	if stored.CheckRuns == nil {
-		return false
-	}
-	if hasInFlightCI(stored) {
-		return false
-	}
-	return true
+	return refreshSkip
 }
 
 // formatChangeSeen is the ChangeSeenAt stamp for a change TF observed by t. It

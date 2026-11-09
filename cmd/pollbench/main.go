@@ -73,6 +73,8 @@ func main() {
 		conflictPct     = flag.Float64("conflict-pct", 0.02, "fraction of PRs in merge-conflict state when the run starts")
 		baseMoves       = flag.Bool("base-moves", false, "land base moves during the warm cycles (on by default for mono: every 2 cycles; otherwise every 10 cycles on 10% of repos)")
 		conflictOverlap = flag.Float64("conflict-on-overlap", 0.03, "chance a base move makes a PR whose paths it overlaps conflicting")
+		headPushPct     = flag.Float64("head-push-pct", 0, "fraction of open PRs whose head is pushed at the start of every warm cycle (mono's preset is 0.01; the other shapes push none)")
+		hints           = flag.Bool("hints", false, "deliver each warm cycle's changes as webhook hints (a refresh mark per change and a narrowed pass before the poll), then run the same scenario without hints and compare the cost per simulated hour")
 		latency         = flag.Duration("latency", 30*time.Millisecond, "injected per-request latency (GHES-in-VPC round trip)")
 		rateLimit       = flag.Int("rate-limit", 0, "API request budget per window; 0 = unlimited")
 		rateLimitWindow = flag.Duration("rate-limit-window", time.Minute, "rate-limit window (GHES uses 1h; short windows keep bench runs fast)")
@@ -104,14 +106,14 @@ func main() {
 	// flag drops the one it replaces. A custom run moves bases at the
 	// default cadence.
 	preset := shapePreset{moveEvery: defaultMoveEvery, moveRepo: defaultMoveRepoPct}
+	explicit := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 	if *shape != "" {
 		var ok bool
 		if preset, ok = shapes[*shape]; !ok {
 			fmt.Fprintf(os.Stderr, "unknown -shape %q (want smoke, dp1, stress, or mono)\n", *shape)
 			os.Exit(2)
 		}
-		explicit := map[string]bool{}
-		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 		if !explicit["repos"] {
 			*repos = preset.repos
 		}
@@ -129,6 +131,13 @@ func main() {
 		if !explicit["base-moves"] {
 			*baseMoves = preset.baseMoves
 		}
+	}
+	if explicit["head-push-pct"] {
+		if *headPushPct < 0 || *headPushPct > 1 {
+			fmt.Fprintf(os.Stderr, "-head-push-pct must be in [0, 1], got %v\n", *headPushPct)
+			os.Exit(2)
+		}
+		preset.headPush = *headPushPct
 	}
 
 	// The modeled deployment is a multi-mode GHES install; multi is also the
@@ -173,14 +182,15 @@ func main() {
 		WarmCycles:   *warmCycles,
 		MaxCycles:    *maxCycles,
 		PollInterval: *pollInterval,
+		Hints:        *hints,
 	}
 
 	name := *shape
 	if name == "" {
 		name = "custom"
 	}
-	fmt.Printf("poll-bench  shape=%s seed=%d latency=%s rate-limit=%s base-moves=%t\n",
-		name, *seed, *latency, rateLimitDesc(*rateLimit, *rateLimitWindow), *baseMoves)
+	fmt.Printf("poll-bench  shape=%s seed=%d latency=%s rate-limit=%s base-moves=%t head-push-pct=%g hints=%t\n",
+		name, *seed, *latency, rateLimitDesc(*rateLimit, *rateLimitWindow), *baseMoves, preset.headPush, *hints)
 
 	res, err := pollbench.Run(cfg)
 	if err != nil {
@@ -190,6 +200,22 @@ func main() {
 	res.Render(os.Stdout)
 
 	failed := len(res.SanityErrors) > 0
+
+	if *hints {
+		fmt.Println("\nhints: running the same scenario without hints for the comparison…")
+		without := cfg
+		without.Hints = false
+		res0, err := pollbench.Run(without)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pollbench (without hints): %v\n", err)
+			os.Exit(1)
+		}
+		for _, s := range res0.SanityErrors {
+			fmt.Printf("hints: run without hints sanity FAIL — %s\n", s)
+		}
+		failed = failed || len(res0.SanityErrors) > 0
+		pollbench.RenderHintComparison(os.Stdout, res0, res)
+	}
 
 	if *check {
 		fmt.Println("\ncheck: re-running for determinism comparison…")

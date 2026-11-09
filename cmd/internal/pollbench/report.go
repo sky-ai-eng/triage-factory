@@ -3,6 +3,7 @@ package pollbench
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ func (r *Result) Render(w io.Writer) {
 	}
 
 	r.renderMergeability(w)
+	r.renderPerHour(w)
 
 	if r.PeakRSSBytes > 0 {
 		fmt.Fprintf(w, "peak RSS: %s\n", fmtBytes(r.PeakRSSBytes))
@@ -141,6 +143,43 @@ func (r *Result) renderMergeability(w io.Writer) {
 		fmt.Fprintf(w, "probing every tracked PR on every base move: %s test merges for the %s moves, against %s here (overlap set plus re-reads)\n",
 			comma(r.World.BaseOpenPRs), comma(r.World.Moves), comma(t.TestMergesOverlap+t.TestMergesReread))
 	}
+}
+
+// renderPerHour states what the warm cycles cost per simulated hour, the
+// narrowed passes apart when the run delivered hints.
+func (r *Result) renderPerHour(w io.Writer) {
+	scheduled, narrowed := r.PerHour()
+	if scheduled == (HourlyCost{}) && narrowed == (HourlyCost{}) {
+		return
+	}
+	fmt.Fprintf(w, "per simulated hour (a warm cycle per %s): scheduled %s\n", r.PollInterval, scheduled)
+	if r.Hints {
+		total := HourlyCost{REST: scheduled.REST + narrowed.REST, GraphQL: scheduled.GraphQL + narrowed.GraphQL, Points: scheduled.Points + narrowed.Points}
+		fmt.Fprintf(w, "  narrowed passes %s; total %s\n", narrowed, total)
+	}
+	fmt.Fprintln(w, "  the warm cycles run back to back, and the refresh floor counts wall-clock time, so it never fires here: a deployment also pays for its refreshes")
+}
+
+func (c HourlyCost) String() string {
+	return fmt.Sprintf("%s REST, %s GraphQL, %s points", comma(int(math.Round(c.REST))), comma(int(math.Round(c.GraphQL))), comma(int(math.Round(c.Points))))
+}
+
+// RenderHintComparison writes the per-simulated-hour cost of two runs of one
+// scenario, without and with hints.
+func RenderHintComparison(w io.Writer, without, with *Result) {
+	sched0, _ := without.PerHour()
+	sched, narrowed := with.PerHour()
+	fmt.Fprintf(w, "\nper simulated hour, a warm cycle per %s:\n", with.PollInterval)
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "run\tREST\tGraphQL\tpoints")
+	row := func(name string, c HourlyCost) {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, comma(int(math.Round(c.REST))), comma(int(math.Round(c.GraphQL))), comma(int(math.Round(c.Points))))
+	}
+	row("without hints", sched0)
+	row("with hints: scheduled cycles", sched)
+	row("with hints: narrowed passes", narrowed)
+	row("with hints: total", HourlyCost{REST: sched.REST + narrowed.REST, GraphQL: sched.GraphQL + narrowed.GraphQL, Points: sched.Points + narrowed.Points})
+	_ = tw.Flush()
 }
 
 // probeReasons renders a cycle's probes by reason in the vocabulary's order.
