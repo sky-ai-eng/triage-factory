@@ -105,7 +105,7 @@ func TestRefreshGitHub_SeedCommitsItsReviewBackfill(t *testing.T) {
 	pub := &recordingPreEnqueuedPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -169,7 +169,7 @@ func TestRefreshGitHub_SeedCASMissCommitsNothing(t *testing.T) {
 	queue := &failingBatchQueue{EventQueueStore: stores.EventQueue}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, queue, stores.PRMergeability, org)
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
 	client := newSeedClient(t, "outsider", "bob", "dependabot", "carol", "dave", "nobody")
 	known := knownLogins{"bob": true, "carol": true, "dave": true}
 
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, known); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), known); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 

@@ -119,6 +119,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			database := newMigratedSQLite(t)
 			stores := sqlitestore.New(database)
 			org := runmode.LocalDefaultOrgID
+			trackRepos(t, stores, org, []string{"octo/repo"})
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", "")
@@ -129,7 +130,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			// Cycle 1 against the REAL store: quiet-seeds the draft snapshot.
 			pub := &recordingPublisher{}
 			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
-			if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 				t.Fatalf("RefreshGitHub cycle 1: %v", err)
 			}
 			if evts := pub.nonSystemEvents(); len(evts) != 0 {
@@ -143,7 +144,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			failing := &failingBatchQueue{EventQueueStore: stores.EventQueue, err: tc.err}
 			losingPub := &recordingPublisher{}
 			loser := New(database, losingPub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, failing, stores.PRMergeability, org)
-			if _, _, err := loser.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+			if _, _, err := loser.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 				t.Fatalf("RefreshGitHub cycle 2 (loser): %v", err)
 			}
 			if atomic.LoadInt32(&failing.calls) == 0 {
@@ -164,7 +165,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			// event_id index).
 			winnerPub := &recordingPublisher{}
 			winner := New(database, winnerPub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
-			if _, _, err := winner.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+			if _, _, err := winner.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 				t.Fatalf("RefreshGitHub cycle 3: %v", err)
 			}
 			evts := winnerPub.nonSystemEvents()
@@ -205,6 +206,7 @@ func TestRefreshGitHub_CommittedEventsRouteWithoutTheBus(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", "")
@@ -215,10 +217,10 @@ func TestRefreshGitHub_CommittedEventsRouteWithoutTheBus(t *testing.T) {
 	// Cycle 1 seeds the draft snapshot; cycle 2 diffs draft→ready. Both run
 	// against a publisher that never delivers anything.
 	tr := New(database, droppingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 

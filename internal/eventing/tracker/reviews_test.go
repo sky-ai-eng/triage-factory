@@ -343,6 +343,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	recordTFComment(t, stores, domain.ProviderGitHub, reviewTestHost, "octo/repo#7", domain.GitHubCommentKey(domain.GitHubReviewComment, 4004))
 	entityID := seedReviewedPR(t, stores, domain.PRSnapshot{
 		ReviewCount:  1,
@@ -353,7 +354,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := ghclient.NewClient(srv.URL, "tok")
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -377,7 +378,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	// The same pull request on the next poll: nothing moved, so nothing is
 	// read and nothing emits.
 	before := len(pub.nonSystemEvents())
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("second RefreshGitHub: %v", err)
 	}
 	if reads != 1 {
@@ -405,6 +406,7 @@ func TestRefreshGitHub_SnapshotWithoutMarker(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	entityID := seedReviewedPR(t, stores, domain.PRSnapshot{
 		ReviewCount: 1,
 		Reviews:     []domain.ReviewState{{ID: "PRR_alice0", Author: "alice", State: "COMMENTED", SubmittedAt: "2026-10-01T09:00:00Z"}},
@@ -412,7 +414,7 @@ func TestRefreshGitHub_SnapshotWithoutMarker(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 

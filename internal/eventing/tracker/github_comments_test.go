@@ -467,13 +467,14 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 			database := newMigratedSQLite(t)
 			stores := sqlitestore.New(database)
 			org := runmode.LocalDefaultOrgID
+			trackRepos(t, stores, org, []string{"octo/repo"})
 			recordTFComment(t, stores, domain.ProviderGitHub, reviewTestHost, "octo/repo#7", domain.GitHubCommentKey(domain.GitHubIssueComment, 4102))
 			entityID := seedReviewedPR(t, stores, tc.prev)
 
 			pub := &recordingPublisher{}
 			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 			client := ghclient.NewClient(srv.URL, "tok")
-			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
 			}
 
@@ -506,7 +507,7 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 			// The same pull request on the next poll: nothing moved, so
 			// nothing is read and nothing emits.
 			before := len(pub.nonSystemEvents())
-			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 				t.Fatalf("second RefreshGitHub: %v", err)
 			}
 			if reads != tc.wantReads {
@@ -603,6 +604,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	entityIDs := map[int]string{}
 	for _, n := range []int{7, 8} {
 		e, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", reviewTestHost, fmt.Sprintf("octo/repo#%d", n), "", "pr", fmt.Sprintf("PR %d", n), fmt.Sprintf("https://github.com/octo/repo/pull/%d", n))
@@ -622,7 +624,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := ghclient.NewClient(srv.URL, "tok")
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub under a rate limit: %v", err)
 	}
 	if got := reads.Load(); got != 1 {
@@ -642,7 +644,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	}
 
 	limited.Store(false)
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub after the limit: %v", err)
 	}
 	got := findEvents(pub.nonSystemEvents(), domain.EventGitHubPRCommented)

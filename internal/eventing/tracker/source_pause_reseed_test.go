@@ -98,7 +98,7 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -135,6 +135,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#9", "", "pr", "Paused PR", "")
 	if err != nil {
@@ -146,7 +147,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, ReachAll(), nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) == 0 {
@@ -317,7 +318,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	resolver := fakeReviewerResolver{users: map[string]bool{"carol": true}}
-	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), resolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 

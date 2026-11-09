@@ -314,6 +314,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	for _, key := range []string{
 		domain.GitHubCommentKey(domain.GitHubIssueComment, 4102),
 		domain.GitHubCommentKey(domain.GitHubReviewComment, 6002),
@@ -353,7 +354,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := ghclient.NewClient(srv.URL, "tok")
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, mentionResolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -369,7 +370,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 	}
 
 	before := len(pub.nonSystemEvents())
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, mentionResolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, ReachAll(), mentionResolver); err != nil {
 		t.Fatalf("second RefreshGitHub: %v", err)
 	}
 	if after := pub.nonSystemEvents(); len(after) != before {
@@ -389,7 +390,7 @@ func TestRefreshGitHub_KeepsBodyMentionsWithoutTheBody(t *testing.T) {
 	srv := commentRefreshServer(t, `{"totalCount":0,"nodes":[]}`, `{}`, &reads)
 
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, mentionResolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, ReachAll(), mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 	if snap := storedPRSnapshot(t, stores, entityID); len(snap.BodyMentions) != 1 || snap.BodyMentions[0] != "bob" || snap.BodyHash != "h" {
@@ -484,14 +485,14 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
 
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), resolver); err != nil {
 		t.Fatalf("first RefreshGitHub: %v", err)
 	}
 	if got := storedMentions(t, tr, stores, 1); len(got) != 0 {
 		t.Fatalf("a pull request from the repository's first listing emitted %v", mentionKeys(got))
 	}
 
-	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, ReachAll(), resolver); err != nil {
 		t.Fatalf("second RefreshGitHub: %v", err)
 	}
 	if got := storedMentions(t, tr, stores, 1); len(got) != 0 {

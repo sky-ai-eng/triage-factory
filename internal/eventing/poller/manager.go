@@ -969,7 +969,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		m.recordRepoIDs(ctx, orgID, scope, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, resolver)
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, domain.GitHubAccount{}, scoped, tracker.ReachOfGrant(grant), resolver)
 		if rerr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
@@ -1180,7 +1180,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	}
 
 	resolver := m.reviewerResolver(ctx, orgID, self, userTeams)
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, resolver)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
 		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)

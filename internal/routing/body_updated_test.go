@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/tracker"
@@ -38,6 +39,9 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 			if source == "github" {
 				setReviewHost(t, database)
 				seedUserOnTeam(t, database, team, "author")
+				if err := dbtest.TrackRepos(ctx, st.Repos, st.TeamGitHubRepos, org, team, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
+					t.Fatal(err)
+				}
 			} else {
 				eventType, sourceID, kind = domain.EventJiraIssueBodyUpdated, "PROJ-7", "issue"
 				setJiraHost(t, database)
@@ -94,7 +98,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				mu.Unlock()
 				var err error
 				if source == "github" {
-					_, _, err = tr.RefreshGitHub(ctx, "https://github.com", gh, domain.GitHubAccount{}, nil, nil)
+					_, _, err = tr.RefreshGitHub(ctx, "https://github.com", gh, domain.GitHubAccount{}, nil, tracker.ReachAll(), nil)
 				} else {
 					_, err = tr.RefreshJira(ctx, testScope("jira"), jira, srv.URL, tracker.JiraRules{{Key: "PROJ"}})
 				}
