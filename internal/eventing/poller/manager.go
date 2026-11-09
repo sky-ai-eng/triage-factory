@@ -821,6 +821,9 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	if len(repos) == 0 {
 		// Anticipated: an org that tracks nothing. Same posture as the
 		// Jira twin's unconfigured skip — an outcome, never an error.
+		// TODO(TFAC-1355): no pass runs here, so the pull requests TF holds in
+		// the org's untracked repositories are never refreshed and their
+		// leftover tasks never close on a merge.
 		span.SetAttributes(telemetry.Outcome("no_repos"))
 		conn.skip("no_repos")
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
@@ -957,6 +960,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		scoped := withoutSlugs(intersectConfigured(repos, grant, covered), contested)
 		if len(scoped) == 0 {
+			// TODO(TFAC-1355): an installation whose grant holds no tracked
+			// repository runs no pass, so the pull requests TF holds in its
+			// untracked repositories are never refreshed and their leftover
+			// tasks never close on a merge.
 			continue
 		}
 		// The grant response carries GitHub's repository id for every repo in
