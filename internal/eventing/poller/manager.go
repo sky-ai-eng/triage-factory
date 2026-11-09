@@ -1259,6 +1259,12 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 
 	client, self, resolver, ok := m.patPass(ctx, conn, orgID, isLocal)
 	if !ok {
+		// An org with no GitHub credential at all has nothing that could
+		// refresh what its marks name; one connected later is polled by its
+		// listings, which show whatever changed meanwhile.
+		if conn.unpolled == "unconfigured" {
+			marks.dropUnreached(nil)
+		}
 		return false
 	}
 	_, resumeFrom, rerr := m.trackerForOrg(orgID).WithRefreshMarks(marks.marks()).RefreshGitHub(ctx, scope, client, self, repos, tracker.ReachAll(), resolver)

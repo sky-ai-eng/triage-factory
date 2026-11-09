@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -190,12 +191,13 @@ func TestOrgPass_ScheduledCycleAndNarrowedPassExcludeEachOther(t *testing.T) {
 	}
 	p.mu.Unlock()
 
+	m.ghStop = make(chan struct{})
 	m.passMu.Lock()
 	p.pending = true
 	m.passMu.Unlock()
 	// With the scheduled cycle owed, the pass returns before reading
 	// anything: this Manager has no stores, so a read would panic.
-	m.runMarkedPass(make(chan struct{}), "org")
+	m.runMarkedPass("org")
 	if p.pending {
 		t.Fatal("pending still set after the pass; want it cleared")
 	}
@@ -231,8 +233,9 @@ func (c *countingMarks) count() int {
 }
 
 // Nudges that land before the narrowed pass reads the marks collapse into
-// one pass; the sweep starts a pass for an active org with marks; neither
-// runs anything while the GitHub loop is stopped.
+// one pass; the sweep starts a pass for an active org with marks; a pass
+// scheduled before the loop restarts runs on the restarted loop; and nothing
+// runs once the loop is stopped.
 func TestHintGitHub_CollapsesNudgesAndTheSweepStartsAPass(t *testing.T) {
 	r := newMarkedRig(t)
 	org := runmode.LocalDefaultOrgID
@@ -255,10 +258,17 @@ func TestHintGitHub_CollapsesNudgesAndTheSweepStartsAPass(t *testing.T) {
 	r.m.scheduleMarkedPass(org, 0)
 	waitReads(0) // the loop is not running
 
-	stop := make(chan struct{})
-	r.m.mu.Lock()
-	r.m.ghStop = stop
-	r.m.mu.Unlock()
+	// setLoop moves the loop to stop, closing the one it replaces as stopAll
+	// does; nil is a stopped loop.
+	setLoop := func(stop chan struct{}) {
+		r.m.mu.Lock()
+		if r.m.ghStop != nil {
+			close(r.m.ghStop)
+		}
+		r.m.ghStop = stop
+		r.m.mu.Unlock()
+	}
+	setLoop(make(chan struct{}))
 	for range 3 {
 		r.m.scheduleMarkedPass(org, 50*time.Millisecond)
 	}
@@ -267,7 +277,94 @@ func TestHintGitHub_CollapsesNudgesAndTheSweepStartsAPass(t *testing.T) {
 	r.m.sweepMarks(context.Background())
 	waitReads(2)
 
-	close(stop)
+	r.m.scheduleMarkedPass(org, 50*time.Millisecond)
+	setLoop(make(chan struct{})) // a restart before the pass is due
+	waitReads(3)
+
+	r.m.scheduleMarkedPass(org, 50*time.Millisecond)
+	setLoop(nil) // a stop before the pass is due
+	waitReads(3)
 	r.m.sweepMarks(context.Background())
-	waitReads(2)
+	waitReads(3)
+}
+
+// The scheduled cycle drops a mark nothing can refresh: one on a tracked
+// repository no installation's grant holds, once every grant was read, and
+// every mark of an org with no GitHub credential at all.
+func TestRunGitHubCycleForOrg_DropsMarksNoCredentialCanRefresh(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	t.Run("no grant holds the repository", func(t *testing.T) {
+		r := newMarkedRig(t)
+		trackRepos(t, r.stores, org, []string{"acme/one", "beta/two", "zed/three"})
+		r.settle()
+		r.mark("zed/three", domain.PullRequestRefreshTarget(3))
+		r.mark("acme/one", domain.PullRequestRefreshTarget(1))
+		r.m.runGitHubCycleForOrg(ctx, org)
+		if got := r.pending(); len(got) != 0 {
+			t.Errorf("marks after the cycle = %+v, want both cleared: one honored, one in no grant", got)
+		}
+	})
+	t.Run("no credential", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		database := newMigratedSQLiteForPoller(t)
+		stores := sqlitestore.New(database)
+		trackRepos(t, stores, org, []string{"acme/one"})
+		m := &Manager{
+			database: database, tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue,
+			mergeability: stores.PRMergeability, repos: stores.Repos, orgs: stores.Orgs,
+			resolver:     &fakeResolver{err: ghclient.ErrNoGitHubCredentials},
+			RefreshMarks: stores.GitHubRefreshMarks,
+		}
+		row, err := stores.Repos.FindOrCreateByRefSystem(ctx, org, domain.RepoRef{Host: "https://github.com", Owner: "acme", Repo: "one"})
+		if err != nil {
+			t.Fatalf("register acme/one: %v", err)
+		}
+		if _, err := stores.GitHubRefreshMarks.MarkSystem(ctx, org, row.ID, domain.PullRequestRefreshTarget(1)); err != nil {
+			t.Fatalf("mark: %v", err)
+		}
+		m.runGitHubCycleForOrg(ctx, org)
+		if got, err := stores.GitHubRefreshMarks.ListSystem(ctx, org, 10); err != nil || len(got) != 0 {
+			t.Errorf("marks after the cycle = %+v, %v; want the mark dropped", got, err)
+		}
+	})
+}
+
+// In local mode a narrowed pass on the personal token runs only once a
+// scheduled cycle has listed the user's teams, which the reviewer resolver
+// needs to tell a review requested from one of them.
+func TestMarkedPATPass_LocalWaitsForTheUsersTeams(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	m := &Manager{orgs: stores.Orgs, users: stores.Users, githubGroups: stores.TeamGitHubGroups,
+		resolver: &fakeResolver{client: ghclient.NewClient("https://github.com", "tok")}}
+	org := runmode.LocalDefaultOrgID
+	set := domain.OrgSettings{GitHubBaseURL: "https://github.com"}
+	if _, _, _, ok := m.markedPATPass(context.Background(), org, set); ok {
+		t.Fatal("markedPATPass ran before any scheduled cycle listed the user's teams")
+	}
+	m.rememberLocalTeams(org, nil)
+	if _, _, _, ok := m.markedPATPass(context.Background(), org, set); !ok {
+		t.Fatal("markedPATPass refused once the teams were listed, as none")
+	}
+}
+
+// A GitHub rate limit holds the org's polls until its reset: a config save's
+// PollSoon does not make the org due sooner, and a narrowed pass sees the hold.
+func TestRecordGitHubCursor_RateLimitHoldsThePolls(t *testing.T) {
+	m := &Manager{}
+	now := time.Now()
+	reset := now.Add(10 * time.Minute)
+	m.recordGitHubCursor("org", "acme/one", &ghclient.ErrRateLimited{ResumeAt: reset})
+	m.PollSoon("github", "org")
+	if m.pollDue("github", "org", now) {
+		t.Error("PollSoon made a rate-limited org due before its reset")
+	}
+	if !m.pollHeld("github", "org", now) {
+		t.Error("pollHeld = false before the reset; a narrowed pass would poll into the limit")
+	}
+	if !m.pollDue("github", "org", reset) || m.pollHeld("github", "org", reset) {
+		t.Error("the hold outlasted its reset")
+	}
 }

@@ -102,13 +102,7 @@ func (m *Manager) HintGitHub(orgID string) {
 }
 
 func (m *Manager) scheduleMarkedPass(orgID string, after time.Duration) {
-	if m.RefreshMarks == nil || orgID == "" {
-		return
-	}
-	m.mu.Lock()
-	stop := m.ghStop
-	m.mu.Unlock()
-	if stop == nil {
+	if m.RefreshMarks == nil || orgID == "" || !m.githubRunning() {
 		return
 	}
 	p := m.orgPassFor(orgID)
@@ -119,15 +113,18 @@ func (m *Manager) scheduleMarkedPass(orgID string, after time.Duration) {
 	}
 	p.pending = true
 	m.passMu.Unlock()
-	time.AfterFunc(after, func() { m.runMarkedPass(stop, orgID) })
+	time.AfterFunc(after, func() { m.runMarkedPass(orgID) })
 }
 
 // runMarkedPass runs one scheduled narrowed pass, after the org's running
-// pass, if any, ends. A loop torn down meanwhile runs nothing, as the
-// scheduled loop starts no org after its stop closes.
-func (m *Manager) runMarkedPass(stop <-chan struct{}, orgID string) {
+// pass, if any, ends, while the GitHub loop is running. The loop is read when
+// the pass is due rather than when it was scheduled, so a nudge collapsed into
+// a pass scheduled before a restart still runs on the restarted loop, and one
+// scheduled before a stop does not run.
+func (m *Manager) runMarkedPass(orgID string) {
 	p := m.orgPassFor(orgID)
-	if !stopped(stop) {
+	running := m.githubRunning()
+	if running {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 	}
@@ -135,19 +132,18 @@ func (m *Manager) runMarkedPass(stop <-chan struct{}, orgID string) {
 	p.pending = false
 	yield := p.yield
 	m.passMu.Unlock()
-	if yield || stopped(stop) {
+	if !running || yield || !m.githubRunning() {
 		return
 	}
 	m.refreshMarkedGitHubForOrg(context.Background(), orgID)
 }
 
-func stopped(stop <-chan struct{}) bool {
-	select {
-	case <-stop:
-		return true
-	default:
-		return false
-	}
+// githubRunning reports whether the GitHub loop is running (startGitHub, until
+// stopAll).
+func (m *Manager) githubRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ghStop != nil
 }
 
 // sweepMarks starts a narrowed pass for every active org with pending marks:
@@ -171,8 +167,12 @@ func (m *Manager) sweepMarks(ctx context.Context) {
 		githubLog.WarnContext(ctx, "list active orgs for the refresh-mark sweep failed", "error", err)
 		return
 	}
+	isActive := make(map[string]bool, len(active))
+	for _, id := range active {
+		isActive[id] = true
+	}
 	for _, orgID := range marked {
-		if slices.Contains(active, orgID) {
+		if isActive[orgID] {
 			m.scheduleMarkedPass(orgID, 0)
 		}
 	}
@@ -268,7 +268,10 @@ func (m *Manager) refreshMarkedGitHubForOrg(ctx context.Context, orgID string) {
 			}
 			client, err := m.resolver.ClientForInstallation(ctx, orgID, inst)
 			if err != nil {
-				githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "resolve client for the narrowed pass failed; its marks wait", "org", orgID, "installation", inst.InstallationID, "error", err)
+				// Debug: the scheduled cycle resolves the same client and
+				// reports its failure once a cycle, where a narrowed pass
+				// would repeat it on every sweep while the marks wait.
+				githubLog.DebugContext(ctx, "resolve client for the narrowed pass failed; its marks wait", "org", orgID, "installation", inst.InstallationID, "error", err)
 				continue
 			}
 			n, err := m.runNarrowed(ctx, orgID, scope, client, domain.GitHubAccount{}, handed, resolver, ledger)
@@ -320,9 +323,8 @@ func (m *Manager) runNarrowed(ctx context.Context, orgID, scope string, client *
 func (m *Manager) markedPATPass(ctx context.Context, orgID string, orgSet domain.OrgSettings) (*ghclient.Client, domain.GitHubAccount, tracker.ReviewerResolver, bool) {
 	client, err := m.resolver.ClientFor(ctx, orgID, "")
 	if err != nil {
-		if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "resolve pat client for the narrowed pass failed; its marks wait", "org", orgID, "error", err)
-		}
+		// Debug, as for an installation's client in the narrowed pass.
+		githubLog.DebugContext(ctx, "resolve pat client for the narrowed pass failed; its marks wait", "org", orgID, "error", err)
 		return nil, domain.GitHubAccount{}, nil, false
 	}
 	if runmode.Current() != runmode.ModeLocal {
@@ -401,15 +403,19 @@ func (m *Manager) rememberLocalTeams(orgID string, teams []string) {
 // pruneKnown drops what the last scheduled cycles learned about orgs no longer
 // active.
 func (m *Manager) pruneKnown(activeOrgIDs []string) {
+	active := make(map[string]bool, len(activeOrgIDs))
+	for _, id := range activeOrgIDs {
+		active[id] = true
+	}
 	m.knownMu.Lock()
 	defer m.knownMu.Unlock()
 	for orgID := range m.knownGrants {
-		if !slices.Contains(activeOrgIDs, orgID) {
+		if !active[orgID] {
 			delete(m.knownGrants, orgID)
 		}
 	}
 	for orgID := range m.localTeams {
-		if !slices.Contains(activeOrgIDs, orgID) {
+		if !active[orgID] {
 			delete(m.localTeams, orgID)
 		}
 	}
