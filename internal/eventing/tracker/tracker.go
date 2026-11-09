@@ -650,6 +650,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// event-source pause cleared, which is the same situation for the same
 		// reason — the state it holds predates the tracking that resumed.
 		seed bool
+		// untracked marks an open pull request in an untracked repository,
+		// refreshed because the floor passed.
+		untracked bool
 	}
 	var openItems, terminalItems []entityWithSnap
 	skippedOpen := 0
@@ -699,11 +702,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		} else {
 			age = 24 * time.Hour
 		}
-		// A pull request in an untracked repository refreshed less than the
-		// floor ago keeps its stored snapshot. A stub in one is resolved and
-		// seeded however recently it was created: until then it has no state
-		// for the floor to keep current.
-		if share == shareUntracked && snap.NodeID != "" && age <= staleRefreshFloor {
+		// An open pull request in an untracked repository refreshed less than
+		// the floor ago keeps its stored snapshot. A stub in one is resolved
+		// and seeded however recently it was created: until then it has no
+		// state for the floor to keep current. One whose snapshot is already
+		// terminal is refreshed on every cycle, as every terminal item is: its
+		// entity is still active, so that refresh is what emits its close
+		// obligation.
+		if share == shareUntracked && snap.NodeID != "" && !prSnapshotTerminal(snap) && age <= staleRefreshFloor {
 			knownOpen()
 			notOwn++
 			continue
@@ -806,6 +812,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			skippedOpen++
 			continue
 		}
+		item.untracked = share == shareUntracked
 		openItems = append(openItems, item)
 	}
 
@@ -915,6 +922,15 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	for _, item := range allItems {
 		newSnap, ok := refreshed[item.nodeID]
 		if !ok {
+			if item.untracked {
+				// GitHub answered null: the pull request is gone, or this
+				// credential cannot read it. Stamping the attempt keeps it on
+				// the floor's schedule; unstamped, it would be sent again on
+				// every cycle.
+				if err := t.entities.MarkPolledSystem(context.Background(), orgID, item.entity.ID); err != nil {
+					trackerLog.WarnContext(ctx, "stamping an unread untracked pull request failed; it is sent again next cycle", "source_id", item.entity.SourceID, "error", err)
+				}
+			}
 			continue
 		}
 		// Preserve NodeID through the refresh (RefreshPRs returns map[nodeID]→snap

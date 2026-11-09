@@ -58,8 +58,8 @@ const (
 	shareOwn passShare = iota
 	// shareUntracked is a pull request in a repository no team tracks that the
 	// pass's credential reads. Nothing lists the repository, so the gate has no
-	// fresh state to compare with, and the pull request is refreshed once its
-	// last refresh is older than staleRefreshFloor. That keeps its state current
+	// fresh state to compare with, and an open one is refreshed once its last
+	// refresh is older than staleRefreshFloor. That keeps its state current
 	// enough for the tasks left on it to close when it merges, and for the
 	// dashboard, until it closes.
 	shareUntracked

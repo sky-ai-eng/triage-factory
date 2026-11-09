@@ -42,10 +42,10 @@ const DefaultTerminalCheckInterval = 5 * time.Minute
 // may go unpolled before Count A counts it. The close obligation is emitted
 // on the refresh AFTER the one that lost the close, so one poll cycle of lag
 // is legitimate and not a violation; the grace is several cycles at any sane
-// poll cadence. What outlives it is an entity no cycle visits — an untracked
-// repo — which is exactly the case the count is for:
-// untracking never destroys tasks (the dismiss affordance is the answer), so
-// the entity is not enforced, and it IS counted.
+// poll cadence. What outlives it is an entity no cycle visits — one in a
+// repository no poll pass reaches — which is exactly the case the count is
+// for: untracking never destroys tasks (the dismiss affordance is the
+// answer), so the entity is not enforced, and it IS counted.
 const TerminalCheckGrace = 15 * time.Minute
 
 // terminalCheckLogIDs caps how many ids a nonzero pass names in its log line.
