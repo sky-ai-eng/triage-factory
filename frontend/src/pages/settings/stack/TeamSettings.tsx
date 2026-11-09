@@ -232,13 +232,10 @@ export default function TeamSettings({
   const [savingProjects, setSavingProjects] = useState(false)
   const [savingLinear, setSavingLinear] = useState(false)
 
-  // Linear's section shows once Linear is a source this deployment serves —
-  // hidden while the source reads `wip`, rather than offering a team picker
-  // nothing behind it can poll. Connected is a bound credential, paused or
-  // not, the way Jira's is.
+  // Linear is connected when the org has a credential bound, whether or not an
+  // admin has paused the source, the way Jira's is.
   const { stateOf } = useEventSources()
   const linearState = stateOf('linear')
-  const linearShown = linearState !== undefined && linearState !== 'wip'
   const linearConnected = linearState === 'available' || linearState === 'disabled'
   const [savingDefaults, setSavingDefaults] = useState(false)
   const [savingGroups, setSavingGroups] = useState(false)
@@ -615,25 +612,23 @@ export default function TeamSettings({
         />
       </SettingsSection>
 
-      {linearShown && (
-        <SettingsSection
-          title="Linear teams"
-          summary={`${linearBaseline.length} tracked`}
-          dirty={linearDirty}
-          saving={savingLinear}
-          saveDisabled={linearBlocked}
-          onSave={saveLinear}
-          onCancel={() => setLinearTeams(linearBaseline)}
-        >
-          <LinearTeamRulesGroup
-            orgId={orgId}
-            value={linearTeams}
-            onChange={setLinearTeams}
-            connected={linearConnected}
-            bare
-          />
-        </SettingsSection>
-      )}
+      <SettingsSection
+        title="Linear teams"
+        summary={`${linearBaseline.length} tracked`}
+        dirty={linearDirty}
+        saving={savingLinear}
+        saveDisabled={linearBlocked}
+        onSave={saveLinear}
+        onCancel={() => setLinearTeams(linearBaseline)}
+      >
+        <LinearTeamRulesGroup
+          orgId={orgId}
+          value={linearTeams}
+          onChange={setLinearTeams}
+          connected={linearConnected}
+          bare
+        />
+      </SettingsSection>
 
       <SettingsSection
         title="Team defaults"
