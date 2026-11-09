@@ -826,19 +826,25 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// pass: an org that tracks nothing, or an installation whose grant holds no
 	// tracked repository. A RefreshHeldGitHub pass runs under such a credential
 	// only when it reads one of them.
-	var heldRows []domain.Repository
-	heldRead := false
-	held := func() []domain.Repository {
-		if !heldRead {
-			heldRead = true
-			heldRows = m.heldUntrackedRepos(ctx, orgID, scope)
+	held := sync.OnceValues(func() ([]domain.Repository, error) {
+		rows, err := m.repos.ListHeldUntrackedSystem(ctx, orgID, scope)
+		if err != nil {
+			githubLog.ErrorContext(ctx, "load untracked repositories holding pull requests failed; none is refreshed this cycle", "org", orgID, "error", err)
 		}
-		return heldRows
-	}
+		return rows, err
+	})
 
 	if len(repos) == 0 {
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
-		if len(held()) == 0 {
+		heldRows, err := held()
+		if err != nil {
+			// Not the deliberate skip below: a read TF failed says nothing
+			// about what the org holds, so the stored connection state stands,
+			// as it does when the tracked set cannot be read.
+			span.SetStatus(codes.Error, "load held repos")
+			return
+		}
+		if len(heldRows) == 0 {
 			// Anticipated: an org that tracks nothing and holds nothing. Same
 			// posture as the Jira twin's unconfigured skip — an outcome,
 			// never an error.
@@ -1001,9 +1007,12 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			// The grant holds no tracked repository, so no RefreshGitHub pass
 			// runs under it, and the pull requests TF holds in its untracked
 			// repositories are refreshed by a held pass instead. An
-			// installation whose grant reads none of them runs nothing.
-			if reach := tracker.ReachOfGrant(grant); reach.HoldsAny(held()) {
-				m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
+			// installation whose grant reads none of them runs nothing, and so
+			// does every installation on a cycle whose read failed.
+			if heldRows, _ := held(); len(heldRows) > 0 {
+				if reach := tracker.ReachOfGrant(grant); reach.HoldsAny(heldRows) {
+					m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
+				}
 			}
 			continue
 		}
@@ -1274,19 +1283,6 @@ func (m *Manager) refreshHeldGitHub(ctx context.Context, orgID, scope string, cl
 		githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "held pull request refresh failed", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
 	}
-}
-
-// heldUntrackedRepos is the untracked repositories on host that TF holds
-// active pull requests in (RepositoryStore.ListHeldUntrackedSystem). A failed
-// read is logged and answers none, which costs their pull requests one
-// cycle's delay.
-func (m *Manager) heldUntrackedRepos(ctx context.Context, orgID, host string) []domain.Repository {
-	rows, err := m.repos.ListHeldUntrackedSystem(ctx, orgID, host)
-	if err != nil {
-		githubLog.WarnContext(ctx, "read untracked repositories holding pull requests failed; none is refreshed this cycle", "org", orgID, "error", err)
-		return nil
-	}
-	return rows
 }
 
 // orgHasRegisteredApp reports whether the org's live GitHub credential is a

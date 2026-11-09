@@ -541,3 +541,70 @@ func TestRunGitHubCycleForOrg_NothingTrackedNothingHeldSendsNothing(t *testing.T
 		})
 	}
 }
+
+// countingEntities counts the reads of the org's active entities. Every pass,
+// RefreshGitHub or RefreshHeldGitHub, makes one.
+type countingEntities struct {
+	db.EntityStore
+	mu     sync.Mutex
+	listed int
+}
+
+func (c *countingEntities) ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
+	c.mu.Lock()
+	c.listed++
+	c.mu.Unlock()
+	return c.EntityStore.ListActiveSystem(ctx, orgID, source)
+}
+
+func (c *countingEntities) take() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.listed
+	c.listed = 0
+	return n
+}
+
+// TestRunGitHubCycleForOrg_InstallationHoldingNothingRunsNoPass: a second
+// installation whose grant holds no tracked repository and no repository TF
+// holds a pull request in adds no pass to the cycle, so the org's database
+// cost does not grow with its installations. Once TF holds a pull request in
+// that installation's grant, its held pass runs, though nothing is due yet.
+func TestRunGitHubCycleForOrg_InstallationHoldingNothingRunsNoPass(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ctx := context.Background()
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"acme/one"})
+	seedBYOAppCredentialClass(t, stores, org)
+
+	grants := map[string][]string{"tok-1": {"acme/one"}, "tok-2": {"beta/two"}}
+	gh := newReachGitHub(t, reachRepos, grants, grants)
+	acme := domain.OrgGitHubAppInstallation{InstallationID: "1", AccountLogin: "acme"}
+	beta := domain.OrgGitHubAppInstallation{InstallationID: "2", AccountLogin: "beta"}
+	m := newReachManager(t, database, stores, gh, []domain.OrgGitHubAppInstallation{acme})
+	entities := &countingEntities{EntityStore: stores.Entities}
+	m.entities = entities
+	withInstalls := func(installs ...domain.OrgGitHubAppInstallation) {
+		m.apps = &fakeInstallsStore{app: &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true}, installs: installs}
+	}
+
+	m.runGitHubCycleForOrg(ctx, org)
+	oneInstallation := entities.take()
+
+	withInstalls(acme, beta)
+	m.runGitHubCycleForOrg(ctx, org)
+	if n := entities.take(); n != oneInstallation {
+		t.Errorf("active-entity reads with a second installation holding nothing = %d, want %d, as with one installation", n, oneInstallation)
+	}
+
+	seedGitHubPR(t, stores, "https://github.com", "beta/two", 2)
+	m.runGitHubCycleForOrg(ctx, org)
+	if n := entities.take(); n != oneInstallation+1 {
+		t.Errorf("active-entity reads once beta/two holds a pull request = %d, want %d: one held pass", n, oneInstallation+1)
+	}
+	if sent := gh.takeSent(); len(sent["tok-2"]) != 0 {
+		t.Errorf("tok-2 sent %v, want nothing: beta/two's pull request was refreshed less than the floor ago", sent["tok-2"])
+	}
+}

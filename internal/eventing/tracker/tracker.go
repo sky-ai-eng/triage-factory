@@ -1612,8 +1612,10 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 	// Query construction is shared with that path (dashboardBackfillQueries) so
 	// both search for exactly the same history. Also skipped once Phase 1a hit
 	// ErrRateLimited, or reached no repo at all — it shares the same client and
-	// the same host, so it would just fail the same way for no benefit.
-	if username != "" && discoveryErr == nil {
+	// the same host, so it would just fail the same way for no benefit. And
+	// skipped with no repos: a search with no repo: qualifier spans all of
+	// GitHub, and would seed pull requests in repositories nobody tracks.
+	if username != "" && len(repos) > 0 && discoveryErr == nil {
 		for _, q := range dashboardBackfillQueries(username, repos) {
 			prs, err := client.DiscoverPRs(ctx, q, 50)
 			if err != nil {

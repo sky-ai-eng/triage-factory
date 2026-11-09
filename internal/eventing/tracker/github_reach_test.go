@@ -167,3 +167,16 @@ func TestRefreshHeldGitHub_RefreshesOnlyAndReportsNoCompletedPoll(t *testing.T) 
 		}
 	}
 }
+
+// A pass handed no repository runs no dashboard search, even for an account
+// with a login: the search would carry no repo: qualifier and span all of
+// GitHub. The fixture counts it as a GraphQL request.
+func TestRefreshGitHub_NoReposRunsNoDashboardSearch(t *testing.T) {
+	f := newUntrackedRefreshFixture(t, untrackedOpenSnapshot, "null")
+	if _, _, err := f.tr.RefreshGitHub(context.Background(), "https://github.com", f.client, domain.GitHubAccount{Login: "aidan"}, nil, ReachAll(), nil); err != nil {
+		t.Fatalf("RefreshGitHub: %v", err)
+	}
+	if n := f.refreshes.Load(); n != 0 {
+		t.Errorf("GraphQL requests = %d, want 0: the pull request is inside the floor and no search may run", n)
+	}
+}

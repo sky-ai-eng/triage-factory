@@ -388,13 +388,13 @@ type RepositoryStore interface {
 	// from every list. An issue entity holds nothing here, because the poller
 	// refreshes pull requests only.
 	//
-	// The GitHub poller reads it once per cycle, and only when some pass would
-	// otherwise not run: an org that tracks nothing on host, or an App
-	// installation whose grant holds no tracked repository. A pass runs for
-	// such an org or installation only when a row here is in its reach, so an
-	// org or installation that holds nothing costs no GitHub request. Unpaged:
-	// the rows are bounded by the org's active pull requests, and the poller
-	// needs every one to match against each installation's grant.
+	// It is an org-wide read for a system job, the GitHub poll, which decides
+	// from it whether a credential no tracked-set pass runs under has pull
+	// requests to refresh: rows outside every team's tracked set, which no
+	// team-scoped read would return. Admin pool in Postgres, and no request
+	// handler returns these rows. Unpaged: the rows are bounded by the org's
+	// active pull requests, and every one is matched against each credential's
+	// reach.
 	ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error)
 
 	// ListTrackedByTeamSystem returns one page of the repository rows on host
