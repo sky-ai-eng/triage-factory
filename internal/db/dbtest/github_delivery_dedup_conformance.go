@@ -9,8 +9,8 @@ import (
 )
 
 // GitHubDeliverySeeder stages and inspects rows the dedup suite cannot reach
-// through the store: the store has exactly one method, and it neither backdates
-// a row nor counts them. Both are raw-SQL probes, one per backend.
+// through the store, which neither backdates a row nor reports one back. Both
+// are raw-SQL probes, one per backend.
 type GitHubDeliverySeeder struct {
 	// Stale records one delivery with received_at set that far in the past.
 	// The prune's cutoff is the only thing a test can vary, so a row's age is
@@ -32,7 +32,8 @@ type GitHubDeliveryFactory func(t *testing.T) (db.GitHubDeliveryStore, GitHubDel
 // RunGitHubDeliveryDedupConformance is the shared assertion suite for GitHub
 // webhook delivery dedup, in both dialects. It covers the insert-conflict path
 // that makes a redelivery recognizable, the negative space that keeps dedup
-// per-delivery rather than per-subject, and the prune.
+// per-delivery rather than per-subject, and the prune, which is a separate call
+// from the record.
 //
 // The negative space is the half worth stating plainly: two DIFFERENT
 // deliveries that describe the same installation must both take effect. GitHub
@@ -123,18 +124,21 @@ func RunGitHubDeliveryDedupConformance(t *testing.T, mk GitHubDeliveryFactory) {
 	})
 
 	t.Run("PrunesExpiredRows", func(t *testing.T) {
-		// A row past the retention window is swept by the next insert. What
-		// makes this observable is that its delivery becomes fresh again —
-		// which is the honest consequence of a bounded table, and why the
-		// window is far longer than the redelivery burst it absorbs.
+		// A row past the retention window is swept by the prune. What makes
+		// this observable is that its delivery becomes fresh again — which is
+		// the honest consequence of a bounded table, and why the window is far
+		// longer than the redelivery burst it absorbs.
 		store, seed := mk(t)
 		seed.Stale(t, "4242", "expired", db.GitHubDeliveryPruneAge+time.Hour)
 
-		if !mark(t, store, "4242", "trigger-the-prune") {
-			t.Fatal("the pruning insert reported as a duplicate; the test asserts nothing")
+		if err := store.PruneDeliveredSystem(ctx); err != nil {
+			t.Fatalf("PruneDeliveredSystem: %v", err)
 		}
 		if seed.Recorded(t, "4242", "expired") {
 			t.Error("a row older than the retention window survived the prune")
+		}
+		if !mark(t, store, "4242", "expired") {
+			t.Error("fresh = false for a delivery the prune removed; want true")
 		}
 	})
 
@@ -145,14 +149,29 @@ func RunGitHubDeliveryDedupConformance(t *testing.T, mk GitHubDeliveryFactory) {
 		store, seed := mk(t)
 		seed.Stale(t, "4242", "recent", db.GitHubDeliveryPruneAge-time.Hour)
 
-		if !mark(t, store, "4242", "trigger-the-prune") {
-			t.Fatal("the pruning insert reported as a duplicate; the test asserts nothing")
+		if err := store.PruneDeliveredSystem(ctx); err != nil {
+			t.Fatalf("PruneDeliveredSystem: %v", err)
 		}
 		if !seed.Recorded(t, "4242", "recent") {
 			t.Fatal("a row inside the retention window was pruned")
 		}
 		if mark(t, store, "4242", "recent") {
 			t.Error("fresh = true for a delivery still inside the retention window; want false")
+		}
+	})
+
+	t.Run("MarkDoesNotPrune", func(t *testing.T) {
+		// Recording runs inside the delivery's transaction, where a prune
+		// would hold other deliveries' prunes and, in Postgres, abort the
+		// transaction on failure. Pruning is its own call.
+		store, seed := mk(t)
+		seed.Stale(t, "4242", "expired", db.GitHubDeliveryPruneAge+time.Hour)
+
+		if !mark(t, store, "4242", "d-1") {
+			t.Fatal("first delivery reported as a duplicate; the test asserts nothing")
+		}
+		if !seed.Recorded(t, "4242", "expired") {
+			t.Error("MarkDeliveredSystem pruned an expired row; only PruneDeliveredSystem prunes")
 		}
 	})
 }

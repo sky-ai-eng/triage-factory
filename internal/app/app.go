@@ -675,6 +675,9 @@ func (a *App) wire() {
 		a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
 		a.srv.SetOnLinearChanged(a.reloader.onLinearChanged)
 		a.srv.SetOnSourcesChanged(a.sourcesChanged)
+		// The GitHub webhook receivers, after a delivery's refresh marks
+		// commit.
+		a.srv.SetOnGitHubRefreshMarked(a.githubRefreshMarked)
 		// The boundaries the server itself stamps (requeue/undo, takeover,
 		// delegate, team archive) and the configuration saves that may have
 		// fixed what a failed generation was waiting on.

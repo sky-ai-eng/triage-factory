@@ -144,7 +144,7 @@ func serveExpectingNoStore(t *testing.T, s *Server, event, sigHeader string, bod
 	return rec
 }
 
-const boundPRBody = `{"action":"synchronize","number":7,"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://github.com/octocat"}}`
+const boundPRBody = `{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001},"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://github.com/octocat"}}`
 
 // TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg: a signed delivery
 // for a bound installation is published under the binding org's id, and the
@@ -357,8 +357,8 @@ func TestDeploymentWebhook_HostDisambiguates(t *testing.T) {
 	// deployment's, so nothing routes to it.
 	for name, body := range map[string]string{
 		"sender on github.com":     boundPRBody,
-		"sender on the bound host": `{"action":"synchronize","number":7,"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://ghe.example.com/octocat"}}`,
-		"no sender":                `{"action":"synchronize","number":7,"installation":{"id":4242}}`,
+		"sender on the bound host": `{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001},"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://ghe.example.com/octocat"}}`,
+		"no sender":                `{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001},"installation":{"id":4242}}`,
 	} {
 		b := []byte(body)
 		if rec := postDeploymentWebhook(s, "pull_request", signDeployment(b), b); rec.Code != http.StatusNoContent {

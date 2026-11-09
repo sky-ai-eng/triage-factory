@@ -4352,6 +4352,53 @@ REVOKE ALL ON public.github_webhook_deliveries FROM PUBLIC;
 REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service_role;
 
 
+-- Pending refresh marks: one row per target in a tracked repository that a
+-- GitHub webhook delivery said changed, written in the transaction that
+-- records the delivery in github_webhook_deliveries. kind says what target
+-- holds: a pull request number in decimal, a head SHA, or a branch name
+-- without refs/heads/. Deliveries naming the same target land on one row:
+-- each bumps revision and marked_at, and first_marked_at stays. A pass clears
+-- a mark only at the revision it read, so a delivery landing mid-pass keeps
+-- its mark.
+--
+-- Admin-pool wired with org_id bound per statement; the policy below is
+-- defense-in-depth.
+CREATE TABLE public.github_refresh_marks (
+    id              uuid NOT NULL DEFAULT gen_random_uuid(),
+    org_id          uuid NOT NULL,
+    repository_id   uuid NOT NULL,
+    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch')),
+    target          text NOT NULL CHECK (target <> ''),
+    revision        bigint NOT NULL DEFAULT 1,
+    first_marked_at timestamp with time zone NOT NULL,
+    marked_at       timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.github_refresh_marks
+    ADD CONSTRAINT github_refresh_marks_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.github_refresh_marks
+    ADD CONSTRAINT github_refresh_marks_target_key UNIQUE (repository_id, kind, target);
+
+ALTER TABLE ONLY public.github_refresh_marks
+    ADD CONSTRAINT github_refresh_marks_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.github_refresh_marks
+    ADD CONSTRAINT github_refresh_marks_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
+
+-- The poll reads an org's marks oldest first.
+CREATE INDEX idx_github_refresh_marks_org ON public.github_refresh_marks (org_id, first_marked_at, id);
+
+ALTER TABLE public.github_refresh_marks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY github_refresh_marks_all ON public.github_refresh_marks
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.github_refresh_marks TO postgres;
+GRANT ALL ON TABLE public.github_refresh_marks TO anon;
+GRANT ALL ON TABLE public.github_refresh_marks TO authenticated;
+GRANT ALL ON TABLE public.github_refresh_marks TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.github_refresh_marks TO tf_app;
+
+
 -- The pending-bind record: one row per initiated deployment-App bind ceremony.
 --
 -- When one App key serves many workspaces, the org<->installation mapping has

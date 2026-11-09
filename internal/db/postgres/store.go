@@ -329,6 +329,9 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// and github_webhook_deliveries has RLS enabled with no policy at all,
 		// so there is no app-pool caller to wire.
 		GitHubDeliveries: newGitHubDeliveryStore(admin),
+		// GitHubRefreshMarks: admin pool only. The receiver that writes marks
+		// is pre-auth and the poll that reads them has no claims.
+		GitHubRefreshMarks: newGitHubRefreshMarkStore(admin),
 		// GitHubPendingBinds: admin pool only. The consume finds its row by
 		// nonce hash and learns the org from it, so there is no org for an RLS
 		// policy to gate on before the read; github_pending_binds has RLS

@@ -146,6 +146,51 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 	})
 
+	t.Run("GetTrackedByExternalIDSystem_reads_only_a_tracked_live_row", func(t *testing.T) {
+		// The webhook receivers resolve a delivery's repository through this
+		// read, and a miss is how a delivery for a repository the poll does not
+		// poll writes no refresh mark.
+		s, orgID, teamID, _ := mk(t)
+		register := func(host, repo, id string) domain.Repository {
+			t.Helper()
+			row, err := s.Repos.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: host, Owner: "octo", Repo: repo, ExternalID: id})
+			if err != nil {
+				t.Fatalf("register %s: %v", repo, err)
+			}
+			return row
+		}
+		tracked := register(TestGitHubHost, "tracked", "8101")
+		register(TestGitHubHost, "untracked", "8102")
+		otherHost := register(TestOtherGitHubHost, "elsewhere", "8103")
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []string{tracked.ID}); err != nil {
+			t.Fatalf("track: %v", err)
+		}
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestOtherGitHubHost, []string{otherHost.ID}); err != nil {
+			t.Fatalf("track on the other host: %v", err)
+		}
+
+		if got, err := s.Repos.GetTrackedByExternalIDSystem(ctx, orgID, TestGitHubHost, "8101"); err != nil || got == nil || got.ID != tracked.ID {
+			t.Fatalf("GetTrackedByExternalIDSystem(tracked) = %+v err=%v, want row %s", got, err, tracked.ID)
+		}
+		for _, miss := range []struct{ name, host, id string }{
+			{"an untracked row", TestGitHubHost, "8102"},
+			{"an id no row carries", TestGitHubHost, "8199"},
+			{"a tracked row's id asked on another host", TestGitHubHost, "8103"},
+			{"an empty id", TestGitHubHost, ""},
+			{"an empty host", "", "8101"},
+		} {
+			if got, err := s.Repos.GetTrackedByExternalIDSystem(ctx, orgID, miss.host, miss.id); err != nil || got != nil {
+				t.Errorf("GetTrackedByExternalIDSystem(%s) = %+v err=%v, want (nil, nil)", miss.name, got, err)
+			}
+		}
+		if _, err := s.Repos.RetireSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "tracked", ExternalID: "8101"}); err != nil {
+			t.Fatalf("retire: %v", err)
+		}
+		if got, err := s.Repos.GetTrackedByExternalIDSystem(ctx, orgID, TestGitHubHost, "8101"); err != nil || got != nil {
+			t.Errorf("GetTrackedByExternalIDSystem of a retired tracked row = %+v err=%v, want (nil, nil)", got, err)
+		}
+	})
+
 	t.Run("Tracking_is_answered_by_the_registry_row_id", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)
 		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{

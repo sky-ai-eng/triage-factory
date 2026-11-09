@@ -313,11 +313,19 @@ type Stores struct {
 
 	// GitHubDeliveries owns github_webhook_deliveries — the dedup record of
 	// GitHub App webhook deliveries the receiver has already applied, so an
-	// operator-triggered redelivery doesn't re-run the installation upsert or
-	// re-publish to the bus. Admin-pool-only in Postgres: the receiver is
-	// pre-auth and has no claims for a policy to gate on. Not in TxStores —
-	// the gate runs before any of the work a delivery does, never inside it.
+	// operator-triggered redelivery doesn't re-run the installation upsert,
+	// re-publish to the bus, or mark its targets again. Admin-pool-only in
+	// Postgres: the receiver is pre-auth and has no claims for a policy to
+	// gate on. Not in TxStores: a content delivery is recorded through
+	// SystemTxStores, with its refresh marks.
 	GitHubDeliveries GitHubDeliveryStore
+
+	// GitHubRefreshMarks owns github_refresh_marks — the targets GitHub
+	// webhook deliveries said changed, pending a poll pass that refreshes
+	// them. Admin pool in Postgres. The receiver writes marks through
+	// SystemTxStores, in the transaction that records the delivery; the poll
+	// reads and clears them here.
+	GitHubRefreshMarks GitHubRefreshMarkStore
 
 	// GitHubPendingBinds owns github_pending_binds — one row per initiated
 	// deployment-App bind ceremony, the durable half of the CSRF pair that
@@ -665,6 +673,12 @@ type SystemTxStores struct {
 	// Notifications' ...System writes join the transaction, so one raise's
 	// writes commit together.
 	Notifications NotificationStore
+
+	// GitHubDeliveries and GitHubRefreshMarks join the transaction, so a
+	// GitHub webhook delivery is recorded only together with the refresh
+	// marks it stands for.
+	GitHubDeliveries   GitHubDeliveryStore
+	GitHubRefreshMarks GitHubRefreshMarkStore
 
 	// Ext carries the opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go) from the app pool and the

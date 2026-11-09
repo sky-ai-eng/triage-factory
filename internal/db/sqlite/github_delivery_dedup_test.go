@@ -12,7 +12,7 @@ import (
 // TestGitHubDeliveryDedup_SQLite runs the shared delivery-dedup conformance
 // suite against the SQLite impl. Each subtest opens a fresh in-memory DB; the
 // seeder writes and reads github_webhook_deliveries by raw SQL, since the store
-// exposes one method and it neither backdates a row nor reports one back.
+// neither backdates a row nor reports one back.
 //
 // received_at is bound as a UTC time.Time here for the same reason the store
 // writes it that way: this driver renders a bound time.Time in Go's own string

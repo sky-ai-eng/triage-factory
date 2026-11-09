@@ -499,6 +499,14 @@ type RepositoryStore interface {
 	// the funnel resolves with no JWT claims.
 	GetByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error)
 
+	// GetTrackedByExternalIDSystem is GetByExternalIDSystem narrowed to the
+	// rows ListTrackedSystem lists: the live GitHub row on host that carries
+	// externalID and that at least one active team tracks, or (nil, nil). It
+	// is the read a GitHub webhook delivery's repository is resolved through,
+	// so a delivery for a repository the poll does not poll is resolved to no
+	// row, and none is created for it. Admin pool: the receiver is pre-auth.
+	GetTrackedByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error)
+
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 
 	// UpdateProfileSystem writes what a profiling pass learned about the

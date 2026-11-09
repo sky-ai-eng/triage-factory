@@ -33,7 +33,7 @@ import (
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
 // ("kick", "new", "ack", "cred_request", "memory_owed", "sign_request",
-// "sign_done").
+// "sign_done", "github_refresh_marked").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -65,6 +65,10 @@ const Channel = "tf_ctl"
 // request up to a second and a half, until a control pod's sweep finds it, and
 // a dropped sign_done up to 250ms, until the waiting executor's next read of
 // the row.
+// KindGitHubRefreshMarked uses OrgID: a GitHub webhook receiver on any control
+// pod whose delivery just wrote refresh marks for the org, nudging the brain to
+// read them now. Lossy like the rest: the marks are stored, so a dropped
+// message costs only the wait until the next pass that reads them.
 type Message struct {
 	Kind           string `json:"kind"`
 	Manager        string `json:"manager,omitempty"`
@@ -74,6 +78,10 @@ type Message struct {
 	ConversationID string `json:"conversation_id,omitempty"`
 	SignatureID    string `json:"signature_id,omitempty"`
 }
+
+// KindGitHubRefreshMarked is the Message kind a GitHub webhook receiver
+// publishes after a delivery's refresh marks commit.
+const KindGitHubRefreshMarked = "github_refresh_marked"
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled
 // connection is fine, pg_notify() doesn't require a dedicated session
