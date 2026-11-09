@@ -718,6 +718,9 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 		identityPairs = githooks.FallbackIdentityConfigPairs()
 	}
 	identityPairs = append(identityPairs, opts.GitConfigPairs...)
+	if gitLFSBinary() != "" {
+		identityPairs = append(identityPairs, githooks.LFSConfigPairs()...)
+	}
 	// Engine runtime tuning rides ExtraEnv's lane. Strip any inherited
 	// jscJITEnvKey from the parent env first rather than relying on
 	// duplicate-key precedence — that resolution order is
@@ -733,9 +736,12 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// were never supposed to have.
 	// backgroundTasksEnvKey is stripped and re-set the same way, so an
 	// operator's export cannot turn background tasks back on.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey})
+	// githooks.LFSSkipSmudgeEnvVar is stripped and re-set for the same reason:
+	// an inherited value would decide whether the agent's checkouts download
+	// LFS content, which is TF's call to make the same way in every run.
+	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
-	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1")
+	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1", githooks.LFSSkipSmudgeEnvVar+"=1")
 	if opts.LocalSandbox != nil {
 		// Re-add the marker the strip above removed, deliberately: this process
 		// is not in a jail, but the child IS, and the marker is what flips the

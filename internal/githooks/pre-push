@@ -1,7 +1,7 @@
 #!/bin/sh
 # Triage Factory pre-push hook (A·3, TFAC-460).
 #
-# Two jobs, in this order:
+# Three jobs, in this order:
 #
 #  1. Enforce the team's base-branch push policy (`hook check-push`). This is
 #     local mode's only enforcement point for it — multi mode enforces the same
@@ -9,7 +9,13 @@
 #     mistaken agent, not a security control: the agent runs as the operator,
 #     so `git push --no-verify` (or a rewritten remote) walks past this hook.
 #     It catches the naive command, which is the failure that actually happens.
-#  2. Record each pushed branch as a durable `branch` deliverable — the one
+#  2. Upload the Git LFS objects the push refers to (`git lfs pre-push`).
+#     git-lfs does that from a pre-push hook of its own, and core.hooksPath
+#     pointing here is why git never runs that one, so this hook runs it in its
+#     place, with git-lfs's own semantics: a failed upload aborts the push,
+#     because a pointer pushed without its object is a broken file on the
+#     remote. Unlike the other two jobs, this one runs under proxy capture too.
+#  3. Record each pushed branch as a durable `branch` deliverable — the one
 #     external action the exec CLIs don't mediate, so a branch pushed with raw
 #     `git` (and maybe never opened as a PR) would otherwise be invisible to TF.
 #
@@ -21,8 +27,8 @@
 # A delete has an all-zero <local sha>; a new branch has an all-zero
 # <remote sha>.
 #
-# Only the policy check may abort the push, and only on the one exit status
-# that means "refused by policy" (3). Every other status — a missing binary
+# Of TF's own jobs, only the policy check may abort the push, and only on the
+# one exit status that means "refused by policy" (3). Every other status — a missing binary
 # (127), a crash, a database that won't open — allows it, so the guard fails
 # open by construction. Recording stays best-effort and non-blocking: every
 # recording call is guarded and can never change the hook's exit status.
@@ -30,14 +36,28 @@
 # run modes), falling back to PATH.
 #
 # When TF_GIT_PUSH_CAPTURE=proxy (the sandbox env, set whenever the per-run
-# git proxy is wired), this hook stands down entirely: every push transits the
-# proxy, which already adjudicates the same policy at its ref gate — so the
-# hook must not double-judge — and whose receive-pack capture sees the
-# upstream's ACTUAL outcome, recording the branch only when the push landed
-# (2xx) and an audit failure row when it was refused. This hook fires before
-# the transfer and cannot know the outcome, so recording here would mint
-# deliverables for pushes GitHub rejected.
-[ "${TF_GIT_PUSH_CAPTURE:-}" = "proxy" ] && exit 0
+# git proxy is wired), this hook stands down from its policy and recording
+# jobs: every push transits the proxy, which already adjudicates the same
+# policy at its ref gate — so the hook must not double-judge — and whose
+# receive-pack capture sees the upstream's ACTUAL outcome, recording the
+# branch only when the push landed (2xx) and an audit failure row when it was
+# refused. This hook fires before the transfer and cannot know the outcome, so
+# recording here would mint deliverables for pushes GitHub rejected.
+
+# lfs_pre_push runs git-lfs's pre-push for a repository git-lfs has stored
+# objects in (its directory under the git dir), which is every repository that
+# can have an object to upload; in any other it would only cost a lock check
+# per push. It reads the ref list from stdin.
+lfs_pre_push() {
+	command -v git-lfs >/dev/null 2>&1 || return 0
+	[ -d "$(git rev-parse --git-common-dir 2>/dev/null)/lfs" ] || return 0
+	git lfs pre-push "$@"
+}
+
+if [ "${TF_GIT_PUSH_CAPTURE:-}" = "proxy" ]; then
+	lfs_pre_push "$@"
+	exit
+fi
 
 remote_url="$2"
 bin="${TRIAGE_FACTORY_BIN:-triagefactory}"
@@ -50,9 +70,11 @@ bin="${TRIAGE_FACTORY_BIN:-triagefactory}"
 # deliverable behind.
 #
 # If the spool can't be created we skip the policy pass and read the refs
-# straight from stdin, so a full or read-only TMPDIR degrades to today's
+# straight from stdin, so a full or read-only TMPDIR degrades to
 # recording-only behavior instead of blocking the push. Same fail-open rule as
-# everything else here.
+# everything else here. Stdin can then be read only once, and an LFS upload
+# that has to happen takes it, leaving the recording pass nothing to record:
+# a push that lands without its LFS objects is the worse loss.
 refs_file=$(mktemp "${TMPDIR:-/tmp}/tf-prepush.XXXXXX" 2>/dev/null) || refs_file=""
 if [ -n "$refs_file" ]; then
 	trap 'rm -f "$refs_file"' EXIT HUP INT TERM
@@ -63,9 +85,14 @@ if [ -n "$refs_file" ]; then
 		exit 1 # refused by policy; check-push already explained why on stderr
 	fi
 
+	# After the policy pass, so a push about to be refused uploads nothing.
+	lfs_pre_push "$@" <"$refs_file" || exit
+
 	# Re-point stdin at the spool so the recording loop below reads the same
 	# refs it just checked.
 	exec <"$refs_file"
+else
+	lfs_pre_push "$@" || exit
 fi
 
 while read -r local_ref local_sha remote_ref remote_sha; do

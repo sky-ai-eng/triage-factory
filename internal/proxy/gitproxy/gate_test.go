@@ -5,10 +5,14 @@ import (
 	"testing"
 )
 
-// TestParseGitPath is the path-shape allowlist: exactly the three git
-// smart-HTTP shapes are recognized (and yield owner/repo + op); everything
-// else — a GHES API path, Git-LFS, a web route, a traversal — is rejected so
-// the Handler 403s it before any credential is injected.
+// TestParseGitPath is the path-shape allowlist: exactly the git smart-HTTP and
+// Git LFS shapes the proxy serves are recognized (and yield owner/repo + op);
+// everything else — a GHES API path, the LFS locking API's writes, a web
+// route, a traversal — is rejected so the Handler 403s it before any
+// credential is injected.
+// testTransferID has the shape of an id storeLFSTransfer mints.
+const testTransferID = "0123456789abcdef0123456789abcdef"
+
 func TestParseGitPath(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -30,8 +34,24 @@ func TestParseGitPath(t *testing.T) {
 		{"ghes api repos", http.MethodGet, "/api/v3/repos/octo/repo", "", "", "", false},
 		{"ghes api admin", http.MethodPost, "/api/v3/admin/users", "", "", "", false},
 
-		// Git-LFS (same host, would otherwise inherit the credential).
-		{"lfs batch", http.MethodPost, "/octo/repo.git/info/lfs/objects/batch", "", "", "", false},
+		// Git LFS: the batch call, the pre-push lock check, and this proxy's own
+		// transfer URLs.
+		{"lfs batch", http.MethodPost, "/octo/repo.git/info/lfs/objects/batch", "octo", "repo", gitOpLFSBatch, true},
+		{"lfs locks verify", http.MethodPost, "/octo/repo.git/info/lfs/locks/verify", "octo", "repo", gitOpLFSLocksVerify, true},
+		{"lfs download", http.MethodGet, "/octo/repo.git/info/lfs/transfers/" + testTransferID, "octo", "repo", gitOpLFSTransfer, true},
+		{"lfs upload", http.MethodPut, "/octo/repo.git/info/lfs/transfers/" + testTransferID, "octo", "repo", gitOpLFSTransfer, true},
+		{"lfs verify", http.MethodPost, "/octo/repo.git/info/lfs/transfers/" + testTransferID, "octo", "repo", gitOpLFSTransfer, true},
+
+		// Git LFS shapes the proxy does not serve: the locking API's list and
+		// writes, the legacy per-object API, and a transfer id it never mints.
+		{"lfs batch via GET", http.MethodGet, "/octo/repo.git/info/lfs/objects/batch", "", "", "", false},
+		{"lfs locks list", http.MethodGet, "/octo/repo.git/info/lfs/locks", "", "", "", false},
+		{"lfs lock create", http.MethodPost, "/octo/repo.git/info/lfs/locks", "", "", "", false},
+		{"lfs unlock", http.MethodPost, "/octo/repo.git/info/lfs/locks/1/unlock", "", "", "", false},
+		{"lfs legacy object", http.MethodGet, "/octo/repo.git/info/lfs/objects/" + testTransferID, "", "", "", false},
+		{"lfs transfer uppercase id", http.MethodGet, "/octo/repo.git/info/lfs/transfers/ABCDEF0123456789ABCDEF0123456789", "", "", "", false},
+		{"lfs transfer short id", http.MethodGet, "/octo/repo.git/info/lfs/transfers/abc", "", "", "", false},
+		{"lfs transfer via DELETE", http.MethodDelete, "/octo/repo.git/info/lfs/transfers/" + testTransferID, "", "", "", false},
 
 		// Web routes / other.
 		{"web settings", http.MethodGet, "/octo/repo/settings", "", "", "", false},
@@ -80,6 +100,11 @@ func TestIsGitSmartHTTPPath_SupersetOfParseGitPath(t *testing.T) {
 		{http.MethodGet, "/octo/repo.git/info/refs"},
 		{http.MethodPost, "/octo/repo/git-upload-pack"},
 		{http.MethodPost, "/octo/repo.git/git-receive-pack"},
+		{http.MethodPost, "/octo/repo.git/info/lfs/objects/batch"},
+		{http.MethodPost, "/octo/repo.git/info/lfs/locks/verify"},
+		{http.MethodGet, "/octo/repo.git/info/lfs/transfers/" + testTransferID},
+		{http.MethodPut, "/octo/repo.git/info/lfs/transfers/" + testTransferID},
+		{http.MethodPost, "/octo/repo.git/info/lfs/transfers/" + testTransferID},
 	}
 	for _, c := range admitted {
 		if _, _, _, ok := parseGitPath(c.method, c.path); !ok {
@@ -96,6 +121,8 @@ func TestIsGitSmartHTTPPath_SupersetOfParseGitPath(t *testing.T) {
 		{http.MethodGet, "/oc%2fto/repo/info/refs"},
 		{http.MethodPost, "/octo/re@po/git-receive-pack"},
 		{http.MethodGet, "/info/refs"},
+		{http.MethodPost, "/octo/repo.git/info/lfs/locks"},
+		{http.MethodGet, "/octo/repo.git/info/lfs/transfers/not-an-id"},
 	} {
 		if _, _, _, ok := parseGitPath(c.method, c.path); ok {
 			t.Fatalf("fixture drift: parseGitPath(%s %s) now admits this shape", c.method, c.path)
@@ -110,7 +137,7 @@ func TestIsGitSmartHTTPPath_SupersetOfParseGitPath(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v3/repos/octo/repo"},
 		{http.MethodPost, "/api/graphql"},
-		{http.MethodPost, "/octo/repo.git/info/lfs/objects/batch"},
+		{http.MethodDelete, "/octo/repo.git/info/lfs/transfers/" + testTransferID},
 		{http.MethodGet, "/octo/repo/settings"},
 		{http.MethodPost, "/octo/repo/info/refs"},
 		{http.MethodGet, "/octo/repo/git-upload-pack"},

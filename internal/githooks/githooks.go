@@ -79,9 +79,11 @@ var readmeContent []byte
 // team's base-branch push policy via `triagefactory hook check-push` (a safety
 // guard against a mistaken agent, aborting only on that verb's
 // dedicated "refused by policy" status, so every operational failure allows
-// the push), then records each pushed branch as a branch_pushed ledger row via
-// `triagefactory hook record-push`. Recording stays best-effort and can never
-// change the exit status.
+// the push), runs git-lfs's own pre-push for a repository with LFS objects
+// (which core.hooksPath would otherwise keep git from running), then records
+// each pushed branch as a branch_pushed ledger row via `triagefactory hook
+// record-push`. Recording stays best-effort and can never change the exit
+// status.
 //
 //go:embed pre-push
 var prePushHook []byte

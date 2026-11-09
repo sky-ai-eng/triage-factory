@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -657,18 +658,24 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 // an interactive prompt, so the inherited askpass helpers are dropped from every
 // child env. (Headless servers have neither set, so this is inert there; it's
 // the local-dev path — and its test suite — that would otherwise hang.)
+//
+// GIT_LFS_SKIP_SMUDGE=1 makes every checkout TF builds leave Git LFS files as
+// their pointers, whatever git-lfs the host has configured: a run fetches LFS
+// content when it asks for it (githooks.LFSSkipSmudgeEnvVar), so what a
+// checkout downloads never depends on the machine it runs on.
 func gitBaseEnv() []string {
 	parent := os.Environ()
-	out := make([]string, 0, len(parent)+1)
+	out := make([]string, 0, len(parent)+2)
 	for _, kv := range parent {
 		if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") ||
 			strings.HasPrefix(kv, "GIT_ASKPASS=") ||
-			strings.HasPrefix(kv, "SSH_ASKPASS=") {
+			strings.HasPrefix(kv, "SSH_ASKPASS=") ||
+			strings.HasPrefix(kv, githooks.LFSSkipSmudgeEnvVar+"=") {
 			continue
 		}
 		out = append(out, kv)
 	}
-	return append(out, "GIT_TERMINAL_PROMPT=0")
+	return append(out, "GIT_TERMINAL_PROMPT=0", githooks.LFSSkipSmudgeEnvVar+"=1")
 }
 
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {

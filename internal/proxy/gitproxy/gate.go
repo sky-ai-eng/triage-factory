@@ -5,30 +5,50 @@ import (
 	"strings"
 )
 
-// git smart-HTTP operation discriminators, returned by parseGitPath and used
-// as the DeniedGitOp.Op token in the audit log.
+// Operation discriminators, returned by parseGitPath and used as the
+// DeniedGitOp.Op token in the audit log.
 const (
 	gitOpAdvertise = "advertise" // GET  /info/refs?service=...
 	gitOpFetch     = "fetch"     // POST /git-upload-pack
 	gitOpPush      = "push"      // POST /git-receive-pack
 	gitOpPath      = "path"      // a non-git path rejected by the allowlist
+
+	// Git LFS. The batch and transfer shapes are routing discriminators only:
+	// what a batch or a transfer does is named by its operation, so a denial
+	// of either is recorded as gitOpLFSDownload or gitOpLFSUpload.
+	gitOpLFSBatch       = "lfs-batch"        // POST /info/lfs/objects/batch
+	gitOpLFSLocksVerify = "lfs-locks-verify" // POST /info/lfs/locks/verify
+	gitOpLFSTransfer    = "lfs-transfer"     // GET|PUT|POST /info/lfs/transfers/{id}
+	gitOpLFSDownload    = "lfs-download"
+	gitOpLFSUpload      = "lfs-upload"
 )
 
-// parseGitPath recognizes exactly the three git smart-HTTP request shapes and
-// extracts the (owner, repo) they target. Anything else — a GHES API path
-// "/api/v3/...", Git-LFS, a web route — returns ok=false so the Handler rejects
-// it with a 403 before any credential is injected. This is the path-shape
-// allowlist that makes "the git proxy can only do git" hold even on GHES,
-// where the REST API shares the git host (unlike github.com's api.github.com
-// split).
+// lfsPathSegment is what every Git LFS path this proxy serves carries between
+// the repository and the LFS endpoint's own path.
+const lfsPathSegment = "/info/lfs/"
+
+// parseGitPath recognizes exactly the git smart-HTTP and Git LFS request shapes
+// the proxy serves and extracts the (owner, repo) they target. Anything else —
+// a GHES API path "/api/v3/...", the LFS locking API's writes, a web route —
+// returns ok=false so the Handler rejects it with a 403 before any credential
+// is injected. This is the path-shape allowlist that makes "the git proxy can
+// only do git" hold even on GHES, where the REST API shares the git host
+// (unlike github.com's api.github.com split).
 //
 // Allowed (the ?service=git-(upload|receive)-pack query a real git client
 // sends on info/refs is not inspected — both advertise variants are repo-gated
 // only, and info/refs is unambiguously a git path):
 //
-//	GET  /{owner}/{repo}[.git]/info/refs        → advertise
-//	POST /{owner}/{repo}[.git]/git-upload-pack  → fetch
-//	POST /{owner}/{repo}[.git]/git-receive-pack → push
+//	GET  /{owner}/{repo}[.git]/info/refs                  → advertise
+//	POST /{owner}/{repo}[.git]/git-upload-pack            → fetch
+//	POST /{owner}/{repo}[.git]/git-receive-pack           → push
+//	POST /{owner}/{repo}[.git]/info/lfs/objects/batch     → lfs-batch
+//	POST /{owner}/{repo}[.git]/info/lfs/locks/verify      → lfs-locks-verify
+//	GET|PUT|POST /{owner}/{repo}[.git]/info/lfs/transfers/{id} → lfs-transfer
+//
+// The transfers path is this proxy's own: it is the URL a rewritten batch
+// answer names in place of each storage URL (lfs.go), and {id} is one it
+// minted.
 func parseGitPath(method, path string) (owner, repo, op string, ok bool) {
 	segs := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if len(segs) < 3 {
@@ -47,13 +67,25 @@ func parseGitPath(method, path string) (owner, repo, op string, ok bool) {
 		return owner, repo, gitOpFetch, true
 	case method == http.MethodPost && len(rest) == 1 && rest[0] == "git-receive-pack":
 		return owner, repo, gitOpPush, true
+	case len(rest) == 4 && rest[0] == "info" && rest[1] == "lfs":
+		switch {
+		case method == http.MethodPost && rest[2] == "objects" && rest[3] == "batch":
+			return owner, repo, gitOpLFSBatch, true
+		case method == http.MethodPost && rest[2] == "locks" && rest[3] == "verify":
+			return owner, repo, gitOpLFSLocksVerify, true
+		case rest[2] == "transfers" && validLFSTransferID(rest[3]) &&
+			(method == http.MethodGet || method == http.MethodPut || method == http.MethodPost):
+			return owner, repo, gitOpLFSTransfer, true
+		}
 	}
 	return "", "", "", false
 }
 
 // IsGitSmartHTTPPath reports whether (method, path) has the SHAPE of a git
-// smart-HTTP request — the routing question, deliberately weaker than
-// parseGitPath's admission question.
+// smart-HTTP or Git LFS request — the routing question, deliberately weaker
+// than parseGitPath's admission question. Git LFS counts because git-lfs
+// derives its endpoint from the same remote URL git uses, so on a shared
+// origin its requests arrive beside git's and belong to the same gate.
 //
 // It exists for a front door that serves this proxy's handler alongside
 // something else on one listener (the run's fake-GHE origin, where git and the
@@ -69,11 +101,14 @@ func parseGitPath(method, path string) (owner, repo, op string, ok bool) {
 // too. Those land on the Handler, which 403s them exactly as it does today —
 // this predicate widens what reaches the git gate, never what passes it.
 func IsGitSmartHTTPPath(method, path string) bool {
+	lfs := strings.Contains(path, lfsPathSegment)
 	switch method {
 	case http.MethodGet:
-		return strings.HasSuffix(path, "/info/refs")
+		return strings.HasSuffix(path, "/info/refs") || lfs
 	case http.MethodPost:
-		return strings.HasSuffix(path, "/git-upload-pack") || strings.HasSuffix(path, "/git-receive-pack")
+		return strings.HasSuffix(path, "/git-upload-pack") || strings.HasSuffix(path, "/git-receive-pack") || lfs
+	case http.MethodPut:
+		return lfs
 	}
 	return false
 }

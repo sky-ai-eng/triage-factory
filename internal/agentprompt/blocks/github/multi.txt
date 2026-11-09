@@ -2,4 +2,6 @@
 Your git traffic is mediated. Pushes leave through a per-run proxy that holds the credential host-side — you never see it, and it is scoped to the repositories your team authorized.
 
 That proxy is also where your team's base-branch push policy is enforced, and it fails closed: a push it cannot authorize is refused, the refusal tells you which ref and why, and it is recorded as a denial against this run.
+
+Files a repository keeps in Git LFS are checked out as their pointer files, a few lines naming each file's object. Fetch the content of the ones you need with `git lfs pull --include=<path>`; it comes through the same proxy. A push uploads any new LFS objects it refers to before the push itself.
 </git_access>

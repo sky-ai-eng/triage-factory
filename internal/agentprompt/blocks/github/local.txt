@@ -4,4 +4,6 @@ Your GitHub git traffic is managed. Clone, fetch, and push leave through a per-r
 The proxy also enforces your team's base-branch push policy and records the actual upstream result. A push it cannot authorize is refused, and the refusal tells you which repository or ref and why.
 
 Local mode still runs you unsandboxed as the operator. This routing is a correctness and safety mechanism for the managed path, not a security boundary against a process trying to bypass it. Do not alter or bypass the run-scoped git configuration.
+
+Files a repository keeps in Git LFS are checked out as their pointer files, a few lines naming each file's object. Where git-lfs is installed, fetch the content of the ones you need with `git lfs pull --include=<path>`; it comes through the same proxy. A push uploads any new LFS objects it refers to before the push itself.
 </git_access>

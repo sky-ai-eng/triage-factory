@@ -1307,14 +1307,16 @@ func TestStartProxiesForSandbox_GitNilSkipsGitProxy(t *testing.T) {
 	if bundle.git != nil {
 		t.Error("git proxy started despite nil GitProxy")
 	}
-	// Only the hooks entry — no proxy insteadOf/extraHeader pairs.
-	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "1" {
-		t.Errorf("GIT_CONFIG_COUNT = %q, want 1 (core.hooksPath only, no proxy pairs)", got)
+	// The hooks entry and git-lfs's filters — no proxy insteadOf/extraHeader
+	// pairs.
+	if got, want := envValue(env, "GIT_CONFIG_COUNT"), strconv.Itoa(1+len(githooks.LFSConfigPairs())); got != want {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want %s (core.hooksPath and the LFS filters only, no proxy pairs)", got, want)
 	}
 	cfg := gitConfigMap(t, env)
 	if cfg[githooks.ConfigKey] != githooks.SandboxDir {
 		t.Errorf("%s = %q, want %q even with nil GitProxy", githooks.ConfigKey, cfg[githooks.ConfigKey], githooks.SandboxDir)
 	}
+	assertLFSConfig(t, env, cfg)
 	for k := range cfg {
 		if strings.HasSuffix(k, ".insteadOf") || strings.HasSuffix(k, ".extraHeader") {
 			t.Errorf("unexpected proxy git config %q present despite nil GitProxy", k)
@@ -1435,9 +1437,10 @@ func TestStartProxiesForSandbox_FoldsOrgIdentity(t *testing.T) {
 	if k := envValue(env, "GIT_CONFIG_KEY_0"); k != githooks.ConfigKey {
 		t.Errorf("GIT_CONFIG_KEY_0 = %q, want %q (hooks must stay at index 0)", k, githooks.ConfigKey)
 	}
-	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "3" {
-		t.Errorf("GIT_CONFIG_COUNT = %q, want 3 (hooks + 2 identity pairs)", got)
+	if got, want := envValue(env, "GIT_CONFIG_COUNT"), strconv.Itoa(3+len(githooks.LFSConfigPairs())); got != want {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want %s (hooks + 2 identity pairs + the LFS filters)", got, want)
 	}
+	assertLFSConfig(t, env, cfg)
 	// Exactly one GIT_CONFIG_COUNT line — the consolidated-block invariant.
 	n := 0
 	for _, kv := range env {
@@ -1447,6 +1450,21 @@ func TestStartProxiesForSandbox_FoldsOrgIdentity(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("GIT_CONFIG_COUNT appears %d times, want exactly 1: %v", n, env)
+	}
+}
+
+// assertLFSConfig pins that a jailed run's git carries git-lfs's filters,
+// which the jail's rootfs installs the binary for, and checks LFS files out as
+// pointers.
+func assertLFSConfig(t *testing.T, env []string, cfg map[string]string) {
+	t.Helper()
+	for _, kv := range githooks.LFSConfigPairs() {
+		if cfg[kv[0]] != kv[1] {
+			t.Errorf("%s = %q, want %q", kv[0], cfg[kv[0]], kv[1])
+		}
+	}
+	if got := envValue(env, githooks.LFSSkipSmudgeEnvVar); got != "1" {
+		t.Errorf("%s = %q, want 1", githooks.LFSSkipSmudgeEnvVar, got)
 	}
 }
 

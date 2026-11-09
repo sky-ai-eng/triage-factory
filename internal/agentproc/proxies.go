@@ -654,6 +654,11 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// core.hooksPath (index 0), with the proxy pairs after that. Empty
 	// identityPairs leaves the block as hooks (+ proxy) only — unchanged.
 	gitPairs = append(gitPairs, identityPairs...)
+	// The jail's rootfs installs git-lfs (internal/sandbox's apkPackages), so
+	// a jailed run always has the binary this config names, and its checkouts
+	// leave LFS files as pointers until the agent asks for them.
+	gitPairs = append(gitPairs, githooks.LFSConfigPairs()...)
+	env = append(env, githooks.LFSSkipSmudgeEnvVar+"=1")
 
 	// Git proxy: a second per-run proxy on its own port of hostVethIP
 	// that holds the GitHub credential host-side and injects Basic auth

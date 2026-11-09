@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -151,6 +152,31 @@ func TestInjector_RoutesGitPathsToGitHandler(t *testing.T) {
 	}
 	if apiHits != 2 {
 		t.Errorf("API upstream hits = %d, want 2 (unchanged by the malformed git path)", apiHits)
+	}
+
+	// git-lfs derives its endpoint from the same rewritten remote, so its calls
+	// arrive here carrying git's credential and belong to the git gate: the
+	// batch API, the lock check, and the transfer URLs the gate hands out.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/octo/repo.git/info/lfs/objects/batch"},
+		{http.MethodPost, "/octo/repo.git/info/lfs/locks/verify"},
+		{http.MethodGet, "/octo/repo.git/info/lfs/transfers/0123456789abcdef0123456789abcdef"},
+		{http.MethodPut, "/octo/repo.git/info/lfs/transfers/0123456789abcdef0123456789abcdef"},
+	} {
+		before := gitSaw.hits
+		req, _ = http.NewRequest(c.method, "https://"+host+c.path, strings.NewReader("{}"))
+		req.SetBasicAuth("x-run", "git-per-run-token")
+		resp, err = client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", c.method, c.path, err)
+		}
+		_ = resp.Body.Close()
+		if gitSaw.hits != before+1 || gitSaw.path != c.path || gitSaw.auth != "Basic eC1ydW46Z2l0LXBlci1ydW4tdG9rZW4=" {
+			t.Errorf("%s %s did not reach the git handler with git's credential (hits %d→%d, saw %s %q)", c.method, c.path, before, gitSaw.hits, gitSaw.path, gitSaw.auth)
+		}
+	}
+	if apiHits != 2 {
+		t.Errorf("API upstream hits = %d, want 2; a Git LFS path must never reach the API credential path", apiHits)
 	}
 }
 
