@@ -523,6 +523,24 @@ func (s *repoStore) ListTrackedSystem(ctx context.Context, orgID, host string, o
 	return s.listRepositories(ctx, orgID, host, opts, repoTrackedByATeam)
 }
 
+// repoHeldUntracked scopes a repositories row to the rows no team tracks that
+// an active GitHub pull request on the row's own host references, the
+// Postgres predicate's reading.
+const repoHeldUntracked = `NOT ` + repoTrackedByATeam + `
+	   AND EXISTS (
+	SELECT 1 FROM entities e
+	 WHERE e.repository_id = repositories.id
+	   AND e.source = 'github'
+	   AND e.scope = repositories.host
+	   AND e.state = 'active'
+	   AND e.kind <> 'issue'
+)`
+
+func (s *repoStore) ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {
+	rows, _, err := s.listRepositories(ctx, orgID, host, db.Unwindowed, repoHeldUntracked)
+	return rows, err
+}
+
 func (s *repoStore) ListTrackedByTeamSystem(ctx context.Context, orgID, teamID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
 	return s.listRepositories(ctx, orgID, host, opts, repoTrackedByTeam, teamID)
 }

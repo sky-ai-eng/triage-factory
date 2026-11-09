@@ -16,8 +16,31 @@ import (
 // repository no team tracks keeps the tasks it was given while a team tracked
 // it. The poll refreshes it once its last refresh is older than the refresh
 // floor, and not on the cycles before, and the refresh that sees it merged
-// closes those tasks and the entity.
+// closes those tasks and the entity. That holds for a RefreshGitHub pass whose
+// credential reads the repository, and for the RefreshHeldGitHub pass the
+// poller runs under a credential no RefreshGitHub pass runs under: an
+// installation whose grant holds the repository and no tracked one.
 func TestUntrackedPR_MergeClosesItsTasksOnTheFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refresh func(ctx context.Context, tr *tracker.Tracker, client *ghclient.Client) error
+	}{
+		{name: "RefreshGitHub", refresh: func(ctx context.Context, tr *tracker.Tracker, client *ghclient.Client) error {
+			// No repository is tracked, so the pass lists none.
+			_, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, tracker.ReachAll(), nil)
+			return err
+		}},
+		{name: "RefreshHeldGitHub", refresh: func(ctx context.Context, tr *tracker.Tracker, client *ghclient.Client) error {
+			grant := tracker.ReachOfGrant([]ghclient.UserRepo{{FullName: "octo/repo"}})
+			_, err := tr.RefreshHeldGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, grant, nil)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testUntrackedMergeCloses(t, tc.refresh) })
+	}
+}
+
+func testUntrackedMergeCloses(t *testing.T, refresh func(ctx context.Context, tr *tracker.Tracker, client *ghclient.Client) error) {
 	ctx := context.Background()
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
@@ -29,9 +52,8 @@ func TestUntrackedPR_MergeClosesItsTasksOnTheFloor(t *testing.T) {
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Deliverables, st.ExternalActions, st.EventQueue, st.PRMergeability, runmode.LocalDefaultOrgID)
 	poll := func() {
 		t.Helper()
-		// No repository is tracked, so the pass lists none.
-		if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), domain.GitHubAccount{}, nil, tracker.ReachAll(), nil); err != nil {
-			t.Fatalf("RefreshGitHub: %v", err)
+		if err := refresh(ctx, tr, ghclient.NewClient(gh.srv.URL, "tok")); err != nil {
+			t.Fatalf("refresh: %v", err)
 		}
 		if err := r.drainEventQueue(ctx); err != nil {
 			t.Fatalf("drainEventQueue: %v", err)

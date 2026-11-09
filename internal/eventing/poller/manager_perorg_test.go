@@ -383,6 +383,12 @@ func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, o
 	return nil, nil
 }
 
+// ListHeldUntrackedSystem answers that the org holds nothing outside its
+// (empty) tracked set, so the loop body still stops at the no_repos skip.
+func (r *recordingRepositoryStore) ListHeldUntrackedSystem(context.Context, string, string) ([]domain.Repository, error) {
+	return nil, nil
+}
+
 // activeEntityStore answers the one entity read every GitHub cycle makes before
 // its tracked-set gate — the active pull requests, so the ones polled from
 // another host can be retired — with no rows, and records which orgs asked.

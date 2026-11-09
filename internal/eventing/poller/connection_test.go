@@ -3,6 +3,7 @@ package poller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -532,6 +533,39 @@ func TestGitHubCycle_DeliberateSkipClearsTheState(t *testing.T) {
 				t.Errorf("a second skipped cycle logged about the connection:\n%s", out)
 			}
 		})
+	}
+}
+
+// heldReadFails is the registry with a held-set read that fails.
+type heldReadFails struct {
+	dbpkg.RepositoryStore
+}
+
+func (heldReadFails) ListHeldUntrackedSystem(context.Context, string, string) ([]domain.Repository, error) {
+	return nil, errors.New("connection reset")
+}
+
+// TestGitHubCycle_UnreadableHeldSetKeepsTheState: for an org that tracks
+// nothing, a held set TF failed to read is no answer about what the org holds,
+// so the cycle is not the deliberate no_repos skip and the stored state
+// stands, as it does when the tracked set itself cannot be read.
+func TestGitHubCycle_UnreadableHeldSetKeepsTheState(t *testing.T) {
+	recorder := recordSpans(t)
+	srv := newGitHubConnServer(t, map[string]string{"a": listOK})
+	f := newConnectionFixture(t, srv)
+	f.m.repos = heldReadFails{RepositoryStore: f.stores.Repos}
+	ctx := context.Background()
+	if _, _, err := f.stores.PollReadiness.RecordConnection(ctx, f.org, "github", dbpkg.ConnectionDown, string(upstream.Transient)); err != nil {
+		t.Fatalf("seed down: %v", err)
+	}
+
+	f.m.runGitHubCycleForOrg(ctx, f.org)
+
+	if got := spanOutcome(t, recorder, "poll.github.org"); got == "no_repos" {
+		t.Error("outcome = no_repos for a cycle that could not read what the org holds")
+	}
+	if st := f.connection(t); st.State != dbpkg.ConnectionDown {
+		t.Errorf("state = %+v, want the stored down state kept", st)
 	}
 }
 

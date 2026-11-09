@@ -348,6 +348,69 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 	})
 
+	t.Run("The_held_untracked_read_lists_untracked_rows_an_active_pull_request_references", func(t *testing.T) {
+		// One row per reason a row is or is not held:
+		//   octo/kept      tracked, with an active pull request    — out
+		//   octo/dropped   untracked, with an active pull request  — in
+		//   zed/lib        never tracked, two active pull requests — in, once
+		//   zed/closed     its only pull request closed            — out
+		//   zed/issues     only an issue entity                    — out
+		//   zed/bare       a registry row nothing references       — out
+		//   zed/elsewhere  held, but on another host               — out here
+		s, orgID, teamID, _ := mk(t)
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "kept"}, {Owner: "octo", Repo: "dropped"},
+		}); err != nil {
+			t.Fatalf("track: %v", err)
+		}
+		if err := TrackRepos(ctx, s.Repos, s.TeamGitHubRepos, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "kept"},
+		}); err != nil {
+			t.Fatalf("untrack octo/dropped: %v", err)
+		}
+		entity := func(host, key, kind string) *domain.Entity {
+			t.Helper()
+			e, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", host, key, "", kind, "", "")
+			if err != nil {
+				t.Fatalf("FindOrCreateSystem(%s on %s): %v", key, host, err)
+			}
+			return e
+		}
+		entity(TestGitHubHost, "octo/kept#1", domain.EntityKindPullRequest)
+		entity(TestGitHubHost, "octo/dropped#2", domain.EntityKindPullRequest)
+		entity(TestGitHubHost, "zed/lib#3", domain.EntityKindPullRequest)
+		entity(TestGitHubHost, "zed/lib#4", domain.EntityKindPullRequest)
+		closed := entity(TestGitHubHost, "zed/closed#5", domain.EntityKindPullRequest)
+		if _, err := s.Entities.CloseSystem(ctx, orgID, closed.ID); err != nil {
+			t.Fatalf("CloseSystem: %v", err)
+		}
+		entity(TestGitHubHost, "zed/issues#6", domain.EntityKindIssue)
+		if _, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, repoRef("zed/bare")); err != nil {
+			t.Fatalf("register zed/bare: %v", err)
+		}
+		entity(TestOtherGitHubHost, "zed/elsewhere#7", domain.EntityKindPullRequest)
+
+		rows, err := s.Repos.ListHeldUntrackedSystem(ctx, orgID, TestGitHubHost)
+		if err != nil {
+			t.Fatalf("ListHeldUntrackedSystem: %v", err)
+		}
+		if got, want := repoSlugs(rows), []string{"octo/dropped", "zed/lib"}; !equalStringSlice(got, want) {
+			t.Fatalf("ListHeldUntrackedSystem = %v, want %v", got, want)
+		}
+		for _, row := range rows {
+			if stored, err := s.Repos.GetSystem(ctx, orgID, row.ID); err != nil || stored == nil || stored.Slug() != row.Slug() || stored.Host != TestGitHubHost {
+				t.Errorf("held row %s (id %s) differs from the stored row %+v (err %v)", row.Slug(), row.ID, stored, err)
+			}
+		}
+		other, err := s.Repos.ListHeldUntrackedSystem(ctx, orgID, TestOtherGitHubHost)
+		if err != nil || !equalStringSlice(repoSlugs(other), []string{"zed/elsewhere"}) {
+			t.Errorf("ListHeldUntrackedSystem(other host) = %v, err=%v; want [zed/elsewhere]", repoSlugs(other), err)
+		}
+		if _, err := s.Repos.ListHeldUntrackedSystem(ctx, orgID, ""); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("ListHeldUntrackedSystem without a host = %v, want db.ErrRepoHostRequired", err)
+		}
+	})
+
 	t.Run("A_github_entity_key_naming_no_repository_is_refused", func(t *testing.T) {
 		s, orgID, _, _ := mk(t)
 		for _, key := range []string{"no-slash#4", "/repo#4", "owner/#4", ""} {

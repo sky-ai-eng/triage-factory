@@ -48,6 +48,7 @@ func TestGitHubReach_Holds(t *testing.T) {
 // refresh with node and counts the batches.
 type untrackedRefreshFixture struct {
 	tr        *Tracker
+	pub       *recordingPublisher
 	client    *ghclient.Client
 	entityID  string
 	refreshes *atomic.Int32
@@ -79,8 +80,10 @@ func newUntrackedRefreshFixture(t *testing.T, snapshot, node string) untrackedRe
 	if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, snapshot, e.PollSeq); err != nil || !ok {
 		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
 	}
+	pub := &recordingPublisher{}
 	return untrackedRefreshFixture{
-		tr:        New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org),
+		pub:       pub,
+		tr:        New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org),
 		client:    ghclient.NewClient(srv.URL, "tok"),
 		entityID:  e.ID,
 		refreshes: refreshes,
@@ -129,5 +132,51 @@ func TestRefreshGitHub_UntrackedTerminalSnapshotRefreshesEveryCycle(t *testing.T
 	f.poll(t)
 	if n := f.refreshes.Load(); n != 1 {
 		t.Errorf("refreshes = %d, want 1 although the last refresh was just now", n)
+	}
+}
+
+// A held pass refreshes an untracked pull request past the floor as
+// RefreshGitHub does, and does nothing else: it lists no repository and runs
+// no dashboard search, even for an account with a login (the search is a
+// GraphQL request too, so it would show as a second batch), and it reports no
+// completed poll.
+func TestRefreshHeldGitHub_RefreshesOnlyAndReportsNoCompletedPoll(t *testing.T) {
+	node := `{"id":"PR_node7","number":7,"title":"PR 7","author":{"login":"aidan"},"state":"OPEN",
+		"url":"https://github.com/octo/repo/pull/7","repository":{"nameWithOwner":"octo/repo"},
+		"createdAt":"2026-09-01T00:00:00Z","updatedAt":"2026-10-01T08:00:00Z"}`
+	f := newUntrackedRefreshFixture(t, untrackedOpenSnapshot, node)
+	held := func() {
+		t.Helper()
+		if _, err := f.tr.RefreshHeldGitHub(context.Background(), "https://github.com", f.client, domain.GitHubAccount{Login: "aidan"}, ReachAll(), nil); err != nil {
+			t.Fatalf("RefreshHeldGitHub: %v", err)
+		}
+	}
+
+	held()
+	if n := f.refreshes.Load(); n != 0 {
+		t.Fatalf("GraphQL requests inside the floor = %d, want 0", n)
+	}
+	f.age(time.Hour)
+	held()
+	if n := f.refreshes.Load(); n != 1 {
+		t.Errorf("GraphQL requests past the floor = %d, want the one refresh", n)
+	}
+	for _, evt := range f.pub.events {
+		if evt.EventType == domain.EventSystemPollCompleted {
+			t.Errorf("a held pass reported a completed poll: %+v", evt)
+		}
+	}
+}
+
+// A pass handed no repository runs no dashboard search, even for an account
+// with a login: the search would carry no repo: qualifier and span all of
+// GitHub. The fixture counts it as a GraphQL request.
+func TestRefreshGitHub_NoReposRunsNoDashboardSearch(t *testing.T) {
+	f := newUntrackedRefreshFixture(t, untrackedOpenSnapshot, "null")
+	if _, _, err := f.tr.RefreshGitHub(context.Background(), "https://github.com", f.client, domain.GitHubAccount{Login: "aidan"}, nil, ReachAll(), nil); err != nil {
+		t.Fatalf("RefreshGitHub: %v", err)
+	}
+	if n := f.refreshes.Load(); n != 0 {
+		t.Errorf("GraphQL requests = %d, want 0: the pull request is inside the floor and no search may run", n)
 	}
 }

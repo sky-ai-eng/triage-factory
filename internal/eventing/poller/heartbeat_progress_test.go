@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
@@ -26,6 +27,10 @@ type hookRepositoryStore struct {
 
 func (r *hookRepositoryStore) ListTrackedNamesSystem(_ context.Context, orgID, _ string) ([]string, error) {
 	r.visit(orgID)
+	return nil, nil
+}
+
+func (r *hookRepositoryStore) ListHeldUntrackedSystem(context.Context, string, string) ([]domain.Repository, error) {
 	return nil, nil
 }
 
