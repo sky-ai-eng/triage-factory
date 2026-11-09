@@ -84,6 +84,30 @@ func (a *App) memoryOwed(orgID, conversationID string) {
 	a.publishCtl(ctlbus.Message{Kind: "memory_owed", OrgID: orgID, ConversationID: conversationID})
 }
 
+// githubRefreshMarked relays a GitHub webhook receiver's nudge the way
+// sourcesChanged relays a pause/resume: a delivery's refresh marks just
+// committed, so the brain should look at the org's marks now. The receiver
+// runs on whichever control pod GitHub reached, which is often not the holder.
+// Lossy like the rest: the marks are stored, so a dropped nudge leaves them
+// for the next pass that reads them.
+func (a *App) githubRefreshMarked(orgID string) {
+	if orgID == "" {
+		return
+	}
+	if a.isBrainHolder() {
+		a.applyGitHubRefreshMarked(orgID)
+		return
+	}
+	a.publishCtl(ctlbus.Message{Kind: ctlbus.KindGitHubRefreshMarked, OrgID: orgID})
+}
+
+// applyGitHubRefreshMarked is the brain-side effect of the refresh-mark nudge.
+func (a *App) applyGitHubRefreshMarked(orgID string) {
+	// TODO(TFAC-1352): wake the org's narrowed poll pass over its pending
+	// refresh marks; until it ships, nothing reads github_refresh_marks and the
+	// scheduled cycle's timers are what pick up the changes the marks name.
+}
+
 // applySourcesChanged is the brain-side effect of a pause/resume: drop the
 // router's cached policy for the org, and re-due the source's poll so a resumed
 // source restarts on the next wake instead of after a full interval. PollSoon
@@ -163,6 +187,8 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		}
 	case "sources_changed":
 		a.applySourcesChanged(msg.OrgID, msg.Source)
+	case ctlbus.KindGitHubRefreshMarked:
+		a.applyGitHubRefreshMarked(msg.OrgID)
 	case "cred_request":
 		// nil at TF_ROLE=executor (buildCredProvisioner never constructs
 		// a.credProvisioner there) and in local mode — an executor is

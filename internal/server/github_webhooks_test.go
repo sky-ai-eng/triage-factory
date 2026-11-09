@@ -473,8 +473,8 @@ func TestGitHubWebhook_RedeliveredEvent_PublishesOnce(t *testing.T) {
 		Handle: func(e domain.Event) { got <- e },
 	})
 
-	pr := []byte(`{"action":"synchronize","number":7,"installation":{"id":4242}}`)
-	push := []byte(`{"ref":"refs/heads/main","installation":{"id":4242}}`)
+	pr := []byte(`{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001},"installation":{"id":4242}}`)
+	push := []byte(`{"ref":"refs/heads/main","repository":{"id":9001},"installation":{"id":4242}}`)
 	const prDelivery = "gh-delivery-pr"
 
 	for _, delivery := range []struct {
@@ -603,7 +603,7 @@ func TestGitHubWebhook_InstallationlessDeliveryDedups(t *testing.T) {
 
 	// Same ordering sentinel as the publish test above: a later, distinct
 	// delivery arriving second proves the replay published nothing.
-	pr := []byte(`{"action":"synchronize","number":7}`)
+	pr := []byte(`{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001}}`)
 	if rec := postWebhook(s, "pull_request", sign(pr), pr); rec.Code != http.StatusNoContent {
 		t.Fatalf("sentinel status = %d, want 204", rec.Code)
 	}
@@ -692,7 +692,7 @@ func TestGitHubWebhook_NotRateLimitedInLocalMode(t *testing.T) {
 	s := newTestServer(t)
 	seedWebhookApp(t, s)
 
-	body := []byte(`{"action":"synchronize","number":7}`)
+	body := []byte(`{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001}}`)
 	for i := 0; i < int(signedWebhookBurst)*3; i++ {
 		rec := postWebhook(s, "pull_request", sign(body), body)
 		if rec.Code != http.StatusNoContent {
@@ -774,7 +774,7 @@ func TestGitHubWebhook_TeardownInvalidatesCachedSecret(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, false) // staged, so the discard route accepts it
 
-	body := []byte(`{"action":"synchronize","number":7}`)
+	body := []byte(`{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001}}`)
 	sig := signWith("webhook-secret", body) // the secret seedLocalApp stores
 	if rec := postWebhook(s, "pull_request", sig, body); rec.Code != http.StatusNoContent {
 		t.Fatalf("delivery before teardown = %d, want 204 (the cache is primed by this)", rec.Code)
@@ -819,7 +819,7 @@ func TestGitHubWebhook_RegistrationInvalidatesCachedSecret(t *testing.T) {
 
 	// A delivery lands while the org still has no App — this is what fills the
 	// cache with the negative.
-	body := []byte(`{"action":"synchronize","number":7}`)
+	body := []byte(`{"action":"synchronize","number":7,"pull_request":{"number":7},"repository":{"id":9001}}`)
 	if rec := postWebhook(s, "pull_request", signWith(registeredSecret, body), body); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("pre-registration delivery = %d, want 401", rec.Code)
 	}

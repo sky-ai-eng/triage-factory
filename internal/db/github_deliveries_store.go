@@ -19,9 +19,9 @@ const GitHubDeliveryPruneAge = 72 * time.Hour
 // GitHub never auto-retries a failed delivery, but it redelivers on demand
 // (the Redeliver button; POST /app/hook/deliveries/{delivery_id}/attempts),
 // which is the recovery path an operator uses after an outage. Without this
-// record a redelivery re-runs the installation upsert and re-publishes to the
-// bus, so a redelivery is ordinary traffic the receiver has to be able to
-// recognize.
+// record a redelivery re-runs the installation upsert, re-publishes to the
+// bus, and lands on its refresh marks again, so a redelivery is ordinary
+// traffic the receiver has to be able to recognize.
 //
 // Keyed (installation_id, delivery_id), not (org_id, delivery_id): the
 // org-keyed form cannot be written before the tenant is known, which is
@@ -36,19 +36,33 @@ const GitHubDeliveryPruneAge = 72 * time.Hour
 // real implementation in both dialects rather than a local stub.
 type GitHubDeliveryStore interface {
 	// MarkDeliveredSystem records one (installationID, deliveryID) delivery
-	// via an insert-on-conflict, and opportunistically prunes deliveries
-	// older than GitHubDeliveryPruneAge in the same call.
+	// via an insert-on-conflict.
 	//
 	// fresh=true means this delivery was not previously recorded and the
 	// caller should apply it; fresh=false means a duplicate, which is
-	// terminal for that delivery — the caller applies nothing and acks. The
-	// prune is best-effort: a failure there cannot affect fresh's
-	// correctness and is never surfaced as an error.
+	// terminal for that delivery — the caller applies nothing and acks.
 	//
-	// The row lands BEFORE the caller applies the delivery, which is what
-	// makes the side effects at-most-once. The cost is that a delivery whose
-	// application then fails is not replayable — the installation mirror's
-	// own convergence path (BackfillInstallationsFromAPI) is what corrects
-	// that, exactly as it does for a delivery that never arrived.
+	// Every delivery but an installation event is recorded on the store
+	// SystemTxStores hands, in the transaction that writes its refresh marks
+	// (none, for a delivery that names nothing to refresh), so the record
+	// commits only with them: if the marks fail, the delivery stays unrecorded
+	// and a redelivery applies it. A concurrent copy of the same delivery
+	// waits for that transaction, and reads as a duplicate once it commits and
+	// as fresh if it rolls back.
+	//
+	// An installation delivery is recorded on its own, BEFORE the caller
+	// applies it, which is what makes its side effects at-most-once. The
+	// cost is that one whose application then fails is not replayable — the
+	// installation mirror's own convergence path
+	// (BackfillInstallationsFromAPI) is what corrects that, exactly as it
+	// does for a delivery that never arrived.
 	MarkDeliveredSystem(ctx context.Context, installationID, deliveryID string) (fresh bool, err error)
+
+	// PruneDeliveredSystem deletes deliveries older than
+	// GitHubDeliveryPruneAge. The receiver calls it best-effort after each
+	// delivery is recorded, never inside the recording transaction: the
+	// delete locks the stale rows it removes, so inside one it would hold
+	// every concurrent delivery's prune until that transaction ended, and in
+	// Postgres its failure would abort the transaction it ran in.
+	PruneDeliveredSystem(ctx context.Context) error
 }

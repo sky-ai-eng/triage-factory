@@ -88,9 +88,11 @@ func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.Syste
 
 	err := db.InTx(ctx, s.admin, func(tx *sql.Tx) error {
 		return fn(db.SystemTxStores{
-			EventQueue:    newEventQueueStore(tx),
-			Notifications: newNotificationStore(s.app, tx),
-			Ext:           db.BuildStoreExtensions(db.DialectPostgres, s.app, tx),
+			EventQueue:         newEventQueueStore(tx),
+			Notifications:      newNotificationStore(s.app, tx),
+			GitHubDeliveries:   newGitHubDeliveryStore(tx),
+			GitHubRefreshMarks: newGitHubRefreshMarkStore(tx),
+			Ext:                db.BuildStoreExtensions(db.DialectPostgres, s.app, tx),
 		})
 	})
 	if err != nil {

@@ -34,10 +34,12 @@ const maxWebhookBody = 25 << 20
 // MarkInstallationRemoved; installation.suspend / .unsuspend →
 // SetInstallationSuspension. deleted and suspend both fire the resolver's
 // token-cache invalidate hook, since either leaves the installation's
-// already-minted tokens dead. Every other (verified) event is published to
-// the bus for downstream content processing and acked with 204. Validation
-// failures return 4xx so GitHub doesn't retry a structurally-bad delivery
-// indefinitely.
+// already-minted tokens dead. A content event (a pull request, review,
+// comment, check, or push) writes a refresh mark for what it names in a
+// tracked repository, recorded with the delivery in one transaction, then
+// nudges the lease holder. Every other (verified) event is published to
+// the bus and acked with 204. Validation failures return 4xx so GitHub
+// doesn't retry a structurally-bad delivery indefinitely.
 //
 // Every refusal that depends on the org — no App, a PAT org, a bad signature —
 // is the same bare 401, so the reply carries no information about which orgs
@@ -104,11 +106,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// An installation delivery is applied to the row on the GitHub it came
-	// from, which for an org's own App is the org's configured GitHub. Read
-	// ahead of the dedup gate, so a failed read leaves the delivery unrecorded
-	// and a redelivery can still apply it.
+	// from, and a content delivery's repository is resolved on it, which for
+	// an org's own App is the org's configured GitHub. Read ahead of the dedup
+	// gate, so a failed read leaves the delivery unrecorded and a redelivery
+	// can still apply it.
 	var host string
-	if d.install != nil {
+	if d.install != nil || d.namesTargets() {
 		if host, err = s.orgGitHubHost(r.Context(), orgID); err != nil {
 			internalError(w, "github-webhook", err)
 			return
@@ -149,28 +152,37 @@ func readWebhookDelivery(w http.ResponseWriter, r *http.Request) (eventName, sig
 
 // verifiedDelivery is what a delivery is reduced to between the signature
 // check and the dedup gate: its GUID, the parsed payload when it is an
-// installation event, and the installation id that keys the gate — "" for a
-// delivery naming no installation.
+// installation event, the refresh hint when it is a content event, and the
+// installation id that keys the gate — "" for a delivery naming no
+// installation.
 type verifiedDelivery struct {
 	deliveryID     string
 	install        *installationWebhook
+	hint           *refreshHint
 	installationID string
+}
+
+// namesTargets reports whether the delivery is a content event naming
+// something to refresh, which is when its repository has to be resolved.
+func (d verifiedDelivery) namesTargets() bool {
+	return d.hint != nil && len(d.hint.targets) > 0
 }
 
 // parseVerifiedDelivery runs the structural checks a VERIFIED delivery has to
 // pass before anything is recorded about it: the delivery GUID, and for an
-// installation event the payload itself. Both are properties of the delivery
-// alone, so a failure here is a 4xx that repeats on every attempt — which is
-// what makes it safe to run ahead of the dedup gate and unsafe to run behind
-// it (see applyWebhookDelivery). No store is read. ok=false means a reply has
-// been written.
+// installation or content event the payload itself. Both are properties of
+// the delivery alone, so a failure here is a 4xx that repeats on every attempt
+// — which is what makes it safe to run ahead of the dedup gate and unsafe to
+// run behind it (see applyWebhookDelivery). No store is read. ok=false means a
+// reply has been written.
 func parseVerifiedDelivery(w http.ResponseWriter, r *http.Request, eventName string, body []byte) (verifiedDelivery, bool) {
-	// Dedup gates ahead of every side effect — the mirror write and the bus
-	// publish alike. GitHub never auto-retries a failed delivery, but it
-	// redelivers on demand (the Redeliver button; POST
+	// Dedup gates ahead of every side effect — the mirror write, the refresh
+	// marks, and the bus publish alike. GitHub never auto-retries a failed
+	// delivery, but it redelivers on demand (the Redeliver button; POST
 	// /app/hook/deliveries/{delivery_id}/attempts), which is the recovery an
 	// operator reaches for after an outage — so a second copy of a delivery is
-	// ordinary traffic, and without this it re-runs the upsert and re-publishes.
+	// ordinary traffic, and without this it re-runs the upsert, marks again,
+	// and re-publishes.
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
 	if deliveryID == "" {
 		// Every genuine delivery carries a GUID. Without one there is nothing
@@ -188,12 +200,17 @@ func parseVerifiedDelivery(w http.ResponseWriter, r *http.Request, eventName str
 	// this leaves behind the gate is only work that can fail on TF's state
 	// rather than on the delivery, and every one of those answers 5xx.
 	var install *installationWebhook
-	if eventName == "installation" {
-		var perr error
-		if install, perr = parseInstallationWebhook(body); perr != nil {
-			badRequest(w, perr.Error())
-			return verifiedDelivery{}, false
-		}
+	var hint *refreshHint
+	var perr error
+	switch {
+	case eventName == "installation":
+		install, perr = parseInstallationWebhook(body)
+	case hintedEvent(eventName):
+		hint, perr = parseRefreshHint(eventName, body)
+	}
+	if perr != nil {
+		badRequest(w, perr.Error())
+		return verifiedDelivery{}, false
 	}
 
 	// The installation half of the dedup key. An installation delivery was just
@@ -205,21 +222,47 @@ func parseVerifiedDelivery(w http.ResponseWriter, r *http.Request, eventName str
 	} else {
 		installationID = deliveryInstallationID(body)
 	}
-	return verifiedDelivery{deliveryID: deliveryID, install: install, installationID: installationID}, true
+	return verifiedDelivery{deliveryID: deliveryID, install: install, hint: hint, installationID: installationID}, true
 }
 
 // applyWebhookDelivery is the tail both receivers share once the tenant is
-// known: the dedup gate, then the installation-lifecycle write or the bus
-// publish, under orgID. host is the GitHub an installation delivery came from,
-// and keys the row it writes; it is unused for any other event. It is the first
-// thing on either route that writes, which is why the gate is its first move —
-// a delivery that reaches here has been verified and structurally validated,
-// and everything it does from here is a side effect the gate has to precede.
+// known: the dedup gate, then the installation-lifecycle write, or the refresh
+// marks and the bus publish, under orgID. host is the GitHub the delivery came
+// from: it keys the row an installation delivery writes and the repository a
+// content delivery's marks resolve to. It is the first thing on either route
+// that writes, which is why the gate is its first write — a delivery that
+// reaches here has been verified and structurally validated, and everything it
+// does from here is a side effect the gate has to precede.
 func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, orgID, host, eventName string, d verifiedDelivery) {
-	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), d.installationID, d.deliveryID)
-	if err != nil {
-		internalError(w, "github-webhook", err)
-		return
+	ctx := r.Context()
+	var fresh bool
+	var marked int
+	if d.install != nil {
+		// Recorded on its own, ahead of the mirror write: an installation
+		// delivery's side effects are at-most-once (GitHubDeliveryStore has
+		// why).
+		var err error
+		fresh, err = s.githubDeliveries.MarkDeliveredSystem(ctx, d.installationID, d.deliveryID)
+		s.pruneWebhookDeliveries(ctx)
+		if err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+	} else {
+		// Resolved ahead of the transaction, which in SQLite holds the one
+		// connection a read outside it would wait on. A failed read leaves the
+		// delivery unrecorded, so a redelivery applies it.
+		repositoryID, err := s.trackedHintRepository(ctx, orgID, host, d.hint)
+		if err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+		fresh, marked, err = s.recordContentDelivery(ctx, orgID, d, repositoryID)
+		s.pruneWebhookDeliveries(ctx)
+		if err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
 	}
 	if !fresh {
 		// Losing is terminal for this request and carries no retry: GitHub was
@@ -238,6 +281,11 @@ func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, or
 		return
 	}
 
+	if marked > 0 && s.onGitHubRefreshMarked != nil {
+		// After the commit, so the holder reads marks that exist. Best-effort:
+		// a lost nudge leaves the marks for the next pass that reads them.
+		s.onGitHubRefreshMarked(orgID)
+	}
 	s.publishWebhookEvent(orgID, eventName, d.deliveryID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -251,8 +299,8 @@ func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, or
 // Returns "" — keying the delivery on its GUID alone — for a delivery that
 // names no installation (github_app_authorization, for one) and for a body
 // this can't parse. A malformed body is not this function's to report: an
-// installation delivery is already refused ahead of the gate, and no other
-// event requires a parseable payload to be recorded and published.
+// installation or content delivery is already refused ahead of the gate, and
+// no other event requires a parseable payload to be recorded and published.
 func deliveryInstallationID(body []byte) string {
 	var envelope struct {
 		Installation struct {

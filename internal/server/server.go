@@ -268,8 +268,15 @@ type Server struct {
 	// the holder that actually generates. Nil until SetOnMemoryOwed runs, and
 	// nil is survivable: the doorbell only ever shortens the wait, it is never
 	// the thing that makes the memory land.
-	onMemoryOwed  func(orgID, conversationID string)
-	scorerTrigger func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
+	onMemoryOwed func(orgID, conversationID string)
+	// onGitHubRefreshMarked fires after a GitHub webhook delivery's refresh
+	// marks commit, so the lease holder looks at the org's marks now. The
+	// delivery lands on whichever control pod GitHub reached, so the callback
+	// relays — in process when this pod runs the brain, over tf_ctl otherwise.
+	// Nil until SetOnGitHubRefreshMarked runs, and nil is survivable: the
+	// marks are stored, and the nudge only shortens the wait for them.
+	onGitHubRefreshMarked func(orgID string)
+	scorerTrigger         func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 	// profilerTrigger kicks the per-org repo-profiling manager. force=true
 	// bypasses the 3-day TTL — the explicit "Re-profile" button and a
 	// repo-set change both want an immediate re-profile rather than waiting
@@ -1089,6 +1096,11 @@ func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 // See the field.
 func (s *Server) SetOnSourcesChanged(fn func(orgID, kind string)) {
 	s.onSourcesChanged = fn
+}
+
+// SetOnGitHubRefreshMarked registers the refresh-mark nudge. See the field.
+func (s *Server) SetOnGitHubRefreshMarked(fn func(orgID string)) {
+	s.onGitHubRefreshMarked = fn
 }
 
 // SetOnMemoryOwed registers the memory doorbell. See the field.

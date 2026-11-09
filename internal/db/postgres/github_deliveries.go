@@ -10,7 +10,9 @@ import (
 
 // gitHubDeliveryStore is the Postgres impl of db.GitHubDeliveryStore. Admin
 // pool only: the pre-auth webhook receiver has no request claims for RLS to
-// gate on, and github_webhook_deliveries carries no policy at all.
+// gate on, and github_webhook_deliveries carries no policy at all. admin is
+// the admin pool, or the admin-pool transaction a db.SystemTxStores is bound
+// to.
 type gitHubDeliveryStore struct{ admin queryer }
 
 func newGitHubDeliveryStore(admin queryer) db.GitHubDeliveryStore {
@@ -32,14 +34,14 @@ func (s *gitHubDeliveryStore) MarkDeliveredSystem(ctx context.Context, installat
 	if err != nil {
 		return false, fmt.Errorf("rows affected github_webhook_deliveries: %w", err)
 	}
-	fresh := n > 0
+	return n > 0, nil
+}
 
-	// Best-effort: a missed prune grows the table a little until the next
-	// successful call, which is never a reason to fail the delivery this call
-	// is deduping.
-	_, _ = s.admin.ExecContext(ctx, `
+func (s *gitHubDeliveryStore) PruneDeliveredSystem(ctx context.Context) error {
+	if _, err := s.admin.ExecContext(ctx, `
 		DELETE FROM github_webhook_deliveries WHERE received_at < $1
-	`, time.Now().UTC().Add(-db.GitHubDeliveryPruneAge))
-
-	return fresh, nil
+	`, time.Now().UTC().Add(-db.GitHubDeliveryPruneAge)); err != nil {
+		return fmt.Errorf("prune github_webhook_deliveries: %w", err)
+	}
+	return nil
 }

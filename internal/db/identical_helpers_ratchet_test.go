@@ -132,6 +132,7 @@ var identicalHelperRatchet = map[string]helperTier{
 	"newDashboardStore":         tierConstructor,
 	"newEventStore":             tierConstructor,
 	"newFactoryReadStore":       tierConstructor,
+	"newGitHubRefreshMarkStore": tierConstructor,
 	"newModelAvailabilityStore": tierConstructor,
 	"newScoreStore":             tierConstructor,
 	"newTeamActivityStore":      tierConstructor,
