@@ -144,7 +144,7 @@ func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string
 	t.Helper()
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("run-worktree-%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("run-worktree-%s-%s", suffix, uuid.New().String())
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, external_id, kind, title, url, snapshot_json, created_at, state, scope, jira_project_id)
 		VALUES (?, 'jira', ?, ?, 'issue', 'ConversationWorktree Conformance', 'https://example/x', '{}', ?, 'active', 'https://jira.example.com', ?)

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -501,6 +502,7 @@ func TestUpgrade_DrainWaitsOnTheDrained(t *testing.T) {
 // TestUpgrade_InterruptedDrain: an interrupt during the drain wait undrains
 // the executors the upgrade drained, and changes nothing else.
 func TestUpgrade_InterruptedDrain(t *testing.T) {
+	skipWithoutSelfInterrupt(t)
 	f, next, dir := upgradeFixture(t)
 	f.dockerReplies[fleetList] = dockerReply{stdout: fleetJSON("exec-a:none:2:1", "exec-b:persistent:1:1")}
 	interruptOnSleep(f)
@@ -615,7 +617,8 @@ func TestUpgrade_FillsWhatTheNewReleaseNeeds(t *testing.T) {
 			t.Errorf("upgrade changed %s, which .env already had", key)
 		}
 	}
-	if info, err := os.Stat(filepath.Join(dir, envFile)); err != nil || info.Mode().Perm() != 0o600 {
+	// Windows reports POSIX mode bits as 0666, so only the stat is checked there.
+	if info, err := os.Stat(filepath.Join(dir, envFile)); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Errorf(".env mode = %v (%v); want 0600", info.Mode().Perm(), err)
 	}
 }

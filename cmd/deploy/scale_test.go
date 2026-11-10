@@ -91,7 +91,9 @@ func TestUp_ScaleDown(t *testing.T) {
 		arrange  func(f *fakeHost)
 		args     []string
 		wantCode int
-		check    func(t *testing.T, f *fakeHost)
+		// interrupts marks a case that delivers SIGINT to the test process.
+		interrupts bool
+		check      func(t *testing.T, f *fakeHost)
 	}{
 		{
 			name: "an executor whose id cannot be read is still removed",
@@ -141,10 +143,11 @@ func TestUp_ScaleDown(t *testing.T) {
 			},
 		},
 		{
-			name:     "an interrupt during the drain undoes it and removes nothing",
-			arrange:  interruptOnSleep,
-			args:     []string{"--executors", "2"},
-			wantCode: 1,
+			name:       "an interrupt during the drain undoes it and removes nothing",
+			arrange:    interruptOnSleep,
+			args:       []string{"--executors", "2"},
+			wantCode:   1,
+			interrupts: true,
 			check: func(t *testing.T, f *fakeHost) {
 				if !strings.Contains(f.errOut.String(), "interrupted; the drain was undone (1 executor(s)); no executor was removed, and nothing was started") {
 					t.Errorf("stderr = %q; want it to say the drain was undone", f.errOut)
@@ -195,6 +198,9 @@ func TestUp_ScaleDown(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.interrupts {
+				skipWithoutSelfInterrupt(t)
+			}
 			stored := tt.stored
 			if stored == 0 {
 				stored = 3

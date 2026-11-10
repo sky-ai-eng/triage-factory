@@ -67,7 +67,7 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 	entityID := uuid.New().String()
 	taskID := uuid.New().String()
 	eventID := uuid.New().String()
-	sourceID := fmt.Sprintf("octo/conformance-runs#%d", now.UnixNano())
+	sourceID := fmt.Sprintf("octo/conformance-runs#%s", uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)

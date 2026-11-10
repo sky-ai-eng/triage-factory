@@ -198,7 +198,7 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	t.Helper()
 	entityID = uuid.New().String()
 	now := time.Now().UTC()
-	sourceID := fmt.Sprintf("octo/task-memory#%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/task-memory#%s-%s", suffix, uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, repository_id)
@@ -249,7 +249,7 @@ func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	t.Helper()
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
-	sourceID := fmt.Sprintf("octo/bp-run#%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/bp-run#%s-%s", suffix, uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope, repository_id)

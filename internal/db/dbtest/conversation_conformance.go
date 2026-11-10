@@ -5602,7 +5602,7 @@ func reapKeysContain(keys []domain.SnapshotReapKey, taskID string) bool {
 // suite's job to test).
 func seedConversationForTest(t *testing.T, orgID string, seed ConversationSeeder, status string) string {
 	t.Helper()
-	ent := seed.Entity(t, "seed-"+status+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	ent := seed.Entity(t, "seed-"+status+"-"+uuid.NewString())
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	return seedConversationForTaskTest(t, orgID, taskID, status, seed)
@@ -5644,7 +5644,7 @@ func concludedSeed(conv domain.Conversation) domain.Conversation {
 func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed ConversationSeeder, status string) (conversationID, blueprintRunID, taskID string) {
 	t.Helper()
 	_ = orgID
-	ent := seed.Entity(t, "seed-bp-"+status+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	ent := seed.Entity(t, "seed-bp-"+status+"-"+uuid.NewString())
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID = seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	brID := seed.BlueprintRun(t, taskID)

@@ -428,6 +428,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		// The newer row: the same issue found again under its current key,
 		// active, carrying the id.
+		awaitClockTick()
 		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-1", "10001", TestJiraProject, "New title", jiraScope+"/browse/NEW-1")
 		if err != nil {
 			t.Fatalf("create newer: %v", err)
@@ -532,6 +533,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		seed.ForgetExternalID(t, older.ID)
 		older, _ = s.Entities.GetSystem(ctx, orgID, older.ID)
+		awaitClockTick()
 		newer, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "NEW-2", "10002", TestJiraProject, "Newer", jiraScope+"/browse/NEW-2")
 		if err != nil {
 			t.Fatalf("create newer: %v", err)

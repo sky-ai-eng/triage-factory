@@ -474,6 +474,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatal("baseline has no last_polled_at")
 		}
 
+		awaitClockTick()
 		if err := s.MarkPolledSystem(ctx, orgID, baseline.ID); err != nil {
 			t.Fatalf("MarkPolledSystem: %v", err)
 		}
@@ -642,6 +643,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// Closed at the right version: state, closed_at and the snapshot
 		// all move in the one statement, and poll_seq advances.
+		awaitClockTick()
 		ok, err = s.ReactivateWithSnapshotCASSystem(ctx, orgID, ent.ID, `{"state":"OPEN","merged":false}`, before.PollSeq)
 		if err != nil {
 			t.Fatalf("ReactivateWithSnapshotCASSystem (closed): %v", err)

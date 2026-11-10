@@ -196,8 +196,8 @@ func seedSQLiteTaskChainOfType(t *testing.T, conn *sql.DB, suffix, eventType str
 	entityID = uuid.New().String()
 	taskID = uuid.New().String()
 	eventID = uuid.New().String()
-	// suffix + nanos keeps source_id unique within and across subtests.
-	sourceID := fmt.Sprintf("octo/conformance#%s-%d", suffix, now.UnixNano())
+	// suffix + a fresh uuid keeps source_id unique within and across subtests.
+	sourceID := fmt.Sprintf("octo/conformance#%s-%s", suffix, uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 
 	if _, err := conn.Exec(`

@@ -100,7 +100,7 @@ func seedSQLiteTaskForSwipes(t *testing.T, conn *sql.DB) string {
 	entityID := uuid.New().String()
 	taskID := uuid.New().String()
 	eventID := uuid.New().String()
-	sourceID := fmt.Sprintf("octo/swipe-conformance#%d", now.UnixNano())
+	sourceID := fmt.Sprintf("octo/swipe-conformance#%s", uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 
 	if _, err := conn.Exec(`

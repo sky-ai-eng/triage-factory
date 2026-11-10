@@ -2,7 +2,16 @@
 
 package deploy
 
-import "errors"
+import (
+	"errors"
+	"testing"
+)
+
+// skipWithoutSelfInterrupt skips a test that needs interruptSelf.
+func skipWithoutSelfInterrupt(t *testing.T) {
+	t.Helper()
+	t.Skip("cannot deliver SIGINT to the test process on this platform")
+}
 
 // interruptSelf fails off unix: there is no way to deliver SIGINT to the
 // current process there, so tests that need it cannot run.

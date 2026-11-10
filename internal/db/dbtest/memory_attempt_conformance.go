@@ -320,6 +320,7 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 			domain.MemoryAttemptFailed, domain.MemoryAttemptErrProviderBackoff, "slow down", "", 6, 0); err != nil {
 			t.Fatalf("CompleteAttemptSystem: %v", err)
 		}
+		awaitClockTick()
 		second, err := store.BeginAttemptSystem(ctx, orgID, convID)
 		if err != nil {
 			t.Fatalf("second BeginAttemptSystem: %v", err)
