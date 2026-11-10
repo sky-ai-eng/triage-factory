@@ -666,7 +666,7 @@ func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID strin
 		JOIN events ev ON ev.id = te.event_id
 		WHERE te.task_id = ?
 		  AND te.kind IN ('spawned', 'bumped', 'injected')
-		ORDER BY ev.created_at DESC, ev.id DESC
+		ORDER BY ev.created_at DESC, ev.rowid DESC
 		LIMIT 1
 	`, taskID).Scan(&eventID)
 	if err == sql.ErrNoRows {
