@@ -64,14 +64,6 @@ func IsJailUID(uid int) bool {
 	return uid >= JailUIDBase && uid < JailUIDBase+MaxSandboxes
 }
 
-// jailSubnetIdx inverts JailUID for a uid inside the band.
-func jailSubnetIdx(uid int) (uint8, bool) {
-	if !IsJailUID(uid) {
-		return 0, false
-	}
-	return uint8(uid - JailUIDBase), true
-}
-
 // SidecarJailGID returns the jail gid of the run whose sidecar runs as
 // sidecarUID — the group the run's socket and cert must carry when that
 // sidecar opens them to the jail. False for a uid outside the sidecar band,

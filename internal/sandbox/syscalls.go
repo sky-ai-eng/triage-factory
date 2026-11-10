@@ -1,3 +1,5 @@
+//go:build linux
+
 package sandbox
 
 // defaultAllowedSyscalls is the syscall allowlist for the default

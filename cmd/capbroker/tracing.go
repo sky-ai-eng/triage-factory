@@ -1,3 +1,5 @@
+//go:build linux
+
 package capbroker
 
 import "go.opentelemetry.io/otel"
@@ -11,7 +13,5 @@ import "go.opentelemetry.io/otel"
 // gains no outbound telemetry dependency. The broker process also installs
 // no TracerProvider, so even this var resolves to the global no-op there.
 //
-// No build tag: the client lives behind one (ipc.go is Linux-only), but a
-// tagless file keeps the package compiling on a non-Linux dev box exactly
-// as capbroker.go does.
+// Linux-only, like its one user: off Linux nothing references it.
 var tracer = otel.Tracer("cmd/capbroker")
