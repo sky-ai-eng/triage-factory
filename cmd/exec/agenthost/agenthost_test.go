@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -525,5 +526,35 @@ func tempSocket(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	// Keep the path short — some unix-socket implementations cap at
 	// ~108 bytes. Linux is fine but defense-in-depth.
-	return filepath.Join(dir, "test.sock")
+	path := filepath.Join(dir, "test.sock")
+	skipIfUnixSocketsBlocked(t, path)
+	return path
+}
+
+// skipIfUnixSocketsBlocked skips on Windows when a unix socket cannot be
+// connected to at path. AF_UNIX works on Windows, but binding succeeds under
+// some directories (a managed machine's %LOCALAPPDATA% among them) where
+// connecting is refused with WSAEINVAL, which says nothing about the code
+// under test. Everywhere else a failure is the test's to report.
+func skipIfUnixSocketsBlocked(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return
+	}
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Skipf("AF_UNIX listen is unavailable under %s: %v", filepath.Dir(path), err)
+	}
+	defer func() { _ = os.Remove(path) }()
+	defer l.Close()
+	go func() {
+		if c, err := l.Accept(); err == nil {
+			_ = c.Close()
+		}
+	}()
+	c, err := net.DialTimeout("unix", path, 5*time.Second)
+	if err != nil {
+		t.Skipf("AF_UNIX connect is refused under %s (set TMP to another directory to run this test): %v", filepath.Dir(path), err)
+	}
+	_ = c.Close()
 }

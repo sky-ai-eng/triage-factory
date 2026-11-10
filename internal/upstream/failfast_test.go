@@ -96,6 +96,11 @@ func TestFailFast_SilentAfterTwoTimeoutsUntilTheHostAnswers(t *testing.T) {
 
 	MarkAnswered(scope, "ghes.corp.example")
 	sent := time.Now()
+	// The answer must be strictly later than the send. The Windows clock ticks
+	// in milliseconds, so two reads in a row can be equal.
+	for !time.Now().After(sent) {
+		time.Sleep(time.Millisecond)
+	}
 	MarkAnswered(scope, "ghes.corp.example")
 	MarkTransportFailure(scope, "ghes.corp.example", sent, timeout)
 	MarkTransportFailure(scope, "ghes.corp.example", time.Now(), timeout)
