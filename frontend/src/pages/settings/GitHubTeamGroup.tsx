@@ -7,6 +7,7 @@ import {
   identifyGroups,
   listGitHubTeams,
   teamRef,
+  type GitHubTeamFilter,
   type GitHubTeamOption,
   type GitHubTeamRef,
 } from '../../lib/githubTeams'
@@ -20,13 +21,31 @@ const TEAM_PAGE_SIZE = 200
 /** How long after the last keystroke before asking for the searched list. */
 const SEARCH_DEBOUNCE_MS = 250
 
-/** The pages held, and the search they answer. */
+/** The pages held, and the read they answer. */
 interface Held {
   search: string
+  filter: GitHubTeamFilter
+  /** The selection a Selected or Unselected tab was read under. A further
+   *  page is read under the same ids, which its token requires, so a team
+   *  checked or unchecked since stays where it was until the tab is read
+   *  again. */
+  ids: string[]
   items: GitHubTeamOption[]
   next: string
   total: number
 }
+
+/** How many teams each tab holds under the search, for the tab labels. */
+interface TabCounts {
+  all: number
+  selected: number
+}
+
+/** The GitHub team ids of a selection, in canonical order. A mapping with no
+ *  id yet has none to send, and the route places it with the unselected
+ *  teams. */
+const selectionIds = (groups: GitHubTeamRef[]): string[] =>
+  [...new Set(groups.map((g) => g.github_team_id).filter((id) => id !== ''))].sort()
 
 /**
  * GitHubTeamGroup is the team-scope GitHub-team → TF-team mapping field
@@ -37,8 +56,9 @@ interface Held {
  * wizard's team steps.
  *
  * It reads the GitHub teams the team can map from their list route, which
- * searches and orders them, and renders the shared GitHubTeamChecklist body
- * over the pages it holds. On first load it seeds the selection up via
+ * searches, orders and splits them by the unsaved selection (a tab is one
+ * read), and renders the shared GitHubTeamChecklist body over the pages it
+ * holds. On first load it seeds the selection up via
  * onLoaded: a prior saved set wins, with any mapping the server has not
  * identified by GitHub's id yet matched to its team among the rows read
  * (identifyGroups) so a save can name it; otherwise, when includeMembership
@@ -77,6 +97,8 @@ export default function GitHubTeamGroup({
   bare?: boolean
 }) {
   const [held, setHeld] = useState<Held | null>(null)
+  const [filter, setFilter] = useState<GitHubTeamFilter>('all')
+  const [counts, setCounts] = useState<TabCounts | null>(null)
   const [credentialsMissing, setCredentialsMissing] = useState(false)
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -96,31 +118,52 @@ export default function GitHubTeamGroup({
   const readSeq = useRef(0)
   // The search the reader is asking for now, for the reads that fire on their
   // own schedule (a retry, a refresh): re-asking an older search would land
-  // over the newer one.
+  // over the newer one. The tab and the selection are held the same way.
   const wanted = useRef('')
+  const filterRef = useRef<GitHubTeamFilter>('all')
+  const valueRef = useRef(value)
+  useEffect(() => {
+    valueRef.current = value
+  }, [value])
 
-  // readPage reads one page under `q` and holds it: a first page replaces
-  // what is held, a further one appends. It resolves to null when a later
-  // read superseded it.
+  // readPage reads one page of a tab under `q` and holds it: a first page
+  // replaces what is held, a further one appends. The tab is the route's
+  // filter, so each tab's rows, total and "Show N more" are its own. It
+  // resolves to null when a later read superseded it, or when the tab holds
+  // no team without asking.
   const readPage = useCallback(
-    async (q: string, pageToken = '') => {
+    async (q: string, tab: GitHubTeamFilter, ids: string[], pageToken = '') => {
       const seq = ++readSeq.current
+      if (tab === 'selected' && ids.length === 0) {
+        // Nothing is selected, and an empty ids narrows nothing.
+        setHeld({ search: q, filter: tab, ids, items: [], next: '', total: 0 })
+        setSearchError('')
+        return null
+      }
       const page = await listGitHubTeams(teamId, {
         search: q,
         includeMembership,
+        ...(tab === 'selected' ? { ids } : tab === 'unselected' ? { excludeIds: ids } : {}),
         pageSize: TEAM_PAGE_SIZE,
         pageToken,
       })
       if (seq !== readSeq.current) return null
       setHeld((prev) =>
-        pageToken && prev && prev.search === q
+        pageToken && prev && prev.search === q && prev.filter === tab
           ? {
               ...prev,
               items: [...prev.items, ...page.items],
               next: page.next_page_token,
               total: page.total_count,
             }
-          : { search: q, items: page.items, next: page.next_page_token, total: page.total_count },
+          : {
+              search: q,
+              filter: tab,
+              ids,
+              items: page.items,
+              next: page.next_page_token,
+              total: page.total_count,
+            },
       )
       setCredentialsMissing(page.credentials_missing)
       setSearchError('')
@@ -135,7 +178,7 @@ export default function GitHubTeamGroup({
     try {
       const seeding = !seededRef.current
       const [page, saved] = await Promise.all([
-        readPage(wanted.current),
+        readPage(wanted.current, filterRef.current, selectionIds(valueRef.current)),
         seeding ? fetchTeamGitHubGroups(teamId) : Promise.resolve(null),
       ])
       if (seeding) {
@@ -196,7 +239,7 @@ export default function GitHubTeamGroup({
     }
     const id = setTimeout(
       () =>
-        void readPage(q).catch((e) =>
+        void readPage(q, filterRef.current, selectionIds(valueRef.current)).catch((e) =>
           setSearchError(httpErrorMessage(e, 'Could not search GitHub teams.')),
         ),
       q ? SEARCH_DEBOUNCE_MS : 0,
@@ -206,10 +249,47 @@ export default function GitHubTeamGroup({
 
   const loadMore = useCallback(() => {
     if (!held?.next) return
-    void readPage(held.search, held.next).catch((e) =>
+    void readPage(held.search, held.filter, held.ids, held.next).catch((e) =>
       setSearchError(httpErrorMessage(e, 'Could not load more GitHub teams.')),
     )
   }, [held, readPage])
+
+  // Opening a tab reads it under the selection as it stands now.
+  const changeFilter = (tab: GitHubTeamFilter) => {
+    filterRef.current = tab
+    setFilter(tab)
+    void readPage(wanted.current, tab, selectionIds(value)).catch((e) =>
+      setSearchError(httpErrorMessage(e, 'Could not load GitHub teams.')),
+    )
+  }
+
+  // The tab labels count under the live selection, which the tab on screen
+  // was not necessarily read under, so they are count-only reads of their
+  // own. The unselected count is the rest: ids and exclude_ids split what
+  // the search matches between them.
+  const idsKey = selectionIds(value).join(',')
+  useEffect(() => {
+    const q = search.trim()
+    const ids = idsKey === '' ? [] : idsKey.split(',')
+    let live = true
+    const id = setTimeout(() => {
+      Promise.all([
+        listGitHubTeams(teamId, { search: q, pageSize: 0 }),
+        ids.length > 0 ? listGitHubTeams(teamId, { search: q, ids, pageSize: 0 }) : null,
+      ]).then(
+        ([all, picked]) => {
+          if (live) setCounts({ all: all.total_count, selected: picked?.total_count ?? 0 })
+        },
+        () => {
+          if (live) setCounts(null)
+        },
+      )
+    }, SEARCH_DEBOUNCE_MS)
+    return () => {
+      live = false
+      clearTimeout(id)
+    }
+  }, [teamId, search, idsKey])
 
   const toggle = (team: GitHubTeamRef) => {
     const k = groupKey(team)
@@ -219,6 +299,11 @@ export default function GitHubTeamGroup({
         : [...value, teamRef(team)],
     )
   }
+
+  // The pages held answer the tab on screen once its read lands; until then
+  // the list is pending rather than showing the last tab's rows under this
+  // one's name.
+  const shown = held?.filter === filter ? held : null
 
   const inner = (
     <>
@@ -247,11 +332,21 @@ export default function GitHubTeamGroup({
       </div>
 
       <GitHubTeamChecklist
-        rows={held?.items ?? []}
-        total={held?.total ?? 0}
-        searched={!!held?.search}
-        hasMore={!!held?.next}
+        rows={shown?.items ?? []}
+        total={shown?.total ?? 0}
+        searched={!!shown?.search}
+        hasMore={!!shown?.next}
         onLoadMore={loadMore}
+        filter={filter}
+        onFilterChange={changeFilter}
+        counts={
+          counts && {
+            all: counts.all,
+            selected: counts.selected,
+            unselected: counts.all - counts.selected,
+          }
+        }
+        pending={!loading && !shown}
         search={search}
         onSearchChange={setSearch}
         listError={searchError}

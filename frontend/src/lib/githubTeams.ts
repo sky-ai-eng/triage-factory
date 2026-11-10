@@ -52,6 +52,10 @@ export interface GitHubTeamPage {
   credentials_missing: boolean
 }
 
+/** Which teams a tab of the editor lists: every one, the ones in the unsaved
+ *  selection, or the rest. */
+export type GitHubTeamFilter = 'all' | 'selected' | 'unselected'
+
 export interface GitHubTeamListRequest {
   /** Matched server-side against `org_login/team_slug` and the name. */
   search?: string
@@ -59,8 +63,14 @@ export interface GitHubTeamListRequest {
   includeMembership?: boolean
   /** Only the teams the caller belongs to, marked `mine`. */
   onlyMine?: boolean
+  /** Only the teams with these GitHub team ids. Empty narrows nothing, as on
+   *  the route, so a caller with no ids to keep has no teams to ask for. */
+  ids?: string[]
+  /** None of the teams with these GitHub team ids. */
+  excludeIds?: string[]
   pageSize?: number
-  /** A token the server minted under the same `search` and `onlyMine`. */
+  /** A token the server minted under the same `search`, `onlyMine`, `ids`
+   *  and `excludeIds`. */
   pageToken?: string
 }
 
@@ -80,6 +90,8 @@ export async function listGitHubTeams(
       ...(req.search ? { search: req.search } : {}),
       ...(req.includeMembership ? { include_membership: true } : {}),
       ...(req.onlyMine ? { only_mine: true } : {}),
+      ...(req.ids?.length ? { ids: req.ids } : {}),
+      ...(req.excludeIds?.length ? { exclude_ids: req.excludeIds } : {}),
       ...(req.pageSize !== undefined ? { page_size: req.pageSize } : {}),
       ...(req.pageToken ? { page_token: req.pageToken } : {}),
     }),

@@ -143,6 +143,14 @@ type teamGitHubGroupsListRequest struct {
 	// them, as include_membership does. Membership is best-effort: when it
 	// cannot be read, no team is the caller's.
 	OnlyMine bool `json:"only_mine"`
+	// IDs narrows to the GitHub teams with these GitHub team ids, and
+	// ExcludeIDs to the ones without them; an editor sends its unsaved
+	// selection as one or the other to page what it has picked, or what is
+	// left. A row with no GitHub team id (a mapping stored before ids were
+	// recorded that GitHub no longer lists) matches no id. Absent or empty
+	// narrows nothing.
+	IDs        []string `json:"ids"`
+	ExcludeIDs []string `json:"exclude_ids"`
 
 	httpx.PageRequest
 }
@@ -150,8 +158,31 @@ type teamGitHubGroupsListRequest struct {
 // teamGitHubGroupsListFilterKey is the filter set the page token is
 // fingerprinted against.
 type teamGitHubGroupsListFilterKey struct {
-	Search   string `json:"search"`
-	OnlyMine bool   `json:"only_mine"`
+	Search     string   `json:"search"`
+	OnlyMine   bool     `json:"only_mine"`
+	IDs        []string `json:"ids"`
+	ExcludeIDs []string `json:"exclude_ids"`
+}
+
+// gitHubTeamIDFilter validates a list filter of GitHub team ids, recording a
+// fault on v for every entry that is not one, and returns the set to match
+// and its canonical form for the page token. Nil means the filter narrows
+// nothing.
+func gitHubTeamIDFilter(v *httpx.Validation, name string, ids []string) (map[string]bool, []string) {
+	for i, id := range ids {
+		if !domain.IsGitHubID(id) {
+			v.Invalid(fmt.Sprintf("%s[%d]", name, i), fmt.Sprintf("%q is not a GitHub team id", id))
+		}
+	}
+	canonical := httpx.CanonicalStrings(ids)
+	if canonical == nil {
+		return nil, nil
+	}
+	set := make(map[string]bool, len(canonical))
+	for _, id := range canonical {
+		set[id] = true
+	}
+	return set, canonical
 }
 
 // gitHubGroupListItemJSON is one GitHub team the team can map: a candidate
@@ -185,8 +216,8 @@ type teamGitHubGroupsListResponse struct {
 //
 // The set is built in Go rather than read from one table — the candidates are
 // a live GitHub read per tracked-repository owner, beside the team's stored
-// mappings — so the search, the only_mine filter and the order all run over
-// the whole built set here, before the page window is cut.
+// mappings — so the search, the only_mine and id filters, and the order all
+// run over the whole built set here, before the page window is cut.
 //
 // Gated as the team's other reads are: any org member may call it, and the
 // candidates are listed only for a member of the team, because they are read
@@ -219,9 +250,13 @@ func (s *Server) handleTeamGitHubGroupsList(w http.ResponseWriter, r *http.Reque
 	}
 	var v httpx.Validation
 	search := httpx.Search(&v, req.Search)
+	onlyIDs, idsKey := gitHubTeamIDFilter(&v, "ids", req.IDs)
+	excludeIDs, excludeKey := gitHubTeamIDFilter(&v, "exclude_ids", req.ExcludeIDs)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(teamGitHubGroupsListFilterKey{
-		Search:   httpx.SearchKey(search),
-		OnlyMine: req.OnlyMine,
+		Search:     httpx.SearchKey(search),
+		OnlyMine:   req.OnlyMine,
+		IDs:        idsKey,
+		ExcludeIDs: excludeKey,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -261,6 +296,12 @@ func (s *Server) handleTeamGitHubGroupsList(w http.ResponseWriter, r *http.Reque
 	matched := make([]gitHubGroupListItemJSON, 0, len(rows))
 	for _, row := range rows {
 		if req.OnlyMine && !row.Mine {
+			continue
+		}
+		if onlyIDs != nil && !onlyIDs[row.GitHubTeamID] {
+			continue
+		}
+		if excludeIDs[row.GitHubTeamID] {
 			continue
 		}
 		if !httpx.SearchMatches(search, row.OrgLogin+"/"+row.TeamSlug, row.Name) {
