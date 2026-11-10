@@ -1,6 +1,6 @@
 //go:build windows
 
-package auth
+package fsutil
 
 import (
 	"errors"

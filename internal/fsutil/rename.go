@@ -1,4 +1,5 @@
-package auth
+// Package fsutil holds small file-system helpers shared across packages.
+package fsutil
 
 import (
 	"os"
@@ -19,13 +20,13 @@ var (
 	renameTransient = isTransientRenameErr
 )
 
-// renameReplace moves oldPath over newPath, retrying briefly when the failure
+// RenameReplace moves oldPath over newPath, retrying briefly when the failure
 // is one a short wait can clear. On Windows a rename onto a file another
 // process has open (a virus scanner, an indexer, a concurrent reader) fails
 // with a sharing violation or access denied and succeeds a moment later; no
 // other platform reports transient errors, so there it is a plain rename.
 // The last error is returned unchanged.
-func renameReplace(oldPath, newPath string) error {
+func RenameReplace(oldPath, newPath string) error {
 	var err error
 	for attempt := 0; attempt < renameAttempts; attempt++ {
 		if attempt > 0 {

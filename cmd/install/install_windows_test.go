@@ -68,6 +68,53 @@ func TestInstallCopy_UpgradeReplacesAndCleansOld(t *testing.T) {
 	}
 }
 
+// A previous .old that is still running cannot be deleted; the upgrade takes
+// the next numbered name instead of failing, and unrelated files are untouched.
+func TestInstallCopy_RunningOldCopyDoesNotBlockUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "triagefactory.exe")
+	if _, err := installCopy(fakeBinary(t, "v1"), target, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target+".old", []byte("running"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(dir, "triagefactory.exe.oldnotes")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// os.Open shares read/write but not delete, so the file cannot be removed
+	// while held, as with a running image.
+	held, err := os.Open(target + ".old")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := installCopy(fakeBinary(t, "v2"), target, false); err != nil {
+		t.Fatalf("upgrade with a running .old: %v", err)
+	}
+	if got := readFile(t, target); got != "v2" {
+		t.Errorf("target content = %q, want v2", got)
+	}
+	if got := readFile(t, target+".old"); got != "running" {
+		t.Errorf("the running copy was disturbed: %q", got)
+	}
+	if got := readFile(t, unrelated); got != "keep" {
+		t.Errorf("an unrelated file was touched: %q", got)
+	}
+
+	// Once nothing holds it, the next install cleans both up.
+	held.Close()
+	if _, err := installCopy(fakeBinary(t, "v3"), target, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{target + ".old", target + ".old.1"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should be gone, stat err = %v", p, err)
+		}
+	}
+}
+
 func TestInstallCopy_FailedSwapKeepsOriginalAndLeavesNoTemp(t *testing.T) {
 	// os.Open shares read/write but not delete, so the rename-aside is refused
 	// the way it is when an antivirus scanner holds the file.

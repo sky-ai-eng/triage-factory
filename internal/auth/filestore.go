@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
+	"github.com/sky-ai-eng/triage-factory/internal/fsutil"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -181,7 +182,7 @@ func (fb *fileBackend) persist() error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return fmt.Errorf("chmod temp secrets file: %w", err)
 	}
-	if err := renameReplace(tmpName, fb.path); err != nil {
+	if err := fsutil.RenameReplace(tmpName, fb.path); err != nil {
 		return fmt.Errorf("rename secrets file into place: %w", err)
 	}
 	return nil
