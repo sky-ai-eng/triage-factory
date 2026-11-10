@@ -47,7 +47,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 )
 
 // Env vars the spawner writes into a managed local run's environment. The
@@ -140,19 +139,13 @@ func hostOnly(dest string) string {
 	return dest
 }
 
-// execSSH replaces this process with the real ssh, so git keeps talking to a
-// single process with the stdio, exit status and signal behavior it would have
-// had if it had execed ssh itself. Returns only on failure to exec.
-func execSSH(args []string, stderr io.Writer) int {
+// lookSSH resolves the real ssh on PATH, reporting a miss the way every
+// platform's execSSH does.
+func lookSSH(stderr io.Writer) (string, bool) {
 	path, err := exec.LookPath("ssh")
 	if err != nil {
 		fmt.Fprintf(stderr, "triagefactory git-ssh: ssh not found for a host this run does not manage: %v\n", err)
-		return 127
+		return "", false
 	}
-	argv := append([]string{"ssh"}, args...)
-	if err := syscall.Exec(path, argv, os.Environ()); err != nil {
-		fmt.Fprintf(stderr, "triagefactory git-ssh: exec ssh: %v\n", err)
-		return 127
-	}
-	return 0 // unreachable: a successful Exec never returns
+	return path, true
 }
