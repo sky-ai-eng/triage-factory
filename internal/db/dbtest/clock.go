@@ -10,5 +10,6 @@ import "time"
 func awaitClockTick() {
 	start := time.Now().Round(0)
 	for !time.Now().Round(0).After(start) {
+		time.Sleep(time.Millisecond)
 	}
 }
