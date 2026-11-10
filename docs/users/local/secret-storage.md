@@ -15,9 +15,10 @@ Windows Credential Manager refuses a single value over 2560 bytes, which a
 4096-bit GitHub App private key can exceed. Triage Factory splits such a value
 across several Credential Manager entries and joins them on read, so there is
 nothing to do. In Credential Manager you will see the entry itself plus extra
-entries named like it with `#1`, `#2` and so on appended. Leave them alone:
-deleting one makes the credential unreadable (`triagefactory uninstall` and
-removing the credential in the app delete all of them together).
+entries named like it with `#` and a short code appended, such as
+`<name>#3fa9c1d2#1`. Leave them alone: deleting one makes the credential
+unreadable (`triagefactory uninstall` and removing the credential in the app
+delete all of them together).
 
 The encrypted file needs a key:
 
