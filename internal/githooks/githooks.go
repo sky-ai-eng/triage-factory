@@ -183,9 +183,11 @@ func Ensure() error {
 // On Windows the block also carries core.longpaths=true and an empty
 // credential.helper (the same pairs TF's own git calls carry), and the env
 // gains GCM_INTERACTIVE=never and GIT_TERMINAL_PROMPT=0, and loses any inherited
-// GIT_ASKPASS and SSH_ASKPASS, so the agent's git never opens a credential
-// prompt or reaches the operator's askpass helper. Other platforms get exactly
-// the entries above.
+// GIT_ASKPASS, SSH_ASKPASS, SSH_ASKPASS_REQUIRE and VSCODE_GIT_* variables, so
+// the agent's git never opens a credential prompt or reaches the operator's
+// askpass helper. That is a courtesy: the agent runs as the operator and can
+// reach a credential manager itself. Other platforms get exactly the entries
+// above.
 func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 	pairs := append([][2]string{{ConfigKey, HostDir()}}, extraPairs...)
 	pairs = append(pairs, platformGitConfigPairs()...)
@@ -229,11 +231,18 @@ func envKeyIn(kv string, vars []string) bool {
 }
 
 // envKeyNamed reports whether kv ("KEY=value") has a KEY equal, ignoring case,
-// to any of names. Windows environment names are case-insensitive, so an
-// inherited "Git_Askpass" is the variable a "GIT_ASKPASS" entry names.
+// to any of names; a name ending in "*" matches every KEY that starts with the
+// rest of it. Windows environment names are case-insensitive, so an inherited
+// "Git_Askpass" is the variable a "GIT_ASKPASS" entry names.
 func envKeyNamed(kv string, names []string) bool {
 	key, _, _ := strings.Cut(kv, "=")
 	for _, n := range names {
+		if prefix, ok := strings.CutSuffix(n, "*"); ok {
+			if len(key) >= len(prefix) && strings.EqualFold(key[:len(prefix)], prefix) {
+				return true
+			}
+			continue
+		}
 		if strings.EqualFold(key, n) {
 			return true
 		}

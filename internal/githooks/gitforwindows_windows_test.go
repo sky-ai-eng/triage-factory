@@ -137,15 +137,28 @@ func TestDirectAgentEnv_WindowsDropsAskpassAndDisablesPrompts(t *testing.T) {
 		"KEEP=1",
 		`GIT_ASKPASS=C:\ide\askpass.cmd`,
 		`Ssh_Askpass=C:\ide\askpass.cmd`,
+		"SSH_ASKPASS_REQUIRE=force",
+		"ssh_askpass_require=prefer",
+		`VSCODE_GIT_ASKPASS_NODE=C:\vscode\Code.exe`,
+		`VSCODE_GIT_ASKPASS_MAIN=C:\vscode\askpass-main.js`,
+		"Vscode_Git_Ipc_Handle=\\\\.\\pipe\\vscode-git-1",
+		"VSCODE_GIT_FUTURE_THING=1",
+		"VSCODE_GITLIKE=keep",  // not VSCODE_GIT_
+		"VSCODE_PID=keep",      // other VS Code state is not an askpass channel
+		"MY_VSCODE_GIT_X=keep", // a prefix match, not a substring match
 		"GIT_TERMINAL_PROMPT=1",
 	})
 	for _, kv := range env {
 		key, _, _ := strings.Cut(kv, "=")
-		if strings.EqualFold(key, "GIT_ASKPASS") || strings.EqualFold(key, "SSH_ASKPASS") {
+		upper := strings.ToUpper(key)
+		if upper == "GIT_ASKPASS" || upper == "SSH_ASKPASS" || upper == "SSH_ASKPASS_REQUIRE" || strings.HasPrefix(upper, "VSCODE_GIT_") {
 			t.Errorf("askpass variable survived: %q", kv)
 		}
 	}
 	assertEnv(t, env, "KEEP", "1")
+	assertEnv(t, env, "VSCODE_GITLIKE", "keep")
+	assertEnv(t, env, "VSCODE_PID", "keep")
+	assertEnv(t, env, "MY_VSCODE_GIT_X", "keep")
 	n := 0
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
