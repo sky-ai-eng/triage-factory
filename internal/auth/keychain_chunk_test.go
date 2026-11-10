@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -605,6 +606,153 @@ func TestKeychainChunking_DisabledIsPlainPassthrough(t *testing.T) {
 	mustPut(t, "k", chunkBasePrefix+"0badc0de:2:abc")
 	if got := mustGet(t, "k"); got != chunkBasePrefix+"0badc0de:2:abc" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// errCrashed is what every keychain write and delete returns once a simulated
+// process death has happened: nothing after the crash point runs, so no cleanup
+// or rollback path gets to tidy up.
+var errCrashed = errors.New("simulated crash")
+
+// crashKeyring lets a fixed number of keychain mutations through, then fails
+// every later one, and records the name of every entry ever written.
+type crashKeyring struct {
+	budget int // mutations still allowed; negative is unlimited
+	ops    int
+	names  []string
+}
+
+func installCrashKeyring(t *testing.T) *crashKeyring {
+	t.Helper()
+	c := &crashKeyring{budget: -1}
+	prevSet, prevDelete := kr.set, kr.delete
+	kr.set = func(svc, user, pw string) error {
+		if err := c.admit(); err != nil {
+			return err
+		}
+		c.names = append(c.names, user)
+		return prevSet(svc, user, pw)
+	}
+	kr.delete = func(svc, user string) error {
+		if err := c.admit(); err != nil {
+			return err
+		}
+		return prevDelete(svc, user)
+	}
+	t.Cleanup(func() { kr.set, kr.delete = prevSet, prevDelete })
+	return c
+}
+
+func (c *crashKeyring) admit() error {
+	if c.budget >= 0 && c.ops >= c.budget {
+		return errCrashed
+	}
+	c.ops++
+	return nil
+}
+
+func (c *crashKeyring) arm(budget int) { c.budget, c.ops = budget, 0 }
+func (c *crashKeyring) disarm()        { c.budget = -1 }
+
+// After a crash at any step of a write that replaces or deletes a chunked
+// value, a later sweep, and a later write, must remove every chunk of the
+// previous generation and of the one being written: their names are random and
+// a keychain cannot be listed, so only the orphan record can find them.
+func TestKeychainChunking_CrashAtAnyStepLeavesNothingUnfindable(t *testing.T) {
+	const key = "k"
+	big := payload(3 * chunkTestLimit)
+	next := strings.ToUpper(payload(2*chunkTestLimit + 1))
+	scenarios := []struct {
+		name  string
+		old   string
+		op    func() error
+		reads []string // the values a read may see after the crash
+	}{
+		{
+			name:  "chunked put replaces a chunked value",
+			old:   big,
+			op:    func() error { return (keychainBackend{}).put(key, next) },
+			reads: []string{big, next},
+		},
+		{
+			name:  "small put replaces a chunked value",
+			old:   big,
+			op:    func() error { return (keychainBackend{}).put(key, "tiny") },
+			reads: []string{big, "tiny"},
+		},
+		{
+			name:  "chunked put replaces a small value",
+			old:   "tiny",
+			op:    func() error { return (keychainBackend{}).put(key, big) },
+			reads: []string{"tiny", big},
+		},
+		{
+			name:  "delete of a chunked value",
+			old:   big,
+			op:    func() error { return (keychainBackend{}).delete(key) },
+			reads: []string{big, ""},
+		},
+	}
+
+	for _, sc := range scenarios {
+		setup := func(t *testing.T) *crashKeyring {
+			withChunking(t)
+			c := installCrashKeyring(t)
+			mustPut(t, key, sc.old)
+			return c
+		}
+
+		steps := 0
+		t.Run(sc.name+"/count", func(t *testing.T) {
+			c := setup(t)
+			c.arm(-1)
+			if err := sc.op(); err != nil {
+				t.Fatalf("uninterrupted run: %v", err)
+			}
+			steps = c.ops
+		})
+		if steps == 0 {
+			t.Fatalf("%s: the operation changed nothing", sc.name)
+		}
+
+		for crashAfter := 0; crashAfter < steps; crashAfter++ {
+			for _, recovery := range []string{"sweep", "rewrite"} {
+				t.Run(fmt.Sprintf("%s/crash after %d of %d/%s", sc.name, crashAfter, steps, recovery), func(t *testing.T) {
+					c := setup(t)
+					c.arm(crashAfter)
+					_ = sc.op() // the interrupted process; its error is not the point
+					c.disarm()
+
+					got, err := (keychainBackend{}).get(key)
+					if err != nil || !slices.Contains(sc.reads, got) {
+						t.Fatalf("read after the crash = %q, %v; want one of the two values", got, err)
+					}
+
+					if recovery == "sweep" {
+						if err := SweepKeychain([]string{key}); err != nil {
+							t.Fatalf("sweep: %v", err)
+						}
+						assertAbsent(t, c.names...)
+						return
+					}
+					final := payload(2*chunkTestLimit + 3)
+					mustPut(t, key, final)
+					live := liveRecord(t, key)
+					allowed := map[string]bool{key: true}
+					for i := 1; i <= live.n; i++ {
+						allowed[chunkName(key, live.gen, i)] = true
+					}
+					for _, n := range c.names {
+						if !allowed[n] {
+							assertAbsent(t, n)
+						}
+					}
+					if got := mustGet(t, key); got != final {
+						t.Errorf("value after the rewrite = %q", got)
+					}
+				})
+			}
+		}
 	}
 }
 

@@ -57,9 +57,14 @@ func SweepKeychain(keys []string) error {
 // "tfchunks:v1:<N>:<digest>" with chunks "<key>#1".."<key>#N", still read and
 // are replaced by the next write.
 //
-// Chunks that cannot be removed are named in "<key>#orphans", a comma-separated
-// list of generations, so a later write, delete or uninstall sweep finds them:
-// a generation's name cannot be guessed, and keychains cannot be listed.
+// Generations whose chunks may outlive their base are named in "<key>#orphans",
+// a comma-separated list, so a later write, delete or uninstall sweep finds
+// them: a generation's name cannot be guessed, and keychains cannot be listed.
+// A write names the new generation before writing it and the current one
+// before the base stops pointing at it; a delete names the current one before
+// removing the base. A generation leaves the record only after its chunks are
+// confirmed deleted, so a crash or a failed delete at any step leaves every
+// chunk of both generations findable.
 
 const (
 	chunkBasePrefix   = "tfchunks:v2:"
@@ -91,6 +96,13 @@ var kr = keyringOps{get: keyring.Get, set: keyring.Set, delete: keyring.Delete}
 // observed half-done by another goroutine in this process. Another process
 // (an agent's `triagefactory exec`) can still read between a write's steps, which
 // get tolerates by reading the base again.
+//
+// Writers are assumed to be single: one process writes a given key at a time,
+// as the server does. There is no cross-process lock, because a keychain offers
+// none. Two processes writing the same key at once can interleave their steps
+// so that the base names a generation the other has already removed; reads of
+// that key then fail loudly (a missing chunk or a digest mismatch) until the
+// next write replaces it. The digest check means no value is read back wrong.
 var keychainMu sync.Mutex
 
 // errTornChunks marks a read that found the chunks and the base disagreeing:
@@ -270,20 +282,55 @@ func deleteChunks(key, gen string, n int) error {
 	return errors.Join(errs...)
 }
 
+// liveGen is the generation a base record points at; "" for no record or a v1
+// record, whose chunk names need no recording because the probes find them.
+func liveGen(rec *chunkRecord) string {
+	if rec == nil {
+		return ""
+	}
+	return rec.gen
+}
+
+// recordGens adds gens ("" is skipped) to the recorded orphan generations orph
+// and stores the result, writing nothing when there is nothing to add.
+func recordGens(key string, orph []string, gens ...string) error {
+	merged := slices.Clone(orph)
+	for _, g := range gens {
+		if g != "" && !slices.Contains(merged, g) {
+			merged = append(merged, g)
+		}
+	}
+	if len(merged) == len(orph) {
+		return nil
+	}
+	return writeOrphanRecord(key, merged)
+}
+
+// unrecordGens puts the orphan record back to orph after a step that followed
+// recordGens failed without changing the base, returning cause with any failure
+// to do so joined to it. Leaving a still-live generation named is harmless: the
+// next write or delete treats it as the live one first.
+func unrecordGens(key string, orph []string, cause error) error {
+	if err := writeOrphanRecord(key, orph); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 // purgeChunks removes every chunk of key that a write or delete leaves
 // without a base: those the old record names, every recorded orphan
-// generation, and the v1 layout's names up to the cap. When something cannot
-// be removed, every generation tried stays named in the orphan record so the
-// next purge retries.
+// generation, and the v1 layout's names up to the cap. A generation leaves the
+// orphan record only once all its chunks are confirmed deleted; one that could
+// not be removed stays named so the next purge retries.
 func purgeChunks(key string, rec *chunkRecord, orph []string) error {
 	var errs []error
-	var tried []string
+	var failed []string
 	if rec != nil {
 		if err := deleteChunks(key, rec.gen, rec.n); err != nil {
 			errs = append(errs, err)
-		}
-		if rec.gen != "" {
-			tried = append(tried, rec.gen)
+			if rec.gen != "" {
+				failed = append(failed, rec.gen)
+			}
 		}
 	}
 	for _, g := range orph {
@@ -292,19 +339,16 @@ func purgeChunks(key string, rec *chunkRecord, orph []string) error {
 		}
 		if err := deleteChunks(key, g, maxChunks); err != nil {
 			errs = append(errs, err)
+			failed = append(failed, g)
 		}
-		tried = append(tried, g)
 	}
 	if err := deleteChunks(key, "", maxChunks); err != nil {
 		errs = append(errs, err)
 	}
-	if len(errs) > 0 {
-		if err := writeOrphanRecord(key, tried); err != nil {
-			errs = append(errs, err)
-		}
-		return errors.Join(errs...)
+	if err := writeOrphanRecord(key, failed); err != nil {
+		errs = append(errs, err)
 	}
-	return writeOrphanRecord(key, nil)
+	return errors.Join(errs...)
 }
 
 // keychainBackend stores secrets in the OS keychain via go-keyring. The desktop
@@ -377,8 +421,13 @@ func (keychainBackend) put(key, value string) error {
 	}
 
 	if len(value) <= chunkLimit {
-		if err := kr.set(service, key, value); err != nil {
+		// The base is the only pointer to the current generation's chunks, so
+		// the generation is named before the base is overwritten.
+		if err := recordGens(key, orph, liveGen(oldRec)); err != nil {
 			return err
+		}
+		if err := kr.set(service, key, value); err != nil {
+			return unrecordGens(key, orph, err)
 		}
 		// The value is stored; chunks of a longer value it replaced are
 		// housekeeping, so their removal failing is logged, not returned.
@@ -401,8 +450,9 @@ func (keychainBackend) put(key, value string) error {
 		return err
 	}
 	// Name the new generation before writing any of it, so chunks left by a
-	// crash before the base write can still be found and removed.
-	if err := writeOrphanRecord(key, append(slices.Clone(orph), gen)); err != nil {
+	// crash before the base write can still be found and removed, and the
+	// current one too, since the base write drops the only other pointer to it.
+	if err := recordGens(key, orph, gen, liveGen(oldRec)); err != nil {
 		return err
 	}
 	for i := 1; i <= n; i++ {
@@ -419,29 +469,7 @@ func (keychainBackend) put(key, value string) error {
 	// The new generation is live. Retire what the previous value left; a
 	// failure here leaves the new value stored, so it is logged, and the
 	// generations that could not be removed stay named for the next attempt.
-	var errs []error
-	var failed []string
-	if oldRec != nil {
-		if err := deleteChunks(key, oldRec.gen, oldRec.n); err != nil {
-			errs = append(errs, err)
-			if oldRec.gen != "" {
-				failed = append(failed, oldRec.gen)
-			}
-		}
-	}
-	for _, g := range orph {
-		if oldRec != nil && g == oldRec.gen {
-			continue
-		}
-		if err := deleteChunks(key, g, maxChunks); err != nil {
-			errs = append(errs, err)
-			failed = append(failed, g)
-		}
-	}
-	if err := writeOrphanRecord(key, failed); err != nil {
-		errs = append(errs, err)
-	}
-	if err := errors.Join(errs...); err != nil {
+	if err := purgeChunks(key, oldRec, orph); err != nil {
 		authLog.Warn("keychain value stored; chunks of the previous value could not be removed", "key", key, "error", err)
 	}
 	return nil
@@ -481,8 +509,14 @@ func (keychainBackend) delete(key string) error {
 	if err != nil {
 		return err
 	}
+	// The base is the only pointer to the current generation's chunks, so the
+	// generation is named before the base goes: a crash between the two would
+	// otherwise leave chunks no later delete or sweep can name.
+	if err := recordGens(key, orph, liveGen(rec)); err != nil {
+		return err
+	}
 	if err := kr.delete(service, key); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("keychain delete %s: %w", key, err)
+		return unrecordGens(key, orph, fmt.Errorf("keychain delete %s: %w", key, err))
 	}
 	return purgeChunks(key, rec, orph)
 }
