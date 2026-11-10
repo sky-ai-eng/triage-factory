@@ -3,6 +3,7 @@
 package uninstall
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,14 +68,71 @@ func TestRemoveInstalledCopy_KeepsDirWithOtherFiles(t *testing.T) {
 	}
 }
 
-func TestRemoveInstalledCopy_RunningExeIsRenamedAside(t *testing.T) {
+// stubScheduleDelete replaces the restart-time delete request for t and returns
+// the paths it was asked to delete.
+func stubScheduleDelete(t *testing.T, result error) *[]string {
+	t.Helper()
+	var asked []string
+	prev := scheduleDelete
+	scheduleDelete = func(path string) error {
+		asked = append(asked, path)
+		return result
+	}
+	t.Cleanup(func() { scheduleDelete = prev })
+	return &asked
+}
+
+func TestRemoveInstalledCopy_RunningExeIsRenamedAndScheduledForDeletion(t *testing.T) {
+	asked := stubScheduleDelete(t, nil)
 	p := installedCopy(t)
 	msg, err := removeInstalledCopy(p, p) // the install IS the running executable
 	if err != nil {
 		t.Fatalf("removeInstalledCopy: %v", err)
 	}
-	if !strings.Contains(msg, ".old") || !strings.Contains(msg, "delete it after") {
-		t.Errorf("message should name the .old file and say to delete it: %q", msg)
+	if len(*asked) != 1 || (*asked)[0] != p+".old" {
+		t.Errorf("scheduled deletions = %v, want [%s.old]", *asked, p)
+	}
+	if !strings.Contains(msg, ".old") || !strings.Contains(msg, "at the next restart") {
+		t.Errorf("message should name the .old file and say its deletion is scheduled: %q", msg)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("install path should be vacated, stat err = %v", err)
+	}
+	if b, err := os.ReadFile(p + ".old"); err != nil || string(b) != "installed" {
+		t.Errorf(".old = %q, %v; want the original content", b, err)
+	}
+}
+
+func TestRemoveInstalledCopy_RunningExeWhenSchedulingFailsAsksForManualDelete(t *testing.T) {
+	stubScheduleDelete(t, errors.New("access denied"))
+	p := installedCopy(t)
+	msg, err := removeInstalledCopy(p, p)
+	if err != nil {
+		t.Fatalf("a failed schedule must not fail the uninstall: %v", err)
+	}
+	if !strings.Contains(msg, "could not schedule") || !strings.Contains(msg, "delete it after this command exits") || !strings.Contains(msg, ".old") {
+		t.Errorf("message should say scheduling failed and ask for a manual delete: %q", msg)
+	}
+	if strings.Contains(msg, "at the next restart") {
+		t.Errorf("message claims a scheduled deletion that did not happen: %q", msg)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("install path should be vacated, stat err = %v", err)
+	}
+	if b, err := os.ReadFile(p + ".old"); err != nil || string(b) != "installed" {
+		t.Errorf(".old = %q, %v; want the original content", b, err)
+	}
+}
+
+func TestRemoveInstalledCopy_RunningExeIsRenamedAside(t *testing.T) {
+	stubScheduleDelete(t, nil)
+	p := installedCopy(t)
+	msg, err := removeInstalledCopy(p, p) // the install IS the running executable
+	if err != nil {
+		t.Fatalf("removeInstalledCopy: %v", err)
+	}
+	if !strings.Contains(msg, ".old") {
+		t.Errorf("message should name the .old file: %q", msg)
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Errorf("install path should be vacated, stat err = %v", err)

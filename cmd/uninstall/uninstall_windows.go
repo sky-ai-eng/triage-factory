@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -53,11 +55,23 @@ func removeInstallLink(path string) (failed bool) {
 	return false
 }
 
+// scheduleDelete asks Windows to delete path at the next restart. It is a var
+// so a test can stand in for it: the request is recorded system-wide, and for
+// some locations it needs an administrator.
+var scheduleDelete = func(path string) error {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+}
+
 // removeInstalledCopy deletes the installed copy at path, but only when it is
 // a regular file named triagefactory.exe. A running executable cannot be
 // deleted on Windows, though it can be renamed, so when path is exePath it is
-// renamed to path+".old" and the message tells the user to delete that after
-// this process exits. A skip returns a message and a nil error.
+// renamed to path+".old", scheduled for deletion at the next restart, and the
+// message says whether that worked; if not, it tells the user to delete the
+// file after this process exits. A skip returns a message and a nil error.
 func removeInstalledCopy(path, exePath string) (msg string, err error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -84,7 +98,10 @@ func removeInstalledCopy(path, exePath string) (msg string, err error) {
 		if err := os.Rename(path, old); err != nil {
 			return "", fmt.Errorf("move the running copy %s aside: %w", path, err)
 		}
-		return fmt.Sprintf("renamed running install %s to %s; delete it after this command exits%s", path, old, msg), nil
+		if err := scheduleDelete(old); err != nil {
+			return fmt.Sprintf("renamed running install %s to %s; could not schedule its deletion (%v), so delete it after this command exits%s", path, old, err, msg), nil
+		}
+		return fmt.Sprintf("renamed running install %s to %s; Windows will delete it at the next restart, or delete it yourself after this command exits%s", path, old, msg), nil
 	}
 	if err := os.Remove(path); err != nil {
 		return "", fmt.Errorf("remove %s: %w", path, err)
