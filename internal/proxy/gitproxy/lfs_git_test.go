@@ -258,7 +258,7 @@ func TestLFS_RealGitLFSThroughProxy(t *testing.T) {
 	remote := host.git.URL + "/octo/repo.git"
 
 	// A checkout with git-lfs's filter active fetches every LFS file in the
-	// tree, which is the request the proxy used to refuse.
+	// tree through the batch API and a transfer per object.
 	smudged := filepath.Join(t.TempDir(), "smudged")
 	if out, err := gitOutput("", env, "clone", remote, smudged); err != nil {
 		t.Fatalf("clone with smudge: %v\n%s", err, out)

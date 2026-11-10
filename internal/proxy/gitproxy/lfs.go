@@ -82,7 +82,6 @@ var errLFSTransfersFull = errors.New("gitproxy: too many outstanding Git LFS tra
 type lfsTransfer struct {
 	repoKey string // lower("owner/repo") of the batch that named it
 	action  string // a key of lfsActionMethods
-	method  string
 	href    *url.URL
 	header  map[string]string
 	expires time.Time
@@ -112,7 +111,6 @@ type lfsBatchCallKey struct{}
 // lfsTransferCall carries a transfer from the Handler to the Rewrite and
 // ModifyResponse hooks, and the upstream's status back.
 type lfsTransferCall struct {
-	id     string
 	t      *lfsTransfer
 	status int
 }
@@ -148,6 +146,23 @@ func (s *Server) mayPush(d Decision) bool {
 	return s.cfg.Authorize == nil || len(d.AllowedRefs) > 0
 }
 
+// authorizeLFS runs the live gate for one Git LFS operation, plus the push
+// right an upload needs. ok=false means the refusal has been recorded and
+// answered.
+func (s *Server) authorizeLFS(w http.ResponseWriter, r *http.Request, owner, repo, op string) bool {
+	d, msg, ok := s.authorize(r.Context(), owner, repo, op)
+	if !ok {
+		writeLFSError(w, http.StatusForbidden, msg)
+		return false
+	}
+	if op == gitOpLFSUpload && !s.mayPush(d) {
+		s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "push-not-authorized"})
+		writeLFSError(w, http.StatusForbidden, fmt.Sprintf("gitproxy: this run may not push to %s/%s, so it may not upload Git LFS objects there", owner, repo))
+		return false
+	}
+	return true
+}
+
 // writeLFSError answers in the Git LFS error shape, which git-lfs prints as
 // the failure's explanation; a plain-text body would be replaced by its
 // generic message for the status.
@@ -167,8 +182,7 @@ func (s *Server) serveLFS(w http.ResponseWriter, r *http.Request, owner, repo, o
 		// The lock check git-lfs makes before every push. It only reads, so
 		// it needs what a fetch needs; the push it precedes is judged by the
 		// ref gate on its own.
-		if _, msg, ok := s.authorize(r.Context(), owner, repo, op); !ok {
-			writeLFSError(w, http.StatusForbidden, msg)
+		if !s.authorizeLFS(w, r, owner, repo, op) {
 			return
 		}
 		r, ok := s.withToken(w, r, owner, repo)
@@ -213,14 +227,7 @@ func (s *Server) serveLFSBatch(w http.ResponseWriter, r *http.Request, owner, re
 		return
 	}
 
-	d, msg, ok := s.authorize(r.Context(), owner, repo, op)
-	if !ok {
-		writeLFSError(w, http.StatusForbidden, msg)
-		return
-	}
-	if op == gitOpLFSUpload && !s.mayPush(d) {
-		s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "push-not-authorized"})
-		writeLFSError(w, http.StatusForbidden, fmt.Sprintf("gitproxy: this run may not push to %s/%s, so it may not upload Git LFS objects there", owner, repo))
+	if !s.authorizeLFS(w, r, owner, repo, op) {
 		return
 	}
 
@@ -234,7 +241,7 @@ func (s *Server) serveLFSBatch(w http.ResponseWriter, r *http.Request, owner, re
 	r.ContentLength = int64(len(out))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(out)), nil }
 
-	r, ok = s.withToken(w, r, owner, repo)
+	r, ok := s.withToken(w, r, owner, repo)
 	if !ok {
 		return
 	}
@@ -335,8 +342,7 @@ func (s *Server) rewriteLFSBatch(raw []byte, call lfsBatchCall) (_ []byte, err e
 		}
 		rewritten := make(map[string]lfsAction, len(actions))
 		for name, a := range actions {
-			method, known := lfsActionMethods[name]
-			if !known {
+			if _, known := lfsActionMethods[name]; !known {
 				return nil, fmt.Errorf("gitproxy: Git LFS server named transfer action %q, which the basic adapter does not define", name)
 			}
 			href, err := s.lfsHref(a.Href)
@@ -346,7 +352,6 @@ func (s *Server) rewriteLFSBatch(raw []byte, call lfsBatchCall) (_ []byte, err e
 			t := &lfsTransfer{
 				repoKey: call.repoKey,
 				action:  name,
-				method:  method,
 				href:    href,
 				header:  a.Header,
 				expires: lfsExpiry(a, now),
@@ -465,26 +470,19 @@ func (s *Server) serveLFSTransfer(w http.ResponseWriter, r *http.Request, owner,
 		writeLFSError(w, http.StatusNotFound, "gitproxy: unknown or expired Git LFS transfer; request a new batch")
 		return
 	}
-	if r.Method != t.method {
-		writeLFSError(w, http.StatusMethodNotAllowed, fmt.Sprintf("gitproxy: this Git LFS transfer is a %s, performed with %s", t.action, t.method))
+	if method := lfsActionMethods[t.action]; r.Method != method {
+		writeLFSError(w, http.StatusMethodNotAllowed, fmt.Sprintf("gitproxy: this Git LFS transfer is a %s, performed with %s", t.action, method))
 		return
 	}
 	op := gitOpLFSDownload
 	if t.action != "download" {
 		op = gitOpLFSUpload
 	}
-	d, msg, ok := s.authorize(r.Context(), owner, repo, op)
-	if !ok {
-		writeLFSError(w, http.StatusForbidden, msg)
-		return
-	}
-	if op == gitOpLFSUpload && !s.mayPush(d) {
-		s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "push-not-authorized"})
-		writeLFSError(w, http.StatusForbidden, fmt.Sprintf("gitproxy: this run may not push to %s/%s, so it may not upload Git LFS objects there", owner, repo))
+	if !s.authorizeLFS(w, r, owner, repo, op) {
 		return
 	}
 
-	call := &lfsTransferCall{id: id, t: t}
+	call := &lfsTransferCall{t: t}
 	s.lfsTransfer.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), lfsTransferCallKey{}, call)))
 	// Reached only when the whole answer was relayed; a body cut off
 	// mid-stream aborts the handler instead, leaving the transfer for
@@ -521,14 +519,8 @@ func (s *Server) observeLFSTransfer(resp *http.Response) error {
 	return nil
 }
 
-// lfsProxyError answers a failed LFS hop in the Git LFS error shape. A
-// transport error's URL is dropped before it is logged: a storage URL is often
-// signed, and the signature is a credential.
+// lfsProxyError answers a failed LFS hop in the Git LFS error shape.
 func (s *Server) lfsProxyError(w http.ResponseWriter, r *http.Request, err error) {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		err = ue.Err
-	}
 	if errors.Is(err, errLFSTransfersFull) {
 		writeLFSError(w, http.StatusServiceUnavailable, errLFSTransfersFull.Error())
 		return

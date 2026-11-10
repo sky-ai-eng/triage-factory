@@ -9,12 +9,10 @@ import (
 	"testing"
 )
 
-// TestCheckoutLeavesLFSPointers is the failure an operator who ran `git lfs
-// install` hit: their global config makes git-lfs's filter required, so a
-// checkout TF builds asked for every LFS file's content, and one it could not
-// get failed the checkout. TF's checkouts now leave pointers whatever the
-// host's git-lfs config says. The repository's LFS objects exist nowhere, so
-// any attempt to fetch one fails the clone.
+// TestCheckoutLeavesLFSPointers pins that a checkout TF builds leaves LFS
+// files as pointers on a host whose global config makes git-lfs's filter
+// required, as `git lfs install` does. The repository's LFS objects exist
+// nowhere, so any attempt to fetch one fails the clone.
 func TestCheckoutLeavesLFSPointers(t *testing.T) {
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		t.Skipf("git-lfs not installed: %v", err)
