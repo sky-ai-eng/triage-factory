@@ -266,7 +266,8 @@ export default function GitHubTeamGroup({
   // The tab labels count under the live selection, which the tab on screen
   // was not necessarily read under, so they are count-only reads of their
   // own. The unselected count is the rest: ids and exclude_ids split what
-  // the search matches between them.
+  // the search matches between them. A refresh re-reads the list because the
+  // teams on offer changed, so it re-reads the counts too.
   const idsKey = selectionIds(value).join(',')
   useEffect(() => {
     const q = search.trim()
@@ -289,7 +290,7 @@ export default function GitHubTeamGroup({
       live = false
       clearTimeout(id)
     }
-  }, [teamId, search, idsKey])
+  }, [teamId, search, idsKey, refreshSignal])
 
   const toggle = (team: GitHubTeamRef) => {
     const k = groupKey(team)

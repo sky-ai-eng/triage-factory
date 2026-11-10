@@ -95,9 +95,11 @@ const tab = (label: string, count?: number) =>
 function Harness({
   includeMembership = false,
   onLoaded,
+  refreshSignal = 0,
 }: {
   includeMembership?: boolean
   onLoaded?: (groups: GitHubGroup[]) => void
+  refreshSignal?: number
 }) {
   const [value, setValue] = useState<GitHubGroup[]>([])
   return (
@@ -106,6 +108,7 @@ function Harness({
       onChange={setValue}
       teamId="t1"
       includeMembership={includeMembership}
+      refreshSignal={refreshSignal}
       onLoaded={(seed) => {
         setValue(seed)
         onLoaded?.(seed)
@@ -191,6 +194,28 @@ describe('GitHubTeamGroup', () => {
     fireEvent.click(tab('Selected'))
     await waitFor(() => expect(rowNames()).toEqual(['acme/platform', 'acme/web']))
     expect(pageBodies(fetchMock).at(-1)).toEqual({ ids: ['11', '12'], page_size: 200 })
+
+    // A search on a tab is read under that tab's filter.
+    fireEvent.change(screen.getByLabelText('Search GitHub teams'), { target: { value: 'web' } })
+    await waitFor(() =>
+      expect(pageBodies(fetchMock).at(-1)).toEqual({
+        search: 'web',
+        ids: ['11', '12'],
+        page_size: 200,
+      }),
+    )
+  })
+
+  it('counts the tabs again when a refresh re-reads the list', async () => {
+    let teams = [option('11', 'platform'), option('12', 'web')]
+    stub([PLATFORM], (body) => routeOver(teams)(body))
+    const { rerender } = render(<Harness />)
+    await waitFor(() => expect(tab('All', 2)).toBeInTheDocument())
+
+    teams = [...teams, option('13', 'zeta')]
+    rerender(<Harness refreshSignal={1} />)
+    await waitFor(() => expect(tab('All', 3)).toBeInTheDocument())
+    expect(tab('Unselected', 2)).toBeInTheDocument()
   })
 
   it('pages a tab under the ids it was read with, offering only its own teams', async () => {
