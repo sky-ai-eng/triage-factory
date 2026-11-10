@@ -106,6 +106,7 @@ func captureTreeInJail(ctx context.Context, w snapshotWrite, captured *capturedS
 		state := worktree.CapturedState{Delta: cc.Delta}
 		if cc.Delta != nil {
 			state.BundlePath, state.PatchPath = got.bundles[i], got.patches[i]
+			cc.Delta.LFSObjects = got.lfs[i]
 		}
 		captured.checkouts = append(captured.checkouts, capturedCheckout{snapshotCheckout: co, state: state})
 	}
@@ -124,8 +125,23 @@ func checkCaptureManifest(ctx context.Context, man worktree.CaptureManifest, rel
 		if cc.Rel != rels[i] {
 			return fmt.Errorf("capture manifest entry %d is %q, asked for %q", i, cc.Rel, rels[i])
 		}
-		if cc.Delta == nil && (cc.HasBundle || cc.HasPatch) {
+		if cc.Delta == nil && (cc.HasBundle || cc.HasPatch || len(cc.LFSObjects) > 0) {
 			return fmt.Errorf("capture manifest gives %s members but no git state", cc.Rel)
+		}
+		// LFS objects are carried for the bundle's commits, and each is named
+		// once, by an id that is also its member's name.
+		if len(cc.LFSObjects) > 0 && !cc.HasBundle {
+			return fmt.Errorf("capture manifest gives %s LFS objects but no bundle", cc.Rel)
+		}
+		seen := map[string]bool{}
+		for _, oid := range cc.LFSObjects {
+			if !worktree.ValidLFSOID(oid) {
+				return fmt.Errorf("capture manifest gives %s an LFS object id %q", cc.Rel, oid)
+			}
+			if seen[oid] {
+				return fmt.Errorf("capture manifest gives %s LFS object %s twice", cc.Rel, oid)
+			}
+			seen[oid] = true
 		}
 		if cc.Delta != nil && (len(cc.Delta.Bundle) != 0 || len(cc.Delta.Patch) != 0) {
 			return fmt.Errorf("capture manifest carries buffered members for %s", cc.Rel)
@@ -145,7 +161,22 @@ func checkCaptureManifest(ctx context.Context, man worktree.CaptureManifest, rel
 
 type unpackedCapture struct {
 	bundles, patches map[int]string
+	lfs              map[int][]worktree.LFSObject
 }
+
+// captureMember is what a checkout member of the stream is: checkout i's
+// bundle, patch, or the LFS object oid.
+type captureMember struct {
+	i    int
+	kind string
+	oid  string
+}
+
+const (
+	memberBundle = "bundle"
+	memberPatch  = "patch"
+	memberLFS    = "lfs"
+)
 
 // unpackCaptureStream reads the jail's stream into stagingDir: each checkout's
 // bundle and patch as files, and every scratch file under treeDir/_tfac. A
@@ -159,25 +190,20 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 	}
 	defer func() { _ = f.Close() }()
 
-	index := map[string]struct {
-		i      int
-		bundle bool
-	}{}
+	index := map[string]captureMember{}
 	for i, cc := range man.Checkouts {
 		if cc.HasBundle {
-			index[worktree.CaptureBundleMember(cc.Rel)] = struct {
-				i      int
-				bundle bool
-			}{i, true}
+			index[worktree.CaptureBundleMember(cc.Rel)] = captureMember{i: i, kind: memberBundle}
 		}
 		if cc.HasPatch {
-			index[worktree.CapturePatchMember(cc.Rel)] = struct {
-				i      int
-				bundle bool
-			}{i, false}
+			index[worktree.CapturePatchMember(cc.Rel)] = captureMember{i: i, kind: memberPatch}
+		}
+		for _, oid := range cc.LFSObjects {
+			index[worktree.CaptureLFSMember(cc.Rel, oid)] = captureMember{i: i, kind: memberLFS, oid: oid}
 		}
 	}
-	out := unpackedCapture{bundles: map[int]string{}, patches: map[int]string{}}
+	out := unpackedCapture{bundles: map[int]string{}, patches: map[int]string{}, lfs: map[int][]worktree.LFSObject{}}
+	staged := map[string]bool{}
 	scratchFiles := 0
 	sr := sandbox.NewCaptureStreamReader(newPunchingReader(f))
 	for {
@@ -213,25 +239,32 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 			if !ok {
 				return unpackedCapture{}, fmt.Errorf("capture stream carries a member nothing asked for: %q", name)
 			}
-			dest := filepath.Join(stagingDir, "co"+strconv.Itoa(want.i)+map[bool]string{true: ".bundle", false: ".patch"}[want.bundle])
+			if staged[name] {
+				return unpackedCapture{}, fmt.Errorf("capture stream carries %q twice", name)
+			}
+			staged[name] = true
+			dest := filepath.Join(stagingDir, "co"+strconv.Itoa(want.i)+"."+want.kind)
+			if want.kind == memberLFS {
+				dest += "." + want.oid
+			}
 			if err := writeStaged(dest, body); err != nil {
 				return unpackedCapture{}, err
 			}
-			target := out.patches
-			if want.bundle {
-				target = out.bundles
+			switch want.kind {
+			case memberBundle:
+				out.bundles[want.i] = dest
+			case memberPatch:
+				out.patches[want.i] = dest
+			case memberLFS:
+				out.lfs[want.i] = append(out.lfs[want.i], worktree.LFSObject{OID: want.oid, Path: dest})
 			}
-			if _, dup := target[want.i]; dup {
-				return unpackedCapture{}, fmt.Errorf("capture stream carries %q twice", name)
-			}
-			target[want.i] = dest
 		}
 	}
 	if scratchFiles != man.ScratchFiles {
 		return unpackedCapture{}, fmt.Errorf("capture stream carries %d scratch files, the manifest announced %d", scratchFiles, man.ScratchFiles)
 	}
 	for i, cc := range man.Checkouts {
-		if cc.HasBundle && out.bundles[i] == "" || cc.HasPatch && out.patches[i] == "" {
+		if cc.HasBundle && out.bundles[i] == "" || cc.HasPatch && out.patches[i] == "" || len(out.lfs[i]) != len(cc.LFSObjects) {
 			return unpackedCapture{}, fmt.Errorf("capture stream is missing a member the manifest announced for %s", cc.Rel)
 		}
 	}

@@ -3,6 +3,8 @@ package snapshotcapture
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -137,6 +139,41 @@ func TestRun_StreamsCheckoutAndScratch(t *testing.T) {
 	}
 	if !man.CILogsOmitted || man.ScratchDigest == "" {
 		t.Errorf("manifest = omitted %v digest %q, want ci-logs reported and a digest", man.CILogsOmitted, man.ScratchDigest)
+	}
+}
+
+// TestRun_StreamsUnpushedLFSObjects: a Git LFS object an unpushed commit's
+// pointer names travels as its own member, named by its id in the manifest.
+func TestRun_StreamsUnpushedLFSObjects(t *testing.T) {
+	root := dirtyRoot(t)
+	co := filepath.Join(root, "acme", "app", "default")
+	const content = "the run's new asset\n"
+	const oid = "3b83b1604b9aa647686a75a479e0a6da7471a96ac3228dac703c071d85f9dc9e"
+	sum := sha256.Sum256([]byte(content))
+	if got := hex.EncodeToString(sum[:]); got != oid {
+		t.Fatalf("fixture oid = %s, the content hashes to %s", oid, got)
+	}
+	write(t, filepath.Join(co, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+	write(t, filepath.Join(co, "asset.bin"), "version https://git-lfs.github.com/spec/v1\noid sha256:"+oid+"\nsize 20\n")
+	write(t, filepath.Join(co, ".git", "lfs", "objects", oid[:2], oid[2:4], oid), content)
+	lfsOff := []string{"-c", "filter.lfs.process=", "-c", "filter.lfs.clean=", "-c", "filter.lfs.required=false"}
+	git(t, co, append(lfsOff, "add", ".gitattributes", "asset.bin")...)
+	git(t, co, append(lfsOff, "commit", "-q", "-m", "add asset")...)
+
+	man, members := runCapture(t, root, "acme/app/default")
+	cc := man.Checkouts[0]
+	if len(cc.LFSObjects) != 1 || cc.LFSObjects[0] != oid {
+		t.Fatalf("manifest LFS objects = %v, want [%s]", cc.LFSObjects, oid)
+	}
+	if got := members[worktree.CaptureLFSMember("acme/app/default", oid)]; got != content {
+		t.Errorf("LFS member = %q, want the object", got)
+	}
+	encoded, err := json.Marshal(cc.Delta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(".git/lfs")) {
+		t.Errorf("the delta names the object's path in the manifest: %s", encoded)
 	}
 }
 

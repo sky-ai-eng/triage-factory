@@ -41,6 +41,9 @@ type CheckoutCapture struct {
 	// carries.
 	HasBundle bool `json:"has_bundle,omitempty"`
 	HasPatch  bool `json:"has_patch,omitempty"`
+	// LFSObjects are the ids of the Git LFS objects the stream carries for
+	// the bundle's commits, one member each.
+	LFSObjects []string `json:"lfs_objects,omitempty"`
 }
 
 // The members of a capture's stream. Each is named by what it is and where it
@@ -53,9 +56,11 @@ const (
 	captureCheckoutsPart = "checkouts/"
 )
 
-// CaptureBundleMember and CapturePatchMember name a checkout's members.
-func CaptureBundleMember(rel string) string { return captureCheckoutsPart + rel + "/bundle" }
-func CapturePatchMember(rel string) string  { return captureCheckoutsPart + rel + "/patch" }
+// CaptureBundleMember, CapturePatchMember and CaptureLFSMember name a
+// checkout's members.
+func CaptureBundleMember(rel string) string   { return captureCheckoutsPart + rel + "/bundle" }
+func CapturePatchMember(rel string) string    { return captureCheckoutsPart + rel + "/patch" }
+func CaptureLFSMember(rel, oid string) string { return captureCheckoutsPart + rel + "/lfs/" + oid }
 
 // ScratchDigest digests what a snapshot of wtPath's scratch would carry: each
 // file's path, size, modification time and status-change time, in walk order.

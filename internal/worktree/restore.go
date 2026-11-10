@@ -46,6 +46,8 @@ type CheckoutRestore struct {
 	// BundlePath and PatchPath are the captured members, staged on disk; ""
 	// when the capture carried none.
 	BundlePath, PatchPath string
+	// LFSObjects are the captured Git LFS objects, each staged on disk.
+	LFSObjects []LFSObject
 }
 
 // PRCheckout is what a pr-<N> checkout's push settings are re-derived from.
@@ -123,6 +125,9 @@ var errRestoreInput = errors.New("invalid checkout restore")
 //  4. Re-derive push settings: a pr-<N> checkout gets the push tracking a
 //     fresh --pr checkout gets, a ref-*/default one the origin fetch refspec a
 //     fresh checkout leaves.
+//  5. Install the captured Git LFS objects into the checkout's LFS store, which
+//     for a linked worktree is the shared bare's, so the run's next push
+//     uploads them.
 //
 // Nothing of TF's is written into the checkout. On any failure the checkout,
 // its registration in the bare and the per-run refs and push config it wrote
@@ -295,11 +300,18 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 		return fmt.Errorf("captured HEAD %s is not in the bare after refreshing and importing the bundle: %w", r.Head, err)
 	}
 
-	// 3. The checkout.
+	// 3 and 4. The checkout and its push settings.
 	if selfContainedRunTrees() {
-		return restoreSelfContainedLocked(ctx, r, bareDir, wtDir, trackBranch, prNumber, prKey, prLocal, prHead)
+		err = restoreSelfContainedLocked(ctx, r, bareDir, wtDir, trackBranch, prNumber, prKey, prLocal, prHead)
+	} else {
+		err = restoreLinkedLocked(ctx, r, bareDir, wtDir, prNumber, prKey, prLocal, prHead, res)
 	}
-	return restoreLinkedLocked(ctx, r, bareDir, wtDir, prNumber, prKey, prLocal, prHead, res)
+	if err != nil {
+		return err
+	}
+
+	// 5. The LFS objects.
+	return installLFSObjects(ctx, wtDir, r.LFSObjects)
 }
 
 // restoreSelfContainedLocked builds the checkout as a standalone clone of the

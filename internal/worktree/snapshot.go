@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -55,6 +56,11 @@ type GitDelta struct {
 	// (tracked modifications and untracked additions alike). nil when the
 	// working tree is clean.
 	Patch []byte
+	// LFSObjects are the Git LFS objects the bundle's commits name that the
+	// checkout holds (unpushedLFSObjects). Never encoded: the capture jail
+	// names them in its manifest by id and streams their bytes, and a path
+	// the jail wrote is not one this process reads.
+	LFSObjects []LFSObject `json:"-"`
 }
 
 // CapturedState is one capture's result: a checkout's git delta, or the
@@ -141,6 +147,11 @@ func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) 
 		return nil, err
 	}
 	d.Bundle = bundle
+	if bundle != nil {
+		if d.LFSObjects, err = unpushedLFSObjects(ctx, wtPath, localRev(d.Branch)); err != nil {
+			return nil, err
+		}
+	}
 
 	patch, err := captureUncommitted(ctx, wtPath)
 	if err != nil {
@@ -153,7 +164,8 @@ func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) 
 
 // CaptureWorkspaceGitToWriters is the multi-mode capture body. It writes the
 // two unbounded git members directly to caller-prepared files (handed in as
-// writers across exec) and returns only the branch/HEAD metadata.
+// writers across exec) and returns the branch/HEAD metadata, with the Git LFS
+// objects the bundle's commits name for the caller to stream.
 func CaptureWorkspaceGitToWriters(ctx context.Context, wtPath string, bundle, patch io.Writer) (_ *GitDelta, hasBundle, hasPatch bool, err error) {
 	if !IsGitWorktree(wtPath) {
 		return nil, false, false, nil
@@ -165,6 +177,11 @@ func CaptureWorkspaceGitToWriters(ctx context.Context, wtPath string, bundle, pa
 	hasBundle, err = bundleLocalCommitsTo(ctx, wtPath, d.Branch, bundle)
 	if err != nil {
 		return nil, false, false, err
+	}
+	if hasBundle {
+		if d.LFSObjects, err = unpushedLFSObjects(ctx, wtPath, localRev(d.Branch)); err != nil {
+			return nil, false, false, err
+		}
 	}
 	hasPatch, err = captureUncommittedTo(ctx, wtPath, patch)
 	if err != nil {
@@ -208,14 +225,7 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // the manifest then says is absent. A `git bundle` failure after the precheck
 // is an error.
 func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Writer) (bool, error) {
-	// TODO(TFAC-1360): the bundle carries these commits but not the Git LFS
-	// objects their new pointers name, which live only in .git/lfs/objects, so
-	// a run restored from it cannot push an LFS file it committed before the
-	// park.
-	rev := branch
-	if rev == "" {
-		rev = "HEAD"
-	}
+	rev := localRev(branch)
 	// The trailing "--" keeps a branch named like a path in the checkout (a
 	// `docs` branch beside a docs/ directory) from failing as ambiguous.
 	local, err := gitCapture(ctx, wtPath, nil, "rev-list", "--max-count=1", rev, "--not", "--remotes", "--")
@@ -229,6 +239,15 @@ func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Write
 		return false, fmt.Errorf("git bundle: %w", err)
 	}
 	return true, nil
+}
+
+// localRev is the tip of a checkout's local work: its branch, or HEAD when it
+// is detached.
+func localRev(branch string) string {
+	if branch == "" {
+		return "HEAD"
+	}
+	return branch
 }
 
 // BundleHeader reads a git bundle's header from r: the signature line, any
@@ -462,6 +481,7 @@ func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool
 			return false, fmt.Errorf("stage worktree: %w", err)
 		}
 	}
+	unstageFetchedLFSFiles(ctx, wtPath, env)
 	cw := &captureCountingWriter{w: w}
 	if err := gitCaptureTo(ctx, wtPath, env, cw, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD"); err != nil {
 		return false, fmt.Errorf("diff temp index: %w", err)
@@ -540,7 +560,26 @@ func (c *captureCountingWriter) Write(p []byte) (int, error) {
 }
 
 func gitCaptureTo(ctx context.Context, dir string, env []string, stdout io.Writer, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	return gitCaptureIO(ctx, dir, env, nil, stdout, args...)
+}
+
+// captureLFSFilterOff turns git-lfs's filter driver off for every capture git
+// runs, whatever the host's or the checkout's config says, so the capture
+// reads the same tree in both modes. A file git-lfs would clean into a pointer
+// is then staged as its content, which is what lets an uncommitted LFS file
+// travel in the patch. The command line outranks every config file, and a
+// driver whose commands are empty runs nothing.
+var captureLFSFilterOff = []string{
+	"-c", "filter.lfs.process=",
+	"-c", "filter.lfs.clean=",
+	"-c", "filter.lfs.smudge=",
+	"-c", "filter.lfs.required=false",
+}
+
+// gitCaptureIO is gitCaptureTo with stdin, nil for none.
+func gitCaptureIO(ctx context.Context, dir string, env []string, stdin io.Reader, stdout io.Writer, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append(slices.Clone(captureLFSFilterOff), args...)...)
+	cmd.Stdin = stdin
 	if dir != "" {
 		cmd.Dir = dir
 	}

@@ -55,13 +55,17 @@ func jailWrite() snapshotWrite {
 	}
 }
 
-// goodHead is a well-formed commit id.
-const goodHead = "0123456789abcdef0123456789abcdef01234567"
+// goodHead is a well-formed commit id, and goodLFSOID a Git LFS object id.
+const (
+	goodHead   = "0123456789abcdef0123456789abcdef01234567"
+	goodLFSOID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
 
 func goodManifest() worktree.CaptureManifest {
 	return worktree.CaptureManifest{
 		Checkouts: []worktree.CheckoutCapture{{
 			Rel: "acme/app/default", Delta: &worktree.GitDelta{Branch: "work", Head: goodHead}, HasBundle: true, HasPatch: true,
+			LFSObjects: []string{goodLFSOID},
 		}},
 		ScratchDigest: "digest", ScratchFiles: 2, CILogsOmitted: true,
 	}
@@ -71,6 +75,7 @@ func goodMembers() []streamMember {
 	return []streamMember{
 		{worktree.CaptureBundleMember("acme/app/default"), "bundle-bytes"},
 		{worktree.CapturePatchMember("acme/app/default"), "patch-bytes"},
+		{worktree.CaptureLFSMember("acme/app/default", goodLFSOID), "lfs-bytes"},
 		{worktree.CaptureScratchPrefix + "notes.txt", "scratch note"},
 		{worktree.CaptureScratchPrefix + "sub/deep.txt", "deep"},
 	}
@@ -93,7 +98,12 @@ func TestCaptureTreeInJail_UnpacksWhatTheJailStreamed(t *testing.T) {
 		}
 	}
 	if st.Delta == nil || st.Delta.Head != goodHead {
-		t.Errorf("delta = %+v", st.Delta)
+		t.Fatalf("delta = %+v", st.Delta)
+	}
+	if objs := st.Delta.LFSObjects; len(objs) != 1 || objs[0].OID != goodLFSOID {
+		t.Errorf("LFS objects = %+v, want %s", objs, goodLFSOID)
+	} else if got, err := os.ReadFile(objs[0].Path); err != nil || string(got) != "lfs-bytes" {
+		t.Errorf("LFS object %s = %q, %v; want %q", objs[0].Path, got, err, "lfs-bytes")
 	}
 	sc := captured.scratch
 	if sc == nil || sc.digest != "digest" || !sc.ciLogsOmitted {
@@ -143,6 +153,20 @@ func TestCaptureTreeInJail_RefusesWhatTheJailMayNotSay(t *testing.T) {
 			return append(m, streamMember{worktree.CaptureScratchPrefix + "notes.txt/inner", "x"})
 		}, 0},
 		{"announced member missing", nil, func(m []streamMember) []streamMember { return m[1:] }, 0},
+		{"announced LFS object missing", nil, func(m []streamMember) []streamMember { return append(m[:2:2], m[3:]...) }, 0},
+		{"LFS object nobody announced", nil, func(m []streamMember) []streamMember {
+			return append(m, streamMember{worktree.CaptureLFSMember("acme/app/default", strings.Repeat("f", 64)), "x"})
+		}, 0},
+		{"LFS object streamed twice", nil, func(m []streamMember) []streamMember {
+			return append(m, streamMember{worktree.CaptureLFSMember("acme/app/default", goodLFSOID), "again"})
+		}, 0},
+		{"LFS object id that is not one", func(m *worktree.CaptureManifest) {
+			m.Checkouts[0].LFSObjects = []string{"../../escape"}
+		}, nil, 0},
+		{"LFS object named twice", func(m *worktree.CaptureManifest) {
+			m.Checkouts[0].LFSObjects = []string{goodLFSOID, goodLFSOID}
+		}, nil, 0},
+		{"LFS objects with no bundle", func(m *worktree.CaptureManifest) { m.Checkouts[0].HasBundle = false }, func(m []streamMember) []streamMember { return m[1:] }, 0},
 		{"manifest names another checkout", func(m *worktree.CaptureManifest) { m.Checkouts[0].Rel = "acme/app/other" }, nil, 0},
 		{"manifest names too many checkouts", func(m *worktree.CaptureManifest) {
 			m.Checkouts = append(m.Checkouts, m.Checkouts[0])

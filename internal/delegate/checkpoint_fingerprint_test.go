@@ -179,3 +179,29 @@ func TestSnapshotFingerprint_SeesEveryCheckout(t *testing.T) {
 		t.Fatal("an untracked file in the first checkout left the fingerprint unchanged")
 	}
 }
+
+// TestSnapshotFingerprint_SeesAnLFSObjectArrive: a run can commit a Git LFS
+// pointer before its object is in the store. The object arriving later is a
+// change a checkpoint has to store, though no commit moved.
+func TestSnapshotFingerprint_SeesAnLFSObjectArrive(t *testing.T) {
+	root, co := repoWithLocalCommits(t, 1)
+	const content = "the run's new asset\n"
+	const oid = "3b83b1604b9aa647686a75a479e0a6da7471a96ac3228dac703c071d85f9dc9e"
+	commitLFSPointer(t, co.path, "asset.bin", oid, len(content))
+	before := captureFingerprint(t, root, co)
+	writeFile(t, filepath.Join(co.path, ".git", "lfs", "objects", oid[:2], oid[2:4], oid), content)
+	if after := captureFingerprint(t, root, co); after == before {
+		t.Fatal("an LFS object arriving left the fingerprint unchanged; the checkpoint would skip storing it")
+	}
+}
+
+// commitLFSPointer commits a Git LFS pointer to name at the checkout dir, with
+// git-lfs's filter off so it is committed as written.
+func commitLFSPointer(t *testing.T, dir, name, oid string, size int) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+	writeFile(t, filepath.Join(dir, name), fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n", oid, size))
+	lfsOff := []string{"-c", "filter.lfs.process=", "-c", "filter.lfs.clean=", "-c", "filter.lfs.required=false"}
+	gitT(t, dir, append(lfsOff, "add", ".gitattributes", name)...)
+	gitT(t, dir, append(lfsOff, "commit", "-q", "-m", "add "+name)...)
+}

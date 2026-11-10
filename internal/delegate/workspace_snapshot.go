@@ -78,9 +78,17 @@ const (
 	// snapshot of a parked run written by an earlier build.
 	snapScratchPrefix = "scratch/"
 	// snapCheckoutsPrefix names a checkout's members:
-	// checkouts/<path relative to the root>/bundle and .../patch.
+	// checkouts/<path relative to the root>/bundle and .../patch, and
+	// .../lfs/<oid> for each Git LFS object (snapLFSMember).
 	snapCheckoutsPrefix = "checkouts/"
 )
+
+// snapLFSMember names the member holding Git LFS object oid of the checkout at
+// rel. The manifest lists a checkout's objects by id, and their members follow
+// from it.
+func snapLFSMember(rel, oid string) string {
+	return snapCheckoutsPrefix + rel + "/lfs/" + oid
+}
 
 // snapshotLayoutVersion is the run-tree layout this binary writes and the only
 // one it restores: a plain run root with every checkout beneath it. A blob
@@ -157,8 +165,9 @@ type snapshotManifest struct {
 }
 
 // manifestCheckout is one checkout in a snapshot: which repository and slug it
-// is, where under the root it sits, the HEAD and branch it was on, and the
-// names of its delta's members ("" when the capture carried none).
+// is, where under the root it sits, the HEAD and branch it was on, the
+// names of its delta's members ("" when the capture carried none), and the ids
+// of the Git LFS objects it carries.
 //
 // RepositoryID is the repository's registry row id, which is what a restore
 // rebuilds against: the bare cache is keyed by it, and an owner/repo name can
@@ -168,14 +177,15 @@ type snapshotManifest struct {
 // before the row id was recorded carry RepoID alone; a restore resolves that
 // name on the GitHub host of the task's own entity.
 type manifestCheckout struct {
-	RepositoryID string `json:"repository_id,omitempty"`
-	RepoID       string `json:"repo_id"`
-	Slug         string `json:"slug"`
-	Path         string `json:"path"`
-	Head         string `json:"head"`
-	Branch       string `json:"branch,omitempty"`
-	Bundle       string `json:"bundle,omitempty"`
-	Patch        string `json:"patch,omitempty"`
+	RepositoryID string   `json:"repository_id,omitempty"`
+	RepoID       string   `json:"repo_id"`
+	Slug         string   `json:"slug"`
+	Path         string   `json:"path"`
+	Head         string   `json:"head"`
+	Branch       string   `json:"branch,omitempty"`
+	Bundle       string   `json:"bundle,omitempty"`
+	Patch        string   `json:"patch,omitempty"`
+	LFSObjects   []string `json:"lfs_objects,omitempty"`
 }
 
 // positionFor is the transcript position this manifest's tree reflects for
@@ -664,7 +674,7 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 	// A checkout whose .git is gone has no HEAD a restore could take it back
 	// to; the directory is all that is left of it.
 	kept := captured.checkouts[:0]
-	var bundleBytes, patchBytes int64
+	var bundleBytes, patchBytes, lfsBytes int64
 	for _, co := range captured.checkouts {
 		if co.state.Delta == nil {
 			delegateLog.Warn("snapshot: checkout is no longer a git worktree; it is not carried", "checkout", co.rel, "path", co.path)
@@ -680,6 +690,13 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 		}
 		bundleBytes += b
 		patchBytes += p
+		for _, obj := range co.state.Delta.LFSObjects {
+			n, err := capturedBytesSize(nil, obj.Path)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot: capture %s LFS object %s size: %w", co.rel, obj.OID, err)
+			}
+			lfsBytes += n
+		}
 		kept = append(kept, co)
 	}
 	captured.checkouts = kept
@@ -690,6 +707,7 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 	capSpan.SetAttributes(
 		telemetry.SnapshotBundleBytes(bundleBytes),
 		telemetry.SnapshotPatchBytes(patchBytes),
+		telemetry.SnapshotLFSBytes(lfsBytes),
 		telemetry.SnapshotTranscriptBytes(transcriptBytes),
 		telemetry.Count(len(captured.checkouts)),
 	)
@@ -1029,8 +1047,9 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // writeSnapshotTar streams the snapshot members into w as one tar: the
 // manifest, built on man, first — so whether a blob is one this binary can
 // restore is answered by its first member (snapshotLayoutAt) — then every
-// checkout's potentially unbounded bundle + uncommitted patch, the ephemeral
-// _tfac tree (streamed file by file), and the Claude session transcript.
+// checkout's potentially unbounded bundle, uncommitted patch and Git LFS
+// objects, the ephemeral _tfac tree (streamed file by file), and the Claude
+// session transcript.
 func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapshot, wtPath string, man snapshotManifest) error {
 	tw := tar.NewWriter(w)
 	man.LayoutVersion = snapshotLayoutVersion
@@ -1057,6 +1076,10 @@ func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapsh
 		if len(d.Patch) > 0 || co.state.PatchPath != "" {
 			mc.Patch = snapCheckoutsPrefix + co.rel + "/patch"
 			members = append(members, member{mc.Patch, co.state.PatchPath, d.Patch})
+		}
+		for _, obj := range d.LFSObjects {
+			mc.LFSObjects = append(mc.LFSObjects, obj.OID)
+			members = append(members, member{snapLFSMember(co.rel, obj.OID), obj.Path, nil})
 		}
 		man.Checkouts = append(man.Checkouts, mc)
 	}
@@ -1626,6 +1649,14 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID string, conv 
 				return snapshotManifest{}, fmt.Errorf("rehydrate: checkout %s names member %q, which the blob does not carry", mc.Path, name)
 			}
 		}
+		for _, oid := range mc.LFSObjects {
+			if !worktree.ValidLFSOID(oid) {
+				return snapshotManifest{}, fmt.Errorf("rehydrate: checkout %s names LFS object %q, which is not an object id", mc.Path, oid)
+			}
+			if staged[snapLFSMember(mc.Path, oid)] == "" {
+				return snapshotManifest{}, fmt.Errorf("rehydrate: checkout %s names LFS object %s, which the blob does not carry", mc.Path, oid)
+			}
+		}
 	}
 
 	// A fresh root. Whatever is at the path is a tree this engagement is about
@@ -1808,6 +1839,9 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 		Root: root, Slug: mc.Slug, RootKey: keyID,
 		Head: mc.Head, Branch: mc.Branch,
 		BundlePath: staged[mc.Bundle], PatchPath: staged[mc.Patch],
+	}
+	for _, oid := range mc.LFSObjects {
+		r.LFSObjects = append(r.LFSObjects, worktree.LFSObject{OID: oid, Path: staged[snapLFSMember(mc.Path, oid)]})
 	}
 	if _, prNumber, _ := worktree.ParseCheckoutSlug(mc.Slug); prNumber > 0 {
 		if restorer.pr == nil {

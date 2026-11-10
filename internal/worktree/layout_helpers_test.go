@@ -58,7 +58,7 @@ func restoreDeltaErr(t *testing.T, root, rootKey, owner, repo, slug, cloneURL st
 	r := CheckoutRestore{
 		RepositoryID: testRepo(owner, repo).ID, Owner: owner, Repo: repo, CloneURL: cloneURL, Auth: auth,
 		Root: root, Slug: slug, RootKey: rootKey, PR: pr,
-		Head: delta.Head, Branch: delta.Branch,
+		Head: delta.Head, Branch: delta.Branch, LFSObjects: delta.LFSObjects,
 	}
 	if len(delta.Bundle) > 0 {
 		r.BundlePath = filepath.Join(staging, "bundle")
