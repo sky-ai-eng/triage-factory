@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -56,7 +57,7 @@ func TestDirectAgentEnv_IndexBookkeeping(t *testing.T) {
 	assertEnv(t, clean, "PATH", "/usr/bin")
 	assertEnv(t, clean, "GIT_CONFIG_KEY_0", ConfigKey)
 	assertEnv(t, clean, "GIT_CONFIG_VALUE_0", wantPath)
-	assertEnv(t, clean, "GIT_CONFIG_COUNT", "1")
+	assertEnv(t, clean, "GIT_CONFIG_COUNT", strconv.Itoa(1+len(platformGitConfigPairs())))
 	assertSingleCount(t, clean)
 
 	// Inherited count 2 → our entry at index 2, count bumped to 3, the
@@ -73,7 +74,7 @@ func TestDirectAgentEnv_IndexBookkeeping(t *testing.T) {
 	assertEnv(t, layered, "GIT_CONFIG_KEY_1", "core.sshCommand")
 	assertEnv(t, layered, "GIT_CONFIG_KEY_2", ConfigKey)
 	assertEnv(t, layered, "GIT_CONFIG_VALUE_2", wantPath)
-	assertEnv(t, layered, "GIT_CONFIG_COUNT", "3")
+	assertEnv(t, layered, "GIT_CONFIG_COUNT", strconv.Itoa(3+len(platformGitConfigPairs())))
 	assertSingleCount(t, layered)
 }
 
@@ -332,8 +333,15 @@ func TestPrePushHook_LargeRefListSurvivesBothPasses(t *testing.T) {
 	// One process per ref bounds how big this can get and stay a fast test, so
 	// the refs are long rather than merely numerous: enough bytes that a
 	// truncating implementation would drop some, without a five-figure fanout.
-	const refs = 1000
-	const pad = "long-branch-name-segment/that-makes-each-line-substantial/"
+	refs := 1000
+	pad := "long-branch-name-segment/that-makes-each-line-substantial/"
+	if runtime.GOOS == "windows" {
+		// Spawning a process costs ~70ms under Git for Windows (1000 refs took
+		// 78s), so trade count for line length: the same number of bytes
+		// crosses the spool, which is what a truncating implementation breaks on.
+		refs = 100
+		pad = strings.Repeat(pad, 10)
+	}
 	var stdin strings.Builder
 	for i := range refs {
 		fmt.Fprintf(&stdin, "refs/heads/%s%d aaaa%d refs/heads/%s%d 0000000000000000000000000000000000000000\n",

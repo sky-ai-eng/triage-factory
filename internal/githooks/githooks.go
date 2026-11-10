@@ -179,13 +179,23 @@ func Ensure() error {
 // (the operator's ~/.gitconfig stays untouched) and the install is scoped
 // to this one agent process. core.hooksPath is always entry 0 of our block so
 // its index is stable for any test asserting it.
+//
+// On Windows the block also carries core.longpaths=true and an empty
+// credential.helper (the same pairs TF's own git calls carry), and the env
+// gains GCM_INTERACTIVE=never, so the agent's git never opens a Git Credential
+// Manager prompt. Other platforms get exactly the entries above.
 func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 	pairs := append([][2]string{{ConfigKey, HostDir()}}, extraPairs...)
+	pairs = append(pairs, platformGitConfigPairs()...)
+	vars := platformGitEnvVars()
 	base := gitConfigCount(env)
-	out := make([]string, 0, len(env)+1+2*len(pairs))
+	out := make([]string, 0, len(env)+1+2*len(pairs)+len(vars))
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
 			continue // re-emitted below, bumped to include our entries
+		}
+		if envKeyIn(kv, vars) {
+			continue // replaced by ours below
 		}
 		out = append(out, kv)
 	}
@@ -196,7 +206,20 @@ func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 			"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+kv[1],
 		)
 	}
-	return append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(base+len(pairs)))
+	out = append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(base+len(pairs)))
+	return append(out, vars...)
+}
+
+// envKeyIn reports whether kv ("KEY=value") has the same KEY as any entry of
+// vars (each "KEY=value").
+func envKeyIn(kv string, vars []string) bool {
+	key, _, _ := strings.Cut(kv, "=")
+	for _, v := range vars {
+		if vk, _, _ := strings.Cut(v, "="); vk == key {
+			return true
+		}
+	}
+	return false
 }
 
 // gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed

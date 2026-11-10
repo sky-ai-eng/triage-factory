@@ -120,6 +120,8 @@ func FallbackIdentityConfigPairs() [][2]string {
 //     call to the run's daemon. hooksDir is the hooks dir where the run sees
 //     it (HostDir in a local run, SandboxDir in a jail). Git needs the path
 //     absolute, because it runs commits from the repository's top directory.
+//     It is written with forward slashes: git hands the program to a shell,
+//     which would read the backslashes of a Windows path as escapes.
 //   - gpg.ssh.allowedSignersFile=<allowedSigners>: the run's allowed-signers
 //     file (AllowedSigners), so git verify-commit and git log
 //     --show-signature can check the run's own commits.
@@ -130,7 +132,7 @@ func SigningConfigPairs(hooksDir, publicKey, allowedSigners string) [][2]string 
 		{"gpg.format", "ssh"},
 		{"commit.gpgsign", "true"},
 		{"user.signingkey", "key::" + publicKey},
-		{"gpg.ssh.program", filepath.Join(hooksDir, SignProgram)},
+		{"gpg.ssh.program", filepath.ToSlash(filepath.Join(hooksDir, SignProgram))},
 		{"gpg.ssh.allowedSignersFile", allowedSigners},
 	}
 }
