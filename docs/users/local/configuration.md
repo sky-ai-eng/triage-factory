@@ -86,3 +86,12 @@ GitHub API uses HTTPS either way.
 Again, neither is a security boundary in local mode: an agent runs as you and
 can bypass these checks deliberately. GitHub branch protection is the
 server-side guard.
+
+## Git LFS
+
+Checkouts Triage Factory makes leave files stored in Git LFS as pointer files,
+whatever your own `git lfs install` configured, so a run never downloads LFS
+content it didn't ask for. An agent fetches the files it needs with
+`git lfs pull --include=<path>`, and a push uploads new LFS objects, both
+through the run's proxy. Both need `git-lfs` installed on the machine Triage
+Factory runs on; without it, agents see only the pointers.

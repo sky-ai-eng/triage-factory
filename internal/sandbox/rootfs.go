@@ -157,6 +157,11 @@ func currentArchRootfs() (url, sha string, err error) {
 //     the pinned pnpm on top at build time — see installPnpm and
 //     pnpmVersion below.
 //   - git — every delegate flow does status/diff/commit/push.
+//   - git-lfs — a checkout of a repository that keeps files in Git LFS
+//     holds their pointers, and the agent fetches the content it needs with
+//     `git lfs pull` and uploads new LFS objects on push, all through the
+//     run's git proxy. The agent's git carries git-lfs's filter config
+//     because this package installs it (agentproc's LFS config pairs).
 //   - ripgrep — agent's primary code-search tool; faster than grep
 //     on large repos.
 //   - bash — alpine ships ash by default; many shell scripts and
@@ -179,7 +184,7 @@ func currentArchRootfs() (url, sha string, err error) {
 //   - build-base — gcc + make + musl-dev; required for native deps
 //     (node-gyp, cgo, anything that compiles at install time).
 var apkPackages = []string{
-	"nodejs", "npm", "git", "ripgrep", "bash", "ca-certificates",
+	"nodejs", "npm", "git", "git-lfs", "ripgrep", "bash", "ca-certificates",
 	"python3", "go", "make", "curl", "openssh-client", "openssh-keygen", "build-base",
 }
 

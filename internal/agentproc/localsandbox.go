@@ -134,5 +134,29 @@ func hostToolPaths(nodePath string) []string {
 	if bin, err := claudeBinaryOverride(); err == nil && bin != "" {
 		tools = append(tools, bin)
 	}
+	// git-lfs is in this list for the same reason as node: a run whose git
+	// carries its filter config (githooks.LFSConfigPairs) fails every checkout
+	// of an LFS file if the binary the config names is masked, and a
+	// user-local install (~/.local/bin, ~/go/bin) is common.
+	if lfs := gitLFSBinary(); lfs != "" {
+		tools = append(tools, lfs)
+	}
 	return tools
+}
+
+// gitLFSBinary is the git-lfs a run's git will find on PATH, as an absolute
+// path, or "" when there is none. A run's git carries git-lfs's filter config
+// only when there is a git-lfs to run it, because the config marks the filter
+// required: with no binary, every checkout of an LFS file would fail instead
+// of leaving its pointer.
+func gitLFSBinary() string {
+	p, err := exec.LookPath("git-lfs")
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	return abs
 }

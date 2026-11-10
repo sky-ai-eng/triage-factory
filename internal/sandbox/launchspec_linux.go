@@ -278,12 +278,15 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"AWS_SECRET_ACCESS_KEY":      {},
 	"AWS_REGION":                 {},
 
-	// Git routing config count + the push-capture hook toggle
-	// (agentproc.encodeGitConfigEnv, githooks.PushCaptureEnvVar). The
+	// Git routing config count, the push-capture hook toggle, and git-lfs's
+	// checkout mode (agentproc.encodeGitConfigEnv, githooks.PushCaptureEnvVar,
+	// githooks.LFSSkipSmudgeEnvVar). The
 	// numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> entries are matched
 	// by prefix below.
 	"GIT_CONFIG_COUNT":    {},
 	"TF_GIT_PUSH_CAPTURE": {},
+	// git-lfs leaves LFS files as pointers at checkout (githooks.LFSSkipSmudgeEnvVar).
+	"GIT_LFS_SKIP_SMUDGE": {},
 
 	// The run's CA bundle (cell.JailEnv): each toolchain's trust
 	// variable, all pointing at the mounted bundle of public certificates.

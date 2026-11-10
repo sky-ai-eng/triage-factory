@@ -415,3 +415,75 @@ func indexOfOperand(argv []string, flag, target string) int {
 	}
 	return -1
 }
+
+// stubGitLFS puts a git-lfs on PATH ahead of any real one and returns its
+// path. Nothing runs it: the spawn only resolves it.
+func stubGitLFS(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "git-lfs")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh"+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return bin
+}
+
+// TestNewDirectCommand_LFSConfig pins what a local run's git is told about
+// Git LFS: its checkouts leave pointers whatever the operator's shell
+// exported, and it carries git-lfs's filters exactly when there is a git-lfs
+// to run them — the filters are required, so naming a missing binary would
+// fail every checkout of an LFS file.
+func TestNewDirectCommand_LFSConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(githooks.LFSSkipSmudgeEnvVar, "0")
+
+	stubGitLFS(t)
+	cmd, err := newDirectCommand(context.Background(), RunOptions{Cwd: t.TempDir()}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("newDirectCommand: %v", err)
+	}
+	var skip []string
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, githooks.LFSSkipSmudgeEnvVar+"="); ok {
+			skip = append(skip, v)
+		}
+	}
+	if !reflect.DeepEqual(skip, []string{"1"}) {
+		t.Errorf("%s values in the run env = %v, want exactly [1]", githooks.LFSSkipSmudgeEnvVar, skip)
+	}
+	cfg := gitConfigMap(t, cmd.Env)
+	for _, kv := range githooks.LFSConfigPairs() {
+		if cfg[kv[0]] != kv[1] {
+			t.Errorf("with git-lfs on PATH, %s = %q, want %q", kv[0], cfg[kv[0]], kv[1])
+		}
+	}
+
+	t.Setenv("PATH", t.TempDir())
+	cmd, err = newDirectCommand(context.Background(), RunOptions{Cwd: t.TempDir()}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("newDirectCommand without git-lfs: %v", err)
+	}
+	for k := range gitConfigMap(t, cmd.Env) {
+		if strings.HasPrefix(k, "filter.lfs.") {
+			t.Errorf("with no git-lfs on PATH the run's git still names its filter: %s", k)
+		}
+	}
+}
+
+// TestDirectArgv_BindsGitLFSBack pins that a git-lfs the run's git config
+// names survives the masks: a user-local install sits under the masked home.
+func TestDirectArgv_BindsGitLFSBack(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	stubBwrap(t)
+	lfs := stubGitLFS(t)
+	runRoot := t.TempDir()
+
+	argv, err := directArgv(RunOptions{Cwd: runRoot, LocalSandbox: sandboxSpec(t, runRoot)}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("directArgv: %v", err)
+	}
+	if !hasBind(argv, "--ro-bind-try", lfs) {
+		t.Errorf("argv does not bind git-lfs back through the masks: %v", argv)
+	}
+}

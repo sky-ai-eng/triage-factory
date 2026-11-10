@@ -59,7 +59,7 @@ process in both modes:
 ## Shipped hooks
 
 - `pre-push` (A·3, TFAC-456→TFAC-460) — two passes over the refs git
-  feeds it on stdin.
+  feeds it on stdin, with git-lfs's upload between them.
 
   1. **Base-branch push policy** via `triagefactory hook check-push`. This
      is local mode's enforcement point for the team's setting (multi mode
@@ -75,8 +75,16 @@ process in both modes:
   Rewritten by `Ensure` on every startup so an upgraded binary refreshes a
   stale on-disk copy.
 
+  Between the two, **Git LFS upload** via `git lfs pre-push`, for a
+  repository git-lfs has stored objects in. git-lfs uploads a push's LFS
+  objects from a pre-push hook of its own, which git never runs while
+  `core.hooksPath` points here, so this hook runs it in its place. A failed
+  upload aborts the push, as git-lfs's own hook does: a pointer pushed
+  without its object is a broken file on the remote. This step runs under
+  proxy capture too, where it is the hook's only job.
+
   **Stands down when `TF_GIT_PUSH_CAPTURE=proxy`** (the sandbox env, set
-  whenever the per-run git proxy is wired), for both passes: the proxy
+  whenever the per-run git proxy is wired), for both of TF's own passes: the proxy
   already adjudicates the same policy at its ref gate, so the hook must
   not double-judge; and pre-push fires *before* the transfer, so it cannot
   know whether the push will land — recording there would mint deliverables

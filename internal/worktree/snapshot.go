@@ -208,6 +208,10 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // the manifest then says is absent. A `git bundle` failure after the precheck
 // is an error.
 func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Writer) (bool, error) {
+	// TODO(TFAC-1360): the bundle carries these commits but not the Git LFS
+	// objects their new pointers name, which live only in .git/lfs/objects, so
+	// a run restored from it cannot push an LFS file it committed before the
+	// park.
 	rev := branch
 	if rev == "" {
 		rev = "HEAD"

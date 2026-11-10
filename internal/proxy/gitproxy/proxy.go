@@ -324,6 +324,17 @@ type Server struct {
 	upstreamURL *url.URL
 	proxy       *httputil.ReverseProxy
 
+	// lfsBatch forwards a Git LFS batch call with the credential and rewrites
+	// its answer; lfsTransfer performs a transfer against the storage URL that
+	// answer named. See lfs.go.
+	lfsBatch    *httputil.ReverseProxy
+	lfsTransfer *httputil.ReverseProxy
+
+	// lfsTransfers holds the storage URL and headers behind every transfer URL
+	// this proxy has handed out, keyed by the id in that URL.
+	lfsMu        sync.Mutex
+	lfsTransfers map[string]*lfsTransfer
+
 	requestCount atomic.Int64
 
 	// misses answers and logs the requests no credential could be found for.
@@ -409,6 +420,16 @@ func New(cfg Config) (*Server, error) {
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
 	}
+	s.lfsBatch = &httputil.ReverseProxy{
+		Rewrite:        s.rewriteLFSBatchRequest,
+		ModifyResponse: s.rewriteLFSBatchResponse,
+		ErrorHandler:   s.lfsProxyError,
+	}
+	s.lfsTransfer = &httputil.ReverseProxy{
+		Rewrite:        s.rewriteLFSTransfer,
+		ModifyResponse: s.observeLFSTransfer,
+		ErrorHandler:   s.lfsProxyError,
+	}
 	return s, nil
 }
 
@@ -451,10 +472,10 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// Path-shape allowlist: forward ONLY the three git smart-HTTP shapes
-		// and extract the (owner, repo) they target. Everything else — most
-		// importantly a GHES API path "/api/v3/..." (same host as git), plus
-		// LFS and web routes — is rejected here, before any credential is
+		// Path-shape allowlist: forward ONLY the git smart-HTTP and Git LFS
+		// shapes and extract the (owner, repo) they target. Everything else —
+		// most importantly a GHES API path "/api/v3/..." (same host as git),
+		// plus web routes — is rejected here, before any credential is
 		// injected. This is what makes "the git proxy can only do git" real on
 		// GHES, where the host split that protects github.com doesn't exist.
 		owner, repo, op, ok := parseGitPath(r.Method, r.URL.Path)
@@ -463,71 +484,20 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "gitproxy: non-git path", http.StatusForbidden)
 			return
 		}
-
-		// Live per-repo authorization. A nil Authorize is allow-all
-		// (loopback/test); in multi mode the wiring always sets it. A backend
-		// error fails closed (the gate is up but its data source is broken —
-		// don't forward), and so does a !Allowed decision. Both are blocked git
-		// activity, so both leave an audit trail.
-		//
-		// Both answer 403. The gate's data is TF's own (a store read, a relay
-		// call), so its failure is never the git host being unreachable, and a
-		// 502 is how git reports one: a setup clone refused that way would be
-		// retried on the upstream schedule for hours, where a refusal fails it
-		// within the setup budget, naming the cause in the log line below.
-		decision := Decision{Allowed: true}
-		if s.cfg.Authorize != nil {
-			d, err := s.cfg.Authorize(r.Context(), owner, repo)
-			if err != nil {
-				// An authz outage/misconfig blocks the op just as a hard deny
-				// does — record it so the audit trail isn't silent on outages.
-				//
-				// Log the cause: this is the only place it survives. The audit
-				// record's Reason is a fixed vocabulary with no room for it, the
-				// 403 body deliberately tells the agent nothing about server
-				// internals, and git prints that body as the whole explanation.
-				// A gate error stops every git operation the run makes, and it
-				// is always a server-side fault — a broken store read, a relay
-				// outage — so an operator reading these logs needs the error the
-				// way an operator reading a failed clone needs the exit status.
-				gitproxyLog.Error("authorize gate errored; failing closed",
-					"owner", owner, "repo", repo, "op", op, "error", err)
-				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "authorize-error"})
-				http.Error(w, "gitproxy: authorization check failed", http.StatusForbidden)
-				return
-			}
-			if !d.Allowed {
-				// The decision may carry a specific reason/message (tracked-but-
-				// unmaterialized vs untracked, so the agent knows whether to run
-				// `workspace add` or escalate to an admin); fall back to the
-				// generic denial for allow-all/test wiring that sets neither.
-				reason := d.DenyReason
-				if reason == "" {
-					reason = "repo-not-authorized"
-				}
-				msg := d.DenyMessage
-				if msg == "" {
-					msg = "gitproxy: repo not authorized for this run"
-				}
-				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: reason})
-				http.Error(w, msg, http.StatusForbidden)
-				return
-			}
-			decision = d
-		}
-
-		tok, err := s.installationToken(r.Context(), owner, repo)
-		if err != nil {
-			// The answer names the reason and nothing else: the underlying
-			// mint error may include the App ID or other identifying info.
-			s.misses.Respond(w, err)
+		if isLFSOp(op) {
+			s.serveLFS(w, r, owner, repo, op)
 			return
 		}
-		// Stash the token on the request context so Rewrite can pick
-		// it up. Passing through context (rather than mutating headers
-		// here) keeps the token off the inbound request's header set,
-		// which means it never appears in a log of pr.In.Header.
-		r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok.Value))
+
+		decision, msg, ok := s.authorize(r.Context(), owner, repo, op)
+		if !ok {
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+		r, ok = s.withToken(w, r, owner, repo)
+		if !ok {
+			return
+		}
 
 		if op == gitOpPush {
 			if s.cfg.Authorize != nil {
@@ -547,6 +517,73 @@ func (s *Server) Handler() http.Handler {
 		}
 		s.proxy.ServeHTTP(w, r)
 	})
+}
+
+// authorize runs the live per-repo gate for one request. A nil Authorize is
+// allow-all (loopback/test); in multi mode the wiring always sets it. ok=false
+// is a refusal: it has been recorded, and msg is what the caller answers with.
+//
+// A backend error fails closed (the gate is up but its data source is broken —
+// don't forward), and so does a !Allowed decision. Both are blocked git
+// activity, so both leave an audit trail. Both answer 403. The gate's data is
+// TF's own (a store read, a relay call), so its failure is never the git host
+// being unreachable, and a 502 is how git reports one: a setup clone refused
+// that way would be retried on the upstream schedule for hours, where a
+// refusal fails it within the setup budget, naming the cause in the log line
+// below.
+func (s *Server) authorize(ctx context.Context, owner, repo, op string) (d Decision, msg string, ok bool) {
+	if s.cfg.Authorize == nil {
+		return Decision{Allowed: true}, "", true
+	}
+	d, err := s.cfg.Authorize(ctx, owner, repo)
+	if err != nil {
+		// Log the cause: this is the only place it survives. The audit
+		// record's Reason is a fixed vocabulary with no room for it, the 403
+		// body deliberately tells the agent nothing about server internals,
+		// and git prints that body as the whole explanation. A gate error
+		// stops every git operation the run makes, and it is always a
+		// server-side fault — a broken store read, a relay outage — so an
+		// operator reading these logs needs the error the way an operator
+		// reading a failed clone needs the exit status.
+		gitproxyLog.Error("authorize gate errored; failing closed",
+			"owner", owner, "repo", repo, "op", op, "error", err)
+		s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "authorize-error"})
+		return Decision{}, "gitproxy: authorization check failed", false
+	}
+	if !d.Allowed {
+		// The decision may carry a specific reason/message (tracked-but-
+		// unmaterialized vs untracked, so the agent knows whether to run
+		// `workspace add` or escalate to an admin); fall back to the generic
+		// denial for allow-all/test wiring that sets neither.
+		reason := d.DenyReason
+		if reason == "" {
+			reason = "repo-not-authorized"
+		}
+		msg := d.DenyMessage
+		if msg == "" {
+			msg = "gitproxy: repo not authorized for this run"
+		}
+		s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: reason})
+		return Decision{}, msg, false
+	}
+	return d, "", true
+}
+
+// withToken resolves the credential for owner/repo and returns r carrying it
+// for the Rewrite hook. ok=false means the miss has been answered.
+//
+// The token travels on the request context rather than in a header set here,
+// which keeps it off the inbound request's header set, so it never appears in
+// a log of pr.In.Header.
+func (s *Server) withToken(w http.ResponseWriter, r *http.Request, owner, repo string) (*http.Request, bool) {
+	tok, err := s.installationToken(r.Context(), owner, repo)
+	if err != nil {
+		// The answer names the reason and nothing else: the underlying mint
+		// error may include the App ID or other identifying info.
+		s.misses.Respond(w, err)
+		return nil, false
+	}
+	return r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok.Value)), true
 }
 
 // recordDenial invokes the audit hook for one denied operation, if wired. The
