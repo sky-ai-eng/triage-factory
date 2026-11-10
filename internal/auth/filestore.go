@@ -181,7 +181,7 @@ func (fb *fileBackend) persist() error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return fmt.Errorf("chmod temp secrets file: %w", err)
 	}
-	if err := os.Rename(tmpName, fb.path); err != nil {
+	if err := renameReplace(tmpName, fb.path); err != nil {
 		return fmt.Errorf("rename secrets file into place: %w", err)
 	}
 	return nil
