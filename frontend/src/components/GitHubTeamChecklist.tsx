@@ -1,23 +1,29 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
-import { groupKey, type GitHubTeamOption, type GitHubTeamRef } from '../lib/githubTeams'
+import {
+  groupKey,
+  type GitHubTeamFilter,
+  type GitHubTeamOption,
+  type GitHubTeamRef,
+} from '../lib/githubTeams'
 import SearchField from './SearchField'
 
 // Teams larger than this get a "broad team — noisy queue" hint. Fixed, not
 // configurable: it's a nudge, not a policy (an open-question call).
 const NOISY_TEAM_THRESHOLD = 20
 
-// The three filter modes behind the segmented control. 'all' is every row
-// read; 'selected' / 'unselected' subset it by the unsaved selection (rows
-// keep the server's order within each), which is how a user with a long org
-// team list finds what they've already picked — or what's left.
-type FilterMode = 'all' | 'unselected' | 'selected'
+const TABS: { filter: GitHubTeamFilter; label: string }[] = [
+  { filter: 'all', label: 'All' },
+  { filter: 'selected', label: 'Selected' },
+  { filter: 'unselected', label: 'Unselected' },
+]
 
 interface Props {
-  /** The GitHub teams read so far, in the order the list route answered
-   *  them: its search applied, alphabetical by handle. */
+  /** The GitHub teams of the open tab read so far, in the order the list
+   *  route answered them: its search and the tab's filter applied,
+   *  alphabetical by handle. */
   rows: GitHubTeamOption[]
-  /** What the route's search matches across every page. */
+  /** What the route matches for the open tab across every page. */
   total: number
   /** Whether `rows` answer a search, so an empty answer reads as "no match"
    *  rather than "no teams". */
@@ -25,6 +31,14 @@ interface Props {
   /** Whether the route holds a further page. */
   hasMore: boolean
   onLoadMore: () => void
+  /** The open tab, which is how a user with a long org team list finds what
+   *  they've already picked, or what's left. */
+  filter: GitHubTeamFilter
+  onFilterChange: (filter: GitHubTeamFilter) => void
+  /** How many teams each tab holds under the search; absent until read. */
+  counts?: Record<GitHubTeamFilter, number> | null
+  /** The open tab's first page is in flight. */
+  pending?: boolean
   /** The search box, owned by the container, which asks the route with it. */
   search: string
   onSearchChange: (search: string) => void
@@ -60,10 +74,11 @@ interface Props {
 
 // GitHubTeamChecklist is the body of the GitHub-team → TF-team mapping group
 // (GitHubTeamGroup, used in the Settings team tab + the setup wizard's team
-// step). It renders the rows the container read — searched and ordered by the
-// list route, never by this component — with a selected/unselected/all filter
-// over the unsaved selection, a bounded scrollable list, the badges (your team
-// / member count / noisy / stale), and the loading / error / empty states.
+// step). It renders the rows the container read — searched, filtered by tab
+// and ordered by the list route, never by this component — with the
+// all/selected/unselected tabs, a bounded scrollable list, the badges (your
+// team / member count / noisy / stale), and the loading / error / empty
+// states.
 //
 // A row is a GitHub team, identified by GitHub's team id (groupKey); the
 // org/slug it shows is the team's current handle. A mapping GitHub no longer
@@ -76,6 +91,10 @@ export default function GitHubTeamChecklist({
   searched,
   hasMore,
   onLoadMore,
+  filter,
+  onFilterChange,
+  counts = null,
+  pending = false,
   search,
   onSearchChange,
   listError = '',
@@ -90,19 +109,7 @@ export default function GitHubTeamChecklist({
   scrollClassName = 'max-h-80',
   bare = false,
 }: Props) {
-  const [mode, setMode] = useState<FilterMode>('all')
-
   const selectedKeys = useMemo(() => new Set(selected.map(groupKey)), [selected])
-
-  // The filter mode subsets the rows by the unsaved selection and nothing
-  // else; the search is the route's.
-  const visible = useMemo(
-    () =>
-      mode === 'all'
-        ? rows
-        : rows.filter((r) => selectedKeys.has(groupKey(r)) === (mode === 'selected')),
-    [rows, mode, selectedKeys],
-  )
 
   // Loading / error / empty pre-empt the controls — there's nothing to
   // search or filter yet. Rendered inside the same flex root so the
@@ -147,7 +154,7 @@ export default function GitHubTeamChecklist({
     )
   }
 
-  if (rows.length === 0 && !searched && !listError) {
+  if (filter === 'all' && !pending && rows.length === 0 && !searched && !listError) {
     return (
       <div className={`flex flex-col min-h-0 ${className}`}>
         <div className="text-body text-ink-3 py-8 leading-relaxed">{emptyLabel}</div>
@@ -155,20 +162,7 @@ export default function GitHubTeamChecklist({
     )
   }
 
-  // Counted over the rows read while they are every row the search matches;
-  // past that only the route's total is known, and the split of the rows not
-  // yet read between selected and unselected is not.
-  const whole = !hasMore
-  const selectedHere = rows.filter((r) => selectedKeys.has(groupKey(r))).length
-  const segments: { mode: FilterMode; label: string; count?: number }[] = [
-    { mode: 'all', label: 'All', count: total },
-    { mode: 'selected', label: 'Selected', count: whole ? selectedHere : undefined },
-    {
-      mode: 'unselected',
-      label: 'Unselected',
-      count: whole ? rows.length - selectedHere : undefined,
-    },
-  ]
+  const segments = TABS.map((t) => ({ ...t, count: counts?.[t.filter] }))
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -195,14 +189,14 @@ export default function GitHubTeamChecklist({
           // Rail-underline filters — borderless, blended (no segmented box).
           <div role="tablist" aria-label="Team filter" className="flex items-center gap-5 text-ui">
             {segments.map((s) => {
-              const active = mode === s.mode
+              const active = filter === s.filter
               return (
                 <button
-                  key={s.mode}
+                  key={s.filter}
                   type="button"
                   role="tab"
                   aria-selected={active}
-                  onClick={() => setMode(s.mode)}
+                  onClick={() => onFilterChange(s.filter)}
                   className={`relative pb-1.5 font-medium transition-colors ${
                     active ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
                   }`}
@@ -229,13 +223,13 @@ export default function GitHubTeamChecklist({
           >
             {segments.map((s) => (
               <button
-                key={s.mode}
+                key={s.filter}
                 type="button"
                 role="tab"
-                aria-selected={mode === s.mode}
-                onClick={() => setMode(s.mode)}
+                aria-selected={filter === s.filter}
+                onClick={() => onFilterChange(s.filter)}
                 className={`flex-1 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
-                  mode === s.mode
+                  filter === s.filter
                     ? 'bg-raised text-ink-1 shadow-float'
                     : 'text-ink-3 hover:text-ink-2'
                 }`}
@@ -254,16 +248,18 @@ export default function GitHubTeamChecklist({
       <div className={`${scrollClassName} overflow-y-auto`}>
         {listError ? (
           <p className="text-body text-alarm text-center py-8">{listError}</p>
-        ) : visible.length === 0 ? (
+        ) : pending ? (
+          <p className="text-body text-ink-3 text-center py-8">Loading teams…</p>
+        ) : rows.length === 0 ? (
           <p className="text-body text-ink-3 text-center py-8">
-            {mode === 'selected'
+            {filter === 'selected'
               ? 'No selected teams match.'
-              : mode === 'unselected'
+              : filter === 'unselected'
                 ? 'No unselected teams match.'
                 : `No teams match "${search.trim()}"`}
           </p>
         ) : (
-          visible.map((team) => {
+          rows.map((team) => {
             const k = groupKey(team)
             const isChecked = selectedKeys.has(k)
             const noisy = (team.member_count ?? 0) > NOISY_TEAM_THRESHOLD
@@ -333,7 +329,7 @@ export default function GitHubTeamChecklist({
             )
           })
         )}
-        {hasMore && !listError && (
+        {hasMore && !listError && !pending && (
           <button
             type="button"
             onClick={onLoadMore}

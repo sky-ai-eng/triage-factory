@@ -12,6 +12,7 @@ const PLATFORM: GitHubGroup = {
   org_login: 'acme',
   team_slug: 'platform',
 }
+const WEB: GitHubGroup = { ...PLATFORM, github_team_id: '12', team_slug: 'web' }
 
 const option = (
   id: string,
@@ -66,14 +67,39 @@ const listBodies = (fetchMock: ReturnType<typeof stub>) =>
     .filter(([path]) => path === '/api/teams/t1/github-groups/list')
     .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)
 
+/** The list reads that ask for rows, leaving out the tab labels' count-only
+ *  reads. */
+const pageBodies = (fetchMock: ReturnType<typeof stub>) =>
+  listBodies(fetchMock).filter((b) => b.page_size !== 0)
+
+/** routeOver answers the list route over `teams` the way the route filters
+ *  them: ids keeps, exclude_ids drops. */
+const routeOver =
+  (teams: GitHubTeamOption[]) =>
+  (body: Record<string, unknown>): Page => {
+    const ids = body.ids as string[] | undefined
+    const excluded = (body.exclude_ids as string[] | undefined) ?? []
+    return {
+      items: teams.filter(
+        (t) => (!ids || ids.includes(t.github_team_id)) && !excluded.includes(t.github_team_id),
+      ),
+    }
+  }
+
+/** A tab by its label and the count beside it. */
+const tab = (label: string, count?: number) =>
+  screen.getByRole('tab', { name: new RegExp(`^${label}\\s*${count ?? '\\d*'}$`) })
+
 /** Harness owns the selection the way a container does, seeding it from
  *  onLoaded. */
 function Harness({
   includeMembership = false,
   onLoaded,
+  refreshSignal = 0,
 }: {
   includeMembership?: boolean
   onLoaded?: (groups: GitHubGroup[]) => void
+  refreshSignal?: number
 }) {
   const [value, setValue] = useState<GitHubGroup[]>([])
   return (
@@ -82,6 +108,7 @@ function Harness({
       onChange={setValue}
       teamId="t1"
       includeMembership={includeMembership}
+      refreshSignal={refreshSignal}
       onLoaded={(seed) => {
         setValue(seed)
         onLoaded?.(seed)
@@ -131,26 +158,97 @@ describe('GitHubTeamGroup', () => {
     fireEvent.change(screen.getByLabelText('Search GitHub teams'), { target: { value: ' plat ' } })
 
     await waitFor(() => expect(screen.getByText('acme/infra')).toBeInTheDocument())
-    expect(listBodies(fetchMock).at(-1)).toEqual({ search: 'plat', page_size: 200 })
+    expect(pageBodies(fetchMock).at(-1)).toEqual({ search: 'plat', page_size: 200 })
     expect(listBodies(fetchMock).every((b) => !('q' in b))).toBe(true)
     expect(screen.queryByText('acme/web')).not.toBeInTheDocument()
   })
 
-  it('filters the tabs by the unsaved selection, not by a search of its own', async () => {
-    stub([PLATFORM], () => ({ items: [option('11', 'platform'), option('12', 'web')] }))
+  it('reads each tab from the route under the selection, and counts each', async () => {
+    const fetchMock = stub(
+      [PLATFORM],
+      routeOver([option('11', 'platform'), option('12', 'web'), option('13', 'zeta')]),
+    )
     render(<Harness />)
     await screen.findByText('acme/web')
+    await waitFor(() => expect(tab('Selected', 1)).toBeInTheDocument())
+    expect(tab('All', 3)).toBeInTheDocument()
+    expect(tab('Unselected', 2)).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('tab', { name: /Selected/ }))
-    expect(rowNames()).toEqual(['acme/platform'])
-    fireEvent.click(screen.getByRole('tab', { name: /Unselected/ }))
-    expect(rowNames()).toEqual(['acme/web'])
+    fireEvent.click(tab('Selected'))
+    await waitFor(() => expect(rowNames()).toEqual(['acme/platform']))
+    expect(pageBodies(fetchMock).at(-1)).toEqual({ ids: ['11'], page_size: 200 })
+    fireEvent.click(tab('Unselected'))
+    await waitFor(() => expect(rowNames()).toEqual(['acme/web', 'acme/zeta']))
+    expect(pageBodies(fetchMock).at(-1)).toEqual({ exclude_ids: ['11'], page_size: 200 })
 
-    // Checking a team moves it between the tabs without a read.
-    fireEvent.click(screen.getByRole('tab', { name: /All/ }))
+    // Checking a team leaves it on the tab it was read on, checked, and moves
+    // the counts; opening a tab reads it under the selection as it stands.
     fireEvent.click(screen.getByRole('checkbox', { name: /acme\/web/ }))
-    fireEvent.click(screen.getByRole('tab', { name: /Selected/ }))
-    expect(rowNames()).toEqual(['acme/platform', 'acme/web'])
+    expect(rowNames()).toEqual(['acme/web', 'acme/zeta'])
+    expect(screen.getByRole('checkbox', { name: /acme\/web/ })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    )
+    await waitFor(() => expect(tab('Selected', 2)).toBeInTheDocument())
+    expect(tab('Unselected', 1)).toBeInTheDocument()
+    fireEvent.click(tab('Selected'))
+    await waitFor(() => expect(rowNames()).toEqual(['acme/platform', 'acme/web']))
+    expect(pageBodies(fetchMock).at(-1)).toEqual({ ids: ['11', '12'], page_size: 200 })
+
+    // A search on a tab is read under that tab's filter.
+    fireEvent.change(screen.getByLabelText('Search GitHub teams'), { target: { value: 'web' } })
+    await waitFor(() =>
+      expect(pageBodies(fetchMock).at(-1)).toEqual({
+        search: 'web',
+        ids: ['11', '12'],
+        page_size: 200,
+      }),
+    )
+  })
+
+  it('counts the tabs again when a refresh re-reads the list', async () => {
+    let teams = [option('11', 'platform'), option('12', 'web')]
+    stub([PLATFORM], (body) => routeOver(teams)(body))
+    const { rerender } = render(<Harness />)
+    await waitFor(() => expect(tab('All', 2)).toBeInTheDocument())
+
+    teams = [...teams, option('13', 'zeta')]
+    rerender(<Harness refreshSignal={1} />)
+    await waitFor(() => expect(tab('All', 3)).toBeInTheDocument())
+    expect(tab('Unselected', 2)).toBeInTheDocument()
+  })
+
+  it('pages a tab under the ids it was read with, offering only its own teams', async () => {
+    const fetchMock = stub([PLATFORM, WEB], (body) => {
+      if (!body.ids) {
+        return { items: [option('11', 'platform')], total_count: 500, next_page_token: 'tok-a' }
+      }
+      return body.page_token
+        ? { items: [option('12', 'web')], total_count: 2 }
+        : { items: [option('11', 'platform')], total_count: 2, next_page_token: 'tok-s' }
+    })
+    render(<Harness />)
+    expect(await screen.findByRole('button', { name: 'Show 499 more' })).toBeInTheDocument()
+
+    fireEvent.click(tab('Selected'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 1 more' }))
+    await waitFor(() => expect(rowNames()).toEqual(['acme/platform', 'acme/web']))
+    expect(pageBodies(fetchMock).at(-1)).toEqual({
+      ids: ['11', '12'],
+      page_size: 200,
+      page_token: 'tok-s',
+    })
+  })
+
+  it('lists nothing on the Selected tab when nothing is selected, without a read', async () => {
+    const fetchMock = stub([], () => ({ items: [option('11', 'platform')] }))
+    render(<Harness />)
+    await screen.findByText('acme/platform')
+    const reads = pageBodies(fetchMock).length
+
+    fireEvent.click(tab('Selected'))
+    expect(await screen.findByText('No selected teams match.')).toBeInTheDocument()
+    expect(pageBodies(fetchMock)).toHaveLength(reads)
   })
 
   it('reads the next page with the server’s token', async () => {
@@ -163,7 +261,7 @@ describe('GitHubTeamGroup', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Show 1 more' }))
 
     await waitFor(() => expect(screen.getByText('acme/web')).toBeInTheDocument())
-    expect(listBodies(fetchMock).at(-1)).toEqual({ page_size: 200, page_token: 'tok-2' })
+    expect(pageBodies(fetchMock).at(-1)).toEqual({ page_size: 200, page_token: 'tok-2' })
     expect(rowNames()).toEqual(['acme/platform', 'acme/web'])
   })
 

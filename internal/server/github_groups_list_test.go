@@ -123,6 +123,60 @@ func TestTeamGitHubGroupsList_Search(t *testing.T) {
 	}
 }
 
+// ids keeps the teams an editor has picked and exclude_ids the rest, under
+// the search, each with its own total: together they partition what the
+// search matches, so a tab of picked teams and a tab of the others each page
+// and count only their own rows.
+func TestTeamGitHubGroupsList_IDFilters(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	switchableGroupsServer(t, srv, acmeFourTeamsGraphQL)
+
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+		want []string
+	}{
+		{"ids", map[string]any{"ids": []string{"13", "11"}}, []string{"11", "13"}},
+		{"exclude_ids", map[string]any{"exclude_ids": []string{"13", "11"}}, []string{"12", "14"}},
+		{"ids under a search", map[string]any{"ids": []string{"11", "12"}, "search": "sec"}, []string{"12"}},
+		{"exclude_ids under a search", map[string]any{"exclude_ids": []string{"11", "12"}, "search": "acme/"}, []string{"14", "13"}},
+		{"an id no team has", map[string]any{"ids": []string{"404"}}, []string{}},
+		{"empty ids narrows nothing", map[string]any{"ids": []string{}}, []string{"11", "12", "14", "13"}},
+		{"empty exclude_ids narrows nothing", map[string]any{"exclude_ids": []string{}}, []string{"11", "12", "14", "13"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := listGitHubGroups(t, srv, tc.body)
+			if got := itemIDs(resp.Items); !reflect.DeepEqual(got, tc.want) || resp.TotalCount != len(tc.want) {
+				t.Errorf("%v = %v (total %d); want %v", tc.body, got, resp.TotalCount, tc.want)
+			}
+		})
+	}
+
+	// A page token carries the ids it was minted under: the same set in
+	// another order, or repeated, continues the walk, and another set is
+	// refused.
+	first := listGitHubGroups(t, srv, map[string]any{"exclude_ids": []string{"11", "13"}, "page_size": 1})
+	if got := itemIDs(first.Items); !reflect.DeepEqual(got, []string{"12"}) || first.NextPageToken == "" {
+		t.Fatalf("page 1 = %v (next %q); want [12] and a further page", got, first.NextPageToken)
+	}
+	second := listGitHubGroups(t, srv, map[string]any{
+		"exclude_ids": []string{"13", "11", "13"}, "page_size": 1, "page_token": first.NextPageToken,
+	})
+	if got := itemIDs(second.Items); !reflect.DeepEqual(got, []string{"14"}) {
+		t.Errorf("page 2 under the same set reordered = %v; want [14]", got)
+	}
+	for _, body := range []map[string]any{
+		{"exclude_ids": []string{"11"}, "page_size": 1, "page_token": first.NextPageToken},
+		{"ids": []string{"11", "13"}, "page_size": 1, "page_token": first.NextPageToken},
+	} {
+		rec := doJSON(t, srv, http.MethodPost, "/api/teams/default/github-groups/list", body)
+		if items := errorItems(t, rec); rec.Code != http.StatusBadRequest || len(items) != 1 || items[0].Field != "page_token" {
+			t.Errorf("token under another id filter %v = %d %+v; want one 400 on page_token", body, rec.Code, items)
+		}
+	}
+}
+
 // A bad body is refused, naming the field: the search cap, a token minted
 // under another search or filter, and the field this route does not have.
 func TestTeamGitHubGroupsList_RefusesBadBodies(t *testing.T) {
@@ -145,6 +199,9 @@ func TestTeamGitHubGroupsList_RefusesBadBodies(t *testing.T) {
 		{"token under another filter", map[string]any{"page_size": 1, "page_token": first.NextPageToken, "only_mine": true}, httpx.ReasonInvalidParam, "page_token"},
 		{"a field the route lacks", map[string]any{"q": "acme"}, httpx.ReasonUnknownField, "q"},
 		{"a mistyped flag", map[string]any{"include_membership": "true"}, httpx.ReasonInvalidField, "include_membership"},
+		{"ids naming no GitHub team id", map[string]any{"ids": []string{"11", "platform"}}, httpx.ReasonInvalidField, "ids[1]"},
+		{"exclude_ids naming a non-canonical id", map[string]any{"exclude_ids": []string{"011"}}, httpx.ReasonInvalidField, "exclude_ids[0]"},
+		{"exclude_ids naming an empty id", map[string]any{"exclude_ids": []string{""}}, httpx.ReasonInvalidField, "exclude_ids[0]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doJSON(t, srv, http.MethodPost, "/api/teams/default/github-groups/list", tc.body)
@@ -158,13 +215,21 @@ func TestTeamGitHubGroupsList_RefusesBadBodies(t *testing.T) {
 		})
 	}
 
+	// Every bad id is reported, across both filters.
+	rec := doJSON(t, srv, http.MethodPost, "/api/teams/default/github-groups/list",
+		map[string]any{"ids": []string{"x"}, "exclude_ids": []string{"y"}})
+	if items := errorItems(t, rec); rec.Code != http.StatusBadRequest || len(items) != 2 ||
+		items[0].Field != "ids[0]" || items[1].Field != "exclude_ids[0]" {
+		t.Errorf("two bad ids = %d %+v; want 400 naming ids[0] and exclude_ids[0]", rec.Code, items)
+	}
+
 	// A search at the cap is a search, not a fault.
 	if resp := listGitHubGroups(t, srv, map[string]any{"search": strings.Repeat("é", httpx.MaxSearchRunes)}); len(resp.Items) != 0 {
 		t.Errorf("a search at the cap matched %v; want nothing", itemIDs(resp.Items))
 	}
 	// include_membership annotates and narrows nothing, so a token minted
 	// without it still pages with it.
-	rec := doJSON(t, srv, http.MethodPost, "/api/teams/default/github-groups/list",
+	rec = doJSON(t, srv, http.MethodPost, "/api/teams/default/github-groups/list",
 		map[string]any{"page_size": 1, "page_token": first.NextPageToken, "include_membership": true})
 	if rec.Code != http.StatusOK {
 		t.Errorf("token plus include_membership = %d, want 200; body=%s", rec.Code, rec.Body.String())
