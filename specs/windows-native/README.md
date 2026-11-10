@@ -250,3 +250,14 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
   would be the starting point.
 - **gh channel on Windows.** See decision 4.
 - **Signing and distribution.** See decisions 2 and 3.
+- **CA bundle paths on Windows.** `internal/cabundle` reads only the Linux CA
+  bundle paths, so on Windows a consumer of `SSL_CERT_FILE` would trust only the
+  injected leaf certificate and not the system roots. Moot while the gh channel
+  is unavailable on Windows (decision 4); fix it before that channel is enabled.
+- **Same-tick re-raise.** `NotificationUpsertOf` can report a re-raise in the
+  same clock tick as an escalation when the clock is coarse, as the Windows
+  clock is.
+- **Go 1.27 `encoding/json` field names.** Under Go 1.27, `encoding/json` puts
+  array and map segments in `UnmarshalTypeError.Field`, which breaks the field
+  naming in `httpx`. This is not Windows-specific. The contributor has a patch
+  available.
