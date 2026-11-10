@@ -89,6 +89,11 @@ go_group() {
   # unformatted-checked on a Mac. goimports is single-threaded per process,
   # so fan it out across cores.
   blue "goimports"
+  # On Windows `go install` writes goimports.exe; bash's -x test finds it only
+  # by that name when GOIMPORTS was not set explicitly.
+  if [[ ! -x "$GOIMPORTS" && -x "$GOIMPORTS.exe" ]]; then
+    GOIMPORTS="$GOIMPORTS.exe"
+  fi
   if [[ ! -x "$GOIMPORTS" ]]; then
     red "goimports not found at $GOIMPORTS — run: go install golang.org/x/tools/cmd/goimports@latest"
     rc=1
@@ -145,7 +150,7 @@ go_group() {
   blue "cross-platform build"
   local host_target target
   host_target="$(go env GOOS)/$(go env GOARCH)"
-  for target in linux/amd64 darwin/arm64; do
+  for target in linux/amd64 darwin/arm64 windows/amd64; do
     if [[ "$target" == "$host_target" ]]; then
       green "skipping $target (host platform — typechecked by golangci-lint)"
       continue
@@ -366,6 +371,12 @@ go_group() {
 rust_group() {
   local rc=0
   blue "cargo fmt + clippy"
+  # The harness crate only builds for the Linux sandbox (std::os::unix,
+  # libc::kill), so a Windows host cannot compile it; CI's Linux job lints it.
+  if [[ "$(go env GOOS)" == "windows" ]]; then
+    green "skipped: the harness crate is Linux-only"
+    return 0
+  fi
   local CARGO="${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}"
   if [[ ! -x "$CARGO" ]]; then
     red "cargo not found — install rust (https://rustup.rs) or set CARGO=/path/to/cargo"
