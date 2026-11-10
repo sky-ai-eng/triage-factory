@@ -55,8 +55,10 @@ type reachGitHub struct {
 	// merged is the pull requests, by node id, the batch refresh answers as
 	// merged.
 	merged map[string]bool
-	// requests counts every request of any kind.
+	// requests counts every request of any kind, and paths records each one
+	// as "token METHOD path".
 	requests int
+	paths    []string
 }
 
 func newReachGitHub(t *testing.T, repos []reachRepo, grants, readable map[string][]string) *reachGitHub {
@@ -80,6 +82,7 @@ func (f *reachGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	f.mu.Lock()
 	f.requests++
+	f.paths = append(f.paths, token+" "+r.Method+" "+r.URL.Path)
 	f.mu.Unlock()
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/installation/repositories"):
@@ -175,6 +178,16 @@ func (f *reachGitHub) takeRequests() int {
 	n := f.requests
 	f.requests = 0
 	return n
+}
+
+// takePaths returns the requests that arrived since the last call, each as
+// "token METHOD path".
+func (f *reachGitHub) takePaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	paths := f.paths
+	f.paths = nil
+	return paths
 }
 
 // takeSent returns the node ids each token sent since the last call.

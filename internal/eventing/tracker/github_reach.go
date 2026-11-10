@@ -61,6 +61,12 @@ func (r GitHubReach) HoldsAny(repos []domain.Repository) bool {
 	return false
 }
 
+// Holds reports whether the reach holds repo, a registry row, by the rule
+// HoldsAny applies.
+func (r GitHubReach) Holds(repo domain.Repository) bool {
+	return r.holds(&repo)
+}
+
 // passShare is how one RefreshGitHub pass treats one of the org's active pull
 // requests.
 type passShare int
@@ -96,6 +102,9 @@ type githubPass struct {
 	// untracked holds the rows read this pass of repositories outside the
 	// tracked set, nil for one that could not be read, so each is read once.
 	untracked map[string]*domain.Repository
+	// narrowed is a RefreshMarkedGitHub pass, whose own pull requests are the
+	// ones in the repositories it was handed and nothing else.
+	narrowed bool
 }
 
 // share is e's share of the pass. listed is whether the pass's own discovery
@@ -105,9 +114,16 @@ type githubPass struct {
 // pass's own all the same: one GitHub renamed before TF applied the rename,
 // which the poller's intersection, matching by name, did not hand to any pass
 // this cycle.
+//
+// A narrowed pass's share is the repositories it was handed alone: anything
+// else, a renamed or an untracked repository's included, waits for the
+// scheduled pass.
 func (p *githubPass) share(ctx context.Context, e domain.Entity, listed bool) passShare {
 	if listed || p.handed[e.RepositoryID] {
 		return shareOwn
+	}
+	if p.narrowed {
+		return shareNone
 	}
 	if row, ok := p.tracked[e.RepositoryID]; ok {
 		if p.reach.holds(&row) {

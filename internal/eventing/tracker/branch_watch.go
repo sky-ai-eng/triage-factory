@@ -68,15 +68,22 @@ type baseWatchScope struct {
 	passRepos map[string]bool
 	// listedOK is the registry row ids whose open-PR listing answered 200.
 	listedOK map[string]bool
+	// marked is the base branches a refresh mark names, checked whatever
+	// their listing answered and however recently they were checked.
+	marked map[domain.BranchRef]bool
+	// noFloor leaves a branch last checked longer than staleRefreshFloor ago
+	// unchecked, for a narrowed pass, which leaves the timers to the
+	// scheduled pass.
+	noFloor bool
 }
 
 // watchBaseBranches checks the tip of each base branch the org's open pull
 // requests target in the pass's repositories, and records each move on the
 // pull requests it can have affected (see describeMove and recordBaseMove). A
 // branch is checked when its repository's open-PR listing answered 200 this
-// cycle, since a merged pull request leaves the listing, or when it was last
-// checked longer than staleRefreshFloor ago, which catches a push that changes
-// no pull request. Branches no open pull request in the org
+// cycle, since a merged pull request leaves the listing, when a refresh mark
+// names it, or when it was last checked longer than staleRefreshFloor ago,
+// which catches a push that changes no pull request. Branches no open pull request in the org
 // targets lose their row, whichever pass sees it.
 //
 // The base is the pull request's current one (basePR.base); open is every
@@ -147,7 +154,7 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 			continue
 		}
 		tip, ok := stored[ref]
-		if ok && !scope.listedOK[ref.RepositoryID] && now.Sub(tip.ObservedAt) <= staleRefreshFloor {
+		if ok && !scope.listedOK[ref.RepositoryID] && !scope.marked[ref] && (scope.noFloor || now.Sub(tip.ObservedAt) <= staleRefreshFloor) {
 			continue
 		}
 		repo, seen := repoNames[ref.RepositoryID]

@@ -578,5 +578,13 @@ func (a *App) newPollerManager() *poller.Manager {
 	// The Jira task rules and triggers the hourly drift check reads beside the
 	// status rules.
 	m.EventHandlers = a.stores.EventHandlers
+	// The refresh marks the GitHub webhook receivers write: honored by every
+	// scheduled cycle, and read between cycles by the narrowed pass the
+	// receivers' nudge (applyGitHubRefreshMarked) and the base tick start.
+	m.RefreshMarks = a.stores.GitHubRefreshMarks
+	// A narrowed pass emits no completed-poll notice, so it kicks the scorer
+	// itself. Through the relay wrapper, because a pass in flight when the
+	// lease moves finishes on a pod that no longer holds the brain.
+	m.TriggerScorer = a.triggerScorer
 	return m
 }

@@ -174,6 +174,26 @@ an hour. The org's admin fixes it: add the repositories to the App's
 installation on GitHub (installing the App on their account if it has none
 there), or untrack them.
 
+### GitHub changes no webhook announced
+
+With a GitHub App, Triage Factory refreshes a pull request a few seconds after
+GitHub sends a webhook about it. The scheduled poll still refreshes pull
+requests on three timers, which catch a change whose webhook never arrived.
+
+`tf_github_missed_hints_total` counts, by `org_id` and `rule`, the refreshes a
+timer made that found a change, one that produced an event, which no webhook
+had announced since the pull request was last refreshed:
+
+| `rule`          | The timer                                                                |
+| --------------- | ------------------------------------------------------------------------ |
+| `change_window` | Every poll for 5 minutes after the pull request last changed             |
+| `floor`         | A pull request not refreshed for 10 minutes                              |
+| `in_flight_ci`  | Every poll while one of the pull request's check runs is still running   |
+
+An org whose webhooks arrive reads close to 0. An org connected with a token,
+or with an App that has no webhook URL, receives no webhooks, so every change
+its timers find is counted.
+
 ### Mergeability probes
 
 Triage Factory learns whether a pull request conflicts by asking GitHub only
