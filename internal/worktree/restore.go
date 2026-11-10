@@ -46,6 +46,8 @@ type CheckoutRestore struct {
 	// BundlePath and PatchPath are the captured members, staged on disk; ""
 	// when the capture carried none.
 	BundlePath, PatchPath string
+	// LFSObjects are the captured Git LFS objects, each staged on disk.
+	LFSObjects []LFSObject
 }
 
 // PRCheckout is what a pr-<N> checkout's push settings are re-derived from.
@@ -105,8 +107,11 @@ var errRestoreInput = errors.New("invalid checkout restore")
 
 // RestoreCheckout rebuilds one checkout the way `workspace add` builds it — a
 // self-contained clone from the shared bare when the run is sandboxed, a linked
-// worktree otherwise — positioned at the captured HEAD, with the captured
-// uncommitted changes applied last.
+// worktree otherwise — positioned at the captured HEAD, with the captured Git
+// LFS objects in the checkout's LFS store (for a linked worktree, the shared
+// bare's), so the run's next push uploads them, and the captured uncommitted
+// changes applied last. Both of those come after the per-repo lock is
+// released: they write nothing another checkout of the repository depends on.
 //
 // The order inside the per-repo lock:
 //
@@ -123,7 +128,7 @@ var errRestoreInput = errors.New("invalid checkout restore")
 //  4. Re-derive push settings: a pr-<N> checkout gets the push tracking a
 //     fresh --pr checkout gets, a ref-*/default one the origin fetch refspec a
 //     fresh checkout leaves.
-//
+
 // Nothing of TF's is written into the checkout. On any failure the checkout,
 // its registration in the bare and the per-run refs and push config it wrote
 // there are removed, and the error is returned wrapped so a git host that could
@@ -160,6 +165,10 @@ func RestoreCheckout(ctx context.Context, r CheckoutRestore) (RestoredCheckout, 
 	res := RestoredCheckout{RepositoryID: r.RepositoryID, Owner: r.Owner, Repo: r.Repo, Path: wtDir}
 
 	if err := restoreCheckoutLocked(ctx, r, ref, prNumber, wtDir, &res); err != nil {
+		res.Discard()
+		return RestoredCheckout{}, fmt.Errorf("restore checkout %s/%s %s: %w", r.Owner, r.Repo, r.Slug, err)
+	}
+	if err := installLFSObjects(ctx, wtDir, r.LFSObjects); err != nil {
 		res.Discard()
 		return RestoredCheckout{}, fmt.Errorf("restore checkout %s/%s %s: %w", r.Owner, r.Repo, r.Slug, err)
 	}

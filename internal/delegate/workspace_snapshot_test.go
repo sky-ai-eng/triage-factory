@@ -1093,6 +1093,29 @@ func TestSnapshotWorkspace_PhaseSpans_NoCheckoutsNoSession(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkspace_ColdRehydrate_CarriesUnpushedLFSObjects: a run that
+// committed a new Git LFS file and lost its root before it pushed gets the
+// object back in the rebuilt checkout's LFS store, where its next push reads
+// it. The checkout is self-contained, so the store went with the root.
+func TestEnsureWorkspace_ColdRehydrate_CarriesUnpushedLFSObjects(t *testing.T) {
+	f := newSnapshotFixture(t, "task-lfs")
+	runmode.SetLocalSandboxForTest(t, true)
+	co := f.addCheckout(t, "acme/app", "default")
+	const content = "the run's new asset\n"
+	const oid = "3b83b1604b9aa647686a75a479e0a6da7471a96ac3228dac703c071d85f9dc9e"
+	object := filepath.Join(co, ".git", "lfs", "objects", oid[:2], oid[2:4], oid)
+	writeFile(t, object, content)
+	commitLFSPointer(t, co, "asset.bin", oid, len(content))
+
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), failingFreshBuilder(t)); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	assertFileContains(t, object, content)
+	assertFileContains(t, filepath.Join(co, "asset.bin"), "oid sha256:"+oid)
+}
+
 // TestEnsureWorkspace_ColdRehydrate_RebuildsAgainstTheRecordedRepository: a
 // snapshot records each checkout's repository row id beside its owner/repo,
 // and a restore rebuilds against that id — the seed is resolved for it, the

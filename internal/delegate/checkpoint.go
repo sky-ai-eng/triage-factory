@@ -35,6 +35,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -583,11 +584,11 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 }
 
 // snapshotFingerprint digests what a snapshot of this capture would carry:
-// every checkout's identity, the commits its bundle carries and the bytes of
-// its patch, in path order, then the transcript, and a stat walk of the scratch
-// the archive would walk. Two captures with the same fingerprint carry the same
-// workspace, so a checkpoint that matches the last one written has nothing to
-// store.
+// every checkout's identity, the commits its bundle carries, the bytes of its
+// patch and the ids of its Git LFS objects, in path order, then the
+// transcript, and a stat walk of the scratch the archive would walk. Two
+// captures with the same fingerprint carry the same workspace, so a checkpoint
+// that matches the last one written has nothing to store.
 //
 // A bundle is read by its header, not its bytes: git does not pack the same
 // commits into the same bytes twice, and a fingerprint over them would take
@@ -615,6 +616,12 @@ func snapshotFingerprint(ctx context.Context, captured *capturedSnapshot, wtPath
 		if err := hashMember(h, d.Patch, co.state.PatchPath); err != nil {
 			return "", fmt.Errorf("fingerprint %s patch: %w", co.rel, err)
 		}
+		oids := make([]string, 0, len(d.LFSObjects))
+		for _, obj := range d.LFSObjects {
+			oids = append(oids, obj.OID)
+		}
+		slices.Sort(oids)
+		field(append([]string{"lfs", strconv.Itoa(len(oids))}, oids...)...)
 	}
 	field("session", captured.state.SessionID)
 	if err := hashMember(h, captured.state.Transcript, ""); err != nil {

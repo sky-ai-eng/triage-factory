@@ -50,6 +50,7 @@ const (
 	keySizeBytes      = attribute.Key("size_bytes")
 	keySnapBundle     = attribute.Key("snapshot.bundle_bytes")
 	keySnapPatch      = attribute.Key("snapshot.patch_bytes")
+	keySnapLFS        = attribute.Key("snapshot.lfs_bytes")
 	keySnapTranscript = attribute.Key("snapshot.transcript_bytes")
 	keySnapRaw        = attribute.Key("snapshot.raw_bytes")
 	keySnapWaitedMS   = attribute.Key("snapshot.waited_ms")
@@ -171,14 +172,15 @@ func SizeBytes(n int64) attribute.KeyValue { return keySizeBytes.Int64(n) }
 
 // The workspace-snapshot member sizes, one per thing the snapshot carries,
 // plus the pre-compression total. They exist because SizeBytes alone could
-// not say where a slow snapshot's bytes came from: the git delta, the
-// scratch tree, or the transcript are captured, archived, and uploaded by
+// not say where a slow snapshot's bytes came from: the git delta and its Git
+// LFS objects, the scratch tree, or the transcript are captured, archived, and uploaded by
 // three different phases, and sizing a fix (shallower delta, faster codec,
 // multipart PUT) needs the split. snapshot.raw_bytes against the archive
 // span's SizeBytes is the compression ratio. All magnitudes — the member
 // NAMES are fixed format strings, so no key here can carry tenant data.
 func SnapshotBundleBytes(n int64) attribute.KeyValue     { return keySnapBundle.Int64(n) }
 func SnapshotPatchBytes(n int64) attribute.KeyValue      { return keySnapPatch.Int64(n) }
+func SnapshotLFSBytes(n int64) attribute.KeyValue        { return keySnapLFS.Int64(n) }
 func SnapshotTranscriptBytes(n int64) attribute.KeyValue { return keySnapTranscript.Int64(n) }
 func SnapshotRawBytes(n int64) attribute.KeyValue        { return keySnapRaw.Int64(n) }
 

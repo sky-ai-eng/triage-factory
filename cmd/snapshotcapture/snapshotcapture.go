@@ -66,7 +66,16 @@ func Run(ctx context.Context, root string, checkouts []string, stream io.Writer,
 		if err := members.finish(); err != nil {
 			return err
 		}
-		man.Checkouts = append(man.Checkouts, worktree.CheckoutCapture{Rel: rel, Delta: delta, HasBundle: hasBundle, HasPatch: hasPatch})
+		cc := worktree.CheckoutCapture{Rel: rel, Delta: delta, HasBundle: hasBundle, HasPatch: hasPatch}
+		if delta != nil {
+			for _, obj := range delta.LFSObjects {
+				if err := streamFile(sw, worktree.CaptureLFSMember(rel, obj.OID), obj.Path); err != nil {
+					return fmt.Errorf("capture %s LFS object %s: %w", rel, obj.OID, err)
+				}
+				cc.LFSObjects = append(cc.LFSObjects, obj.OID)
+			}
+		}
+		man.Checkouts = append(man.Checkouts, cc)
 	}
 
 	scratchFiles := 0
@@ -110,6 +119,24 @@ func Run(ctx context.Context, root string, checkouts []string, stream io.Writer,
 		return fmt.Errorf("encode manifest: %w", err)
 	}
 	return nil
+}
+
+// streamFile writes the file at path to the stream as one member.
+func streamFile(sw *sandbox.CaptureStreamWriter, name, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	m, err := sw.Member(name)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(m, f); err != nil {
+		_ = m.Close()
+		return err
+	}
+	return m.Close()
 }
 
 // memberWriters opens a stream member on a writer's first write, so a bundle
