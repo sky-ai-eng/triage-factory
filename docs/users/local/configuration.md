@@ -2,17 +2,19 @@
 
 Most of Triage Factory's settings live in the database and are edited in-app.
 This covers where state is kept on disk, how credentials reach agents, the
-Linux agent sandbox, and the clone protocol.
+agent sandbox (Linux), what Windows does differently, and the clone protocol.
 
 ## Where state lives
 
-Everything is under `~/.triagefactory/`:
+Everything is under `~/.triagefactory/` (on Windows,
+`%USERPROFILE%\.triagefactory\`):
 
 | Path                                   | Contents                                                                                          |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `triagefactory.db`                     | The SQLite database, settings included. You should never need to make changes directly in the db. |
 | `secrets.enc`                          | Credentials when there is no OS keychain ([Secret storage](secret-storage.md)).                   |
-| `bin/gh`                               | The `gh` release agents use.                                                                      |
+| `bin/gh`                               | The `gh` release agents use (macOS and Linux only).                                               |
+| `bin/triagefactory.exe`                | Windows only. The copy of the binary agents run as `triagefactory`. Triage Factory refreshes it.  |
 | `blobs/`                               | Snapshots of parked runs' workspaces.                                                             |
 | `teams/<team id>/kb/{private,shared}/` | The team's knowledge base, as plain files you can edit in any editor.                             |
 
@@ -44,7 +46,9 @@ Triage Factory's own environment.
 The one exception is the team setting **claude.ai connectors**, off by default,
 which lets runs on system Claude Code credentials use your connectors.
 
-## Agent sandbox (Linux)
+## Agent sandbox
+
+### Linux
 
 On Linux, each run executes in a
 [bubblewrap](https://github.com/containers/bubblewrap) namespace that hides your
@@ -66,6 +70,27 @@ sandbox off, for example when Triage Factory itself runs in a container:
 ```bash
 TF_LOCAL_SANDBOX=off triagefactory
 ```
+
+### Windows
+
+There is no agent sandbox on Windows. Each run is a plain child process with the
+full access of your user account: your home folder, the database, other runs'
+folders and the network. Triage Factory logs
+`local agent sandbox not available on Windows` at startup. Setting
+`TF_LOCAL_SANDBOX=on` fails at startup with
+`TF_LOCAL_SANDBOX=on cannot be honored on windows`; leave it unset or set it to
+`off`.
+
+Windows has two other differences that you can see:
+
+- Agents don't get a real `gh` binary. The pinned `gh` that macOS and Linux runs
+  use isn't published for Windows, so a run does its GitHub work with the
+  scoped `triagefactory exec gh …` commands instead. They use your stored GitHub
+  credential and record each action. Nothing needs configuring, and a run isn't
+  blocked by it.
+- Agents run shell commands in Git Bash (see
+  [Install](install.md#prerequisites)), and Triage Factory sets
+  `core.longpaths` for their Git, so deep checkouts work.
 
 ## Clone protocol
 

@@ -6,6 +6,9 @@ your own machine: SQLite for state under `~/.triagefactory/`, the OS keychain
 Postgres, GoTrue or Docker. Agents in this mode cannot be securely sandboxed to
 the same extent as a multi-tenant deployment.
 
+Local mode runs on macOS, Linux and Windows. On Windows, agent runs have no
+sandbox at all; see [Configuration](configuration.md#agent-sandbox).
+
 Local mode is intended for single developers or users without access to GitHub
 Apps through their enterprise. Many features from the multi-tenant mode are
 missing, but setup is intentionally lightweight and the full triage engine is
@@ -17,9 +20,9 @@ Claude, repositories, teams) is set up in the app.
 
 ## Pages
 
-- [Install](install.md): Homebrew, a release tarball, or a source build
+- [Install](install.md): Homebrew, a release tarball or zip, or a source build
 - [Running](running.md): flags, network exposure, `install` / `uninstall`
-- [Configuration](configuration.md): where state lives, credentials, the Linux agent sandbox, the clone protocol
+- [Configuration](configuration.md): where state lives, credentials, the agent sandbox, the clone protocol
 - [Secret storage](secret-storage.md): keychain or encrypted file, `TF_SECRET_ENCRYPTION_KEY`
 - [Running on a server](server.md): a host with no keychain or browser
 - [Tuning](tuning.md): run concurrency, disk, logging, tracing, the Claude binary
