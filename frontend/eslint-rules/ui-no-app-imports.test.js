@@ -40,7 +40,10 @@ describe('ui-no-app-imports', () => {
         { code: "import './table.css'", filename: COMPONENT },
         { code: "import { columnDef } from './columns'", filename: COMPONENT },
         // Across ui/, which is what src/ui/shared exists for.
-        { code: "import { useReducedMotion } from '../shared/useReducedMotion'", filename: COMPONENT },
+        {
+          code: "import { useReducedMotion } from '../shared/useReducedMotion'",
+          filename: COMPONENT,
+        },
         { code: "import { Checkbox } from '../checkbox/Checkbox'", filename: COMPONENT },
         // A ui file that is itself one level down.
         { code: "import { Pager } from '../table/Pager'", filename: SHARED },
@@ -108,6 +111,22 @@ describe('ui-no-app-imports', () => {
         {
           code: "import { api } from '../../lib/api'",
           filename: SHARED,
+          errors: [{ messageId: 'escapes' }],
+        },
+      ],
+    })
+  })
+
+  it('reads a Windows filename the same as a POSIX one', () => {
+    const WINDOWS_COMPONENT = 'C:\\repo\\frontend\\src\\ui\\table\\Table.tsx'
+    ruleTester.run('ui-no-app-imports', rule, {
+      valid: [
+        { code: "import { Checkbox } from '../checkbox/Checkbox'", filename: WINDOWS_COMPONENT },
+      ],
+      invalid: [
+        {
+          code: "import { api } from '../../lib/api'",
+          filename: WINDOWS_COMPONENT,
           errors: [{ messageId: 'escapes' }],
         },
       ],
