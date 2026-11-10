@@ -135,7 +135,7 @@ func TestEnsureSandboxSkillsLink_ForceReplaces(t *testing.T) {
 // TestSweepOrphanedStagingDirs reclaims leftover per-run staging dirs of both
 // kinds a launch mounts, while honoring the caller's warm-worktree keep set.
 func TestSweepOrphanedStagingDirs(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	setTestTmp(t, t.TempDir())
 	bases := []string{sandbox.SkillStagingBase(), sandbox.MemoryStagingBase()}
 	for _, base := range bases {
 		for _, name := range []string{"gone-run", "kept-run"} {

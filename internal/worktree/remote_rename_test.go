@@ -67,7 +67,8 @@ func TestStaleRemoteURLs_LinkedWorktreeReadsTheSharedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StaleRemoteURLs: %v", err)
 	}
-	if len(renames) != 1 || renames[0].ConfigPath != filepath.Join(bare, "config") {
+	// git reports the long-name spelling of a path TEMP gave in 8.3 form.
+	if len(renames) != 1 || !sameFileName(renames[0].ConfigPath, longPathName(filepath.Join(bare, "config"))) {
 		t.Fatalf("renames = %+v, want origin's url in %s", renames, filepath.Join(bare, "config"))
 	}
 	if err := RewriteRemoteURLs(context.Background(), renames); err != nil {

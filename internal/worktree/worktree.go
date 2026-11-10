@@ -122,7 +122,7 @@ func RunsBase() string {
 	if runmode.Current() == runmode.ModeMulti {
 		return filepath.Join(paths.StateRoot(), stateRunsDir)
 	}
-	return filepath.Join(os.TempDir(), runsDir)
+	return filepath.Join(longTempDir(), runsDir)
 }
 
 // CloneAuth is an optional HTTPS credential for a host-side `git clone` /
@@ -663,6 +663,11 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 // their pointers, whatever git-lfs the host has configured: a run fetches LFS
 // content when it asks for it (githooks.LFSSkipSmudgeEnvVar), so what a
 // checkout downloads never depends on the machine it runs on.
+//
+// On Windows the env also carries core.longpaths=true, an empty
+// credential.helper and GCM_INTERACTIVE=never (platformGitConfigPairs), layered
+// onto GIT_CONFIG_COUNT so an inherited GIT_CONFIG_* set and the http
+// extraHeader gitConfigEnviron adds both compose with them.
 func gitBaseEnv() []string {
 	parent := os.Environ()
 	out := make([]string, 0, len(parent)+2)
@@ -675,7 +680,8 @@ func gitBaseEnv() []string {
 		}
 		out = append(out, kv)
 	}
-	return append(out, "GIT_TERMINAL_PROMPT=0", githooks.LFSSkipSmudgeEnvVar+"=1")
+	out = append(out, "GIT_TERMINAL_PROMPT=0", githooks.LFSSkipSmudgeEnvVar+"=1")
+	return layerGitEnv(out, platformGitConfigPairs(), platformGitEnvVars())
 }
 
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {

@@ -1,6 +1,8 @@
 package worktree
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,28 @@ import (
 
 // claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
 const claudeProjectsDir = ".claude/projects"
+
+// ErrClaudeSessionNameTooLong is returned on Windows when the encoded project
+// directory name for a cwd exceeds the length Claude Code stores verbatim. Past
+// it Claude Code truncates the name and appends a hash TF does not reproduce, so
+// the session transcript cannot be located. Callers treat it like a missing
+// session: a crash-reclaim starts fresh, and a message resume reports the
+// session lost, as Claude Code itself does for such a cwd.
+var ErrClaudeSessionNameTooLong = errors.New("claude project directory name exceeds the length Claude Code stores verbatim")
+
+// WarnIfClaudeSessionNameTooLong logs a WARN and returns true when cwd's
+// encoded Claude project directory name is too long for TF to locate on this
+// platform (Windows only). Call it at launch so the cause of a later failed
+// resume is visible in the log of the run that created the problem.
+func WarnIfClaudeSessionNameTooLong(cwd string) bool {
+	encoded, resolved := claudeProjectEncoding(cwd)
+	if !claudeEncodedNameTooLong(encoded) {
+		return false
+	}
+	worktreeLog.Warn("encoded cwd exceeds Claude Code's project directory name limit; session resume and cleanup are unavailable for this run, shorten the state root or TEMP path",
+		"cwd", resolved, "encoded_len", len(encoded))
+	return true
+}
 
 // claudeHome resolves this process's home directory for ~/.claude
 // access. Claude Code SDK session state (the per-cwd JSONL transcripts
@@ -51,28 +75,12 @@ func ClaudeProjectDir(resolvedCwd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolvedCwd)), nil
-}
-
-// encodeClaudeProjectDir returns the directory name Claude Code uses
-// under ~/.claude/projects/ for a symlink-resolved absolute cwd.
-//
-// Encoding rule (verified empirically against Claude Code 2.1.119):
-// every '/' AND every '.' in the resolved path becomes '-'. The
-// dot-replacement is the part that's easy to miss — paths like
-// ~/.triagefactory/... contain dots, and only replacing slashes
-// produces a name Claude Code can't find: a resolved cwd like
-// `/Users/.../.triagefactory/...` encodes to
-// `-Users-...--triagefactory-...` (note the `--` where the dot got
-// collapsed), not `-Users-...-.triagefactory-...`.
-//
-// Caveat: only `/` and `.` are verified. Claude Code may also rewrite
-// other characters (underscores, spaces). The paths Triage Factory
-// actually uses (/tmp/triagefactory-runs/<uuid>) only contain slashes
-// and dots, so this matches in practice; if a cwd is ever configured
-// to a path with other special characters, revisit.
-func encodeClaudeProjectDir(resolvedAbs string) string {
-	return strings.NewReplacer("/", "-", ".", "-").Replace(resolvedAbs)
+	encoded := encodeClaudeProjectDir(resolvedCwd)
+	if claudeEncodedNameTooLong(encoded) {
+		worktreeLog.Warn("claude project dir name too long to locate", "cwd", resolvedCwd, "encoded_len", len(encoded))
+		return "", fmt.Errorf("%w: %d characters for %q", ErrClaudeSessionNameTooLong, len(encoded), resolvedCwd)
+	}
+	return filepath.Join(home, claudeProjectsDir, encoded), nil
 }
 
 // claudeProjectEncoding combines symlink resolution and encoding for
@@ -141,7 +149,12 @@ func RemoveClaudeProjectDir(cwd string) {
 	if err != nil {
 		return
 	}
-	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolved))
+	encoded := encodeClaudeProjectDir(resolved)
+	if claudeEncodedNameTooLong(encoded) {
+		worktreeLog.Warn("not removing claude project dir: name too long to locate", "cwd", resolved, "encoded_len", len(encoded))
+		return
+	}
+	projectDir := filepath.Join(home, claudeProjectsDir, encoded)
 	if err := os.RemoveAll(projectDir); err != nil {
 		worktreeLog.Warn("remove ghost project dir", "dir", projectDir, "error", err)
 	}

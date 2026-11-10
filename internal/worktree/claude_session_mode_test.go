@@ -11,13 +11,14 @@ import (
 func TestClaudeProjectDir_LocalModeUsesHome(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
-	dir, err := ClaudeProjectDir("/tmp/triagefactory-runs/run-1")
+	cwd := filepath.Join(string(filepath.Separator), "tmp", "triagefactory-runs", "run-1")
+	dir, err := ClaudeProjectDir(cwd)
 	if err != nil {
 		t.Fatalf("ClaudeProjectDir: %v", err)
 	}
-	want := filepath.Join(home, ".claude", "projects", "-tmp-triagefactory-runs-run-1")
+	want := filepath.Join(home, ".claude", "projects", encodeClaudeProjectDir(cwd))
 	if dir != want {
 		t.Fatalf("ClaudeProjectDir = %q, want %q", dir, want)
 	}
@@ -30,7 +31,7 @@ func TestClaudeProjectDir_SandboxedMultiUsesRunRoot(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	// Must NOT consult HOME at all: the sandboxed agent ran with
 	// HOME=/work, so its session tree is inside the run root on the host.
-	t.Setenv("HOME", "")
+	setTestHome(t, "")
 
 	dir, err := ClaudeProjectDir("/data/orgs/org-1/projects/p-1")
 	if err != nil {
