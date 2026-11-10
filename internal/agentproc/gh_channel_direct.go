@@ -59,7 +59,7 @@ func prependPath(dir, current string) string {
 	}
 	kept := make([]string, 0, strings.Count(current, string(os.PathListSeparator))+1)
 	for _, p := range filepath.SplitList(current) {
-		if p == "" || filepath.Clean(p) == dir {
+		if p == "" || samePathEntry(filepath.Clean(p), dir) {
 			continue
 		}
 		kept = append(kept, p)

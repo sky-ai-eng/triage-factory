@@ -58,12 +58,14 @@ type execProc struct {
 func newExecProc(cmd *exec.Cmd, tree *procTree) (*execProc, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		removeArgsFile(cmd)
 		tree.close()
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		removeArgsFile(cmd)
 		tree.close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
@@ -77,6 +79,7 @@ func newExecProc(cmd *exec.Cmd, tree *procTree) (*execProc, error) {
 // falls back to killing the direct child.
 func (p *execProc) Start() error {
 	if err := p.cmd.Start(); err != nil {
+		removeArgsFile(p.cmd)
 		p.tree.close()
 		return err
 	}
@@ -88,10 +91,12 @@ func (p *execProc) Start() error {
 	return nil
 }
 
-// Wait reaps the process, then releases the process tree. Releasing it ends
-// any descendant the agent left running.
+// Wait reaps the process, removes its args file if the wrapper never did, then
+// releases the process tree. Releasing it ends any descendant the agent left
+// running.
 func (p *execProc) Wait() error {
 	err := p.cmd.Wait()
+	removeArgsFile(p.cmd)
 	p.tree.close()
 	return err
 }

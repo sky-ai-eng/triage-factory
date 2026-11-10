@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -9,15 +10,22 @@ import (
 
 // TestAgentVisibleHelpers_LocalPassthrough exercises the un-sandboxed path
 // (tests run in local mode, so shouldSandbox() is false): both helpers must
-// return the host value unchanged. The sandbox branch (cell.WorkDir and
-// cell.TFBinaryPath) can't be unit-asserted here without forcing multi mode
-// and a Linux host.
+// return the host value unchanged, except where the platform spells it for the
+// agent differently (Windows: forward slashes, and the bare binary name found
+// on PATH). The sandbox branch (cell.WorkDir and cell.TFBinaryPath) can't be
+// unit-asserted here without forcing multi mode and a Linux host.
 func TestAgentVisibleHelpers_LocalPassthrough(t *testing.T) {
-	if got := AgentVisibleRoot("/data/worktrees/abc"); got != "/data/worktrees/abc" {
-		t.Errorf("AgentVisibleRoot local passthrough: got %q want %q", got, "/data/worktrees/abc")
+	root, bin := "/data/worktrees/abc", "/home/user/bin/triagefactory"
+	wantRoot, wantBin := root, bin
+	if runtime.GOOS == "windows" {
+		root, bin = `C:\data\worktrees\abc`, `C:\Users\me\triagefactory.exe`
+		wantRoot, wantBin = "C:/data/worktrees/abc", "triagefactory"
 	}
-	if got := AgentVisibleBinary("/home/user/bin/triagefactory"); got != "/home/user/bin/triagefactory" {
-		t.Errorf("AgentVisibleBinary local passthrough: got %q want %q", got, "/home/user/bin/triagefactory")
+	if got := AgentVisibleRoot(root); got != wantRoot {
+		t.Errorf("AgentVisibleRoot local passthrough: got %q want %q", got, wantRoot)
+	}
+	if got := AgentVisibleBinary(bin); got != wantBin {
+		t.Errorf("AgentVisibleBinary local passthrough: got %q want %q", got, wantBin)
 	}
 }
 

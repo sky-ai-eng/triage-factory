@@ -32,7 +32,8 @@ func TestDirectGHChannelEnv_Off(t *testing.T) {
 }
 
 func TestDirectGHChannelEnv_Shape(t *testing.T) {
-	t.Setenv("PATH", "/usr/bin:/bin")
+	sep := string(os.PathListSeparator)
+	t.Setenv("PATH", "/usr/bin"+sep+"/bin")
 	gc := &GHChannelParams{
 		Host:           "127.0.0.1:54321",
 		Token:          "per-run-placeholder",
@@ -57,7 +58,7 @@ func TestDirectGHChannelEnv_Shape(t *testing.T) {
 	// PATH must LEAD with the TF-owned dir, or `gh` resolves to whatever the
 	// user has installed — which carries the user's own GitHub auth.
 	parts := filepath.SplitList(env["PATH"])
-	if len(parts) == 0 || parts[0] != "/state/bin" {
+	if len(parts) == 0 || parts[0] != filepath.Clean("/state/bin") {
 		t.Errorf("PATH = %q, want it to lead with the TF-owned gh dir", env["PATH"])
 	}
 	if !strings.Contains(env["PATH"], "/usr/bin") {
@@ -87,8 +88,11 @@ func TestDirectGHChannelEnv_PlaceholderOnly(t *testing.T) {
 
 func TestPrependPath(t *testing.T) {
 	sep := string(os.PathListSeparator)
-	if got := prependPath("/tf/bin", ""); got != "/tf/bin" {
-		t.Errorf("empty PATH = %q, want /tf/bin", got)
+	// prependPath cleans the directory, which spells it with the platform's
+	// separator; the expectations do too.
+	tf := filepath.Clean("/tf/bin")
+	if got := prependPath("/tf/bin", ""); got != tf {
+		t.Errorf("empty PATH = %q, want %s", got, tf)
 	}
 	// Idempotent: applying it twice must not accumulate duplicates.
 	once := prependPath("/tf/bin", "/usr/bin"+sep+"/bin")
@@ -97,7 +101,7 @@ func TestPrependPath(t *testing.T) {
 	}
 	// An existing copy anywhere in PATH moves to the front rather than
 	// leaving a stale duplicate behind it.
-	if got := prependPath("/tf/bin", "/usr/bin"+sep+"/tf/bin"); got != "/tf/bin"+sep+"/usr/bin" {
+	if got := prependPath("/tf/bin", "/usr/bin"+sep+"/tf/bin"); got != tf+sep+"/usr/bin" {
 		t.Errorf("prepend over an existing entry = %q", got)
 	}
 }

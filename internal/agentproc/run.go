@@ -681,6 +681,16 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	if err != nil {
 		return nil, err
 	}
+	if useArgsFile {
+		// After every flag above is in nodeArgs, so the file carries the whole
+		// list; nodeArgs is the tail of argv whatever launcher precedes it.
+		split := len(argv) - len(nodeArgs)
+		tail, err := rewriteArgsFile(argsFileDir(), argv[split:])
+		if err != nil {
+			return nil, err
+		}
+		argv = append(slices.Clip(argv[:split]), tail...)
+	}
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = opts.Cwd
 	// Install the TF-controlled git hooks dir as process-scoped
@@ -740,6 +750,8 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// LFS content, which is TF's call to make the same way in every run.
 	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	// On Windows, the Git Bash the preflight approved; nothing elsewhere.
+	hookEnv = append(hookEnv, gitBashEnv()...)
 	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1", githooks.LFSSkipSmudgeEnvVar+"=1")
 	if opts.LocalSandbox != nil {
 		// Re-add the marker the strip above removed, deliberately: this process
@@ -764,7 +776,12 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// Claude Code itself applies the two in. Empty when a credential was
 	// resolved.
 	parentEnv = append(parentEnv, auth.env...)
-	cmd.Env = githooks.DirectAgentEnv(mergeEnv(parentEnv, hookEnv, creds), identityPairs...)
+	env, err := withAgentBinOnPath(mergeEnv(parentEnv, hookEnv, creds))
+	if err != nil {
+		removeArgsFile(cmd)
+		return nil, err
+	}
+	cmd.Env = githooks.DirectAgentEnv(env, identityPairs...)
 	return cmd, nil
 }
 
@@ -774,7 +791,8 @@ const envClaudeBinary = "TF_CLAUDE_BINARY"
 
 // claudeBinaryOverride resolves TF_CLAUDE_BINARY to an absolute path to an
 // executable file, or "" when unset (normal binary resolution). A set-but-
-// unusable value — missing, a directory, or not executable — is a hard error:
+// unusable value — missing, a directory, or not executable (on Windows, not an
+// .exe or .js file) — is a hard error:
 // an explicit override that's wrong should fail the spawn loudly rather than
 // silently fall back to the bundled binary and mask the misconfiguration.
 func claudeBinaryOverride() (string, error) {
@@ -799,8 +817,8 @@ func claudeBinaryOverride() (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("%s=%q is a directory, not a Claude binary", envClaudeBinary, raw)
 	}
-	if info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("%s=%q is not executable", envClaudeBinary, raw)
+	if err := checkClaudeBinaryRunnable(raw, abs, info); err != nil {
+		return "", err
 	}
 	return abs, nil
 }
