@@ -465,6 +465,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	defer func() { _ = localSbx.Close() }()
 
+	// A cold resume spawns a new session in the same cwd, so the long-name
+	// warning applies to it as it does to a first launch.
+	worktree.WarnIfClaudeSessionNameTooLong(cwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, opts.TeamID)
 	baseOpts := agentproc.RunOptions{
 		Cwd:                cwd,

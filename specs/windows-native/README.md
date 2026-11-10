@@ -250,6 +250,3 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
   would be the starting point.
 - **gh channel on Windows.** See decision 4.
 - **Signing and distribution.** See decisions 2 and 3.
-- **Launch WARN for long session names.** `worktree.WarnIfClaudeSessionNameTooLong`
-  exists but is not called at run launch, so the log only shows the cause when a
-  resume or cleanup hits it.

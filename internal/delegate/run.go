@@ -573,6 +573,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 
+	// Logged at launch so a later failed resume of this session has its cause in
+	// the log of the run that created it. The result is not acted on: the run
+	// proceeds, it only cannot be resumed.
+	worktree.WarnIfClaudeSessionNameTooLong(claudeCwd)
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, teamID)
 	baseOpts := agentproc.RunOptions{
