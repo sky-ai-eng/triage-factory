@@ -3,6 +3,8 @@
 package agentproc
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
@@ -46,7 +49,8 @@ var agentBinaryMu sync.Mutex
 func agentBinDir() string { return filepath.Join(paths.StateRoot(), "bin") }
 
 // withAgentBinOnPath returns env with the TF-owned bin directory leading PATH,
-// after making sure <StateRoot>\bin\triagefactory.exe is this binary. It reads
+// after making sure <StateRoot>\bin\triagefactory.exe is a copy of this binary,
+// and turns off the current directory in the executable search. It reads
 // the PATH the child is about to get from env itself, so it composes with
 // whatever the credential, gh-channel and operator-settings layers did to it.
 //
@@ -62,7 +66,28 @@ func withAgentBinOnPath(env []string) ([]string, error) {
 	if err := ensureAgentBinary(self, dir); err != nil {
 		return nil, err
 	}
-	return setPathLeading(env, dir), nil
+	return setEnvVar(setPathLeading(env, dir), noDefaultCwdInExePathEnv, "1"), nil
+}
+
+// noDefaultCwdInExePathEnv makes the Windows executable search skip the current
+// directory. Without it, a bare command name resolves in the working directory
+// first, and the agent's working directory is a repository checkout, so a
+// program the checkout carries (git.exe, triagefactory.exe) would run in place
+// of the one on PATH.
+const noDefaultCwdInExePathEnv = "NoDefaultCurrentDirectoryInExePath"
+
+// setEnvVar returns env with exactly one entry for key, set to value. Windows
+// environment names are case-insensitive, so every spelling already in env is
+// dropped.
+func setEnvVar(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok && strings.EqualFold(k, key) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, key+"="+value)
 }
 
 // setPathLeading returns env with dir first in its PATH entry. Windows
@@ -83,11 +108,13 @@ func setPathLeading(env []string, dir string) []string {
 	return append(out, key+"="+prependPath(dir, current))
 }
 
-// ensureAgentBinary makes <dir>\triagefactory.exe the running binary, cheaply
-// when it already is. The file is a hardlink to self where the volume allows,
-// so a TF upgrade that replaces the install is seen at once; where it does not
-// (another volume, a filesystem without links) it is a copy, recognised as
-// current by size and modification time.
+// ensureAgentBinary makes <dir>\triagefactory.exe a copy of the running binary,
+// cheaply when it already is. It is always a copy and never a link: the agent
+// runs as the operator and can write to <dir>, and a hardlink would alias the
+// installed binary, so a write through the agent-visible path would modify it.
+// A copy is recognised as current only when its size and SHA-256 equal the
+// running binary's, so an agent that rewrote the file (and reset its
+// modification time) is caught and the file replaced.
 //
 // A stale file is renamed aside rather than overwritten: a run still using the
 // previous version holds it open, and Windows allows a rename of an open image
@@ -101,6 +128,10 @@ func ensureAgentBinary(self, dir string) error {
 	if err != nil {
 		return fmt.Errorf("stat own binary %s: %w", self, err)
 	}
+	selfSum, err := ownBinaryDigest(self, selfInfo)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create agent bin directory %s: %w", dir, err)
 	}
@@ -110,7 +141,11 @@ func ensureAgentBinary(self, dir string) error {
 	dstInfo, err := os.Lstat(dst)
 	switch {
 	case err == nil:
-		if isCurrentAgentBinary(dstInfo, selfInfo) {
+		current, err := isCurrentAgentBinary(dst, dstInfo, selfInfo, selfSum)
+		if err != nil {
+			agentprocLog.Debug("agent binary could not be verified; replacing it", "path", dst, "error", err)
+		}
+		if current {
 			return nil
 		}
 		if err := os.Remove(aside); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -124,11 +159,8 @@ func ensureAgentBinary(self, dir string) error {
 		return fmt.Errorf("stat agent binary %s: %w", dst, err)
 	}
 
-	if err := os.Link(self, dst); err != nil {
-		agentprocLog.Debug("hardlink agent binary failed; copying", "from", self, "to", dst, "error", err)
-		if err := copyAgentBinary(self, dst, selfInfo); err != nil {
-			return err
-		}
+	if err := copyAgentBinary(self, dst); err != nil {
+		return err
 	}
 	if err := os.Remove(aside); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		agentprocLog.Debug("remove replaced agent binary failed; it is replaced on the next refresh", "path", aside, "error", err)
@@ -136,21 +168,64 @@ func ensureAgentBinary(self, dir string) error {
 	return nil
 }
 
-// isCurrentAgentBinary reports whether the file at the agent-visible path is
-// already this binary: the same file (a hardlink), or a regular-file copy with
-// the same size and modification time (copyAgentBinary stamps the copy with
-// the original's).
-func isCurrentAgentBinary(dst, self fs.FileInfo) bool {
-	if os.SameFile(dst, self) {
-		return true
+// isCurrentAgentBinary reports whether the file at the agent-visible path is a
+// regular file that is not the running binary itself (a leftover hardlink
+// aliases the install and is replaced by a copy) and holds the same bytes: equal
+// size, then equal SHA-256. The file is hashed on every call, since a cheaper
+// stamp such as its modification time is one the agent can reset.
+func isCurrentAgentBinary(dst string, dstInfo, selfInfo fs.FileInfo, selfSum string) (bool, error) {
+	if !dstInfo.Mode().IsRegular() || os.SameFile(dstInfo, selfInfo) || dstInfo.Size() != selfInfo.Size() {
+		return false, nil
 	}
-	return dst.Mode().IsRegular() && dst.Size() == self.Size() && dst.ModTime().Equal(self.ModTime())
+	sum, err := fileDigest(dst)
+	if err != nil {
+		return false, err
+	}
+	return sum == selfSum, nil
+}
+
+// ownDigest caches the digest of the running binary so it is hashed once per
+// process rather than once per spawn. The key is the file's identity at the
+// time it was hashed, so a TF upgrade that replaces the file at the same path
+// is rehashed.
+var ownDigest struct {
+	path    string
+	size    int64
+	modTime time.Time
+	sum     string
+}
+
+// ownBinaryDigest returns the hex SHA-256 of the running binary at self. The
+// caller holds agentBinaryMu.
+func ownBinaryDigest(self string, info fs.FileInfo) (string, error) {
+	if ownDigest.sum != "" && ownDigest.path == self && ownDigest.size == info.Size() && ownDigest.modTime.Equal(info.ModTime()) {
+		return ownDigest.sum, nil
+	}
+	sum, err := fileDigest(self)
+	if err != nil {
+		return "", fmt.Errorf("hash own binary %s: %w", self, err)
+	}
+	ownDigest.path, ownDigest.size, ownDigest.modTime, ownDigest.sum = self, info.Size(), info.ModTime(), sum
+	return sum, nil
+}
+
+// fileDigest returns the hex SHA-256 of the file at path.
+func fileDigest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // copyAgentBinary copies self to dst through a temporary file, so a reader
-// never sees a half-written executable, and gives it self's modification time
-// so a later call can tell the copy is current.
-func copyAgentBinary(self, dst string, selfInfo fs.FileInfo) error {
+// never sees a half-written executable.
+func copyAgentBinary(self, dst string) error {
 	src, err := os.Open(self)
 	if err != nil {
 		return fmt.Errorf("open own binary %s: %w", self, err)
@@ -169,10 +244,6 @@ func copyAgentBinary(self, dst string, selfInfo fs.FileInfo) error {
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("close agent binary copy %s: %w", tmpName, err)
-	}
-	if err := os.Chtimes(tmpName, selfInfo.ModTime(), selfInfo.ModTime()); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("stamp agent binary copy %s: %w", tmpName, err)
 	}
 	if err := os.Rename(tmpName, dst); err != nil {
 		_ = os.Remove(tmpName)
