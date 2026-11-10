@@ -179,10 +179,10 @@ const (
 )
 
 // unpackCaptureStream reads the jail's stream into stagingDir: each checkout's
-// bundle and patch as files, and every scratch file under treeDir/_tfac. A
-// member this process did not ask for, one named outside the places members
-// go, one the manifest did not announce, or a stream cut short is a failed
-// capture, never a partial one.
+// bundle, patch and Git LFS objects as files, and every scratch file under
+// treeDir/_tfac. A member this process did not ask for, one named outside the
+// places members go, one the manifest did not announce, or a stream cut short
+// is a failed capture, never a partial one.
 func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.CaptureManifest) (unpackedCapture, error) {
 	f, err := os.OpenFile(streamPath, os.O_RDWR, 0)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -282,5 +283,33 @@ func TestCaptureUncommitted_FetchedLFSFileStaysOut(t *testing.T) {
 				assertFileContent(t, filepath.Join(got, "new.bin"), "uncommitted asset\n")
 			})
 		}
+	}
+}
+
+// TestDropFetchedLFSPaths pins that the scoped stage never sees an LFS file
+// the run fetched, so the capture neither hashes nor stores it, while an LFS
+// file edited past its pointer and every other change stay in.
+func TestDropFetchedLFSPaths(t *testing.T) {
+	ctx := context.Background()
+	fetched, edited := newLFSContent("fetched asset\n"), newLFSContent("edited asset\n")
+	wtDir := captureWorktree(t, sanitizeRootKey(t.Name()))
+	writeUnder(t, wtDir, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+	writeUnder(t, wtDir, "fetched.bin", fetched.pointer)
+	writeUnder(t, wtDir, "edited.bin", edited.pointer)
+	gitNoLFS(t, wtDir, "add", "-A")
+	gitNoLFS(t, wtDir, "-c", "user.name=Seed", "-c", "user.email=seed@example.test", "commit", "-q", "-m", "lfs files")
+	storeLFSObject(t, wtDir, fetched)
+	writeUnder(t, wtDir, "fetched.bin", fetched.content)
+	writeUnder(t, wtDir, "edited.bin", "edited past its pointer\n")
+	writeUnder(t, wtDir, "tracked.txt", "changed\n")
+
+	changed, ok := changedPathsVsHEAD(ctx, wtDir)
+	if !ok || !slices.Contains(changed, "fetched.bin") {
+		t.Fatalf("pre-pass = %v (ok %v); the fixture needs fetched.bin to read as modified", changed, ok)
+	}
+	got := dropFetchedLFSPaths(ctx, wtDir, changed)
+	slices.Sort(got)
+	if want := []string{"edited.bin", "tracked.txt"}; !slices.Equal(got, want) {
+		t.Errorf("dropFetchedLFSPaths = %v, want %v", got, want)
 	}
 }

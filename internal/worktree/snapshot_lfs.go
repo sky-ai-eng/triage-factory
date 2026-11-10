@@ -116,8 +116,8 @@ func lfsStoreExists(objectsDir string) bool {
 // checkout holds and nothing upstream may have. It scans the range as `git lfs
 // pre-push` does: every blob in it under the pointer size cutoff, read as a
 // pointer. An object the checkout does not hold, or holds at a size its
-// pointer does not name, is left out: the push fails on it the way it would
-// have without the snapshot.
+// pointer does not name, is left out: what the store has there is not the
+// object.
 //
 // --missing=allow-any keeps the walk from fetching a blob a partial clone
 // lacks. Such a blob came from upstream, so whatever object it names is not
@@ -136,7 +136,11 @@ func unpushedLFSObjects(ctx context.Context, wtPath, rev string) ([]LFSObject, e
 	if err != nil {
 		return nil, fmt.Errorf("git rev-list --objects: %w", err)
 	}
-	pointers, err := readLFSPointers(ctx, wtPath, nil, strings.Fields(string(out)))
+	blobs, err := smallBlobs(ctx, wtPath, nil, strings.Fields(string(out)))
+	if err != nil {
+		return nil, err
+	}
+	pointers, err := readLFSPointers(ctx, wtPath, nil, blobs)
 	if err != nil {
 		return nil, err
 	}
@@ -170,33 +174,52 @@ func unpushedLFSObjects(ctx context.Context, wtPath, rev string) ([]LFSObject, e
 	return objects, nil
 }
 
-// readLFSPointers reads every blob among oids small enough to be a Git LFS
-// pointer and returns the ones that are, keyed by blob id. Only objects git
-// already holds are asked about: cat-file fetches one a partial clone lacks.
-func readLFSPointers(ctx context.Context, dir string, env []string, oids []string) (map[string]lfsPointer, error) {
-	if len(oids) == 0 {
+// smallBlobs asks git about each object name in names and returns, in the
+// same order, the blob id of each that is a blob small enough to be a Git LFS
+// pointer, and "" for each that is not (or that git does not hold). Asking
+// does not fetch: the names are of objects git already holds, or, in a
+// partial clone, of blobs a checkout read.
+func smallBlobs(ctx context.Context, dir string, env []string, names []string) ([]string, error) {
+	if len(names) == 0 {
 		return nil, nil
 	}
 	var check bytes.Buffer
-	if err := gitCaptureIO(ctx, dir, env, strings.NewReader(strings.Join(oids, "\n")+"\n"), &check,
+	if err := gitCaptureIO(ctx, dir, env, strings.NewReader(strings.Join(names, "\n")+"\n"), &check,
 		"cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"); err != nil {
 		return nil, fmt.Errorf("git cat-file --batch-check: %w", err)
 	}
-	var small []string
-	for _, line := range strings.Split(strings.TrimSpace(check.String()), "\n") {
+	lines := strings.Split(strings.TrimSuffix(check.String(), "\n"), "\n")
+	if len(lines) != len(names) {
+		return nil, fmt.Errorf("git cat-file --batch-check answered %d of %d names", len(lines), len(names))
+	}
+	blobs := make([]string, len(names))
+	for i, line := range lines {
 		f := strings.Fields(line)
 		if len(f) != 3 || f[1] != "blob" {
 			continue
 		}
 		if n, err := strconv.ParseInt(f[2], 10, 64); err == nil && n < lfsPointerMaxSize {
-			small = append(small, f[0])
+			blobs[i] = f[0]
 		}
 	}
-	if len(small) == 0 {
+	return blobs, nil
+}
+
+// readLFSPointers reads each of blobs, small blob ids smallBlobs returned, and
+// returns the ones that are Git LFS pointers, keyed by blob id. "" entries are
+// skipped.
+func readLFSPointers(ctx context.Context, dir string, env []string, blobs []string) (map[string]lfsPointer, error) {
+	var ids []string
+	for _, b := range blobs {
+		if b != "" {
+			ids = append(ids, b)
+		}
+	}
+	if len(ids) == 0 {
 		return nil, nil
 	}
 	var contents bytes.Buffer
-	if err := gitCaptureIO(ctx, dir, env, strings.NewReader(strings.Join(small, "\n")+"\n"), &contents, "cat-file", "--batch"); err != nil {
+	if err := gitCaptureIO(ctx, dir, env, strings.NewReader(strings.Join(ids, "\n")+"\n"), &contents, "cat-file", "--batch"); err != nil {
 		return nil, fmt.Errorf("git cat-file --batch: %w", err)
 	}
 	pointers := map[string]lfsPointer{}
@@ -230,9 +253,8 @@ func readLFSPointers(ctx context.Context, dir string, env []string, oids []strin
 // installLFSObjects writes each object into the Git LFS store of the checkout
 // at wtDir, where git-lfs finds it, so the run's next push uploads it. An
 // object is installed only as content that hashes to its id, and one that does
-// not is left out with a warning: the snapshot is not what was written, and
-// the push then fails on that object as it would have without the snapshot.
-// An object the store already holds is kept as it is.
+// not is left out with a warning, since the snapshot does not hold that
+// object. An object the store already holds is kept as it is.
 func installLFSObjects(ctx context.Context, wtDir string, objects []LFSObject) error {
 	if len(objects) == 0 {
 		return nil
@@ -284,7 +306,7 @@ func installLFSObject(objectsDir string, obj LFSObject) (err error) {
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != obj.OID {
 		_ = os.Remove(tmp.Name())
-		worktreeLog.Warn("snapshot's LFS object does not hash to its id; it is not restored, and a push that needs it will fail", "oid", obj.OID, "sha256", got)
+		worktreeLog.Warn("snapshot's LFS object does not hash to its id; it is not restored", "oid", obj.OID, "sha256", got)
 		return nil
 	}
 	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
@@ -293,15 +315,61 @@ func installLFSObject(objectsDir string, obj LFSObject) (err error) {
 	return os.Rename(tmp.Name(), dest)
 }
 
-// unstageFetchedLFSFiles takes back out of a capture's temp index every file
-// whose HEAD blob is a Git LFS pointer and whose content is the object that
-// pointer names: an LFS file the run fetched. git-lfs would clean it back into
-// the same pointer, so nothing about it changed, but the capture's git runs
-// without git-lfs's filter, and a file whose index entry does not match it by
-// stat alone (one written in the same second as the index, or any file once
-// the stage falls back to `add -A`) is staged as its content. Left in, a
-// fetched file rides in the patch whole. The restored checkout holds its
-// pointer instead, and the run fetches the object again.
+// dropFetchedLFSPaths returns paths without the LFS files the run fetched:
+// every file whose HEAD blob is a Git LFS pointer and whose content is the
+// object that pointer names. git-lfs would clean such a file back into the
+// same pointer, so nothing about it changed. But the capture's git runs
+// without git-lfs's filter, and reads the file as modified whenever the index
+// cannot vouch for it by stat alone, which it cannot for a file written in the
+// same second as the index: every file `git lfs pull` writes, until the index
+// is next rewritten. Staged, the file would be hashed and stored whole, and
+// ride in the patch whole. Left out, the restored checkout holds its pointer,
+// and the run fetches the object again.
+//
+// Best-effort: on a failure paths come back as they were, and a fetched file
+// then travels whole, which restores the same tree. A path holding a newline
+// cannot be named on cat-file's input and stays in.
+func dropFetchedLFSPaths(ctx context.Context, wtPath string, paths []string) []string {
+	if objectsDir, err := lfsObjectsDir(ctx, wtPath); err != nil || !lfsStoreExists(objectsDir) {
+		return paths
+	}
+	var named []string
+	var names []string
+	for _, p := range paths {
+		if !strings.Contains(p, "\n") {
+			named = append(named, p)
+			names = append(names, "HEAD:"+p)
+		}
+	}
+	blobs, err := smallBlobs(ctx, wtPath, nil, names)
+	if err != nil {
+		return paths
+	}
+	pointers, err := readLFSPointers(ctx, wtPath, nil, blobs)
+	if err != nil || len(pointers) == 0 {
+		return paths
+	}
+	fetched := map[string]bool{}
+	for i, p := range named {
+		if ptr, ok := pointers[blobs[i]]; ok && fileHoldsLFSObject(filepath.Join(wtPath, filepath.FromSlash(p)), ptr) {
+			fetched[p] = true
+		}
+	}
+	if len(fetched) == 0 {
+		return paths
+	}
+	kept := make([]string, 0, len(paths)-len(fetched))
+	for _, p := range paths {
+		if !fetched[p] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// unstageFetchedLFSFiles takes the LFS files the run fetched (as
+// dropFetchedLFSPaths finds them) back out of a capture's temp index once the
+// full `add -A` has staged them, which leaves them out of the patch.
 //
 // Best-effort: a failure leaves the index as it was, and a file then travels
 // whole, which restores the same tree.
@@ -328,7 +396,11 @@ func unstageFetchedLFSFiles(ctx context.Context, wtPath string, env []string) {
 		entries = append(entries, entry{mode: f[0], blob: f[2], path: tokens[i+1]})
 		blobs = append(blobs, f[2])
 	}
-	pointers, err := readLFSPointers(ctx, wtPath, env, blobs)
+	small, err := smallBlobs(ctx, wtPath, env, blobs)
+	if err != nil {
+		return
+	}
+	pointers, err := readLFSPointers(ctx, wtPath, env, small)
 	if err != nil || len(pointers) == 0 {
 		return
 	}

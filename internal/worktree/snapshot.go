@@ -420,9 +420,13 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 
 func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool, error) {
 	changed, scoped := changedPathsVsHEAD(ctx, wtPath)
+	if scoped {
+		changed = dropFetchedLFSPaths(ctx, wtPath, changed)
+	}
 	if scoped && len(changed) == 0 {
-		// The real index's stat cache says the tree matches HEAD exactly —
-		// nothing uncommitted to carry, and no temp index to build.
+		// The real index's stat cache says the tree matches HEAD exactly, or
+		// differs only in LFS files the run fetched — nothing uncommitted to
+		// carry, and no temp index to build.
 		return false, nil
 	}
 
@@ -480,8 +484,10 @@ func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool
 		if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
 			return false, fmt.Errorf("stage worktree: %w", err)
 		}
+		// The full stage cannot leave fetched LFS files out the way the
+		// scoped one does, so it takes them back out of the index after.
+		unstageFetchedLFSFiles(ctx, wtPath, env)
 	}
-	unstageFetchedLFSFiles(ctx, wtPath, env)
 	cw := &captureCountingWriter{w: w}
 	if err := gitCaptureTo(ctx, wtPath, env, cw, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD"); err != nil {
 		return false, fmt.Errorf("diff temp index: %w", err)
@@ -565,10 +571,10 @@ func gitCaptureTo(ctx context.Context, dir string, env []string, stdout io.Write
 
 // captureLFSFilterOff turns git-lfs's filter driver off for every capture git
 // runs, whatever the host's or the checkout's config says, so the capture
-// reads the same tree in both modes. A file git-lfs would clean into a pointer
-// is then staged as its content, which is what lets an uncommitted LFS file
-// travel in the patch. The command line outranks every config file, and a
-// driver whose commands are empty runs nothing.
+// reads LFS files the same way in both modes. A file git-lfs would clean into
+// a pointer is then staged as its content, which is what lets an uncommitted
+// LFS file travel in the patch. The command line outranks every config file,
+// and a driver whose commands are empty runs nothing.
 var captureLFSFilterOff = []string{
 	"-c", "filter.lfs.process=",
 	"-c", "filter.lfs.clean=",
