@@ -115,6 +115,33 @@ func TestInstallCopy_RunningOldCopyDoesNotBlockUpgrade(t *testing.T) {
 	}
 }
 
+// Only target.old and target.old.<digits> are ours to delete; a file a person
+// named target.old.bak survives an upgrade.
+func TestInstallCopy_UpgradeKeepsLookalikeFiles(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "triagefactory.exe")
+	if _, err := installCopy(fakeBinary(t, "v1"), target, false); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dir, "triagefactory.exe.old.bak")
+	if err := os.WriteFile(keep, []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	numbered := target + ".old.7"
+	if err := os.WriteFile(numbered, []byte("ours"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installCopy(fakeBinary(t, "v2"), target, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, keep); got != "mine" {
+		t.Errorf("triagefactory.exe.old.bak was touched: %q", got)
+	}
+	if _, err := os.Stat(numbered); !os.IsNotExist(err) {
+		t.Errorf("a numbered aside should be cleaned up, stat err = %v", err)
+	}
+}
+
 func TestInstallCopy_FailedSwapKeepsOriginalAndLeavesNoTemp(t *testing.T) {
 	// os.Open shares read/write but not delete, so the rename-aside is refused
 	// the way it is when an antivirus scanner holds the file.

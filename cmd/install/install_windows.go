@@ -96,7 +96,7 @@ func installCopy(src, target string, force bool) (installResult, error) {
 	var old string
 	if exists {
 		var err error
-		if old, err = asidePath(target); err != nil {
+		if old, err = fsutil.AsidePath(target); err != nil {
 			_ = os.Remove(tmpName) // best-effort; the error returned is the real failure
 			return installResult{}, err
 		}
@@ -119,38 +119,6 @@ func installCopy(src, target string, force bool) (installResult, error) {
 		_ = os.Remove(old)
 	}
 	return installResult{}, nil
-}
-
-// maxAsideFiles bounds how many target.old.<n> names asidePath tries.
-const maxAsideFiles = 100
-
-// asidePath returns the name the existing target is renamed to. It first tries
-// to delete earlier copies, target.old and target.old.<n>: a copy that is still
-// running cannot be deleted, and is skipped here rather than failing the
-// install. The result is target.old when that is free and otherwise the first
-// free target.old.<n>, so a running previous copy never blocks an upgrade.
-func asidePath(target string) (string, error) {
-	dir, base := filepath.Split(target)
-	prefix := strings.ToLower(base + ".old")
-	if entries, err := os.ReadDir(filepath.Clean(dir)); err == nil {
-		for _, e := range entries {
-			name := strings.ToLower(e.Name())
-			if name == prefix || strings.HasPrefix(name, prefix+".") {
-				// Best effort: a copy still in use stays, and is retried next install.
-				_ = os.Remove(filepath.Join(dir, e.Name()))
-			}
-		}
-	}
-	for n := 0; n < maxAsideFiles; n++ {
-		cand := target + ".old"
-		if n > 0 {
-			cand = fmt.Sprintf("%s.old.%d", target, n)
-		}
-		if _, err := os.Lstat(cand); errors.Is(err, os.ErrNotExist) {
-			return cand, nil
-		}
-	}
-	return "", fmt.Errorf("%s.old and %d numbered copies are all in use; delete them by hand", target, maxAsideFiles-1)
 }
 
 // copyInto copies the file at src into the already-open tmp and closes it.

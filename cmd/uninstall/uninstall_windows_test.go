@@ -142,6 +142,67 @@ func TestRemoveInstalledCopy_RunningExeIsRenamedAside(t *testing.T) {
 	}
 }
 
+// An earlier .old that is still locked by a running process takes the next
+// numbered name for the new aside, and that is the one scheduled for deletion.
+func TestRemoveInstalledCopy_LockedEarlierAsideTakesANumberedName(t *testing.T) {
+	asked := stubScheduleDelete(t, nil)
+	p := installedCopy(t)
+	if err := os.WriteFile(p+".old", []byte("running"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// os.Open shares read/write but not delete, so the file cannot be removed
+	// while held, as with a running image.
+	held, err := os.Open(p + ".old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	msg, err := removeInstalledCopy(p, p)
+	if err != nil {
+		t.Fatalf("removeInstalledCopy: %v", err)
+	}
+	want := p + ".old.1"
+	if len(*asked) != 1 || (*asked)[0] != want {
+		t.Errorf("scheduled deletions = %v, want [%s]", *asked, want)
+	}
+	if !strings.Contains(msg, want) || !strings.Contains(msg, "is still in use") {
+		t.Errorf("message should name the numbered aside and the locked one: %q", msg)
+	}
+	if b, err := os.ReadFile(want); err != nil || string(b) != "installed" {
+		t.Errorf("%s = %q, %v; want the original content", want, b, err)
+	}
+	if b, err := os.ReadFile(p + ".old"); err != nil || string(b) != "running" {
+		t.Errorf("the locked aside was disturbed: %q, %v", b, err)
+	}
+}
+
+// Leftover numbered asides are removed with the install, and only those: a
+// file that merely starts the same way is not ours.
+func TestRemoveInstalledCopy_RemovesLeftoverNumberedAsides(t *testing.T) {
+	p := installedCopy(t)
+	for _, n := range []string{".old", ".old.1", ".old.12"} {
+		if err := os.WriteFile(p+n, []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keep := p + ".old.bak"
+	if err := os.WriteFile(keep, []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removeInstalledCopy(p, otherExe(t)); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"", ".old", ".old.1", ".old.12"} {
+		if _, err := os.Stat(p + n); !os.IsNotExist(err) {
+			t.Errorf("%s should be gone, stat err = %v", p+n, err)
+		}
+	}
+	if b, err := os.ReadFile(keep); err != nil || string(b) != "mine" {
+		t.Errorf("%s = %q, %v; want it kept", keep, b, err)
+	}
+}
+
 func TestRemoveInstalledCopy_SkipsOtherNames(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "something-else.exe")
 	if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {

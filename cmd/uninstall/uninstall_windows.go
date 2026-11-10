@@ -3,7 +3,6 @@
 package uninstall
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/sky-ai-eng/triage-factory/internal/fsutil"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -69,9 +69,11 @@ var scheduleDelete = func(path string) error {
 // removeInstalledCopy deletes the installed copy at path, but only when it is
 // a regular file named triagefactory.exe. A running executable cannot be
 // deleted on Windows, though it can be renamed, so when path is exePath it is
-// renamed to path+".old", scheduled for deletion at the next restart, and the
-// message says whether that worked; if not, it tells the user to delete the
-// file after this process exits. A skip returns a message and a nil error.
+// renamed aside (path+".old", or path+".old.<n>" when an earlier one is still
+// locked), scheduled for deletion at the next restart, and the message says
+// whether that worked; if not, it tells the user to delete the file after this
+// process exits. Earlier asides are deleted best-effort first. A skip returns a
+// message and a nil error.
 func removeInstalledCopy(path, exePath string) (msg string, err error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -84,10 +86,10 @@ func removeInstalledCopy(path, exePath string) (msg string, err error) {
 		return fmt.Sprintf("skipped %s: not named %s", path, installedName), nil
 	}
 
-	old := path + ".old"
-	// A leftover from an earlier upgrade; the running copy keeps it locked.
-	if err := os.Remove(old); err != nil && !errors.Is(err, os.ErrNotExist) {
-		msg = fmt.Sprintf(" (%s is still in use; delete it by hand)", old)
+	// Leftovers from earlier upgrades or uninstalls. One that is still running
+	// stays locked; it is named rather than failing the uninstall.
+	for _, p := range fsutil.RemoveAsides(path) {
+		msg += fmt.Sprintf(" (%s is still in use; delete it by hand)", p)
 	}
 
 	running := false
@@ -95,6 +97,11 @@ func removeInstalledCopy(path, exePath string) (msg string, err error) {
 		running = true
 	}
 	if running {
+		// A locked earlier aside makes this one take the next numbered name.
+		old, err := fsutil.AsidePath(path)
+		if err != nil {
+			return "", err
+		}
 		if err := os.Rename(path, old); err != nil {
 			return "", fmt.Errorf("move the running copy %s aside: %w", path, err)
 		}
