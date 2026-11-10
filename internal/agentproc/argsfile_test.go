@@ -110,9 +110,23 @@ func TestPruneStaleArgsFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	old := time.Now().Add(-2 * staleArgsFileAge)
-	if err := os.Chtimes(stale, old, old); err != nil {
+	// Old files that are not args files are not the prune's to remove.
+	foreign := filepath.Join(dir, "notes.txt")
+	foreignJSON := filepath.Join(dir, "settings.json")
+	foreignDir := filepath.Join(dir, "args-dir.json")
+	for _, p := range []string{foreign, foreignJSON} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(foreignDir, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleArgsFileAge)
+	for _, p := range []string{stale, foreign, foreignJSON, foreignDir} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	pruneStaleArgsFiles(dir)
@@ -122,6 +136,11 @@ func TestPruneStaleArgsFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("fresh args file was pruned: %v", err)
+	}
+	for _, p := range []string{foreign, foreignJSON, foreignDir} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s is not an args file and was pruned: %v", filepath.Base(p), err)
+		}
 	}
 }
 

@@ -624,13 +624,17 @@ function argvFromArgsFile(argv) {
   }
   let list
   try {
-    const raw = readFileSync(argv[1], "utf8")
-    unlinkSync(argv[1])
-    list = JSON.parse(raw)
+    list = JSON.parse(readFileSync(argv[1], "utf8"))
   } catch (err) {
     process.stderr.write(`wrapper: cannot read args file ${argv[1]}: ${err?.message ?? err}\n`)
     process.exit(2)
   }
+  // Best effort: the Go side removes the file again when the process is reaped,
+  // so a failed delete (an antivirus scan holding the file open on Windows, say)
+  // must not stop a run that already has its arguments.
+  try {
+    unlinkSync(argv[1])
+  } catch {}
   if (!Array.isArray(list) || !list.every((a) => typeof a === "string")) {
     process.stderr.write("wrapper: args file must hold a JSON array of strings\n")
     process.exit(2)

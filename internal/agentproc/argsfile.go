@@ -57,7 +57,7 @@ func rewriteArgsFile(dir string, nodeArgs []string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("args file: encode arguments: %w", err)
 	}
-	f, err := os.CreateTemp(dir, "args-*.json")
+	f, err := os.CreateTemp(dir, argsFilePattern)
 	if err != nil {
 		return nil, fmt.Errorf("args file: create in %s: %w", dir, err)
 	}
@@ -97,9 +97,21 @@ func removeArgsFile(cmd *exec.Cmd) {
 	}
 }
 
+// argsFilePattern is both the os.CreateTemp pattern rewriteArgsFile names its
+// files by and the glob that recognises them: CreateTemp replaces the "*" with
+// a random string.
+const argsFilePattern = "args-*.json"
+
+// isArgsFileName reports whether name is one rewriteArgsFile could have made.
+func isArgsFileName(name string) bool {
+	ok, err := filepath.Match(argsFilePattern, name)
+	return err == nil && ok
+}
+
 // pruneStaleArgsFiles removes args files old enough that no live wrapper can
-// still be about to read them. Best effort: a failure is logged and the spawn
-// goes on.
+// still be about to read them. Only files named like an args file are touched,
+// so anything else that ends up in the directory is left alone. Best effort: a
+// failure is logged and the spawn goes on.
 func pruneStaleArgsFiles(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -108,6 +120,9 @@ func pruneStaleArgsFiles(dir string) {
 	}
 	cutoff := time.Now().Add(-staleArgsFileAge)
 	for _, e := range entries {
+		if !isArgsFileName(e.Name()) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil || e.IsDir() || info.ModTime().After(cutoff) {
 			continue
