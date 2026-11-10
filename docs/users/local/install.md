@@ -78,7 +78,8 @@ didn't install.
 path above. A copy you installed with `--dest` is not found: delete it by hand.
 When you run uninstall from the installed copy, the file is renamed to
 `triagefactory.exe.old` and Windows is asked to delete it at the next restart.
-The output says whether that request worked; if it didn't, delete the `.old`
+Windows accepts that request only from an administrator terminal, so from a
+normal terminal the output says it could not be scheduled: delete the `.old`
 file by hand after the command exits. A `triagefactory.exe` you ran from
 somewhere else stays.
 

@@ -62,8 +62,8 @@ triagefactory uninstall    # deletes local data and the installed copy
 `uninstall` removes only the copy at that default path. A copy installed with
 `install --dest` must be deleted by hand. If you run `uninstall` from the
 installed copy, it is renamed to `triagefactory.exe.old` and scheduled for
-deletion at the next restart; delete it by hand if the output says scheduling
-failed. See [Install](install.md#windows) for the details.
+deletion at the next restart. Scheduling needs an administrator terminal; from
+a normal one, delete the `.old` file by hand after the command exits. See [Install](install.md#windows) for the details.
 
 `triagefactory exec …` is the set of commands delegated agents run from their
 worktree. You don't need to call them; `triagefactory exec --help` lists them.
