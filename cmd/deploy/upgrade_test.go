@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -528,7 +527,7 @@ func TestUpgrade_InterruptedDrain(t *testing.T) {
 // outside a drain, where nothing catches the signal, ends the test binary.
 func interruptOnSleep(f *fakeHost) {
 	f.sleep = func(ctx context.Context, _ time.Duration) error {
-		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		if err := interruptSelf(); err != nil {
 			panic(err)
 		}
 		<-ctx.Done()
