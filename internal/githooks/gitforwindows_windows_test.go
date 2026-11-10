@@ -128,6 +128,35 @@ func TestGitForWindows_HooksSigningAndPush(t *testing.T) {
 	}
 }
 
+// An editor's askpass helper can answer with the operator's token, so the agent
+// never inherits one, in any spelling of the name, and git's own prompt is off.
+func TestDirectAgentEnv_WindowsDropsAskpassAndDisablesPrompts(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	paths.SetForTest(t, "/s")
+	env := DirectAgentEnv([]string{
+		"KEEP=1",
+		`GIT_ASKPASS=C:\ide\askpass.cmd`,
+		`Ssh_Askpass=C:\ide\askpass.cmd`,
+		"GIT_TERMINAL_PROMPT=1",
+	})
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(key, "GIT_ASKPASS") || strings.EqualFold(key, "SSH_ASKPASS") {
+			t.Errorf("askpass variable survived: %q", kv)
+		}
+	}
+	assertEnv(t, env, "KEEP", "1")
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
+			n++
+		}
+	}
+	if n != 1 || envValue(env, "GIT_TERMINAL_PROMPT") != "0" {
+		t.Errorf("GIT_TERMINAL_PROMPT entries = %d (value %q), want exactly one, 0", n, envValue(env, "GIT_TERMINAL_PROMPT"))
+	}
+}
+
 // The Windows pairs layer after an inherited GIT_CONFIG_* set and the http
 // extraHeader worktree adds, replacing an inherited GCM_INTERACTIVE.
 func TestDirectAgentEnv_WindowsPairs(t *testing.T) {

@@ -8,3 +8,6 @@ func platformGitConfigPairs() [][2]string { return nil }
 
 // platformGitEnvVars is empty off Windows.
 func platformGitEnvVars() []string { return nil }
+
+// platformGitEnvStrip is empty off Windows.
+func platformGitEnvStrip() []string { return nil }

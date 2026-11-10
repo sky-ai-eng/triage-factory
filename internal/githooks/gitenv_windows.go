@@ -13,6 +13,18 @@ func platformGitConfigPairs() [][2]string {
 	}
 }
 
-// platformGitEnvVars is GCM_INTERACTIVE=never, which stops Git Credential
-// Manager prompting should a helper still be reached.
-func platformGitEnvVars() []string { return []string{"GCM_INTERACTIVE=never"} }
+// platformGitEnvVars stops every interactive credential prompt the agent's git
+// could open: GCM_INTERACTIVE=never for Git Credential Manager should a helper
+// still be reached, and GIT_TERMINAL_PROMPT=0 for git's own username and
+// password prompt.
+func platformGitEnvVars() []string {
+	return []string{"GCM_INTERACTIVE=never", "GIT_TERMINAL_PROMPT=0"}
+}
+
+// platformGitEnvStrip names inherited variables dropped from the agent's env
+// with no replacement. An askpass program is how git, and ssh through git, ask
+// for a secret without a terminal; an editor that launched TF commonly exports
+// one that answers from the operator's signed-in session, which would hand the
+// agent that credential. With these gone git has no helper to ask, and the
+// prompts above are off.
+func platformGitEnvStrip() []string { return []string{"GIT_ASKPASS", "SSH_ASKPASS"} }

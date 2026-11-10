@@ -182,12 +182,15 @@ func Ensure() error {
 //
 // On Windows the block also carries core.longpaths=true and an empty
 // credential.helper (the same pairs TF's own git calls carry), and the env
-// gains GCM_INTERACTIVE=never, so the agent's git never opens a Git Credential
-// Manager prompt. Other platforms get exactly the entries above.
+// gains GCM_INTERACTIVE=never and GIT_TERMINAL_PROMPT=0, and loses any inherited
+// GIT_ASKPASS and SSH_ASKPASS, so the agent's git never opens a credential
+// prompt or reaches the operator's askpass helper. Other platforms get exactly
+// the entries above.
 func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 	pairs := append([][2]string{{ConfigKey, HostDir()}}, extraPairs...)
 	pairs = append(pairs, platformGitConfigPairs()...)
 	vars := platformGitEnvVars()
+	strip := platformGitEnvStrip()
 	base := gitConfigCount(env)
 	out := make([]string, 0, len(env)+1+2*len(pairs)+len(vars))
 	for _, kv := range env {
@@ -196,6 +199,9 @@ func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 		}
 		if envKeyIn(kv, vars) {
 			continue // replaced by ours below
+		}
+		if envKeyNamed(kv, strip) {
+			continue // dropped with no replacement
 		}
 		out = append(out, kv)
 	}
@@ -216,6 +222,19 @@ func envKeyIn(kv string, vars []string) bool {
 	key, _, _ := strings.Cut(kv, "=")
 	for _, v := range vars {
 		if vk, _, _ := strings.Cut(v, "="); vk == key {
+			return true
+		}
+	}
+	return false
+}
+
+// envKeyNamed reports whether kv ("KEY=value") has a KEY equal, ignoring case,
+// to any of names. Windows environment names are case-insensitive, so an
+// inherited "Git_Askpass" is the variable a "GIT_ASKPASS" entry names.
+func envKeyNamed(kv string, names []string) bool {
+	key, _, _ := strings.Cut(kv, "=")
+	for _, n := range names {
+		if strings.EqualFold(key, n) {
 			return true
 		}
 	}
