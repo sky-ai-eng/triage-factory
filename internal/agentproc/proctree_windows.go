@@ -237,7 +237,9 @@ func (t *procTree) waitDrained() {
 // pass through.
 func waitOutcome(cmd *exec.Cmd, err error) error {
 	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
-		agentprocLog.Debug("agent exited cleanly but an output pipe stayed open past the wait delay", "delay", windowsWaitDelay)
+		// Warn, not debug: output the agent wrote after the delay was not read, so
+		// the transcript of a run reported as successful may be cut short.
+		agentprocLog.Warn("agent exited cleanly but an output pipe stayed open past the wait delay; output after the delay may be truncated", "delay", windowsWaitDelay)
 		return nil
 	}
 	return err
