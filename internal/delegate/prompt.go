@@ -506,7 +506,9 @@ func agentVisibleCheckout(hostRoot, checkout string) string {
 	}
 	rel, err := filepath.Rel(hostRoot, checkout)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return checkout
+		return agentproc.AgentVisiblePath(checkout)
 	}
-	return filepath.Join(agentproc.AgentVisibleRoot(hostRoot), rel)
+	// The join is what puts backslashes back on Windows, so the agent-visible
+	// spelling is applied after it.
+	return agentproc.AgentVisiblePath(filepath.Join(agentproc.AgentVisibleRoot(hostRoot), rel))
 }

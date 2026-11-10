@@ -484,7 +484,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
+			// The name the agent types, which on Windows is the bare
+			// `triagefactory` rather than the host path, so the rule matches the
+			// command the prompt tells the model to write.
+			SelfBin: agentproc.LocalAgentBinary(selfBin),
 			Extras:  opts.ExtraAllowedTools,
 			GH:      ghChannel != nil,
 		}),
