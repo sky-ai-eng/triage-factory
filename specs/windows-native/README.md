@@ -151,21 +151,28 @@ are replaced by the next write. A random id is used rather than one derived from
 the value so a re-write of the same value never reuses the names of the live
 chunks.
 
-Write order: record the new generation in `key#orphans`, write every new chunk,
-write the base last (the commit), then delete the previous generation's chunks.
-A failed or interrupted write therefore leaves the previous value readable; it
-removes only its own chunks. Failing to delete the previous generation is a WARN,
-not a failed put, and the generation stays named in `key#orphans` so the next
-write, delete or uninstall sweep retries it. Read reassembles the chunks and
+Write order: record both the new and the previous generation in `key#orphans`,
+write every new chunk, write the base last (the commit), then delete the
+previous generation's chunks. A failed or interrupted write therefore leaves the
+previous value readable and removes only its own chunks, and a crash at any step
+leaves every generation it touched named in `key#orphans`, because chunk names
+are random and the keychain cannot be listed. A generation leaves the record
+only once its chunks are confirmed deleted. Failing to delete the previous
+generation is a WARN, not a failed put; the next write, delete or uninstall
+sweep retries it. Read reassembles the chunks and
 verifies the hash; on a missing chunk or a mismatch it re-reads the base once
 (a write in another process) and retries, then errors. A record with more than
 64 chunks is corrupt, and a value that would need more is refused at write time.
-Delete removes the base first, so a failure leaves the value readable, then the
+Delete records the current generation in `key#orphans`, then removes the base,
+so a failure leaves the value readable, then the
 chunks it named (descending), then every generation in `key#orphans`, then the
 v1 names `key#1` to `key#64`, which is probed to the cap rather than stopping at
 the first gap. `SweepKeychain` (uninstall) uses the same delete, so it removes
 every generation, and a failure on one key does not stop the others. One mutex
-covers put, get and delete in a process. Values at or under the limit are stored
+covers put, get and delete in a process. There is no cross-process lock (the
+keychain offers none), so one writer per key is assumed: two processes writing
+one key at once can leave it unreadable until the next write, and the hash check
+means a read never returns a wrong value. Values at or under the limit are stored
 exactly as before (their housekeeping failing is a WARN), and other platforms set
 the limit to 0 (off). The limit is a per-platform constant, and the tests run
 the logic on every OS.
@@ -175,9 +182,11 @@ the logic on every OS.
 TF's own git calls and the agent's git get `core.longpaths=true`, an empty
 `credential.helper` (resets the list so Git Credential Manager never opens a
 window or stores a token), and `GCM_INTERACTIVE=never`. The agent's env also
-gets `GIT_TERMINAL_PROMPT=0` and loses any inherited `GIT_ASKPASS` and
-`SSH_ASKPASS` (an editor such as VS Code exports an askpass helper that can
-answer with the operator's token); Linux and macOS are unchanged. Both env
+gets `GIT_TERMINAL_PROMPT=0` and loses any inherited `GIT_ASKPASS`,
+`SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE` and `VSCODE_GIT_*` variables (an editor such
+as VS Code exports an askpass helper that can answer with the operator's token).
+This is a courtesy, not a boundary: the agent runs as the user and can call a
+credential manager itself. Linux and macOS are unchanged. Both env
 builders use the same `GIT_CONFIG_COUNT` layering. `gpg.ssh.program` is forward-slashed,
 because git runs it through a shell. Hooks run under Git for Windows' sh; a
 Windows-only test runs real `git commit -S` and `git push` through the hooks
@@ -195,9 +204,12 @@ transient-failure retry as the secrets file (`internal/fsutil`). Replacing an
 existing destination without `--force` is allowed only for a regular file named
 `triagefactory.exe`. Re-running install after an upgrade is the upgrade path.
 Uninstall removes only the copy at the default path (one installed with `--dest`
-is not discovered); a running copy is renamed to `.old` and scheduled for
-deletion with `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`. If scheduling fails
-(some locations need an administrator), the message tells the user to delete it.
+is not discovered). It first removes leftover `.old` and `.old.<n>` copies, then
+renames a running copy to the first free aside name (the same helper install
+uses, which matches only `.old` and `.old.<digits>`) and schedules it for
+deletion with `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`. Windows accepts that
+call only from an administrator, so from a normal terminal the message tells the
+user to delete the file by hand.
 
 ### Other
 
@@ -321,6 +333,13 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
 - **Same-tick re-raise.** `NotificationUpsertOf` can report a re-raise in the
   same clock tick as an escalation when the clock is coarse, as the Windows
   clock is.
+- **Same-tick ordering in conformance tests.** `sorts_by_resolved_at` in
+  `internal/db/dbtest/notification_conformance.go` writes three rows back to
+  back and expects distinct timestamps. It has not failed on Windows, but it has
+  the coarse-clock exposure the server-side sort test had.
+- **git-lfs in Linux test images.** `TestCaptureUncommitted_FetchedLFSFileStaysOut`
+  in `internal/worktree` fails, rather than skipping, when `git-lfs` is not
+  installed. This is not Windows-specific.
 - **Go 1.27 `encoding/json` field names.** Under Go 1.27, `encoding/json` puts
   array and map segments in `UnmarshalTypeError.Field`, which breaks the field
   naming in `httpx`. This is not Windows-specific. The contributor has a patch
