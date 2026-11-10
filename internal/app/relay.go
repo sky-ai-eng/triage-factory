@@ -101,11 +101,12 @@ func (a *App) githubRefreshMarked(orgID string) {
 	a.publishCtl(ctlbus.Message{Kind: ctlbus.KindGitHubRefreshMarked, OrgID: orgID})
 }
 
-// applyGitHubRefreshMarked is the brain-side effect of the refresh-mark nudge.
+// applyGitHubRefreshMarked is the brain-side effect of the refresh-mark nudge:
+// the org's narrowed poll pass, after the poller's debounce.
 func (a *App) applyGitHubRefreshMarked(orgID string) {
-	// TODO(TFAC-1352): wake the org's narrowed poll pass over its pending
-	// refresh marks; until it ships, nothing reads github_refresh_marks and the
-	// scheduled cycle's timers are what pick up the changes the marks name.
+	if a.pollerMgr != nil {
+		a.pollerMgr.HintGitHub(orgID)
+	}
 }
 
 // applySourcesChanged is the brain-side effect of a pause/resume: drop the

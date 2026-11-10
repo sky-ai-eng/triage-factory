@@ -98,6 +98,7 @@ other shapes' small repos is not calibrated.
 ./scripts/poll-bench.sh --shape mono                # mergeability probing on one monorepo
 ./scripts/poll-bench.sh --shape smoke --latency 0   # fast local sanity run
 ./scripts/poll-bench.sh --shape dp1 --base-moves --warm-cycles 20
+./scripts/poll-bench.sh --shape dp1 --base-moves --head-push-pct 0.01 --warm-cycles 20 --hints
 ./scripts/poll-bench.sh --shape dp1 --rate-limit 200 --rate-limit-window 60s
 ./scripts/poll-bench.sh --repos 100 --prs-mean 30 --files-mean 20 --seed 7
 ```
@@ -117,6 +118,11 @@ flags (see `go run ./cmd/pollbench -h` for all):
   for `mono` (every 2 cycles); off by default for the other shapes, where
   a move lands every 10 cycles on 10% of the repos, so pair it with
   `--warm-cycles 10` or more.
+- `--head-push-pct` — the fraction of open PRs whose head is pushed at the
+  start of every warm cycle. 0.01 for `mono`, none for the other shapes.
+- `--hints` — deliver each warm cycle's changes as webhook hints, and then
+  run the same scenario again without them to compare. See
+  [Hint mode](#hint-mode).
 - `--conflict-on-overlap` — the chance a move makes a PR whose paths it
   overlaps conflicting, default 0.03 (1–3% was measured on real
   repositories).
@@ -173,6 +179,8 @@ Each driven cycle is one row:
 - **warm #N** — cycles after the sync. With no base moves or head pushes
   nothing changed: the conditional-request measurement. `304` vs `list` is
   the ETag hit rate; `graphql` should be 0 at `--inflight-pct 0`.
+- **hint #N** — with `--hints`, the narrowed pass over the hints of warm
+  cycle N's changes, run before that cycle's poll.
 - **settle** — probe passes with no poll after the last warm cycle, until
   no probe is owed, so the last moves' answers land. Printed only when
   something was owed. Its wall time includes waiting for probes the worker
@@ -216,7 +224,10 @@ Each driven cycle is one row:
 After the table, the report prints the cold cycle's probes, path reads and
 ref reads; the warm cycles' REST requests, GraphQL requests and points; the
 base moves' mean overlap set; the test merges by cause and the shortfall;
-and the test merges probing every tracked PR on every move would have run.
+the test merges probing every tracked PR on every move would have run; and
+the warm cycles' REST requests, GraphQL requests and points per simulated
+hour, each warm cycle standing for one `--poll-interval`, with the narrowed
+passes apart under `--hints`.
 - **allocs** — Go heap allocated during the cycle; **peak RSS** is the
   process high-water mark.
 
@@ -351,6 +362,58 @@ read per base branch and one `PRMergeability` query (1 point) per 100 PRs:
 | `dp1` | after | 874 | 1,422 | 26.28s |
 | `stress` | before | 1,237 | 3,626 | 1m16s |
 | `stress` | after | 1,936 | 3,747 | 1m29s |
+
+## Hint mode
+
+With `--hints`, each change a warm cycle makes is delivered the way a GitHub
+App's webhook delivers it: a refresh mark, as the receiver writes one, for
+each pushed PR (a `pull_request` delivery) and each moved base branch (a
+`push`). A narrowed pass over the marks runs before the cycle's scheduled
+poll (the `hint #N` row). The change window counts it as half a poll
+interval after the previous poll, which stands for a change that lands
+mid-interval and the pass a few seconds after it. The run is then repeated
+without hints, and the report ends with both runs' cost per simulated hour.
+
+Every refresh timer still runs in hint mode. The scheduled poll after a
+narrowed pass refreshes each PR the pass saw change again, inside the
+5-minute change window, so hints add GraphQL points. Timers that hints make
+unnecessary are removed separately, and these numbers are the baseline for that.
+
+The warm cycles run back to back, so the refresh floor, which counts
+wall-clock time, never fires in either run. A deployment also pays for a
+full refresh of every open PR at least every 10 minutes, which these numbers
+leave out.
+
+### Results at `dp1`
+
+Recorded 2026-11-09 on a 4-vCPU Intel Xeon at 2.30 GHz (Linux, 15 GB), seed
+42, `--latency 0`. Request and point counts are exact; wall times at zero
+latency do not stand for a deployment's and are not recorded.
+
+`./scripts/poll-bench.sh --shape dp1 --base-moves --head-push-pct 0.01 --warm-cycles 20 --hints --latency 0`:
+20 warm cycles, each standing for the default 5-minute interval. Each pushes
+46 PRs' heads, and every 10th moves the base of 30 repositories.
+
+Per simulated hour:
+
+| Run | REST requests | GraphQL requests | Points |
+| -- | -- | -- | -- |
+| Without hints | 4,265 | 86 | 218 |
+| With hints: scheduled polls | 3,612 | 51 | 183 |
+| With hints: narrowed passes | 1,143 | 71 | 203 |
+| With hints: total | 4,755 | 122 | 386 |
+
+- Hints cost 11% more REST requests and 77% more points. The extra points
+  are the second refresh of each changed PR by the scheduled poll, inside
+  the change window.
+- A narrowed pass lists only the repositories its marks name: 35 to 44 of
+  the 300 on a cycle with no base move and about 60 on one with, against
+  300 conditional listings for every scheduled poll.
+  The listings and branch checks that the changed repositories need move
+  from the scheduled poll into the pass, which is why the scheduled polls
+  cost fewer REST requests with hints.
+- Each pushed PR's `new_commits` is emitted once, by the narrowed pass, and
+  the sanity check holds for both runs.
 
 ## CI
 

@@ -236,6 +236,49 @@ func RunGitHubRefreshMarkConformance(t *testing.T, mk GitHubRefreshMarkFactory) 
 		}
 	})
 
+	t.Run("Marked_orgs_are_the_orgs_holding_a_pending_mark", func(t *testing.T) {
+		f := mk(t)
+		marked := func() []string {
+			t.Helper()
+			got, err := f.Stores.GitHubRefreshMarks.ListMarkedOrgsSystem(ctx)
+			if err != nil {
+				t.Fatalf("ListMarkedOrgsSystem: %v", err)
+			}
+			return got
+		}
+		if got := marked(); len(got) != 0 {
+			t.Fatalf("marked orgs before any mark = %v, want none", got)
+		}
+		repoID := repo(t, f, "api")
+		mark(t, f, repoID, domain.PullRequestRefreshTarget(7))
+		mark(t, f, repoID, domain.BranchRefreshTarget("main"))
+		want := []string{f.OrgID}
+		if f.OtherOrgID != "" {
+			other, err := f.Stores.Repos.FindOrCreateByRefSystem(ctx, f.OtherOrgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "api"})
+			if err != nil {
+				t.Fatalf("register the other org's repository: %v", err)
+			}
+			if _, err := f.Stores.GitHubRefreshMarks.MarkSystem(ctx, f.OtherOrgID, other.ID, domain.PullRequestRefreshTarget(7)); err != nil {
+				t.Fatalf("mark the other org's repository: %v", err)
+			}
+			want = append(want, f.OtherOrgID)
+			sort.Strings(want)
+		}
+		if got := marked(); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("marked orgs = %v, want %v, once each in id order", got, want)
+		}
+		if _, err := f.Stores.GitHubRefreshMarks.ClearSystem(ctx, f.OrgID, list(t, f)); err != nil {
+			t.Fatalf("ClearSystem: %v", err)
+		}
+		want = want[:0]
+		if f.OtherOrgID != "" {
+			want = append(want, f.OtherOrgID)
+		}
+		if got := marked(); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("marked orgs after clearing the org's marks = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("Reads_and_clears_are_scoped_to_the_org", func(t *testing.T) {
 		f := mk(t)
 		if f.OtherOrgID == "" {

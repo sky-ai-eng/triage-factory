@@ -112,6 +112,9 @@ type Tracker struct {
 	// changeClock is the clock the refresh gate's change window is kept on
 	// (changeNow); nil is time.Now.
 	changeClock func() time.Time
+	// marks is the org's pending refresh marks the GitHub passes honor
+	// (WithRefreshMarks).
+	marks refreshMarks
 }
 
 // WithChangeClock keeps the refresh gate's change window on now: the time a
@@ -364,8 +367,11 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 // or every repository for a personal token (ReachAll). Phase 2 refreshes only
 // the org's pull requests in repositories reach holds, so a pass never sends
 // GitHub a node id its credential cannot read (see passShare).
+//
+// A pull request the tracker's refresh marks name (WithRefreshMarks) is
+// refreshed whatever the gate says, and a base branch they name is checked.
 func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, reach GitHubReach, resolver ReviewerResolver) (int, string, error) {
-	return t.refreshGitHub(ctx, scope, client, self, repos, reach, resolver, false)
+	return t.refreshGitHub(ctx, scope, client, self, repos, reach, resolver, passScheduled)
 }
 
 // RefreshHeldGitHub refreshes the pull requests TF holds in repositories no
@@ -382,13 +388,44 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 // org asked TF to poll is its tracked set, and a pass over what it no longer
 // tracks is not a poll of it. A call with nothing due sends GitHub no request.
 func (t *Tracker) RefreshHeldGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, reach GitHubReach, resolver ReviewerResolver) (int, error) {
-	n, _, err := t.refreshGitHub(ctx, scope, client, self, nil, reach, resolver, true)
+	n, _, err := t.refreshGitHub(ctx, scope, client, self, nil, reach, resolver, passHeld)
 	return n, err
 }
 
-// refreshGitHub is one GitHub pass. held is a RefreshHeldGitHub pass, which
-// skips discovery and reports no completed poll.
-func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, reach GitHubReach, resolver ReviewerResolver, held bool) (int, string, error) {
+// RefreshMarkedGitHub is the narrowed pass: it refreshes what the tracker's
+// refresh marks (WithRefreshMarks) name in repos, the tracked repositories the
+// marks are on, all of which client's credential reads. It lists each of them,
+// refreshes the pull requests a mark names and the ones whose listing shows a
+// change (a new pull request, a moved head or updatedAt, a changed body, or one
+// that left a listing that answered), and checks the base branches a mark names
+// and the ones the watch checks after a listing that answered.
+//
+// It leaves the rest to the scheduled pass: the timer rules (the change
+// window, the floor and in-flight CI), stubs and terminal snapshots no mark
+// names, every pull request outside repos, and the dashboard search. It reports
+// no completed poll (EmitPollComplete), because reading a few repositories is
+// not a poll of what the org tracks.
+func (t *Tracker) RefreshMarkedGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, resolver ReviewerResolver) (int, error) {
+	n, _, err := t.refreshGitHub(ctx, scope, client, self, repos, GitHubReach{}, resolver, passNarrowed)
+	return n, err
+}
+
+// passMode is which GitHub pass refreshGitHub runs.
+type passMode int
+
+const (
+	// passScheduled is RefreshGitHub: the scheduled cycle's pass.
+	passScheduled passMode = iota
+	// passHeld is RefreshHeldGitHub, which skips discovery.
+	passHeld
+	// passNarrowed is RefreshMarkedGitHub.
+	passNarrowed
+)
+
+// refreshGitHub is one GitHub pass of mode. Only a scheduled pass reports a
+// completed poll.
+func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, reach GitHubReach, resolver ReviewerResolver, mode passMode) (int, string, error) {
+	narrowed := mode == passNarrowed
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
@@ -399,9 +436,14 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 	// held pull request from a tracked one.
 	var discovery githubDiscovery
 	var discoveryErr error
-	if held {
+	// A narrowed pass runs no dashboard search: it spans every tracked
+	// repository, and the pass reads only the marked ones.
+	switch mode {
+	case passHeld:
 		_, discovery.tracked = t.trackedRepositoryIDs(ctx, scope)
-	} else {
+	case passNarrowed:
+		discovery, discoveryErr = t.discoverGitHub(ctx, scope, client, "", repos)
+	default:
 		discovery, discoveryErr = t.discoverGitHub(ctx, scope, client, self.Login, repos)
 	}
 	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
@@ -414,7 +456,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 			listedOK[c.repositoryID] = true
 		}
 	}
-	watch := baseWatchScope{passRepos: discovery.passRepos, listedOK: listedOK}
+	watch := baseWatchScope{passRepos: discovery.passRepos, listedOK: listedOK, marked: t.marks.branches, noFloor: narrowed}
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
 		if errors.As(discoveryErr, &rateLimited) {
@@ -685,6 +727,10 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 		// untracked marks an open pull request in an untracked repository,
 		// refreshed because the floor passed.
 		untracked bool
+		// timer is the timer rule a scheduled pass refreshed an open pull
+		// request by, for one no mark named and whose listing showed no
+		// change; empty for every other refresh.
+		timer refreshRule
 	}
 	var openItems, terminalItems []entityWithSnap
 	skippedOpen := 0
@@ -695,7 +741,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 	// open is every open pull request this cycle knows, refreshed or
 	// skipped, which is the set the mergeability probes are decided over.
 	var open []mergeabilityCandidate
-	pass := githubPass{t: t, reach: reach, handed: discovery.passRepos, tracked: discovery.tracked, untracked: map[string]*domain.Repository{}}
+	pass := githubPass{t: t, reach: reach, handed: discovery.passRepos, tracked: discovery.tracked, untracked: map[string]*domain.Repository{}, narrowed: narrowed}
 
 	for _, e := range entities {
 		var snap domain.PRSnapshot
@@ -746,7 +792,14 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 			notOwn++
 			continue
 		}
+		// A mark is honored for the pass's own pull requests only: the receiver
+		// marks tracked repositories, and a mark left on one no team tracks
+		// any more is the poller's to clear.
+		marked := share == shareOwn && t.marks.names(e, snap)
 		if snap.NodeID == "" {
+			if narrowed && !marked {
+				continue
+			}
 			// No stored snapshot, so no node_id either: a stub created outside
 			// the poller (e.g. exec-touch FindOrCreate), or an
 			// entity whose snapshot was cleared when an org admin paused this
@@ -777,6 +830,9 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 
 		item := entityWithSnap{entity: e, snap: snap, nodeID: snap.NodeID}
 		if prSnapshotTerminal(snap) {
+			if narrowed && !marked {
+				continue
+			}
 			terminalItems = append(terminalItems, item)
 			continue
 		}
@@ -798,54 +854,46 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 		if !listed && quietRepos[e.RepositoryID] {
 			fresh, listed = snap, true
 		}
-		if listed && shouldSkipRefresh(snap, fresh, age, sinceChange) {
-			// Skipped entities won't be diffed, so reconcile stale
-			// per-reviewer review_requested tasks here: for each active
-			// review_requested task whose keyed reviewer is no longer in the
-			// (quiet) snapshot's request list, emit a per-identity
-			// review_request_removed so the router can close that one task.
-			// Entities proceeding to DiffPRSnapshots emit their own removals.
-			// A task keyed by GitHub's id is matched by id; one keyed by a
-			// handle (created before ids were recorded) by that handle, so
-			// such a task whose reviewer was renamed since reads as removed.
-			if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
-				for _, task := range stale {
-					reviewer, ok := reviewerFromDedupKey(task.DedupKey)
-					if !ok || snap.HasRequestedReviewer(reviewer) {
-						continue // legacy/unkeyed task, or reviewer still requested
-					}
-					login, team, userID, teamID := requestedIdentityFields(reviewer)
-					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
-						Author:          snap.Author,
-						AuthorID:        snap.AuthorID,
-						Repo:            snap.Repo,
-						RepositoryID:    e.RepositoryID,
-						PRNumber:        snap.Number,
-						IsDraft:         snap.IsDraft,
-						HeadSHA:         snap.HeadSHA,
-						Labels:          snap.Labels,
-						Title:           snap.Title,
-						RequestedLogin:  login,
-						RequestedTeam:   team,
-						RequestedUserID: userID,
-						RequestedTeamID: teamID,
-					})
-					eid := e.ID
-					t.publish(ctx, domain.Event{
-						EventType:    domain.EventGitHubPRReviewRequestRemoved,
-						EntityID:     &eid,
-						DedupKey:     task.DedupKey,
-						MetadataJSON: string(meta),
-						OccurredAt:   time.Now().UTC(),
-					})
-					trackerLog.Info("reconciled: emitting review_request_removed for skipped entity", "dedup_key", task.DedupKey, "entity", e.ID)
-				}
+		rule := refreshSkip
+		if listed {
+			rule = refreshRuleFor(snap, fresh, age, sinceChange)
+		}
+		var refresh bool
+		switch {
+		case marked:
+			refresh = true
+		case narrowed:
+			// What the narrowed pass's listings show changed: a listed pull
+			// request by the gate's comparison, and one missing from a listing
+			// that answered, which has merged or closed. The timer rules stay
+			// with the scheduled pass, and so does a pull request whose
+			// listing failed.
+			refresh = rule == refreshChanged || (!listed && listedOK[e.RepositoryID])
+		case listed:
+			refresh = rule != refreshSkip
+		default:
+			refresh = true
+		}
+		if !refresh {
+			if !narrowed {
+				t.reconcileSkippedReviewRequests(ctx, orgID, e, snap)
 			}
 			skippedOpen++
 			continue
 		}
+		if !narrowed && !marked && share == shareOwn && rule.timer() {
+			item.timer = rule
+		}
 		item.untracked = share == shareUntracked
 		openItems = append(openItems, item)
+	}
+
+	// probed is the open pull requests the mergeability probes are decided
+	// over: every one the org knows, or a narrowed pass's own, so that it
+	// admits no probe outside the repositories its marks name.
+	probed := open
+	if narrowed {
+		probed = candidatesIn(open, discovery.passRepos)
 	}
 
 	if len(openItems) == 0 && len(terminalItems) == 0 {
@@ -855,8 +903,8 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 		// liveness is reported independently via /readyz.
 		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn)
 		t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, nil)
-		t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, nil)
-		if len(entities) > 0 && !held {
+		t.admitMergeabilityProbes(ctx, orgID, probed, discoveredByNodeID, nil)
+		if len(entities) > 0 && mode == passScheduled {
 			t.EmitPollComplete(ctx, "github", startedAt, len(entities), 0)
 		}
 		return 0, "", nil
@@ -1009,6 +1057,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 
 		// Diff against previous snapshot.
 		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, item.entity.RepositoryID, self, resolver, newReviews[item.nodeID], newComments[item.nodeID])
+		changes := len(events)
 
 		// The close obligation: this entity is active (Phase 2 lists only
 		// active rows) and its snapshot was ALREADY terminal last cycle, so
@@ -1061,6 +1110,9 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 			continue
 		}
 		eventsEmitted += enqueued
+		if item.timer != "" && changes > 0 {
+			recordMissedHint(orgID, item.timer)
+		}
 
 		// Best-effort, outside the transaction: the title and description
 		// are mirrors read outside the diff (display, the scorer), so a
@@ -1078,7 +1130,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 	diffSpan.End()
 
 	t.watchBaseBranches(cycleCtx, client, orgID, open, watch, discoveredByNodeID, refreshed)
-	t.admitMergeabilityProbes(cycleCtx, orgID, open, discoveredByNodeID, refreshed)
+	t.admitMergeabilityProbes(cycleCtx, orgID, probed, discoveredByNodeID, refreshed)
 
 	// Info only when the cycle actually produced something (an emitted
 	// event) — a cycle that fetched fresh state but found no transitions is
@@ -1089,11 +1141,75 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 		trackerLog.Debug("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "not_own", notOwn, "refreshed", len(refreshed), "events", eventsEmitted)
 	}
 
-	if len(entities) > 0 && !held {
+	if len(entities) > 0 && mode == passScheduled {
 		t.EmitPollComplete(ctx, "github", startedAt, len(entities), eventsEmitted)
 	}
 
+	// A rate limit cut the reviews and comments short. A scheduled pass counts
+	// as complete all the same: the pull requests it did not read keep their
+	// stored markers, and the change window refreshes them again. A narrowed
+	// pass reports the limit, so the marks that named them stay for the pass
+	// after the reset.
+	if stopped, ok := reader.(rateLimitedReader); ok && narrowed {
+		return eventsEmitted, "", stopped.err
+	}
 	return eventsEmitted, "", nil
+}
+
+// reconcileSkippedReviewRequests emits, for an open pull request a scheduled
+// pass skipped, a per-identity review_request_removed for each of its active
+// review_requested tasks whose keyed reviewer the stored snapshot snap no
+// longer requests, for the router to close that one task. A skipped pull
+// request is not diffed, and a refreshed one's diff emits its own removals. A
+// task keyed by GitHub's id is matched by id; one keyed by a handle (created
+// before ids were recorded) by that handle, so such a task whose reviewer was
+// renamed since reads as removed.
+func (t *Tracker) reconcileSkippedReviewRequests(ctx context.Context, orgID string, e domain.Entity, snap domain.PRSnapshot) {
+	if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
+		for _, task := range stale {
+			reviewer, ok := reviewerFromDedupKey(task.DedupKey)
+			if !ok || snap.HasRequestedReviewer(reviewer) {
+				continue // legacy/unkeyed task, or reviewer still requested
+			}
+			login, team, userID, teamID := requestedIdentityFields(reviewer)
+			meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
+				Author:          snap.Author,
+				AuthorID:        snap.AuthorID,
+				Repo:            snap.Repo,
+				RepositoryID:    e.RepositoryID,
+				PRNumber:        snap.Number,
+				IsDraft:         snap.IsDraft,
+				HeadSHA:         snap.HeadSHA,
+				Labels:          snap.Labels,
+				Title:           snap.Title,
+				RequestedLogin:  login,
+				RequestedTeam:   team,
+				RequestedUserID: userID,
+				RequestedTeamID: teamID,
+			})
+			eid := e.ID
+			t.publish(ctx, domain.Event{
+				EventType:    domain.EventGitHubPRReviewRequestRemoved,
+				EntityID:     &eid,
+				DedupKey:     task.DedupKey,
+				MetadataJSON: string(meta),
+				OccurredAt:   time.Now().UTC(),
+			})
+			trackerLog.Info("reconciled: emitting review_request_removed for skipped entity", "dedup_key", task.DedupKey, "entity", e.ID)
+		}
+	}
+}
+
+// candidatesIn is the candidates in open whose repository is in repos, by
+// registry row id.
+func candidatesIn(open []mergeabilityCandidate, repos map[string]bool) []mergeabilityCandidate {
+	var out []mergeabilityCandidate
+	for _, c := range open {
+		if repos[c.entity.RepositoryID] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // mergeabilityCandidate is one open pull request a cycle knows: its entity,
