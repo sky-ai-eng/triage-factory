@@ -108,9 +108,9 @@ export interface TeamConfigForm {
   // repos and github_groups load from their own endpoints (separate from the
   // team-settings GET), so they carry a third state: `undefined` means "not
   // loaded yet / load failed" — distinct from `[]` ("loaded, genuinely
-  // empty"). A surface skips the save of an `undefined` slice rather than
-  // PUTting an empty set over data it never read, so a flaky load can't wipe
-  // a team's repos or mappings.
+  // empty"). A surface must never PUT an empty set for an `undefined` slice,
+  // since that writes over data it never read, and a flaky load would wipe a
+  // team's repos or mappings.
   repos?: RepoRef[]
   github_groups?: GitHubGroup[]
 }
@@ -494,7 +494,7 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
 // form from a team GET. Repos and GitHub-team mappings come from their own
 // endpoints, so they stay undefined here (unloaded) and the container patches
 // them in once their own fetches land — keeping them undefined until then is
-// what lets a surface skip saving a slice that never loaded.
+// what lets a surface tell a slice that never loaded from an empty one.
 export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
     default_model: data.team_settings.DefaultModel,
