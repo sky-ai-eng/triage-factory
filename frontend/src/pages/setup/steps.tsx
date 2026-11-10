@@ -1526,9 +1526,12 @@ const reposStep: WizardStep = {
     (s.team.repos ?? []).length === 0
       ? 'Pick at least one repository for this team to watch.'
       : null,
-  persist: async ({ state, teamId }) => {
+  persist: async ({ state, teamId, patch }) => {
     const result = await saveTeamRepos(teamId, state.team.repos ?? [])
     if (!result.ok) throw new Error(result.error)
+    // Adopt the set as stored, so a repository registered on the way in is
+    // named by its registry id when the step is saved again.
+    patch({ team: { ...state.team, repos: result.repos } })
   },
   collapsedSummary: (s) => `Tracked repos: ${(s.team.repos ?? []).length}`,
   render: ({ state, patch }) => {
@@ -1563,13 +1566,15 @@ const githubTeamsStep: WizardStep = {
   section: 'team',
   title: 'GitHub teams',
   isComplete: () => true,
-  persist: async ({ state, teamId }) => {
+  persist: async ({ state, teamId, patch }) => {
     // Skip when the mapping never loaded (the group's fetch failed) so a flaky
     // load can't wipe stored mappings with []. A user edit makes the slice
     // defined, so an intentional pick still saves.
     if (state.team.github_groups === undefined) return
     const result = await saveTeamGitHubGroups(teamId, state.team.github_groups)
     if (!result.ok) throw new Error(result.error)
+    // Adopt the set as stored: the server holds each GitHub team's name.
+    patch({ team: { ...state.team, github_groups: result.groups } })
   },
   // Mappings load lazily (GitHubTeamGroup's onLoaded), so before the step is
   // visited github_groups is undefined — show a neutral dash rather than a
@@ -1607,10 +1612,10 @@ const jiraProjectsStep: WizardStep = {
     teamProjectsBlocked(s.team.jira_projects, s.jiraConnected)
       ? 'Finish or clear the half-mapped Jira status rule before continuing.'
       : null,
-  persist: async ({ state, teamId }) => {
-    // The rules are their own replace-set resource now, not a key inside the
-    // team-settings body — so this step writes only what it owns, and a Jira
-    // rule edit no longer re-saves the team's model and thresholds alongside it.
+  persist: async ({ state, teamId, patch }) => {
+    // The rules are their own replace-set resource, not a key inside the
+    // team-settings body, so this step writes only what it owns and a Jira
+    // rule edit does not re-save the team's model and thresholds alongside it.
     if (!state.teamLoaded) {
       throw new Error(
         'Team settings didn’t load — reopen the Repositories step and retry before saving.',
@@ -1618,6 +1623,11 @@ const jiraProjectsStep: WizardStep = {
     }
     const result = await saveTeamJiraProjects(teamId, state.team.jira_projects)
     if (!result.ok) throw new Error(result.error)
+    // Adopt the set as stored. A project added here is named by its Jira id
+    // until the save registers it, and the PUT refuses a tracked project under
+    // that id, so a second save from unadopted state fails. The response also
+    // carries the status names the server resolved from Jira.
+    patch({ team: { ...state.team, jira_projects: result.projects } })
   },
   collapsedSummary: (s) => `Tracked Jira projects: ${s.team.jira_projects.length}`,
   render: ({ state, patch, orgId }) =>

@@ -11,6 +11,7 @@ import {
 import { isStepVisible, nextVisibleIndex, prevVisibleIndex, resumeIndex } from './resume'
 import { jsonBody } from '../../test/apiResponse'
 import { appImportedPatch } from './githubAppImported'
+import { watchedProject } from '../settings/teamConfig'
 import type { WizardState } from './types'
 
 // The org save is FIELD-SCOPED: a step's persist names exactly the fields its
@@ -910,5 +911,134 @@ describe('setup — GitHub through the deployment App', () => {
       githubAppAccounts: ['acme-corp'],
       githubAppInstalled: true,
     })
+  })
+})
+
+// Going back to a team step and continuing again saves it again. The second
+// save has to start from the set the first one stored, because the PUT
+// refuses some of what the step first sent (a tracked Jira project under its
+// Jira id) and answers the rest with what it resolved on the way in.
+describe('setup — team steps adopt the set the server stored', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  const stepFor = (id: string) => {
+    const step = WIZARD_STEPS.find((s) => s.id === id)
+    if (!step) throw new Error(`${id} is missing from WIZARD_STEPS`)
+    return step
+  }
+
+  type Sent = { method: string; url: string; body: Record<string, unknown> }
+
+  // Stub fetch with one answer per path, recording every request.
+  function serve(answers: Record<string, unknown>): Sent[] {
+    const sent: Sent[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        sent.push({
+          method: init?.method ?? 'GET',
+          url,
+          body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+        })
+        if (!(url in answers)) throw new Error(`unexpected request to ${url}`)
+        return { ok: true, status: 200, ...jsonBody(answers[url]) }
+      }),
+    )
+    return sent
+  }
+
+  // Run one step's persist and return the state its patches leave.
+  async function persistFrom(id: string, state: WizardState): Promise<WizardState> {
+    let next = state
+    await stepFor(id).persist({
+      orgId: ORG_ID,
+      teamId: 't1',
+      isLocal: false,
+      state,
+      patch: (p) => {
+        next = { ...next, ...p }
+      },
+    })
+    return next
+  }
+
+  it('names a project added on the Jira step by its registry id when the step is saved again', async () => {
+    const candidate = { jira_id: '10100', key: 'SKY', name: 'Sky' }
+    const stored = { ...watchedProject(candidate), id: 'reg-sky' }
+    const sent = serve({ '/api/teams/t1/jira-projects': { jira_projects: [stored] } })
+    const base = initialWizardState()
+    const state = {
+      ...base,
+      teamLoaded: true,
+      team: { ...base.team, jira_projects: [watchedProject(candidate)] },
+    }
+
+    const once = await persistFrom('team-jira-projects', state)
+    expect(once.team.jira_projects).toEqual([stored])
+    await persistFrom('team-jira-projects', once)
+
+    const emptyRule = { member_ids: [], canonical_id: '' }
+    expect(sent.map((r) => r.body.jira_projects)).toEqual([
+      [
+        {
+          jira_id: '10100',
+          pickup: { member_ids: [] },
+          in_progress: emptyRule,
+          in_review: emptyRule,
+          done: emptyRule,
+        },
+      ],
+      [
+        {
+          id: 'reg-sky',
+          pickup: { member_ids: [] },
+          in_progress: emptyRule,
+          in_review: emptyRule,
+          done: emptyRule,
+        },
+      ],
+    ])
+  })
+
+  it('registers a repository picked on the Repositories step once, however often the step is saved', async () => {
+    const picked = { id: '', github_id: '501', owner: 'acme', repo: 'api' }
+    const stored = { ...picked, id: 'repo-1' }
+    const sent = serve({
+      '/api/repos': { id: 'repo-1' },
+      '/api/teams/t1/github-repos': { repos: [stored] },
+    })
+    const base = initialWizardState()
+
+    const once = await persistFrom('team-repos', {
+      ...base,
+      team: { ...base.team, repos: [picked] },
+    })
+    expect(once.team.repos).toEqual([stored])
+    await persistFrom('team-repos', once)
+
+    expect(sent.map((r) => `${r.method} ${r.url}`)).toEqual([
+      'POST /api/repos',
+      'PUT /api/teams/t1/github-repos',
+      'PUT /api/teams/t1/github-repos',
+    ])
+    expect(sent[2].body).toEqual({ repository_ids: ['repo-1'] })
+  })
+
+  it('shows the GitHub teams as stored once the GitHub teams step saves', async () => {
+    const picked = {
+      github_team_id: '77',
+      github_org_id: '9',
+      org_login: 'acme',
+      team_slug: 'core',
+    }
+    const stored = { ...picked, team_slug: 'platform' }
+    serve({ '/api/teams/t1/github-groups': { groups: [stored] } })
+    const base = initialWizardState()
+
+    const once = await persistFrom('team-github-teams', {
+      ...base,
+      team: { ...base.team, github_groups: [picked] },
+    })
+    expect(once.team.github_groups).toEqual([stored])
   })
 })
