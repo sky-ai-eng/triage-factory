@@ -3,11 +3,13 @@
 package worktree
 
 import (
+	"bytes"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -53,11 +55,16 @@ func TestClaudeProjectDir_NameTooLongOnWindows(t *testing.T) {
 	if _, err := ClaudeSessionPath(tooLong, "sess"); !errors.Is(err, ErrClaudeSessionNameTooLong) {
 		t.Errorf("ClaudeSessionPath err = %v, want ErrClaudeSessionNameTooLong", err)
 	}
-	if WarnIfClaudeSessionNameTooLong(tooLong) != true {
-		t.Error("WarnIfClaudeSessionNameTooLong(201 chars) = false, want true")
+	var logged bytes.Buffer
+	restore := logging.SetOutput(&logged)
+	defer restore()
+	WarnIfClaudeSessionNameTooLong(atLimit)
+	if logged.Len() != 0 {
+		t.Errorf("WarnIfClaudeSessionNameTooLong(200 chars) logged %q, want nothing", logged.String())
 	}
-	if WarnIfClaudeSessionNameTooLong(atLimit) {
-		t.Error("WarnIfClaudeSessionNameTooLong(200 chars) = true, want false")
+	WarnIfClaudeSessionNameTooLong(tooLong)
+	if !strings.Contains(logged.String(), "exceeds Claude Code's project directory name limit") {
+		t.Errorf("WarnIfClaudeSessionNameTooLong(201 chars) logged %q, want the warning", logged.String())
 	}
 }
 

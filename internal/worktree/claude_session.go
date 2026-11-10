@@ -22,18 +22,17 @@ const claudeProjectsDir = ".claude/projects"
 // session lost, as Claude Code itself does for such a cwd.
 var ErrClaudeSessionNameTooLong = errors.New("claude project directory name exceeds the length Claude Code stores verbatim")
 
-// WarnIfClaudeSessionNameTooLong logs a WARN and returns true when cwd's
-// encoded Claude project directory name is too long for TF to locate on this
-// platform (Windows only). Call it at launch so the cause of a later failed
-// resume is visible in the log of the run that created the problem.
-func WarnIfClaudeSessionNameTooLong(cwd string) bool {
+// WarnIfClaudeSessionNameTooLong logs a WARN when cwd's encoded Claude project
+// directory name is too long for TF to locate on this platform (Windows only).
+// Call it at launch so the cause of a later failed resume is visible in the log
+// of the run that created the problem.
+func WarnIfClaudeSessionNameTooLong(cwd string) {
 	encoded, resolved := claudeProjectEncoding(cwd)
 	if !claudeEncodedNameTooLong(encoded) {
-		return false
+		return
 	}
 	worktreeLog.Warn("encoded cwd exceeds Claude Code's project directory name limit; session resume and cleanup are unavailable for this run, shorten the state root or TEMP path",
 		"cwd", resolved, "encoded_len", len(encoded))
-	return true
 }
 
 // claudeHome resolves this process's home directory for ~/.claude

@@ -150,7 +150,7 @@ go_group() {
   blue "cross-platform build"
   local host_target target
   host_target="$(go env GOOS)/$(go env GOARCH)"
-  for target in linux/amd64 darwin/arm64 windows/amd64; do
+  for target in linux/amd64 darwin/arm64 windows/amd64 windows/arm64; do
     if [[ "$target" == "$host_target" ]]; then
       green "skipping $target (host platform — typechecked by golangci-lint)"
       continue
