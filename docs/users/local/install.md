@@ -45,8 +45,10 @@ Windows is supported for local mode only. Install the
    [latest release](https://github.com/sky-ai-eng/triage-factory/releases/latest)
    and extract it.
 2. The binary is not code-signed, so SmartScreen may say "Windows protected your
-   PC". Choose **More info**, then **Run anyway**. Or clear the download mark
-   from PowerShell before the first run:
+   PC". Check the download against the release's checksum and signature first
+   ([Verifying releases](../security/verifying-releases.md)). Then choose **More
+   info**, then **Run anyway**. Or clear the download mark from PowerShell
+   before the first run:
 
    ```powershell
    Unblock-File .\triagefactory.exe
@@ -72,9 +74,12 @@ re-run `triagefactory install` after upgrading to refresh it. `--dest <path>`
 picks another location, and `--force` replaces a file there that Triage Factory
 didn't install.
 
-`triagefactory uninstall` deletes your local data and the installed copy. When
-you run it from that copy, the file is renamed to `triagefactory.exe.old`;
-delete it by hand after the command exits. A `triagefactory.exe` you ran from
+`triagefactory uninstall` deletes your local data and the copy at the default
+path above. A copy you installed with `--dest` is not found: delete it by hand.
+When you run uninstall from the installed copy, the file is renamed to
+`triagefactory.exe.old` and Windows is asked to delete it at the next restart.
+The output says whether that request worked; if it didn't, delete the `.old`
+file by hand after the command exits. A `triagefactory.exe` you ran from
 somewhere else stays.
 
 ### Long paths

@@ -42,8 +42,14 @@ waits up to 2s for the job's active process count to reach zero. The job handle
 closes after `Wait`, and also when TF itself dies, which kills the tree. The
 spawn seam is `execProc` (`proc.go`): attach happens right after `cmd.Start`.
 `cmd.WaitDelay` is 3s on Windows so a grandchild holding the stdout pipe cannot
-hang `Wait`. The Unix arm is the same two statements as before (`Setpgid`,
-`Kill(-pid)`).
+hang `Wait`; when the agent exited 0 and only the delay elapsed (`ErrWaitDelay`),
+`Wait` reports success (`waitOutcome`, Windows only). The Unix arm is the same
+two statements as before (`Setpgid`, `Kill(-pid)`).
+
+A cancel that arrives between `Start` and attach kills the direct child and sets
+a flag under the tree's mutex. Attach then joins the process to the job and
+terminates it, or kills the process if it cannot join one, and logs at DEBUG
+rather than WARN since the run is already being torn down.
 
 Known gap: `os/exec` has no suspended start, so a child spawned between `Start`
 and attach escapes the job. A launcher shim (Volta, fnm) that spawns at once can
@@ -55,9 +61,11 @@ reach it. Accepted: node loads the SDK before it spawns anything.
 system prompt, the tool allowlist, the tool schemas) are typically 22 to 40 KB
 before Windows quoting. On Windows the wrapper gets `--args-file <path>`
 instead: the arguments as a JSON array in an owner-only file under the state
-root (not the run root, which the agent can write). The wrapper reads and
-deletes it. Stale files older than an hour are pruned, since a crashed spawn
-leaves prompt text behind. It is always on for Windows rather than past a
+root (not the run root, which the agent can write). The wrapper reads it and
+deletes it best-effort; Go removes it again when the process is reaped, so a
+failed delete does not fail the run, while a failed read exits 2. Stale
+`args-*.json` files older than an hour are pruned, since a crashed spawn leaves
+prompt text behind; nothing else in the directory is touched. It is always on for Windows rather than past a
 length threshold, because typical runs already exceed the limit and a threshold
 would make the common path the untested one. stdin stays the interactive
 control channel.
@@ -67,13 +75,34 @@ control channel.
 The agent runs commands in Git Bash, which treats a backslash as an escape, so
 `C:\Users\me\triagefactory.exe exec ...` arrives mangled and a permission rule
 naming that path never matches. Instead, the agent's PATH gets
-`<StateRoot>\bin` first, where `triagefactory.exe` is a hardlink to the running
-binary (a copy where links fail, compared by size and mtime; a stale file is
-renamed aside, since Windows allows renaming an open image but not overwriting
-it). The prompt keeps the bare name `triagefactory exec`, and the allowlist is
-`Bash(triagefactory exec *)`. It is never the running binary's own folder: the
-user owns that folder and may keep other programs in it. Paths shown to the
-agent (run root, checkouts) are forward-slashed.
+`<StateRoot>\bin` first, where `triagefactory.exe` is a copy of the running
+binary. It is a copy and never a hardlink: the agent runs as the user and can
+write to `bin\`, and a link would alias the installed binary, so a write through
+the shim path would modify it. A copy counts as current only when its size and
+SHA-256 equal the running binary's (the running binary is hashed once per
+process, the copy on each spawn; a modification time is something the agent can
+reset). A stale or aliased file is renamed aside, since Windows allows renaming
+an open image but not overwriting it. The prompt keeps the bare name
+`triagefactory exec`, and the allowlist is `Bash(triagefactory exec *)`. It is
+never the running binary's own folder: the user owns that folder and may keep
+other programs in it. Paths shown to the agent (run root, checkouts) are
+forward-slashed.
+
+The agent env also sets `NoDefaultCurrentDirectoryInExePath=1`, so a bare
+command name does not resolve to a program in the working directory, which is a
+repository checkout.
+
+On Windows the Claude Code tool allowlist is the only gate on what the agent
+runs: there is no sandbox. What the mitigations above (and the git env below)
+do and do not do:
+
+- The shim is a copy, so a write through it cannot reach the install.
+- The shim is verified by content on every spawn, so an agent that replaced it
+  between runs is caught at the next spawn. This is not a boundary: the agent
+  can still rewrite the file while a run is live, and the window between the
+  check and the spawn is not closed.
+- The working directory is out of the executable search.
+- The args file is outside the run root and prunes only its own files.
 
 ### Git Bash preflight (`gitbash_windows.go`)
 
@@ -111,25 +140,45 @@ with inherited stdio and exits with its code (127 on start failure, as before).
 Windows byte-range locks are mandatory and block reads through other handles, so
 locking offset 0 would make the id file unreadable to anything but the holder.
 
-### Keychain chunking (`internal/auth/keychain.go`)
+### Keychain chunking (`internal/auth/keychain_chunk.go`)
 
 go-keyring refuses a Windows Credential Manager value over 2560 bytes. Values
-over the limit are split by bytes into `key#1` to `key#N`; the base entry holds
-`tfchunks:v1:<N>:<sha256 of the whole value>`. Write order is chunks, then
-base. Read reassembles the chunks and verifies the hash; a mismatch or a
-missing chunk is an error. Delete removes the base and probes `key#1...` until one is not
-found. Replacing a chunked value removes chunks beyond the new count. A failed
-chunked write deletes the chunks it wrote and the stale base, so the key reads
-as absent. One mutex covers put, get and delete. Values at or under the limit
-are stored exactly as before, and other platforms set the limit to 0 (off).
-The limit is a per-platform constant, and the tests run the logic on every OS.
+over the limit are split by bytes into `key#<gen>#1` to `key#<gen>#N`, where
+`<gen>` is a random 8-hex id per write. The base entry holds
+`tfchunks:v2:<gen>:<N>:<sha256 of the whole value>`. Records from the earlier
+layout (`tfchunks:v1:<N>:<digest>`, chunks `key#1` to `key#N`) still read and
+are replaced by the next write. A random id is used rather than one derived from
+the value so a re-write of the same value never reuses the names of the live
+chunks.
+
+Write order: record the new generation in `key#orphans`, write every new chunk,
+write the base last (the commit), then delete the previous generation's chunks.
+A failed or interrupted write therefore leaves the previous value readable; it
+removes only its own chunks. Failing to delete the previous generation is a WARN,
+not a failed put, and the generation stays named in `key#orphans` so the next
+write, delete or uninstall sweep retries it. Read reassembles the chunks and
+verifies the hash; on a missing chunk or a mismatch it re-reads the base once
+(a write in another process) and retries, then errors. A record with more than
+64 chunks is corrupt, and a value that would need more is refused at write time.
+Delete removes the base first, so a failure leaves the value readable, then the
+chunks it named (descending), then every generation in `key#orphans`, then the
+v1 names `key#1` to `key#64`, which is probed to the cap rather than stopping at
+the first gap. `SweepKeychain` (uninstall) uses the same delete, so it removes
+every generation, and a failure on one key does not stop the others. One mutex
+covers put, get and delete in a process. Values at or under the limit are stored
+exactly as before (their housekeeping failing is a WARN), and other platforms set
+the limit to 0 (off). The limit is a per-platform constant, and the tests run
+the logic on every OS.
 
 ### Git environment (`internal/githooks/gitenv_windows.go`, `internal/worktree/gitenv_windows.go`)
 
 TF's own git calls and the agent's git get `core.longpaths=true`, an empty
 `credential.helper` (resets the list so Git Credential Manager never opens a
-window or stores a token), and `GCM_INTERACTIVE=never`. Both env builders use
-the same `GIT_CONFIG_COUNT` layering. `gpg.ssh.program` is forward-slashed,
+window or stores a token), and `GCM_INTERACTIVE=never`. The agent's env also
+gets `GIT_TERMINAL_PROMPT=0` and loses any inherited `GIT_ASKPASS` and
+`SSH_ASKPASS` (an editor such as VS Code exports an askpass helper that can
+answer with the operator's token); Linux and macOS are unchanged. Both env
+builders use the same `GIT_CONFIG_COUNT` layering. `gpg.ssh.program` is forward-slashed,
 because git runs it through a shell. Hooks run under Git for Windows' sh; a
 Windows-only test runs real `git commit -S` and `git push` through the hooks
 against a local bare remote.
@@ -138,24 +187,30 @@ against a local bare remote.
 
 Windows has no unprivileged symlink, so install copies the binary to
 `%LOCALAPPDATA%\Programs\triagefactory\triagefactory.exe` (temp file plus
-rename; an existing copy is renamed to `.old` first), compares PATH entries
+rename; an existing copy is renamed to `.old` first, or to `.old.<n>` when an
+earlier `.old` is still running and cannot be deleted), compares PATH entries
 case-insensitively, and prints a PowerShell line that prepends the folder to the
-user PATH. It does not change PATH itself. Replacing an existing destination
-without `--force` is allowed only for a regular file named `triagefactory.exe`.
-Re-running install after an upgrade is the upgrade path. Uninstall removes only
-that file; a running copy is renamed to `.old` for the user to delete.
+user PATH. It does not change PATH itself. The renames use the same
+transient-failure retry as the secrets file (`internal/fsutil`). Replacing an
+existing destination without `--force` is allowed only for a regular file named
+`triagefactory.exe`. Re-running install after an upgrade is the upgrade path.
+Uninstall removes only the copy at the default path (one installed with `--dest`
+is not discovered); a running copy is renamed to `.old` and scheduled for
+deletion with `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`. If scheduling fails
+(some locations need an administrator), the message tells the user to delete it.
 
 ### Other
 
 - State root stays `%USERPROFILE%\.triagefactory`, matching the `paths` package
   and the docs on other systems.
-- The boot log says at INFO that Windows has no local sandbox.
+- The boot log says at WARN that Windows has no local sandbox.
   `TF_LOCAL_SANDBOX=on` already fails at boot on any non-Linux system.
 - `isRunsBase` compares case-insensitively; the over-long path check in the
   scratch walk matches `ERROR_FILENAME_EXCED_RANGE`.
 - `cmd/runsidecar` splits its listener fd check by platform; off Linux it
   reports an error and falls back to an ephemeral port, as a closed fd does.
-- `filestore` rename retries briefly on a sharing violation.
+- `filestore` rename retries briefly on a sharing violation, through
+  `internal/fsutil.RenameReplace`, which the installer shares.
 
 ### Line endings
 
@@ -170,7 +225,7 @@ checkout with `autocrlf=true` cannot ship one.
 the detector needs cgo). `goreleaser.yaml` builds windows amd64 and arm64 and
 packs them as zips named `triagefactory_<version>_windows_<arch>.zip`; the brew
 formula sees only darwin and linux. `scripts/lint.sh` cross-builds
-`windows/amd64` and finds `goimports.exe`.
+`windows/amd64` and `windows/arm64` and finds `goimports.exe`.
 
 ## Decisions and rationale
 
@@ -180,7 +235,7 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
   untested.
 - **Bare name on PATH, not an absolute path.** An absolute Windows path cannot
   survive Git Bash quoting or be matched by a permission rule. The cost is one
-  hardlink per upgrade.
+  copy of the binary per upgrade, hashed on each spawn.
 - **Closing the job after `Wait` also kills background processes the agent left
   running.** This differs from Unix, where the process group can outlive the
   run. On Windows it is the wanted cleanup.
@@ -192,8 +247,9 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
   probably maps all non-alphanumerics on Linux too (see follow-ups).
 - **Bad `CLAUDE_CODE_GIT_BASH_PATH` is an error.** A silent fall-through to
   another bash hides the mistake.
-- **Chunks carry a hash.** A partial or interleaved write is detected and
-  surfaces as an error, not as a corrupt key.
+- **Chunks carry a hash and a generation.** A partial or interleaved write is
+  detected and surfaces as an error, not as a corrupt key, and a failed write
+  cannot damage the value it was replacing.
 - **State root unchanged.** Moving to `%LOCALAPPDATA%` would make Windows the one
   platform whose state is somewhere else, for no user benefit.
 - **Skipped tests.** A Windows skip carries a one-line reason. Permission-bit
@@ -213,8 +269,12 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
   Win32 `LongPathsEnabled` setting, and a long `TEMP` path disables session
   resume (200-character limit).
 - **Unsandboxed runs.** Windows has no local sandbox, so a run has the user's
-  full access. Documented, logged at boot, and not a regression relative to
-  `TF_LOCAL_SANDBOX=off` elsewhere.
+  full access, including stored credentials, and the Claude Code tool allowlist
+  is the only gate on what it runs. Documented, logged at WARN at boot, and not a
+  regression relative to `TF_LOCAL_SANDBOX=off` elsewhere.
+- **Console close, sign-out, shutdown.** The Job Object ends the agent tree, but
+  Windows ends TF itself a few seconds after the event, which may not be enough
+  to save each run for resuming. This is not parity with Ctrl+C.
 - **Windows CI cost.** The `test-windows` job is slower and costs more per minute
   than the Linux jobs, and was not run on GitHub Actions while writing this.
 - **Tests.** Part of the suite assumes Unix (`sh`, `chmod`, symlinks). The ones
@@ -248,6 +308,10 @@ formula sees only darwin and linux. `scripts/lint.sh` cross-builds
 - **Local sandbox on Windows.** There is no bubblewrap equivalent. A Job Object
   limits resources, not file access; an AppContainer or a restricted token
   would be the starting point.
+- **Configurable state root.** The state root is fixed at `%USERPROFILE%\.triagefactory`,
+  whose ACL keeps other users out. A configurable state root would need an
+  explicit DACL (owner-only, inheritance removed) on `argv\` and `bin\`, since
+  the args files hold prompt text and `bin\` holds an executable the agent runs.
 - **gh channel on Windows.** See decision 4.
 - **Signing and distribution.** See decisions 2 and 3.
 - **CA bundle paths on Windows.** `internal/cabundle` reads only the Linux CA

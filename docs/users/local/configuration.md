@@ -73,10 +73,11 @@ TF_LOCAL_SANDBOX=off triagefactory
 
 ### Windows
 
-There is no agent sandbox on Windows. Each run is a plain child process with the
-full access of your user account: your home folder, the database, other runs'
-folders and the network. Triage Factory logs
-`local agent sandbox not available on Windows` at startup. Setting
+There is no agent sandbox on Windows. Each run is a plain child process that
+runs as you and can read whatever you can read: your home folder, the database,
+other runs' folders, the network, and your stored credentials (in Windows
+Credential Manager, or `secrets.enc` when there is no keychain). Triage Factory
+logs a warning, `local agent sandbox not available on Windows`, at startup. Setting
 `TF_LOCAL_SANDBOX=on` fails at startup with
 `TF_LOCAL_SANDBOX=on cannot be honored on windows`; leave it unset or set it to
 `off`.

@@ -26,10 +26,15 @@ tunnel to it; see [Running on a server](server.md).
 
 ## Stopping
 
-Press Ctrl+C in the terminal running Triage Factory. On Windows, Ctrl+Break
-works the same way, and so does closing the console window, signing out or
-shutting down. Triage Factory stops its live agent runs and exits. A stopped
-run keeps its workspace, so you can resume it the next time you start.
+Press Ctrl+C in the terminal running Triage Factory. Triage Factory stops its
+live agent runs and exits. A stopped run keeps its workspace, so you can resume
+it the next time you start.
+
+On Windows, Ctrl+Break works the same way. Closing the console window, signing
+out or shutting down also ends the agent runs, but Windows ends the Triage
+Factory process a few seconds after the event, which may not be enough time to
+save each run for resuming. Stop with Ctrl+C when you want a run to be
+resumable.
 
 Only one Triage Factory can use a state folder at a time. A second one refuses
 to start while the first is running.
@@ -54,7 +59,11 @@ triagefactory install      # re-run after every upgrade to refresh the copy
 triagefactory uninstall    # deletes local data and the installed copy
 ```
 
-See [Install](install.md#windows) for the details.
+`uninstall` removes only the copy at that default path. A copy installed with
+`install --dest` must be deleted by hand. If you run `uninstall` from the
+installed copy, it is renamed to `triagefactory.exe.old` and scheduled for
+deletion at the next restart; delete it by hand if the output says scheduling
+failed. See [Install](install.md#windows) for the details.
 
 `triagefactory exec …` is the set of commands delegated agents run from their
 worktree. You don't need to call them; `triagefactory exec --help` lists them.
