@@ -7,10 +7,9 @@
 // Key difference from org: team config spans MULTIPLE endpoints, not the
 // single org-settings PATCH. The team settings row has its own PATCH; the
 // Jira project rules, the tracked repos and the GitHub-team mappings are each
-// a child collection with its own replace-set PUT. saveTeamConfig sequences
-// all four and surfaces partial failure (so the user never silently lands on a
-// half-saved team), while the per-slice savers let a surface that only touched
-// one slice (e.g. Settings' change-aware save) write just that one.
+// a child collection with its own replace-set PUT. Each slice has its own
+// saver, so a surface writes only the slices it touched, and each replace-set
+// saver hands back the set as stored for the caller to adopt.
 
 import { apiJSON, apiListAll, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
@@ -109,10 +108,9 @@ export interface TeamConfigForm {
   // repos and github_groups load from their own endpoints (separate from the
   // team-settings GET), so they carry a third state: `undefined` means "not
   // loaded yet / load failed" — distinct from `[]` ("loaded, genuinely
-  // empty"). saveTeamConfig skips an `undefined` slice rather than PUTting an
-  // empty set over data it never read, so a flaky load can't wipe a team's
-  // repos or mappings. This makes the no-wipe invariant hold by construction
-  // for every consumer instead of each one re-implementing a load guard.
+  // empty"). A surface must never PUT an empty set for an `undefined` slice,
+  // since that writes over data it never read, and a flaky load would wipe a
+  // team's repos or mappings.
   repos?: RepoRef[]
   github_groups?: GitHubGroup[]
 }
@@ -496,7 +494,7 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
 // form from a team GET. Repos and GitHub-team mappings come from their own
 // endpoints, so they stay undefined here (unloaded) and the container patches
 // them in once their own fetches land — keeping them undefined until then is
-// what lets saveTeamConfig skip a slice that never loaded.
+// what lets a surface tell a slice that never loaded from an empty one.
 export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
     default_model: data.team_settings.DefaultModel,
@@ -886,64 +884,4 @@ export async function fetchTeamSlackChannelFacets(
   )
     .then((f) => ({ tracked: f.tracked ?? [], primary: f.primary ?? [] }))
     .catch(() => null)
-}
-
-// partialFailure builds a "<saved> saved, but <failed> did not — <err>"
-// message from the slices that already committed, so the user knows exactly
-// what landed and what to retry rather than reading a bare "failed".
-function partialFailure(saved: string[], failed: string, err: string): string {
-  const phrase =
-    saved.length <= 1
-      ? saved.join('')
-      : `${saved.slice(0, -1).join(', ')} and ${saved[saved.length - 1]}`
-  return `${phrase} saved, but ${failed} did not — ${err}`
-}
-
-// saveTeamConfig orchestrates the team save across the endpoints, the
-// create-step's "Finish" path. Order is deliberate: team settings and the Jira
-// rules first (pure server-side validation — project rules, dup keys — with no
-// external calls, so a bad rule fails before the repos PUT does any
-// reachability work or profiling), then repos, then GitHub-team mappings.
-//
-// A slice left `undefined` (never loaded / load failed) is skipped, not
-// written — that's the no-wipe guarantee. On a mid-sequence failure the
-// earlier writes are already committed (separate endpoints, no spanning
-// transaction), so the error names exactly which slices landed.
-export async function saveTeamConfig(
-  teamId: string,
-  form: TeamConfigForm,
-  isLocal: boolean,
-): Promise<SaveResult> {
-  const saved: string[] = []
-
-  const settings = await saveTeamSettings(teamId, form, isLocal)
-  if (!settings.ok) return settings
-  saved.push('Team settings')
-
-  const projects = await saveTeamJiraProjects(teamId, form.jira_projects)
-  if (!projects.ok) {
-    return { ok: false, error: partialFailure(saved, 'Jira projects', projects.error) }
-  }
-  saved.push('Jira projects')
-
-  if (form.repos !== undefined) {
-    const repos = await saveTeamRepos(teamId, form.repos)
-    if (!repos.ok) {
-      return { ok: false, error: partialFailure(saved, 'tracked repositories', repos.error) }
-    }
-    saved.push('tracked repositories')
-  }
-
-  if (form.github_groups !== undefined) {
-    const groups = await saveTeamGitHubGroups(teamId, form.github_groups)
-    if (!groups.ok) {
-      return { ok: false, error: partialFailure(saved, 'GitHub team mappings', groups.error) }
-    }
-    // Kept consistent with the slices above even though it's last and the
-    // success path doesn't read `saved` — a future fourth slice's partial
-    // message would otherwise silently omit it.
-    saved.push('GitHub team mappings')
-  }
-
-  return { ok: true, warning: settings.warning }
 }
