@@ -95,7 +95,7 @@ func (p *execProc) Start() error {
 // releases the process tree. Releasing it ends any descendant the agent left
 // running.
 func (p *execProc) Wait() error {
-	err := p.cmd.Wait()
+	err := waitOutcome(p.cmd, p.cmd.Wait())
 	removeArgsFile(p.cmd)
 	p.tree.close()
 	return err

@@ -3,6 +3,7 @@
 package agentproc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,14 +51,17 @@ type jobBasicAccounting struct {
 // spawns. Windows has no process group that can be signalled as a unit, so
 // the job is what makes a cancel reach grandchildren.
 //
-// mu guards job and attached, which cmd.Cancel reads from the exec watcher
-// goroutine while Start and Wait write them.
+// mu guards job, attached and cancelled, which cmd.Cancel reads from the exec
+// watcher goroutine while Start and Wait write them. cancelled records a cancel
+// that ran before attach: the process is already being killed, and attach
+// finishes the job by ending the whole tree.
 type procTree struct {
 	cmd *exec.Cmd
 
-	mu       sync.Mutex
-	job      windows.Handle
-	attached bool
+	mu        sync.Mutex
+	job       windows.Handle
+	attached  bool
+	cancelled bool
 }
 
 // configureProcessTree creates the job and routes cmd's cancel through it.
@@ -113,9 +117,56 @@ func newKillOnCloseJob() (windows.Handle, error) {
 // creation. A child that escapes this way is not killed by cancel, but the
 // agent's own descendants, spawned after the runtime has loaded, are all
 // inside the job.
+//
+// When cancel already ran, the run is being torn down and an attach problem is
+// not worth a warning: the process joins the job if it can, and the job is
+// terminated; if it cannot join, the process is killed directly.
 func (t *procTree) attach(p *os.Process) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	err := t.assign(p)
+	if !t.cancelled {
+		return err
+	}
+	if err != nil {
+		agentprocLog.Debug("cancelled before attach and the process could not join the job; killing it directly",
+			"pid", p.Pid, "error", err)
+		// cancel already killed the process, so it has usually exited by now,
+		// and Windows answers a kill of an exited process with access denied
+		// rather than ErrProcessDone.
+		if killErr := p.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) && processStillActive(p.Pid) {
+			return fmt.Errorf("kill cancelled process %d: %w", p.Pid, killErr)
+		}
+		return nil
+	}
+	agentprocLog.Debug("cancelled before attach; ending the job", "pid", p.Pid)
+	if err := windows.TerminateJobObject(t.job, terminateExitCode); err != nil {
+		return fmt.Errorf("TerminateJobObject: %w", err)
+	}
+	t.waitDrained()
+	return nil
+}
+
+// processStillActive reports whether pid names a running process. A process
+// that cannot be opened is taken as gone.
+func processStillActive(pid int) bool {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code == stillActiveExitCode
+}
+
+// stillActiveExitCode is GetExitCodeProcess's answer for a running process.
+const stillActiveExitCode = 259
+
+// assign puts p in the job and records that it is attached. Caller holds t.mu.
+func (t *procTree) assign(p *os.Process) error {
 	if t.job == 0 {
 		return fmt.Errorf("no job object to attach pid %d to", p.Pid)
 	}
@@ -131,14 +182,21 @@ func (t *procTree) attach(p *os.Process) error {
 	return nil
 }
 
-// cancel ends the tree. Without a job that holds the process it falls back to
-// killing the direct child, which leaves grandchildren running, so it says so.
+// cancel ends the tree. Without a job at all it falls back to killing the
+// direct child, which leaves grandchildren running, so it says so. With a job
+// the process has not joined yet (attach runs just after Start), it kills the
+// direct child now and leaves attach to end the rest of the tree.
 func (t *procTree) cancel() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if !t.attached || t.job == 0 {
-		agentprocLog.Warn("process tree not attached to job object; killing direct child only")
+	if t.job == 0 {
+		agentprocLog.Warn("process tree has no job object; killing direct child only")
+		return t.cmd.Process.Kill()
+	}
+	if !t.attached {
+		t.cancelled = true
+		agentprocLog.Debug("cancel before attach; killing the direct child, attach ends the tree")
 		return t.cmd.Process.Kill()
 	}
 	if err := windows.TerminateJobObject(t.job, terminateExitCode); err != nil {
@@ -170,6 +228,19 @@ func (t *procTree) waitDrained() {
 		}
 		time.Sleep(jobDrainPoll)
 	}
+}
+
+// waitOutcome is the error Wait reports for the command. The agent exited with
+// status 0 but a descendant outside the job kept an output pipe open past
+// windowsWaitDelay, which exec reports as ErrWaitDelay; the run itself
+// succeeded, so that is not a failure. Any other error, and a non-zero exit,
+// pass through.
+func waitOutcome(cmd *exec.Cmd, err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		agentprocLog.Debug("agent exited cleanly but an output pipe stayed open past the wait delay", "delay", windowsWaitDelay)
+		return nil
+	}
+	return err
 }
 
 // close releases the job handle. Anything still in the job when the handle

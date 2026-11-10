@@ -34,3 +34,7 @@ func (t *procTree) attach(*os.Process) error { return nil }
 
 // close is a no-op: nothing is held beyond the process group.
 func (t *procTree) close() {}
+
+// waitOutcome is the error Wait reports for the command: unchanged on unix,
+// where no WaitDelay is set and so no wait-delay error can arise.
+func waitOutcome(_ *exec.Cmd, err error) error { return err }

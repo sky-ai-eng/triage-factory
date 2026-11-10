@@ -4,6 +4,7 @@ package agentproc
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,18 @@ func TestProcTreeHelper(t *testing.T) {
 		t.Skip("helper process only")
 	case "grandchild":
 		time.Sleep(5 * time.Minute)
+	case "briefchild":
+		time.Sleep(20 * time.Second)
+	case "leaver":
+		// Wait for the parent to put this process in its job, then leave a
+		// descendant holding the inherited stderr pipe and exit cleanly.
+		time.Sleep(500 * time.Millisecond)
+		gc := exec.Command(os.Args[0], "-test.run="+procTreeHelperTest)
+		gc.Env = append(os.Environ(), procTreeHelperEnv+"=briefchild")
+		gc.Stderr = os.Stderr
+		if err := gc.Start(); err != nil {
+			t.Fatalf("start descendant: %v", err)
+		}
 	case "child":
 		gc := exec.Command(os.Args[0], "-test.run="+procTreeHelperTest)
 		gc.Env = append(os.Environ(), procTreeHelperEnv+"=grandchild")
@@ -183,5 +196,107 @@ func TestProcessTree_CancelBeforeAttachKillsDirectChild(t *testing.T) {
 	_ = proc.cmd.Wait()
 	if processRunning(pid) {
 		t.Errorf("direct child %d still running after unattached cancel", pid)
+	}
+}
+
+// An agent that exits 0 while a descendant still holds its stderr pipe makes
+// exec report ErrWaitDelay once the wait delay passes; the run succeeded, so
+// Wait reports no error. A non-zero exit still fails.
+func TestExecProc_WaitIgnoresWaitDelayAfterCleanExit(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run="+procTreeHelperTest)
+	cmd.Env = append(os.Environ(), procTreeHelperEnv+"=leaver")
+	proc, err := newExecProc(cmd, configureProcessTree(cmd))
+	if err != nil {
+		t.Fatalf("newExecProc: %v", err)
+	}
+	if err := proc.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, proc.Stdout()) }()
+	start := time.Now()
+	if err := proc.Wait(); err != nil {
+		t.Errorf("Wait after a clean exit with a pipe holder = %v, want nil", err)
+	}
+	if time.Since(start) < windowsWaitDelay-time.Second {
+		t.Errorf("Wait returned in %s, before the wait delay: the pipe holder did not exercise ErrWaitDelay", time.Since(start))
+	}
+}
+
+func TestWaitOutcome_PassesOtherErrorsThrough(t *testing.T) {
+	cmd := exec.Command("cmd.exe", "/c", "exit 3")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected a non-zero exit")
+	}
+	if got := waitOutcome(cmd, err); got != err {
+		t.Errorf("waitOutcome changed a non-zero exit error: %v", got)
+	}
+	plain := exec.Command("cmd.exe", "/c", "exit 0")
+	if err := plain.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitOutcome(plain, exec.ErrWaitDelay); got != nil {
+		t.Errorf("waitOutcome(ErrWaitDelay after exit 0) = %v, want nil", got)
+	}
+	if got := waitOutcome(cmd, exec.ErrWaitDelay); got == nil {
+		t.Error("waitOutcome swallowed ErrWaitDelay after a non-zero exit")
+	}
+}
+
+// A cancel that lands between Start and attach kills the direct child at once
+// and records itself; attach then finds the process already gone, cannot join
+// it to the job, and still returns no error, since there is nothing to warn
+// about in a run that was cancelled.
+func TestProcessTree_AttachAfterCancelEndsTheTree(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run="+procTreeHelperTest)
+	cmd.Env = append(os.Environ(), procTreeHelperEnv+"=grandchild")
+	tree := configureProcessTree(cmd)
+	defer tree.close()
+	proc, err := newExecProc(cmd, tree)
+	if err != nil {
+		t.Fatalf("newExecProc: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	pid := cmd.Process.Pid
+
+	if err := tree.cancel(); err != nil {
+		t.Fatalf("cancel before attach: %v", err)
+	}
+	tree.mu.Lock()
+	cancelled := tree.cancelled
+	tree.mu.Unlock()
+	if !cancelled {
+		t.Fatal("cancel before attach was not recorded")
+	}
+	if err := tree.attach(cmd.Process); err != nil {
+		t.Fatalf("attach after cancel returned %v, want nil", err)
+	}
+	_ = proc.cmd.Wait()
+	if processRunning(pid) {
+		t.Errorf("child %d still running after cancel and attach", pid)
+	}
+}
+
+// When the cancelled process cannot join a job at all, attach kills it itself.
+func TestProcessTree_AttachAfterCancelWithoutJobKillsTheProcess(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run="+procTreeHelperTest)
+	cmd.Env = append(os.Environ(), procTreeHelperEnv+"=grandchild")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	tree := &procTree{cmd: cmd, cancelled: true}
+
+	if err := tree.attach(cmd.Process); err != nil {
+		t.Fatalf("attach of a cancelled process with no job returned %v, want nil", err)
+	}
+	_ = cmd.Wait()
+	if processRunning(pid) {
+		t.Errorf("process %d still running after attach of a cancelled tree", pid)
 	}
 }
