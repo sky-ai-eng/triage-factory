@@ -1260,8 +1260,9 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	client, self, resolver, ok := m.patPass(ctx, conn, orgID, isLocal)
 	if !ok {
 		// An org with no GitHub credential at all has nothing that could
-		// refresh what its marks name; one connected later is polled by its
-		// listings, which show whatever changed meanwhile.
+		// refresh what its marks name. Once one is connected, the listings
+		// show most of what changed meanwhile, and the refresh floor catches
+		// what they cannot, such as a CI re-run on an unchanged head.
 		if conn.unpolled == "unconfigured" {
 			marks.dropUnreached(nil)
 		}
