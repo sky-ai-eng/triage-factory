@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -20,6 +21,9 @@ import (
 // the orchestrator, and the rest of the scratch still has to reach the blob
 // whole.
 func TestTarScratch_SkipsWhatItCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ignores chmod 0, so no entry is closed to the owner without an ACL")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads every file whatever its mode; the case needs an identity the modes apply to")
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -101,6 +102,12 @@ func newGitRepo(t *testing.T, git string, committer Identity) *gitRepo {
 		"GIT_COMMITTER_NAME=" + committer.Name,
 		"GIT_COMMITTER_EMAIL=" + committer.Email,
 		"GIT_COMMITTER_DATE=1700000000 +0100",
+	}
+	if runtime.GOOS == "windows" {
+		// git for Windows writes the signature it hands ssh-keygen under the
+		// temp dir, and neither finds it without these.
+		tmp := t.TempDir()
+		r.env = append(r.env, "SystemRoot="+os.Getenv("SystemRoot"), "TEMP="+tmp, "TMP="+tmp)
 	}
 	r.run(nil, nil, "init", "-q")
 	return r

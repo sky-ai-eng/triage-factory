@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -697,6 +698,9 @@ func TestSetupGitHub_ResolvesTheRepositoryByTheEntitysID(t *testing.T) {
 // the blob already under the key, which carries that checkout, stands. A blob
 // written without it would replace the last one that had its work.
 func TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports a symlink loop as file-not-found, so no stat error other than absence can be provoked without an ACL")
+	}
 	f := newSnapshotFixture(t, "task-unstattable")
 	co := f.addCheckout(t, "acme/app", "default")
 	dirtyCheckout(t, co)
@@ -1697,7 +1701,10 @@ func newStorageSpawner(t *testing.T) *Spawner {
 // developer's global config.
 func setupGitTestEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	// USERPROFILE is what os.UserHomeDir reads on Windows.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	t.Setenv("GIT_AUTHOR_NAME", "Test")
