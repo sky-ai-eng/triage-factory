@@ -61,6 +61,18 @@ const (
 	keyBudget         = attribute.Key("budget")
 	keySigned         = attribute.Key("signed")
 	keyKind           = attribute.Key("kind")
+	keyModel          = attribute.Key("model")
+	keyTool           = attribute.Key("tool")
+	keyTurn           = attribute.Key("turn")
+	keyStopReason     = attribute.Key("stop_reason")
+	keyMaxTokens      = attribute.Key("max_tokens")
+	keyTokensInput    = attribute.Key("tokens.input")
+	keyTokensOutput   = attribute.Key("tokens.output")
+	keyTokensRead     = attribute.Key("tokens.cache_read")
+	keyTokensWrite    = attribute.Key("tokens.cache_write")
+	keyLLMCostUSD     = attribute.Key("llm.cost_usd")
+	keyFirstChunkMS   = attribute.Key("llm.first_chunk_ms")
+	keyMemoryKills    = attribute.Key("memory.kills")
 )
 
 // Opaque row identifiers, the backbone of the set. Each is the id and
@@ -221,3 +233,44 @@ func Signed(signed bool) attribute.KeyValue { return keySigned.String(strconv.Fo
 // an extension's own package, or "clear_source" for a ClearSource call; never
 // text a tenant wrote.
 func NotificationKind(name string) attribute.KeyValue { return keyKind.String(name) }
+
+// The provider-call vocabulary.
+//
+// Model is a catalog key from internal/llm/modelcatalog, the model a call
+// REQUESTED: the deployment's allowlist, so a closed set. Never the model a
+// provider reports serving, which on Bedrock can be an inference-profile id
+// naming the operator's account.
+//
+// MaxTokens is the completion cap a call was sent with, which is how a
+// one-shot escalation after a truncated turn shows. The four token counts are
+// the ledger's disjoint buckets (input is the part billed at the plain input
+// rate), so they sum to the prompt plus the completion exactly once, as the
+// messages columns do. LLMCostUSD is one call's price, distinct from
+// AgentCostUSD, which is a whole engagement's.
+//
+// FirstChunk is how long a streamed call waited for its first chunk. A
+// duration, so it can be filtered and selected in a span list, which a span
+// event's timestamp cannot.
+func Model(id string) attribute.KeyValue            { return keyModel.String(id) }
+func MaxTokens(n int) attribute.KeyValue            { return keyMaxTokens.Int(n) }
+func TokensInput(n int) attribute.KeyValue          { return keyTokensInput.Int(n) }
+func TokensOutput(n int) attribute.KeyValue         { return keyTokensOutput.Int(n) }
+func TokensCacheRead(n int) attribute.KeyValue      { return keyTokensRead.Int(n) }
+func TokensCacheWrite(n int) attribute.KeyValue     { return keyTokensWrite.Int(n) }
+func LLMCostUSD(usd float64) attribute.KeyValue     { return keyLLMCostUSD.Float64(usd) }
+func FirstChunk(d time.Duration) attribute.KeyValue { return keyFirstChunkMS.Int64(d.Milliseconds()) }
+
+// The native agent loop's vocabulary.
+//
+// Tool is a tool's registry name (internal/tooldefs) or "unknown". The model
+// chooses the name it calls, so the raw name is model output and may be
+// anything; only a name the registry declares is passed through. Turn is the
+// ordinal of a provider call within its engagement. StopReason is the loop's
+// classification of why the provider stopped ("end_turn", "tool_calls",
+// "length", …), never the provider's own string, which the loop does not
+// recognize in every case. MemoryKills is how many processes the jail's
+// memory ceiling killed that a tool call's result reported.
+func Tool(name string) attribute.KeyValue        { return keyTool.String(name) }
+func Turn(n int) attribute.KeyValue              { return keyTurn.Int(n) }
+func StopReason(class string) attribute.KeyValue { return keyStopReason.String(class) }
+func MemoryKills(n int) attribute.KeyValue       { return keyMemoryKills.Int(n) }

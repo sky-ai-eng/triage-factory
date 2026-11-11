@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // ToolHostLostError is a tool host that died during a call: the jail it runs
@@ -26,6 +30,34 @@ type ToolHostLostError struct {
 	MemoryLimit bool
 	// Err is the failure the call returned.
 	Err error
+
+	// overran marks a call its driver ended by stopping the jail, for running
+	// past the longest one tool call may run.
+	overran bool
+}
+
+// The causes of a lost tool host, as the agent.tool span names them: closed,
+// unlike Reason, which is prose for a person.
+const (
+	lostMemoryCeiling = "memory_ceiling"
+	lostOverran       = "overran"
+	lostRefused       = "refused"
+	lostStopped       = "stopped"
+)
+
+// cause names what ended the tool host.
+func (e *ToolHostLostError) cause() string {
+	switch {
+	case e.MemoryLimit:
+		return lostMemoryCeiling
+	case e.overran:
+		return lostOverran
+	}
+	var proto *ProtocolError
+	if errors.As(e.Err, &proto) {
+		return lostRefused
+	}
+	return lostStopped
 }
 
 func (e *ToolHostLostError) Error() string {
@@ -102,8 +134,9 @@ func ToolCallOverranError(limit time.Duration, err error) *ToolHostLostError {
 	return &ToolHostLostError{
 		Notice: "This tool call ran past the " + phrase + " limit on a single tool call, so the sandbox was stopped to " +
 			"end it. Its result is lost, and it may have run in part or in full: check its effects before you repeat it.",
-		Reason: "a tool call ran past the " + phrase + " limit on a single tool call",
-		Err:    err,
+		Reason:  "a tool call ran past the " + phrase + " limit on a single tool call",
+		Err:     err,
+		overran: true,
 	}
 }
 
@@ -154,7 +187,12 @@ func (e *Engine) restartToolHost(ctx context.Context, params Params, call domain
 		return false
 	}
 	deaths.sinceCompleted++
+	// A child of the lost call's span, and the restart's ctx: the new jail's
+	// launch spans land under it.
+	ctx, span := tracer.Start(ctx, "agent.tool_host.restart", trace.WithAttributes(telemetry.Count(deaths.sinceCompleted)))
+	defer span.End()
 	if deaths.sinceCompleted >= maxConsecutiveDeaths {
+		span.SetAttributes(telemetry.Outcome(restartExhausted))
 		e.warn("the tool host died again with no call completing since its last restart; ending the engagement",
 			"conversation", params.ConversationID, "deaths", deaths.sinceCompleted)
 		return false
@@ -165,10 +203,17 @@ func (e *Engine) restartToolHost(ctx context.Context, params Params, call domain
 	err := host.Restart(ctx)
 	end()
 	if err != nil {
+		if ctx.Err() != nil {
+			span.SetAttributes(telemetry.Outcome(outcomeCancelled))
+		} else {
+			span.SetAttributes(telemetry.Outcome(restartFailed))
+			span.SetStatus(codes.Error, "tool host restart failed")
+		}
 		e.warn("restarting the tool host failed; ending the engagement",
 			"conversation", params.ConversationID, "error", err)
 		return false
 	}
+	span.SetAttributes(telemetry.Outcome(restartDone))
 	e.info("restarted the tool host after it died during a call",
 		"conversation", params.ConversationID, "tool", call.Name, "deaths", deaths.sinceCompleted)
 	e.configureToolHost(params)

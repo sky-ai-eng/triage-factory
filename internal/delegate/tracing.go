@@ -107,10 +107,9 @@ func (e *engagement) finish(outcome string, err error) {
 // what makes a requeued run's up-to-five attempts findable together while
 // claim.attempt tells them apart.
 //
-// runtime is on the root rather than only on the loop's own spans because
-// everything this span covers is UPSTREAM of the runtime branch: a native
-// run's setup is traced here in full even though the loop it hands off to
-// is deliberately out of scope.
+// runtime is on the root because everything this span covers is UPSTREAM of
+// the runtime branch: both runtimes' setup is traced here alike, and the
+// native loop it hands off to traces itself under roots linked to this one.
 func (s *Spawner) beginEngagement(ctx context.Context, conv *domain.Conversation) (context.Context, func()) {
 	attrs := []attribute.KeyValue{
 		telemetry.ConversationID(conv.ID),
@@ -244,6 +243,19 @@ func (s *Spawner) engagementSpanContext(conversationID string) trace.SpanContext
 		return trace.SpanContext{}
 	}
 	return e.sc
+}
+
+// detachEngagement is ctx with no span, for an engagement's work after
+// agent-live.
+//
+// The engagement's root has ended by then, but ctx still carries it, and a
+// span or a traced statement started under it joins its trace: for a native
+// engagement, every transcript write for as long as it runs, which grows the
+// setup trace for hours and defeats ending it at agent-live. With no span on
+// ctx, a span starts a root of its own and the statement tracer records
+// nothing, while ctx keeps its values and its cancellation.
+func detachEngagement(ctx context.Context) context.Context {
+	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
 }
 
 // startPunctual opens one of the spans that cover the period AFTER agent-live

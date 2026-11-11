@@ -352,6 +352,38 @@ func TestPunctualSpansLinkToTheEngagementRoot(t *testing.T) {
 // TestPunctualSpanWithoutAnEngagementIsUnlinked: tracing is optional and the
 // absence of an engagement is never an error — a local-mode park, a test
 // fixture. The span still exists and still names its run.
+// TestDetachedEngagementStartsNoChildOfTheRoot pins what work after
+// agent-live runs under: no span, so a span it starts is a root of its own and
+// a statement it makes carries no parent to attach to, while the context's
+// cancellation still reaches it.
+func TestDetachedEngagementStartsNoChildOfTheRoot(t *testing.T) {
+	read := recordSpans(t)
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	conv := traceTestConversation("run-detach")
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx, done := s.beginEngagement(parent, conv)
+	defer done()
+	root := s.engagementSpanContext(conv.ID)
+	s.endEngagement(conv.ID, engagementLive)
+
+	detached := detachEngagement(ctx)
+	if trace.SpanContextFromContext(detached).IsValid() {
+		t.Fatal("a detached context still carries a span")
+	}
+	_, span := tracer.Start(detached, "after.live")
+	span.End()
+	after := spansNamed(read(), "after.live")
+	if len(after) != 1 || after[0].Parent().IsValid() || after[0].SpanContext().TraceID() == root.TraceID() {
+		t.Errorf("a span started after agent-live joined the engagement's trace: %+v", after)
+	}
+
+	cancel()
+	if detached.Err() == nil {
+		t.Error("a detached context must keep the engagement's cancellation")
+	}
+}
+
 func TestPunctualSpanWithoutAnEngagementIsUnlinked(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")

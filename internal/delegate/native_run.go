@@ -258,6 +258,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 
 	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, "")
+	// That write ended the engagement's root. What follows runs for as long as
+	// the engagement does, so none of it may hang off that span: the loop's
+	// spans are roots linked to it, and the rest opens roots of its own.
+	engagementSpan := s.engagementSpanContext(conversationID)
+	ctx = detachEngagement(ctx)
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
 	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
@@ -311,6 +316,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		OrgID:          orgID,
 		ConversationID: conversationID,
 		ClaimID:        cfg.claimID,
+		EngagementSpan: engagementSpan,
 		Model:          model,
 		SystemPrompt:   systemPrompt,
 		SystemAddendum: launchText.systemBlock,

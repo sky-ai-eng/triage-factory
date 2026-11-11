@@ -44,6 +44,16 @@ compactor:
 
 metrics_generator:
   processor:
+    span_metrics:
+      # Extra labels on every traces_spanmetrics_* series, from the span
+      # attribute of the same name. Both are closed sets by construction — a
+      # catalog key (`model`, on llm.stream) and a tool's registry name or
+      # "unknown" (`tool`, on agent.tool) — which is what lets the dashboard's
+      # native-loop row break provider and tool latency down by them. A span
+      # without the attribute gets the label empty, so every other span name
+      # keeps the one series it had. Add a dimension only for an attribute TF
+      # keeps closed: each value is a series per span name and bucket.
+      dimensions: [model, tool]
     local_blocks:
       # The processor TraceQL metrics run on — `{...} | rate()`,
       # `| quantile_over_time()`, and every query Grafana's Traces Drilldown

@@ -68,14 +68,11 @@ func (s *spend) add(cost *float64) {
 	}
 }
 
-// modelForRow prefers the model the provider reported serving over the one
-// requested: an inference profile or an alias can resolve to a concrete id,
-// and the ledger should record what was actually billed.
+// modelForRow is the model the row is billed under (inference.BilledModel):
+// the provider-reported one when there is one, so the ledger records what was
+// billed, and the llm.stream span prices the call the same way.
 func modelForRow(completion *inference.Completion, params Params) string {
-	if completion.Model != "" {
-		return completion.Model
-	}
-	return params.Model
+	return inference.BilledModel(completion, params.Model)
 }
 
 // stampFinishReason records why the provider stopped generating, on

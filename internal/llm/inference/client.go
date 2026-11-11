@@ -9,11 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // Client is the TF-owned surface over embedded bifrost core. It always
@@ -168,7 +170,12 @@ type Completion struct {
 // Stream runs one streaming chat completion and reassembles it. It respects
 // ctx cancellation (the underlying stream is bound to it). A nil, uninitialized,
 // or closed client returns ErrClientClosed rather than panicking.
-func (c *Client) Stream(ctx context.Context, req Request) (*Completion, error) {
+//
+// Every call is one llm.stream span under ctx's (see startStream).
+func (c *Client) Stream(ctx context.Context, req Request) (completion *Completion, err error) {
+	ctx, span := startStream(ctx, req)
+	defer func() { endStream(ctx, span, req, completion, err) }()
+
 	if c == nil || c.bf == nil || c.closed.Load() {
 		return nil, ErrClientClosed
 	}
@@ -176,15 +183,17 @@ func (c *Client) Stream(ctx context.Context, req Request) (*Completion, error) {
 	if err != nil {
 		return nil, err
 	}
+	span.SetAttributes(telemetry.MaxTokens(*breq.Params.MaxCompletionTokens))
 
 	bfCtx, cancel := schemas.NewBifrostContextWithCancel(ctx)
 	defer cancel()
 
+	onChunk := firstChunkTimer(span, time.Now(), req.OnChunk)
 	ch, berr := c.bf.ChatCompletionStreamRequest(bfCtx, breq)
 	if berr != nil {
 		return nil, c.wrapProviderError(req.Provider, berr)
 	}
-	completion, err := reassembleStream(ch, req.OnChunk)
+	completion, err = reassembleStream(ch, onChunk)
 	if err != nil {
 		return nil, c.annotateEndpoint(req.Provider, err)
 	}
