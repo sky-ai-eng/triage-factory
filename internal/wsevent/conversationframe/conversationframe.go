@@ -41,10 +41,11 @@ const (
 	typeDeliverableUpdated = "deliverable_updated"
 )
 
-// audienceTimeout bounds the audience read. The emitters run on a run's
-// transcript and lifecycle paths and on request handlers, and a frame is a
-// hint the client can recover from, so a slow read drops the frame rather
-// than holding up the work it describes.
+// audienceTimeout bounds the audience read. Its callers run on a run's
+// transcript and lifecycle paths, on request handlers, and inside a
+// permission prompt's wait. A frame is a hint the client can recover from,
+// and a presence check that fails reads as absent, so a slow read gives up
+// rather than holding up the work it serves.
 const audienceTimeout = 3 * time.Second
 
 // StatusUpdate is the conversation_update payload: the status the
@@ -75,6 +76,33 @@ type DeliverableUpdate struct {
 // otherwise the user ids that may. db.ConversationStore's
 // ConversationFrameRecipientsSystem is the production implementation.
 type AudienceFunc func(ctx context.Context, orgID, conversationID string) (orgWide bool, userIDs []string, err error)
+
+// Readers resolves who may read conversationID in orgID as a recipient set:
+// nil when every member of the org may, which is also a nil AudienceFunc's
+// answer (local mode, where N=1 has no team boundary), and the user ids
+// otherwise. ok is false when nobody may: the read failed, and err says why,
+// or it named nobody (no such conversation, an archived team, or a creator
+// who left the org). The frames and the permission prompts' presence check
+// both read the audience through Readers, so who receives a prompt and whose
+// tab counts as present for it are decided by one rule.
+func (f AudienceFunc) Readers(ctx context.Context, orgID, conversationID string) (userIDs []string, ok bool, err error) {
+	if f == nil {
+		return nil, true, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, audienceTimeout)
+	defer cancel()
+	orgWide, userIDs, err := f(ctx, orgID, conversationID)
+	if err != nil {
+		return nil, false, err
+	}
+	if orgWide {
+		return nil, true, nil
+	}
+	if len(userIDs) == 0 {
+		return nil, false, nil
+	}
+	return userIDs, true, nil
+}
 
 // Broadcaster is the hub surface a Notifier needs; *websocket.Hub satisfies
 // it, and is nil-receiver-safe, so a typed-nil hub no-ops.
@@ -128,33 +156,19 @@ func (n *Notifier) DeliverableUpdated(ctx context.Context, orgID, conversationID
 // fails closed: a resolution error drops the frame, because falling back to
 // an org-wide broadcast would send the conversation to every team. A dropped
 // message frame is repaired by the run station's tail-follow read, and any
-// other frame by the client's next refetch.
+// other frame by the client's next refetch. An audience of nobody also
+// stops the frame here, since the hub refuses an empty recipient set.
 func (n *Notifier) publish(ctx context.Context, eventType, orgID, conversationID string, data any) {
 	if n == nil || n.hub == nil {
 		return
 	}
-	evt := websocket.Event{Type: eventType, OrgID: orgID, ConversationID: conversationID, Data: data}
-	if n.audience == nil {
-		n.hub.Broadcast(evt)
-		return
-	}
-	actx, cancel := context.WithTimeout(ctx, audienceTimeout)
-	defer cancel()
-	orgWide, userIDs, err := n.audience(actx, orgID, conversationID)
+	userIDs, ok, err := n.audience.Readers(ctx, orgID, conversationID)
 	if err != nil {
 		frameLog.Error("resolve audience failed; dropping frame", "type", eventType, "org", orgID, "conversation", conversationID, "error", err)
 		return
 	}
-	if orgWide {
-		n.hub.Broadcast(evt)
+	if !ok {
 		return
 	}
-	if len(userIDs) == 0 {
-		// Nobody may read the conversation: no such row, an archived team,
-		// or a creator who left the org. The hub refuses an empty set, so
-		// the frame stops here.
-		return
-	}
-	evt.UserIDs = userIDs
-	n.hub.Broadcast(evt)
+	n.hub.Broadcast(websocket.Event{Type: eventType, OrgID: orgID, ConversationID: conversationID, UserIDs: userIDs, Data: data})
 }

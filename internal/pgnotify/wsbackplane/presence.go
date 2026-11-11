@@ -87,20 +87,25 @@ func (b *Backplane) heartbeatOnce(ctx context.Context) {
 }
 
 // PresentFor reports whether anyone is present for a prompt raised by
-// conversationID in orgID (TFAC-392's unattended-prompt fast-deny), checking THIS
+// conversationID in orgID (the unattended-prompt fast-deny), checking THIS
 // pod's local sockets first (websocket.Hub.PresentFor — cheap, no DB
 // round trip) and falling back to the fleet-wide ws_presence table so a
 // reviewer connected to a DIFFERENT pod than the one running the
 // permission check still counts. A row qualifies under the exact same
 // rule Hub.PresentFor applies locally: visible AND (viewing == "board" OR
 // viewing == "run:<conversationID>"), with last_seen inside the live window
-// (default 45s, TF_WS_PRESENCE_TTL_SECONDS).
+// (default 45s, TF_WS_PRESENCE_TTL_SECONDS), and, when userIDs is non-nil,
+// a user_id in that set. A nil set is the org-wide check; an empty one
+// matches nobody, on either side.
 //
 // A DB read failure logs and reports absent — the safe default for a
 // fast-deny gate is to fail toward requiring an explicit answer, not
 // toward silently approving unattended.
-func (b *Backplane) PresentFor(ctx context.Context, orgID, conversationID string) bool {
-	if b.hub.PresentFor(orgID, conversationID) {
+func (b *Backplane) PresentFor(ctx context.Context, orgID, conversationID string, userIDs []string) bool {
+	if userIDs != nil && len(userIDs) == 0 {
+		return false
+	}
+	if b.hub.PresentFor(orgID, conversationID, userIDs) {
 		return true
 	}
 	readCtx, cancel := context.WithTimeout(ctx, presenceReadTimeout)
@@ -111,17 +116,23 @@ func (b *Backplane) PresentFor(ctx context.Context, orgID, conversationID string
 	// pod's: last_seen is stamped with the server's now() on every heartbeat,
 	// so a pod whose clock runs ahead would otherwise judge genuinely-present
 	// reviewers absent and fire the unattended fast-deny with someone watching.
-	var exists bool
-	err := b.db.QueryRowContext(readCtx, `
+	query := `
 		SELECT EXISTS (
 			SELECT 1 FROM ws_presence
 			WHERE org_id = $1
 			  AND visible
 			  AND (viewing = 'board' OR viewing = $2)
-			  AND last_seen > now() - make_interval(secs => $3)
-		)
-	`, orgID, runView, PresenceLiveWindowFromEnv().Seconds()).Scan(&exists)
-	if err != nil {
+			  AND last_seen > now() - make_interval(secs => $3)`
+	args := []any{orgID, runView, PresenceLiveWindowFromEnv().Seconds()}
+	if userIDs != nil {
+		query += `
+			  AND user_id = ANY($4::text[])`
+		args = append(args, userIDs)
+	}
+	query += `
+		)`
+	var exists bool
+	if err := b.db.QueryRowContext(readCtx, query, args...).Scan(&exists); err != nil {
 		backplaneLog.Warn("ws_presence: read failed; treating as absent for this check", "org", orgID, "conversation", conversationID, "error", err)
 		return false
 	}

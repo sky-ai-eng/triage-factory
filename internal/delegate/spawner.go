@@ -78,13 +78,15 @@ type EventPublisher interface {
 	Publish(evt domain.Event)
 }
 
-// PresenceChecker is the multi-mode fleet-wide presence check (TFAC-584):
-// the plain *wsbackplane.Backplane satisfies this directly, combining
-// this pod's local Hub state with the fleet-wide ws_presence table so a
-// reviewer connected to a different pod than the one running a
-// permission check still counts as present. See presentFor.
+// PresenceChecker is the multi-mode fleet-wide presence check: the plain
+// *wsbackplane.Backplane satisfies this directly, combining this pod's
+// local Hub state with the fleet-wide ws_presence table so a reviewer
+// connected to a different pod than the one running a permission check
+// still counts as present. userIDs follows websocket.Hub.PresentFor: nil
+// is the org-wide check, a non-nil set counts only those users. See
+// presentFor.
 type PresenceChecker interface {
-	PresentFor(ctx context.Context, orgID, conversationID string) bool
+	PresentFor(ctx context.Context, orgID, conversationID string, userIDs []string) bool
 }
 
 // Spawner manages delegated agent runs.
@@ -263,9 +265,11 @@ type Spawner struct {
 	tx    db.TxRunner
 	wsHub *websocket.Hub
 	// frameAudience is who a frame about one conversation goes to (see
-	// frames). Nil, the default and always the case in local mode, sends
-	// those frames to the whole org; multi mode wires the per-frame
-	// resolution through SetConversationFrameAudience.
+	// frames), and so whose tabs may count as present for its permission
+	// prompts (see presentFor). Nil, the default and always the case in
+	// local mode, sends those frames to the whole org and counts any tab in
+	// it; multi mode wires the per-frame resolution through
+	// SetConversationFrameAudience.
 	frameAudience conversationframe.AudienceFunc
 	// presence is the optional multi-mode presence checker (TFAC-584),
 	// wired via SetPresenceChecker. When set, presentFor consults it
@@ -863,9 +867,11 @@ func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
 }
 
 // SetConversationFrameAudience scopes the spawner's conversation frames to
-// each conversation's REST audience, resolved per frame. Multi-mode wiring
-// only, once at boot before any run starts; without it the frames go to the
-// whole org, which is right only at N=1.
+// each conversation's REST audience, resolved per frame, and the presence
+// check behind its permission prompts to the same audience, resolved per
+// check. Multi-mode wiring only, once at boot before any run starts;
+// without it the frames go to the whole org and any tab in it counts as
+// present, which is right only at N=1.
 func (s *Spawner) SetConversationFrameAudience(audience conversationframe.AudienceFunc) {
 	s.frameAudience = audience
 }

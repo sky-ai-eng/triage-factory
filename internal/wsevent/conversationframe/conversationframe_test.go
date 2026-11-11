@@ -99,3 +99,32 @@ func TestPublish_FailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestReaders pins the recipient-set reading of an audience answer that the
+// frames and the presence check share: nil for org-wide (and for a nil
+// AudienceFunc), the ids for a narrower audience, and not ok for a failed
+// read or an audience of nobody.
+func TestReaders(t *testing.T) {
+	readErr := errors.New("db down")
+	cases := []struct {
+		name     string
+		audience AudienceFunc
+		wantIDs  []string
+		wantOK   bool
+		wantErr  error
+	}{
+		{"nil audience", nil, nil, true, nil},
+		{"org-wide", func(context.Context, string, string) (bool, []string, error) { return true, nil, nil }, nil, true, nil},
+		{"narrower audience", func(context.Context, string, string) (bool, []string, error) {
+			return false, []string{"user-a", "user-b"}, nil
+		}, []string{"user-a", "user-b"}, true, nil},
+		{"audience of nobody", func(context.Context, string, string) (bool, []string, error) { return false, []string{}, nil }, nil, false, nil},
+		{"read failed", func(context.Context, string, string) (bool, []string, error) { return false, nil, readErr }, nil, false, readErr},
+	}
+	for _, tc := range cases {
+		ids, ok, err := tc.audience.Readers(context.Background(), "org-1", "conv-1")
+		if ok != tc.wantOK || !errors.Is(err, tc.wantErr) || !slices.Equal(ids, tc.wantIDs) || (ids == nil) != (tc.wantIDs == nil) {
+			t.Errorf("%s: Readers = (%v, %v, %v), want (%v, %v, %v)", tc.name, ids, ok, err, tc.wantIDs, tc.wantOK, tc.wantErr)
+		}
+	}
+}

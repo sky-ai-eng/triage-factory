@@ -459,18 +459,32 @@ func (h *Hub) readPump(c *client) {
 }
 
 // PresentFor reports whether any connected client is "present" for a prompt
-// raised by conversationID in orgID (TFAC-392): an answer-capable, focused tab. A client
+// raised by conversationID in orgID: an answer-capable, focused tab. A client
 // qualifies iff it is in the run's org (or unscoped, matching Broadcast's
 // tolerance for pre-auth / test clients) AND its tab is visible/focused AND it
 // is viewing the board or this run's own detail page. A backgrounded tab, or a
 // tab on Settings (viewing "other"), never qualifies.
 //
+// userIDs narrows the check to the people who may read the conversation, under
+// the same strict rule as Event.UserIDs: when it is non-nil, only a connection
+// whose user id is non-empty and in the set qualifies, so an unscoped client
+// never does and an empty set matches nobody. A nil set is the org-wide check.
+// The viewing value is the tab's own report, so the set is what keeps a tab
+// naming a conversation its user cannot read from counting.
+//
 // Nil-receiver-safe (returns false) so the hub-less test spawner and any
 // conditionally-wired caller read as "nobody present" without guarding the call
 // site, consistent with Broadcast.
-func (h *Hub) PresentFor(orgID, conversationID string) bool {
+func (h *Hub) PresentFor(orgID, conversationID string, userIDs []string) bool {
 	if h == nil {
 		return false
+	}
+	var allowed map[string]struct{}
+	if userIDs != nil {
+		allowed = make(map[string]struct{}, len(userIDs))
+		for _, id := range userIDs {
+			allowed[id] = struct{}{}
+		}
 	}
 	runView := "run:" + conversationID
 	h.mu.RLock()
@@ -478,6 +492,11 @@ func (h *Hub) PresentFor(orgID, conversationID string) bool {
 	for c := range h.clients {
 		if orgID != "" && c.orgID != "" && c.orgID != orgID {
 			continue
+		}
+		if allowed != nil {
+			if _, ok := allowed[c.userID]; !ok || c.userID == "" {
+				continue
+			}
 		}
 		if !c.visible {
 			continue
