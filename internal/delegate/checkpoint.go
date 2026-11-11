@@ -72,6 +72,16 @@ const (
 	// checkpointUploadTimeout bounds the background upload, so a PUT that
 	// hangs cannot hold the engagement's one checkpoint slot forever.
 	checkpointUploadTimeout = 5 * time.Minute
+
+	// turnEndSlotWait bounds how long a turn-end checkpoint waits for a host
+	// slot. A slot is held through one capture and archive, which
+	// checkpointCaptureTimeout bounds.
+	turnEndSlotWait = checkpointCaptureTimeout
+
+	// turnEndCheckpointBound is the watchdog's bound on a whole turn-end
+	// checkpoint: the slot wait, the capture and the upload, each under its own
+	// timeout, and the margin past them.
+	turnEndCheckpointBound = turnEndSlotWait + checkpointCaptureTimeout + checkpointUploadTimeout + backstopMargin
 )
 
 // checkpointStoppingNotice answers a tool call the engagement stopped while it
@@ -128,19 +138,38 @@ func (s *Spawner) checkpointInterval() time.Duration {
 	return s.snapshotInterval
 }
 
-// acquireCheckpointSlot takes one of the host's checkpoint slots without
-// waiting, reporting whether it got one.
-func (s *Spawner) acquireCheckpointSlot() bool {
+// checkpointSlotPool is the host's checkpoint slots, made on first use.
+func (s *Spawner) checkpointSlotPool() chan struct{} {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.checkpointSlots == nil {
 		s.checkpointSlots = make(chan struct{}, checkpointHostSlots)
 	}
-	slots := s.checkpointSlots
-	s.mu.Unlock()
+	return s.checkpointSlots
+}
+
+// acquireCheckpointSlot takes one of the host's checkpoint slots without
+// waiting, reporting whether it got one.
+func (s *Spawner) acquireCheckpointSlot() bool {
 	select {
-	case slots <- struct{}{}:
+	case s.checkpointSlotPool() <- struct{}{}:
 		return true
 	default:
+		return false
+	}
+}
+
+// waitCheckpointSlot takes one of the host's checkpoint slots, waiting up to
+// limit for one to come free, and reports whether it got one.
+func (s *Spawner) waitCheckpointSlot(ctx context.Context, limit time.Duration) bool {
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case s.checkpointSlotPool() <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
 		return false
 	}
 }
@@ -318,21 +347,68 @@ func (c *checkpointer) afterToolBatch(_ context.Context, position float64) {
 		}
 		return
 	}
-	c.busyCounted = false
-	c.lastStarted = time.Now()
-	c.sandboxCalls = 0
-	c.inflight = true
-	captured := make(chan struct{})
-	c.captured = captured
-	last := c.lastFingerprint
-	c.wg.Add(1)
+	last, captured := c.startLocked()
 	c.mu.Unlock()
 
 	go c.run(position, last, captured)
 }
 
+// checkpointTurnEnd writes a checkpoint of the tree as the turn left it, at
+// position, the turn's newest transcript row, and reports whether the stored
+// blob and its record now cover it.
+//
+// It is the checkpoint an engagement takes before it waits warm, and three
+// things make it different from a boundary's. It is not gated on the interval
+// or on a tool call having run: a waiting engagement's tree is on this executor
+// alone, and if the executor dies the person's next message resumes from the
+// blob. It waits for a host slot rather than skipping, since a skip here is a
+// window that does not open. And it returns only once the upload and the
+// record write are done. The fingerprint still skips a tree the last
+// checkpoint stored, and that tree is covered by recording the new position.
+//
+// The loop has returned when this runs, so no boundary can start a checkpoint
+// beside it, and one still uploading is waited for first.
+func (c *checkpointer) checkpointTurnEnd(position float64) bool {
+	if c == nil {
+		return false
+	}
+	end := c.activity.begin("checkpoint", turnEndCheckpointBound)
+	defer end()
+	c.wg.Wait()
+	if !c.s.waitCheckpointSlot(c.ctx, turnEndSlotWait) {
+		if c.ctx.Err() == nil {
+			recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		}
+		return false
+	}
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		c.s.releaseCheckpointSlot()
+		return false
+	}
+	last, captured := c.startLocked()
+	c.mu.Unlock()
+
+	res := c.run(position, last, captured)
+	return res.recorded && (res.outcome == checkpointWritten || res.outcome == checkpointSkippedUnchanged)
+}
+
+// startLocked marks a checkpoint as started and returns what its run needs.
+// The caller holds c.mu and one of the host's slots, which the run releases.
+func (c *checkpointer) startLocked() (lastFingerprint string, captured chan struct{}) {
+	c.busyCounted = false
+	c.lastStarted = time.Now()
+	c.sandboxCalls = 0
+	c.inflight = true
+	captured = make(chan struct{})
+	c.captured = captured
+	c.wg.Add(1)
+	return c.lastFingerprint, captured
+}
+
 // run is one checkpoint, from capture to recorded outcome.
-func (c *checkpointer) run(position float64, lastFingerprint string, captured chan struct{}) {
+func (c *checkpointer) run(position float64, lastFingerprint string, captured chan struct{}) checkpointResult {
 	defer c.wg.Done()
 	var once sync.Once
 	treeReleased := func() {
@@ -359,6 +435,7 @@ func (c *checkpointer) run(position float64, lastFingerprint string, captured ch
 	}
 	c.mu.Unlock()
 	recordWorkspaceCheckpoint(res.outcome)
+	return res
 }
 
 // awaitCapture is the barrier the BeforeToolCall hook runs: a sandbox tool
@@ -477,6 +554,10 @@ type checkpointResult struct {
 	outcome     string
 	fingerprint string
 	capturedAt  time.Time
+	// recorded is whether the key's record says what the outcome left: the
+	// blob written, or the unchanged blob covering this checkpoint's position.
+	// True where no record is kept at all.
+	recorded bool
 }
 
 // writeCheckpoint captures the live tree, skips the write when it matches the
@@ -529,7 +610,7 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 		res.outcome = checkpointSkippedUnchanged
 		captured.release()
 		treeReleased()
-		s.coverSnapshotState(ctx, w, res.fingerprint)
+		res.recorded = s.workspaceSnapshots == nil || s.coverSnapshotState(ctx, w, res.fingerprint)
 		return res
 	}
 	w.fingerprint = res.fingerprint
@@ -576,8 +657,10 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	}
 	span.SetAttributes(telemetry.SizeBytes(staged.compressedBytes))
 	if owned {
-		s.finishSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID, true)
+		res.recorded = s.finishSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID, true)
 		settled = true
+	} else {
+		res.recorded = s.workspaceSnapshots == nil
 	}
 	res.outcome = checkpointWritten
 	return res

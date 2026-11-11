@@ -296,10 +296,10 @@ func TestCrossPodController_Interrupt_NonOKAckSurfacesAsNoLiveProcess(t *testing
 	}
 }
 
-// TestApplySignal_SteerReachesNoProcess: a steer signal delivers nothing,
-// even to a process live on this pod — a person's message reaches a live
-// process through the transcript — and is acked gone, which its sender reads
-// as the re-read-and-retry answer.
+// TestApplySignal_SteerReachesNoProcess: a steer signal is a doorbell for an
+// engagement waiting warm and delivers nothing, even to a process live on this
+// pod — a person's message reaches a live process through the transcript. With
+// no engagement waiting it is acked gone.
 func TestApplySignal_SteerReachesNoProcess(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-owner-steer", "sess", "/tmp/wt")

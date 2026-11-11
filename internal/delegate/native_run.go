@@ -283,11 +283,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// resolvable.
 	coldModel := agentloop.DefaultColdCompactionModel
 
-	// Checkpoints, for as long as the loop runs and not a moment longer.
-	// recordNativeResult stops this before any ending writes, because a
-	// checkpoint still in flight is the same writer to the key as that
-	// ending's snapshot; the deferred stop only covers an exit that never
-	// reaches it.
+	// Checkpoints, for as long as the engagement's turns and the warm waits
+	// between them run, and not a moment longer. recordNativeResult stops this
+	// before any ending writes, because a checkpoint still in flight is the same
+	// writer to the key as that ending's snapshot; the deferred stop only covers
+	// an exit that never reaches it.
 	ckpt := s.startCheckpointer(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd)
 	ckpt.freezeWith(jail)
 	defer ckpt.stop()
@@ -312,7 +312,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Log: delegateLog,
 	}
 
-	result := engine.Run(ctx, agentloop.Params{
+	params := agentloop.Params{
 		OrgID:          orgID,
 		ConversationID: conversationID,
 		ClaimID:        cfg.claimID,
@@ -337,17 +337,32 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		// The jail was launched above for this engagement, so no process an
 		// earlier one started runs in it, and its /tmp starts empty.
 		NewSandbox: true,
+	}
+
+	return s.runNativeTail(ctx, nativeTail{
+		orgID:          orgID,
+		conversationID: conversationID,
+		task:           task,
+		cfg:            cfg,
+		namespace:      namespace,
+		claudeCwd:      claudeCwd,
+		creatorUserID:  creatorUserID,
+		startTime:      startTime,
+		mirror:         mirror,
+		run:            engine.Run,
+		params:         params,
+		transcript:     transcript,
+		ckpt:           ckpt,
+		// The loop is over, and every ending may read the run's tree. The jail
+		// is stopped first, until its runtime is gone: a process the agent
+		// backgrounded would otherwise still be writing while the snapshot is
+		// taken. A jail that will not stop leaves its tree uncaptured until it
+		// has exited, and the ending proceeds on the last checkpoint.
+		release: func() {
+			_ = tools.Close()
+			stopJail()
+		},
 	})
-
-	// The loop is over, and every ending below may read the run's tree. The
-	// jail is stopped first, until its runtime is gone: a process the agent
-	// backgrounded would otherwise still be writing while the snapshot is taken. A
-	// jail that will not stop leaves its tree uncaptured until it has exited, and
-	// the ending proceeds on the last checkpoint.
-	_ = tools.Close()
-	stopJail()
-
-	return s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, creatorUserID, startTime, result, mirror)
 }
 
 // executorChangedSince reports whether the engagement before this one ran on

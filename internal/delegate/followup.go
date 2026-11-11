@@ -560,7 +560,48 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	if flipped {
 		s.announceWake(ctx, orgID, userID, conv)
 	}
+	// A native conversation with an active claim needs no wake, because its
+	// engagement drains the row. It may be waiting warm, though, and a waiting
+	// engagement reads the row when it is rung, or on its backstop poll. So it
+	// is rung whatever the status read above said: the read is from before
+	// the insert, and an engagement that started waiting since would be missed
+	// by a ring gated on awaiting_message. One that starts waiting after the
+	// ring finds the row when it looks on entering the wait (waitWarm).
+	if !wake && undeliveredRowsFor(conv.Runtime) == inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
+		s.ringWarmWait(ctx, orgID, conv.ID)
+	}
 	return nil
+}
+
+// ringWarmWait tells the engagement on conversationID that a person's message
+// may be waiting for it, without waiting for an answer. An engagement waiting
+// warm in this process is rung directly; otherwise the conversation's live
+// owner is sent a steer signal, which its apply loop answers by ringing the
+// engagement there (deliverSignal). A ring nothing answers costs nothing: the
+// row is already on the transcript.
+func (s *Spawner) ringWarmWait(ctx context.Context, orgID, conversationID string) {
+	if s.warmWaits.Wake(conversationID) {
+		return
+	}
+	s.mu.Lock()
+	conversationSignals := s.conversationSignals
+	s.mu.Unlock()
+	if conversationSignals == nil {
+		return
+	}
+	executorID, ok := s.resolveLiveOwner(ctx, orgID, conversationID)
+	if !ok {
+		return
+	}
+	id, err := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalSteer, "", executorID)
+	if err != nil {
+		delegateLog.Warn("insert the doorbell for a waiting engagement failed; its backstop poll reads the message",
+			"conversation", conversationID, "error", err)
+		return
+	}
+	if err := s.notifyCtl(ctx, "new", id); err != nil {
+		delegateLog.Warn("notify tf_ctl for the doorbell failed; the owner's backstop scan still finds it", "signal_id", id, "error", err)
+	}
 }
 
 // announceWake is what follows a wake that flipped conv back to the queue: the
