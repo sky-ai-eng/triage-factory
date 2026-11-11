@@ -259,6 +259,12 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 				return warmWoken
 			}
 		case <-window.C:
+			// One last look. Input whose ring is still on its way, or that
+			// landed as the timer fired, is read rather than concluded over:
+			// a folded event has no run behind it to fall back on.
+			if s.wakingInputPending(ctx, n.orgID, n.conversationID) {
+				return warmWoken
+			}
 			return warmLetGo
 		case <-wait.LetGo():
 			return warmLetGo

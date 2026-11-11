@@ -595,6 +595,29 @@ func TestWarmClaim_EventInjectionWakesTheWait(t *testing.T) {
 	f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed the new failure")
 }
 
+// Input that is waiting when the window expires, with no ring to say so, is
+// read rather than concluded over. The event here is staged straight onto the
+// transcript, which rings nothing, and the backstop poll is far longer than
+// the window.
+func TestWarmClaim_ExpiryReadsInputItWasNeverRungFor(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: 2 * time.Second, turns: []gateTurn{{text: "fixed it"}, {text: "fixed the new failure"}}})
+	f.awaitWaiting(t, 1)
+
+	const event = "the CI check failed again on the main branch"
+	if _, ok := f.control.stageInjection(context.Background(), f.orgID, f.conversationID, domain.MessageSubtypeInjectionEvent,
+		"test", event, domain.NoteProvenance{}); !ok {
+		t.Fatal("stage the event injection")
+	}
+	f.awaitCalls(t, 2, 10*time.Second)
+	if !strings.Contains(f.provider.sent(1), event) {
+		t.Errorf("the turn at expiry was not sent the event:\n%s", f.provider.sent(1))
+	}
+	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the ordinary ending", d)
+	}
+	f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed the new failure")
+}
+
 // A note that is information rather than work does not start a turn, even with
 // the doorbell rung. It reaches the model with the person's next message.
 func TestWarmClaim_InformationalNoteWaitsForTheNextTurn(t *testing.T) {
