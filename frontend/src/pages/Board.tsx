@@ -1788,7 +1788,9 @@ const SortableCard = memo(function SortableCard({
         retry={
           delegateFailure ? { message: delegateFailure, onRetry: () => onRetry(task) } : undefined
         }
-        interactive={!picker.pickerReadOnly}
+        // Allow and Deny are for a reader the permission route accepts; a
+        // team viewer sees the ask and the link to the run, not the verbs.
+        interactive={!picker.pickerReadOnly && conversation?.can_write !== false}
         assigneeSlot={
           <AssigneePicker
             task={task}

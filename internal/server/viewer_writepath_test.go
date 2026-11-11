@@ -221,3 +221,35 @@ func TestViewer_TaskCreate_Forbidden(t *testing.T) {
 		t.Fatalf("member task create: got 403 (role gate must allow members); body=%s", rec.Body.String())
 	}
 }
+
+// TestViewer_TaskGet_CanWrite: the task detail read answers can_write from the
+// check the task write routes run, so the run station offers "Return to
+// queue" to the team's writers and not to its viewer.
+func TestViewer_TaskGet_CanWrite(t *testing.T) {
+	r := newViewerRig(t)
+	taskID := r.seedTask(t)
+
+	for _, tc := range []struct {
+		name, caller string
+		want         bool
+	}{
+		{"admin", r.admin, true},
+		{"member", r.member, true},
+		{"viewer", r.viewer, false},
+	} {
+		rec := httptest.NewRecorder()
+		req := r.req(http.MethodGet, "/api/tasks/"+taskID, tc.caller, nil)
+		req.SetPathValue("id", taskID)
+		r.s.handleTaskGet(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s GET task: status = %d, want 200; body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s GET task: decode: %v", tc.name, err)
+		}
+		if body["can_write"] != tc.want {
+			t.Errorf("%s GET task: can_write = %v, want %v", tc.name, body["can_write"], tc.want)
+		}
+	}
+}

@@ -67,6 +67,12 @@ export interface Task {
     error_message?: string
     started_at: string
   }
+  // can_write is whether the caller may write the task: claim, delegate,
+  // requeue, undo, or PATCH it. The server derives it from the rule those
+  // routes enforce, so a team viewer reads false. Detail read only
+  // (GET /api/tasks/{id}); ABSENT means the server did not answer, and
+  // consumers offer the control, whose route still refuses with a 403.
+  can_write?: boolean
 }
 
 // TranscriptPage is GET /api/agent/conversations/{id}/messages.
@@ -384,6 +390,14 @@ export interface Conversation {
   // the conversations that skip it. It is a read, not a promise — the send's
   // own 409/410 stays the enforcement.
   resumable?: boolean
+  // can_write is whether the caller may act on this conversation: stop it,
+  // message it, and answer its permission prompts. The server derives it from
+  // the rule the three routes enforce (a team writer for a team conversation,
+  // an org admin for an org-visible one, the creator for a private one), so a
+  // team viewer reads false. On both the detail and the list reads. ABSENT
+  // means the server did not answer, and consumers offer the controls, whose
+  // routes still refuse with a 403.
+  can_write?: boolean
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
   // 'blueprint_cancelled' | 'session_missing' | 'worktree_missing' |

@@ -11,7 +11,9 @@ import {
 // PermissionPrompt — the head of a conversation's tool-approval queue, rendered with
 // priority because it's parking the agent's turn. The SDK's prompt sentence
 // (or a tool-name fallback) + a compact input summary, Deny / Allow, and an "N
-// more" count when parallel tool calls stacked up. The RunStation dock's control; the board card draws its own
+// more" count when parallel tool calls stacked up. With no onResolve the verbs
+// are absent, not disabled: the reader may not answer, and a greyed Allow
+// would read as a button they could earn. The RunStation dock's control; the board card draws its own
 // permission row off the same summarizer, so the line a reader approves reads
 // the same on both surfaces.
 export function PermissionPrompt({
@@ -84,25 +86,27 @@ export function PermissionPrompt({
           +{remaining} more
         </span>
       )}
-      <div className="flex shrink-0 items-center gap-2">
-        <PromptButton
-          tone="var(--color-alarm)"
-          onClick={() => void resolve('deny')}
-          disabled={resolving || !onResolve}
-          icon={<X size={11} />}
-        >
-          Deny
-        </PromptButton>
-        <PromptButton
-          tone="var(--color-warm)"
-          solid
-          onClick={() => void resolve('allow')}
-          disabled={resolving || !onResolve}
-          icon={<Check size={11} />}
-        >
-          Allow
-        </PromptButton>
-      </div>
+      {onResolve && (
+        <div className="flex shrink-0 items-center gap-2">
+          <PromptButton
+            tone="var(--color-alarm)"
+            onClick={() => void resolve('deny')}
+            disabled={resolving}
+            icon={<X size={11} />}
+          >
+            Deny
+          </PromptButton>
+          <PromptButton
+            tone="var(--color-warm)"
+            solid
+            onClick={() => void resolve('allow')}
+            disabled={resolving}
+            icon={<Check size={11} />}
+          >
+            Allow
+          </PromptButton>
+        </div>
+      )}
     </div>
   )
 }

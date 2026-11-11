@@ -31,6 +31,7 @@ import DeliverableList from '../DeliverableList'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
 import { PermissionPrompt } from '../permissions/PermissionPrompt'
+import ViewOnlyBadge from '../ViewOnlyBadge'
 import ScreenTranscript from './ScreenTranscript'
 import { TelemetryRail } from './StationInstruments'
 import { liveHeat, stationState, tint } from './stationStyle'
@@ -543,6 +544,10 @@ function IntakeDock({
   const resumeBlocked =
     !active && isResumableConversation(conversation) && conversation.resumable === false
   const hasPrompt = pending.length > 0
+  // A reader who may not act on the conversation (a team viewer, a member on an
+  // org-visible one) gets no composer, no stop, and no Allow/Deny. Absent is
+  // unknown, and offers the controls.
+  const canWrite = conversation.can_write !== false
 
   const sublabel = hasUnresolved
     ? counts.total === 1
@@ -578,7 +583,7 @@ function IntakeDock({
           prompt={pending[0]}
           remaining={pending.length - 1}
           worktree={conversation.WorktreePath}
-          onResolve={actions.onResolvePermission}
+          onResolve={canWrite ? actions.onResolvePermission : undefined}
         />
       )}
 
@@ -600,6 +605,9 @@ function IntakeDock({
             {state.label}
           </span>
           <span className="truncate text-ui leading-none text-ink-3">{sublabel}</span>
+          {!canWrite && (
+            <ViewOnlyBadge title="You can read this run but not stop it, message it, or answer its prompts." />
+          )}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -609,7 +617,7 @@ function IntakeDock({
           {/* Pause and Cancel are one operation now — both stop the run and
               park it open, resumable. Merging them into a single control is UI
               work that rides with the native-loop phase. */}
-          {active && actions.onInterrupt && (
+          {active && canWrite && actions.onInterrupt && (
             <DockButton
               tone="var(--hmi-cyan)"
               onClick={actions.onInterrupt}
@@ -619,7 +627,7 @@ function IntakeDock({
               {actions.stopPending ? 'Stopping…' : 'Pause'}
             </DockButton>
           )}
-          {active && actions.onCancel && (
+          {active && canWrite && actions.onCancel && (
             <DockButton
               tone="var(--color-alarm)"
               onClick={actions.onCancel}
@@ -638,7 +646,7 @@ function IntakeDock({
 
       {/* Steering composer — live + resumable runs, hidden (not unmounted) behind
           a pending prompt so a draft in progress isn't lost. */}
-      {steerable && actions.onMessage && (
+      {steerable && canWrite && actions.onMessage && (
         <DockComposer
           state={state}
           placeholder={working ? 'Steer the agent…' : 'Message to resume…'}
@@ -650,7 +658,7 @@ function IntakeDock({
       {/* …and where the composer would have been for a run the server won't
           resume: the reason, in the same words the refused send would have
           given. */}
-      {resumeBlocked && actions.onMessage && (
+      {resumeBlocked && canWrite && actions.onMessage && (
         <p
           role="status"
           className="mt-2.5 rounded-[5px] border border-line-1 bg-tint-2 px-2.5 py-2 text-ui leading-relaxed text-ink-3"

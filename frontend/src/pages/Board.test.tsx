@@ -343,3 +343,32 @@ describe('returning a task to the queue', () => {
     ).not.toBeInTheDocument()
   })
 })
+
+describe('a permission prompt on a card', () => {
+  afterEach(() => {
+    ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {}
+  })
+
+  function parkOnPrompt(canWrite: boolean) {
+    held = { ...conversation('running'), can_write: canWrite }
+    ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
+      [held.ID]: [{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'make test' } }],
+    }
+  }
+
+  it('offers Allow and Deny to a caller who may answer', async () => {
+    parkOnPrompt(true)
+    renderBoard()
+    expect(await screen.findByText('make test')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Allow' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeInTheDocument()
+  })
+
+  it('shows the ask without the verbs to a caller who may not', async () => {
+    parkOnPrompt(false)
+    renderBoard()
+    expect(await screen.findByText('make test')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Allow' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+})

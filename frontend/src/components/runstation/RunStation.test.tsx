@@ -203,3 +203,71 @@ describe('RunStation retry readout', () => {
     expect(screen.queryByText(/Retrying at/)).not.toBeInTheDocument()
   })
 })
+
+describe('RunStation for a reader who may not act', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('no network in this suite'))),
+    )
+  })
+
+  // A live conversation parked on a prompt, with every control's handler
+  // wired, so the only thing deciding what renders is can_write.
+  function liveStation(canWrite: boolean | undefined) {
+    const conversation = {
+      ID: 'r1',
+      TaskID: '',
+      Status: 'running',
+      Model: 'claude-opus-5',
+      StartedAt: '2026-07-30T00:00:00Z',
+      ResultSummary: '',
+      ...(canWrite === undefined ? {} : { can_write: canWrite }),
+    } as Conversation
+    return render(
+      <MemoryRouter>
+        <RunStation
+          conversation={conversation}
+          task={null}
+          messages={[]}
+          now={new Date('2026-07-30T00:01:00Z').getTime()}
+          pendingPermissions={[
+            { tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'ls' } },
+          ]}
+          actions={{
+            onBack: () => {},
+            onMessage: () => {},
+            onCancel: () => {},
+            onInterrupt: () => {},
+            onResolvePermission: () => Promise.resolve(),
+          }}
+        />
+      </MemoryRouter>,
+    )
+  }
+
+  it('offers no composer, stop, or Allow/Deny when the server says the caller cannot write', () => {
+    liveStation(false)
+    expect(screen.queryByLabelText(/steer the agent/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /pause/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /cancel/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /allow/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /deny/i })).not.toBeInTheDocument()
+    // The prompt itself still shows: the reader learns the agent is waiting.
+    expect(screen.getByText('Allow Bash?')).toBeInTheDocument()
+    expect(screen.getByText(/view only/i)).toBeInTheDocument()
+  })
+
+  it('offers every control to a writer, and to a response without the field', () => {
+    for (const canWrite of [true, undefined]) {
+      cleanup()
+      liveStation(canWrite)
+      expect(screen.getByLabelText(/steer the agent/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /pause/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /allow/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /deny/i })).toBeInTheDocument()
+      expect(screen.queryByText(/view only/i)).not.toBeInTheDocument()
+    }
+  })
+})

@@ -5,10 +5,16 @@ import { Eye } from 'lucide-react'
 // for a read-only (viewer) member, so the absence of buttons reads as a role
 // boundary rather than a broken page. Quiet by design — a muted chip, not an
 // error banner: a viewer's read-only view is a legitimate, expected state.
-export default function ViewOnlyBadge({ className = '' }: { className?: string }) {
+export default function ViewOnlyBadge({
+  className = '',
+  title = 'You have view-only access to this team. Ask a team admin for write access to make changes.',
+}: {
+  className?: string
+  title?: string
+}) {
   return (
     <span
-      title="You have view-only access to this team. Ask a team admin for write access to make changes."
+      title={title}
       className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-line-1 bg-raised px-2.5 py-1 text-reported font-medium text-ink-3 ${className}`}
     >
       <Eye size={12} aria-hidden />
