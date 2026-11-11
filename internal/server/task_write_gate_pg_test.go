@@ -12,13 +12,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // taskGateRig is the viewer rig plus the five routes RequireTaskWrite gates,
-// and two more callers: an org member on another team, who can see none of
-// the rig team's tasks, and a viewer of the rig team who writes on a side
-// team, which a task can name in task_teams.
+// a spawner, so delegate runs its check for a task an executor holds, and two
+// more callers: an org member on another team, who can see none of the rig
+// team's tasks, and a viewer of the rig team who writes on a side team, which
+// a task can name in task_teams.
 type taskGateRig struct {
 	*viewerRig
 	mux      *http.ServeMux
@@ -56,6 +59,9 @@ func newTaskGateRig(t *testing.T) *taskGateRig {
 	`, r.orgID, entityID).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
+
+	stores := pgstore.New(r.h.AdminDB, r.h.AppDB, pgtest.SecretKey)
+	r.s.SetSpawner(delegate.NewSpawner(r.h.AdminDB, stores, nil, r.s.ws, "claude-sonnet-4-6"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/tasks/{id}", r.s.handleTaskGet)
@@ -95,6 +101,21 @@ func (r *taskGateRig) seedGateTask(t *testing.T, dedup, visibility, creator, cla
 		pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, id, sharedWith)
 	}
 	return id
+}
+
+// holdTask gives taskID a conversation with a live executor claim, which is
+// what delegate refuses as held.
+func (r *taskGateRig) holdTask(t *testing.T, taskID string) {
+	t.Helper()
+	conversationID := uuid.NewString()
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO conversations (id, org_id, team_id, task_id, creator_user_id, trigger_type, origin, runtime, visibility)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'native', 'team')
+	`, conversationID, r.orgID, r.teamID, taskID, r.admin)
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ($1, $2, 'executor-a', 1, now() + interval '1 hour')
+	`, r.orgID, conversationID)
 }
 
 func (r *taskGateRig) do(t *testing.T, caller, method, path string, body any) *httptest.ResponseRecorder {
@@ -158,6 +179,8 @@ func TestTaskWriteGate_Postgres(t *testing.T) {
 	team := r.seedGateTask(t, "team", "team", r.admin, "", "")
 	private := r.seedGateTask(t, "private", "private", r.member, "", "")
 	claimedShared := r.seedGateTask(t, "claimed-shared", "team", r.admin, r.member, r.sideTeam)
+	held := r.seedGateTask(t, "held", "team", r.admin, "", "")
+	r.holdTask(t, held)
 	missing := uuid.NewString()
 
 	// What each route answers for an id that does not exist: the body every
@@ -176,6 +199,10 @@ func TestTaskWriteGate_Postgres(t *testing.T) {
 		want                int
 	}{
 		{"member of another team on a team task", team, r.outsider, http.StatusNotFound},
+		// Delegate checks for a holding executor before its own read under
+		// the caller's claims, so only the gate stands between this case
+		// and a 409 that says the task exists.
+		{"member of another team on a task an executor holds", held, r.outsider, http.StatusNotFound},
 		{"team admin on someone else's private task", private, r.admin, http.StatusNotFound},
 		{"team viewer on someone else's private task", private, r.viewer, http.StatusNotFound},
 		{"team viewer on a team task", team, r.viewer, http.StatusForbidden},

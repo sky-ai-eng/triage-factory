@@ -334,9 +334,6 @@ func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgI
 // the 404 itself rather than leave it to the handler, because a handler may do
 // work keyed by the task id before its own read under the caller's claims, and
 // any answer that work gives for an invisible task would say the task exists.
-//
-// Local mode answers every task visible and writable, so a missing task there
-// is the handler's 404.
 func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgID, userID, taskID string) bool {
 	if _, err := uuid.Parse(taskID); err != nil {
 		httpx.NotFound(w, "task")
