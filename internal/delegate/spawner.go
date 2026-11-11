@@ -499,8 +499,8 @@ type Spawner struct {
 	// DefaultWarmWindow; SetWarmWindow (TF_CLAIM_WARM_WINDOW) overrides it
 	// once at startup.
 	claimWarmWindow time.Duration
-	// idleWaits is the engagements on this executor waiting warm.
-	idleWaits *IdleRegistry
+	// warmWaits is the engagements on this executor waiting warm.
+	warmWaits *WarmWaits
 
 	// unquietTrees holds, by run-tree root, the jails that did not stop when an
 	// ending asked: a func reporting whether each has exited. See treeQuiet.
@@ -708,7 +708,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		diskAvailMB:           executorDiskAvailableMB,
 		snapshotInterval:      DefaultSnapshotInterval,
 		claimWarmWindow:       DefaultWarmWindow,
-		idleWaits:             NewIdleRegistry(),
+		warmWaits:             NewWarmWaits(),
 	}
 	s.controller = inProcessController{s: s}
 	// Every engagement write goes through s.conversations, from both runtimes,

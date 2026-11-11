@@ -9,6 +9,7 @@ import {
   isActiveStatus,
   isFailedStatus,
   isTerminalStatus,
+  isWorkingStatus,
   completionGloss,
   formatDurationMs,
   formatElapsed,
@@ -533,6 +534,10 @@ function IntakeDock({
   // and a conversation that looks parked-and-warm from here may answer every
   // message with a 409/410.
   const steerable = active || canResumeConversation(conversation)
+  // Live is not working: an engagement awaiting a person's message keeps its
+  // composer and its stop controls, but nothing is executing, so it reads as
+  // a parked conversation does.
+  const working = isWorkingStatus(conversation.Status)
   // The honest other half: a conversation whose status says "resumable" but
   // whose server verdict says otherwise gets the reason where the input would
   // have been, rather than a live composer that fails on send.
@@ -546,7 +551,7 @@ function IntakeDock({
         ? 'a draft PR is ready for your approval'
         : 'a review is ready for your approval'
       : `${counts.total} deliverables await your approval`
-    : active
+    : working
       ? 'agent is executing — streaming live'
       : isConcluded(conversation)
         ? // The state word above says which ending; this says what it means
@@ -555,15 +560,17 @@ function IntakeDock({
           completionGloss(conversation)
         : conversation.Status === 'open'
           ? 'open — idle, resumable'
-          : conversation.Status === 'failed'
-            ? conversation.FailureKind === 'memory_limit'
-              ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
-              : 'run failed'
-            : conversation.Status
+          : conversation.Status === 'awaiting_message'
+            ? 'waiting for your message'
+            : conversation.Status === 'failed'
+              ? conversation.FailureKind === 'memory_limit'
+                ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
+                : 'run failed'
+              : conversation.Status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-line-1 px-4 py-2.5">
-      {active && <StreamShimmer light={state.light} />}
+      {working && <StreamShimmer light={state.light} />}
 
       {/* Permission prompt — priority: it's blocking the agent's turn. */}
       {hasPrompt && (
@@ -635,7 +642,7 @@ function IntakeDock({
       {steerable && actions.onMessage && (
         <DockComposer
           state={state}
-          placeholder={active ? 'Steer the agent…' : 'Message to resume…'}
+          placeholder={working ? 'Steer the agent…' : 'Message to resume…'}
           onSend={actions.onMessage}
           hidden={hasPrompt}
         />

@@ -401,11 +401,11 @@ type conversationEntry struct {
 
 // isTerminalConversationStatus reports whether status is one of the conversation-lifecycle
 // terminals (domain.Conversation's documented vocabulary), the parked/
-// awaiting-input "open" state, or an engagement waiting idle for a person —
+// awaiting-input "open" state, or an engagement awaiting a person's message —
 // each stops the worker and clears the indicator, since no agent is working;
 // only "failed" additionally posts the failure reply.
 func isTerminalConversationStatus(status string) bool {
-	return domain.IsTerminalConversationStatus(status) || status == domain.StatusOpen || status == domain.ClaimPhaseIdle
+	return domain.IsTerminalConversationStatus(status) || status == domain.StatusOpen || status == domain.ClaimPhaseAwaitingMessage
 }
 
 // handleConversationStatus resolves (and caches) the conversation's Slack context on first

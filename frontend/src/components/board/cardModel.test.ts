@@ -161,8 +161,8 @@ describe('deriveCard lifecycle', () => {
     ).toBe('canceled')
   })
 
-  it('reads an engagement waiting for a message as idle, not working', () => {
-    const m = deriveCard(task(), conversation({ Status: 'idle' }), undefined, NOW)
+  it('reads an engagement awaiting a message as idle, not working', () => {
+    const m = deriveCard(task(), conversation({ Status: 'awaiting_message' }), undefined, NOW)
     expect(m.lifecycle).toBe('idle')
     expect(m.ticking).toBe(false)
   })

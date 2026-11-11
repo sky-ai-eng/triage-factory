@@ -903,13 +903,13 @@ function entityLabel(e: FactoryEntity): string {
 // The working arm is the shared predicate rather than a list of names, so
 // every setup phase — including a conversation parked awaiting its
 // credential bundle — reads as working instead of falling through to the
-// inert grey. An engagement waiting idle for a person is not working: it
+// inert grey. An engagement awaiting a person's message is not working: it
 // reads as parked, like `open`.
 function conversationStatusColor(status: ConversationStatusValue): string {
   if (isWorkingStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
     case 'open':
-    case 'idle':
+    case 'awaiting_message':
       return '#8a6e1f' // --color-snooze (warm amber)
     case 'failed':
       return '#a84545' // --color-alarm (warm rose)
@@ -926,8 +926,8 @@ function conversationStatusLabel(status: ConversationStatusValue): string {
       return 'starting'
     case 'awaiting_credentials':
       return 'awaiting credentials'
-    case 'idle':
-      return 'Idle'
+    case 'awaiting_message':
+      return 'awaiting message'
     default:
       return status
   }

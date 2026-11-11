@@ -43,9 +43,9 @@ describe('RunStation composer gate', () => {
     )
   })
 
-  it('keeps the input on an engagement waiting for a message: it is live', () => {
-    station({ Status: 'idle' })
-    expect(screen.getByPlaceholderText(/steer the agent/i)).toBeInTheDocument()
+  it('keeps the input on an engagement awaiting a message: it is live', () => {
+    station({ Status: 'awaiting_message' })
+    expect(composer()).toBeInTheDocument()
   })
 
   it('offers the input on a parked conversation the server says is resumable', () => {

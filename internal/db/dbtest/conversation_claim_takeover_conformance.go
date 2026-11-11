@@ -298,24 +298,26 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
-	// idleClaimed stages and claims one step, then puts its engagement in the
-	// idle wait: the turn ended and the claim is held for a person's message.
-	idleClaimed := func(t *testing.T, f ClaimLeaseFixture, executorID string, bootEpoch int64) *domain.Conversation {
+	// awaitingClaimed stages and claims one step, then puts its engagement in
+	// awaiting_message: the turn ended and the claim is held for a person's
+	// message.
+	awaitingClaimed := func(t *testing.T, f ClaimLeaseFixture, executorID string, bootEpoch int64) *domain.Conversation {
 		t.Helper()
 		c := stageClaimed(t, f, executorID, bootEpoch)
-		if _, err := f.Stores.Conversations.SetClaimPhaseSystem(ctx, f.OrgID, c.ID, c.ClaimID, domain.ClaimPhaseIdle); err != nil {
-			t.Fatalf("SetClaimPhaseSystem(idle): %v", err)
+		if _, err := f.Stores.Conversations.SetClaimPhaseSystem(ctx, f.OrgID, c.ID, c.ClaimID, domain.ClaimPhaseAwaitingMessage); err != nil {
+			t.Fatalf("SetClaimPhaseSystem(awaiting_message): %v", err)
 		}
 		return c
 	}
-	// parkedIdle checks what a crashed idle claim leaves behind: the claim
-	// released 'parked', the conversation parked `open` as a turn that ended,
-	// no budget spent, and nothing to drive until a person writes to it.
+	// parkedIdle checks what a crashed claim awaiting a message leaves behind:
+	// the claim released 'parked', the conversation parked `open` with the
+	// idle park reason as a turn that ended, no budget spent, and nothing to
+	// drive until a person writes to it.
 	parkedIdle := func(t *testing.T, f ClaimLeaseFixture, c *domain.Conversation) {
 		t.Helper()
 		parked := db.ParkIdle().ClaimOutcome()
 		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != parked {
-			t.Errorf("idle claim after the release = (released %v, %q), want (true, %s)", released, outcome, parked)
+			t.Errorf("claim awaiting a message after the release = (released %v, %q), want (true, %s)", released, outcome, parked)
 		}
 		if got := get(t, f, c.ID); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
 			t.Errorf("conversation after the release = (%q, %q), want (open, idle)", got.Status, got.ParkReason)
@@ -337,15 +339,15 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		if next.Attempts != c.Attempts || next.SetupFailures != c.SetupFailures || next.LostEngagements != c.LostEngagements ||
 			next.UpstreamHandBacks != c.UpstreamHandBacks || next.JailLosses != c.JailLosses {
-			t.Errorf("budgets after the idle release = (attempts %d, setup %d, lost %d, upstream %d, jail %d), want the first claim's (%d, %d, %d, %d, %d)",
+			t.Errorf("budgets after the release = (attempts %d, setup %d, lost %d, upstream %d, jail %d), want the first claim's (%d, %d, %d, %d, %d)",
 				next.Attempts, next.SetupFailures, next.LostEngagements, next.UpstreamHandBacks, next.JailLosses,
 				c.Attempts, c.SetupFailures, c.LostEngagements, c.UpstreamHandBacks, c.JailLosses)
 		}
 	}
 
-	t.Run("Takeover_ParksAnIdleClaim", func(t *testing.T) {
+	t.Run("Takeover_ParksAClaimAwaitingAMessage", func(t *testing.T) {
 		f := mk(t)
-		c := idleClaimed(t, f, takeoverOtherExecutor, 1)
+		c := awaitingClaimed(t, f, takeoverOtherExecutor, 1)
 		f.SetLease(t, c.ClaimID, -time.Second)
 		if got := takeOver(t, f, 100); len(got) != 1 || got[0] != c.ClaimID {
 			t.Fatalf("taken over = %v, want [%s]", got, c.ClaimID)
@@ -353,9 +355,9 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		parkedIdle(t, f, c)
 	})
 
-	t.Run("OwnRelease_ParksAnIdleClaim", func(t *testing.T) {
+	t.Run("OwnRelease_ParksAClaimAwaitingAMessage", func(t *testing.T) {
 		f := mk(t)
-		c := idleClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		c := awaitingClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
 		f.SetLease(t, c.ClaimID, -time.Second)
 		if released, err := f.Stores.ConversationQueue.ReleaseExpiredClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID); err != nil || !released {
 			t.Fatalf("ReleaseExpiredClaimSystem = (%v, %v), want (true, nil)", released, err)
@@ -363,9 +365,9 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		parkedIdle(t, f, c)
 	})
 
-	t.Run("BootReset_ParksAnIdleClaim", func(t *testing.T) {
+	t.Run("BootReset_ParksAClaimAwaitingAMessage", func(t *testing.T) {
 		f := mk(t)
-		c := idleClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)
+		c := awaitingClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)
 		if n, err := f.Stores.ConversationQueue.ResetProcessingConversations(ctx, claimLeaseExecutor, claimLeaseBootEpoch); err != nil || n != 1 {
 			t.Fatalf("ResetProcessingConversations = (%d, %v), want (1, nil)", n, err)
 		}

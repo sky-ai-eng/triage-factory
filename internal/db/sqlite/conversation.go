@@ -834,8 +834,8 @@ const sqliteQueuePositionQuery = `
 	  AND ` + nextAttemptDueSQL
 
 // sqliteConversationWorkingStatusesSQL is the display statuses that mean an
-// agent is WORKING — `running`, plus every claim phase but `idle` — as a SQL
-// IN-list body, and the SQLite mirror of the Postgres twin. Mirrors
+// agent is WORKING — `running`, plus every claim phase but `awaiting_message`
+// — as a SQL IN-list body, and the SQLite mirror of the Postgres twin. Mirrors
 // domain.IsWorkingConversationStatus. See the twin for the model: SQL cannot
 // import a Go const, and the conformance suite derives its coverage from
 // domain.AllClaimPhases() so a phase taught to neither dialect fails on both.

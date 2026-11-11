@@ -95,7 +95,7 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			// An engagement waiting for a person holds its claim, but no
 			// agent is working under it.
-			{name: "idle_claim", status: "", phase: domain.ClaimPhaseIdle,
+			{name: "claim_awaiting_a_message", status: "", phase: domain.ClaimPhaseAwaitingMessage,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			{name: "held_by_a_hand_back", status: "", working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.HoldUntilLater(t, convID) }},

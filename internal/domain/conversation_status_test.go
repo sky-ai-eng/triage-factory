@@ -25,9 +25,9 @@ func TestConversationStatusClassification(t *testing.T) {
 		if !IsActiveConversationStatus(s) {
 			t.Errorf("%q should be active", s)
 		}
-		// Working is every active status but the idle wait: an engagement
-		// waiting for a person holds its slot without an agent working.
-		if got, want := IsWorkingConversationStatus(s), s != ClaimPhaseIdle; got != want {
+		// Working is every active status but awaiting_message: an engagement
+		// awaiting a person's message holds its slot without an agent working.
+		if got, want := IsWorkingConversationStatus(s), s != ClaimPhaseAwaitingMessage; got != want {
 			t.Errorf("IsWorkingConversationStatus(%q) = %v, want %v", s, got, want)
 		}
 	}

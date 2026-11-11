@@ -43,10 +43,10 @@ describe('no-ghost-conversation-status', () => {
       [
         'agent_starting',
         'awaiting_credentials',
+        'awaiting_message',
         'cloning',
         'failed',
         'fetching',
-        'idle',
         'open',
         'queued',
         'running',

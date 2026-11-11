@@ -116,11 +116,11 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
 // workingClaimExistsSQL is activeClaimExistsSQL without the engagements
-// waiting idle for a person; the Postgres twin carries the model.
+// awaiting a person's message; the Postgres twin carries the model.
 const workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
-		  AND cl_w.phase IS NOT '` + domain.ClaimPhaseIdle + `')`
+		  AND cl_w.phase IS NOT '` + domain.ClaimPhaseAwaitingMessage + `')`
 
 // workingConversationSQL is a conversation still working on its task, with
 // no person needed for it to go on. The Postgres twin carries the model; this
@@ -694,13 +694,13 @@ func scanLapsedClaims(rows *sql.Rows) ([]lapsedClaim, error) {
 // releaseLapsedClaim releases one claim whose holder is gone, while it is
 // still live and guard (extra SQL on the claims row) holds, and reports
 // whether it did. A claim lost mid-work is reaped; one lost while its
-// engagement waited idle for a person is parked, its conversation with it,
+// engagement awaited a person's message is parked, its conversation with it,
 // as db.ParkIdle() parks a turn that ended. The Postgres twin,
 // releaseLapsedClaims, carries why.
 func releaseLapsedClaim(ctx context.Context, q queryer, c lapsedClaim, guard string, at time.Time) (bool, error) {
-	idle := c.phase == domain.ClaimPhaseIdle
+	awaiting := c.phase == domain.ClaimPhaseAwaitingMessage
 	outcome := db.HandBackReaped
-	if idle {
+	if awaiting {
 		outcome = db.ParkIdle().ClaimOutcome()
 	}
 	res, err := q.ExecContext(ctx, `
@@ -712,7 +712,7 @@ func releaseLapsedClaim(ctx context.Context, q queryer, c lapsedClaim, guard str
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return false, err
 	}
-	if idle {
+	if awaiting {
 		if _, err := parkOpen(ctx, q, c.ConversationID, db.ParkIdle()); err != nil {
 			return false, err
 		}
@@ -1360,7 +1360,7 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		  AND last_activity_at IS NOT NULL
-		  AND phase IS NOT '`+domain.ClaimPhaseIdle+`'`).Scan(&seconds)
+		  AND phase IS NOT '`+domain.ClaimPhaseAwaitingMessage+`'`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}
@@ -1379,7 +1379,7 @@ func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) 
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		  AND last_checkpoint_at IS NOT NULL
-		  AND phase IS NOT '`+domain.ClaimPhaseIdle+`'`).Scan(&seconds)
+		  AND phase IS NOT '`+domain.ClaimPhaseAwaitingMessage+`'`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}

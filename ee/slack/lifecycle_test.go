@@ -221,9 +221,10 @@ func TestHandleConversationStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 // rather than quietly rendering nothing.
 func TestPreRunIndicatorText_CoversEveryClaimPhase(t *testing.T) {
 	for _, phase := range append(domain.AllClaimPhases(), domain.StatusQueued) {
-		// An idle engagement's turn is over, not starting: it clears the
-		// indicator the way a park does (isTerminalConversationStatus).
-		if phase == domain.ClaimPhaseIdle {
+		// An engagement awaiting a message has finished its turn rather than
+		// starting one: it clears the indicator the way a park does
+		// (isTerminalConversationStatus).
+		if phase == domain.ClaimPhaseAwaitingMessage {
 			if !isTerminalConversationStatus(phase) {
 				t.Errorf("isTerminalConversationStatus(%q) = false, want the indicator cleared", phase)
 			}
@@ -240,7 +241,7 @@ func TestPreRunIndicatorText_CoversEveryClaimPhase(t *testing.T) {
 	}
 
 	// Everything else stays invisible rather than rendering guessed copy.
-	for _, status := range []string{domain.StatusRunning, domain.StatusOpen, domain.ClaimPhaseIdle, domain.StatusFailed, "", "some_future_state"} {
+	for _, status := range []string{domain.StatusRunning, domain.StatusOpen, domain.ClaimPhaseAwaitingMessage, domain.StatusFailed, "", "some_future_state"} {
 		if _, ok := preRunIndicatorText(status); ok {
 			t.Errorf("preRunIndicatorText(%q) = ok:true, want no setup copy for a non-setup status", status)
 		}

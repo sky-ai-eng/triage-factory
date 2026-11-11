@@ -11,8 +11,8 @@ func received(ch <-chan struct{}) bool {
 	}
 }
 
-func TestIdleRegistry_LetGoOldestTakesTheLongestIdle(t *testing.T) {
-	r := NewIdleRegistry()
+func TestWarmWaits_LetGoOldestTakesTheLongestWait(t *testing.T) {
+	r := NewWarmWaits()
 	first := r.Register("conv-1", "org-a")
 	second := r.Register("conv-2", "org-a")
 
@@ -20,7 +20,7 @@ func TestIdleRegistry_LetGoOldestTakesTheLongestIdle(t *testing.T) {
 		t.Fatal("LetGoOldest = false with two engagements waiting")
 	}
 	if !received(first.LetGo()) {
-		t.Error("the engagement idle longest was not let go")
+		t.Error("the engagement waiting longest was not let go")
 	}
 	if received(second.LetGo()) {
 		t.Error("the newer engagement was let go")
@@ -39,8 +39,8 @@ func TestIdleRegistry_LetGoOldestTakesTheLongestIdle(t *testing.T) {
 	}
 }
 
-func TestIdleRegistry_LetGoOldestInOrgStaysInTheOrg(t *testing.T) {
-	r := NewIdleRegistry()
+func TestWarmWaits_LetGoOldestInOrgStaysInTheOrg(t *testing.T) {
+	r := NewWarmWaits()
 	otherOrg := r.Register("conv-1", "org-a")
 	mine := r.Register("conv-2", "org-b")
 
@@ -62,8 +62,8 @@ func TestIdleRegistry_LetGoOldestInOrgStaysInTheOrg(t *testing.T) {
 	}
 }
 
-func TestIdleRegistry_RingAfterUnregisterIsANoOp(t *testing.T) {
-	r := NewIdleRegistry()
+func TestWarmWaits_RingAfterUnregisterIsANoOp(t *testing.T) {
+	r := NewWarmWaits()
 	w := r.Register("conv-1", "org-a")
 	w.Unregister()
 	w.Unregister()
@@ -79,8 +79,8 @@ func TestIdleRegistry_RingAfterUnregisterIsANoOp(t *testing.T) {
 	}
 }
 
-func TestIdleRegistry_ADoubleRingDoesNotBlock(t *testing.T) {
-	r := NewIdleRegistry()
+func TestWarmWaits_ADoubleRingDoesNotBlock(t *testing.T) {
+	r := NewWarmWaits()
 	w := r.Register("conv-1", "org-a")
 
 	for range 2 {

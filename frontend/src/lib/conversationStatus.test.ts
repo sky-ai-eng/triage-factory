@@ -52,9 +52,9 @@ describe('status classification', () => {
     expect(ACTIVE_STATUSES).toHaveLength(CLAIM_PHASES.length + 1)
   })
 
-  it('counts every active status but idle as working, mirroring domain.IsWorkingConversationStatus', () => {
+  it('counts every active status but awaiting_message as working, mirroring domain.IsWorkingConversationStatus', () => {
     for (const status of ACTIVE_STATUSES) {
-      expect(isWorkingStatus(status), `${status} working`).toBe(status !== 'idle')
+      expect(isWorkingStatus(status), `${status} working`).toBe(status !== 'awaiting_message')
     }
     for (const status of ['queued', 'open', ...TERMINAL_CONVERSATION_STATUSES]) {
       expect(isWorkingStatus(status), `${status} should not be working`).toBe(false)

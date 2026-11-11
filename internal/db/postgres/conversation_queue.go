@@ -216,14 +216,14 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
 // workingClaimExistsSQL is activeClaimExistsSQL without the engagements
-// waiting idle for a person (domain.ClaimPhaseIdle): such a claim still holds
-// the conversation, so activeClaimExistsSQL keeps it from a second claim, but
-// no agent is working under it. It mirrors
+// awaiting a person's message (domain.ClaimPhaseAwaitingMessage): such a
+// claim still holds the conversation, so activeClaimExistsSQL keeps it from a
+// second claim, but no agent is working under it. It mirrors
 // domain.IsWorkingConversationStatus.
 const workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
-		  AND cl_w.phase IS DISTINCT FROM '` + domain.ClaimPhaseIdle + `')`
+		  AND cl_w.phase IS DISTINCT FROM '` + domain.ClaimPhaseAwaitingMessage + `')`
 
 // workingConversationSQL is a conversation still working on its task, with
 // no person needed for it to go on: a top-level conversation that has not
@@ -1017,7 +1017,7 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
 		  AND last_activity_at IS NOT NULL
-		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseIdle+`'
+		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseAwaitingMessage+`'
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestIdleClaimSystem")
@@ -1037,7 +1037,7 @@ func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) 
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
 		  AND last_checkpoint_at IS NOT NULL
-		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseIdle+`'
+		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseAwaitingMessage+`'
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestCheckpointAgeSystem")
@@ -1127,32 +1127,34 @@ func scanLapsedClaims(rows *sql.Rows) ([]lapsedClaim, error) {
 // releaseLapsedClaims releases claims whose holder is gone, and returns the
 // ones it released. A claim lost mid-work is reaped: the loss budget counts
 // it, and its conversation returns to the queue. A claim lost while its
-// engagement waited idle for a person (domain.ClaimPhaseIdle) is parked
-// instead, its conversation with it, exactly as db.ParkIdle() parks a turn
-// that ended: that turn was over, so re-driving it would answer nothing, and
-// nothing was lost that a budget should count. The person's next message
-// wakes it like any idle park. The park and the release commit together,
-// because the release alone would hand the conversation to the queue.
+// engagement awaited a person's message (domain.ClaimPhaseAwaitingMessage) is
+// parked instead, its conversation with it, exactly as db.ParkIdle() parks a
+// turn that ended: that turn was over, so re-driving it would answer nothing,
+// and nothing was lost that a budget should count. The person's next message
+// wakes it like any other park of an ended turn. The park and the release
+// commit together, because the release alone would hand the conversation to
+// the queue.
 //
-// An idle claim's conversation is locked with SKIP LOCKED, for the reason
-// clearPreferredExecutor gives: the caller already holds the claim, and a
-// writer that locks a conversation before its claim would otherwise wait on
-// this transaction while this one waited on it. An idle claim whose
-// conversation another writer holds stays unreleased for a later pass.
+// The conversation of a claim awaiting a message is locked with SKIP LOCKED,
+// for the reason clearPreferredExecutor gives: the caller already holds the
+// claim, and a writer that locks a conversation before its claim would
+// otherwise wait on this transaction while this one waited on it. Such a
+// claim whose conversation another writer holds stays unreleased for a later
+// pass.
 func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) ([]db.ClaimRef, error) {
-	var idleConversations []string
+	var awaitingConversations []string
 	for _, c := range claims {
-		if c.phase == domain.ClaimPhaseIdle {
-			idleConversations = append(idleConversations, c.ConversationID)
+		if c.phase == domain.ClaimPhaseAwaitingMessage {
+			awaitingConversations = append(awaitingConversations, c.ConversationID)
 		}
 	}
 	parkable := map[string]bool{}
-	if len(idleConversations) > 0 {
+	if len(awaitingConversations) > 0 {
 		rows, err := q.QueryContext(ctx, `
 			SELECT id::text FROM conversations
 			WHERE id = ANY($1::uuid[])
 			FOR NO KEY UPDATE SKIP LOCKED
-		`, pgUUIDArray(idleConversations))
+		`, pgUUIDArray(awaitingConversations))
 		if err != nil {
 			return nil, err
 		}
@@ -1173,7 +1175,7 @@ func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) (
 	var released []db.ClaimRef
 	for _, c := range claims {
 		switch {
-		case c.phase != domain.ClaimPhaseIdle:
+		case c.phase != domain.ClaimPhaseAwaitingMessage:
 			reaped = append(reaped, c.ClaimID)
 		case parkable[c.ConversationID]:
 			parked = append(parked, c.ClaimID)
@@ -1189,7 +1191,7 @@ func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) (
 		return nil, err
 	}
 	for _, c := range claims {
-		if c.phase == domain.ClaimPhaseIdle && parkable[c.ConversationID] {
+		if c.phase == domain.ClaimPhaseAwaitingMessage && parkable[c.ConversationID] {
 			if _, err := parkOpen(ctx, q, c.OrgID, c.ConversationID, db.ParkIdle()); err != nil {
 				return nil, err
 			}

@@ -3064,7 +3064,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				t.Errorf("statuses=[%s] = %v, want [%s]", phase, got, queued)
 			}
 			// Every phase belongs to the live set; the working set is the live
-			// set without the idle wait.
+			// set without awaiting_message.
 			live := append([]string{domain.StatusRunning}, domain.AllClaimPhases()...)
 			if got := filter(live...); len(got) != 1 || got[0] != queued {
 				t.Errorf("phase %s missing from the live status set: %v", phase, got)
@@ -3075,7 +3075,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 					working = append(working, s)
 				}
 			}
-			if got, want := len(filter(working...)) == 1, phase != domain.ClaimPhaseIdle; got != want {
+			if got, want := len(filter(working...)) == 1, phase != domain.ClaimPhaseAwaitingMessage; got != want {
 				t.Errorf("phase %s in the working status set = %v, want %v", phase, got, want)
 			}
 		}
@@ -3349,13 +3349,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got := attention(); len(got) != 1 || got[0] != drafted {
 			t.Errorf("a live conversation's draft PR counted as attention: %v", got)
 		}
-		// An engagement waiting idle for a person is live but not working, so
-		// its draft PR is the person's move, as an `open` conversation's is.
-		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, domain.ClaimPhaseIdle); err != nil {
-			t.Fatalf("SetActiveClaimPhaseSystem(idle): %v", err)
+		// An engagement awaiting a person's message is live but not working,
+		// so its draft PR is the person's move, as an `open` conversation's is.
+		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, domain.ClaimPhaseAwaitingMessage); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem(awaiting_message): %v", err)
 		}
 		if got := attention(); len(got) != 2 {
-			t.Errorf("attention with an idle conversation's draft PR = %v, want it beside %s", got, drafted)
+			t.Errorf("attention with the draft PR of a conversation awaiting a message = %v, want it beside %s", got, drafted)
 		}
 		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, ""); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem(clear): %v", err)

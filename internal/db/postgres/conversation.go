@@ -1319,9 +1319,9 @@ const pgQueuePositionCTE = `
 `
 
 // pgConversationWorkingStatusesSQL is the display statuses that mean an agent
-// is WORKING — `running`, plus every claim phase but `idle` — as a SQL IN-list
-// body. Mirrors domain.IsWorkingConversationStatus: an engagement waiting idle
-// for a person is live, but the person's move is theirs to make.
+// is WORKING — `running`, plus every claim phase but `awaiting_message` — as a
+// SQL IN-list body. Mirrors domain.IsWorkingConversationStatus: an engagement
+// awaiting a person's message is live, but the move is the person's.
 //
 // SQL cannot import a Go const, so the set is spelled here and held to the Go
 // one by the dual-dialect conformance suite, whose coverage is derived from
@@ -1369,7 +1369,7 @@ const pgUnresolvedDeliverableSQL = `
 // conversation mid-claim carries no stored status at all, and counting it as
 // needing a human while its agent is still working is the exact
 // disagreement-with-the-surface this predicate exists to avoid. An engagement
-// waiting idle for a person is not working, so it counts the way an `open`
+// awaiting a person's message is not working, so it counts the way an `open`
 // conversation does.
 const pgConversationAttentionSQL = `(
 		EXISTS (
