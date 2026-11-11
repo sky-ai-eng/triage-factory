@@ -1,10 +1,11 @@
 // A native engagement from agent-live to its ending: the turns it runs, and
 // the warm waits between them. After a turn a person took part in, the
 // engagement keeps its claim, its cell and its jail for the warm window, in
-// claim phase awaiting_message, so the person's next message starts the next
-// turn on the same engagement instead of on a new claim that rebuilds all of
-// it. The ended turn's outcome is written only when the engagement lets go,
-// exactly as it would have been at the turn end.
+// claim phase awaiting_message, so the person's next message, or an event the
+// router folds into the conversation, starts the next turn on the same
+// engagement instead of on a new claim that rebuilds all of it. The ended
+// turn's outcome is written only when the engagement lets go, exactly as it
+// would have been at the turn end.
 //
 // The wait sits here, around engine.Run, rather than inside the loop. Re-entering
 // Run is already how every claim drives a transcript, a re-entry after a long
@@ -210,7 +211,8 @@ func (s *Spawner) checkpointBeforeWaiting(ctx context.Context, n nativeTail) boo
 type warmEnd int
 
 const (
-	// warmWoken: a person's message is waiting, and the next turn reads it.
+	// warmWoken: a person's message or a new event is waiting, and the next
+	// turn reads it.
 	warmWoken warmEnd = iota
 	// warmLetGo: the window expired, or the registry let the engagement go.
 	warmLetGo
@@ -225,11 +227,10 @@ const (
 // waitWarm holds the engagement until deadline, or until something ends the
 // wait first.
 //
-// The entry order is what keeps a message from being missed. The engagement
+// The entry order is what keeps input from being missed. The engagement
 // registers before anything can see its phase, so a doorbell rung by a sender
-// that saw awaiting_message reaches it; and it looks for a waiting message
-// once it is registered, so a message whose doorbell rang before then is
-// read anyway.
+// that saw awaiting_message reaches it; and it looks for waiting input once it
+// is registered, so input whose doorbell rang before then is read anyway.
 func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time) warmEnd {
 	wait := s.warmWaits.Register(n.conversationID, n.orgID)
 	defer wait.Unregister()
@@ -240,7 +241,7 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	}
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
 
-	if s.personMessagePending(ctx, n.orgID, n.conversationID) {
+	if s.wakingInputPending(ctx, n.orgID, n.conversationID) {
 		return warmWoken
 	}
 	window := time.NewTimer(time.Until(deadline))
@@ -250,11 +251,11 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	for {
 		select {
 		case <-wait.Wake():
-			if s.personMessagePending(ctx, n.orgID, n.conversationID) {
+			if s.wakingInputPending(ctx, n.orgID, n.conversationID) {
 				return warmWoken
 			}
 		case <-backstop.C:
-			if s.personMessagePending(ctx, n.orgID, n.conversationID) {
+			if s.wakingInputPending(ctx, n.orgID, n.conversationID) {
 				return warmWoken
 			}
 		case <-window.C:
@@ -274,24 +275,33 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	}
 }
 
-// personMessagePending reports whether a person's message is waiting on the
-// conversation. Only a person's message ends a wait: an injection or a staged
-// note stays queued and reaches the model with the person's next turn, as it
-// does for a parked conversation. A read that fails answers no, and the next
+// wakingInputPending reports whether input that ends a wait is waiting on the
+// conversation (wakesWarmWait). A read that fails answers no, and the next
 // ring or backstop tick asks again.
-func (s *Spawner) personMessagePending(ctx context.Context, orgID, conversationID string) bool {
+func (s *Spawner) wakingInputPending(ctx context.Context, orgID, conversationID string) bool {
 	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read the transcript for a waiting message failed; asking again on the next ring",
+		delegateLog.Warn("read the transcript for waiting input failed; asking again on the next ring",
 			"conversation", conversationID, "error", err)
 		return false
 	}
 	for _, r := range rows {
-		if r.Delivered != nil && !*r.Delivered && isPersonMessage(r) {
+		if r.Delivered != nil && !*r.Delivered && wakesWarmWait(r) {
 			return true
 		}
 	}
 	return false
+}
+
+// wakesWarmWait reports whether a pending row ends a warm wait: a person's
+// message, or a new-event injection. An event is folded into a live
+// conversation in place of the run its trigger would have fired, so a
+// waiting engagement that left it for a message nobody sends would conclude
+// with the event unread and no run behind it. Any other staged note is
+// information, and waits for the next turn, as it does for a running turn
+// about to conclude (agentloop.KeepsAFinishingTurnGoing).
+func wakesWarmWait(r domain.Message) bool {
+	return isPersonMessage(r) || r.Subtype == domain.MessageSubtypeInjectionEvent
 }
 
 // isPersonMessage reports whether a transcript row is a message a person

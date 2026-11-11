@@ -571,25 +571,45 @@ func TestWarmClaim_RegistryLetGoEndsTheWaitAtOnce(t *testing.T) {
 	f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed it")
 }
 
-// An event injection staged during the wait does not start a turn, even with
-// the doorbell rung for it. It reaches the model with the person's next
-// message.
-func TestWarmClaim_StagedInjectionWaitsForThePersonsTurn(t *testing.T) {
-	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}, {text: "saw both"}}})
+// An event the router folds into the conversation during the wait starts a
+// turn at once: the event replaced the run its trigger would have fired, so it
+// cannot wait for a message nobody may send. The router rings the engagement
+// the way a follow-up does. A turn an event started opens no window of its
+// own, since no person took part in it, and lets go when it ends.
+func TestWarmClaim_EventInjectionWakesTheWait(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}, {text: "fixed the new failure"}}})
 	f.awaitWaiting(t, 1)
 
 	const event = "the CI check failed again on the main branch"
-	if _, ok := f.control.stageInjection(context.Background(), f.orgID, f.conversationID, domain.MessageSubtypeInjectionEvent,
-		"test", event, domain.NoteProvenance{}); !ok {
-		t.Fatal("stage the event injection")
+	if got := f.control.StageOrDeliverAdditiveEvent(context.Background(), f.orgID, f.conversationID, "test", event,
+		domain.NoteProvenance{}, AdditiveFiringRef{}); got != InjectStagedResumable {
+		t.Fatalf("StageOrDeliverAdditiveEvent = %v, want the event staged for the waiting engagement", got)
 	}
+	f.awaitCalls(t, 2, warmWaitBackstop/3)
+	if !strings.Contains(f.provider.sent(1), event) {
+		t.Errorf("the turn the event started was not sent it:\n%s", f.provider.sent(1))
+	}
+	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the ordinary ending", d)
+	}
+	f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed the new failure")
+}
+
+// A note that is information rather than work does not start a turn, even with
+// the doorbell rung. It reaches the model with the person's next message.
+func TestWarmClaim_InformationalNoteWaitsForTheNextTurn(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}, {text: "saw both"}}})
+	f.awaitWaiting(t, 1)
+
+	const note = "the pull request's base branch moved"
+	f.control.StageOrDeliverInformationalEvent(context.Background(), f.orgID, f.conversationID, "test", note, domain.NoteProvenance{})
 	f.x.warmWaits.Wake(f.conversationID)
 	time.Sleep(300 * time.Millisecond)
 	if n := f.provider.calls(); n != 1 {
-		t.Fatalf("provider calls after the injection = %d, want 1: an injection alone must not start a turn", n)
+		t.Fatalf("provider calls after the note = %d, want 1: a note alone must not start a turn", n)
 	}
 	if phase := f.claimPhase(t); phase != domain.ClaimPhaseAwaitingMessage {
-		t.Fatalf("claim phase after the injection = %q, want still awaiting a message", phase)
+		t.Fatalf("claim phase after the note = %q, want still awaiting a message", phase)
 	}
 
 	if err := f.followUp("and check the other job"); err != nil {
@@ -597,8 +617,8 @@ func TestWarmClaim_StagedInjectionWaitsForThePersonsTurn(t *testing.T) {
 	}
 	f.awaitWaiting(t, 2)
 	sent := f.provider.sent(1)
-	if !strings.Contains(sent, event) || !strings.Contains(sent, "and check the other job") {
-		t.Errorf("the person's turn was not sent both the injection and the message:\n%s", sent)
+	if !strings.Contains(sent, note) || !strings.Contains(sent, "and check the other job") {
+		t.Errorf("the person's turn was not sent both the note and the message:\n%s", sent)
 	}
 }
 

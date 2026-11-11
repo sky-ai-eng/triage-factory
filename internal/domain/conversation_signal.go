@@ -15,9 +15,10 @@ const (
 	// ConversationSignalInterrupt stops the conversation's current turn, leaving the process
 	// alive for further input.
 	ConversationSignalInterrupt ConversationSignalKind = "interrupt"
-	// ConversationSignalSteer rings an engagement waiting warm for a person's
-	// message: the message is on the conversation's transcript, and the owner
-	// wakes the engagement to read it. No payload; fire-and-forget.
+	// ConversationSignalSteer rings an engagement waiting warm: a person's
+	// message or a new-event injection is on the conversation's transcript,
+	// and the owner wakes the engagement to read it. No payload;
+	// fire-and-forget.
 	ConversationSignalSteer ConversationSignalKind = "steer"
 	// ConversationSignalPermission answers a pending tool-permission prompt. Payload:
 	// {"request_id","behavior","message","updated_input"}.

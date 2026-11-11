@@ -573,8 +573,9 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	return nil
 }
 
-// ringWarmWait tells the engagement on conversationID that a person's message
-// may be waiting for it, without waiting for an answer. An engagement waiting
+// ringWarmWait tells the engagement on conversationID that input that ends a
+// warm wait (wakesWarmWait) may be waiting for it, without waiting for an
+// answer. An engagement waiting
 // warm in this process is rung directly; otherwise the conversation's live
 // owner is sent a steer signal, which its apply loop answers by ringing the
 // engagement there (deliverSignal). A ring nothing answers costs nothing: the

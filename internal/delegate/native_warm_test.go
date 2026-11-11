@@ -105,6 +105,26 @@ func TestIsPersonMessage(t *testing.T) {
 	}
 }
 
+// A wait ends for a person's message or for an event folded in place of a run,
+// and for nothing else TF stages.
+func TestWakesWarmWait(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  domain.Message
+		want bool
+	}{
+		{"a person's message", domain.Message{Role: "user", UserID: "u1"}, true},
+		{"a new-event injection", domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionEvent}, true},
+		{"an informational note", domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote}, false},
+		{"a turn-end nudge", domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge}, false},
+		{"a user row with no author", domain.Message{Role: "user"}, false},
+	} {
+		if got := wakesWarmWait(tc.row); got != tc.want {
+			t.Errorf("%s: wakesWarmWait = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // The transcript notes a person's message when a flush delivers one, and not
 // when it delivers only rows TF wrote.
 func TestNativeTranscript_NotesAPersonsMessageDelivered(t *testing.T) {
