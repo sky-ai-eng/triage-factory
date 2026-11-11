@@ -46,7 +46,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 )
 
 // The two terminal deny messages a surfaced prompt can resolve to without a
@@ -338,19 +338,13 @@ func (s *Spawner) BrowserPermissionHandler(orgID, conversationID, claimID string
 		// all (refresh, second tab, cold load) finds it too.
 		s.recordPermissionRequest(orgID, conversationID, claimID, full, req)
 
-		// Hub.Broadcast is nil-receiver-safe, so no guard is needed for the
-		// hub-less test spawner. The payload is deliberately just the id: the
-		// prompt itself is read from
-		// GET /api/agent/conversations/{id}/permissions, so the socket is a
-		// refetch trigger like deliverable_updated rather than the sole carrier of
-		// state no other path can reach. That costs one round-trip before a
-		// prompt renders, which is nothing against a human-paced, rare event.
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "permission_request",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           map[string]any{"tool_call_id": req.ToolCallID},
-		})
+		// The payload is deliberately just the id: the prompt itself is read
+		// from GET /api/agent/conversations/{id}/permissions, so the socket is
+		// a refetch trigger like deliverable_updated rather than the sole
+		// carrier of state no other path can reach. That costs one round-trip
+		// before a prompt renders, which is nothing against a human-paced,
+		// rare event.
+		s.frames().PermissionRequest(context.Background(), orgID, conversationID, conversationframe.PermissionUpdate{ToolCallID: req.ToolCallID})
 
 		decision, got, reason, why := s.awaitPermission(ch, orgID, conversationID, full, deadline, absent)
 		if got {
@@ -650,16 +644,9 @@ func (s *Spawner) SetPresencePollInterval(d time.Duration) {
 // terminal resolution (answered or timed out) so every surface rendering it —
 // the board card and the run-detail dock, or two board tabs — drops it promptly
 // instead of waiting out its own client-side TTL. The client TTL stays as a
-// backstop for a dropped/missed event. Hub.Broadcast is nil-receiver-safe.
+// backstop for a dropped/missed event.
 func (s *Spawner) broadcastPermissionResolved(orgID, conversationID, toolCallID string) {
-	s.wsHub.Broadcast(websocket.Event{
-		Type:           "permission_resolved",
-		OrgID:          orgID,
-		ConversationID: conversationID,
-		Data: map[string]any{
-			"tool_call_id": toolCallID,
-		},
-	})
+	s.frames().PermissionResolved(context.Background(), orgID, conversationID, conversationframe.PermissionUpdate{ToolCallID: toolCallID})
 }
 
 // AutoApprovePermissionHandler returns a PermissionHandler for gVisor-sandboxed

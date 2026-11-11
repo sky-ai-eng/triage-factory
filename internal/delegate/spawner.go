@@ -37,6 +37,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -261,6 +262,11 @@ type Spawner struct {
 	// (..., creatorUserID, fn) } else { s.x.MethodSystem(...) }`.
 	tx    db.TxRunner
 	wsHub *websocket.Hub
+	// frameAudience is who a frame about one conversation goes to (see
+	// frames). Nil, the default and always the case in local mode, sends
+	// those frames to the whole org; multi mode wires the per-frame
+	// resolution through SetConversationFrameAudience.
+	frameAudience conversationframe.AudienceFunc
 	// presence is the optional multi-mode presence checker (TFAC-584),
 	// wired via SetPresenceChecker. When set, presentFor consults it
 	// (local Hub state OR the fleet-wide ws_presence table) instead of
@@ -854,6 +860,22 @@ func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
 		return
 	}
 	fn(orgID, conversationID)
+}
+
+// SetConversationFrameAudience scopes the spawner's conversation frames to
+// each conversation's REST audience, resolved per frame. Multi-mode wiring
+// only, once at boot before any run starts; without it the frames go to the
+// whole org, which is right only at N=1.
+func (s *Spawner) SetConversationFrameAudience(audience conversationframe.AudienceFunc) {
+	s.frameAudience = audience
+}
+
+// frames is the notifier every websocket frame about one conversation goes
+// through (message, conversation_update, the permission frames). It is
+// built over the spawner's current hub, so a hub replaced after
+// construction is the one the frame reaches.
+func (s *Spawner) frames() *conversationframe.Notifier {
+	return conversationframe.NewNotifier(s.wsHub, s.frameAudience)
 }
 
 // SetPresenceChecker wires the multi-mode fleet-wide presence check
@@ -1662,7 +1684,7 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	if task.Status == "done" || task.Status == "dismissed" {
 		return
 	}
-	s.broadcastTaskUpdate(orgID, taskID, task.Status)
+	s.broadcastTaskUpdate(orgID)
 
 	// Mirror the move onto the task's Jira ticket or Linear issue under the
 	// org's system credential, so a watcher there sees the bot pick it up.
@@ -1677,37 +1699,30 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	}
 }
 
-// broadcastTaskUpdate emits a task_updated WS event so the
-// board can refetch / patch the card without polling. Payload
-// matches the shared event shape (task_id + status) the other
-// emitters use (broadcastTaskStatus on the task PATCH arms,
-// finalizeRequeue), so the FE's typed WSEvent ('task_updated':
-// {task_id, status}) holds across producers.
-func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {
+// broadcastTaskUpdate emits a task_updated WS event so the board refetches
+// without polling. Like every other task_updated producer it is a
+// payload-free ping: the hub scopes it to the org only, and the board's REST
+// read is what carries the task's visibility.
+func (s *Spawner) broadcastTaskUpdate(orgID string) {
 	if s.wsHub == nil {
 		return
 	}
 	s.wsHub.Broadcast(websocket.Event{
 		Type:  "task_updated",
 		OrgID: orgID,
-		Data:  map[string]string{"task_id": taskID, "status": status},
+		Data:  map[string]any{},
 	})
 }
 
-// broadcastConversationUpdate stamps the run's owning org on the event so the
-// hub's per-connection scoping filter routes it only to clients
-// authed against that tenant. Every caller is inside a goroutine
-// that already has orgID in scope (the run's tenant, set at
-// Delegate() entry and threaded through every helper).
+// broadcastConversationUpdate sends the conversation_update frame to the
+// conversation's audience and mirrors the status onto the bus. Every caller
+// is inside a goroutine that already has orgID in scope (the run's tenant,
+// set at Delegate() entry and threaded through every helper). The frame
+// takes a background context because several callers run after the run's
+// own context is cancelled, and a terminal status is the frame that most
+// needs to land.
 func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status string) {
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "conversation_update",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           map[string]string{"status": status},
-		})
-	}
+	s.frames().ConversationUpdate(context.Background(), orgID, conversationID, conversationframe.StatusUpdate{Status: status})
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
 		ConversationID: conversationID,
 		Status:         status,
@@ -1721,18 +1736,11 @@ func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status stri
 // for an unclassified failure — consumers treat absence as "generic
 // failed", which keeps the payload backward compatible.
 func (s *Spawner) broadcastConversationFailed(orgID, conversationID string, kind domain.ConversationFailureKind) {
-	data := map[string]string{"status": "failed"}
+	upd := conversationframe.StatusUpdate{Status: "failed"}
 	if kind != domain.ConversationFailureUnclassified {
-		data["failure_kind"] = string(kind)
+		upd.FailureKind = string(kind)
 	}
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "conversation_update",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           data,
-		})
-	}
+	s.frames().ConversationUpdate(context.Background(), orgID, conversationID, upd)
 	meta := events.SystemConversationStatusMetadata{ConversationID: conversationID, Status: "failed"}
 	if kind != domain.ConversationFailureUnclassified {
 		meta.FailureKind = string(kind)
@@ -1740,15 +1748,10 @@ func (s *Spawner) broadcastConversationFailed(orgID, conversationID string, kind
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, meta)
 }
 
+// broadcastMessage sends one transcript row to the conversation's audience,
+// then publishes a tool-calling assistant turn on the bus.
 func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Message) {
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "message",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           msg.ToDTO(),
-		})
-	}
+	s.frames().Message(context.Background(), orgID, conversationID, msg.ToDTO())
 	// Only a tool-calling assistant turn is published — a plain text or
 	// reasoning turn is noise for bus consumers, and this bounds volume.
 	//

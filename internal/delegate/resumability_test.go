@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -197,7 +198,7 @@ func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
 	}
-	if frames := captured.conversationUpdates(conversationID); len(frames) != 0 {
+	if frames := captured.conversationUpdates(t, conversationID); len(frames) != 0 {
 		t.Errorf("conversation_update frames = %d, want none: %+v", len(frames), frames)
 	}
 
@@ -252,7 +253,7 @@ func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 		t.Fatalf("fixture wrote no snapshot, so this test would pass for the wrong reason: %v", err)
 	}
 	_ = rc.Close()
-	if frames := captured.conversationUpdates(conversationID); len(frames) != 0 {
+	if frames := captured.conversationUpdates(t, conversationID); len(frames) != 0 {
 		t.Errorf("conversation_update frames = %d, want none — the successor's run is not parked: %+v", len(frames), frames)
 	}
 	if published := pub.eventsCopy(); len(published) != 0 {
@@ -271,8 +272,9 @@ func capturingHub(t *testing.T) (*websocket.Hub, *capturedEvents) {
 }
 
 // conversationUpdates returns the conversation_update payloads captured for one
-// conversation, in broadcast order.
-func (c *capturedEvents) conversationUpdates(conversationID string) []map[string]any {
+// conversation, in broadcast order, decoded from the JSON the frame carries.
+func (c *capturedEvents) conversationUpdates(t *testing.T, conversationID string) []map[string]any {
+	t.Helper()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []map[string]any
@@ -280,16 +282,15 @@ func (c *capturedEvents) conversationUpdates(conversationID string) []map[string
 		if e.Type != "conversation_update" || e.ConversationID != conversationID {
 			continue
 		}
-		switch data := e.Data.(type) {
-		case map[string]any:
-			out = append(out, data)
-		case map[string]string:
-			m := make(map[string]any, len(data))
-			for k, v := range data {
-				m[k] = v
-			}
-			out = append(out, m)
+		raw, err := json.Marshal(e.Data)
+		if err != nil {
+			t.Fatalf("marshal conversation_update payload: %v", err)
 		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decode conversation_update payload %s: %v", raw, err)
+		}
+		out = append(out, m)
 	}
 	return out
 }

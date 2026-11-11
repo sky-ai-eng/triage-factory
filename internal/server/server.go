@@ -47,6 +47,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/internal/server/work"
 	"github.com/sky-ai-eng/triage-factory/internal/ttlcache"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -102,6 +103,10 @@ type Server struct {
 	mux       *routeMux
 	static    fs.FS
 	ws        *websocket.Hub
+	// frames sends the conversation frames handlers emit. New builds it in
+	// the local shape over ws; SetConversationFrameAudience rebuilds it with
+	// the audience multi mode resolves per frame.
+	frames *conversationframe.Notifier
 	// wsBackplane is the optional multi-mode cross-pod kick publisher, wired
 	// via SetWSBackplane. Nil in local mode and before wiring; every call site
 	// nil-checks it, so on a single-pod deployment a session revoke closes
@@ -580,6 +585,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		mux:                &routeMux{ServeMux: http.NewServeMux()},
 		ws:                 websocket.NewHub(),
 	}
+	s.frames = conversationframe.NewNotifier(s.ws, nil)
 	// Per-IP rate limiters for the pre-auth allowlist, the signed-webhook
 	// tier, and API-token authentication failures. Built here (not injected)
 	// so a Server is always usable without external wiring; every consumer
@@ -1274,6 +1280,14 @@ type WSKicker interface {
 // local-only.
 func (s *Server) SetWSBackplane(b WSKicker) {
 	s.wsBackplane = b
+}
+
+// SetConversationFrameAudience scopes the conversation frames handlers
+// emit to each conversation's REST audience, resolved per frame. Multi-mode
+// wiring only, once at boot before traffic; without it the frames go to the
+// whole org, which is right only at N=1.
+func (s *Server) SetConversationFrameAudience(audience conversationframe.AudienceFunc) {
+	s.frames = conversationframe.NewNotifier(s.ws, audience)
 }
 
 // SetVersion records main.Version (the release tag, or "dev") for GET

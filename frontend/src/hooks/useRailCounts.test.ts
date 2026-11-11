@@ -124,7 +124,7 @@ describe('useRailCounts', () => {
         conversation_id: 'c1',
         data: { status: 'running' },
       })
-      dispatch?.({ type: 'task_updated', data: { task_id: 't1', status: 'in_progress' } })
+      dispatch?.({ type: 'task_updated', data: {} })
       dispatch?.({ type: 'permission_request', conversation_id: 'c1', data: { tool_call_id: 'x' } })
     })
     // Still nothing in flight: the window is open, not elapsed.
@@ -140,11 +140,8 @@ describe('useRailCounts', () => {
   it('refetches on every hint that can move one of the three sets', async () => {
     const hints: WSEvent[] = [
       { type: 'tasks_updated', data: {} },
-      { type: 'task_updated', data: { task_id: 't', status: 'done' } },
-      {
-        type: 'task_claimed',
-        data: { task_id: 't', claimed_by_agent_id: '', claimed_by_user_id: 'u' },
-      },
+      { type: 'task_updated', data: {} },
+      { type: 'task_claimed', data: {} },
       { type: 'conversation_update', conversation_id: 'c', data: { status: 'completed' } },
       { type: 'permission_request', conversation_id: 'c', data: { tool_call_id: 'x' } },
       { type: 'permission_resolved', conversation_id: 'c', data: { tool_call_id: 'x' } },
@@ -169,7 +166,7 @@ describe('useRailCounts', () => {
     renderHook(() => useRailCounts())
     await settle()
     act(() => {
-      dispatch?.({ type: 'scoring_started', data: { task_ids: ['t'] } })
+      dispatch?.({ type: 'scoring_started', data: {} })
     })
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000)

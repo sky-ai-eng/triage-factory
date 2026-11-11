@@ -145,8 +145,18 @@ func (a *App) handleSignerHealthPoll(evt domain.Event) {
 	a.signerHealth.Trigger(a.runCtx, orgID)
 }
 
-// broadcastEvent forwards a bus event to the websocket hub, scoped to the
-// originating tenant (system events with an empty OrgID fan out
+// eventFrame is the "event" websocket payload: the type of the event the
+// bus carried, and nothing about the entity it is on. The frame is
+// org-scoped and the hub has no team axis, so an event's metadata (PR
+// titles, authors, repository names, Jira keys) would reach members whose
+// teams track none of it. A surface that needs more refetches through the
+// REST read, which carries the scoping.
+type eventFrame struct {
+	EventType string `json:"event_type"`
+}
+
+// broadcastEvent forwards a bus event's type to the websocket hub, scoped to
+// the originating tenant (system events with an empty OrgID fan out
 // everywhere). It also re-emits the legacy "tasks_updated" message on poll
 // completion for backward compatibility.
 func (a *App) broadcastEvent(evt domain.Event) {
@@ -163,7 +173,7 @@ func (a *App) broadcastEvent(evt domain.Event) {
 	a.wsHub.Broadcast(websocket.Event{
 		Type:  "event",
 		OrgID: evt.OrgID,
-		Data:  evt,
+		Data:  eventFrame{EventType: evt.EventType},
 	})
 	if evt.EventType == domain.EventSystemPollCompleted {
 		a.wsHub.Broadcast(websocket.Event{

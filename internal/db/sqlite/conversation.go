@@ -1389,6 +1389,54 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 	return orgID, err
 }
 
+// ConversationFrameRecipientsSystem — identical query to the Postgres impl
+// so both backends pin to one result; the Postgres twin carries the
+// reasoning. Production local mode never calls it — the conversationframe
+// notifier is built without an audience there and broadcasts org-wide — but
+// the shared conformance suite exercises it, so N=1 must not be assumed
+// here.
+func (s *conversationStore) ConversationFrameRecipientsSystem(ctx context.Context, orgID, conversationID string) (bool, []string, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT c.visibility, om.user_id
+		FROM conversations c
+		LEFT JOIN org_memberships om
+		  ON om.org_id = c.org_id
+		 AND ((c.visibility = 'private' AND om.user_id = c.creator_user_id)
+		   OR (c.visibility = 'team' AND EXISTS (
+		        SELECT 1 FROM memberships m
+		        JOIN teams t ON t.id = m.team_id
+		        WHERE m.user_id = om.user_id
+		          AND m.team_id = c.team_id
+		          AND t.deleted_at IS NULL)))
+		WHERE c.org_id = ? AND c.id = ?
+		ORDER BY om.user_id ASC
+	`, orgID, conversationID)
+	if err != nil {
+		return false, nil, fmt.Errorf("conversation frame recipients: %w", err)
+	}
+	defer rows.Close()
+	found := false
+	var visibility string
+	userIDs := []string{}
+	for rows.Next() {
+		var userID sql.NullString
+		if err := rows.Scan(&visibility, &userID); err != nil {
+			return false, nil, fmt.Errorf("scan conversation frame recipient: %w", err)
+		}
+		found = true
+		if userID.Valid {
+			userIDs = append(userIDs, userID.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("conversation frame recipients: %w", err)
+	}
+	if found && visibility == "org" {
+		return true, nil, nil
+	}
+	return false, userIDs, nil
+}
+
 // workspaceKeyMembersSQL, workspaceKeyIdleSinceSQL and
 // workspaceKeyUnclaimedSQL are what a workspace key's collectability is
 // computed from — every top-level conversation on the task, the newest of

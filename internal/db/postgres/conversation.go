@@ -1594,6 +1594,62 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 	return orgID, err
 }
 
+// ConversationFrameRecipientsSystem — identical query to the SQLite impl so
+// both backends pin to one result. The org_memberships join is
+// tf.user_has_org_access, and its two arms are conversations_select's
+// private and team arms, tf.user_in_team for the second, which reads no
+// role. An org-visible conversation matches no arm and comes back as one
+// row with a NULL user, which is the whole answer for it.
+func (s *conversationStore) ConversationFrameRecipientsSystem(ctx context.Context, orgID, conversationID string) (bool, []string, error) {
+	// A handle that was never a conversation id names no conversation;
+	// deciding that here keeps the driver's uuid parse failure from standing
+	// in for the answer SQLite gives.
+	if !isValidUUID(conversationID) {
+		return false, []string{}, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT c.visibility, om.user_id::text
+		FROM conversations c
+		LEFT JOIN org_memberships om
+		  ON om.org_id = c.org_id
+		 AND ((c.visibility = 'private' AND om.user_id = c.creator_user_id)
+		   OR (c.visibility = 'team' AND EXISTS (
+		        SELECT 1 FROM memberships m
+		        JOIN teams t ON t.id = m.team_id
+		        WHERE m.user_id = om.user_id
+		          AND m.team_id = c.team_id
+		          AND t.deleted_at IS NULL)))
+		WHERE c.org_id = $1 AND c.id = $2
+		ORDER BY om.user_id ASC
+	`, orgID, conversationID)
+	if err != nil {
+		return false, nil, fmt.Errorf("conversation frame recipients: %w", err)
+	}
+	defer rows.Close()
+	// No rows is no conversation, an org-visible row is the whole org, and
+	// anything else is the users the rows name.
+	found := false
+	var visibility string
+	userIDs := []string{}
+	for rows.Next() {
+		var userID sql.NullString
+		if err := rows.Scan(&visibility, &userID); err != nil {
+			return false, nil, fmt.Errorf("scan conversation frame recipient: %w", err)
+		}
+		found = true
+		if userID.Valid {
+			userIDs = append(userIDs, userID.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("conversation frame recipients: %w", err)
+	}
+	if found && visibility == "org" {
+		return true, nil, nil
+	}
+	return false, userIDs, nil
+}
+
 func getConversation(ctx context.Context, q queryer, orgID, conversationID string) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT `+pgConversationColumns+`

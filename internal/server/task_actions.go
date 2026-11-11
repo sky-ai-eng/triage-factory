@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -309,11 +310,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
 			OrgID: orgID,
-			Data: map[string]any{
-				"task_id":             id,
-				"claimed_by_agent_id": "",
-				"claimed_by_user_id":  userID,
-			},
+			Data:  map[string]any{},
 		})
 	}
 	return jiraUserClient, linearUserClient, landing, true
@@ -487,11 +484,7 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
 			OrgID: orgID,
-			Data: map[string]any{
-				"task_id":             id,
-				"claimed_by_agent_id": "",
-				"claimed_by_user_id":  targetUserID,
-			},
+			Data:  map[string]any{},
 		})
 	}
 	return true
@@ -688,11 +681,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
 			OrgID: orgID,
-			Data: map[string]any{
-				"task_id":             id,
-				"claimed_by_agent_id": a.ID,
-				"claimed_by_user_id":  "",
-			},
+			Data:  map[string]any{},
 		})
 	}
 	return newStatus, true
@@ -784,16 +773,8 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 	// what changed is whether a follow-up can land — so this is an
 	// invalidation signal: a run station holding one of them refetches and
 	// finds the composer disabled with the rung that refused it.
-	if s.ws == nil {
-		return
-	}
 	for i := range ended {
-		s.ws.Broadcast(websocket.Event{
-			Type:           "conversation_update",
-			OrgID:          orgID,
-			ConversationID: ended[i].ID,
-			Data:           map[string]any{"status": ended[i].Status},
-		})
+		s.frames.ConversationUpdate(ctx, orgID, ended[i].ID, conversationframe.StatusUpdate{Status: ended[i].Status})
 	}
 }
 

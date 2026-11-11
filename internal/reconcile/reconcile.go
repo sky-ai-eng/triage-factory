@@ -25,6 +25,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationevent"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -60,6 +61,11 @@ type Reconciler struct {
 	claims        db.ConversationQueueStore // read for the engagement live when a pull request was opened
 	authorship    Authorship
 	ws            *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
+	// frames sends deliverable_updated to the owning conversation's audience.
+	// NewReconciler builds it in the local shape over ws;
+	// SetConversationFrameAudience rebuilds it with the audience multi mode
+	// resolves per frame.
+	frames *conversationframe.Notifier
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
@@ -89,7 +95,16 @@ func NewReconciler(resolver clientResolver, stores db.Stores, authorship Authors
 		claims:        stores.ConversationQueue,
 		authorship:    authorship,
 		ws:            ws,
+		frames:        conversationframe.NewNotifier(ws, nil),
 	}
+}
+
+// SetConversationFrameAudience scopes deliverable_updated to each owning
+// conversation's REST audience, resolved per frame. Multi-mode wiring only,
+// once at boot before any reconcile; without it the frame goes to the whole
+// org, which is right only at N=1.
+func (rc *Reconciler) SetConversationFrameAudience(audience conversationframe.AudienceFunc) {
+	rc.frames = conversationframe.NewNotifier(rc.ws, audience)
 }
 
 // onCurrentHost returns the org's current GitHub host and the deliverables of
@@ -422,7 +437,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			settled, v, moved := rc.settle(writeCtx, orgID, a, snap, attribution)
 			switch {
 			case moved && v == verdictForeign:
-				rc.broadcast(orgID, settled)
+				rc.broadcast(writeCtx, orgID, settled)
 				transitioned = append(transitioned, settled)
 				if settled.ConversationID != "" && isDraftResolved(a, settled.State) {
 					resolvedConversations[settled.ConversationID] = true
@@ -488,7 +503,7 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 	if err != nil {
 		return domain.Deliverable{}, err
 	}
-	rc.broadcast(orgID, updated)
+	rc.broadcast(ctx, orgID, updated)
 	reconcileLog.InfoContext(ctx, "deliverable reconciled",
 		"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
 	return updated, nil
@@ -502,16 +517,11 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 // deliverable-derived surface (pending kind / approval card) is — so the FE handlers
 // refetch the conversation on this event without touching status. Skipped for a
 // detached deliverable (no conversation) or unset hub.
-func (rc *Reconciler) broadcast(orgID string, a domain.Deliverable) {
+func (rc *Reconciler) broadcast(ctx context.Context, orgID string, a domain.Deliverable) {
 	if rc.ws == nil || a.ConversationID == "" {
 		return
 	}
-	rc.ws.Broadcast(websocket.Event{
-		Type:           "deliverable_updated",
-		OrgID:          orgID,
-		ConversationID: a.ConversationID,
-		Data:           map[string]any{"deliverable_id": a.ID, "state": a.State},
-	})
+	rc.frames.DeliverableUpdated(ctx, orgID, a.ConversationID, conversationframe.DeliverableUpdate{DeliverableID: a.ID, State: a.State})
 	// And the resource-wide ping beside it, for the counters that follow a SET
 	// rather than one conversation. The event above is addressed to whoever is
 	// watching this conversation and carries what changed on it; the shell rail

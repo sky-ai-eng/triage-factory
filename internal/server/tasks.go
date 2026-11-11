@@ -1169,7 +1169,7 @@ func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, user
 		})
 		return false
 	}
-	s.broadcastTaskStatus(orgID, id, taskStatusSnoozed)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
@@ -1194,7 +1194,7 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 		})
 		return false
 	}
-	s.broadcastTaskStatus(orgID, id, taskStatusQueued)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
@@ -1228,7 +1228,7 @@ func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userI
 		})
 		return false
 	}
-	s.broadcastTaskStatus(orgID, id, status)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
@@ -1242,11 +1242,10 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	if status == taskStatusDone {
 		action = swipeActionComplete
 	}
-	var newStatus string
 	var closed bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, closed, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, action, hesitationMs, nil)
+		_, closed, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, action, hesitationMs, nil)
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
@@ -1268,21 +1267,23 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
 	s.teardownTaskDeliverables(cleanupCtx, orgID, userID, id)
-	s.broadcastTaskStatus(orgID, id, newStatus)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
 // broadcastTaskStatus nudges peer sessions onto a task's new lane. Without it
 // a dismissed / completed / snoozed / advanced task stays where it was on
-// other browsers until the next user-driven refresh.
-func (s *Server) broadcastTaskStatus(orgID, id, status string) {
+// other browsers until the next user-driven refresh. The frame is a
+// payload-free ping, so it is safe under the hub's org-only scope: the board
+// refetches through the REST read, which carries the task's visibility.
+func (s *Server) broadcastTaskStatus(orgID string) {
 	if s.ws == nil {
 		return
 	}
 	s.ws.Broadcast(websocket.Event{
 		Type:  "task_updated",
 		OrgID: orgID,
-		Data:  map[string]any{"task_id": id, "status": status},
+		Data:  map[string]any{},
 	})
 }
 
@@ -1486,7 +1487,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_updated",
 			OrgID: orgID,
-			Data:  map[string]any{"task_id": taskID, "status": "queued"},
+			Data:  map[string]any{},
 		})
 	}
 }

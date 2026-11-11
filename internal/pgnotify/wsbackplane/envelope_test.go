@@ -2,23 +2,26 @@ package wsbackplane
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// TestWireEvent_RoundTripPreservesOrgAndUser is the whole reason
-// wireEvent exists: websocket.Event hides OrgID/UserID from its own
+// TestWireEvent_RoundTripPreservesRouting is the whole reason wireEvent
+// exists: websocket.Event hides OrgID, UserID and UserIDs from its own
 // JSON tags (browser-facing wire shape), but the backplane needs them
 // preserved across the Postgres hop so the receiving pod's DeliverRemote
 // can reapply the same per-connection scope filter Broadcast applied
-// locally.
-func TestWireEvent_RoundTripPreservesOrgAndUser(t *testing.T) {
+// locally. The event carries both a user and a set only to check each
+// field; Broadcast never publishes that shape.
+func TestWireEvent_RoundTripPreservesRouting(t *testing.T) {
 	orig := websocket.Event{
 		Type:           "message",
 		ConversationID: "run-1",
 		OrgID:          "org-1",
 		UserID:         "user-1",
+		UserIDs:        []string{"user-2", "user-3"},
 		Data:           map[string]any{"text": "hello"},
 	}
 	we, err := newWireEvent(orig)
@@ -34,7 +37,8 @@ func TestWireEvent_RoundTripPreservesOrgAndUser(t *testing.T) {
 		t.Fatalf("unmarshal wireEvent: %v", err)
 	}
 	got := decoded.toEvent()
-	if got.Type != orig.Type || got.ConversationID != orig.ConversationID || got.OrgID != orig.OrgID || got.UserID != orig.UserID {
+	if got.Type != orig.Type || got.ConversationID != orig.ConversationID || got.OrgID != orig.OrgID || got.UserID != orig.UserID ||
+		!slices.Equal(got.UserIDs, orig.UserIDs) {
 		t.Fatalf("round trip mismatch: got %+v, want %+v", got, orig)
 	}
 	data, ok := got.Data.(map[string]any)
