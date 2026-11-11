@@ -69,9 +69,10 @@ export interface Task {
   }
   // can_write is whether the caller may write the task: claim, delegate,
   // requeue, undo, or PATCH it. The server derives it from the rule those
-  // routes enforce, so a team viewer reads false. Detail read only
-  // (GET /api/tasks/{id}); ABSENT means the server did not answer, and
-  // consumers offer the control, whose route still refuses with a 403.
+  // routes enforce, so a team viewer reads false. On the detail read
+  // (GET /api/tasks/{id}) and each row of POST /api/tasks/list; ABSENT means
+  // the server did not answer, and consumers offer the control, whose route
+  // still refuses with a 403.
   can_write?: boolean
 }
 
@@ -438,6 +439,13 @@ export interface Deliverable {
   url: string
   details: unknown
   created_at: string
+  // can_write is whether the caller may act on the deliverable: approve,
+  // reject, dismiss, or edit it. The server derives it from the rule those
+  // routes enforce (a writer of the deliverable's team), so a team viewer and
+  // an org admin who is not on the team read false. On this list and on
+  // GET /api/deliverables/{id}; ABSENT means the server did not answer, and
+  // consumers offer the controls, whose routes still refuse with a 403.
+  can_write?: boolean
 }
 
 // ObjectKind is the closed set of object kinds an external action can name

@@ -75,7 +75,8 @@ func (r *recordingResolver) OrgIdentityFor(context.Context, string) (string, str
 // routes under live RLS. An org admin on another team, and a viewer of the
 // deliverable's own team, can both read the deliverable; every route that acts
 // on it answers them 403 before resolving a GitHub client, while GET answers
-// the org admin 200 and a writer of the team still gets through.
+// the org admin 200, with the gate's answer as can_write, and a writer of the
+// team still gets through.
 func TestDeliverableWriteGate_Postgres(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -239,6 +240,31 @@ func TestDeliverableWriteGate_Postgres(t *testing.T) {
 		}
 		if rec := do(orgAdmin, http.MethodGet, reviewPath, nil); rec.Code != http.StatusOK {
 			t.Errorf("org admin GET review = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("get_carries_the_gate_answer_as_can_write", func(t *testing.T) {
+		for _, caller := range []struct {
+			name, id string
+			want     bool
+		}{
+			{"team writer", writer, true},
+			{"team viewer", viewer, false},
+			{"off-team org admin", orgAdmin, false},
+		} {
+			for _, path := range []string{prPath, reviewPath} {
+				rec := do(caller.id, http.MethodGet, path, nil)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("%s: GET %s = %d, want 200; body=%s", caller.name, path, rec.Code, rec.Body.String())
+				}
+				var got map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatalf("%s: decode GET %s: %v", caller.name, path, err)
+				}
+				if got["can_write"] != caller.want {
+					t.Errorf("%s: GET %s can_write = %v, want %v", caller.name, path, got["can_write"], caller.want)
+				}
+			}
 		}
 	})
 

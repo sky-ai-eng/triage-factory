@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // execSQL runs a statement against the test DB, failing the test on error.
@@ -183,6 +184,33 @@ func TestDetailReads_LocalCanWrite(t *testing.T) {
 		}
 		if body["can_write"] != true {
 			t.Errorf("GET %s: can_write = %v, want true", path, body["can_write"])
+		}
+	}
+}
+
+// TestListReads_LocalCanWrite: local mode's sole user writes every task and
+// every deliverable, so each row of the board's task list and of a
+// conversation's deliverable list answers can_write true, and no control is
+// hidden.
+func TestListReads_LocalCanWrite(t *testing.T) {
+	s := newTestServer(t)
+	conversationID := seedSteerConversation(t, s.db, "listcanwrite", dbtest.SeedConcluded)
+	seedConversationDeliverable(t, s, conversationID, domain.NewPullRequestDeliverable(
+		"octo/repo", 42, "PR_node", "feature/x", "main",
+		"https://github.com/octo/repo/pull/42", "Add thing", "Body.", true))
+
+	for _, path := range []string{
+		"/api/tasks/list",
+		"/api/agent/conversations/" + conversationID + "/deliverables/list",
+	} {
+		page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path, map[string]any{}))
+		if len(page.Items) == 0 {
+			t.Fatalf("POST %s: no rows", path)
+		}
+		for _, row := range page.Items {
+			if row["can_write"] != true {
+				t.Errorf("POST %s: row %v can_write = %v, want true", path, row["id"], row["can_write"])
+			}
 		}
 	}
 }

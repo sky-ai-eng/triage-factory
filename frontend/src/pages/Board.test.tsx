@@ -121,11 +121,14 @@ function conversation(status: string): Conversation {
 let listBodies: Array<Record<string, unknown>> = []
 let facetBodies: Array<Record<string, unknown>> = []
 let held: Conversation
+/** The can_write every listed task carries; undefined leaves the key off. */
+let taskCanWrite: boolean | undefined
 
 beforeEach(() => {
   listBodies = []
   facetBodies = []
   held = conversation('completed')
+  taskCanWrite = undefined
   api.apiList.mockReset()
   api.apiJSON.mockReset()
   api.apiFetch.mockReset()
@@ -134,11 +137,14 @@ beforeEach(() => {
     if (path !== '/api/tasks/list') throw new Error('unexpected apiList ' + path)
     listBodies.push(body)
     const statuses = (body.statuses as string[] | undefined) ?? []
-    const items = statuses.includes('in_progress')
+    const lane = statuses.includes('in_progress')
       ? [HELD]
       : statuses.includes('queued')
         ? [FREE]
         : []
+    const items = lane.map((t) =>
+      taskCanWrite === undefined ? t : { ...t, can_write: taskCanWrite },
+    )
     return { items, next_page_token: '', total_count: items.length }
   })
   api.apiJSON.mockImplementation(async (path: string, init?: { body?: string }) => {
@@ -370,5 +376,63 @@ describe('a permission prompt on a card', () => {
     expect(await screen.findByText('make test')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Allow' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+})
+
+describe('a card the caller may not write', () => {
+  /** Every /api/tasks/… path the board asked for, in call order. */
+  function taskCalls(): string[] {
+    return api.apiFetch.mock.calls
+      .map((c) => String(c[0]))
+      .filter((p) => p.startsWith('/api/tasks/'))
+  }
+
+  /** The sortable wrapper the card's drag rides on. */
+  function dragHandle(title: string) {
+    return screen.getByText(title).closest('[aria-roledescription="sortable"]')
+  }
+
+  it('keeps the assignee mark and drops the picker and the drag', async () => {
+    taskCanWrite = false
+    renderBoard()
+    expect(await screen.findByText(FREE.title)).toBeInTheDocument()
+    expect(screen.getByText(HELD.title)).toBeInTheDocument()
+
+    // The marks still say who holds what; neither opens a picker.
+    expect(screen.getByTitle('Unassigned')).toBeInTheDocument()
+    expect(screen.getByTitle('Aidan')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Unassigned' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Assigned to Aidan' })).not.toBeInTheDocument()
+
+    expect(dragHandle(FREE.title)).toHaveAttribute('aria-disabled', 'true')
+    expect(dragHandle(HELD.title)).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('claims and requeues nothing when its card is dropped', async () => {
+    taskCanWrite = false
+    renderBoard()
+    await screen.findByText(FREE.title)
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+      await dnd.drop!(HELD.id, 'queued')
+    })
+    expect(taskCalls()).toEqual([])
+    expect(
+      screen.queryByText('This stops the run. Its work stays with the task.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the picker and the drag to a writer', async () => {
+    taskCanWrite = true
+    renderBoard()
+    expect(await screen.findByRole('button', { name: 'Unassigned' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Assigned to Aidan' })).toBeInTheDocument()
+    expect(dragHandle(FREE.title)).toHaveAttribute('aria-disabled', 'false')
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+    expect(taskCalls()).toEqual([`/api/tasks/${FREE.id}/claim`])
   })
 })
