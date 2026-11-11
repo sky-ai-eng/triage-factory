@@ -57,10 +57,8 @@ export function bashHeadline(
 /**
  * The headline for one tool call: the argument that says what the call is
  * about. The file tools head with their path and the search tools with their
- * pattern, under either runtime's spelling, which is the set the run row's
- * activity line covers on the server — so one call reads the same on both
- * surfaces. Any other tool heads with its first short string argument, since
- * nothing here knows its shape.
+ * pattern, under either runtime's spelling. Any other tool heads with its
+ * first short string argument, since nothing here knows its shape.
  */
 export function toolHeadline(
   name: string,
