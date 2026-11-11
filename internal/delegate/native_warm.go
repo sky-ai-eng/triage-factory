@@ -85,7 +85,19 @@ func (s *Spawner) runNativeTurns(ctx context.Context, n nativeTail) (result agen
 		// started still gets all of it, and the checkpoint below comes out of
 		// it.
 		deadline := time.Now().Add(s.WarmWindow())
-		if !s.warmWindowOpens(ctx, n, result, n.transcript.takePersonDelivered()) || !s.checkpointBeforeWaiting(ctx, n) {
+		if !s.warmWindowOpens(ctx, n, result, n.transcript.takePersonDelivered()) {
+			return result, ctx, false
+		}
+		if !s.checkpointBeforeWaiting(ctx, n) {
+			// A stop or a shutdown that cancelled the checkpoint reached a turn
+			// that had already concluded, and the conclusion is what is
+			// recorded. It is recorded on a context the cancel does not reach,
+			// because the ending's snapshot is the only blob of the turn's tree
+			// left, and on the cancelled one it would fail. A fence is left on
+			// ctx, where recordNativeResult reads it and writes nothing.
+			if ctx.Err() != nil && !leaseFenced(ctx) {
+				return result, context.WithoutCancel(ctx), false
+			}
 			return result, ctx, false
 		}
 		if !time.Now().Before(deadline) {

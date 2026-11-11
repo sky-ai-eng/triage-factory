@@ -79,9 +79,11 @@ const (
 	turnEndSlotWait = checkpointCaptureTimeout
 
 	// turnEndCheckpointBound is the watchdog's bound on a whole turn-end
-	// checkpoint: the slot wait, the capture and the upload, each under its own
-	// timeout, and the margin past them.
-	turnEndCheckpointBound = turnEndSlotWait + checkpointCaptureTimeout + checkpointUploadTimeout + backstopMargin
+	// checkpoint: the wait for a boundary checkpoint still in flight, then the
+	// slot wait, the capture and the upload, each under its own timeout, and
+	// the margin past them.
+	turnEndCheckpointBound = (checkpointCaptureTimeout + checkpointUploadTimeout) +
+		turnEndSlotWait + checkpointCaptureTimeout + checkpointUploadTimeout + backstopMargin
 )
 
 // checkpointStoppingNotice answers a tool call the engagement stopped while it

@@ -136,11 +136,13 @@ func startWarmEngagement(t *testing.T, o warmOpts) *warmEngagement {
 	pf.x.mu.Lock()
 	pf.x.cancels[claim.ID] = func() { cancel(errStopRequested) }
 	pf.x.mu.Unlock()
-	stopActivity := pf.x.startActivityTracker(claim, cancel)
+	t.Cleanup(pf.x.startActivityTracker(claim, cancel))
 
 	// X's signal apply loop, which is what answers the control pod's doorbell
-	// and its stops.
+	// and its stops. Its stop is registered before anything below can fail
+	// the test, and runs after the engagement's below has ended it.
 	loopCtx, stopLoop := context.WithCancel(context.Background())
+	t.Cleanup(stopLoop)
 	pf.spawn(func() { pf.x.ConversationSignalApplyLoop(loopCtx, 20*time.Millisecond) })
 
 	if o.beforeStart != nil {
@@ -205,8 +207,6 @@ func startWarmEngagement(t *testing.T, o warmOpts) *warmEngagement {
 		case <-time.After(30 * time.Second):
 			t.Error("the engagement did not end within 30s of the test stopping it")
 		}
-		stopLoop()
-		stopActivity()
 		ckpt.stop()
 	})
 	pf.spawn(func() {
@@ -496,6 +496,77 @@ func TestWarmClaim_ShutdownDuringTheWaitLetsGo(t *testing.T) {
 	f.cancel(errDispatcherShutdown)
 	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
 		t.Fatalf("disposition = %+v, want the let-go, not a hand-back", d)
+	}
+	f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed it")
+}
+
+// A stop or a shutdown that cancels the turn-end checkpoint reaches a turn that
+// has already concluded. The conclusion is recorded with a snapshot of the
+// tree, not on the cancelled context, where the snapshot would fail.
+func TestWarmClaim_CancelDuringTheTurnEndCheckpointRecordsTheConclusion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel func(f *warmEngagement)
+	}{
+		{"stop", func(f *warmEngagement) {
+			if err := f.control.Stop(f.orgID, f.conversationID, f.userID); err != nil {
+				t.Fatalf("stop from the control pod: %v", err)
+			}
+		}},
+		{"shutdown", func(f *warmEngagement) { f.cancel(errDispatcherShutdown) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}},
+				beforeStart: func(f *warmEngagement) { f.gate.hold() }})
+			select {
+			case <-f.gate.entered:
+			case <-time.After(15 * time.Second):
+				t.Fatal("the turn-end checkpoint never uploaded")
+			}
+			tc.cancel(f)
+			if d := f.await(t, 20*time.Second); d.fenced || d.handedBack {
+				t.Fatalf("disposition = %+v, want the conclusion recorded", d)
+			}
+			f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed it")
+		})
+	}
+}
+
+// A lease fence during the wait writes nothing: the claim is someone else's to
+// release, and the conversation keeps no verdict from this engagement.
+func TestWarmClaim_LeaseFenceDuringTheWaitWritesNothing(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+	f.awaitWaiting(t, 1)
+
+	f.cancel(errClaimLeaseLost)
+	if d := f.await(t, 15*time.Second); !d.fenced {
+		t.Fatalf("disposition = %+v, want fenced", d)
+	}
+	if conv := f.read(t); conv.Concluded() || conv.Outcome != "" {
+		t.Errorf("the fenced engagement wrote a verdict: concluded %v, outcome %q", conv.Concluded(), conv.Outcome)
+	}
+	if released, _, _ := f.claimRelease(t); released {
+		t.Error("the fenced engagement released the claim")
+	}
+	if !f.jailStopped.Load() {
+		t.Error("the fenced engagement left its jail running")
+	}
+	if n := f.x.warmWaits.Len(); n != 0 {
+		t.Errorf("registered waits after the fence = %d, want none", n)
+	}
+}
+
+// The registry letting a waiting engagement go, as reclaiming its slot does,
+// ends the wait at once with the turn-end writes.
+func TestWarmClaim_RegistryLetGoEndsTheWaitAtOnce(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+	f.awaitWaiting(t, 1)
+
+	if !f.x.warmWaits.LetGoOldest() {
+		t.Fatal("the registry held no waiting engagement to let go")
+	}
+	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the ordinary ending", d)
 	}
 	f.assertTurnEndWrites(t, domain.ConversationOutcomeContinue, "fixed it")
 }
