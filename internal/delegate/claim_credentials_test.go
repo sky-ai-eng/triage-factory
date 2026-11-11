@@ -316,6 +316,18 @@ func TestResumeWithMessage_RequiresModel(t *testing.T) {
 	}
 }
 
+// TestResumeWithMessage_RequiresCommitIdentity pins that a resume with no
+// commit identity resolved for it is refused, rather than started as a
+// process that commits under ambient git config.
+func TestResumeWithMessage_RequiresCommitIdentity(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "fallback-model")
+	_, err := s.ResumeWithMessage(context.Background(), "org", "run-1", "sess-1", "/tmp/wt", "hi",
+		ResumeOptions{Model: "claude-sonnet-4-6", Namespace: "ws"}, "manual", "user-1")
+	if err == nil || !strings.Contains(err.Error(), "missing commit identity") {
+		t.Fatalf("ResumeWithMessage with no commit identity = %v; want a missing-commit-identity error", err)
+	}
+}
+
 // TestTaskOwnerRepo pins the per-(org, owner, repo) key derivation: a GitHub
 // task's pair is its registry row's names, read through the id its entity
 // references, so a repository renamed with no key rewritten keys on its new

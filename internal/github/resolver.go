@@ -425,12 +425,14 @@ type Resolver interface {
 	//
 	// ok=false with no error is an org that has no identity: no GitHub
 	// credential, a staged or inactive App with no PAT behind it, no stored PAT
-	// login (an org bound before TFAC-452), or a managed org whose deployment
-	// App is not ready to commit as. The caller stamps no identity, never a
-	// fabricated one; it self-heals on the next PAT re-save / App re-register.
+	// login (a PAT bound before the login was captured carries none), or a
+	// managed org whose established deployment App has no bot to commit as. The
+	// caller stamps no identity, never a fabricated one; it self-heals on the
+	// next PAT re-save / App re-register.
 	//
-	// An error is a read that failed — the credential class, the App, the PAT,
-	// or the stored login — or a credential class this build does not know
+	// An error is a read that failed — the credential class, the org's App
+	// registration or the deployment App's preflight, the PAT, or the stored
+	// login — or a credential class this build does not know
 	// (ErrUnknownCredentialClass). It never reads as absence: an org that has
 	// an identity this call could not read would otherwise commit as something
 	// else, so the caller refuses whatever needed the identity instead.
@@ -1269,8 +1271,8 @@ func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (Org
 	app, err := r.appForIdentity(ctx, orgID, class, host)
 	switch {
 	case errors.Is(err, ErrNoGitHubCredentials):
-		// An org with no GitHub URL has no GitHub credential, so it has no
-		// identity on any tier.
+		// Only the managed arm reads the host: a managed org with no GitHub
+		// URL has no credential, so it has no identity.
 		return OrgIdentity{}, false, nil
 	case err != nil:
 		return OrgIdentity{}, false, fmt.Errorf("resolve the app commit identity for org %s: %w", orgID, err)

@@ -12,13 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
-// identityOutage is a failed identity read that a client marked as an
-// unreachable upstream.
-type identityOutage struct{}
-
-func (identityOutage) Error() string                 { return "github: connection refused" }
-func (identityOutage) UpstreamClass() upstream.Class { return upstream.Transient }
-
 // A run whose org's commit identity cannot be read does not start: runAgent
 // hands the engagement back as a launch failure before it writes anything
 // about the launch, and the dispatcher's hand-back requeues the claim on the
@@ -31,7 +24,7 @@ func TestRunAgent_FailedCommitIdentityReadHandsBack(t *testing.T) {
 		want    db.RequeueOutcome
 	}{
 		"a failed read":           {"ident-read", errors.New("keychain: item could not be read"), db.RequeueSetupFailure},
-		"an unreachable upstream": {"ident-upstream", identityOutage{}, db.RequeueUpstreamUnavailable},
+		"an unreachable upstream": {"ident-upstream", &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}, db.RequeueUpstreamUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			paths.SetForTest(t, t.TempDir())

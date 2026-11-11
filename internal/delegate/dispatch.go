@@ -1514,7 +1514,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
 		nudge:             turnEndNudge(s.artifactContractNudge(orgID, conv.ID, *task, s.resumedStepIsFinal(stepCtx, orgID, conv))),
-		commitSigner:      commitSigner,
+		commitSigner:      &commitSigner,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		if leaseFenced(stepCtx) {

@@ -127,7 +127,7 @@ func (s *Spawner) orgCommitIdentity(ctx context.Context, orgID string) (commitsi
 		}
 		org, found, err := ghclient.OrgIdentityAccount(ctx, s.ghResolver, orgID)
 		if err != nil {
-			return commitsigner.Identity{}, fmt.Errorf("resolve the org's commit identity: %w", err)
+			return commitsigner.Identity{}, fmt.Errorf("resolve the org's GitHub commit identity: %w", err)
 		}
 		if !found {
 			return none, nil
@@ -135,11 +135,7 @@ func (s *Spawner) orgCommitIdentity(ctx context.Context, orgID string) (commitsi
 		none.Name, none.Email, none.AccountID = org.Name, org.Email, org.AccountID
 		return none, nil
 	}
-	id, err := commitsigner.Resolver{Signers: stores.OrgCommitSigners, GitHub: s.ghResolver}.Resolve(ctx, orgID)
-	if err != nil {
-		return commitsigner.Identity{}, fmt.Errorf("resolve the org's commit identity: %w", err)
-	}
-	return id, nil
+	return commitsigner.Resolver{Signers: stores.OrgCommitSigners, GitHub: s.ghResolver}.Resolve(ctx, orgID)
 }
 
 // runCommitIdentity is the commit identity of a run that may have a credential

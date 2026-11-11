@@ -327,9 +327,9 @@ type ResumeOptions struct {
 	// commitSigner is the org's commit identity and how it signs
 	// (orgCommitIdentity), which the resumed process commits and signs as.
 	// The dispatcher resolves it before it takes the queued input, so a read
-	// that fails hands the claim back with the message still queued; the zero
-	// value stamps no identity and signs nothing.
-	commitSigner commitsigner.Identity
+	// that fails hands the claim back with the message still queued. Required:
+	// nil is refused rather than read as an org with no identity.
+	commitSigner *commitsigner.Identity
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -419,6 +419,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		return nil, fmt.Errorf("resume: missing namespace (caller must pass the workspace namespace captured at run start)")
 	}
 	extraEnv = append(extraEnv, "TRIAGE_FACTORY_WORKSPACE_KEY="+opts.Namespace)
+	if opts.commitSigner == nil {
+		return nil, fmt.Errorf("resume: missing commit identity (caller must resolve the org's commit identity for this resume)")
+	}
+	signer := *opts.commitSigner
 
 	// A resumed run gets the same gh channel shape the initial invocation had:
 	// the sidecar's in multi, a fresh loopback injector in local (the channel is
@@ -454,8 +458,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	// identity follows the same rule, so there is one rule for both. The
 	// trailer is resolved here, for the user whose queued message this turn
 	// delivers.
-	commitIdentity := s.signerCommitIdentity(ctx, orgID, opts.commitSigner, triggerType, creatorUserID)
-	commitSigning := s.prepareLocalCommitSigning(ctx, orgID, conversationID, opts.claimID, opts.commitSigner)
+	commitIdentity := s.signerCommitIdentity(ctx, orgID, signer, triggerType, creatorUserID)
+	commitSigning := s.prepareLocalCommitSigning(ctx, orgID, conversationID, opts.claimID, signer)
 	defer commitSigning.Close()
 	extraEnv = append(extraEnv, commitSigning.env()...)
 
