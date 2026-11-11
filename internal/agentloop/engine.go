@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
@@ -113,6 +114,11 @@ type Params struct {
 	// ClaimID is the executor engagement this is, handed to a TF tool's
 	// handler as part of the conversation's identity.
 	ClaimID string
+
+	// EngagementSpan is the engagement's root span, which ended when the agent
+	// went live. Every span the loop opens is a root of its own linked to it
+	// (see loopSpan). The zero value links nothing.
+	EngagementSpan trace.SpanContext
 
 	// Model is the provider model id. SystemPrompt is the fully assembled
 	// envelope (see envelope.go) — the loop never composes prompt text
@@ -388,6 +394,11 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	var spent spend
 	defer func() { result.CostUSD = float64(spent) }()
 
+	// The span open now: the preparation's, then each iteration's in turn.
+	// Whichever one the engagement ends in is ended here, with the result.
+	pctx, current := e.startLoopSpan(ctx, params, "agent.prepare")
+	defer func() { current.finish(result) }()
+
 	// Policy into the jail, before anything can dispatch a tool. One frame,
 	// once per engagement — the host holds it for the life of the connection.
 	e.configureToolHost(params)
@@ -395,7 +406,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	// Setup: make the transcript legal and honest before anything reads it.
 	// Unconditional and idempotent — there is no resume branch, so the
 	// crash-recovery path is the path that runs every time and cannot rot.
-	if err := e.repairTranscript(ctx, params); err != nil {
+	if err := e.repairTranscript(pctx, params); err != nil {
 		return e.failed(ctx, started, 0, fmt.Errorf("repair transcript: %w", err))
 	}
 
@@ -403,16 +414,17 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	// repair → compact → drain → call, so the summarize call reads exactly
 	// what the previous engagement left and queued input stays queued
 	// through it.
-	if err := e.compactOnResume(ctx, params, &spent); err != nil {
+	if err := e.compactOnResume(pctx, params, &spent); err != nil {
 		if ctx.Err() != nil {
 			return e.cancelled(ctx, started, 0)
 		}
 		if upstreamUnavailable(err) {
 			return e.unavailable(started, 0, err)
 		}
-		e.insertNotice(ctx, params, "Compacting this conversation on resume failed: "+err.Error())
+		e.insertNotice(pctx, params, "Compacting this conversation on resume failed: "+err.Error())
 		return e.failed(ctx, started, 0, fmt.Errorf("compact on resume: %w", err))
 	}
+	current.next(prepareOK)
 
 	// bareDrain is true for the engagement's first drain and for any drain
 	// that follows a no-tool-call assistant message. Every other drain
@@ -453,6 +465,12 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			return e.cancelled(ctx, started, turn)
 		}
 
+		// One root span per iteration (see loopSpan). ctx is shadowed for the
+		// rest of the body, so everything in it, store writes included, runs
+		// under this iteration's span.
+		ctx, it := e.startLoopSpan(ctx, params, "agent.turn")
+		current = it
+
 		// 1. Compaction trip, BEFORE the drain — the same order the resume
 		// path uses (compact → drain → call), and for the same reason: a
 		// message queued while the window filled must stay queued through
@@ -464,7 +482,9 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			return e.failed(ctx, started, turn, fmt.Errorf("list rows for compaction trip: %w", err))
 		}
 		if e.compactionDue(params, preRows) {
-			if err := e.compactWarm(ctx, params, &spent); err != nil {
+			if err := e.compaction(ctx, compactTrip, func(ctx context.Context) error {
+				return e.compactWarm(ctx, params, &spent)
+			}); err != nil {
 				if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
 				}
@@ -474,6 +494,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
 				return e.failed(ctx, started, turn, fmt.Errorf("compact conversation: %w", err))
 			}
+			it.next(turnCompacted)
 			continue
 		}
 
@@ -495,6 +516,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		// 3. Guards, before every call. Each sees the engagement's own call
 		// count.
 		if notice := e.checkGuards(ctx, params, turn); notice != "" {
+			it.parked(parkGuard)
 			if !HasNoticeSince(rows, notice) {
 				e.insertNotice(ctx, params, notice)
 			}
@@ -537,7 +559,10 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			// this call exactly once.
 			if errors.Is(err, inference.ErrContextOverflow) && !reactiveCompacted {
 				reactiveCompacted = true
-				if cerr := e.compactWindowFull(ctx, params, &spent); cerr == nil {
+				if cerr := e.compaction(ctx, compactOverflow, func(ctx context.Context) error {
+					return e.compactWindowFull(ctx, params, &spent)
+				}); cerr == nil {
+					it.next(turnCompacted)
 					continue
 				} else if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
@@ -569,6 +594,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		// arguments stay a loud persist failure: with nothing to blame for
 		// the damage they are a provider bug, not something to paper over.
 		class := classifyStop(completion.FinishReason)
+		it.called(turn, class)
 		if completion.FinishReason == "" {
 			// Read as an ordinary stop, per classifyStop. The warn is the only
 			// trace it leaves, since an absent reason is deliberately not
@@ -616,6 +642,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 					return e.failed(ctx, started, turn, err)
 				}
 				bareDrain = false
+				it.next(turnTruncatedBatch)
 				continue
 			}
 
@@ -647,6 +674,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			// Mid-work, not concluding: the model was on its way to an action
 			// when the cut landed, so input arriving now is a steer.
 			bareDrain = false
+			it.next(turnRetryLargerCap)
 			continue
 
 		case stopWindowWall:
@@ -673,7 +701,9 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			}
 			e.warn("model call stopped at the context window wall; compacting",
 				"conversation", params.ConversationID, "model", params.Model, "max_tokens", maxTokens)
-			if err := e.compactWindowFull(ctx, params, &spent); err != nil {
+			if err := e.compaction(ctx, compactWindowWall, func(ctx context.Context) error {
+				return e.compactWindowFull(ctx, params, &spent)
+			}); err != nil {
 				if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
 				}
@@ -684,6 +714,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				return e.failed(ctx, started, turn, fmt.Errorf("compact after context window wall: %w", err))
 			}
 			bareDrain = false
+			it.next(turnCompacted)
 			continue
 
 		case stopDecline:
@@ -699,6 +730,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			if err := e.answerUndispatchedCalls(ctx, params, assistantRow.ID, calls, interruptedCallNotice); err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
+			it.parked(parkDecline)
 			return e.parkOnStop(ctx, params, started, turn, rows, declineParkNotice(completion.FinishReason))
 
 		case stopUnknown:
@@ -708,6 +740,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			if err := e.answerUndispatchedCalls(ctx, params, assistantRow.ID, calls, interruptedCallNotice); err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
+			it.parked(parkUnknownStop)
 			return e.parkOnStop(ctx, params, started, turn, rows, unrecognizedStopParkNotice(completion.FinishReason))
 
 		case stopToolCalls:
@@ -715,6 +748,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			// the message contradicts its own stop reason — dispatch has
 			// nothing to run and there is no completed turn to conclude from.
 			if len(calls) == 0 {
+				it.parked(parkEmptyToolBatch)
 				return e.parkOnStop(ctx, params, started, turn, rows, emptyToolBatchParkNotice)
 			}
 
@@ -752,9 +786,11 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				}
 				outcome.NumTurns = turn
 				outcome.DurationMs = e.msSince(started)
+				it.next(turnStopped)
 				return outcome
 			}
 			bareDrain = false
+			it.next(turnToolCalls)
 			continue
 		}
 
@@ -772,6 +808,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			return e.failed(ctx, started, turn, fmt.Errorf("recheck pending input: %w", err))
 		}
 		if pending {
+			it.next(turnPendingInput)
 			continue
 		}
 
@@ -783,6 +820,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				if err := e.insertPending(ctx, params, nudge, domain.MessageSubtypeInjectionNudge); err != nil {
 					return e.failed(ctx, started, turn, fmt.Errorf("insert turn-end nudge: %w", err))
 				}
+				it.next(turnNudged)
 				continue
 			}
 		}

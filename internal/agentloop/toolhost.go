@@ -84,12 +84,18 @@ func (e *ProtocolError) Fatal() bool {
 // Cause accompanies a ToolError when the tool host ended the call itself and
 // said why, as one of the ToolErrorCause values. The model reads ToolError
 // alone; Cause is what the call's failure is counted under.
+//
+// CeilingKills is how many processes the jail's memory ceiling killed that
+// this result reports (see WatchMemoryKills), in a jail that went on running.
+// The model reads them in the result's notice; the count is for the call's
+// span.
 type ToolOutcome struct {
-	Content   string
-	Images    []ToolImage
-	ToolError string
-	Cause     string
-	Protocol  *ProtocolError
+	Content      string
+	Images       []ToolImage
+	ToolError    string
+	Cause        string
+	Protocol     *ProtocolError
+	CeilingKills int
 }
 
 // ToolErrorCauseMemoryBudget is the cause the harness gives a `bash` command

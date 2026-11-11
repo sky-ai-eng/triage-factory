@@ -41,7 +41,12 @@ var approvedKeys = []string{
 	"event.type",
 	"job",
 	"kind",
+	"llm.cost_usd",
+	"llm.first_chunk_ms",
+	"max_tokens",
+	"memory.kills",
 	"mode",
+	"model",
 	"op",
 	"org.id",
 	"outcome",
@@ -59,9 +64,16 @@ var approvedKeys = []string{
 	"snapshot.transcript_bytes",
 	"snapshot.waited_ms",
 	"source",
+	"stop_reason",
 	"task.id",
 	"team.id",
+	"tokens.cache_read",
+	"tokens.cache_write",
+	"tokens.input",
+	"tokens.output",
+	"tool",
 	"transport",
+	"turn",
 	"upstream",
 	"work.kind",
 	"workspace.provenance",
@@ -83,6 +95,9 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		NotificationKind("linear.team_unreadable"),
 		AgentCostUSD(0.42), AgentDuration(9000),
 		WorkKind("event_queue"), Reason("budget_exhausted"),
+		Model("claude-sonnet-4-5"), MaxTokens(32000), TokensInput(10), TokensOutput(20),
+		TokensCacheRead(30), TokensCacheWrite(40), LLMCostUSD(0.01), FirstChunk(800 * time.Millisecond),
+		Tool("bash"), Turn(3), StopReason("tool_calls"), MemoryKills(1),
 	}
 	for _, kv := range produced {
 		if !slices.Contains(approvedKeys, string(kv.Key)) {
@@ -127,6 +142,9 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"WorkKind": true, "Reason": true,
 		"Signer": true, "SigningMode": true, "Budget": true, "Signed": true,
 		"NotificationKind": true,
+		"Model":            true, "MaxTokens": true, "TokensInput": true, "TokensOutput": true,
+		"TokensCacheRead": true, "TokensCacheWrite": true, "LLMCostUSD": true, "FirstChunk": true,
+		"Tool": true, "Turn": true, "StopReason": true, "MemoryKills": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

@@ -134,7 +134,13 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spen
 		// passed as nil: the span flips it inactive with everything else.
 		e.info("committing a compaction summary an earlier engagement persisted",
 			"conversation", params.ConversationID)
-		return e.commitCompaction(ctx, params, nil, summary, compactionSpan(rows))
+		return e.compaction(ctx, compactResume, func(ctx context.Context) error {
+			if err := e.commitCompaction(ctx, params, nil, summary, compactionSpan(rows)); err != nil {
+				return err
+			}
+			markCompacted(ctx, compactedRecovered)
+			return nil
+		})
 	}
 	if !e.compactionDue(params, rows) {
 		return nil
@@ -142,7 +148,9 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spen
 	if warmCacheLive(rows) {
 		return nil
 	}
-	return e.compactCold(ctx, params, spent)
+	return e.compaction(ctx, compactResume, func(ctx context.Context) error {
+		return e.compactCold(ctx, params, spent)
+	})
 }
 
 // compactWindowFull is the reactive arm's dispatcher: warm semantics while
@@ -266,7 +274,11 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	}
 	spent.add(replyRow.CostUSD)
 	span := append(compactionSpan(rows), replyRow.ID)
-	return e.commitCompaction(ctx, params, nil, summary, span)
+	if err := e.commitCompaction(ctx, params, nil, summary, span); err != nil {
+		return err
+	}
+	markCompacted(ctx, compactedWarm)
+	return nil
 }
 
 // compactCold is the forced-shape call: nothing inherited, nothing that can
@@ -342,6 +354,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) e
 		return err
 	}
 	spent.add(replyRow.CostUSD)
+	markCompacted(ctx, compactedCold)
 	return nil
 }
 
