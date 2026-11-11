@@ -491,11 +491,7 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 	r.ws.Broadcast(websocket.Event{
 		Type:  "task_claimed",
 		OrgID: orgID,
-		Data: map[string]any{
-			"task_id":             task.ID,
-			"claimed_by_agent_id": agentID,
-			"claimed_by_user_id":  "",
-		},
+		Data:  map[string]any{},
 	})
 }
 
@@ -527,11 +523,7 @@ func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *d
 		r.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
 			OrgID: orgID,
-			Data: map[string]any{
-				"task_id":             task.ID,
-				"claimed_by_agent_id": agentID,
-				"claimed_by_user_id":  "",
-			},
+			Data:  map[string]any{},
 		})
 	}
 }

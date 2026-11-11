@@ -794,6 +794,24 @@ type ConversationStore interface {
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error)
 
+	// ConversationFrameRecipientsSystem resolves who may receive a websocket
+	// frame about conversationID in orgID: the audience of the REST read of
+	// that conversation, which conversations_select decides. An org-visible
+	// conversation answers orgWide = true and nil userIDs, because every
+	// member of the org may read it. A team-visible one answers every user
+	// with a membership row of any role on its team, while that team is not
+	// archived, who is also a member of the org. A private one answers its
+	// creator, while the creator is a member of the org. No such
+	// conversation, or any other visibility, answers nobody.
+	//
+	// userIDs are distinct and sorted ascending, and empty but non-nil when
+	// nobody qualifies. Admin pool: the emitters are executor and control
+	// paths with no request claims, and the audience crosses the team
+	// boundaries the membership policies would hide. The answer is read
+	// fresh on every call so a membership change applies from the next
+	// frame.
+	ConversationFrameRecipientsSystem(ctx context.Context, orgID, conversationID string) (orgWide bool, userIDs []string, err error)
+
 	// RequestStopSystem records that a stop was asked for. by is the user who
 	// asked, or "" for a system stop. signalTarget is the executor id a
 	// cross-pod cancel signal should be addressed to, or "" for none; on

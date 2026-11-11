@@ -123,6 +123,11 @@ func (a *App) buildAI() {
 		authorship = reconcile.TrustRecords
 	}
 	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores, authorship, a.wsHub)
+	// Multi only, as for the server: deliverable_updated goes to the owning
+	// conversation's REST audience.
+	if !a.local() {
+		reconciler.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+	}
 	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)
@@ -202,6 +207,14 @@ func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
+	// Multi only: scope the transcript, status, and permission frames to each
+	// conversation's REST audience, resolved per frame — the hub has no team
+	// axis, so an org-scoped broadcast would stream every team's transcripts
+	// to the whole org. Local keeps the org-wide broadcast: N=1, no team
+	// boundary.
+	if !a.local() {
+		a.spawner.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+	}
 	a.hookReconcilerToSpawner()
 	// Mirror run status/activity onto the bus (TFAC-592) so an EE
 	// subscriber (ExtensionAPI.Bus()) can observe run lifecycle — the
@@ -517,18 +530,18 @@ func (a *App) buildRouting() error {
 // OnError stay unset.
 func (a *App) scorerCallbacks() scorer.RunnerCallbacks {
 	return scorer.RunnerCallbacks{
-		OnScoringStarted: func(orgID string, taskIDs []string) {
+		OnScoringStarted: func(orgID string, _ []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
 				OrgID: orgID,
-				Data:  map[string]any{"task_ids": taskIDs},
+				Data:  map[string]any{},
 			})
 		},
-		OnScoringCompleted: func(ctx context.Context, orgID string, taskIDs []string) {
+		OnScoringCompleted: func(_ context.Context, orgID string, _ []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_completed",
 				OrgID: orgID,
-				Data:  map[string]any{"task_ids": taskIDs},
+				Data:  map[string]any{},
 			})
 			// The score write admitted each task's re-evaluation row in its
 			// own transaction; wake the router's re-derive worker so they

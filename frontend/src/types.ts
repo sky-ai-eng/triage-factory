@@ -646,18 +646,13 @@ export interface TriageEvent {
   created_at: string
 }
 
-/** Shape of `data` on a `{ type: "event" }` WS frame — matches Go's
- *  `domain.Event`. The frontend factory uses entity_id + event_type
- *  to drive chip animations between stations. */
+/** Shape of `data` on a `{ type: "event" }` WS frame: the type of an event
+ *  the backend just recorded, and nothing about the entity it is on. The
+ *  frame is org-scoped, so it carries no entity data a viewer's teams may not
+ *  read; a surface that needs the event's entity refetches through the REST
+ *  read, which carries the scoping. */
 export interface DomainEvent {
-  id?: string
   event_type: string
-  /** FK to entities.id; null for system events (poll markers, etc.). */
-  entity_id?: string | null
-  dedup_key?: string
-  metadata_json?: string
-  occurred_at?: string
-  created_at?: string
 }
 
 export interface Prompt {
@@ -1416,27 +1411,14 @@ export type WSEvent =
   // scoping — the cheap tier, and what turns a first-ever open's "discovering
   // repositories…" into a list without the client polling for it.
   | { type: 'github_repos_updated'; data: Record<string, never> }
-  | {
-      // Claim-axis change. Exactly one of the two ID fields
-      // is populated when claim landed; both empty when claim was
-      // cleared (Requeue, revert). Status is NOT in the payload —
-      // status changes fire as task_updated. The two channels stay
-      // orthogonal, matching the three-axis design.
-      type: 'task_claimed'
-      data: {
-        task_id: string
-        claimed_by_agent_id: string
-        claimed_by_user_id: string
-      }
-    }
-  | {
-      // Genuine status transitions (done, dismissed, snoozed) — NOT
-      // responsibility changes. Responsibility lives on task_claimed.
-      type: 'task_updated'
-      data: { task_id: string; status: string }
-    }
-  | { type: 'scoring_started'; data: { task_ids: string[] } }
-  | { type: 'scoring_completed'; data: { task_ids: string[] } }
+  // The task and scoring frames are payload-free, org-scoped pings: the
+  // client refetches through the REST reads, which carry the scoping.
+  // task_claimed says a task's claim moved, task_updated says its status
+  // moved, and scoring_started / scoring_completed bracket a scoring cycle.
+  | { type: 'task_claimed'; data: Record<string, never> }
+  | { type: 'task_updated'; data: Record<string, never> }
+  | { type: 'scoring_started'; data: Record<string, never> }
+  | { type: 'scoring_completed'; data: Record<string, never> }
   | {
       // One sparse-diff event for the repositories table (mirrors Go's
       // repoevent.Update allowlist): only the fields the backend just

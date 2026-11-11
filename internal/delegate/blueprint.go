@@ -684,5 +684,5 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 		}
 		return
 	}
-	s.broadcastTaskUpdate(orgID, br.TaskID, "done")
+	s.broadcastTaskUpdate(orgID)
 }

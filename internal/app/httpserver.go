@@ -40,6 +40,12 @@ func (a *App) buildExecutorRuntime() {
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 	a.srv = server.New(a.database, a.stores)
 	a.wsHub = a.srv.WSHub()
+	// Multi only: scope the conversation frames handlers send to each
+	// conversation's REST audience. Local keeps the org-wide broadcast: N=1,
+	// no team boundary.
+	if !a.local() {
+		a.srv.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+	}
 	// TFAC-573: main.Version isn't otherwise threaded into this package;
 	// GET /readyz surfaces it so an operator can confirm a deploy landed.
 	a.srv.SetVersion(a.cfg.Version)

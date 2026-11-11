@@ -1393,7 +1393,7 @@ func (ah *Handler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, us
 	ah.ws.Broadcast(websocket.Event{
 		Type:  "task_updated",
 		OrgID: orgID,
-		Data:  map[string]any{"task_id": taskID, "status": "done"},
+		Data:  map[string]any{},
 	})
 }
 
