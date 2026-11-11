@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,11 +11,14 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // conversationGateRig is the viewer rig plus the agent routes, a spawner over
@@ -254,5 +258,79 @@ func TestConversationCanWrite_Postgres(t *testing.T) {
 		if got := listed(tc.caller)[tc.conversation]; got != tc.want {
 			t.Errorf("%s: list can_write = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestConversationDeliverablesCanWrite_Postgres: each row of a conversation's
+// deliverable list carries the deliverable write gate's answer, a writer of
+// the deliverable's team, rather than the conversation's. On an org-visible
+// conversation an org admin who is not on the team may act on the
+// conversation and still may not approve or dismiss its deliverables.
+func TestConversationDeliverablesCanWrite_Postgres(t *testing.T) {
+	r := newConversationGateRig(t)
+	ag := &agentHandler{tx: r.s.tx, az: r.s.az, ws: r.s.ws}
+	r.mux.HandleFunc("POST /api/agent/conversations/{conversationID}/deliverables/list", ag.handleAgentDeliverables)
+
+	offTeamAdmin := pgtest.SeedUser(t, r.h, "off-team-org-admin")
+	otherTeam := pgtest.SeedTeam(t, r.h, r.orgID, "admin-team")
+	pgtest.AddOrgMember(t, r.h, offTeamAdmin, r.orgID, otherTeam, "admin", "member")
+
+	seed := pgstore.New(r.h.AdminDB, r.h.AdminDB, pgtest.SecretKey)
+	if _, _, err := seed.Orgs.AdoptSourceBaseURL(t.Context(), r.orgID, domain.ProviderGitHub, dbtest.TestGitHubHost); err != nil {
+		t.Fatalf("set the org's GitHub host: %v", err)
+	}
+	seedDeliverable := func(conversationID string, number int) string {
+		t.Helper()
+		d := domain.NewPullRequestDeliverable("octo/repo", number, fmt.Sprintf("PR_octo_repo_%d", number), "feature/x", "main",
+			fmt.Sprintf("https://github.com/octo/repo/pull/%d", number), "title", "body", true)
+		d.OrgID, d.TeamID, d.Scope, d.ConversationID = r.orgID, r.teamID, dbtest.TestGitHubHost, conversationID
+		row, err := seed.Deliverables.UpsertSystem(t.Context(), r.orgID, d)
+		if err != nil {
+			t.Fatalf("seed deliverable: %v", err)
+		}
+		return row.ID
+	}
+
+	team := r.seedConversation(t, "team", r.admin)
+	teamDeliverable := seedDeliverable(team, 1)
+	org := r.seedConversation(t, "org", r.admin)
+	orgDeliverable := seedDeliverable(org, 2)
+
+	listed := func(caller, conversationID string) map[string]any {
+		t.Helper()
+		rec := r.do(t, caller, http.MethodPost, "/api/agent/conversations/"+conversationID+"/deliverables/list", map[string]any{})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list deliverables of %s as %s = %d; body=%s", conversationID, caller, rec.Code, rec.Body.String())
+		}
+		page := httpxtest.DecodeList[map[string]any](t, rec)
+		out := map[string]any{}
+		for _, row := range page.Items {
+			out[row["id"].(string)] = row["can_write"]
+		}
+		return out
+	}
+
+	cases := []struct {
+		name, caller, conversation, deliverable string
+		want                                    bool
+	}{
+		{"team admin", r.admin, team, teamDeliverable, true},
+		{"team member", r.member, team, teamDeliverable, true},
+		{"team viewer", r.viewer, team, teamDeliverable, false},
+		{"team admin on the org conversation", r.admin, org, orgDeliverable, true},
+		{"off-team org admin on the org conversation", offTeamAdmin, org, orgDeliverable, false},
+	}
+	for _, tc := range cases {
+		if got := listed(tc.caller, tc.conversation)[tc.deliverable]; got != tc.want {
+			t.Errorf("%s: can_write = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// The conversation's own answer differs for the off-team org admin, which
+	// is why the deliverable rows carry their own.
+	rec := r.do(t, offTeamAdmin, http.MethodGet, "/api/agent/conversations/"+org, nil)
+	var conv map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &conv); err != nil || conv["can_write"] != true {
+		t.Errorf("off-team org admin's org conversation: can_write = %v (status %d), want true", conv["can_write"], rec.Code)
 	}
 }

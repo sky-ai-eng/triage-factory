@@ -56,6 +56,14 @@ func TestSwipeStore_SQLite(t *testing.T) {
 					t.Fatalf("seed foreign %s gesture on %s: %v", action, taskID, err)
 				}
 			},
+			InCallerTx: func(t *testing.T, fn func(db.SwipeStore) error) {
+				t.Helper()
+				if err := stores.Tx.WithTx(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+					return fn(tx.Swipes)
+				}); err != nil {
+					t.Fatalf("caller tx: %v", err)
+				}
+			},
 		}
 	})
 }

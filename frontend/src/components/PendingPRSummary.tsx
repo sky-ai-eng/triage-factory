@@ -23,6 +23,10 @@ interface Props {
   onReject: () => void
   onClose: () => void
   submitting: boolean
+  // readOnly is the view for a caller who may read the draft and not act on
+  // it: the title and body as text, no Edit, no Reject, and the footer's Open
+  // PR replaced by a link to the draft on GitHub.
+  readOnly?: boolean
 }
 
 // PendingPRSummary is the title/body editor + Open-PR button for the draft-PR
@@ -49,6 +53,7 @@ export default function PendingPRSummary({
   onReject,
   onClose,
   submitting,
+  readOnly = false,
 }: Props) {
   const [editingTitle, setEditingTitle] = useState(false)
   const [editingBody, setEditingBody] = useState(false)
@@ -163,6 +168,12 @@ export default function PendingPRSummary({
               </button>
             </div>
           </div>
+        ) : readOnly ? (
+          <div className="bg-raised rounded-xl px-4 py-2.5 border border-transparent">
+            <span className="text-body font-medium text-ink-1">
+              {title || <span className="text-ink-3 italic">No title</span>}
+            </span>
+          </div>
         ) : (
           <div
             onClick={() => {
@@ -219,25 +230,28 @@ export default function PendingPRSummary({
               >
                 {rawView ? 'Preview' : 'Raw'}
               </button>
-              <button
-                onClick={() => {
-                  setBodyDraft(body)
-                  setEditingBody(true)
-                }}
-                className="text-label text-ink-3 hover:text-warm px-1.5 py-0.5 rounded bg-raised border border-line-1 transition-colors"
-              >
-                Edit
-              </button>
+              {!readOnly && (
+                <button
+                  onClick={() => {
+                    setBodyDraft(body)
+                    setEditingBody(true)
+                  }}
+                  className="text-label text-ink-3 hover:text-warm px-1.5 py-0.5 rounded bg-raised border border-line-1 transition-colors"
+                >
+                  Edit
+                </button>
+              )}
             </div>
 
             <div className="bg-raised rounded-xl px-4 py-3 border border-transparent hover:border-line-1 transition-colors min-h-[48px]">
               {!body ? (
                 <span
                   onClick={() => {
+                    if (readOnly) return
                     setBodyDraft(body)
                     setEditingBody(true)
                   }}
-                  className="text-body text-ink-3 italic cursor-text"
+                  className={`text-body text-ink-3 italic ${readOnly ? '' : 'cursor-text'}`}
                 >
                   No description
                 </span>
@@ -259,45 +273,58 @@ export default function PendingPRSummary({
           that cannot be undone, so it does not share the cluster a stray click
           lands in. */}
       <div className="px-5 py-3 border-t border-line-1 flex items-center justify-between">
-        <button
-          onClick={onReject}
-          disabled={submitting || saving}
-          className="text-reported font-medium text-alarm/80 hover:text-alarm px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Reject &amp; delete branch
-        </button>
-        <div className="flex items-center gap-2">
+        {!readOnly && (
+          <button
+            onClick={onReject}
+            disabled={submitting || saving}
+            className="text-reported font-medium text-alarm/80 hover:text-alarm px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Reject &amp; delete branch
+          </button>
+        )}
+        <div className="ml-auto flex items-center gap-2">
           <button
             onClick={onClose}
             className="text-reported font-medium text-ink-3 hover:text-ink-1 px-3 py-1.5 rounded-lg transition-colors"
           >
             Close
           </button>
-          <button
-            onClick={onSubmit}
-            disabled={submitting || saving || editingTitle || editingBody}
-            title={
-              editingTitle || editingBody
-                ? 'Save or cancel your edit before opening the PR'
-                : saving
-                  ? 'Waiting for your save to land before opening the PR'
-                  : undefined
-            }
-            className={`flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
-              submitting || saving || editingTitle || editingBody
-                ? 'bg-warm/50 text-warm-ink cursor-not-allowed'
-                : 'bg-warm text-warm-ink hover:bg-warm/90'
-            }`}
-          >
-            {submitting ? (
-              <>
-                <span className="inline-block w-3 h-3 border border-line-1 border-t-white rounded-full animate-spin" />
-                Opening...
-              </>
-            ) : (
-              <>Open PR</>
-            )}
-          </button>
+          {readOnly ? (
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl text-warm-ink bg-warm hover:bg-warm/90 transition-all duration-150"
+            >
+              View on GitHub
+            </a>
+          ) : (
+            <button
+              onClick={onSubmit}
+              disabled={submitting || saving || editingTitle || editingBody}
+              title={
+                editingTitle || editingBody
+                  ? 'Save or cancel your edit before opening the PR'
+                  : saving
+                    ? 'Waiting for your save to land before opening the PR'
+                    : undefined
+              }
+              className={`flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
+                submitting || saving || editingTitle || editingBody
+                  ? 'bg-warm/50 text-warm-ink cursor-not-allowed'
+                  : 'bg-warm text-warm-ink hover:bg-warm/90'
+              }`}
+            >
+              {submitting ? (
+                <>
+                  <span className="inline-block w-3 h-3 border border-line-1 border-t-white rounded-full animate-spin" />
+                  Opening...
+                </>
+              ) : (
+                <>Open PR</>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -203,6 +203,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	if runCell == nil {
 		return launchFailed(errors.New("launch tool host: no cell was provisioned for this engagement — multi mode is always per-run-isolated"))
 	}
+	env, err := s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID)
+	if err != nil {
+		return launchFailed(err)
+	}
 	// One resolution of the claim's memory ceiling for the jail and the bash
 	// budget derived from it, so the two cannot disagree.
 	memoryLimitMB := agentproc.ClaimMemoryLimitMB()
@@ -213,7 +217,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	launched, err := launchRestartableJail(ctx, runCell, cell.LaunchSpec{
 		WorkspaceKey:     namespace,
 		RunTree:          claudeCwd,
-		Env:              s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
+		Env:              env,
 		ProxyEnv:         cfg.sidecar.jailEnv(),
 		SidecarEndpoints: cfg.sidecar.jailEndpoints(),
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
@@ -607,17 +611,21 @@ func prepareInheritedMemory(cwd string, handedOff, opened bool) *memoryFingerpri
 // nativeAgentEnv is the env the jail's tool host exports to every `bash`
 // command it runs — the same run-identity variables the SDK path exports, so
 // a `tfac`/`triagefactory exec` invocation from inside a tool resolves the
-// same run.
-func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, namespace string, cfg runConfig, triggerType, creatorUserID string) []string {
+// same run. An error is runCommitIdentity's.
+func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, namespace string, cfg runConfig, triggerType, creatorUserID string) ([]string, error) {
 	env := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot,
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
-	if id := s.runCommitIdentity(ctx, orgID, cfg.sidecar, triggerType, creatorUserID); id.CoAuthorTrailer != "" {
+	id, err := s.runCommitIdentity(ctx, orgID, cfg.sidecar, triggerType, creatorUserID)
+	if err != nil {
+		return nil, err
+	}
+	if id.CoAuthorTrailer != "" {
 		env = append(env, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+id.CoAuthorTrailer)
 	}
-	return env
+	return env, nil
 }
 
 // nativeCredentials resolves the loop's provider account per call.

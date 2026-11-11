@@ -157,6 +157,42 @@ describe('RunArtifacts', () => {
     expect(onOpen).toHaveBeenCalledWith('pr', 'pr1')
   })
 
+  it('offers no dismiss on a deliverable the caller may not write, in either kind of row', async () => {
+    // The artifact's deliverable ref carries no can_write; the deliverables
+    // list, which names every deliverable, answers for it.
+    stubReads({
+      deliverables: [
+        deliverable({ id: 'rv1', kind: 'review', state: 'pending', can_write: false }),
+        deliverable({ id: 'pr1', kind: 'pull_request', state: 'draft', can_write: false }),
+      ],
+      artifacts: [
+        artifact({
+          object_id: 'cHIx',
+          object_kind: 'pull_request',
+          target: 'org/repo#18',
+          url: 'https://github.com/org/repo/pull/18',
+          last_action: 'pr_edited',
+          deliverable: { id: 'pr1', kind: 'pull_request', state: 'draft' },
+        }),
+      ],
+    })
+    render(
+      <RunArtifacts
+        conversation={conversation({ artifact_count: 1, pending_deliverable_ids: ['pr1', 'rv1'] })}
+        onOpenDeliverable={vi.fn()}
+      />,
+    )
+
+    // Both still open: the overlay is a read.
+    expect(
+      await screen.findByRole('button', { name: 'Open review: org/repo#19' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Open pull request: org/repo#18' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Dismiss/ })).not.toBeInTheDocument()
+  })
+
   it('titles a branch by its name, with its repository on the secondary line', async () => {
     stubReads({
       artifacts: [

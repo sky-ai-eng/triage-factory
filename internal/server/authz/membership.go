@@ -47,9 +47,13 @@ type membership interface {
 	teamMemberCountAndRole(ctx context.Context, orgID, userID, teamID string) (int, string, error)
 	// taskWritable answers both halves of the task-write gate in one read:
 	// whether the caller can see taskID at all, and whether they may write it.
-	// One read, because the two drive a 403 and a deliberate silence and must
-	// not disagree.
+	// One read, because the two drive a 403 and a 404 and must not disagree.
+	// A task that does not exist is not visible.
 	taskWritable(ctx context.Context, orgID, userID, taskID string) (visible, canWrite bool, err error)
+	// tasksWritable is taskWritable's write half over many tasks, as the set
+	// of writable ids, for a list that tells a client which rows to offer a
+	// write on. An id the caller cannot see is never in it.
+	tasksWritable(ctx context.Context, orgID, userID string, taskIDs []string) (map[string]bool, error)
 	// conversationsWritable reports which of conversationIDs the caller may
 	// act on, as the set of writable ids. An id the caller cannot see is never
 	// in it, so the answer cannot tell an invisible conversation from a
@@ -120,12 +124,22 @@ func (localMembership) taskWritable(context.Context, string, string, string) (bo
 	return true, true, nil
 }
 
+func (localMembership) tasksWritable(_ context.Context, _, _ string, taskIDs []string) (map[string]bool, error) {
+	return allWritable(taskIDs), nil
+}
+
 func (localMembership) conversationsWritable(_ context.Context, _, _ string, conversationIDs []string) (map[string]bool, error) {
-	out := make(map[string]bool, len(conversationIDs))
-	for _, id := range conversationIDs {
+	return allWritable(conversationIDs), nil
+}
+
+// allWritable is N=1's answer to a batched write probe: the sole user writes
+// every row, so every id asked about is in the set.
+func allWritable(ids []string) map[string]bool {
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
 		out[id] = true
 	}
-	return out, nil
+	return out
 }
 
 // pgMembership answers from Postgres, inside db.WithTx so every read sees the
@@ -236,30 +250,64 @@ func (m pgMembership) teamMemberCountAndRole(ctx context.Context, orgID, userID,
 	return n, role, err
 }
 
-// taskWritable mirrors the team branches of the tasks_update write RLS policy
-// arm-for-arm. It reads tables, but what it encodes is the policy, so it is
-// spelled out here to be diffable against the policy it shadows.
+// taskWritePolicy is the write half of the task gate, as a predicate over a
+// tasks row aliased t: the USING clause of tasks_update, arm for arm, with the
+// org and membership terms this pool needs (see taskWritable). taskWritable
+// and tasksWritable both run it, so a task's detail read, its row on a list,
+// and the write gate give one answer.
+const taskWritePolicy = `t.org_id = tf.current_org_id() AND tf.user_has_org_access(t.org_id)
+	AND (
+	  (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
+	  OR (t.visibility = 'team' AND (
+	       (t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL
+	        AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_can_write_team(tt.team_id)))
+	       OR (t.team_id IS NOT NULL AND tf.user_can_write_team(t.team_id))
+	  ))
+	  OR (t.visibility = 'org' AND tf.user_is_org_admin(t.org_id))
+	)`
+
+// taskWritable mirrors two policies arm for arm: visible is tasks_select, and
+// can_write is the USING clause of tasks_update (taskWritePolicy). It reads
+// tables, but what it encodes is the policies, so they are spelled out here to
+// be diffable against the policies they shadow. This pool bypasses RLS, so each
+// half carries its policy in full, the org and membership terms included: a
+// half that drops an arm's condition answers for rows the policy would hide.
+// The two differ only in the role each arm asks for (tf.user_in_team against
+// tf.user_can_write_team, any member against an org admin), so every task
+// can_write admits is one visible admits.
 func (m pgMembership) taskWritable(ctx context.Context, orgID, userID, taskID string) (bool, bool, error) {
 	var visible, canWrite bool
 	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 			SELECT
-			  EXISTS (SELECT 1 FROM tasks t WHERE t.id = $1::uuid AND t.org_id = $2::uuid) AS visible,
 			  EXISTS (
 			    SELECT 1 FROM tasks t
-			    WHERE t.id = $1::uuid AND t.org_id = $2::uuid AND (
-			      (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
-			      OR (t.visibility = 'org' AND tf.user_is_org_admin(t.org_id))
-			      OR (t.visibility = 'team' AND (
-			           (t.team_id IS NOT NULL AND tf.user_can_write_team(t.team_id))
-			           OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_can_write_team(tt.team_id))
-			      ))
-			    )
+			    WHERE t.id = $1::uuid
+			      AND t.org_id = tf.current_org_id() AND tf.user_has_org_access(t.org_id)
+			      AND (
+			        (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
+			        OR (t.visibility = 'team' AND (
+			             (t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL
+			              AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_in_team(tt.team_id)))
+			             OR (t.team_id IS NOT NULL AND tf.user_in_team(t.team_id))
+			        ))
+			        OR t.visibility = 'org'
+			      )
+			  ) AS visible,
+			  EXISTS (
+			    SELECT 1 FROM tasks t WHERE t.id = $1::uuid AND `+taskWritePolicy+`
 			  ) AS can_write`,
-			taskID, orgID,
+			taskID,
 		).Scan(&visible, &canWrite)
 	})
 	return visible, canWrite, err
+}
+
+func (m pgMembership) tasksWritable(ctx context.Context, orgID, userID string, taskIDs []string) (map[string]bool, error) {
+	return m.writableIDs(ctx, orgID, userID, `
+		SELECT t.id::text FROM tasks t
+		WHERE t.id = ANY($1::uuid[]) AND `+taskWritePolicy,
+		taskIDs)
 }
 
 // conversationsWritable mirrors the USING arms of the conversations_update
@@ -268,22 +316,28 @@ func (m pgMembership) taskWritable(ctx context.Context, orgID, userID, taskID st
 // that admits the write also admits the conversations_select read, which is
 // what keeps an invisible id out of the answer.
 func (m pgMembership) conversationsWritable(ctx context.Context, orgID, userID string, conversationIDs []string) (map[string]bool, error) {
-	out := make(map[string]bool, len(conversationIDs))
-	if len(conversationIDs) == 0 {
+	return m.writableIDs(ctx, orgID, userID, `
+		SELECT c.id::text FROM conversations c
+		WHERE c.id = ANY($1::uuid[])
+		  AND c.org_id = tf.current_org_id() AND tf.user_has_org_access(c.org_id)
+		  AND (
+		    (c.visibility = 'private' AND c.creator_user_id = tf.current_user_id())
+		    OR (c.visibility = 'team' AND tf.user_can_write_team(c.team_id))
+		    OR (c.visibility = 'org' AND tf.user_is_org_admin(c.org_id))
+		  )`,
+		conversationIDs)
+}
+
+// writableIDs runs a batched write probe under the caller's claims: query
+// takes the ids as $1 (a uuid array) and returns the writable ones as text,
+// which come back as the set.
+func (m pgMembership) writableIDs(ctx context.Context, orgID, userID, query string, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
 		return out, nil
 	}
 	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `
-			SELECT c.id::text FROM conversations c
-			WHERE c.id = ANY($1::uuid[])
-			  AND c.org_id = tf.current_org_id() AND tf.user_has_org_access(c.org_id)
-			  AND (
-			    (c.visibility = 'private' AND c.creator_user_id = tf.current_user_id())
-			    OR (c.visibility = 'team' AND tf.user_can_write_team(c.team_id))
-			    OR (c.visibility = 'org' AND tf.user_is_org_admin(c.org_id))
-			  )`,
-			conversationIDs,
-		)
+		rows, err := tx.QueryContext(ctx, query, ids)
 		if err != nil {
 			return err
 		}

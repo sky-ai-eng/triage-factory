@@ -600,4 +600,6 @@ func (githubAt) TokenFor(context.Context, string, string) (githubapp.Token, erro
 
 func (g githubAt) BaseURLFor(context.Context, string) (string, error) { return g.url, nil }
 
-func (githubAt) OrgIdentityFor(context.Context, string) (string, string, bool) { return "", "", false }
+func (githubAt) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
+}

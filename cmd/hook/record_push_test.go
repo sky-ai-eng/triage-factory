@@ -151,7 +151,7 @@ func (f fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, err
 	return db.OrgGitHubHostSystem(ctx, f.stores.Orgs, orgID)
 }
 
-func (f fakeResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
+func (f fakeResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
 	panic("OrgIdentityFor is not used by the hook")
 }
 

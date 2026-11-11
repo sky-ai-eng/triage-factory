@@ -96,8 +96,8 @@ func (r *freshClientPerCallResolver) BaseURLFor(ctx context.Context, orgID strin
 	return ghbase.DefaultBaseURL(), nil
 }
 
-func (r *freshClientPerCallResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
-	return "", "", false
+func (r *freshClientPerCallResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // TestPollGitHubOnce_RateLimitCursorResumesAcrossCycles is TFAC-571's core
@@ -368,8 +368,8 @@ func (r *perAccountFailResolver) BaseURLFor(ctx context.Context, orgID string) (
 	return ghbase.DefaultBaseURL(), nil
 }
 
-func (r *perAccountFailResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
-	return "", "", false
+func (r *perAccountFailResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor is

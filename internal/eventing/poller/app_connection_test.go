@@ -101,8 +101,8 @@ func (r *mintingResolver) BaseURLFor(ctx context.Context, orgID string) (string,
 	return r.url, nil
 }
 
-func (r *mintingResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
-	return "", "", false
+func (r *mintingResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // TestGitHubAppCycle_MintOutageIsAConnectionLoss: an App org's host goes
