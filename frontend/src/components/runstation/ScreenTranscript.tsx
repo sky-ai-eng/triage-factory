@@ -5,7 +5,7 @@ import type { Message, Conversation, ToolCall } from '../../types'
 import { isActiveConversation } from '../../lib/conversationStatus'
 import { isSystemNotice } from '../../lib/messageVoice'
 import { stripWorktree } from '../../lib/worktree'
-import { type BashCallState, bashHeadline, isBashTool } from '../../lib/toolHeadline'
+import { type BashCallState, toolHeadline } from '../../lib/toolHeadline'
 import { toast } from '../Toast/toastStore'
 import { stationState } from './stationStyle'
 
@@ -456,7 +456,7 @@ const ToolLine = memo(function ToolLine({
   const state: BashCallState = !result ? 'running' : result.is_error ? 'failed' : 'succeeded'
   // Collapse the agent's absolute worktree paths to worktree-relative ones
   // everywhere they show up — the headline, the input args, and the output.
-  const headline = stripWorktree(headlineForToolCall(call, state), worktree)
+  const headline = stripWorktree(toolHeadline(call.name, call.input || {}, state), worktree)
   const inputJson = useMemo(
     () => stripWorktree(safeJsonStringify(call.input), worktree),
     [call.input, worktree],
@@ -667,22 +667,6 @@ function clockTime(iso: string): string {
     second: '2-digit',
     hour12: false,
   })
-}
-
-function headlineForToolCall(call: ToolCall, state: BashCallState): string {
-  const input = call.input || {}
-  // Bash: prefer the agent-authored summary — the human-readable intent — in
-  // whichever tense this row's state calls for. The raw command stays one
-  // click away in the expanded IN pane.
-  if (isBashTool(call.name)) return bashHeadline(input, state) || '(no command)'
-  if (call.name === 'Read' || call.name === 'Write' || call.name === 'Edit')
-    return String(input.file_path || '(no path)')
-  if (call.name === 'Glob') return String(input.pattern || '(no pattern)')
-  if (call.name === 'Grep') return String(input.pattern || '(no pattern)')
-  for (const v of Object.values(input)) {
-    if (typeof v === 'string' && v.length < 200) return v
-  }
-  return ''
 }
 
 function safeJsonStringify(v: unknown): string {
