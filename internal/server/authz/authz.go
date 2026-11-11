@@ -352,6 +352,37 @@ func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgI
 	return true
 }
 
+// WritableConversations reports which of conversationIDs the caller may act
+// on: stop, message, or answer a permission prompt for. The rule is the
+// conversations_update policy's: the creator of a private conversation, a
+// writer of a team conversation's team (tf.user_can_write_team, so not a
+// viewer and not an archived team), and an org admin for an org-visible one.
+// The answer is the set of writable ids, keyed as the store spells them.
+//
+// An id the caller cannot see is never in the set, so a false answer does not
+// say whether the conversation exists. A route that owes a 404 for an
+// invisible conversation reads its visibility first and answers 403 only for
+// a conversation it has seen.
+func (az *Checker) WritableConversations(ctx context.Context, userID, orgID string, conversationIDs []string) (map[string]bool, error) {
+	return az.members().conversationsWritable(ctx, orgID, userID, conversationIDs)
+}
+
+// UserCanWriteConversation is WritableConversations for one id, in any
+// spelling uuid.Parse accepts: a path segment is not canonicalized before it
+// reaches here, and the set comes back keyed by the stored form.
+func (az *Checker) UserCanWriteConversation(ctx context.Context, userID, orgID, conversationID string) (bool, error) {
+	parsed, err := uuid.Parse(conversationID)
+	if err != nil {
+		return false, nil
+	}
+	id := parsed.String()
+	writable, err := az.WritableConversations(ctx, userID, orgID, []string{id})
+	if err != nil {
+		return false, err
+	}
+	return writable[id], nil
+}
+
 // UserOwnsOrg returns true when the calling user is the founder/owner of the
 // given org — the holder of orgs.owner_user_id. Distinct from UserIsOrgAdmin
 // because ownership transfer is owner-only: a plain org admin can't reassign

@@ -48,3 +48,21 @@ func TestLocalMembership_OrgFacts(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalMembership_ConversationsWritable: N=1's sole user acts on every
+// conversation, so every id asked about comes back writable.
+func TestLocalMembership_ConversationsWritable(t *testing.T) {
+	ids := []string{"00000000-0000-0000-0000-0000000000a1", "00000000-0000-0000-0000-0000000000a2"}
+	got, err := localMembership{}.conversationsWritable(context.Background(), runmode.LocalDefaultOrgID, "u1", ids)
+	if err != nil {
+		t.Fatalf("conversationsWritable: %v", err)
+	}
+	if len(got) != len(ids) {
+		t.Fatalf("conversationsWritable = %v, want every id", got)
+	}
+	for _, id := range ids {
+		if !got[id] {
+			t.Errorf("conversationsWritable[%s] = false, want true", id)
+		}
+	}
+}

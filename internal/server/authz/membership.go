@@ -50,6 +50,12 @@ type membership interface {
 	// One read, because the two drive a 403 and a deliberate silence and must
 	// not disagree.
 	taskWritable(ctx context.Context, orgID, userID, taskID string) (visible, canWrite bool, err error)
+	// conversationsWritable reports which of conversationIDs the caller may
+	// act on, as the set of writable ids. An id the caller cannot see is never
+	// in it, so the answer cannot tell an invisible conversation from a
+	// visible one the caller may only read: callers that owe a 404 for the
+	// first establish visibility themselves.
+	conversationsWritable(ctx context.Context, orgID, userID string, conversationIDs []string) (map[string]bool, error)
 }
 
 // localMembership is N=1: one org, one user, and that user is its admin and its
@@ -112,6 +118,14 @@ func (localMembership) teamMemberCountAndRole(context.Context, string, string, s
 
 func (localMembership) taskWritable(context.Context, string, string, string) (bool, bool, error) {
 	return true, true, nil
+}
+
+func (localMembership) conversationsWritable(_ context.Context, _, _ string, conversationIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(conversationIDs))
+	for _, id := range conversationIDs {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // pgMembership answers from Postgres, inside db.WithTx so every read sees the
@@ -246,4 +260,42 @@ func (m pgMembership) taskWritable(ctx context.Context, orgID, userID, taskID st
 		).Scan(&visible, &canWrite)
 	})
 	return visible, canWrite, err
+}
+
+// conversationsWritable mirrors the USING arms of the conversations_update
+// policy, for the reason taskWritable spells out its policy. This pool bypasses
+// RLS, so the policy's org and membership terms are written out too. Each arm
+// that admits the write also admits the conversations_select read, which is
+// what keeps an invisible id out of the answer.
+func (m pgMembership) conversationsWritable(ctx context.Context, orgID, userID string, conversationIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(conversationIDs))
+	if len(conversationIDs) == 0 {
+		return out, nil
+	}
+	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT c.id::text FROM conversations c
+			WHERE c.id = ANY($1::uuid[])
+			  AND c.org_id = tf.current_org_id() AND tf.user_has_org_access(c.org_id)
+			  AND (
+			    (c.visibility = 'private' AND c.creator_user_id = tf.current_user_id())
+			    OR (c.visibility = 'team' AND tf.user_can_write_team(c.team_id))
+			    OR (c.visibility = 'org' AND tf.user_is_org_admin(c.org_id))
+			  )`,
+			conversationIDs,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out[id] = true
+		}
+		return rows.Err()
+	})
+	return out, err
 }

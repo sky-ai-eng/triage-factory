@@ -163,6 +163,25 @@ func TestSteerRoutes_UnknownConversationNotFound(t *testing.T) {
 	}
 }
 
+// TestConversationRead_LocalCanWrite: N=1's sole user acts on every
+// conversation, so the detail read offers the controls.
+func TestConversationRead_LocalCanWrite(t *testing.T) {
+	s := newTestServer(t)
+	conversationID := seedSteerConversation(t, s.db, "canwrite", "open")
+
+	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+conversationID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["can_write"] != true {
+		t.Errorf("can_write = %v, want true", body["can_write"])
+	}
+}
+
 // TestHandleMessage_EmptyTextRejected: a blank message is 400 before the
 // conversation is even looked up. The path id must still be well-formed — the uuid
 // guard runs ahead of body validation, so a junk id would answer 404 first.
