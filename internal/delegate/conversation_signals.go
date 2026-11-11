@@ -449,6 +449,9 @@ type AdditiveFiringRef struct {
 //     continues for this subtype, so a running loop reads it before it
 //     concludes. An engagement waiting warm is rung to read it
 //     (ringWarmWait).
+//     TODO(TFAC-1347): a row staged after a stop_blueprint call, or after a
+//     warm wait ended and before its let-go concludes, is never read, and the
+//     firing it replaced is gone.
 //  3. An SDK conversation with a live remote owner: an `inject`
 //     conversation_signals row, fire-and-forget — never waited on, per the
 //     reply-leg contract.
