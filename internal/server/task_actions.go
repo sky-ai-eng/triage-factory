@@ -90,8 +90,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	// Viewers can't act on a team's tasks. A claim is a
 	// team-scoped write, so gate it here with one clean 403 rather than
 	// letting the store UPDATE fall off the tasks_update RLS policy as a
-	// confusing 409/500. A task the viewer can't see at all still 404s
-	// downstream — RequireTaskWrite doesn't mask it.
+	// confusing 409/500. A task the caller can't see at all is a 404.
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
 		return
 	}

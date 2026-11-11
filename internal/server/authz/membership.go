@@ -47,8 +47,8 @@ type membership interface {
 	teamMemberCountAndRole(ctx context.Context, orgID, userID, teamID string) (int, string, error)
 	// taskWritable answers both halves of the task-write gate in one read:
 	// whether the caller can see taskID at all, and whether they may write it.
-	// One read, because the two drive a 403 and a deliberate silence and must
-	// not disagree.
+	// One read, because the two drive a 403 and a 404 and must not disagree.
+	// A task that does not exist is not visible.
 	taskWritable(ctx context.Context, orgID, userID, taskID string) (visible, canWrite bool, err error)
 	// conversationsWritable reports which of conversationIDs the caller may
 	// act on, as the set of writable ids. An id the caller cannot see is never
@@ -236,27 +236,49 @@ func (m pgMembership) teamMemberCountAndRole(ctx context.Context, orgID, userID,
 	return n, role, err
 }
 
-// taskWritable mirrors the team branches of the tasks_update write RLS policy
-// arm-for-arm. It reads tables, but what it encodes is the policy, so it is
-// spelled out here to be diffable against the policy it shadows.
+// taskWritable mirrors two policies arm for arm: visible is tasks_select, and
+// can_write is the USING clause of tasks_update. It reads tables, but what it
+// encodes is the policies, so they are spelled out here to be diffable against
+// the policies they shadow. This pool bypasses RLS, so each half carries its
+// policy in full, the org and membership terms included: a half that drops an
+// arm's condition answers for rows the policy would hide. The two differ only
+// in the role each arm asks for (tf.user_in_team against
+// tf.user_can_write_team, any member against an org admin), so every task
+// can_write admits is one visible admits.
 func (m pgMembership) taskWritable(ctx context.Context, orgID, userID, taskID string) (bool, bool, error) {
 	var visible, canWrite bool
 	err := db.WithReadTx(ctx, m.db, db.Claims{Sub: userID, OrgID: orgID}, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 			SELECT
-			  EXISTS (SELECT 1 FROM tasks t WHERE t.id = $1::uuid AND t.org_id = $2::uuid) AS visible,
 			  EXISTS (
 			    SELECT 1 FROM tasks t
-			    WHERE t.id = $1::uuid AND t.org_id = $2::uuid AND (
-			      (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
-			      OR (t.visibility = 'org' AND tf.user_is_org_admin(t.org_id))
-			      OR (t.visibility = 'team' AND (
-			           (t.team_id IS NOT NULL AND tf.user_can_write_team(t.team_id))
-			           OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_can_write_team(tt.team_id))
-			      ))
-			    )
+			    WHERE t.id = $1::uuid
+			      AND t.org_id = tf.current_org_id() AND tf.user_has_org_access(t.org_id)
+			      AND (
+			        (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
+			        OR (t.visibility = 'team' AND (
+			             (t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL
+			              AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_in_team(tt.team_id)))
+			             OR (t.team_id IS NOT NULL AND tf.user_in_team(t.team_id))
+			        ))
+			        OR t.visibility = 'org'
+			      )
+			  ) AS visible,
+			  EXISTS (
+			    SELECT 1 FROM tasks t
+			    WHERE t.id = $1::uuid
+			      AND t.org_id = tf.current_org_id() AND tf.user_has_org_access(t.org_id)
+			      AND (
+			        (t.visibility = 'private' AND t.creator_user_id = tf.current_user_id())
+			        OR (t.visibility = 'team' AND (
+			             (t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL
+			              AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tf.user_can_write_team(tt.team_id)))
+			             OR (t.team_id IS NOT NULL AND tf.user_can_write_team(t.team_id))
+			        ))
+			        OR (t.visibility = 'org' AND tf.user_is_org_admin(t.org_id))
+			      )
 			  ) AS can_write`,
-			taskID, orgID,
+			taskID,
 		).Scan(&visible, &canWrite)
 	})
 	return visible, canWrite, err

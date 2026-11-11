@@ -81,9 +81,8 @@ type SwipeStore interface {
 	// claim cols NULL"), and a closed task is never parked. The
 	// UPDATE carries both predicates and returns ok=false when
 	// either refuses — a claimed task, or one that went
-	// done/dismissed since the caller read it; the audit row is
-	// rolled back atomically so a refused gesture leaves no state
-	// change. Handler maps ok=false to 409.
+	// done/dismissed since the caller read it — and writes nothing,
+	// audit row included. Handler maps ok=false to 409.
 	SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (ok bool, err error)
 
 	// RequeueTask sends a task back to the queue WITHOUT recording a
