@@ -1,15 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
+import { jsonBody } from '../test/apiResponse'
 import PendingPROverlay from './PendingPROverlay'
 
 // The draft PR overlay offers its verbs (edit, Open PR, Reject) to a caller
 // the deliverable's routes accept, and reads the draft to one they refuse.
-
-const api = vi.hoisted(() => ({ apiJSON: vi.fn(), apiFetch: vi.fn() }))
-vi.mock('../lib/apiClient', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../lib/apiClient')>()
-  return { ...actual, ...api }
-})
 
 function draft(canWrite: boolean | undefined) {
   return {
@@ -30,14 +25,23 @@ function draft(canWrite: boolean | undefined) {
   }
 }
 
-beforeEach(() => {
-  api.apiJSON.mockReset()
-  api.apiFetch.mockReset()
-  api.apiFetch.mockResolvedValue({ text: async () => '', headers: { get: () => null } })
-})
+// stubReads answers the overlay's two reads: the deliverable, and its diff,
+// whose patch text arrives empty.
+function stubReads(deliverable: unknown) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) =>
+      url.endsWith('/diff')
+        ? { ok: true, status: 200, text: async (): Promise<string> => '', headers: new Headers() }
+        : { ok: true, status: 200, ...jsonBody(deliverable) },
+    ),
+  )
+}
+
+beforeEach(() => vi.restoreAllMocks())
 
 async function open(canWrite: boolean | undefined) {
-  api.apiJSON.mockResolvedValue(draft(canWrite))
+  stubReads(draft(canWrite))
   render(<PendingPROverlay deliverableId="d1" open onClose={() => {}} />)
   expect(await screen.findByText('Harden the sampler')).toBeInTheDocument()
 }

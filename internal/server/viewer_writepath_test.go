@@ -317,6 +317,9 @@ func TestViewer_TaskList_CanWrite(t *testing.T) {
 		req := r.req(http.MethodGet, "/api/tasks/"+taskID, caller, nil)
 		req.SetPathValue("id", taskID)
 		r.s.handleTaskGet(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET task %s as %s = %d; body=%s", taskID, caller, rec.Code, rec.Body.String())
+		}
 		var body map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode task: %v", err)

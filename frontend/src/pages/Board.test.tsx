@@ -180,6 +180,11 @@ function laterBodies(): Array<Record<string, unknown>> {
   return listBodies.slice(3)
 }
 
+/** Every /api/tasks/… path the board asked for, in call order. */
+function taskCalls(): string[] {
+  return api.apiFetch.mock.calls.map((c) => String(c[0])).filter((p) => p.startsWith('/api/tasks/'))
+}
+
 /** Opens one card's assignee picker and returns a scope over it — every card
  *  on the board has one, and their rows carry the same names, so a row has to
  *  be chosen inside the picker that owns it. The mark names its holder, and
@@ -275,13 +280,6 @@ describe('the lane read runs on the server', () => {
 })
 
 describe('starting a queued task', () => {
-  /** Every /api/tasks/… path the board asked for, in call order. */
-  function taskCalls(): string[] {
-    return api.apiFetch.mock.calls
-      .map((c) => String(c[0]))
-      .filter((p) => p.startsWith('/api/tasks/'))
-  }
-
   it('makes the drag one call: the claim is what moves the card', async () => {
     renderBoard()
     await waitFor(() => expect(listBodies.length).toBe(3))
@@ -380,13 +378,6 @@ describe('a permission prompt on a card', () => {
 })
 
 describe('a card the caller may not write', () => {
-  /** Every /api/tasks/… path the board asked for, in call order. */
-  function taskCalls(): string[] {
-    return api.apiFetch.mock.calls
-      .map((c) => String(c[0]))
-      .filter((p) => p.startsWith('/api/tasks/'))
-  }
-
   /** The sortable wrapper the card's drag rides on. */
   function dragHandle(title: string) {
     return screen.getByText(title).closest('[aria-roledescription="sortable"]')

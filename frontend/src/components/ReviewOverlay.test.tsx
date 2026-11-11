@@ -1,16 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
+import { jsonBody } from '../test/apiResponse'
 import ReviewOverlay from './ReviewOverlay'
 
 // The pending review overlay offers its verbs (the verdict, edit, Submit) to a
 // caller the deliverable's routes accept, and reads the review to one they
 // refuse, the way it reads a resolved one.
-
-const api = vi.hoisted(() => ({ apiJSON: vi.fn(), apiFetch: vi.fn() }))
-vi.mock('../lib/apiClient', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../lib/apiClient')>()
-  return { ...actual, ...api }
-})
 
 function pendingReview(canWrite: boolean | undefined) {
   return {
@@ -31,14 +26,23 @@ function pendingReview(canWrite: boolean | undefined) {
   }
 }
 
-beforeEach(() => {
-  api.apiJSON.mockReset()
-  api.apiFetch.mockReset()
-  api.apiFetch.mockResolvedValue({ text: async () => '', headers: { get: () => null } })
-})
+// stubReads answers the overlay's two reads: the deliverable, and its diff,
+// whose patch text arrives empty.
+function stubReads(deliverable: unknown) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) =>
+      url.endsWith('/diff')
+        ? { ok: true, status: 200, text: async (): Promise<string> => '', headers: new Headers() }
+        : { ok: true, status: 200, ...jsonBody(deliverable) },
+    ),
+  )
+}
+
+beforeEach(() => vi.restoreAllMocks())
 
 async function open(canWrite: boolean | undefined) {
-  api.apiJSON.mockResolvedValue(pendingReview(canWrite))
+  stubReads(pendingReview(canWrite))
   render(<ReviewOverlay deliverableId="d1" open onClose={() => {}} />)
   expect(await screen.findByText('Looks close.')).toBeInTheDocument()
 }
