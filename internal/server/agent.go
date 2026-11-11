@@ -889,9 +889,8 @@ func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int 
 // The caller is checked by requireWritableConversation: 404 for a
 // conversation they cannot see, 403 for one they may only read. A
 // conversation the caller may act on that has already concluded is 409
-// ALREADY_TERMINAL, the same answer its sibling /message gives for the same state: the two verbs used to
-// disagree (404 here, 409 there) about one condition on one resource.
-// Anything else Stop returns is an internal fault on the way to stopping a conversation
+// ALREADY_TERMINAL, the same answer its sibling /message gives for the same
+// state. Anything else Stop returns is an internal fault on the way to stopping a conversation
 // that really was active — a failed read, a failed intent write — and goes through
 // internalError, which logs it and redacts the detail in multi mode. Reporting
 // those as 404 would tell the user their conversation is gone when it is still running.
