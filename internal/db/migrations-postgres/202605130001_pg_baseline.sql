@@ -6493,8 +6493,9 @@ REVOKE ALL ON public.ws_outbox FROM PUBLIC;
 REVOKE ALL ON public.ws_outbox FROM anon, authenticated, service_role;
 
 
--- ws_presence: cross-pod presence for the unattended-prompt fast-deny and the
--- fleet dashboard's live-viewer count — a Hub only sees its own pod's sockets.
+-- ws_presence: cross-pod presence for the unattended-prompt fast-deny — a Hub
+-- only sees its own pod's sockets. The read counts a row only when its user_id
+-- may read the prompt's conversation, unless every member of the org may.
 -- Every control pod upserts one row per (user_id, conn_id) on a ~15 s heartbeat
 -- (TF_WS_PRESENCE_HEARTBEAT_SECONDS); the writer qualifies conn_id with its
 -- instance id, since that id is unique only within one process. A row is live

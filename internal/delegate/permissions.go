@@ -62,8 +62,8 @@ import (
 // retrying is futile, and what to do instead.
 
 // permDenyNoOperator is the deny reason for a prompt nobody could have
-// answered: no answer-capable, focused tab was open in the run's org for the
-// whole grace window.
+// answered: nobody who may read the conversation had an answer-capable,
+// focused tab open for the whole grace window.
 func permDenyNoOperator(grace time.Duration) string {
 	return "This tool call required permission from a human, but nobody is watching this run — " +
 		"there was no operator on the board or the run's page to approve it. " +
@@ -117,11 +117,17 @@ func countOf(n int, unit string) string {
 }
 
 // defaultPresencePollInterval is how often the presence-gated wait re-checks
-// whether an answer-capable, focused tab is present in the run's org. 1s is
-// fine-grained enough for a 15s-default grace while staying cheap (an RLock +
-// map scan over the hub's clients). Tests inject a shorter value via
+// whether an answer-capable, focused tab is present for the conversation. 1s
+// is fine-grained enough for a 15s-default grace while staying cheap: an
+// RLock + map scan over the hub's clients, plus in multi mode the audience
+// read and the ws_presence read. Tests inject a shorter value via
 // SetPresencePollInterval to drive the absent/present paths deterministically.
 const defaultPresencePollInterval = time.Second
+
+// presenceAudienceTimeout bounds the audience read behind each presence
+// check. The check runs inside the prompt's wait loop, so a slow read holds
+// up the next decision read; failing it reads as absent.
+const presenceAudienceTimeout = 2 * time.Second
 
 // ErrNoPendingPermission is returned by ResolvePermission when no in-flight
 // request matches (orgID, conversationID, toolCallID) — it was already answered, timed
@@ -508,8 +514,9 @@ func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
 //
 // With absent.enabled false this is the exact legacy select: ch vs the full
 // window. With it enabled the wait polls presence on a short ticker and tracks
-// two deadlines: the full window (always), and the grace clock (only while no
-// answer-capable, focused tab is present in the run's org). The effective
+// two deadlines: the full window (always), and the grace clock (only while
+// nobody who may read the conversation has an answer-capable, focused tab
+// open; see presentFor). The effective
 // deadline is whichever is sooner; presence flipping to present re-arms the wait
 // to the full window (disarming graceTimer), and flipping back restarts the
 // grace clock. The grace deadline never exceeds the full window (clampGrace), so the
@@ -602,22 +609,55 @@ func resetTimer(t *time.Timer, d time.Duration) {
 	t.Reset(d)
 }
 
-// presentFor reports whether any answer-capable, focused tab in orgID is on the
-// board or this run's detail page (TFAC-392). In multi mode, once
-// SetPresenceChecker has wired a fleet-wide checker (TFAC-584), this
+// presentFor reports whether anyone who may read conversationID has an
+// answer-capable, focused tab on the board or this run's detail page. In
+// multi mode, once SetPresenceChecker has wired a fleet-wide checker, this
 // consults it — local Hub state OR the ws_presence table — so a reviewer
 // connected to a different pod than the one running this run still
 // counts. Otherwise (local mode, or before wiring) it falls back to the
 // hub directly, which is nil-receiver-safe (the hub-less test spawner
 // reads as "nobody present").
 func (s *Spawner) presentFor(orgID, conversationID string) bool {
+	userIDs, ok := s.presenceAudience(orgID, conversationID)
+	if !ok {
+		return false
+	}
 	s.mu.Lock()
 	pc := s.presence
 	s.mu.Unlock()
 	if pc != nil {
-		return pc.PresentFor(context.Background(), orgID, conversationID)
+		return pc.PresentFor(context.Background(), orgID, conversationID, userIDs)
 	}
-	return s.wsHub.PresentFor(orgID, conversationID)
+	return s.wsHub.PresentFor(orgID, conversationID, userIDs)
+}
+
+// presenceAudience resolves whose tabs may count as present for a prompt on
+// conversationID: the people who receive its permission frames, since a tab
+// that never receives the prompt cannot answer it. A nil set with ok is the
+// org-wide check — local mode, where frameAudience is nil, and an
+// org-visible conversation. ok false means nobody's tab can count: the read
+// failed, or nobody may read the conversation. presentFor reads that as
+// absent, the direction the fast-deny already fails in. The audience is
+// read on every check, as the frames read it, so a membership change
+// applies from the next poll.
+func (s *Spawner) presenceAudience(orgID, conversationID string) ([]string, bool) {
+	if s.frameAudience == nil {
+		return nil, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), presenceAudienceTimeout)
+	defer cancel()
+	orgWide, userIDs, err := s.frameAudience(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("resolve presence audience failed; treating as absent for this check", "org", orgID, "conversation", conversationID, "error", err)
+		return nil, false
+	}
+	if orgWide {
+		return nil, true
+	}
+	if len(userIDs) == 0 {
+		return nil, false
+	}
+	return userIDs, true
 }
 
 // presencePollInterval is the absent-deny presence poll cadence, falling back to
