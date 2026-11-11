@@ -57,8 +57,8 @@ var (
 	// The creator therefore has to arrive on the call, and an absent one is a
 	// programming error in a new door rather than a value to default:
 	// attributing a person's delegation to the org owner would put it on the
-	// wrong person's reads, since both tables' SELECT policies are
-	// creator-scoped, with nothing to notice it by.
+	// wrong person's reads, since blueprint_runs_select shows a manual run
+	// only to its creator, with nothing to notice it by.
 	//
 	// Defense in depth rather than a live fix. Every manual delegation today
 	// passes through SyntheticClaimsWithTx first, which refuses both values
