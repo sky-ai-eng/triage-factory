@@ -110,12 +110,14 @@ type authDeps struct {
 // both modes; local mode just threads the sentinel rows everywhere a
 // real org/user UUID would otherwise flow.
 //
-// Multi-mode with nil authDeps is treated as a transient boot state
-// (SetAuthDeps lands after routes() registers handlers) and falls
-// through to the prior pass-through behavior. Downstream handlers that
-// require real claims (e.g. /api/me) detect the missing claim and 401;
-// masquerading as a sentinel-authed multi-mode request would be
-// strictly worse than 401.
+// Multi-mode with nil authDeps is a boot state (SetAuthDeps lands after
+// routes() registers handlers), and a request in it is answered 503
+// without reaching the handler. Only boot order keeps requests out of
+// this window, so the middleware fails closed rather than trusting it:
+// a request passed through with no identity is safe only if every
+// handler behind it refuses a missing claim, and a change to the boot
+// order then costs a retry instead of serving an unauthenticated caller.
+// Masquerading as a sentinel-authed request would be worse still.
 func (s *Server) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.authDeps == nil {
@@ -125,7 +127,10 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
-			next.ServeHTTP(w, r)
+			httpx.WriteErrors(w, http.StatusServiceUnavailable, httpx.ErrorItem{
+				Reason:  httpx.ReasonNotConfigured,
+				Message: "authentication is not available on this server yet",
+			})
 			return
 		}
 		// The Bearer path is the cookie's peer, not its fallback: ANY
