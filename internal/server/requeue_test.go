@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -261,8 +262,9 @@ func TestRequeueRoutes_ConcludedRun(t *testing.T) {
 			prID := seedCarriedDraftPR(t, s.db, conversationID)
 			var wantSwipes []string
 			if route == "undo" {
-				seedCallerGesture(t, s.db, taskID, "claim")
-				wantSwipes = []string{"claim", "undo"}
+				// The fixture's task is agent-held, the state a delegate leaves.
+				seedCallerGesture(t, s.db, taskID, "delegate")
+				wantSwipes = []string{"delegate", "undo"}
 			}
 
 			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/"+route, nil)
@@ -906,6 +908,12 @@ func TestHandleUndo_404OnMissingTask(t *testing.T) {
 func TestHandleUndo_RefusesWithNothingOfTheCallersToReverse(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "undo-guard", lifecycleTaskOpts{status: "dismissed"})
+	// Closed the way a dismiss closes it, so what refuses below is the missing
+	// gesture and not the task's state.
+	if _, err := s.db.Exec(`UPDATE tasks SET close_reason = ?, closed_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		db.UserDismissedCloseReason, taskID); err != nil {
+		t.Fatalf("stamp the dismiss's close: %v", err)
+	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
 	if rec.Code != http.StatusConflict {

@@ -1342,12 +1342,14 @@ func (s *Server) broadcastTaskStatus(orgID string) {
 // requeue cleanup that /requeue does.
 //
 // It reverses the CALLER'S OWN last gesture and nothing else: with no such
-// gesture on the task, or with the caller's last one already reversed, the
-// store refuses and the route answers 409. Without that the route is a
-// force-reset for any task the caller can address, and the deliberate
-// version of that gesture — "put this back in the queue" — already exists at
-// /requeue, which skips the swipe row. Same finalizer, same observable
-// outcome, different audit shape.
+// gesture on the task, with the caller's last one already reversed, or with
+// the task changed since it (closed, or claimed by someone else), the store
+// refuses and the route answers 409. The store decides that in the statement
+// that writes, so a change landing after the write gate below still refuses.
+// Without that the route is a force-reset for any task the caller can
+// address, and the deliberate version of that gesture — "put this back in the
+// queue" — already exists at /requeue, which skips the swipe row. Same
+// finalizer, same observable outcome, different audit shape.
 //
 // POST /api/tasks/{id}/undo
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
@@ -1396,7 +1398,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	if !undone {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
-			Message: "no gesture of yours on this task to undo; use requeue to return it to the queue",
+			Message: "nothing of yours to undo: you have no gesture on this task, or it has changed since your last one; use requeue to return it to the queue",
 		})
 		return
 	}

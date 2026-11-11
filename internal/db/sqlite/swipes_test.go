@@ -24,10 +24,18 @@ func TestSwipeStore_SQLite(t *testing.T) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
+		if _, err := conn.Exec(
+			`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Swipe Conformance Bot')`,
+			runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+		); err != nil {
+			t.Fatalf("seed agent: %v", err)
+		}
 
 		return dbtest.SwipeStoreHarness{
-			Store: stores.Swipes,
-			OrgID: runmode.LocalDefaultOrgID,
+			Store:   stores.Swipes,
+			Tasks:   stores.Tasks,
+			AgentID: runmode.LocalDefaultAgentID,
+			OrgID:   runmode.LocalDefaultOrgID,
 			// swipe_events.creator_user_id has no explicit write in local
 			// mode — N=1, so the column default is the single local user,
 			// which is exactly the subject a local request carries.

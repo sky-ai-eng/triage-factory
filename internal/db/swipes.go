@@ -107,33 +107,84 @@ type SwipeStore interface {
 	ClearSnooze(ctx context.Context, orgID string, taskID string) (ok bool, err error)
 
 	// UndoLastSwipe reverses the last gesture made on a task, provided
-	// that gesture is the caller's: it writes an 'undo' swipe_events
-	// row + flips the task back to 'queued' with snooze_until cleared.
-	// The undo toast maps to this; the audit row makes the undo itself
-	// visible in the swipe-history view.
+	// that gesture is the caller's and is still the last thing that
+	// happened to the task: it writes an 'undo' swipe_events row + flips
+	// the task back to 'queued' with snooze_until cleared. The undo toast
+	// maps to this; the audit row makes the undo itself visible in the
+	// swipe-history view.
 	//
-	// The guard is on the task's NEWEST swipe_events row, whoever wrote
-	// it: that row must belong to userID and must not itself be an
-	// 'undo'. Both halves are load-bearing, and the first is not the
-	// weaker "userID has some gesture here" — gestures never expire and
-	// RequeueTask deliberately writes none, so a released claim stays a
-	// user's own newest row indefinitely, and a caller holding one could
-	// otherwise reverse an action somebody else took afterwards (wiping
-	// their closed_at / close_reason, and the task's claim with it).
-	// Write access is team-scoped, so that caller need not be anyone in
-	// particular. The second half stops a second undo re-reversing a
-	// gesture already reversed. "Put this back in the queue" as a
-	// deliberate state change is RequeueTask.
+	// The guard has three parts, all on the task's NEWEST swipe_events
+	// row, whoever wrote it. That row must belong to userID: not the
+	// weaker "userID has some gesture here", because gestures never
+	// expire and RequeueTask deliberately writes none, so a released
+	// claim stays a user's own newest row indefinitely, and a caller
+	// holding one could otherwise reverse an action somebody else took
+	// afterwards. Its action must be one undo can reverse, which 'undo'
+	// is not, so a second undo can't re-reverse a gesture already
+	// reversed. And the task must still be in the state that action left
+	// (UndoableGestureStateSQL): only gestures write swipe_events, so a
+	// close, an automated agent claim, or a wake that landed after the
+	// caller's gesture leaves that gesture the newest row, and only the
+	// task's own state shows it is no longer the last thing that
+	// happened. Without that part an undo would reopen a task an event
+	// closed, or take a task off the agent that claimed it, and record
+	// the reversal as an undo of something else. "Put this back in the
+	// queue" as a deliberate state change is RequeueTask.
 	//
 	// The guard rides the UPDATE rather than a read before it, so the
-	// check and the write are one statement and two undos racing on one
-	// task can't both pass; the audit row goes in after, or it would be
-	// the newest row and shadow the thing being tested. Implementations
-	// need to read rows the requesting user did not write, which is why
-	// the Postgres one runs on the admin pool — see its own comment.
-	// Handlers map ok=false to 409. Like RequeueTask, a successful undo
-	// clears the claim and its source_status, and any held close.
+	// check and the write are one statement: two undos racing on one task
+	// can't both pass, and a change landing after the handler's own reads
+	// and write gate still refuses the undo. The audit row goes in after,
+	// or it would be the newest row and shadow the thing being tested.
+	// Implementations need to read rows the requesting user did not
+	// write, which is why the Postgres one runs on the admin pool — see
+	// its own comment. Handlers map ok=false to 409. Like RequeueTask, a
+	// successful undo clears the claim and its source_status, and any
+	// held close.
 	UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (ok bool, err error)
+}
+
+// The close_reason values a dismiss and a complete gesture stamp. Nothing else
+// writes them, which is what lets UndoableGestureStateSQL tell a task the
+// caller closed from one an event, a run, or a merge closed after them.
+const (
+	UserDismissedCloseReason = "user_dismissed"
+	UserCompletedCloseReason = "user_completed"
+)
+
+// UndoableGestureStateSQL renders UndoLastSwipe's state guard, one text for
+// both dialects: the state each gesture an undo can reverse leaves the task
+// in, as a predicate over the tasks row the undo's UPDATE targets. actionExpr
+// is the newest swipe_events row's action and callerExpr the caller's user id,
+// each as the dialect spells it. An action with no arm, 'undo' among them,
+// refuses, and so does a NULL from any arm.
+//
+// A dismiss or a complete leaves the task closed with its own close_reason,
+// so the undo refuses once the task has been reopened, or closed by anything
+// else, since. A snooze leaves it snoozed, so a wake since refuses. A claim
+// leaves it open and held by the caller, and a reassign open and held by a
+// person, so an agent claim, a close, or a requeue since refuses.
+//
+// A delegate leaves it open and held by an agent, which is also what an
+// automated agent claim leaves; the row records nothing that tells the two
+// apart, so an automated claim that lands after the task was put back in the
+// queue passes for the caller's delegate. A held close moves no status or
+// claim, so one that an event left after the caller's gesture passes too, and
+// the undo clears it.
+func UndoableGestureStateSQL(actionExpr, callerExpr string) string {
+	const open = `tasks.status NOT IN ('done', 'dismissed')`
+	// TODO(TFAC-1379): refuse an undo when an automated agent claim or a held
+	// close landed after the caller's gesture; both need the task to record
+	// which change came last, which no column does.
+	return `CASE ` + actionExpr + `
+		WHEN 'dismiss'  THEN tasks.status = 'dismissed' AND tasks.close_reason = '` + UserDismissedCloseReason + `'
+		WHEN 'complete' THEN tasks.status = 'done' AND tasks.close_reason = '` + UserCompletedCloseReason + `'
+		WHEN 'snooze'   THEN tasks.status = 'snoozed'
+		WHEN 'claim'    THEN ` + open + ` AND tasks.claimed_by_user_id = ` + callerExpr + `
+		WHEN 'reassign' THEN ` + open + ` AND tasks.claimed_by_user_id IS NOT NULL
+		WHEN 'delegate' THEN ` + open + ` AND tasks.claimed_by_agent_id IS NOT NULL
+		ELSE FALSE
+	END`
 }
 
 // ErrSnoozeUntilRequired is returned by RecordSwipe when action is

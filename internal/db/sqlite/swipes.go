@@ -58,10 +58,10 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		// caller's WS broadcast carries the right value.
 	case "dismiss":
 		newStatus = "dismissed"
-		closeReason = "user_dismissed"
+		closeReason = db.UserDismissedCloseReason
 	case "complete":
 		newStatus = "done"
-		closeReason = "user_completed"
+		closeReason = db.UserCompletedCloseReason
 	case "snooze":
 		// The snooze arm. It must write a real wake time — the queue's
 		// wake sweep requeues on snooze_until, so a snoozed row without
@@ -280,19 +280,18 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 	var ok bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		// Undo reverses the caller's own last gesture, and only while that
-		// gesture is still the last thing that happened to the task. Both
-		// halves matter: "mine" alone would let a stale gesture reverse
-		// somebody else's later dismiss (gestures don't expire, and
-		// RequeueTask deliberately logs nothing, so a released claim stays
-		// a user's newest row indefinitely), and "not already undone"
-		// alone would let a second undo re-reverse.
+		// gesture is still the last thing that happened to the task: the
+		// newest swipe_events row is the caller's, and the task is still in
+		// the state its action left. The interface doc says why each part
+		// is load-bearing. A task with no gestures at all has no newest
+		// row, so the EXISTS refuses it.
 		//
 		// The predicate rides the UPDATE rather than a read before it, so
 		// the check and the write are one statement: two undos racing on
-		// the same task can't both pass. The audit row goes in AFTER, or
-		// it would be the newest row and shadow the very thing being
-		// tested. A task with no gestures at all reads NULL here, which
-		// fails the comparison and refuses — the same answer.
+		// the same task can't both pass, and neither can a close or claim
+		// that landed after the handler's reads. The audit row goes in
+		// AFTER, or it would be the newest row and shadow the very thing
+		// being tested.
 		//
 		// Undo mirrors requeue's full reset — claim cols also clear. A
 		// claim/delegate gesture stamps the relevant claim col; the claim
@@ -313,12 +312,14 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        close_reason = NULL,
 			        close_deferred_event_id = NULL,
 			        close_deferred_at = NULL
-			  WHERE id = ?
-			    AND (SELECT creator_user_id FROM swipe_events
-			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) = ?
-			    AND (SELECT action FROM swipe_events
-			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) <> 'undo'`,
-			taskID, taskID, userID, taskID,
+			  WHERE id = ?1
+			    AND EXISTS (
+			        SELECT 1
+			          FROM (SELECT creator_user_id, action FROM swipe_events
+			                 WHERE task_id = ?1 ORDER BY id DESC LIMIT 1) AS newest
+			         WHERE newest.creator_user_id = ?2
+			           AND `+db.UndoableGestureStateSQL("newest.action", "?2")+`)`,
+			taskID, userID,
 		)
 		if err != nil {
 			return err
@@ -346,7 +347,7 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 }
 
 // errNothingToUndo signals UndoLastSwipe's guard tripped: the task's newest
-// gesture isn't the caller's, or is itself an undo. Distinct from a real DB
-// error so UndoLastSwipe can return (false, nil) while still triggering
-// inTx's deferred rollback.
+// gesture isn't the caller's, isn't one undo reverses, or isn't what the task's
+// state still shows. Distinct from a real DB error so UndoLastSwipe can return
+// (false, nil) while still triggering inTx's deferred rollback.
 var errNothingToUndo = errors.New("sqlite swipes: the task's newest gesture isn't the caller's to undo")
