@@ -384,14 +384,17 @@ var textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
 // write it: one is the singular ("a whole number"), many the plural ("whole
 // numbers") an array or object of them is described with. A type that reads
 // itself from text through UnmarshalText takes a string. Both are empty for
-// an interface, or any other type with no one JSON type.
+// an interface, or any other type with no one JSON type, except an empty
+// interface that refused a number.
 //
 // refused is the type fault being described, nil for none. Where it turned
 // down a number for one of the number types in t, that type's noun says
 // which rule the number broke. Every number type has a range. An integer is
 // also written as plain digits, so 1e3 and 1.0 are refused though they are
 // whole, and an unsigned integer takes no minus sign, so -0 is refused
-// though it is zero.
+// though it is zero. An empty interface takes any JSON value but reads a
+// number as a float64, so the one value it refuses is a number beyond
+// float64's range, and that is the rule its noun names.
 func jsonType(t reflect.Type, refused *json.UnmarshalTypeError) (one, many string) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -431,12 +434,7 @@ func jsonType(t reflect.Type, refused *json.UnmarshalTypeError) (one, many strin
 	case reflect.Float32, reflect.Float64:
 		var why string
 		if _, ok := refusedNumber(t, refused); ok {
-			largest := math.MaxFloat64
-			if t.Bits() == 32 {
-				largest = math.MaxFloat32
-			}
-			why = fmt.Sprintf(" from %s to %s",
-				strconv.FormatFloat(-largest, 'g', -1, t.Bits()), strconv.FormatFloat(largest, 'g', -1, t.Bits()))
+			why = floatRange(t.Bits())
 		}
 		return "a number" + why, "numbers" + why
 	case reflect.Slice, reflect.Array:
@@ -461,11 +459,24 @@ func jsonType(t reflect.Type, refused *json.UnmarshalTypeError) (one, many strin
 		return "an object" + of, "objects" + of
 	case reflect.Struct:
 		return "an object", "objects"
+	case reflect.Interface:
+		if _, ok := refusedNumber(reflect.TypeFor[float64](), refused); ok && t.NumMethod() == 0 {
+			why := " with every number" + floatRange(64)
+			return "any JSON value" + why, "JSON values" + why
+		}
 	}
-	// TODO(TFAC-1337): an empty interface refuses a number beyond float64's
-	// range, and with no noun here the field reads "must be an object" (or
-	// "has the wrong type") for a value of the right kind.
 	return "", ""
+}
+
+// floatRange is the range of a float of the given bits, as the words that
+// follow the noun for a number: " from -largest to largest".
+func floatRange(bits int) string {
+	largest := math.MaxFloat64
+	if bits == 32 {
+		largest = math.MaxFloat32
+	}
+	return fmt.Sprintf(" from %s to %s",
+		strconv.FormatFloat(-largest, 'g', -1, bits), strconv.FormatFloat(largest, 'g', -1, bits))
 }
 
 // refusedNumber returns the number literal refused turned down for t, if it
