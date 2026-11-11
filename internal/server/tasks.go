@@ -89,6 +89,13 @@ type taskJSON struct {
 	// MemoryAttempt is the newest try at that memory — absent when none has
 	// run yet, which is the ordinary case for a wait that has just begun.
 	MemoryAttempt *memoryAttemptJSON `json:"memory_attempt,omitempty"`
+	// CanWrite is whether the caller may write the task (PATCH, claim,
+	// delegate, requeue, undo), from the check those routes run
+	// (authz.Checker.UserCanWriteTask), so a client offers a task write only
+	// to a caller the route would accept. On the detail read only: the list
+	// would pay a probe per row for a field the board does not read. Absent
+	// there, and when the check fails, which a client reads as unknown.
+	CanWrite *bool `json:"can_write,omitempty"`
 }
 
 // memoryAttemptJSON is the wire shape of the newest memory-generation attempt
@@ -874,7 +881,17 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "task")
 		return
 	}
-	writeJSON(w, http.StatusOK, taskToJSON(*task))
+	out := taskToJSON(*task)
+	// Best-effort, like the other display enrichment on a read: a failed
+	// probe omits the field rather than failing the read of a row the caller
+	// can see. It runs after the read's transaction because the probe opens
+	// its own.
+	if canWrite, err := s.az.UserCanWriteTask(r.Context(), userID, orgID, task.ID); err != nil {
+		serverLog.Warn("task-write probe failed; omitting can_write", "task", task.ID, "error", err)
+	} else {
+		out.CanWrite = &canWrite
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // Task status vocabulary, split by who owns each write. Terminal statuses

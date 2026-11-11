@@ -383,6 +383,16 @@ func (az *Checker) UserCanWriteConversation(ctx context.Context, userID, orgID, 
 	return writable[id], nil
 }
 
+// UserCanWriteTask reports whether the caller may write taskID: the write half
+// of RequireTaskWrite, for a read that tells a client whether to offer a task
+// write. It is the same check the write routes run, so the control a client
+// shows and the route's answer agree. Every arm that admits the write also
+// admits the read, so a task the caller cannot see answers false.
+func (az *Checker) UserCanWriteTask(ctx context.Context, userID, orgID, taskID string) (bool, error) {
+	_, canWrite, err := az.members().taskWritable(ctx, orgID, userID, taskID)
+	return canWrite, err
+}
+
 // UserOwnsOrg returns true when the calling user is the founder/owner of the
 // given org — the holder of orgs.owner_user_id. Distinct from UserIsOrgAdmin
 // because ownership transfer is owner-only: a plain org admin can't reassign

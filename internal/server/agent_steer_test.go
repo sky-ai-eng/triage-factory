@@ -163,22 +163,27 @@ func TestSteerRoutes_UnknownConversationNotFound(t *testing.T) {
 	}
 }
 
-// TestConversationRead_LocalCanWrite: N=1's sole user acts on every
-// conversation, so the detail read offers the controls.
-func TestConversationRead_LocalCanWrite(t *testing.T) {
+// TestDetailReads_LocalCanWrite: N=1's sole user writes every conversation
+// and every task, so both detail reads offer the controls.
+func TestDetailReads_LocalCanWrite(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "canwrite", "open")
 
-	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+conversationID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body["can_write"] != true {
-		t.Errorf("can_write = %v, want true", body["can_write"])
+	for _, path := range []string{
+		"/api/agent/conversations/" + conversationID,
+		"/api/tasks/" + fixtureUUID("t_canwrite"),
+	} {
+		rec := doJSON(t, s, "GET", path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200: %s", path, rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if body["can_write"] != true {
+			t.Errorf("GET %s: can_write = %v, want true", path, body["can_write"])
+		}
 	}
 }
 

@@ -211,7 +211,9 @@ export default function RunDetail() {
   const actions: StationActions = {
     onBack: () => navigate(orgHref('/board')),
     onCancel: handleStop,
-    onRequeue: handleRequeue,
+    // A caller who may not write the task (a team viewer) is not offered the
+    // requeue. Absent is unknown, and offers it.
+    onRequeue: task?.can_write === false ? undefined : handleRequeue,
     onOpenDeliverable: handleOpenDeliverable,
     onDeliverableResolved: softRefresh,
     onMessage: handleMessage,
