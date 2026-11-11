@@ -18,9 +18,9 @@ import (
 var tracer = otel.Tracer("internal/agentloop")
 
 // How an agent.turn or agent.prepare span ended. The ones an iteration that
-// goes on to another ends with are named here; an iteration that ends the
-// engagement takes its outcome from the Result (resultOutcome), except a
-// flow-control stop, which says so.
+// goes on to another ends with are named here, with a flow-control stop's; an
+// iteration that ends the engagement otherwise takes its outcome from the
+// Result (resultOutcome).
 const (
 	prepareOK          = "ok"
 	turnToolCalls      = "tool_calls"
@@ -97,9 +97,8 @@ const unknownTool = "unknown"
 // engagement's own (Params.EngagementSpan) and carries conversation.id, the
 // join that survives a link whose other side was not sampled.
 type loopSpan struct {
-	span    trace.Span
-	outcome string
-	done    bool
+	span trace.Span
+	done bool
 }
 
 // startLoopSpan opens one of the engagement's root spans.
@@ -126,7 +125,8 @@ func (l *loopSpan) parked(reason string) {
 	l.span.SetAttributes(telemetry.Reason(reason))
 }
 
-// next ends a span whose engagement goes on, with how it handed on.
+// next ends a span with how it handed on: to the next iteration, or, for a
+// flow-control stop, to the engagement's ending.
 func (l *loopSpan) next(outcome string) {
 	if l == nil || l.done {
 		return
@@ -146,11 +146,7 @@ func (l *loopSpan) finish(r Result) {
 		return
 	}
 	l.done = true
-	outcome := l.outcome
-	if outcome == "" {
-		outcome = resultOutcome(r.Kind)
-	}
-	l.span.SetAttributes(telemetry.Outcome(outcome))
+	l.span.SetAttributes(telemetry.Outcome(resultOutcome(r.Kind)))
 	if r.Kind == ResultFailed {
 		l.span.SetStatus(codes.Error, "engagement failed")
 	}
@@ -231,10 +227,8 @@ func toolLabel(name string, params Params) string {
 			return name
 		}
 	}
-	for _, t := range tooldefs.TFTools(tfToolFacts(params.HasBlueprint)) {
-		if t.Name == name {
-			return name
-		}
+	if _, ok := tooldefs.TFTool(name, tfToolFacts(params.HasBlueprint)); ok {
+		return name
 	}
 	return unknownTool
 }

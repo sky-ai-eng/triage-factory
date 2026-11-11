@@ -786,7 +786,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 				}
 				outcome.NumTurns = turn
 				outcome.DurationMs = e.msSince(started)
-				it.outcome = turnStopped
+				it.next(turnStopped)
 				return outcome
 			}
 			bareDrain = false

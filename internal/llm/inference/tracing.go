@@ -23,15 +23,12 @@ const (
 	streamCancelled = "cancelled"
 )
 
-// startStream opens the span for one provider call: one HTTP request, since
-// the client leaves bifrost's own retries at zero and configures no
-// fallbacks. A caller that retries, as the agent loop does, therefore shows
-// each attempt as its own span under whatever span it holds, with its backoff
-// between them.
+// startStream opens the span for one provider call. The provider configs this
+// package builds leave bifrost's own retries at zero and name no fallbacks, so
+// a call is one HTTP request, and a caller's retries are spans of their own.
 //
-// A child of ctx's span rather than a root: a call is always part of
-// something that already has its own root (a native turn, a compaction, a
-// system job's completion), and is meaningless outside it.
+// A child of ctx's span rather than a root: a call is one step of whatever
+// its caller is doing, and is meaningless outside it.
 //
 // Client kind, because it is the outbound edge: the HTTP client underneath is
 // fasthttp, which no transport wrapper sees, so this span is the only record

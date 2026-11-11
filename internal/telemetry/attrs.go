@@ -147,10 +147,13 @@ func Bucket(name string) attribute.KeyValue       { return keyBucket.String(name
 func Credential(id string) attribute.KeyValue     { return keyCredential.String(id) }
 
 // WorkKind names an adopting work table by its registered kind name, and
-// Reason says why a work item was parked or why a conversation's memory link
-// to an entity went unwritten. Both are closed vocabularies TF declares
-// itself: kind names are registry identifiers, reasons are the typed outcomes
-// and each package's own constants.
+// Reason says why something happened where Outcome alone does not: why a work
+// item was parked, why a conversation's memory link to an entity went
+// unwritten, why a native turn parked, why a compaction ran, and what ended a
+// tool call (a lost tool host's cause, the bash memory budget). Both are
+// closed vocabularies TF declares itself: kind names are registry
+// identifiers, reasons are the typed outcomes and each package's own
+// constants, never a notice or an error's text.
 func WorkKind(name string) attribute.KeyValue { return keyWorkKind.String(name) }
 func Reason(value string) attribute.KeyValue  { return keyReason.String(value) }
 
@@ -163,7 +166,8 @@ func Outcome(value string) attribute.KeyValue { return keyOutcome.String(value) 
 // Counters. Attempt separates a span that spent four minutes in backoff
 // from one slow request; ClaimAttempt says which engagement attempt
 // produced a span; Count is a span's cardinality of work (PRs refreshed,
-// events emitted) — a bare number, never a list of what was counted.
+// events emitted, a tool host's deaths since a call last completed) — a bare
+// number, never a list of what was counted.
 func Attempt(n int) attribute.KeyValue      { return keyAttempt.Int(n) }
 func ClaimAttempt(n int) attribute.KeyValue { return keyClaimAttempt.Int(n) }
 func Count(n int) attribute.KeyValue        { return keyCount.Int(n) }
