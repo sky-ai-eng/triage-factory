@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -74,14 +75,12 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		// Unknown action — same fallback as before, write 'queued'.
 		newStatus = "queued"
 	}
+	responsibilityOnly := newStatus == ""
+	var landed bool
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if _, err := q.ExecContext(ctx,
-			`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, ?, ?)`,
-			taskID, action, hesitationMs,
-		); err != nil {
-			return err
-		}
-		if newStatus == "" {
+		var res sql.Result
+		var err error
+		if responsibilityOnly {
 			// claim / delegate: preserve in_progress across
 			// takeover, but flip 'snoozed' → 'queued' so the
 			// "snoozed ↔ unclaimed" invariant holds even when a code
@@ -90,7 +89,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			// keeps every non-snoozed status intact — load-bearing for
 			// the assignee picker's take-over-from-bot path, which
 			// hits an in_progress row.
-			res, err := q.ExecContext(ctx,
+			res, err = q.ExecContext(ctx,
 				`UPDATE tasks
 				   SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 				       snooze_until = NULL
@@ -98,41 +97,28 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 				   AND status NOT IN ('done', 'dismissed')`,
 				taskID,
 			)
-			if err != nil {
-				return err
+		} else {
+			var closedAt any
+			var reason any
+			if terminal {
+				closedAt = time.Now().UTC()
+				reason = closeReason
 			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				return errTerminalRefused
-			}
-			// Read-back so the caller's WS broadcast carries the
-			// actual post-mutation status.
-			row := q.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, taskID)
-			return row.Scan(&newStatus)
+			// The status predicate is what makes a second close a no-op
+			// rather than a rewrite: two callers closing the same task
+			// concurrently both pass their own pre-read, and only the one
+			// that gets here first finds a row to update.
+			res, err = q.ExecContext(ctx,
+				`UPDATE tasks
+				   SET status = ?,
+				       snooze_until = ?,
+				       closed_at = ?,
+				       close_reason = ?
+				 WHERE id = ?
+				   AND status NOT IN ('done', 'dismissed')`,
+				newStatus, snoozeVal, closedAt, reason, taskID,
+			)
 		}
-		var closedAt any
-		var reason any
-		if terminal {
-			closedAt = time.Now().UTC()
-			reason = closeReason
-		}
-		// The status predicate is what makes a second close a no-op
-		// rather than a rewrite: two callers closing the same task
-		// concurrently both pass their own pre-read, and only the one
-		// that gets here first finds a row to update.
-		res, err := q.ExecContext(ctx,
-			`UPDATE tasks
-			   SET status = ?,
-			       snooze_until = ?,
-			       closed_at = ?,
-			       close_reason = ?
-			 WHERE id = ?
-			   AND status NOT IN ('done', 'dismissed')`,
-			newStatus, snoozeVal, closedAt, reason, taskID,
-		)
 		if err != nil {
 			return err
 		}
@@ -141,24 +127,32 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			return err
 		}
 		if n == 0 {
-			return errTerminalRefused
+			return nil
 		}
+		if responsibilityOnly {
+			// Read-back so the caller's WS broadcast carries the
+			// actual post-mutation status.
+			if err := q.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&newStatus); err != nil {
+				return err
+			}
+		}
+		// The audit row goes in only once the guarded UPDATE has landed: a
+		// refusal returns no error, so a caller's transaction this runs in
+		// commits whatever was written before it.
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, ?, ?)`,
+			taskID, action, hesitationMs,
+		); err != nil {
+			return err
+		}
+		landed = true
 		return nil
 	})
-	if errors.Is(err, errTerminalRefused) {
-		return "", false, nil
-	}
-	if err != nil {
+	if err != nil || !landed {
 		return "", false, err
 	}
 	return newStatus, true, nil
 }
-
-// errTerminalRefused signals RecordSwipe's status predicate refused: the task
-// closed between the caller's read and this write. Distinct from a real DB
-// error so RecordSwipe can return ("", false, nil) while still triggering
-// inTx's deferred rollback for the audit row it already inserted.
-var errTerminalRefused = errors.New("sqlite swipes: task is closed")
 
 func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -166,18 +160,6 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 	}
 	var ok bool
 	err := inTx(ctx, s.q, func(q queryer) error {
-		// Audit row first so a refused snooze rolls both back as a
-		// unit via the tx abort. If we wrote audit on refuse we'd
-		// leave an "attempted snooze" log entry plus zero state
-		// change — not useful, and inconsistent with the
-		// "refused gesture leaves no trace" semantic the helper
-		// callers depend on.
-		if _, err := q.ExecContext(ctx,
-			`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, 'snooze', ?)`,
-			taskID, hesitationMs,
-		); err != nil {
-			return err
-		}
 		// Claim guard: snooze is queue-only post-invariant. A
 		// claimed task being snoozed would create a state that no
 		// flow in the code path knows how to handle correctly
@@ -206,22 +188,22 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 			return err
 		}
 		if n == 0 {
-			// Refused: roll the audit row back too via the sentinel.
-			return errSnoozeRefused
+			return nil
+		}
+		// The audit row follows the guarded UPDATE, as in RecordSwipe: a
+		// refused snooze leaves no trace even in a caller's transaction
+		// that commits.
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, 'snooze', ?)`,
+			taskID, hesitationMs,
+		); err != nil {
+			return err
 		}
 		ok = true
 		return nil
 	})
-	if errors.Is(err, errSnoozeRefused) {
-		return false, nil
-	}
 	return ok, err
 }
-
-// errSnoozeRefused signals the snooze-on-claimed-task guard tripped.
-// Distinct from a real DB error so SnoozeTask can return (false, nil)
-// while still triggering inTx's deferred rollback for the audit row.
-var errSnoozeRefused = errors.New("sqlite swipes: snooze refused (task is claimed)")
 
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {

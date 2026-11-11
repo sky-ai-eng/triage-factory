@@ -71,17 +71,18 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	default:
 		newStatus = "queued"
 	}
+	responsibilityOnly := newStatus == ""
+	var landed bool
 	if err := s.runInTx(ctx, func(tx *sql.Tx) error {
-		if err := insertSwipeEvent(ctx, tx, orgID, taskID, action, &hesitationMs); err != nil {
-			return err
-		}
-		if newStatus == "" {
+		var res sql.Result
+		var err error
+		if responsibilityOnly {
 			// claim / delegate: preserve in_progress across
 			// takeover, but flip 'snoozed' → 'queued' so the
 			// "snoozed ↔ unclaimed" invariant holds when a
 			// path bypasses the claim helpers. See SQLite mirror for
 			// the full rationale.
-			res, err := tx.ExecContext(ctx,
+			res, err = tx.ExecContext(ctx,
 				`UPDATE tasks
 				    SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 				        snooze_until = NULL
@@ -89,40 +90,26 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 				    AND status NOT IN ('done', 'dismissed')`,
 				orgID, taskID,
 			)
-			if err != nil {
-				return err
+		} else {
+			var closedAt any
+			var reason any
+			if terminal {
+				closedAt = time.Now().UTC()
+				reason = closeReason
 			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				return errTerminalRefused
-			}
-			row := tx.QueryRowContext(ctx,
-				`SELECT status FROM tasks WHERE org_id = $1 AND id = $2`,
-				orgID, taskID,
+			// The status predicate is what makes a second close a no-op
+			// rather than a rewrite — see the SQLite mirror.
+			res, err = tx.ExecContext(ctx,
+				`UPDATE tasks
+				    SET status = $1,
+				        snooze_until = $2,
+				        closed_at = $3,
+				        close_reason = $4
+				  WHERE org_id = $5 AND id = $6
+				    AND status NOT IN ('done', 'dismissed')`,
+				newStatus, snoozeVal, closedAt, reason, orgID, taskID,
 			)
-			return row.Scan(&newStatus)
 		}
-		var closedAt any
-		var reason any
-		if terminal {
-			closedAt = time.Now().UTC()
-			reason = closeReason
-		}
-		// The status predicate is what makes a second close a no-op
-		// rather than a rewrite — see the SQLite mirror.
-		res, err := tx.ExecContext(ctx,
-			`UPDATE tasks
-			    SET status = $1,
-			        snooze_until = $2,
-			        closed_at = $3,
-			        close_reason = $4
-			  WHERE org_id = $5 AND id = $6
-			    AND status NOT IN ('done', 'dismissed')`,
-			newStatus, snoozeVal, closedAt, reason, orgID, taskID,
-		)
 		if err != nil {
 			return err
 		}
@@ -131,32 +118,32 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			return err
 		}
 		if n == 0 {
-			return errTerminalRefused
+			return nil
 		}
+		if responsibilityOnly {
+			if err := tx.QueryRowContext(ctx,
+				`SELECT status FROM tasks WHERE org_id = $1 AND id = $2`,
+				orgID, taskID,
+			).Scan(&newStatus); err != nil {
+				return err
+			}
+		}
+		// The audit row goes in only once the guarded UPDATE has landed —
+		// see the SQLite mirror.
+		if err := insertSwipeEvent(ctx, tx, orgID, taskID, action, &hesitationMs); err != nil {
+			return err
+		}
+		landed = true
 		return nil
-	}); err != nil {
-		if errors.Is(err, errTerminalRefused) {
-			return "", false, nil
-		}
+	}); err != nil || !landed {
 		return "", false, err
 	}
 	return newStatus, true, nil
 }
 
-// errTerminalRefused signals RecordSwipe's status predicate refused: the task
-// closed between the caller's read and this write. Sentinel distinct from real
-// DB errors so RecordSwipe can return ("", false, nil) while triggering the
-// deferred tx rollback for the audit row it already inserted.
-var errTerminalRefused = errors.New("postgres swipes: task is closed")
-
 func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	var ok bool
 	err := s.runInTx(ctx, func(tx *sql.Tx) error {
-		// Audit row first so a refused snooze rolls both back as a
-		// unit via tx abort. Mirrors the SQLite impl.
-		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "snooze", &hesitationMs); err != nil {
-			return err
-		}
 		// Claim guard: snooze is queue-only post-invariant ("snoozed
 		// ↔ both claim cols NULL"), plus the status predicate that keeps
 		// a task closed under us out of the snoozed lane. Inline UPDATE
@@ -179,22 +166,17 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 			return err
 		}
 		if n == 0 {
-			return errSnoozeRefused
+			return nil
+		}
+		// The audit row follows the guarded UPDATE — see the SQLite mirror.
+		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "snooze", &hesitationMs); err != nil {
+			return err
 		}
 		ok = true
 		return nil
 	})
-	if errors.Is(err, errSnoozeRefused) {
-		return false, nil
-	}
 	return ok, err
 }
-
-// errSnoozeRefused signals the snooze-on-claimed-task guard tripped.
-// Sentinel distinct from real DB errors so SnoozeTask can return
-// (false, nil) while triggering the deferred tx rollback for the
-// audit row.
-var errSnoozeRefused = errors.New("postgres swipes: snooze refused (task is claimed)")
 
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	var ok bool

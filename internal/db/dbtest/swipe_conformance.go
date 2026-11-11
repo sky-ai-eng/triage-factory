@@ -54,6 +54,11 @@ type SwipeStoreHarness struct {
 	// UndoLastSwipe's real guard (is my gesture the task's newest) apart
 	// from the weaker one it could be mistaken for (do I have any gesture).
 	SeedForeignGesture func(t *testing.T, taskID, action string)
+	// InCallerTx runs fn against a SwipeStore bound to a transaction the
+	// harness owns and commits when fn returns nil, failing the test on any
+	// error. Every handler holds the store this way, inside its own WithTx,
+	// so whatever the store leaves in that transaction is committed.
+	InCallerTx func(t *testing.T, fn func(db.SwipeStore) error)
 }
 
 // RunSwipeStoreConformance runs the shared assertion suite. The
@@ -64,6 +69,8 @@ type SwipeStoreHarness struct {
 //     task that is already closed.
 //   - SnoozeTask sets snooze_until + status='snoozed', and refuses a
 //     task that is claimed or already closed.
+//   - A refused RecordSwipe or SnoozeTask writes nothing, audit row
+//     included, also inside a caller's transaction that commits.
 //   - RequeueTask flips status back without writing an audit row,
 //     and returns ok=false on a missing id.
 //   - ClearSnooze wakes a snoozed task without an audit row, and
@@ -307,6 +314,83 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		if got := readAudit(t, taskID); !equalActions(got, []string{"dismiss"}) {
 			t.Fatalf("swipe_events actions=%v want [dismiss] (a refused snooze leaves no trace)", got)
 		}
+	})
+
+	t.Run("Refusal_InCallerTx_LeavesNoTrace", func(t *testing.T) {
+		// A refusal answers ok=false with a nil error, so a caller holding the
+		// store inside its own transaction commits. A refused gesture must
+		// therefore write nothing in the first place: an audit row it left
+		// would be committed as a gesture that never happened, and
+		// UndoLastSwipe reverses the caller's newest gesture.
+		for _, action := range []string{"dismiss", "complete", "claim", "delegate", "reassign", "garbage"} {
+			t.Run("RecordSwipe_"+action, func(t *testing.T) {
+				h := factory(t)
+				ctx := context.Background()
+				taskID := h.SeedTask(t)
+				if _, ok, err := h.Store.RecordSwipe(ctx, h.OrgID, taskID, "dismiss", 0, nil); err != nil || !ok {
+					t.Fatalf("seed dismiss: ok=%v err=%v", ok, err)
+				}
+				var ok bool
+				h.InCallerTx(t, func(s db.SwipeStore) error {
+					var err error
+					_, ok, err = s.RecordSwipe(ctx, h.OrgID, taskID, action, 0, nil)
+					return err
+				})
+				if ok {
+					t.Fatalf("RecordSwipe(%s) returned ok=true against a closed task", action)
+				}
+				if got := h.ReadAudit(t, taskID); !equalActions(got, []string{"dismiss"}) {
+					t.Fatalf("swipe_events actions=%v want [dismiss] (a refused swipe leaves no trace)", got)
+				}
+			})
+		}
+		t.Run("SnoozeTask", func(t *testing.T) {
+			h := factory(t)
+			ctx := context.Background()
+			taskID := h.SeedTask(t)
+			if _, ok, err := h.Store.RecordSwipe(ctx, h.OrgID, taskID, "dismiss", 0, nil); err != nil || !ok {
+				t.Fatalf("seed dismiss: ok=%v err=%v", ok, err)
+			}
+			var ok bool
+			h.InCallerTx(t, func(s db.SwipeStore) error {
+				var err error
+				ok, err = s.SnoozeTask(ctx, h.OrgID, taskID, time.Now().Add(time.Hour).UTC(), 0)
+				return err
+			})
+			if ok {
+				t.Fatalf("SnoozeTask returned ok=true against a closed task")
+			}
+			if got := h.ReadAudit(t, taskID); !equalActions(got, []string{"dismiss"}) {
+				t.Fatalf("swipe_events actions=%v want [dismiss] (a refused snooze leaves no trace)", got)
+			}
+		})
+		t.Run("UndoAfterTheRefusal", func(t *testing.T) {
+			// The race a refusal stands for: somebody else closed the task
+			// after the caller read it. The caller's refused gesture must not
+			// become the task's newest, or the caller's undo would reopen a
+			// task somebody else closed.
+			h := factory(t)
+			ctx := context.Background()
+			taskID := h.SeedTask(t)
+			if _, ok, err := h.Store.RecordSwipe(ctx, h.OrgID, taskID, "dismiss", 0, nil); err != nil || !ok {
+				t.Fatalf("seed dismiss: ok=%v err=%v", ok, err)
+			}
+			h.SeedForeignGesture(t, taskID, "dismiss")
+			h.InCallerTx(t, func(s db.SwipeStore) error {
+				_, _, err := s.RecordSwipe(ctx, h.OrgID, taskID, "dismiss", 0, nil)
+				return err
+			})
+			ok, err := h.Store.UndoLastSwipe(ctx, h.OrgID, taskID, h.UserID)
+			if err != nil {
+				t.Fatalf("UndoLastSwipe: %v", err)
+			}
+			if ok {
+				t.Fatalf("UndoLastSwipe reversed the caller's refused dismiss, reopening a task somebody else closed")
+			}
+			if status, _ := h.ReadTask(t, taskID); status != "dismissed" {
+				t.Fatalf("status=%q want dismissed", status)
+			}
+		})
 	})
 
 	t.Run("RequeueTask_FlipsToQueuedWithoutAuditRow", func(t *testing.T) {
