@@ -11,10 +11,9 @@ import (
 )
 
 // TestConversationFrameRecipients_SQLite runs the shared
-// ConversationFrameRecipientsSystem suite against the SQLite impl.
-// Production local mode never calls the method (the conversationframe
-// notifier broadcasts org-wide at N=1), but the impl runs the identical
-// query to Postgres so this suite can pin both backends to one result.
+// ConversationFrameRecipientsSystem suite against the SQLite impl, which runs
+// the identical query to Postgres so the suite pins both backends to one
+// result.
 func TestConversationFrameRecipients_SQLite(t *testing.T) {
 	dbtest.RunConversationFrameRecipientsConformance(t, func(t *testing.T) (db.ConversationStore, dbtest.ConversationFrameRecipientsSeeder) {
 		t.Helper()
@@ -47,6 +46,9 @@ func TestConversationFrameRecipients_SQLite(t *testing.T) {
 			},
 			OrgMembership: func(t *testing.T, userID, orgID, role string) {
 				exec(t, `INSERT INTO org_memberships (user_id, org_id, role) VALUES (?, ?, ?)`, userID, orgID, role)
+			},
+			RemoveOrgMembership: func(t *testing.T, userID, orgID string) {
+				exec(t, `DELETE FROM org_memberships WHERE user_id = ? AND org_id = ?`, userID, orgID)
 			},
 			TeamMembership: func(t *testing.T, userID, teamID, role string) {
 				exec(t, `INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, ?)`, userID, teamID, role)

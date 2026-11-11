@@ -1391,10 +1391,8 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 
 // ConversationFrameRecipientsSystem — identical query to the Postgres impl
 // so both backends pin to one result; the Postgres twin carries the
-// reasoning. Production local mode never calls it — the conversationframe
-// notifier is built without an audience there and broadcasts org-wide — but
-// the shared conformance suite exercises it, so N=1 must not be assumed
-// here.
+// reasoning. The shared conformance suite runs it with several users, teams,
+// and orgs, so N=1 must not be assumed here.
 func (s *conversationStore) ConversationFrameRecipientsSystem(ctx context.Context, orgID, conversationID string) (bool, []string, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT c.visibility, om.user_id

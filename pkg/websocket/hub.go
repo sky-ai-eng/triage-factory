@@ -250,8 +250,8 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) 
 //   - Both set + mismatch → skip. This is the multi-tenant case.
 //
 // The per-user filter has the same shape: evt.UserID != "" AND
-// c.userID != "" AND they differ → skip. It carries per-user events
-// (notifications, toasts, the per-user fan-out of a low-rate event).
+// c.userID != "" AND they differ → skip. It addresses one user's
+// connections.
 //
 // The recipient-set filter is strict: evt.UserIDs != nil delivers only to
 // a connection whose userID is non-empty and in the set, so an unscoped

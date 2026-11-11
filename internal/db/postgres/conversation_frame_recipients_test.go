@@ -49,6 +49,11 @@ func TestConversationFrameRecipients_Postgres(t *testing.T) {
 					`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, $3::org_role)`,
 					userID, orgID, role)
 			},
+			RemoveOrgMembership: func(t *testing.T, userID, orgID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`DELETE FROM org_memberships WHERE user_id = $1 AND org_id = $2`, userID, orgID)
+			},
 			TeamMembership: func(t *testing.T, userID, teamID, role string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB,

@@ -30,6 +30,10 @@ type ConversationFrameRecipientsSeeder struct {
 	// ('owner' | 'admin' | 'member').
 	OrgMembership func(t *testing.T, userID, orgID, role string)
 
+	// RemoveOrgMembership deletes userID's org_memberships row in orgID and
+	// nothing else.
+	RemoveOrgMembership func(t *testing.T, userID, orgID string)
+
 	// TeamMembership enrolls userID on teamID with the given team role
 	// ('admin' | 'member' | 'viewer').
 	TeamMembership func(t *testing.T, userID, teamID, role string)
@@ -166,6 +170,34 @@ func RunConversationFrameRecipientsConformance(t *testing.T, mk ConversationFram
 
 		orgWide, got := recipients(t, s, org, uuid.NewString())
 		assertUsers(t, "missing conversation", orgWide, got)
+	})
+
+	t.Run("LeftOrg_OutOfAudience", func(t *testing.T) {
+		// The read requires org membership on top of each arm, so a user
+		// whose org membership is gone reads neither a private conversation
+		// they created nor their team's conversation, whatever rows they
+		// still hold. The founder owns the org and the member who stays is
+		// the team's admin, because Postgres refuses to leave an org without
+		// an owner or a team without an admin.
+		s, seed := mk(t)
+		founder := seed.User(t)
+		org := seed.Org(t, founder)
+		seed.OrgMembership(t, founder, org, "owner")
+		team := seed.Team(t, org)
+		stays := seed.User(t)
+		leaves := seed.User(t)
+		seed.OrgMembership(t, stays, org, "member")
+		seed.OrgMembership(t, leaves, org, "member")
+		seed.TeamMembership(t, stays, team, "admin")
+		seed.TeamMembership(t, leaves, team, "member")
+		teamConv := seed.Conversation(t, org, team, stays, "team")
+		privateConv := seed.Conversation(t, org, team, leaves, "private")
+		seed.RemoveOrgMembership(t, leaves, org)
+
+		orgWide, got := recipients(t, s, org, teamConv)
+		assertUsers(t, "team conversation", orgWide, got, stays)
+		orgWide, got = recipients(t, s, org, privateConv)
+		assertUsers(t, "private conversation of a creator who left", orgWide, got)
 	})
 
 	t.Run("RemovedMember_LeavesNextAnswer", func(t *testing.T) {
