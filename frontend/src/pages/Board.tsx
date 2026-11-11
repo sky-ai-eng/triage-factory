@@ -1186,11 +1186,11 @@ export default function Board() {
     setActiveDropCol(ALL_COLUMNS.includes(id as ColumnId) ? (id as ColumnId) : getColumn(id))
   }
 
-  // Every card is draggable, whatever its run is doing: the drop is what the
-  // gestures are, and each one either confirms first or is reversible. The
-  // server is the boundary for a move it will not make — a refused write
-  // surfaces as a toast and the next fetch reconciles — rather than a card
-  // that silently snaps back.
+  // Every card the caller may write is draggable, whatever its run is doing:
+  // the drop is what the gestures are, and each one either confirms first or
+  // is reversible. The server is the boundary for a move it will not make — a
+  // refused write surfaces as a toast and the next fetch reconciles — rather
+  // than a card that silently snaps back.
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event
     setActiveId(null)
@@ -1202,6 +1202,9 @@ export default function Board() {
       const sourceCol = getColumn(taskId)
       const task = allTasks.get(taskId)
       if (!sourceCol || !task) return
+      // Every drop is a task write. The card of a task the caller may not
+      // write does not drag, and a drop that arrives anyway writes nothing.
+      if (task.can_write === false) return
 
       const overId = String(over.id)
       let targetCol: ColumnId
@@ -1598,6 +1601,8 @@ interface PickerProps {
   members: TeamMember[]
   searchMembers: RosterSearch
   bot: TeamBot | null
+  // The lane's answer: Done's picker is read-only for everyone. A card also
+  // reads its task's can_write.
   pickerReadOnly: boolean
   onPickerClaim: (task: Task) => Promise<void>
   onPickerUnclaim: (task: Task) => Promise<void>
@@ -1723,17 +1728,23 @@ const SortableCard = memo(function SortableCard({
   onRetry: (task: Task) => void
 } & PickerProps) {
   const orgHref = useOrgHref()
+  // A caller the task's write routes refuse (a team viewer) gets the card to
+  // read: the assignee mark without its picker, and no drag, since every drop
+  // is a claim, a requeue, or a close. Absent is unknown, and offers both.
+  const canWrite = task.can_write !== false
   // Draggable whatever the run is doing — a working run's drop into Queued
   // asks before it stops the run, and every other drop is reversible or
-  // gated, so there is no state where the grab has to be refused.
+  // gated, so the only grab refused is one by a caller who may not write the
+  // task. It stays a drop target, so a writer's card can land beside it.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
+    disabled: { draggable: !canWrite, droppable: false },
   })
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.3 : 1,
-    cursor: 'grab',
+    cursor: canWrite ? 'grab' : undefined,
   }
 
   // The clock the working card's elapsed reads, ticked once a second while
@@ -1802,7 +1813,7 @@ const SortableCard = memo(function SortableCard({
             onUnclaim={picker.onPickerUnclaim}
             onDelegate={picker.onPickerDelegate}
             onReassign={picker.onPickerReassign}
-            readOnly={picker.pickerReadOnly}
+            readOnly={picker.pickerReadOnly || !canWrite}
           />
         }
         {...model}

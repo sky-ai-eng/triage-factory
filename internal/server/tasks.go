@@ -91,10 +91,11 @@ type taskJSON struct {
 	MemoryAttempt *memoryAttemptJSON `json:"memory_attempt,omitempty"`
 	// CanWrite is whether the caller may write the task (PATCH, claim,
 	// delegate, requeue, undo), from the check those routes run
-	// (authz.Checker.UserCanWriteTask), so a client offers a task write only
-	// to a caller the route would accept. On the detail read only: the list
-	// would pay a probe per row for a field the board does not read. Absent
-	// there, and when the check fails, which a client reads as unknown.
+	// (authz.Checker.UserCanWriteTask, and WritableTasks for a page of them),
+	// so a client offers a task write only to a caller the route would
+	// accept. On the detail read and on each row of the list. Absent from the
+	// task a write answers with, and when the check fails, which a client
+	// reads as unknown.
 	CanWrite *bool `json:"can_write,omitempty"`
 }
 
@@ -742,7 +743,36 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	for i, t := range tasks {
 		items[i] = taskToJSON(t)
 	}
+	s.addTaskCanWrite(r.Context(), orgID, userID, items)
 	httpx.WriteListKeyset(w, page, items, total, nextKey)
+}
+
+// addTaskCanWrite puts the write gate's answer on each task of a list page,
+// as `can_write`, so the board offers the assignee picker and the drag only
+// on a card the claim, requeue, and delegate routes would accept. One query
+// for the page (authz.Checker.WritableTasks), the predicate the detail read's
+// probe runs.
+//
+// Best-effort, like the detail read's: a failed probe omits the key on every
+// row, which a client reads as unknown rather than as a refusal. It runs after
+// the read's transaction because the probe opens its own.
+func (s *Server) addTaskCanWrite(ctx context.Context, orgID, userID string, items []taskJSON) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	writable, err := s.az.WritableTasks(ctx, userID, orgID, ids)
+	if err != nil {
+		serverLog.Warn("task-write probe failed; omitting can_write", "error", err)
+		return
+	}
+	for i := range items {
+		canWrite := writable[items[i].ID]
+		items[i].CanWrite = &canWrite
+	}
 }
 
 // taskFacetsRequest is the body of POST /api/tasks/facets: the lane, and

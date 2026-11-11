@@ -122,6 +122,13 @@ type JSON struct {
 	URL        string          `json:"url"`
 	Details    json.RawMessage `json:"details"`
 	CreatedAt  time.Time       `json:"created_at"`
+	// CanWrite is whether the caller may act on the deliverable: approve,
+	// reject, dismiss, or edit it. It is the answer loadWritableDeliverable
+	// gives (canWriteDeliverable), so a team viewer and an org admin who is
+	// not on the deliverable's team read false, and a client offers the verbs
+	// only to a caller the routes accept. Absent when the check fails, which
+	// a client reads as unknown.
+	CanWrite *bool `json:"can_write,omitempty"`
 }
 
 // ToJSON projects a stored deliverable onto the read-API wire shape,
@@ -253,7 +260,7 @@ func (ah *Handler) loadWritableDeliverable(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return nil, false
 	}
-	canWrite, err := ah.az.UserCanWriteTeam(r.Context(), userID, orgID, art.TeamID)
+	canWrite, err := canWriteDeliverable(r.Context(), ah.az, orgID, userID, *art)
 	if err != nil {
 		httpx.InternalError(w, "deliverables", fmt.Errorf("team-write check for deliverable %s: %w", art.ID, err))
 		return nil, false
@@ -263,6 +270,42 @@ func (ah *Handler) loadWritableDeliverable(w http.ResponseWriter, r *http.Reques
 		return nil, false
 	}
 	return art, true
+}
+
+// canWriteDeliverable is the deliverable write rule: a writer of the
+// deliverable's team, which the deliverables write policies require
+// (tf.user_can_write_team). The write gate and the reads' can_write both ask
+// it, so the verbs a client offers and the routes' answers agree.
+func canWriteDeliverable(ctx context.Context, az *authz.Checker, orgID, userID string, art domain.Deliverable) (bool, error) {
+	return az.UserCanWriteTeam(ctx, userID, orgID, art.TeamID)
+}
+
+// AddCanWrite puts canWriteDeliverable's answer on each deliverable a read
+// returns, as `can_write`. The rule depends only on the team, so it asks once
+// per distinct team: one probe for a conversation's deliverables, whose team
+// is the conversation's.
+//
+// arts and out are index-aligned. Best-effort, like the reads' other display
+// enrichment: a failed probe omits the key on every row, which a client reads
+// as unknown rather than as a refusal. It runs outside the read's transaction
+// because the probe opens its own.
+func AddCanWrite(ctx context.Context, az *authz.Checker, orgID, userID string, arts []domain.Deliverable, out []JSON) {
+	byTeam := map[string]bool{}
+	for _, a := range arts {
+		if _, asked := byTeam[a.TeamID]; asked {
+			continue
+		}
+		canWrite, err := canWriteDeliverable(ctx, az, orgID, userID, a)
+		if err != nil {
+			deliverablesLog.Warn("deliverable-write probe failed; omitting can_write", "team", a.TeamID, "error", err)
+			return
+		}
+		byTeam[a.TeamID] = canWrite
+	}
+	for i, a := range arts {
+		canWrite := byTeam[a.TeamID]
+		out[i].CanWrite = &canWrite
+	}
 }
 
 // actionableOr409 answers whether a person may act on pull request deliverable
@@ -404,7 +447,9 @@ func (ah *Handler) handleDeliverableGet(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, out)
+	rows := []JSON{out}
+	AddCanWrite(r.Context(), ah.az, orgID, userID, []domain.Deliverable{*art}, rows)
+	httpx.WriteJSON(w, http.StatusOK, rows[0])
 }
 
 // prDeliverableDetails composes the pull_request `details` payload: the live PR

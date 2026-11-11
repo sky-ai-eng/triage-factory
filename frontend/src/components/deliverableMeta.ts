@@ -108,3 +108,9 @@ export function rowTone(highlighted?: boolean): string {
     ? 'border-warm/40 bg-warm/[0.06] hover:bg-warm/[0.1]'
     : 'border-line-1 bg-tint-1 hover:bg-tint-3'
 }
+
+// DELIVERABLE_VIEW_ONLY is the hover text on a deliverable overlay's "View
+// only" badge. The caller can be an org admin who is not on the team, so it
+// names the team's write access rather than the caller's role on it.
+export const DELIVERABLE_VIEW_ONLY =
+  'You can read this but not approve, edit, or dismiss it. That takes write access to the team that owns it.'

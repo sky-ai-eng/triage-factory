@@ -323,6 +323,7 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 	for i, a := range arts {
 		out[i] = deliverables.ToJSON(a)
 	}
+	deliverables.AddCanWrite(r.Context(), ag.az, orgID, userID, arts, out)
 	httpx.WriteList(w, page, out, total)
 }
 

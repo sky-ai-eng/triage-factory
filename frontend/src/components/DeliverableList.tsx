@@ -16,8 +16,8 @@ import { DeliverableRow } from './DeliverableRow'
 // authoritative unresolved set — the ready-review predicate lives server-side,
 // so deliverable.state alone can't reconstruct it), those rows sort to the top of
 // the loaded pages in the projection's order (draft PRs first, then ready
-// reviews) and carry an in-place [x] dismiss. Everything else keeps the backend's
-// order below them.
+// reviews) and carry an in-place [x] dismiss, for a caller whose row says they
+// may write it. Everything else keeps the backend's order below them.
 //
 // It is deliberately not the answer to "what did this conversation do" — a
 // deliverable is work waiting on a person, and the objects a run changed are its
@@ -156,7 +156,11 @@ export default function DeliverableList({
             key={a.id}
             deliverable={a}
             onOpenApproval={onOpenApproval}
-            onDismiss={pendingSet.has(a.id) ? () => void dismissOne(a) : undefined}
+            // A caller the dismiss route refuses (a team viewer, an org admin
+            // off the team) is not offered it. Absent is unknown, and offers it.
+            onDismiss={
+              pendingSet.has(a.id) && a.can_write !== false ? () => void dismissOne(a) : undefined
+            }
             dismissing={!!dismissing[a.id]}
           />
         ))}

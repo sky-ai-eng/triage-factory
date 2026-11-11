@@ -396,6 +396,15 @@ func (az *Checker) UserCanWriteTask(ctx context.Context, userID, orgID, taskID s
 	return canWrite, err
 }
 
+// WritableTasks is UserCanWriteTask over many tasks, as the set of writable
+// ids keyed as the store spells them, for a list read that answers per row in
+// one query. It runs the predicate RequireTaskWrite's write half runs, so a
+// row on a list, the task's detail read, and the write routes give one answer.
+// An id the caller cannot see is never in the set.
+func (az *Checker) WritableTasks(ctx context.Context, userID, orgID string, taskIDs []string) (map[string]bool, error) {
+	return az.members().tasksWritable(ctx, orgID, userID, taskIDs)
+}
+
 // UserOwnsOrg returns true when the calling user is the founder/owner of the
 // given org — the holder of orgs.owner_user_id. Distinct from UserIsOrgAdmin
 // because ownership transfer is owner-only: a plain org admin can't reassign
