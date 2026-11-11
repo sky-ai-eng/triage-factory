@@ -788,15 +788,26 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var conv *domain.Conversation
 	var messages []domain.Message
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
+		// The messages read alone cannot tell an invisible or nonexistent
+		// conversation from an empty transcript: RLS hides the rows either way.
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil || conv == nil {
+			return e
+		}
 		messages, e = tx.Conversations.MessagesWindow(r.Context(), orgID, conversationID, db.MessageWindow{
 			SinceID: sinceID, BeforeID: beforeID, Limit: transcriptPageSize,
 		})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
+		return
+	}
+	if conv == nil {
+		notFound(w, "conversation")
 		return
 	}
 
