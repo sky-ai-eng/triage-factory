@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useRailCounts } from './useRailCounts'
-import { ACTIVE_STATUSES } from '../lib/conversationStatus'
+import { WORKING_STATUSES } from '../lib/conversationStatus'
 import type { WSEvent } from '../types'
 import { jsonBody } from '../test/apiResponse'
 
@@ -77,10 +77,11 @@ describe('useRailCounts', () => {
     const { result } = renderHook(() => useRailCounts())
     await settle()
 
-    // running: the live display statuses — `running` plus every claim phase,
-    // taken from the vocabulary a Go test pins to the backend's.
+    // running: the working display statuses — `running` plus every claim
+    // phase but awaiting_message, taken from the vocabulary a Go test pins to
+    // the backend's.
     expect(bodyFor(CONVERSATIONS, 'running')).toEqual({
-      statuses: [...ACTIVE_STATUSES],
+      statuses: [...WORKING_STATUSES],
       page_size: 0,
     })
     // needs: the server-side attention predicate.

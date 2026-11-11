@@ -82,14 +82,20 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 	t.Run("Working_predicate", func(t *testing.T) {
 		// run is the blueprint's status, "" for running.
 		cases := []struct {
-			name    string
-			run     string
-			status  string
-			stage   func(t *testing.T, seed TaskCloseDeferralSeeder, runID, convID string)
+			name   string
+			run    string
+			status string
+			stage  func(t *testing.T, seed TaskCloseDeferralSeeder, runID, convID string)
+			// phase is the active claim's phase, set after stage.
+			phase   string
 			working bool
 		}{
 			{name: "mid_flight", status: "", working: true},
 			{name: "active_claim", status: domain.StatusOpen, working: true,
+				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
+			// An engagement waiting for a person holds its claim, but no
+			// agent is working under it.
+			{name: "claim_awaiting_a_message", status: "", phase: domain.ClaimPhaseAwaitingMessage,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			{name: "held_by_a_hand_back", status: "", working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.HoldUntilLater(t, convID) }},
@@ -111,6 +117,11 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 				runID, convID := seed.BlueprintAndConversation(t, taskID, run, tc.status)
 				if tc.stage != nil {
 					tc.stage(t, seed, runID, convID)
+				}
+				if tc.phase != "" {
+					if _, err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, orgID, convID, tc.phase); err != nil {
+						t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", tc.phase, err)
+					}
 				}
 				// Nothing else holds the task, so the close holds exactly
 				// when the conversation is working.

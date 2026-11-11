@@ -289,6 +289,16 @@ func (a *App) buildExecution() error {
 	} else if interval != delegate.DefaultSnapshotInterval {
 		appLog.Info("workspace checkpoint interval configured", "interval", interval, "env", "TF_SNAPSHOT_INTERVAL_SEC")
 	}
+	// How long an engagement waits warm after a person's turn, parsed in New
+	// on a dispatching process and zero on one that runs no engagement.
+	a.spawner.SetWarmWindow(a.claimWarmWindow)
+	if a.plan.dispatcher {
+		if a.claimWarmWindow == 0 {
+			appLog.Info("warm claims disabled (TF_CLAIM_WARM_WINDOW=0)")
+		} else if a.claimWarmWindow != delegate.DefaultWarmWindow {
+			appLog.Info("warm claim window configured", "window", a.claimWarmWindow, "env", "TF_CLAIM_WARM_WINDOW")
+		}
+	}
 	floor, err := delegate.ParseDispatchMemFloorMB(os.Getenv("TF_DISPATCH_MEM_FLOOR_MB"))
 	a.spawner.SetDispatchMemFloor(floor)
 	if err != nil {

@@ -1247,8 +1247,8 @@ const pgConversationColumns = `
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
-// is no longer stored. A LIVE claim's setup sub-state wins
-// (fetching/cloning/agent_starting/awaiting_credentials); then the mere
+// is no longer stored. A LIVE claim's phase wins (any of
+// domain.AllClaimPhases); then the mere
 // existence of a live claim is 'running'; then a conversation matching
 // the needs-driving predicate — mid-flight and unclaimed, or parked without
 // a verdict and woken by input — is 'queued'; and finally the stored column
@@ -1318,16 +1318,16 @@ const pgQueuePositionCTE = `
 	)
 `
 
-// pgConversationLiveStatusesSQL is the display statuses that mean a LIVE
-// engagement — `running`, plus every claim phase — as a SQL IN-list body.
-// Mirrors domain.IsActiveConversationStatus, which is what the run view
-// lights as WORKING and what the rail counts as `running`.
+// pgConversationWorkingStatusesSQL is the display statuses that mean an agent
+// is WORKING — `running`, plus every claim phase but `awaiting_message` — as a
+// SQL IN-list body. Mirrors domain.IsWorkingConversationStatus: an engagement
+// awaiting a person's message is live, but the move is the person's.
 //
 // SQL cannot import a Go const, so the set is spelled here and held to the Go
 // one by the dual-dialect conformance suite, whose coverage is derived from
 // domain.AllClaimPhases(): a phase added there and not taught to the stores
 // fails on both backends.
-const pgConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
+const pgConversationWorkingStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
 
 // pgUnresolvedDeliverableSQL is the SQL twin of domain.HasUnresolvedDeliverables,
 // written against a deliverables alias `art`: a draft pull request, or a pending
@@ -1357,25 +1357,27 @@ const pgUnresolvedDeliverableSQL = `
 
 // pgConversationAttentionSQL is the "YOUR MOVE" predicate — the rail's
 // `needs`, counted per conversation — written against the conversation alias
-// `r`: an unanswered permission prompt, OR a conversation that is not live and
-// still holds an unresolved deliverable.
+// `r`: an unanswered permission prompt, OR a conversation no agent is working
+// on that still holds an unresolved deliverable.
 //
 // Pending is derived the way PermissionStore.ListPending derives it (state
 // 'pending' AND owned by the conversation's currently-active claim), so a
 // prompt left behind by a process that no longer exists doesn't hold the count
 // up without anything having written its expiry.
 //
-// The liveness half reads the DISPLAY status, not the stored column: a
+// The working half reads the DISPLAY status, not the stored column: a
 // conversation mid-claim carries no stored status at all, and counting it as
 // needing a human while its agent is still working is the exact
-// disagreement-with-the-surface this predicate exists to avoid.
+// disagreement-with-the-surface this predicate exists to avoid. An engagement
+// awaiting a person's message is not working, so it counts the way an `open`
+// conversation does.
 const pgConversationAttentionSQL = `(
 		EXISTS (
 			SELECT 1 FROM conversation_permissions p
 			WHERE p.org_id = r.org_id AND p.conversation_id = r.id AND p.state = 'pending'
 			  AND p.claim_id = (SELECT cl_p.id FROM claims cl_p
 			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
-		OR ((` + pgDisplayStatusSQL + `) NOT IN (` + pgConversationLiveStatusesSQL + `)
+		OR ((` + pgDisplayStatusSQL + `) NOT IN (` + pgConversationWorkingStatusesSQL + `)
 		    AND EXISTS (
 		        SELECT 1 FROM deliverables art
 		        WHERE art.org_id = r.org_id AND art.conversation_id = r.id

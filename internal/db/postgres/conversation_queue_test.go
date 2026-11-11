@@ -1360,7 +1360,7 @@ func TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
 			var waiting int
 			if err := h.AdminDB.QueryRowContext(ctx, `
 				SELECT count(*) FROM pg_stat_activity
-				WHERE wait_event_type = 'Lock' AND query LIKE '%outcome = ''reaped''%'
+				WHERE wait_event_type = 'Lock' AND query LIKE '%claims%'
 			`).Scan(&waiting); err != nil {
 				t.Fatalf("read pg_stat_activity: %v", err)
 			}
@@ -1392,6 +1392,71 @@ func TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
 	}
 	if live, err := stores.ConversationQueue.LiveClaimsOfExecutorSystem(ctx, executorID, 1); err != nil || len(live) != 0 {
 		t.Errorf("live claims after both writes = (%+v, %v), want none", live, err)
+	}
+}
+
+// TestCrashPark_Postgres_LeavesAClaimWhoseConversationIsHeld pins the one
+// branch only this dialect has: a lapsed claim awaiting a message parks its
+// conversation, and a conversation another writer holds is skipped rather
+// than waited on, since every release path already holds the claim and a
+// writer takes the conversation before the claim. The skipped claim stays
+// live, because releasing it without the park would hand the conversation to
+// the queue, and a pass after the writer commits parks it.
+func TestCrashPark_Postgres_LeavesAClaimWhoseConversationIsHeld(t *testing.T) {
+	h := pgtest.Shared(t)
+	f := pgClaimLeaseFixture(t, h)
+	ctx := context.Background()
+	q := f.Stores.ConversationQueue
+
+	const owner = "crash-park-owner"
+	convID, _ := f.StageStep(t)
+	claimed, err := q.ClaimNextConversation(ctx, owner, 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != convID {
+		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, convID)
+	}
+	if _, err := f.Stores.Conversations.SetClaimPhaseSystem(ctx, f.OrgID, convID, claimed.ClaimID, domain.ClaimPhaseAwaitingMessage); err != nil {
+		t.Fatalf("SetClaimPhaseSystem(awaiting_message): %v", err)
+	}
+	f.SetLease(t, claimed.ClaimID, -time.Second)
+
+	writer, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = writer.Rollback() }()
+	if _, err := writer.ExecContext(ctx, `SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, convID); err != nil {
+		t.Fatalf("lock the conversation: %v", err)
+	}
+
+	// Each release must answer without waiting on the writer.
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if refs, err := q.TakeOverExpiredClaimsSystem(bounded, "crash-park-other", 1, 10); err != nil || len(refs) != 0 {
+		t.Fatalf("takeover with the conversation held = (%+v, %v), want nothing released and no wait", refs, err)
+	}
+	if released, err := q.ReleaseExpiredClaimSystem(bounded, f.OrgID, convID, claimed.ClaimID); err != nil || released {
+		t.Fatalf("own release with the conversation held = (%v, %v), want (false, nil)", released, err)
+	}
+	if n, err := q.ResetProcessingConversations(bounded, owner, 2); err != nil || n != 0 {
+		t.Fatalf("boot reset with the conversation held = (%d, %v), want (0, nil)", n, err)
+	}
+	if c, err := q.ClaimByIDSystem(ctx, claimed.ClaimID); err != nil || c == nil || c.ReleasedAt != nil {
+		t.Fatalf("claim with its conversation held = (%+v, %v), want it still live", c, err)
+	}
+
+	if err := writer.Rollback(); err != nil {
+		t.Fatalf("release the writer's lock: %v", err)
+	}
+	if refs, err := q.TakeOverExpiredClaimsSystem(ctx, "crash-park-other", 1, 10); err != nil || len(refs) != 1 || refs[0].ClaimID != claimed.ClaimID {
+		t.Fatalf("takeover after the writer let go = (%+v, %v), want claim %s", refs, err, claimed.ClaimID)
+	}
+	c, err := q.ClaimByIDSystem(ctx, claimed.ClaimID)
+	if err != nil || c == nil || c.ReleasedAt == nil || c.Outcome != db.ParkIdle().ClaimOutcome() {
+		t.Fatalf("claim after the takeover = (%+v, %v), want released %s", c, err, db.ParkIdle().ClaimOutcome())
+	}
+	got, err := f.Stores.Conversations.GetSystem(ctx, f.OrgID, convID)
+	if err != nil || got == nil || got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
+		t.Fatalf("conversation after the takeover = (%+v, %v), want open with park reason idle", got, err)
 	}
 }
 

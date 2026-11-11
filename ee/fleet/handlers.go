@@ -211,7 +211,7 @@ func summarizeRuns(timings []domain.ConversationTiming, hours int) runsSummary {
 				failureCounts[t.FailureKind]++
 			}
 		}
-		if domain.IsActiveConversationStatus(t.Status) {
+		if domain.IsWorkingConversationStatus(t.Status) {
 			rs.Active++
 		}
 		if t.DurationMS != nil {

@@ -81,10 +81,13 @@ func TestSummarizeRunsAndQueue(t *testing.T) {
 		{Status: "running", StartedAt: now.Add(-2 * time.Minute), ClaimedAt: tp(now.Add(-2 * time.Minute))},
 		// A parked "open" run — NOT executing, must NOT count as active.
 		{Status: "open", StartedAt: now.Add(-90 * time.Second), ClaimedAt: tp(now.Add(-90 * time.Second))},
+		// An engagement awaiting a person's message holds its claim, but no
+		// agent is working under it, so it is not active either.
+		{Status: domain.ClaimPhaseAwaitingMessage, StartedAt: now.Add(-80 * time.Second), ClaimedAt: tp(now.Add(-80 * time.Second))},
 		{Status: "queued", StartedAt: now.Add(-1 * time.Minute)}, // not claimed → no wait sample
 	}
 	rs := summarizeRuns(timings, 24)
-	if rs.Total != 6 || rs.Completed != 1 {
+	if rs.Total != 7 || rs.Completed != 1 {
 		t.Fatalf("run totals wrong: %+v", rs)
 	}
 	// Both failed runs count (classified + unclassified), but only the classified
@@ -95,9 +98,9 @@ func TestSummarizeRunsAndQueue(t *testing.T) {
 	if len(rs.FailureKinds) != 1 || rs.FailureKinds[0].Kind != "memory_limit" || rs.FailureKinds[0].Count != 1 {
 		t.Fatalf("failure kinds wrong: %+v", rs.FailureKinds)
 	}
-	// Only the running run is active — queued and open are excluded.
+	// Only the running run is active — queued, open and awaiting_message are excluded.
 	if rs.Active != 1 {
-		t.Fatalf("Active = %d, want 1 (open + queued excluded)", rs.Active)
+		t.Fatalf("Active = %d, want 1 (open, awaiting_message and queued excluded)", rs.Active)
 	}
 	if rs.DurationP50MS == nil {
 		t.Fatalf("expected duration percentile")

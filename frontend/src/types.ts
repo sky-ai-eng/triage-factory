@@ -153,14 +153,18 @@ export interface TeamBot {
 // file and fails the lint on any comparison or `case` that tests a
 // conversation status against a name the arrays don't hold.
 
-// CLAIM_PHASES are the setup/parked sub-states of a live executor engagement.
-// They arrive in Conversation.Status because display reads coalesce the active
-// claim's phase over the conversation's stored status.
+// CLAIM_PHASES are the setup, parked, and waiting sub-states of a live
+// executor engagement. They arrive in Conversation.Status because display
+// reads coalesce the active claim's phase over the conversation's stored
+// status. `awaiting_message` is an engagement whose turn ended, holding its
+// claim while it waits for a person's message: live, but not working
+// (isWorkingStatus).
 export const CLAIM_PHASES = [
   'fetching',
   'cloning',
   'agent_starting',
   'awaiting_credentials',
+  'awaiting_message',
 ] as const
 export type ClaimPhase = (typeof CLAIM_PHASES)[number]
 

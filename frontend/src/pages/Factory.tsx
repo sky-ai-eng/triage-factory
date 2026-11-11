@@ -33,7 +33,7 @@ import type {
   ConversationStatusValue,
   Task,
 } from '../types'
-import { isActiveStatus } from '../lib/conversationStatus'
+import { isWorkingStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
@@ -900,14 +900,16 @@ function entityLabel(e: FactoryEntity): string {
 // rest (queued, and completed — a finished conversation is unremarkable
 // here).
 //
-// The active arm is the shared predicate rather than a list of names, so
-// every claim phase — including a conversation parked awaiting its
+// The working arm is the shared predicate rather than a list of names, so
+// every setup phase — including a conversation parked awaiting its
 // credential bundle — reads as working instead of falling through to the
-// inert grey.
+// inert grey. An engagement awaiting a person's message is not working: it
+// reads as parked, like `open`.
 function conversationStatusColor(status: ConversationStatusValue): string {
-  if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
+  if (isWorkingStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
     case 'open':
+    case 'awaiting_message':
       return '#8a6e1f' // --color-snooze (warm amber)
     case 'failed':
       return '#a84545' // --color-alarm (warm rose)
@@ -924,6 +926,8 @@ function conversationStatusLabel(status: ConversationStatusValue): string {
       return 'starting'
     case 'awaiting_credentials':
       return 'awaiting credentials'
+    case 'awaiting_message':
+      return 'awaiting message'
     default:
       return status
   }

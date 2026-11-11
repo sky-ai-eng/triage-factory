@@ -787,7 +787,7 @@ const sqliteConversationColumns = `
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
-// Postgres pgDisplayStatusSQL ladder. A LIVE claim's setup sub-state
+// Postgres pgDisplayStatusSQL ladder. A LIVE claim's phase
 // wins; then the mere existence of a live claim is 'running'; then a
 // conversation matching the needs-driving predicate — mid-flight and
 // unclaimed, or parked without a verdict and woken by input — is 'queued';
@@ -833,13 +833,13 @@ const sqliteQueuePositionQuery = `
 	WHERE (` + sqliteDisplayStatusSQL + `) = 'queued'
 	  AND ` + nextAttemptDueSQL
 
-// sqliteConversationLiveStatusesSQL is the display statuses that mean a LIVE
-// engagement — `running`, plus every claim phase — as a SQL IN-list body, and
-// the SQLite mirror of the Postgres twin. See that constant for the model:
-// SQL cannot import a Go const, and the conformance suite derives its coverage
-// from domain.AllClaimPhases() so a phase taught to neither dialect fails on
-// both.
-const sqliteConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
+// sqliteConversationWorkingStatusesSQL is the display statuses that mean an
+// agent is WORKING — `running`, plus every claim phase but `awaiting_message`
+// — as a SQL IN-list body, and the SQLite mirror of the Postgres twin. Mirrors
+// domain.IsWorkingConversationStatus. See the twin for the model: SQL cannot
+// import a Go const, and the conformance suite derives its coverage from
+// domain.AllClaimPhases() so a phase taught to neither dialect fails on both.
+const sqliteConversationWorkingStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
 
 // sqliteUnresolvedDeliverableSQL is the SQL twin of
 // domain.HasUnresolvedDeliverables, written against a deliverables alias `art` — the
@@ -863,7 +863,7 @@ const sqliteConversationAttentionSQL = `(
 			WHERE p.conversation_id = r.id AND p.state = 'pending'
 			  AND p.claim_id = (SELECT cl_p.id FROM claims cl_p
 			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
-		OR ((` + sqliteDisplayStatusSQL + `) NOT IN (` + sqliteConversationLiveStatusesSQL + `)
+		OR ((` + sqliteDisplayStatusSQL + `) NOT IN (` + sqliteConversationWorkingStatusesSQL + `)
 		    AND EXISTS (
 		        SELECT 1 FROM deliverables art
 		        WHERE art.conversation_id = r.id
