@@ -1,6 +1,6 @@
 module github.com/sky-ai-eng/triage-factory
 
-go 1.26.10
+go 1.26.11
 
 require github.com/zalando/go-keyring v0.2.8
 
