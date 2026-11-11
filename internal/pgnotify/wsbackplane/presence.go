@@ -102,6 +102,9 @@ func (b *Backplane) heartbeatOnce(ctx context.Context) {
 // fast-deny gate is to fail toward requiring an explicit answer, not
 // toward silently approving unattended.
 func (b *Backplane) PresentFor(ctx context.Context, orgID, conversationID string, userIDs []string) bool {
+	if userIDs != nil && len(userIDs) == 0 {
+		return false
+	}
 	if b.hub.PresentFor(orgID, conversationID, userIDs) {
 		return true
 	}

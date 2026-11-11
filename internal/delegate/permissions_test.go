@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -641,8 +642,12 @@ func TestPresentFor_CountsOnlyTheConversationsReaders(t *testing.T) {
 			s := NewSpawner(nil, db.Stores{}, nil, hub, "")
 			var asked []string
 			s.SetConversationFrameAudience(fixedAudience(tc.orgWide, tc.audience, tc.err, &asked))
-			if got := s.presentFor(presenceTestOrg, "run-1"); got != tc.want {
+			got, err := s.presentFor(presenceTestOrg, "run-1")
+			if got != tc.want {
 				t.Errorf("presentFor = %v, want %v", got, tc.want)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("presentFor error = %v, want %v", err, tc.err)
 			}
 			if len(asked) != 1 || asked[0] != "run-1" {
 				t.Errorf("audience asked about %v, want [run-1]", asked)
@@ -674,7 +679,7 @@ func TestPresentFor_HandsTheAudienceToTheFleetCheck(t *testing.T) {
 		pc := &recordingPresence{}
 		s.SetPresenceChecker(pc)
 		s.SetConversationFrameAudience(fixedAudience(false, []string{"user-a", "user-b"}, nil, nil))
-		if !s.presentFor(presenceTestOrg, "run-1") {
+		if present, _ := s.presentFor(presenceTestOrg, "run-1"); !present {
 			t.Fatal("presentFor = false, want the checker's answer")
 		}
 		if pc.calls != 1 || strings.Join(pc.userIDs, ",") != "user-a,user-b" {
@@ -686,7 +691,7 @@ func TestPresentFor_HandsTheAudienceToTheFleetCheck(t *testing.T) {
 		pc := &recordingPresence{}
 		s.SetPresenceChecker(pc)
 		s.SetConversationFrameAudience(fixedAudience(true, nil, nil, nil))
-		s.presentFor(presenceTestOrg, "run-1")
+		_, _ = s.presentFor(presenceTestOrg, "run-1")
 		if pc.calls != 1 || pc.userIDs != nil {
 			t.Errorf("checker called %d times with %v, want once with a nil set", pc.calls, pc.userIDs)
 		}
@@ -696,7 +701,7 @@ func TestPresentFor_HandsTheAudienceToTheFleetCheck(t *testing.T) {
 		pc := &recordingPresence{}
 		s.SetPresenceChecker(pc)
 		s.SetConversationFrameAudience(fixedAudience(false, []string{}, nil, nil))
-		if s.presentFor(presenceTestOrg, "run-1") {
+		if present, _ := s.presentFor(presenceTestOrg, "run-1"); present {
 			t.Error("presentFor = true for a conversation nobody may read")
 		}
 		if pc.calls != 0 {
@@ -707,7 +712,7 @@ func TestPresentFor_HandsTheAudienceToTheFleetCheck(t *testing.T) {
 		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		pc := &recordingPresence{}
 		s.SetPresenceChecker(pc)
-		s.presentFor(presenceTestOrg, "run-1")
+		_, _ = s.presentFor(presenceTestOrg, "run-1")
 		if pc.calls != 1 || pc.userIDs != nil {
 			t.Errorf("checker called %d times with %v, want once with a nil set", pc.calls, pc.userIDs)
 		}
@@ -738,6 +743,59 @@ func TestBrowserPermissionHandler_OutsiderTabDeniesAfterGrace(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("an outsider's tab delayed the absent deny to the full window")
+	}
+}
+
+// TestBrowserPermissionHandler_ReaderRemovedMidWaitDeniesAfterGrace: a
+// reader's focused tab keeps the prompt waiting past the grace, and once the
+// reader leaves the conversation's audience mid-wait, the next poll stops
+// counting them and the grace clock runs out. The audience is read on every
+// poll, not once at wait start.
+func TestBrowserPermissionHandler_ReaderRemovedMidWaitDeniesAfterGrace(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClientAs(t, hub, "reader", presenceTestOrg)
+	defer cleanup()
+
+	var mu sync.Mutex
+	audience := []string{"reader"}
+	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+	s.setActivityTimings(activityTimings{permission: 15 * time.Second})
+	s.SetPresencePollInterval(5 * time.Millisecond)
+	s.SetConversationFrameAudience(func(context.Context, string, string) (bool, []string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return false, audience, nil
+	})
+
+	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", true, true)
+
+	const grace = 100 * time.Millisecond
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", "", AbsentAutoDeny{enabled: true, grace: grace})
+	got := make(chan agentproc.PermissionDecision, 1)
+	go func() {
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-removed", ToolName: "Bash"})
+	}()
+
+	// Well past the grace, the reader's tab still holds the prompt open.
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case d := <-got:
+		t.Fatalf("prompt resolved early (%q/%q) with a reader's tab present", d.Behavior, d.Message)
+	default:
+	}
+
+	// The reader leaves the team: the tab is still focused, but no longer counts.
+	mu.Lock()
+	audience = []string{"someone-else"}
+	mu.Unlock()
+
+	select {
+	case d := <-got:
+		if d.Behavior != "deny" || d.Message != permDenyNoOperator(grace) {
+			t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, permDenyNoOperator(grace))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt not denied after the reader left the audience and the grace elapsed")
 	}
 }
 
