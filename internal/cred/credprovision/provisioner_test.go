@@ -55,6 +55,7 @@ type fakeScopedResolver struct {
 	hasCred     bool
 	token       githubapp.Token
 	identity    ghclient.Identity // the tier TokenForRepoScoped reports
+	identityErr error             // what the org's commit identity read fails with
 	errFor      map[string]error  // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
 	calls       []scopedCall
 	reposCalls  []reposScopedCall
@@ -64,12 +65,18 @@ func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error)
 	return f.base, f.baseErr
 }
 
-func (f *fakeScopedResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return f.name, f.email, f.name != ""
+func (f *fakeScopedResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	if f.identityErr != nil {
+		return "", "", false, f.identityErr
+	}
+	return f.name, f.email, f.name != "", nil
 }
 
-func (f *fakeScopedResolver) OrgIdentityAccountFor(context.Context, string) (ghclient.OrgIdentity, bool) {
-	return ghclient.OrgIdentity{Name: f.name, Email: f.email, AccountID: f.accountID}, f.name != ""
+func (f *fakeScopedResolver) OrgIdentityAccountFor(context.Context, string) (ghclient.OrgIdentity, bool, error) {
+	if f.identityErr != nil {
+		return ghclient.OrgIdentity{}, false, f.identityErr
+	}
+	return ghclient.OrgIdentity{Name: f.name, Email: f.email, AccountID: f.accountID}, f.name != "", nil
 }
 
 func (f *fakeScopedResolver) AppBotAccountFor(context.Context, string) (ghclient.BotAccount, bool) {

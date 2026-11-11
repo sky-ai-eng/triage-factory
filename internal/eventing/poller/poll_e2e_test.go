@@ -555,8 +555,8 @@ func (r *orreryResolver) BaseURLFor(context.Context, string) (string, error) {
 	return r.base, nil
 }
 
-func (r *orreryResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
+func (r *orreryResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // countingTransport counts responses by request and status, and keeps the

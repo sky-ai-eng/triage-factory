@@ -377,6 +377,6 @@ func (plainResolver) TokenFor(context.Context, string, string) (githubapp.Token,
 func (plainResolver) BaseURLFor(context.Context, string) (string, error) {
 	return "", errors.New("not wired")
 }
-func (plainResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
+func (plainResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
 }

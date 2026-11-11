@@ -67,8 +67,8 @@ func (r *recordingResolver) BaseURLFor(context.Context, string) (string, error) 
 	return r.url, nil
 }
 
-func (r *recordingResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
+func (r *recordingResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // TestDeliverableWriteGate_Postgres pins the write gate on the deliverable-id

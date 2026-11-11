@@ -1440,6 +1440,17 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
+	// The identity the resumed process commits and signs as, resolved for this
+	// resume (see ResumeWithMessage). A read that failed is the resume's
+	// runtime failing to come up: handed back before the queued input is
+	// taken, rather than a process that commits as whatever its git config
+	// says.
+	commitSigner, cerr := s.orgCommitIdentity(stepCtx, orgID)
+	if cerr != nil {
+		handBack(cerr)
+		return
+	}
+
 	// The mirror for this turn. No inherited fingerprint: a resume continues
 	// this conversation's own work in its own tree, so the file at the fixed
 	// path is its own however many engagements ago it was written. Built here
@@ -1503,6 +1514,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
 		nudge:             turnEndNudge(s.artifactContractNudge(orgID, conv.ID, *task, s.resumedStepIsFinal(stepCtx, orgID, conv))),
+		commitSigner:      &commitSigner,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		if leaseFenced(stepCtx) {

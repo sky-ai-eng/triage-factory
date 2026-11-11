@@ -89,12 +89,12 @@ func TestResolver_UnknownCredentialClass_Refuses(t *testing.T) {
 	}
 }
 
-// TestResolver_UnknownCredentialClass_StampsNoIdentity covers the one entry
-// point that cannot return an error. OrgIdentityFor's whole posture is to stamp
-// nothing rather than something fabricated, and an org whose credential system
-// this build can't name is the clearest case of that — the PAT login would be
-// an identity for a credential it may not be acting as.
-func TestResolver_UnknownCredentialClass_StampsNoIdentity(t *testing.T) {
+// TestResolver_UnknownCredentialClass_IdentityIsAnError: an org whose
+// credential system this build can't name has an identity nobody here can
+// read, which is an error and not absence — the PAT login would be an
+// identity for a credential it may not be acting as, and absence would have a
+// run commit as its placeholder or its own git config.
+func TestResolver_UnknownCredentialClass_IdentityIsAnError(t *testing.T) {
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_present"}},
 		&fakeApps{app: nil},
@@ -103,7 +103,10 @@ func TestResolver_UnknownCredentialClass_StampsNoIdentity(t *testing.T) {
 		nil,
 	)
 
-	name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+	name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+	if !errors.Is(err, ErrUnknownCredentialClass) {
+		t.Errorf("OrgIdentityFor err = %v; want ErrUnknownCredentialClass", err)
+	}
 	if ok || name != "" || email != "" {
 		t.Errorf("OrgIdentityFor = (%q, %q, %v); want no identity under an unrecognised credential class", name, email, ok)
 	}
@@ -231,8 +234,8 @@ func TestResolver_ResolvesOrgSettingsOncePerCall(t *testing.T) {
 			return err
 		}},
 		{"OrgIdentityFor_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
-			r.OrgIdentityFor(ctx, "org-1")
-			return nil
+			_, _, _, err := r.OrgIdentityFor(ctx, "org-1")
+			return err
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

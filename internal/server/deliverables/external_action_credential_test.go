@@ -51,7 +51,7 @@ func (r identityResolver) BaseURLFor(context.Context, string) (string, error) {
 	panic("BaseURLFor is not used by the credential classification")
 }
 
-func (r identityResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
+func (r identityResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
 	panic("OrgIdentityFor is not used by the credential classification")
 }
 

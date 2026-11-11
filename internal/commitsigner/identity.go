@@ -25,8 +25,7 @@ var signerLog = logging.Component("commitsigner")
 // Identity is a run's commit identity, the author and committer of every
 // commit it makes, and how those commits are signed.
 //
-// Name is empty when no identity resolves; the caller then stamps none, as
-// it does for an org with no GitHub identity today.
+// Name is empty when the org has no identity; the caller then stamps none.
 type Identity struct {
 	Name  string
 	Email string
@@ -92,8 +91,10 @@ type DeploymentArm struct {
 //   - the identity the org commits as without a signer: the App's bot or the
 //     PAT's owner, unsigned.
 //
-// An error is a failed read of a signer, which the caller must not answer
-// with the identity a signer would have replaced.
+// An error is a read that failed, of a signer or of the org's GitHub
+// identity. The caller must not answer it with another identity: the one a
+// signer would have replaced, or none, which a run turns into whatever its git
+// config says.
 func (r Resolver) Resolve(ctx context.Context, orgID string) (Identity, error) {
 	signer, err := r.Signers.GetSystem(ctx, orgID)
 	if err != nil {
@@ -108,7 +109,7 @@ func (r Resolver) Resolve(ctx context.Context, orgID string) (Identity, error) {
 		// author a commit, and the org commits as it would without a signer.
 		signerLog.Warn("commit signer has no committer address; committing as the org's GitHub identity",
 			"org", orgID, "host", signer.Host, "login", signer.Login)
-		return r.withoutSigner(ctx, orgID), nil
+		return r.withoutSigner(ctx, orgID)
 	}
 	id, ok, err := r.Deployment.identity(ctx, orgID)
 	if err != nil {
@@ -117,7 +118,7 @@ func (r Resolver) Resolve(ctx context.Context, orgID string) (Identity, error) {
 	if ok {
 		return id, nil
 	}
-	return r.withoutSigner(ctx, orgID), nil
+	return r.withoutSigner(ctx, orgID)
 }
 
 // identity is the deployment signer's identity for orgID, or false when the
@@ -201,16 +202,20 @@ func signerIdentity(s domain.OrgCommitSigner) (Identity, bool) {
 	return id, true
 }
 
-// withoutSigner is the identity orgID commits as with no signer, unsigned.
-func (r Resolver) withoutSigner(ctx context.Context, orgID string) Identity {
+// withoutSigner is the identity orgID commits as with no signer, unsigned,
+// and a nameless one when the org has no GitHub identity.
+func (r Resolver) withoutSigner(ctx context.Context, orgID string) (Identity, error) {
 	id := Identity{Mode: domain.CommitSigningNone}
 	if r.GitHub == nil {
-		return id
+		return id, nil
 	}
-	org, ok := ghclient.OrgIdentityAccount(ctx, r.GitHub, orgID)
+	org, ok, err := ghclient.OrgIdentityAccount(ctx, r.GitHub, orgID)
+	if err != nil {
+		return Identity{}, fmt.Errorf("resolve the org's GitHub commit identity: %w", err)
+	}
 	if !ok {
-		return id
+		return id, nil
 	}
 	id.Name, id.Email, id.AccountID = org.Name, org.Email, org.AccountID
-	return id
+	return id, nil
 }

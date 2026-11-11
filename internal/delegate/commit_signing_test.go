@@ -61,7 +61,7 @@ func signingSpawner(t *testing.T, active bool) (*Spawner, db.Stores, string) {
 func TestResolveCommitIdentity_Signer(t *testing.T) {
 	for _, active := range []bool{true, false} {
 		s, _, public := signingSpawner(t, active)
-		id, signer := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "event", "")
+		id, signer := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, "event", "")
 		if id.Name != "Acme" || id.Email != "583231+octocat@users.noreply.github.com" {
 			t.Errorf("active=%v: identity = %+v, want Acme <583231+octocat@users.noreply.github.com>", active, id)
 		}
@@ -84,7 +84,7 @@ func TestPrepareLocalCommitSigning(t *testing.T) {
 	if _, err := stores.OrgCommitSigners.StagePendingKey(ctx, runmode.LocalDefaultOrgID, "ssh-ed25519 AAAApending"); err != nil {
 		t.Fatalf("StagePendingKey: %v", err)
 	}
-	_, signer := s.resolveCommitIdentity(ctx, runmode.LocalDefaultOrgID, "event", "")
+	_, signer := resolveCommitIdentityT(t, s, ctx, runmode.LocalDefaultOrgID, "event", "")
 
 	c := s.prepareLocalCommitSigning(ctx, runmode.LocalDefaultOrgID, "conv-1", "claim-1", signer)
 	if c == nil {
@@ -141,14 +141,14 @@ func TestPrepareLocalCommitSigning(t *testing.T) {
 func TestPrepareLocalCommitSigning_RunsThatDoNotSign(t *testing.T) {
 	t.Run("a pending signer", func(t *testing.T) {
 		s, _, _ := signingSpawner(t, false)
-		_, signer := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "event", "")
+		_, signer := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, "event", "")
 		if c := s.prepareLocalCommitSigning(context.Background(), runmode.LocalDefaultOrgID, "conv-1", "claim-1", signer); c != nil {
 			t.Error("a pending signer prepared signing")
 		}
 	})
 	t.Run("git older than 2.34", func(t *testing.T) {
 		s, _, _ := signingSpawner(t, true)
-		_, signer := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "event", "")
+		_, signer := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, "event", "")
 		bin := t.TempDir()
 		if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho 'git version 2.30.2'\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -163,7 +163,7 @@ func TestPrepareLocalCommitSigning_RunsThatDoNotSign(t *testing.T) {
 	})
 	t.Run("no claim id", func(t *testing.T) {
 		s, _, _ := signingSpawner(t, true)
-		_, signer := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "event", "")
+		_, signer := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, "event", "")
 		if c := s.prepareLocalCommitSigning(context.Background(), runmode.LocalDefaultOrgID, "conv-1", "", signer); c != nil {
 			t.Error("an engagement with no claim id prepared signing")
 		}
@@ -173,7 +173,7 @@ func TestPrepareLocalCommitSigning_RunsThatDoNotSign(t *testing.T) {
 	})
 	t.Run("multi mode", func(t *testing.T) {
 		s, _, _ := signingSpawner(t, true)
-		_, signer := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "event", "")
+		_, signer := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, "event", "")
 		runmode.SetForTest(t, runmode.ModeMulti)
 		if c := s.prepareLocalCommitSigning(context.Background(), runmode.LocalDefaultOrgID, "conv-1", "claim-1", signer); c != nil {
 			t.Error("multi mode prepared local signing")
@@ -228,7 +228,7 @@ func TestStampCommitIdentity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := tc.spawner(t)
-			id, _ := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, tc.triggerType, tc.creator)
+			id, _ := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, tc.triggerType, tc.creator)
 			opts := agentproc.RunOptions{ExtraEnv: []string{"TRIAGE_FACTORY_CONVERSATION_ID=conv-1"}}
 			stampCommitIdentity(&opts, id)
 			if opts.GitUserName != tc.wantName || opts.GitUserEmail != tc.wantEmail {
@@ -247,7 +247,7 @@ func TestStampCommitIdentity(t *testing.T) {
 		s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "tok"), nil, "m")
 		s.SetRunCredentialResolvers(&fakeResolver{}, nil, nil)
 		s.SetStores(db.Stores{Users: fakeUsers{login: "alice"}})
-		id, _ := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "manual", "user-1")
+		id, _ := resolveCommitIdentityT(t, s, context.Background(), runmode.LocalDefaultOrgID, "manual", "user-1")
 		var opts agentproc.RunOptions
 		stampCommitIdentity(&opts, id)
 		if opts.GitUserName != "" || opts.GitUserEmail != "" || len(opts.ExtraEnv) != 0 {

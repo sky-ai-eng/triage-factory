@@ -69,8 +69,8 @@ func (r staticResolver) BaseURLFor(context.Context, string) (string, error) {
 	return ghbase.DefaultBaseURL(), nil
 }
 
-func (r staticResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
+func (r staticResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // expectToastControl fires a toast at the org and requires the client to

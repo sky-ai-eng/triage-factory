@@ -164,8 +164,8 @@ func (g *signerGitHub) reads() int {
 // identity the org commits as without a signer, the App's bot.
 type signerResolver struct{ repositoriesByIDResolver }
 
-func (signerResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "acme-tf[bot]", "9+acme-tf[bot]@users.noreply.github.com", true
+func (signerResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "acme-tf[bot]", "9+acme-tf[bot]@users.noreply.github.com", true, nil
 }
 
 // newSignerServer is a local-mode server on host whose GitHub is a fresh fake.
