@@ -103,8 +103,8 @@ type client struct {
 	send   chan []byte
 	closed chan struct{} // signals writePump to exit
 	// userID + orgID are captured at handshake by HandleWS. Empty means
-	// "unscoped client" (pre-auth, tests that hit the hub without the
-	// full server pipeline); such a client receives every event that
+	// "unscoped client" (a test that hits the hub without the server
+	// pipeline); such a client receives every event that
 	// carries no recipient set. The org and user filters in Broadcast
 	// only kick in when both event and client carry values; a recipient
 	// set never reaches a client with no userID.
@@ -166,9 +166,9 @@ func NewHub() *Hub {
 // UserID and OrgID drive Broadcast's scoping filter. SessionID and TokenID name
 // the credential, so a revalidation sweep can close exactly the connections
 // whose credential died; at most one is set, since a request authenticates one
-// way. Every field empty is the "unscoped" client — pre-auth, local mode, a
-// test hitting the hub without the server pipeline — which receives every event
-// but one addressed to a recipient set, and no sweep targets.
+// way. Every field empty is the "unscoped" client — a test hitting the hub
+// without the server pipeline — which receives every event but one addressed
+// to a recipient set, and no sweep targets.
 type ConnIdentity struct {
 	UserID    string
 	OrgID     string
@@ -245,8 +245,8 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) 
 //   - evt.OrgID == "" — system-wide event, delivers to every client
 //     regardless of their org. Used for system:poll:* sentinels,
 //     deployment-level toasts, etc.
-//   - c.orgID == "" — unscoped client (pre-auth, test harness),
-//     receives every event. Matches pre-D9b behavior.
+//   - c.orgID == "" — unscoped client (test harness), receives every
+//     event.
 //   - Both set + mismatch → skip. This is the multi-tenant case.
 //
 // The per-user filter has the same shape: evt.UserID != "" AND

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -104,6 +106,39 @@ func TestAllMutatingRoutes_RejectCrossOrigin(t *testing.T) {
 					rec.Code, strings.TrimSpace(rec.Body.String()))
 			}
 		})
+	}
+}
+
+// TestAllProtectedRoutes_UnavailableBeforeAuthWired: in multi mode, every route
+// mounted through s.api / s.apiMutating answers 503 while SetAuthDeps has not
+// run, so a request that reaches the listener before auth is wired is refused
+// rather than handed to its handler with no identity. /api/ws is in the set,
+// so the handshake opens no socket either.
+func TestAllProtectedRoutes_UnavailableBeforeAuthWired(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	s := New(h.AdminDB, pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey))
+
+	protected := protectedRoutes(s)
+	if len(protected) == 0 {
+		t.Fatalf("server mounted no protected routes")
+	}
+
+	for _, route := range protected {
+		method, pattern := splitMethodAndPath(route.pattern)
+		concrete := substitutePathParams(pattern)
+		t.Run(method+" "+pattern, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, httptest.NewRequest(method, concrete, nil))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("status=%d body=%q, want 503 (via=%s)",
+					rec.Code, strings.TrimSpace(rec.Body.String()), route.via)
+			}
+		})
+	}
+	if n := s.ws.ClientCount(); n != 0 {
+		t.Errorf("hub has %d clients, want 0", n)
 	}
 }
 
