@@ -3354,8 +3354,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, domain.ClaimPhaseAwaitingMessage); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem(awaiting_message): %v", err)
 		}
-		if got := attention(); len(got) != 2 {
-			t.Errorf("attention with the draft PR of a conversation awaiting a message = %v, want it beside %s", got, drafted)
+		if got := attention(); len(got) != 2 || !slices.Contains(got, live) || !slices.Contains(got, drafted) {
+			t.Errorf("attention with the draft PR of a conversation awaiting a message = %v, want [%s %s]", got, drafted, live)
 		}
 		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, ""); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem(clear): %v", err)

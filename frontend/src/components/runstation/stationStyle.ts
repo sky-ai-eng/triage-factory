@@ -62,12 +62,12 @@ export function stationState(conversation: Conversation): StationState {
       belt: 1,
     }
   }
-  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled
-  // conversation (idle / terminal) that still holds unresolved draft PRs or
-  // ready reviews wears the amber "your move" light, regardless of its stored
-  // status. A live conversation keeps WORKING (handled above) — the dock
-  // surfaces the approval affordance without recoloring the whole machine
-  // mid-turn.
+  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a
+  // conversation no agent is working on (parked, awaiting a message, or
+  // terminal) that still holds unresolved draft PRs or ready reviews wears the
+  // amber "your move" light, regardless of its stored status. A working
+  // conversation keeps WORKING (handled above) — the dock surfaces the
+  // approval affordance without recoloring the whole machine mid-turn.
   if (hasUnresolvedDeliverables(conversation)) {
     return {
       key: 'attention',

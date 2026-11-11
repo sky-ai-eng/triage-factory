@@ -1135,6 +1135,13 @@ func scanLapsedClaims(rows *sql.Rows) ([]lapsedClaim, error) {
 // commit together, because the release alone would hand the conversation to
 // the queue.
 //
+// A conversation with a stop pending is released without the park. The stop
+// keeps it out of the queue, and the settlement pass that follows settles it
+// as it settles any stop on a conversation no claim holds: the park with the
+// stop's reason, the cancel of a run whose cancel was requested, and the
+// status broadcast. A park here would clear the stop first, and the
+// settlement would never see it.
+//
 // The conversation of a claim awaiting a message is locked with SKIP LOCKED,
 // for the reason clearPreferredExecutor gives: the caller already holds the
 // claim, and a writer that locks a conversation before its claim would
@@ -1148,10 +1155,12 @@ func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) (
 			awaitingConversations = append(awaitingConversations, c.ConversationID)
 		}
 	}
-	parkable := map[string]bool{}
+	// stopPending holds the awaiting claims' conversations this transaction
+	// locked, each with whether a stop is pending on it.
+	stopPending := map[string]bool{}
 	if len(awaitingConversations) > 0 {
 		rows, err := q.QueryContext(ctx, `
-			SELECT id::text FROM conversations
+			SELECT id::text, stop_requested_at IS NOT NULL FROM conversations
 			WHERE id = ANY($1::uuid[])
 			FOR NO KEY UPDATE SKIP LOCKED
 		`, pgUUIDArray(awaitingConversations))
@@ -1160,11 +1169,12 @@ func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) (
 		}
 		for rows.Next() {
 			var id string
-			if err := rows.Scan(&id); err != nil {
+			var stop bool
+			if err := rows.Scan(&id, &stop); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			parkable[id] = true
+			stopPending[id] = stop
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
@@ -1172,14 +1182,17 @@ func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) (
 	}
 
 	var reaped, parked []string
+	var parkConversations []lapsedClaim
 	var released []db.ClaimRef
 	for _, c := range claims {
-		switch {
-		case c.phase != domain.ClaimPhaseAwaitingMessage:
+		if c.phase != domain.ClaimPhaseAwaitingMessage {
 			reaped = append(reaped, c.ClaimID)
-		case parkable[c.ConversationID]:
+		} else if stop, locked := stopPending[c.ConversationID]; locked {
 			parked = append(parked, c.ClaimID)
-		default:
+			if !stop {
+				parkConversations = append(parkConversations, c)
+			}
+		} else {
 			continue
 		}
 		released = append(released, c.ClaimRef)
@@ -1190,11 +1203,9 @@ func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) (
 	if err := releaseClaimsWithOutcome(ctx, q, parked, db.ParkIdle().ClaimOutcome()); err != nil {
 		return nil, err
 	}
-	for _, c := range claims {
-		if c.phase == domain.ClaimPhaseAwaitingMessage && parkable[c.ConversationID] {
-			if _, err := parkOpen(ctx, q, c.OrgID, c.ConversationID, db.ParkIdle()); err != nil {
-				return nil, err
-			}
+	for _, c := range parkConversations {
+		if _, err := parkOpen(ctx, q, c.OrgID, c.ConversationID, db.ParkIdle()); err != nil {
+			return nil, err
 		}
 	}
 	return released, nil

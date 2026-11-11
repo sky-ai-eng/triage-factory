@@ -6,7 +6,6 @@ import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
 import type { Message, Conversation, Task } from '../../types'
 import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
 import {
-  isActiveStatus,
   isFailedStatus,
   isTerminalStatus,
   isWorkingStatus,
@@ -880,14 +879,15 @@ function DockButton({
   )
 }
 
-// stepStateOf maps one chain step to its progress-track state.
+// stepStateOf maps one chain step to its progress-track state. A step awaiting
+// a person's message is current, not active: no agent is working on it.
 function stepStateOf(
   s: Conversation,
   i: number,
   currentConversationID: string,
   currentStepIndex?: number,
 ): StepState {
-  if (isActiveStatus(s.Status)) return 'active'
+  if (isWorkingStatus(s.Status)) return 'active'
   if (isConcluded(s)) return 'done'
   if (isFailedStatus(s.Status)) return 'failed'
   if (s.ID === currentConversationID || i === currentStepIndex) return 'current'

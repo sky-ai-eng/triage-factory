@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -372,6 +373,76 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Fatalf("ResetProcessingConversations = (%d, %v), want (1, nil)", n, err)
 		}
 		parkedIdle(t, f, c)
+	})
+
+	t.Run("Takeover_ReapsAndParksInOneBatch", func(t *testing.T) {
+		// One pass over a claim lost mid-work and one lost while awaiting a
+		// message: each takes its own outcome, and only the waiting one's
+		// conversation parks.
+		f := mk(t)
+		working := stageClaimed(t, f, takeoverOtherExecutor, 1)
+		waiting := awaitingClaimed(t, f, takeoverOtherExecutor, 1)
+		f.SetLease(t, working.ClaimID, -time.Second)
+		f.SetLease(t, waiting.ClaimID, -time.Second)
+		got := takeOver(t, f, 100)
+		if !slices.Contains(got, working.ClaimID) || !slices.Contains(got, waiting.ClaimID) || len(got) != 2 {
+			t.Fatalf("taken over = %v, want [%s %s]", got, working.ClaimID, waiting.ClaimID)
+		}
+		if released, outcome := claimState(t, f, working.ClaimID); !released || outcome != db.HandBackReaped {
+			t.Errorf("working claim = (released %v, %q), want (true, %s)", released, outcome, db.HandBackReaped)
+		}
+		if got := get(t, f, working.ID); got.Status != domain.StatusQueued {
+			t.Errorf("working claim's conversation = %q, want queued", got.Status)
+		}
+		parked := db.ParkIdle().ClaimOutcome()
+		if released, outcome := claimState(t, f, waiting.ClaimID); !released || outcome != parked {
+			t.Errorf("waiting claim = (released %v, %q), want (true, %s)", released, outcome, parked)
+		}
+		if got := get(t, f, waiting.ID); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
+			t.Errorf("waiting claim's conversation = (%q, %q), want (open, idle)", got.Status, got.ParkReason)
+		}
+	})
+
+	t.Run("Takeover_LeavesAPendingStopToTheSettlement", func(t *testing.T) {
+		// A stop reached an engagement awaiting a message whose holder was
+		// already gone. The release leaves the stop on the row, so the
+		// settlement pass settles it at once, as it does any stop on a
+		// conversation no claim holds: the park with the stop's reason and
+		// the cancel of the run whose cancel was requested.
+		f := mk(t)
+		c := awaitingClaimed(t, f, takeoverOtherExecutor, 1)
+		br := runOf(t, f, c.ID)
+		if _, err := f.Stores.Blueprints.RequestRunCancelSystem(ctx, f.OrgID, br.ID); err != nil {
+			t.Fatalf("RequestRunCancelSystem: %v", err)
+		}
+		if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, c.ID, stopTestUser, "", ""); err != nil || !ok {
+			t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+		}
+		f.SetLease(t, c.ClaimID, -time.Second)
+		if got := takeOver(t, f, 100); len(got) != 1 || got[0] != c.ClaimID {
+			t.Fatalf("taken over = %v, want [%s]", got, c.ClaimID)
+		}
+		parked := db.ParkIdle().ClaimOutcome()
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != parked {
+			t.Errorf("claim = (released %v, %q), want (true, %s)", released, outcome, parked)
+		}
+		if next, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, takeoverOtherExecutor, 1, db.ClaimPlacement{}, testClaimLease); err != nil || next != nil {
+			t.Fatalf("claim with a stop pending = (%+v, %v), want none", next, err)
+		}
+
+		settled, err := f.Stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+		if err != nil {
+			t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+		}
+		if len(settled) != 1 || settled[0].ConversationID != c.ID || settled[0].BlueprintRunID != br.ID {
+			t.Fatalf("settled = %+v, want %s with run %s cancelled", settled, c.ID, br.ID)
+		}
+		if got := get(t, f, c.ID); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("conversation = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
+		}
+		if after := runOf(t, f, c.ID); after.Status != domain.BlueprintRunStatusCancelled {
+			t.Errorf("run = %q, want cancelled", after.Status)
+		}
 	})
 
 	t.Run("Settle_ParksAQueuedStepACancelNeverReachedAndCancelsItsRun", func(t *testing.T) {

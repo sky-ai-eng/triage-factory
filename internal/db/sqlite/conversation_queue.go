@@ -695,7 +695,8 @@ func scanLapsedClaims(rows *sql.Rows) ([]lapsedClaim, error) {
 // still live and guard (extra SQL on the claims row) holds, and reports
 // whether it did. A claim lost mid-work is reaped; one lost while its
 // engagement awaited a person's message is parked, its conversation with it,
-// as db.ParkIdle() parks a turn that ended. The Postgres twin,
+// as db.ParkIdle() parks a turn that ended, unless a stop is pending on the
+// conversation, which the settlement pass then settles. The Postgres twin,
 // releaseLapsedClaims, carries why.
 func releaseLapsedClaim(ctx context.Context, q queryer, c lapsedClaim, guard string, at time.Time) (bool, error) {
 	awaiting := c.phase == domain.ClaimPhaseAwaitingMessage
@@ -712,7 +713,16 @@ func releaseLapsedClaim(ctx context.Context, q queryer, c lapsedClaim, guard str
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return false, err
 	}
-	if awaiting {
+	if !awaiting {
+		return true, nil
+	}
+	var stopPending bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT stop_requested_at IS NOT NULL FROM conversations WHERE id = ?
+	`, c.ConversationID).Scan(&stopPending); err != nil {
+		return false, err
+	}
+	if !stopPending {
 		if _, err := parkOpen(ctx, q, c.ConversationID, db.ParkIdle()); err != nil {
 			return false, err
 		}

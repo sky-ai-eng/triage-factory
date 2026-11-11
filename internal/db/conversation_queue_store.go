@@ -623,9 +623,12 @@ type ConversationQueueStore interface {
 	// requeued: its engagement had ended its turn and was waiting for a
 	// person, so it is released 'parked' and its conversation parked `open`
 	// with ParkIdle()'s reason in the same transaction, spending no hand-back
-	// budget. The person's next message wakes it. The same holds for the two
-	// releases below. Postgres may answer false for such a claim while another
-	// writer holds its conversation; the next pass releases it.
+	// budget. The person's next message wakes it. A conversation with a stop
+	// pending is left unparked, for the settlement pass to settle the stop.
+	// The same holds for the two releases below. Postgres leaves such a claim
+	// held while another writer holds its conversation: this release answers
+	// false and a later one releases it, the takeover takes it on a later
+	// pass, and one the boot reset leaves is taken over once its lease lapses.
 	ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
 
 	// TakeOverExpiredClaimsSystem releases, as 'reaped', up to limit live claims
