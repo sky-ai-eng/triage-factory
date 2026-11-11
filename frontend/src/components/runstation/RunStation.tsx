@@ -6,9 +6,9 @@ import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
 import type { Message, Conversation, Task } from '../../types'
 import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
 import {
+  isActiveStatus,
   isFailedStatus,
   isTerminalStatus,
-  isWorkingStatus,
   completionGloss,
   formatDurationMs,
   formatElapsed,
@@ -534,10 +534,6 @@ function IntakeDock({
   // and a conversation that looks parked-and-warm from here may answer every
   // message with a 409/410.
   const steerable = active || canResumeConversation(conversation)
-  // Live is not working: an engagement awaiting a person's message keeps its
-  // composer and its stop controls, but nothing is executing, so it reads as
-  // a parked conversation does.
-  const working = isWorkingStatus(conversation.Status)
   // The honest other half: a conversation whose status says "resumable" but
   // whose server verdict says otherwise gets the reason where the input would
   // have been, rather than a live composer that fails on send.
@@ -555,7 +551,7 @@ function IntakeDock({
         ? 'a draft PR is ready for your approval'
         : 'a review is ready for your approval'
       : `${counts.total} deliverables await your approval`
-    : working
+    : active
       ? 'agent is executing — streaming live'
       : isConcluded(conversation)
         ? // The state word above says which ending; this says what it means
@@ -564,17 +560,15 @@ function IntakeDock({
           completionGloss(conversation)
         : conversation.Status === 'open'
           ? 'open — idle, resumable'
-          : conversation.Status === 'awaiting_message'
-            ? 'waiting for your message'
-            : conversation.Status === 'failed'
-              ? conversation.FailureKind === 'memory_limit'
-                ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
-                : 'run failed'
-              : conversation.Status
+          : conversation.Status === 'failed'
+            ? conversation.FailureKind === 'memory_limit'
+              ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
+              : 'run failed'
+            : conversation.Status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-line-1 px-4 py-2.5">
-      {working && <StreamShimmer light={state.light} />}
+      {active && <StreamShimmer light={state.light} />}
 
       {/* Permission prompt — priority: it's blocking the agent's turn. */}
       {hasPrompt && (
@@ -649,7 +643,7 @@ function IntakeDock({
       {steerable && canWrite && actions.onMessage && (
         <DockComposer
           state={state}
-          placeholder={working ? 'Steer the agent…' : 'Message to resume…'}
+          placeholder={active ? 'Steer the agent…' : 'Message to resume…'}
           onSend={actions.onMessage}
           hidden={hasPrompt}
         />
@@ -887,15 +881,14 @@ function DockButton({
   )
 }
 
-// stepStateOf maps one chain step to its progress-track state. A step awaiting
-// a person's message is current, not active: no agent is working on it.
+// stepStateOf maps one chain step to its progress-track state.
 function stepStateOf(
   s: Conversation,
   i: number,
   currentConversationID: string,
   currentStepIndex?: number,
 ): StepState {
-  if (isWorkingStatus(s.Status)) return 'active'
+  if (isActiveStatus(s.Status)) return 'active'
   if (isConcluded(s)) return 'done'
   if (isFailedStatus(s.Status)) return 'failed'
   if (s.ID === currentConversationID || i === currentStepIndex) return 'current'

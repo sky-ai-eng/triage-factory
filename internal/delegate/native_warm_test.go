@@ -11,7 +11,7 @@ import (
 
 // The turn-end checkpoint is taken whether or not a boundary's checkpoint
 // would be due, and it waits for a host slot rather than skipping, since a
-// skip is a window that does not open. A second one over an unchanged tree
+// skip is a claim that is not kept warm. A second one over an unchanged tree
 // writes nothing and still covers the turn.
 func TestCheckpointTurnEnd_WaitsForASlotAndIgnoresTheInterval(t *testing.T) {
 	f := newCheckpointFixture(t, "r-ckpt-turn-end")
@@ -55,8 +55,8 @@ func TestCheckpointTurnEnd_WaitsForASlotAndIgnoresTheInterval(t *testing.T) {
 	}
 }
 
-// A steer signal is the doorbell of an engagement waiting warm: it rings the
-// engagement and is acked ok.
+// A steer signal is the doorbell of an engagement keeping its claim warm: it
+// rings the engagement and is acked ok.
 func TestApplySignal_SteerWakesAWaitingEngagement(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-warm-steer", "", "/tmp/wt")
@@ -83,8 +83,8 @@ func TestApplySignal_SteerWakesAWaitingEngagement(t *testing.T) {
 	}
 }
 
-// The rows that open a warm window are the ones a person wrote, delivered as
-// a turn's input or as a steer during it.
+// The rows that keep a claim warm, and that resume a warm claim, are the ones
+// a person wrote.
 func TestIsPersonMessage(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -101,26 +101,6 @@ func TestIsPersonMessage(t *testing.T) {
 	} {
 		if got := isPersonMessage(tc.row); got != tc.want {
 			t.Errorf("%s: isPersonMessage = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-// A wait ends for a person's message or for an event folded in place of a run,
-// and for nothing else TF stages.
-func TestWakesWarmWait(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		row  domain.Message
-		want bool
-	}{
-		{"a person's message", domain.Message{Role: "user", UserID: "u1"}, true},
-		{"a new-event injection", domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionEvent}, true},
-		{"an informational note", domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote}, false},
-		{"a turn-end nudge", domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge}, false},
-		{"a user row with no author", domain.Message{Role: "user"}, false},
-	} {
-		if got := wakesWarmWait(tc.row); got != tc.want {
-			t.Errorf("%s: wakesWarmWait = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

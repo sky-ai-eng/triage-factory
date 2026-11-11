@@ -589,9 +589,7 @@ type ConversationQueueStore interface {
 	// unexpired lease has gone without activity, measured from the
 	// last_activity_at its renewal stamped to database now. Zero when no such
 	// claim has stamped one. Cross-org, for the brain's gauge, like
-	// ExpiredClaimsSystem beside it. A claim in phase
-	// domain.ClaimPhaseAwaitingMessage is left out: its engagement is waiting
-	// for a person by design, which is not the stall the gauge watches for.
+	// ExpiredClaimsSystem beside it.
 	OldestIdleClaimSystem(ctx context.Context) (time.Duration, error)
 
 	// OldestCheckpointAgeSystem reports the longest any live claim with an
@@ -599,9 +597,7 @@ type ConversationQueueStore interface {
 	// a stored checkpoint, measured from the last_checkpoint_at its renewal
 	// stamped to database now: the workspace a hard kill would lose right now.
 	// Zero when no such claim has stamped one. Cross-org, for the brain's
-	// gauge. A claim in phase domain.ClaimPhaseAwaitingMessage is left out:
-	// no tool runs while it waits, so its tree is not drifting from the
-	// checkpoint.
+	// gauge.
 	OldestCheckpointAgeSystem(ctx context.Context) (time.Duration, error)
 
 	// ExpiredClaimsOfExecutorSystem lists the live claims one executor boot
@@ -618,17 +614,6 @@ type ConversationQueueStore interface {
 	// it is settled by the next settlement pass. The caller must have seen
 	// that no engagement of its own drives the claim — the guard here proves
 	// the lease lapsed, not that its holder has finished tearing down.
-	//
-	// A claim that lapsed in phase domain.ClaimPhaseAwaitingMessage is not
-	// requeued: its engagement had ended its turn and was waiting for a
-	// person, so it is released 'parked' and its conversation parked `open`
-	// with ParkIdle()'s reason in the same transaction, spending no hand-back
-	// budget. The person's next message wakes it. A conversation with a stop
-	// pending is left unparked, for the settlement pass to settle the stop.
-	// The same holds for the two releases below. Postgres leaves such a claim
-	// held while another writer holds its conversation: this release answers
-	// false and a later one releases it, the takeover takes it on a later
-	// pass, and one the boot reset leaves is taken over once its lease lapses.
 	ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
 
 	// TakeOverExpiredClaimsSystem releases, as 'reaped', up to limit live claims
@@ -636,10 +621,8 @@ type ConversationQueueStore interface {
 	// not mint. The release is the takeover: a conversation with no live claim
 	// matches the needs-driving predicate again, and a stop or a cancel pending
 	// on it is settled by the settlement pass that follows. Claims under a
-	// holder's fence read are skipped and taken on a later pass. A claim
-	// awaiting a message parks rather than being reaped, as
-	// ReleaseExpiredClaimSystem describes.
-	// Returns the conversations released.
+	// holder's fence read are skipped and taken on a later pass. Returns the
+	// conversations released.
 	//
 	// Every expired claim qualifies, whatever its conversation's state: a
 	// parked or terminal row's lapsed claim holds nothing up but the gauge,
@@ -758,10 +741,7 @@ type ConversationQueueStore interface {
 	// conversation that kills its process is failed after
 	// TF_MAX_CLAIM_ATTEMPTS boots rather than crash-looping forever. A
 	// mid-flight conversation it releases is claimable at once; a parked or
-	// terminal one only stops holding a claim it should not. A claim awaiting
-	// a message parks rather than being reaped, as ReleaseExpiredClaimSystem
-	// describes, so a conversation waiting for a person spends no loss budget
-	// on a crash.
+	// terminal one only stops holding a claim it should not.
 	//
 	// A live sibling instance's claims carry a different executor_id and are
 	// never touched, which is what makes a rolling deploy or a two-replica

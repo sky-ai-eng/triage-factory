@@ -31,7 +31,7 @@ import BrandMark from '../components/BrandMark'
 import { useShellScope } from '../hooks/useShellScope'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useWsConnected } from '../hooks/useWebSocket'
-import { isWorkingStatus, workStartedAt } from '../lib/conversationStatus'
+import { ACTIVE_STATUSES, workStartedAt } from '../lib/conversationStatus'
 import type { Conversation } from '../types'
 import './overview/overview.css'
 
@@ -135,7 +135,7 @@ export default function Overview() {
   const runningItems = useMemo<RunRowItem[]>(() => {
     const rows = running?.rows ?? []
     const live = rows
-      .filter((c) => isWorkingStatus(c.Status))
+      .filter((c) => (ACTIVE_STATUSES as readonly string[]).includes(c.Status))
       .sort((a, b) => Date.parse(workStartedAt(b)) - Date.parse(workStartedAt(a)))
     const queued = rows
       .filter((c: Conversation) => c.Status === 'queued')

@@ -137,7 +137,9 @@ const activeClaimExistsSQL = `EXISTS (
 // liveClaimExistsSQL is the narrower question the DISPLAY asks: is an
 // engagement actually alive on this conversation right now. An unreleased
 // claim whose lease has lapsed answers no — whatever process held it is gone,
-// and the row is waiting to be taken over.
+// and the row is waiting to be taken over. A warm claim answers no as well: its
+// turn has ended, and the conversation shows the state that turn wrote
+// (domain.ClaimPhaseWarm).
 //
 // It is deliberately not what the ownership predicates read. Those ask "may a
 // second claim exist", and the answer to that is still no: idx_claims_one_active
@@ -152,7 +154,8 @@ const activeClaimExistsSQL = `EXISTS (
 const liveClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
-		  AND cl_a.lease_expires_at > statement_timestamp())`
+		  AND cl_a.lease_expires_at > statement_timestamp()
+		  AND cl_a.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections (subtype 'injection:…', including a
@@ -215,19 +218,37 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
-// workingClaimExistsSQL is activeClaimExistsSQL without the engagements
-// awaiting a person's message (domain.ClaimPhaseAwaitingMessage): such a
-// claim still holds the conversation, so activeClaimExistsSQL keeps it from a
-// second claim, but no agent is working under it. It mirrors
-// domain.IsWorkingConversationStatus.
+// lapsedClaimOutcomeSQL is the outcome a claim whose holder is gone is
+// released with. A claim lost mid-work is reaped, which the loss budget
+// counts. A warm claim (domain.ClaimPhaseWarm) lost nothing: its turn had
+// ended and written its state, so it is released as completed, as the turn's
+// own write would have released it, and its conversation is left as it is.
+const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
+
+// workingClaimExistsSQL is activeClaimExistsSQL without warm claims
+// (domain.ClaimPhaseWarm). A warm claim still holds its conversation, so
+// activeClaimExistsSQL keeps a second claim off it, but its turn has ended and
+// no agent works under it.
 const workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
-		  AND cl_w.phase IS DISTINCT FROM '` + domain.ClaimPhaseAwaitingMessage + `')`
+		  AND cl_w.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `')`
+
+// warmTreeHeldSQL is conversation r's task tree held by a warm claim on
+// another of the task's conversations. Every conversation on a task shares one
+// run tree, and a warm claim's jail is still running in it, so r waits for
+// that claim to let go rather than start a second engagement in the tree. The
+// warm engagement lets go once its conversation has ended, which a new
+// delegation on the task does as it queues r, or once its window closes.
+const warmTreeHeldSQL = `EXISTS (
+		SELECT 1 FROM conversations sib
+		JOIN claims cl_t ON cl_t.conversation_id = sib.id AND cl_t.released_at IS NULL
+		WHERE sib.org_id = r.org_id AND sib.task_id = r.task_id AND sib.id <> r.id
+		  AND cl_t.phase = '` + domain.ClaimPhaseWarm + `')`
 
 // workingConversationSQL is a conversation still working on its task, with
 // no person needed for it to go on: a top-level conversation that has not
-// ended and either holds an active claim an agent is working under
+// ended and either holds an active claim an agent works under
 // (workingClaimExistsSQL), is waiting to be driven
 // (awaitingDrivingSQL, whatever a hand-back's wait) under a blueprint nobody
 // called off, on either of the two columns blueprintDrivableSQL checks, or is
@@ -628,6 +649,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			LEFT JOIN org_settings os ON os.org_id = r.org_id
 			WHERE ` + eligibleForDrivingSQL + `
 			  AND ` + blueprintDrivableSQL + `
+			  AND NOT ` + warmTreeHeldSQL + `
 			  AND (
 			    os.max_concurrent_runs IS NULL
 			    OR os.max_concurrent_runs <= 0
@@ -1017,7 +1039,7 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
 		  AND last_activity_at IS NOT NULL
-		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseAwaitingMessage+`'
+		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseWarm+`'
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestIdleClaimSystem")
@@ -1037,7 +1059,7 @@ func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) 
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
 		  AND last_checkpoint_at IS NOT NULL
-		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseAwaitingMessage+`'
+		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseWarm+`'
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestCheckpointAgeSystem")
@@ -1075,151 +1097,19 @@ func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, 
 	if !isValidUUID(orgID) || !isValidUUID(conversationID) || !isValidUUID(claimID) {
 		return false, nil
 	}
-	var released bool
-	err := inTx(ctx, s.conn, func(q queryer) error {
-		var phase string
-		err := q.QueryRowContext(ctx, `
-			SELECT COALESCE(phase, '') FROM claims
-			WHERE id = $1 AND org_id = $2 AND conversation_id = $3
-			  AND released_at IS NULL AND lease_expires_at <= statement_timestamp()
-			FOR UPDATE
-		`, claimID, orgID, conversationID).Scan(&phase)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		out, err := releaseLapsedClaims(ctx, q, []lapsedClaim{{
-			ClaimRef: db.ClaimRef{ClaimID: claimID, OrgID: orgID, ConversationID: conversationID},
-			phase:    phase,
-		}})
-		released = len(out) == 1
-		return err
-	})
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = `+lapsedClaimOutcomeSQL+`
+		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+		  AND released_at IS NULL AND lease_expires_at <= statement_timestamp()
+	`, claimID, orgID, conversationID)
 	if err != nil {
 		return false, wrapAdminPoolPermErr(err, "conversation_queue.ReleaseExpiredClaimSystem")
 	}
-	return released, nil
-}
-
-// lapsedClaim is a live claim whose holder is gone, locked FOR UPDATE by the
-// caller's transaction, with the phase it was in when the holder went.
-type lapsedClaim struct {
-	db.ClaimRef
-	phase string
-}
-
-// scanLapsedClaims reads (id, org_id, conversation_id, phase) rows.
-func scanLapsedClaims(rows *sql.Rows) ([]lapsedClaim, error) {
-	defer rows.Close()
-	var out []lapsedClaim
-	for rows.Next() {
-		var c lapsedClaim
-		if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID, &c.phase); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
 	}
-	return out, rows.Err()
-}
-
-// releaseLapsedClaims releases claims whose holder is gone, and returns the
-// ones it released. A claim lost mid-work is reaped: the loss budget counts
-// it, and its conversation returns to the queue. A claim lost while its
-// engagement awaited a person's message (domain.ClaimPhaseAwaitingMessage) is
-// parked instead, its conversation with it, exactly as db.ParkIdle() parks a
-// turn that ended: that turn was over, so re-driving it would answer nothing,
-// and nothing was lost that a budget should count. The person's next message
-// wakes it like any other park of an ended turn. The park and the release
-// commit together, because the release alone would hand the conversation to
-// the queue.
-//
-// A conversation with a stop pending is released without the park. The stop
-// keeps it out of the queue, and the settlement pass that follows settles it
-// as it settles any stop on a conversation no claim holds: the park with the
-// stop's reason, the cancel of a run whose cancel was requested, and the
-// status broadcast. A park here would clear the stop first, and the
-// settlement would never see it.
-//
-// The conversation of a claim awaiting a message is locked with SKIP LOCKED,
-// for the reason clearPreferredExecutor gives: the caller already holds the
-// claim, and a writer that locks a conversation before its claim would
-// otherwise wait on this transaction while this one waited on it. Such a
-// claim whose conversation another writer holds stays unreleased for a later
-// pass.
-func releaseLapsedClaims(ctx context.Context, q queryer, claims []lapsedClaim) ([]db.ClaimRef, error) {
-	var awaitingConversations []string
-	for _, c := range claims {
-		if c.phase == domain.ClaimPhaseAwaitingMessage {
-			awaitingConversations = append(awaitingConversations, c.ConversationID)
-		}
-	}
-	// stopPending holds the awaiting claims' conversations this transaction
-	// locked, each with whether a stop is pending on it.
-	stopPending := map[string]bool{}
-	if len(awaitingConversations) > 0 {
-		rows, err := q.QueryContext(ctx, `
-			SELECT id::text, stop_requested_at IS NOT NULL FROM conversations
-			WHERE id = ANY($1::uuid[])
-			FOR NO KEY UPDATE SKIP LOCKED
-		`, pgUUIDArray(awaitingConversations))
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id string
-			var stop bool
-			if err := rows.Scan(&id, &stop); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			stopPending[id] = stop
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-	}
-
-	var reaped, parked []string
-	var parkConversations []lapsedClaim
-	var released []db.ClaimRef
-	for _, c := range claims {
-		if c.phase != domain.ClaimPhaseAwaitingMessage {
-			reaped = append(reaped, c.ClaimID)
-		} else if stop, locked := stopPending[c.ConversationID]; locked {
-			parked = append(parked, c.ClaimID)
-			if !stop {
-				parkConversations = append(parkConversations, c)
-			}
-		} else {
-			continue
-		}
-		released = append(released, c.ClaimRef)
-	}
-	if err := releaseClaimsWithOutcome(ctx, q, reaped, db.HandBackReaped); err != nil {
-		return nil, err
-	}
-	if err := releaseClaimsWithOutcome(ctx, q, parked, db.ParkIdle().ClaimOutcome()); err != nil {
-		return nil, err
-	}
-	for _, c := range parkConversations {
-		if _, err := parkOpen(ctx, q, c.OrgID, c.ConversationID, db.ParkIdle()); err != nil {
-			return nil, err
-		}
-	}
-	return released, nil
-}
-
-func releaseClaimsWithOutcome(ctx context.Context, q queryer, claimIDs []string, outcome string) error {
-	if len(claimIDs) == 0 {
-		return nil
-	}
-	_, err := q.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(), outcome = $1
-		WHERE id = ANY($2::uuid[])
-	`, outcome, pgUUIDArray(claimIDs))
-	return err
+	return n == 1, nil
 }
 
 // TakeOverExpiredClaimsSystem locks claim rows only, and with SKIP LOCKED, so
@@ -1236,28 +1126,34 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 	var out []db.ClaimRef
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			SELECT id::text, org_id::text, conversation_id::text, COALESCE(phase, '')
-			FROM claims
-			WHERE released_at IS NULL
-			  AND lease_expires_at <= statement_timestamp()
-			  AND NOT (executor_id = $1 AND boot_epoch = $2)
-			ORDER BY lease_expires_at, id
-			LIMIT $3
-			FOR UPDATE SKIP LOCKED
+			WITH expired AS (
+				SELECT id FROM claims
+				WHERE released_at IS NULL
+				  AND lease_expires_at <= statement_timestamp()
+				  AND NOT (executor_id = $1 AND boot_epoch = $2)
+				ORDER BY lease_expires_at, id
+				LIMIT $3
+				FOR UPDATE SKIP LOCKED
+			)
+			UPDATE claims c SET released_at = now(), outcome = `+lapsedClaimOutcomeSQL+`
+			FROM expired e WHERE c.id = e.id
+			RETURNING c.id::text, c.org_id::text, c.conversation_id::text
 		`, executorID, bootEpoch, limit)
 		if err != nil {
 			return err
 		}
-		expired, err := scanLapsedClaims(rows)
-		if err != nil {
-			return err
-		}
-		if out, err = releaseLapsedClaims(ctx, q, expired); err != nil {
-			return err
-		}
-		ids := make([]string, 0, len(out))
-		for _, c := range out {
+		ids := make([]string, 0, limit)
+		for rows.Next() {
+			var c db.ClaimRef
+			if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID); err != nil {
+				rows.Close()
+				return err
+			}
+			out = append(out, c)
 			ids = append(ids, c.ConversationID)
+		}
+		if err := rows.Close(); err != nil {
+			return err
 		}
 		return clearPreferredExecutor(ctx, q, ids)
 	})
@@ -1692,24 +1588,23 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 	var released []string
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			SELECT id::text, org_id::text, conversation_id::text, COALESCE(phase, '')
-			FROM claims
+			UPDATE claims SET released_at = now(), outcome = `+lapsedClaimOutcomeSQL+`
 			WHERE released_at IS NULL AND executor_id = $1 AND boot_epoch < $2
-			FOR UPDATE
+			RETURNING conversation_id::text
 		`, executorID, bootEpoch)
 		if err != nil {
 			return err
 		}
-		prior, err := scanLapsedClaims(rows)
-		if err != nil {
-			return err
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			released = append(released, id)
 		}
-		refs, err := releaseLapsedClaims(ctx, q, prior)
-		if err != nil {
+		if err := rows.Close(); err != nil {
 			return err
-		}
-		for _, c := range refs {
-			released = append(released, c.ConversationID)
 		}
 		return clearPreferredExecutor(ctx, q, released)
 	})

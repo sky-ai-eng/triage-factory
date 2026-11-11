@@ -560,26 +560,33 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	if flipped {
 		s.announceWake(ctx, orgID, userID, conv)
 	}
-	// A native conversation with an active claim needs no wake, because its
-	// engagement drains the row. It may be waiting warm, though, and a waiting
-	// engagement reads the row when it is rung, or on its backstop poll. So it
-	// is rung whatever the status read above said: the read is from before
-	// the insert, and an engagement that started waiting since would be missed
-	// by a ring gated on awaiting_message. One that starts waiting after the
-	// ring finds the row when it looks on entering the wait (waitWarm).
-	if !wake && undeliveredRowsFor(conv.Runtime) == inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
-		s.ringWarmWait(ctx, orgID, conv.ID)
-	}
 	return nil
 }
 
-// ringWarmWait tells the engagement on conversationID that input that ends a
-// warm wait (wakesWarmWait) may be waiting for it, without waiting for an
-// answer. An engagement waiting
-// warm in this process is rung directly; otherwise the conversation's live
-// owner is sent a steer signal, which its apply loop answers by ringing the
-// engagement there (deliverSignal). A ring nothing answers costs nothing: the
-// row is already on the transcript.
+// announceWake is what follows a wake that flipped conv back to the queue: the
+// status push the views refetch on, the resume on the task's timeline
+// (attributed to userID, whose message the wake is for), and the dispatcher
+// nudge.
+func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv domain.Conversation) {
+	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
+	s.recordResumeTaskEvent(ctx, orgID, userID, conv)
+	// Same-process fast path (local): the wake is a ~ms in-process
+	// dispatcher nudge. Cross-pod there is no wake nudge by design — the
+	// claiming executor's own scan-interval backstop picks the row up.
+	s.wakeDispatcher()
+	// The flip keeps a warm claim rather than release it, and the engagement
+	// holding it is the one to drive the conversation now.
+	if undeliveredRowsFor(conv.Runtime) == inputRoleLiveQueue {
+		s.ringWarmWait(ctx, orgID, conv.ID)
+	}
+}
+
+// ringWarmWait tells the engagement keeping conversationID's claim warm that
+// the conversation was resumed, without waiting for an answer. One in this
+// process is rung directly; otherwise the claim's executor is sent a steer
+// signal, which its apply loop answers by ringing the engagement there
+// (deliverSignal). A ring nothing answers costs nothing: no claim is warm, or
+// the engagement finds the message on its backstop poll.
 func (s *Spawner) ringWarmWait(ctx context.Context, orgID, conversationID string) {
 	if s.warmWaits.Wake(conversationID) {
 		return
@@ -596,26 +603,13 @@ func (s *Spawner) ringWarmWait(ctx context.Context, orgID, conversationID string
 	}
 	id, err := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalSteer, "", executorID)
 	if err != nil {
-		delegateLog.Warn("insert the doorbell for a waiting engagement failed; its backstop poll reads the message",
+		delegateLog.Warn("insert the doorbell for a warm claim failed; its engagement's backstop poll finds the message",
 			"conversation", conversationID, "error", err)
 		return
 	}
 	if err := s.notifyCtl(ctx, "new", id); err != nil {
 		delegateLog.Warn("notify tf_ctl for the doorbell failed; the owner's backstop scan still finds it", "signal_id", id, "error", err)
 	}
-}
-
-// announceWake is what follows a wake that flipped conv back to the queue: the
-// status push the views refetch on, the resume on the task's timeline
-// (attributed to userID, whose message the wake is for), and the dispatcher
-// nudge.
-func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv domain.Conversation) {
-	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
-	s.recordResumeTaskEvent(ctx, orgID, userID, conv)
-	// Same-process fast path (local): the wake is a ~ms in-process
-	// dispatcher nudge. Cross-pod there is no wake nudge by design — the
-	// claiming executor's own scan-interval backstop picks the row up.
-	s.wakeDispatcher()
 }
 
 // wakeForUnreadInput wakes a conversation that concluded with a person's

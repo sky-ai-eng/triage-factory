@@ -444,14 +444,10 @@ type AdditiveFiringRef struct {
 //     TODO(TFAC-1347): nothing starts that engagement for an event alone, so
 //     a conversation that concludes first never reads it, and the firing it
 //     replaced is gone; the conversation should be woken to read it.
-//  2. A native conversation: staged as an injection:event row. The loop reads
-//     its pending rows before every model call, and its would-stop recheck
-//     continues for this subtype, so a running loop reads it before it
-//     concludes. An engagement waiting warm is rung to read it
-//     (ringWarmWait).
-//     TODO(TFAC-1347): a row staged after a stop_blueprint call, or after a
-//     warm wait ended and before its let-go concludes, is never read, and the
-//     firing it replaced is gone.
+//  2. A native conversation: staged as an injection:event row, never sent as
+//     a signal. The loop reads its pending rows before every model call, and
+//     its would-stop recheck continues for this subtype, so a running loop
+//     reads it before it concludes.
 //  3. An SDK conversation with a live remote owner: an `inject`
 //     conversation_signals row, fire-and-forget — never waited on, per the
 //     reply-leg contract.
@@ -478,14 +474,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		if !ok {
 			return InjectNotDelivered
 		}
-		outcome := s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, nativeLoopWillRead)
-		// An engagement waiting warm reads the event once it is rung. Rung
-		// whenever the conversation is claimed, for the reason queueFollowUp
-		// gives: a status read before the stage cannot say whether it waits.
-		if outcome == InjectStagedResumable && domain.IsActiveConversationStatus(conv.Status) {
-			s.ringWarmWait(ctx, orgID, conversationID)
-		}
-		return outcome
+		return s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, nativeLoopWillRead)
 	}
 	if s.signalRemoteInject(ctx, orgID, conv, producer, body, prov, firing) {
 		return InjectDeliveredRemote
@@ -699,10 +688,11 @@ func (s *Spawner) deliverSignal(ctx context.Context, sig domain.ConversationSign
 	case domain.ConversationSignalInterrupt:
 		return ackResultForControlErr(local.Interrupt(ctx, sig.ConversationID))
 	case domain.ConversationSignalSteer:
-		// A doorbell, not a delivery: the input is already on the transcript,
-		// and the signal tells an engagement waiting warm here to read it
-		// (ringWarmWait). Gone, when none is waiting, costs nothing, because an
-		// engagement that is not waiting reads the row at its next drain.
+		// A doorbell, not a delivery: the person's message is on the
+		// transcript, and the signal tells an engagement keeping the
+		// conversation's claim warm here to resume it (ringWarmWait). Gone,
+		// when none is waiting, costs the sender nothing; it never reads the
+		// answer.
 		if s.warmWaits.Wake(sig.ConversationID) {
 			return domain.ConversationSignalAckOK
 		}

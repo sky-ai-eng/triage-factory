@@ -853,12 +853,12 @@ terminate without another resume). Under `conversation_signals`, the owner
 delivers into its live process; the staged fallback remains for
 genuinely parked runs.
 
-`steer` carries no message. Both a person's message and an event folded into a
-native conversation are transcript rows the control pod writes, and a native
-engagement's loop reads them. The signal is the doorbell for an engagement
-waiting warm between turns (its claim in phase `awaiting_message`): the owner
-wakes the engagement to read the row, and acks `gone` when none is waiting,
-which the sender never waits for.
+`steer` carries no message. A person's message is a transcript row the
+control pod writes, and the resume it causes keeps a warm claim rather than
+releasing it: the engagement that held the conversation's last turn is still
+up, waiting for its window to end. The signal is the doorbell for that
+engagement, and the owner acks `gone` when no claim is warm, which the sender
+never waits for.
 
 Control-pod handler logic (`message` / `interrupt` / `cancel` /
 `permissions/{id}`):

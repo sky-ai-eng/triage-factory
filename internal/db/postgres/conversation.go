@@ -431,37 +431,12 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		if err != nil {
 			return err
 		}
-		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = NULL,
-			                parked_at = NULL, park_reason = NULL,
-			                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
-			                next_attempt_at = NULL,
-			                queued_at = now(),
-			                preferred_executor_id = (
-			                    SELECT c.executor_id FROM claims c
-			                    WHERE c.org_id = conversations.org_id
-			                      AND c.conversation_id = conversations.id
-			                    `+newestEngagementFirstSQL("c")+`
-			                    LIMIT 1)
-			WHERE org_id = $1 AND id = $2
-			  AND ended_at IS NULL
-			  AND status = 'open' AND NOT $3::boolean
-			  AND (completed_at IS NULL
-			       OR NOT tf.blueprint_run_is_running(
-			                conversations.blueprint_run_id, conversations.org_id))
-		`, orgID, conversationID, calledOff)
-		if err != nil {
+		if flipped, err = resumeFlip(ctx, q, orgID, conversationID, calledOff); err != nil || !flipped {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		flipped = n > 0
-		if !flipped {
-			return nil
-		}
-		if err := releaseActiveClaim(ctx, s.admin, orgID, conversationID, "requeued"); err != nil {
+		// A warm claim is kept: its engagement is waiting for exactly this,
+		// and drives the conversation from here (ResumeWarmClaimSystem).
+		if err := releaseActiveClaimUnlessWarm(ctx, s.admin, orgID, conversationID, "requeued"); err != nil {
 			return err
 		}
 		// tf_wake doorbell: resume-by-enqueue re-queues an
@@ -475,6 +450,148 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		return false, err
 	}
 	return flipped, nil
+}
+
+// resumeFlip is the resume's one conversation write: an `open` conversation,
+// concluded ones included, back to mid-flight. Shared by MarkQueuedForResume
+// and ResumeWarmClaimSystem, so a resume through a warm claim and one through
+// the queue take the conversation out of its park under one set of guards.
+// The caller has locked the row and read calledOff while holding the lock.
+func resumeFlip(ctx context.Context, q queryer, orgID, conversationID string, calledOff bool) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE conversations SET status = NULL,
+		                parked_at = NULL, park_reason = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+		                next_attempt_at = NULL,
+		                queued_at = now(),
+		                preferred_executor_id = (
+		                    SELECT c.executor_id FROM claims c
+		                    WHERE c.org_id = conversations.org_id
+		                      AND c.conversation_id = conversations.id
+		                    `+newestEngagementFirstSQL("c")+`
+		                    LIMIT 1)
+		WHERE org_id = $1 AND id = $2
+		  AND ended_at IS NULL
+		  AND status = 'open' AND NOT $3::boolean
+		  AND (completed_at IS NULL
+		       OR NOT tf.blueprint_run_is_running(
+		                conversations.blueprint_run_id, conversations.org_id))
+	`, orgID, conversationID, calledOff)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// releaseActiveClaimUnlessWarm is releaseActiveClaim for every claim but a
+// warm one (domain.ClaimPhaseWarm).
+func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = $1
+		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+		  AND phase IS DISTINCT FROM $4
+	`, outcome, orgID, conversationID, domain.ClaimPhaseWarm)
+	return err
+}
+
+// ConcludeKeepingClaimSystem is CompleteForClaimSystem's verdict for a turn
+// whose engagement stays warm: the same fence and the same conversation write,
+// with the claim kept instead of released. The claim takes the warm phase and
+// the engagement's turn time so far, which is what its eventual release keeps.
+// Its cost needs no lump: the native runtime settles per assistant row.
+func (s *conversationStore) ConcludeKeepingClaimSystem(ctx context.Context, orgID, conversationID, claimID string, durationMs, numTurns int, resultSummary, outcome, outcomeReason string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE claims SET phase = $1, duration_ms = $2, num_turns = $3
+			WHERE id = $4 AND org_id = $5 AND conversation_id = $6 AND released_at IS NULL
+		`, domain.ClaimPhaseWarm, durationMs, numTurns, claimID, orgID, conversationID); err != nil {
+			return err
+		}
+		r, err := completeConversationFlip(ctx, q, orgID, conversationID, domain.StatusOpen, resultSummary, outcome, outcomeReason, "")
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ResumeWarmClaimSystem takes a warm claim's conversation back for its next
+// turn: the resume flip, when a follow-up has not already made it, and the
+// claim out of the warm phase, in one transaction. resumed is false when the
+// conversation cannot be resumed (ended, its run called off), and the claim
+// then stays warm for its engagement to let go.
+func (s *conversationStore) ResumeWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (resumed bool, err error) {
+	err = inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		var status sql.NullString
+		if err := q.QueryRowContext(ctx, `
+			SELECT status FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+		`, orgID, conversationID).Scan(&status); err != nil {
+			return err
+		}
+		resumed = !status.Valid
+		if !resumed {
+			calledOff, err := conversationRunCalledOff(ctx, q, orgID, conversationID)
+			if err != nil {
+				return err
+			}
+			if resumed, err = resumeFlip(ctx, q, orgID, conversationID, calledOff); err != nil || !resumed {
+				return err
+			}
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE claims SET phase = NULL
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL AND phase = $4
+		`, claimID, orgID, conversationID, domain.ClaimPhaseWarm)
+		return err
+	})
+	return resumed, err
+}
+
+// ReleaseWarmClaimSystem lets a warm claim go, released completed as its
+// turn's own write would have released it. The conversation is not written:
+// it holds its turn-end state already. A conversation a follow-up resumed in
+// the moment before the release is left mid-flight with no claim, which is
+// the queue's to claim, so the dispatchers are told. released is false when
+// the claim was not this engagement's warm claim any more.
+func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error) {
+	err = inTx(ctx, s.admin, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'completed'
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL AND phase = $4
+		`, claimID, orgID, conversationID, domain.ClaimPhaseWarm)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		released = true
+		var resumed bool
+		if err := q.QueryRowContext(ctx, `
+			SELECT status IS NULL FROM conversations WHERE org_id = $1 AND id = $2
+		`, orgID, conversationID).Scan(&resumed); err != nil {
+			return err
+		}
+		if resumed {
+			_ = wakebus.Publish(ctx, q, wakebus.KindEvent, orgID)
+		}
+		return nil
+	})
+	return released, err
 }
 
 // conversationRunCalledOff reports whether the conversation's blueprint run
@@ -741,6 +858,16 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return s.taskHasClaim(ctx, orgID, taskID, true)
+}
+
+func (s *conversationStore) HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return s.taskHasClaim(ctx, orgID, taskID, false)
+}
+
+// taskHasClaim reports whether a conversation on taskID holds a live claim,
+// warm claims counted only when includeWarm is set.
+func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID string, includeWarm bool) (bool, error) {
 	if !isValidUUID(taskID) {
 		return false, nil
 	}
@@ -751,8 +878,9 @@ func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, org
 			FROM conversations c
 			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
 			WHERE c.org_id = $1 AND c.task_id = $2
+			  AND ($3 OR cl.phase IS DISTINCT FROM $4)
 		)
-	`, orgID, taskID).Scan(&exists)
+	`, orgID, taskID, includeWarm, domain.ClaimPhaseWarm).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
@@ -1247,8 +1375,9 @@ const pgConversationColumns = `
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
-// is no longer stored. A LIVE claim's phase wins (any of
-// domain.AllClaimPhases); then the mere
+// is no longer stored. A LIVE claim's setup sub-state wins
+// (fetching/cloning/agent_starting/awaiting_credentials; a warm claim is read
+// past, see liveClaimExistsSQL); then the mere
 // existence of a live claim is 'running'; then a conversation matching
 // the needs-driving predicate — mid-flight and unclaimed, or parked without
 // a verdict and woken by input — is 'queued'; and finally the stored column
@@ -1272,7 +1401,8 @@ const pgConversationColumns = `
 const pgDisplayStatusSQL = `COALESCE(
 		(SELECT cl_d.phase FROM claims cl_d
 		 WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL
-		   AND cl_d.lease_expires_at > statement_timestamp()),
+		   AND cl_d.lease_expires_at > statement_timestamp()
+		   AND cl_d.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `'),
 		CASE WHEN ` + liveClaimExistsSQL + ` THEN 'running' END,
 		CASE WHEN r.status IS NULL
 		       OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `)
@@ -1318,16 +1448,16 @@ const pgQueuePositionCTE = `
 	)
 `
 
-// pgConversationWorkingStatusesSQL is the display statuses that mean an agent
-// is WORKING — `running`, plus every claim phase but `awaiting_message` — as a
-// SQL IN-list body. Mirrors domain.IsWorkingConversationStatus: an engagement
-// awaiting a person's message is live, but the move is the person's.
+// pgConversationLiveStatusesSQL is the display statuses that mean a LIVE
+// engagement — `running`, plus every claim phase — as a SQL IN-list body.
+// Mirrors domain.IsActiveConversationStatus, which is what the run view
+// lights as WORKING and what the rail counts as `running`.
 //
 // SQL cannot import a Go const, so the set is spelled here and held to the Go
 // one by the dual-dialect conformance suite, whose coverage is derived from
 // domain.AllClaimPhases(): a phase added there and not taught to the stores
 // fails on both backends.
-const pgConversationWorkingStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
+const pgConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
 
 // pgUnresolvedDeliverableSQL is the SQL twin of domain.HasUnresolvedDeliverables,
 // written against a deliverables alias `art`: a draft pull request, or a pending
@@ -1357,27 +1487,25 @@ const pgUnresolvedDeliverableSQL = `
 
 // pgConversationAttentionSQL is the "YOUR MOVE" predicate — the rail's
 // `needs`, counted per conversation — written against the conversation alias
-// `r`: an unanswered permission prompt, OR a conversation no agent is working
-// on that still holds an unresolved deliverable.
+// `r`: an unanswered permission prompt, OR a conversation that is not live and
+// still holds an unresolved deliverable.
 //
 // Pending is derived the way PermissionStore.ListPending derives it (state
 // 'pending' AND owned by the conversation's currently-active claim), so a
 // prompt left behind by a process that no longer exists doesn't hold the count
 // up without anything having written its expiry.
 //
-// The working half reads the DISPLAY status, not the stored column: a
+// The liveness half reads the DISPLAY status, not the stored column: a
 // conversation mid-claim carries no stored status at all, and counting it as
 // needing a human while its agent is still working is the exact
-// disagreement-with-the-surface this predicate exists to avoid. An engagement
-// awaiting a person's message is not working, so it counts the way an `open`
-// conversation does.
+// disagreement-with-the-surface this predicate exists to avoid.
 const pgConversationAttentionSQL = `(
 		EXISTS (
 			SELECT 1 FROM conversation_permissions p
 			WHERE p.org_id = r.org_id AND p.conversation_id = r.id AND p.state = 'pending'
 			  AND p.claim_id = (SELECT cl_p.id FROM claims cl_p
 			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
-		OR ((` + pgDisplayStatusSQL + `) NOT IN (` + pgConversationWorkingStatusesSQL + `)
+		OR ((` + pgDisplayStatusSQL + `) NOT IN (` + pgConversationLiveStatusesSQL + `)
 		    AND EXISTS (
 		        SELECT 1 FROM deliverables art
 		        WHERE art.org_id = r.org_id AND art.conversation_id = r.id
@@ -1404,8 +1532,8 @@ const conversationClaimLateral = `
 		       COUNT(*)::int      AS attempts,
 		       MAX(c2.executor_id) FILTER (WHERE c2.released_at IS NULL) AS executor_id,
 		       MAX(c2.phase)       FILTER (WHERE c2.released_at IS NULL) AS phase,
-		       MAX(c2.last_activity_at) FILTER (WHERE c2.released_at IS NULL) AS last_activity_at,
-		       MAX(c2.current_op)       FILTER (WHERE c2.released_at IS NULL) AS current_op,
+		       MAX(c2.last_activity_at) FILTER (WHERE c2.released_at IS NULL AND c2.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
+		       MAX(c2.current_op)       FILTER (WHERE c2.released_at IS NULL AND c2.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `') AS current_op,
 		       SUM(c2.duration_ms)::bigint AS duration_ms,
 		       SUM(c2.num_turns)::bigint   AS num_turns
 		FROM claims c2

@@ -195,9 +195,17 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 	// The flip and its RETURNING run LAST — see the doc comment above — so
 	// the derived columns it returns already reflect the settlement and
 	// release just above.
-	// A verdict (status 'open') records no park reason, since nothing stopped
-	// the conversation; completed_at is its stamp, and what the idle sweeps
-	// age it from. A failure leaves the reason as it was.
+	return completeConversationFlip(ctx, q, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
+}
+
+// completeConversationFlip is the terminal status flip, RETURNING the row as
+// Get reads it: always the last statement of its caller's write, so the
+// derived columns it returns reflect the claim writes before it.
+//
+// A verdict (status 'open') records no park reason, since nothing stopped the
+// conversation; completed_at is its stamp, and what the idle sweeps age it
+// from. A failure leaves the reason as it was.
+func completeConversationFlip(ctx context.Context, q queryer, conversationID, status, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
 		UPDATE conversations
 		SET status = ?,
@@ -336,42 +344,59 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 	}
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = NULL,
-			                parked_at = NULL, park_reason = NULL,
-			                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
-			                next_attempt_at = NULL,
-			                queued_at = ?,
-			                preferred_executor_id = (
-			                    SELECT c.executor_id FROM claims c
-			                    WHERE c.conversation_id = conversations.id
-			                    `+newestEngagementFirstSQL("c")+`
-			                    LIMIT 1)
-			WHERE id = ?
-			  AND ended_at IS NULL
-			  AND status = 'open'
-			  AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
-			                  WHERE br.id = conversations.blueprint_run_id
-			                    AND (br.cancel_requested = 1 OR br.status = 'cancelled'))
-			  AND (completed_at IS NULL
-			       OR NOT EXISTS (SELECT 1 FROM blueprint_runs br
-			                      WHERE br.id = conversations.blueprint_run_id
-			                        AND br.status = 'running'))
-		`, time.Now().UTC(), conversationID)
-		if err != nil {
+		var err error
+		if flipped, err = sqliteResumeFlip(ctx, q, conversationID); err != nil || !flipped {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		flipped = n > 0
-		if !flipped {
-			return nil
-		}
-		return releaseActiveClaim(ctx, q, conversationID, "requeued")
+		// A warm claim is kept: its engagement drives the conversation from
+		// here (ResumeWarmClaimSystem).
+		return releaseActiveClaimUnlessWarm(ctx, q, conversationID, "requeued")
 	})
 	return flipped, err
+}
+
+// sqliteResumeFlip is the resume's one conversation write, shared by
+// MarkQueuedForResume and ResumeWarmClaimSystem so both take a conversation
+// out of its park under one set of guards. The Postgres twin carries the
+// model.
+func sqliteResumeFlip(ctx context.Context, q queryer, conversationID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE conversations SET status = NULL,
+		                parked_at = NULL, park_reason = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+		                next_attempt_at = NULL,
+		                queued_at = ?,
+		                preferred_executor_id = (
+		                    SELECT c.executor_id FROM claims c
+		                    WHERE c.conversation_id = conversations.id
+		                    `+newestEngagementFirstSQL("c")+`
+		                    LIMIT 1)
+		WHERE id = ?
+		  AND ended_at IS NULL
+		  AND status = 'open'
+		  AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
+		                  WHERE br.id = conversations.blueprint_run_id
+		                    AND (br.cancel_requested = 1 OR br.status = 'cancelled'))
+		  AND (completed_at IS NULL
+		       OR NOT EXISTS (SELECT 1 FROM blueprint_runs br
+		                      WHERE br.id = conversations.blueprint_run_id
+		                        AND br.status = 'running'))
+	`, time.Now().UTC(), conversationID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// releaseActiveClaimUnlessWarm is releaseActiveClaim for every claim but a
+// warm one (domain.ClaimPhaseWarm).
+func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, conversationID, outcome string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = ?
+		WHERE conversation_id = ? AND released_at IS NULL AND phase IS NOT ?
+	`, time.Now().UTC(), outcome, conversationID, domain.ClaimPhaseWarm)
+	return err
 }
 
 // scanConversationReturning maps a RETURNING sqliteConversationReturningColumns
@@ -781,13 +806,13 @@ const sqliteConversationColumns = `
 	COALESCE(a.display_name, '') AS actor_agent_name,
 	r.ended_at, COALESCE(r.ended_reason, ''),
 	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
-	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL) AS last_activity_at,
-	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL), '') AS current_op,
+	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
+	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `'), '') AS current_op,
 	r.next_attempt_at
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
-// Postgres pgDisplayStatusSQL ladder. A LIVE claim's phase
+// Postgres pgDisplayStatusSQL ladder. A LIVE claim's setup sub-state
 // wins; then the mere existence of a live claim is 'running'; then a
 // conversation matching the needs-driving predicate — mid-flight and
 // unclaimed, or parked without a verdict and woken by input — is 'queued';
@@ -799,7 +824,8 @@ const sqliteConversationColumns = `
 // wire. Requires the conversation alias `r`.
 const sqliteDisplayStatusSQL = `COALESCE(
 		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL
-		   AND cl_d.lease_expires_at > ` + sqliteNowExpr + `),
+		   AND cl_d.lease_expires_at > ` + sqliteNowExpr + `
+		   AND cl_d.phase IS NOT '` + domain.ClaimPhaseWarm + `'),
 		CASE WHEN ` + liveClaimExistsSQL + ` THEN 'running' END,
 		CASE WHEN r.status IS NULL
 		       OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `)
@@ -833,13 +859,13 @@ const sqliteQueuePositionQuery = `
 	WHERE (` + sqliteDisplayStatusSQL + `) = 'queued'
 	  AND ` + nextAttemptDueSQL
 
-// sqliteConversationWorkingStatusesSQL is the display statuses that mean an
-// agent is WORKING — `running`, plus every claim phase but `awaiting_message`
-// — as a SQL IN-list body, and the SQLite mirror of the Postgres twin. Mirrors
-// domain.IsWorkingConversationStatus. See the twin for the model: SQL cannot
-// import a Go const, and the conformance suite derives its coverage from
-// domain.AllClaimPhases() so a phase taught to neither dialect fails on both.
-const sqliteConversationWorkingStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
+// sqliteConversationLiveStatusesSQL is the display statuses that mean a LIVE
+// engagement — `running`, plus every claim phase — as a SQL IN-list body, and
+// the SQLite mirror of the Postgres twin. See that constant for the model:
+// SQL cannot import a Go const, and the conformance suite derives its coverage
+// from domain.AllClaimPhases() so a phase taught to neither dialect fails on
+// both.
+const sqliteConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
 
 // sqliteUnresolvedDeliverableSQL is the SQL twin of
 // domain.HasUnresolvedDeliverables, written against a deliverables alias `art` — the
@@ -863,7 +889,7 @@ const sqliteConversationAttentionSQL = `(
 			WHERE p.conversation_id = r.id AND p.state = 'pending'
 			  AND p.claim_id = (SELECT cl_p.id FROM claims cl_p
 			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
-		OR ((` + sqliteDisplayStatusSQL + `) NOT IN (` + sqliteConversationWorkingStatusesSQL + `)
+		OR ((` + sqliteDisplayStatusSQL + `) NOT IN (` + sqliteConversationLiveStatusesSQL + `)
 		    AND EXISTS (
 		        SELECT 1 FROM deliverables art
 		        WHERE art.conversation_id = r.id
@@ -911,8 +937,8 @@ const sqliteConversationReturningColumns = `
 	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name,
 	ended_at, COALESCE(ended_reason, ''),
 	stop_requested_at, COALESCE(stop_requested_by, ''), COALESCE(stop_requested_reason, ''),
-	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL) AS last_activity_at,
-	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL), '') AS current_op,
+	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
+	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `'), '') AS current_op,
 	next_attempt_at
 `
 
@@ -920,8 +946,10 @@ const sqliteConversationReturningColumns = `
 // the bare `conversations` table name for the same RETURNING-clause reason
 // sqliteConversationReturningColumns exists — see that constant's doc.
 const sqliteReturningDisplayStatusSQL = `COALESCE(
-		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = conversations.id AND cl_d.released_at IS NULL),
-		CASE WHEN EXISTS (SELECT 1 FROM claims cl_a WHERE cl_a.conversation_id = conversations.id AND cl_a.released_at IS NULL) THEN 'running' END,
+		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = conversations.id AND cl_d.released_at IS NULL
+		   AND cl_d.phase IS NOT '` + domain.ClaimPhaseWarm + `'),
+		CASE WHEN EXISTS (SELECT 1 FROM claims cl_a WHERE cl_a.conversation_id = conversations.id AND cl_a.released_at IS NULL
+		   AND cl_a.phase IS NOT '` + domain.ClaimPhaseWarm + `') THEN 'running' END,
 		CASE WHEN status IS NULL
 		       OR (status = 'open' AND completed_at IS NULL AND EXISTS (
 		             SELECT 1 FROM messages m_i
@@ -1654,6 +1682,16 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return s.taskHasClaim(ctx, orgID, taskID, true)
+}
+
+func (s *conversationStore) HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return s.taskHasClaim(ctx, orgID, taskID, false)
+}
+
+// taskHasClaim reports whether a conversation on taskID holds a live claim,
+// warm claims counted only when includeWarm is set.
+func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID string, includeWarm bool) (bool, error) {
 	// The eviction sweep reads this immediately before a privileged removal,
 	// and an org that cannot exist here would answer a confident `false` off
 	// the org_id predicate alone — "nobody is in that tree" for a question
@@ -1669,8 +1707,9 @@ func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, org
 			FROM conversations c
 			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
 			WHERE c.org_id = ? AND c.task_id = ?
+			  AND (? OR cl.phase IS NOT ?)
 		)
-	`, orgID, taskID).Scan(&exists)
+	`, orgID, taskID, includeWarm, domain.ClaimPhaseWarm).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
@@ -1865,6 +1904,68 @@ func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, c
 		return nil, err
 	}
 	return result, nil
+}
+
+func (s *conversationStore) ConcludeKeepingClaimSystem(ctx context.Context, orgID, conversationID, claimID string, durationMs, numTurns int, resultSummary, outcome, outcomeReason string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE claims SET phase = ?, duration_ms = ?, num_turns = ?
+			WHERE id = ? AND conversation_id = ? AND released_at IS NULL
+		`, domain.ClaimPhaseWarm, durationMs, numTurns, claimID, conversationID); err != nil {
+			return err
+		}
+		r, err := completeConversationFlip(ctx, q, conversationID, domain.StatusOpen, resultSummary, outcome, outcomeReason, "")
+		result = r
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *conversationStore) ResumeWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (resumed bool, err error) {
+	err = inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		var status sql.NullString
+		if err := q.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
+			return err
+		}
+		resumed = !status.Valid
+		if !resumed {
+			var err error
+			if resumed, err = sqliteResumeFlip(ctx, q, conversationID); err != nil || !resumed {
+				return err
+			}
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE claims SET phase = NULL
+			WHERE id = ? AND conversation_id = ? AND released_at IS NULL AND phase = ?
+		`, claimID, conversationID, domain.ClaimPhaseWarm)
+		return err
+	})
+	return resumed, err
+}
+
+func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = 'completed'
+		WHERE id = ? AND conversation_id = ? AND released_at IS NULL AND phase = ?
+	`, time.Now().UTC(), claimID, conversationID, domain.ClaimPhaseWarm)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {

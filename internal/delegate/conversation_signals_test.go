@@ -296,10 +296,10 @@ func TestCrossPodController_Interrupt_NonOKAckSurfacesAsNoLiveProcess(t *testing
 	}
 }
 
-// TestApplySignal_SteerReachesNoProcess: a steer signal is a doorbell for an
-// engagement waiting warm and delivers nothing, even to a process live on this
-// pod — a person's message reaches a live process through the transcript. With
-// no engagement waiting it is acked gone.
+// TestApplySignal_SteerReachesNoProcess: a steer signal delivers nothing,
+// even to a process live on this pod — a person's message reaches a live
+// process through the transcript — and is acked gone, which its sender reads
+// as the re-read-and-retry answer.
 func TestApplySignal_SteerReachesNoProcess(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-owner-steer", "sess", "/tmp/wt")
@@ -623,14 +623,13 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	}
 }
 
-// TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutInject: a
+// TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutSignal: a
 // native conversation has no process to steer, and its owning executor would
 // answer an inject signal as gone. The new-event injection is staged as an
 // injection:event row for the loop to read instead, even though a live remote
-// owner is resolvable, and nothing compensates with a pending firing. The one
-// signal is the doorbell for an engagement that may be waiting warm.
+// owner is resolvable, and nothing compensates with a pending firing.
 // InjectStagedResumable is the outcome the router records injected on.
-func TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutInject(t *testing.T) {
+func TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutSignal(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-native", "sess", "/tmp/wt")
 	setConversationRuntime(t, database, "r-native", domain.ConversationRuntimeNative)
@@ -645,9 +644,8 @@ func TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutInject(t *te
 	if outcome != InjectStagedResumable {
 		t.Fatalf("outcome = %v, want InjectStagedResumable", outcome)
 	}
-	sigs, _ := signals.ListUnackedForTarget(context.Background(), "executor-2")
-	if len(sigs) != 1 || sigs[0].Kind != domain.ConversationSignalSteer || sigs[0].Payload != "" {
-		t.Errorf("signals = %+v, want the one steer doorbell and no inject", sigs)
+	if n := signals.count(); n != 0 {
+		t.Errorf("wrote %d conversation signal(s) for a native conversation, want 0", n)
 	}
 	staged, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, "r-native")
 	if err != nil {

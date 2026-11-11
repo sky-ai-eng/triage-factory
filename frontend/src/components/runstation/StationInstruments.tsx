@@ -6,7 +6,7 @@ import {
   isConcluded,
   formatDurationMs,
   formatElapsed,
-  isWorkingStatus,
+  isActiveConversation,
   QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
   parkReasonLabel,
@@ -68,11 +68,10 @@ export function TelemetryRail({
         : null
   const dwellMs = queueDwellMs(conversation, now)
   const retryAt = retryingAt(conversation, now)
-  // Shown for a working engagement, setting up or running: a clone or a
+  // Shown for a live engagement, setting up or running: a clone or a
   // credentials wait is an operation the watchdog bounds as much as a tool
-  // call is. An engagement awaiting a person's message is quiet by design, so
-  // it shows none, as the oldest-idle gauge leaves it out.
-  const idle = isWorkingStatus(conversation.Status)
+  // call is.
+  const idle = isActiveConversation(conversation)
     ? claimIdleReadout(conversation.claim_last_activity_at, conversation.claim_current_op, now)
     : null
 

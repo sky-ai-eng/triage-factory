@@ -400,17 +400,16 @@ type conversationEntry struct {
 }
 
 // isTerminalConversationStatus reports whether status is one of the conversation-lifecycle
-// terminals (domain.Conversation's documented vocabulary), the parked/
-// awaiting-input "open" state, or an engagement awaiting a person's message —
-// each stops the worker and clears the indicator, since no agent is working;
-// only "failed" additionally posts the failure reply.
+// terminals (domain.Conversation's documented vocabulary) or the parked/
+// awaiting-input "open" state — both stop the worker and clear the
+// indicator; only "failed" additionally posts the failure reply.
 func isTerminalConversationStatus(status string) bool {
-	return domain.IsTerminalConversationStatus(status) || status == domain.StatusOpen || status == domain.ClaimPhaseAwaitingMessage
+	return domain.IsTerminalConversationStatus(status) || status == domain.StatusOpen
 }
 
 // handleConversationStatus resolves (and caches) the conversation's Slack context on first
 // sight, then drives the per-conversation worker off the status value: a
-// pre-"running" progress status (queued, or any setup claim phase — see
+// pre-"running" progress status (queued, or any claim phase — see
 // preRunIndicatorText, which owns that set)
 // starts the worker with that phase's text — or retexts a live one — so the
 // thread shows setup progress before the agent exists; "running" starts the

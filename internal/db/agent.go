@@ -1465,4 +1465,33 @@ type ConversationStore interface {
 	// dispatcher in the same process can claim a conversation on the key in
 	// between. Admin pool, for the same claims-less caller.
 	HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// HasEngagedClaimForTaskSystem is HasActiveClaimForTaskSystem without warm
+	// claims (domain.ClaimPhaseWarm): whether an engagement on taskID has a
+	// turn in progress or starting. A warm claim's turn has ended, and a new
+	// run on the task ends its conversation, which lets it go, so it does not
+	// stand in the way of one.
+	HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// ConcludeKeepingClaimSystem is CompleteForClaimSystem's `open` verdict for
+	// a turn whose engagement stays warm: the same fence, the same conversation
+	// write and the same returned row, with the claim kept in phase
+	// domain.ClaimPhaseWarm instead of released. The claim records the
+	// engagement's turn time and turns so far. No cost lump is taken: the
+	// native runtime, the only one that keeps a claim warm, settles spend per
+	// assistant row.
+	ConcludeKeepingClaimSystem(ctx context.Context, orgID, conversationID, claimID string, durationMs, numTurns int, resultSummary, outcome, outcomeReason string) (*domain.Conversation, error)
+
+	// ResumeWarmClaimSystem takes a warm claim's conversation back for its next
+	// turn, in one transaction: the resume flip MarkQueuedForResume makes, when
+	// a follow-up has not made it already, and the claim out of the warm phase.
+	// resumed is false when the conversation cannot be resumed (ended, or its
+	// run called off); the claim then stays warm. ErrClaimReleased when claimID
+	// is not live.
+	ResumeWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (resumed bool, err error)
+
+	// ReleaseWarmClaimSystem releases a warm claim as `completed`, the outcome
+	// its turn's own write would have given it, and writes nothing to the
+	// conversation. released is false when claimID is not a live warm claim.
+	ReleaseWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
 }

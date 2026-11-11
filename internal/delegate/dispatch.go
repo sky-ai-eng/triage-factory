@@ -343,7 +343,7 @@ func (s *Spawner) releaseOwnExpiredClaims(ctx context.Context) {
 			continue
 		}
 		if released {
-			dispatchLog.Warn("released an expired claim no engagement drives; the conversation returns to the queue, or parks if it was awaiting a message",
+			dispatchLog.Warn("released an expired claim no engagement drives; a conversation mid-turn returns to the queue, and one a warm claim held keeps its state",
 				"conversation", c.ConversationID, "claim", c.ClaimID, "org_id", c.OrgID)
 		}
 	}

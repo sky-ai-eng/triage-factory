@@ -93,9 +93,9 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			{name: "mid_flight", status: "", working: true},
 			{name: "active_claim", status: domain.StatusOpen, working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
-			// An engagement waiting for a person holds its claim, but no
-			// agent is working under it.
-			{name: "claim_awaiting_a_message", status: "", phase: domain.ClaimPhaseAwaitingMessage,
+			// A warm claim holds its conversation, but its turn ended and wrote
+			// its verdict, so nothing works under it.
+			{name: "warm_claim", run: string(domain.BlueprintRunStatusCompleted), status: SeedConcluded, phase: domain.ClaimPhaseWarm,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			{name: "held_by_a_hand_back", status: "", working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.HoldUntilLater(t, convID) }},

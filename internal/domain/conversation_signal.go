@@ -15,10 +15,10 @@ const (
 	// ConversationSignalInterrupt stops the conversation's current turn, leaving the process
 	// alive for further input.
 	ConversationSignalInterrupt ConversationSignalKind = "interrupt"
-	// ConversationSignalSteer rings an engagement waiting warm: a person's
-	// message or a new-event injection is on the conversation's transcript,
-	// and the owner wakes the engagement to read it. No payload;
-	// fire-and-forget.
+	// ConversationSignalSteer rings an engagement keeping a conversation's
+	// claim warm (ClaimPhaseWarm): a person's message resumed the
+	// conversation, and the owner wakes the engagement to drive it. No
+	// payload; fire-and-forget.
 	ConversationSignalSteer ConversationSignalKind = "steer"
 	// ConversationSignalPermission answers a pending tool-permission prompt. Payload:
 	// {"request_id","behavior","message","updated_input"}.
@@ -35,7 +35,7 @@ const (
 const (
 	// ConversationSignalAckOK is the generic success result for cancel/interrupt/
 	// steer/permission: the local RunController op was applied, or for steer
-	// an engagement waiting warm was rung (or, for cancel, the DB-only
+	// a warm claim's engagement was rung (or, for cancel, the DB-only
 	// fallback already covers correctness and this just records that the
 	// signal was seen).
 	ConversationSignalAckOK = "ok"
@@ -45,9 +45,9 @@ const (
 	// ConversationSignalAckGone means the owner found the conversation no longer live by the
 	// time it looked — an interrupt/permission signal simply lost the
 	// race (the caller sees this as "no live process" and 409s); a steer
-	// signal found no engagement waiting, which its sender never reads; an
-	// inject signal additionally enqueues the pending_firing itself so the
-	// intent is never dropped.
+	// signal found no warm claim to ring, which its sender never reads; an inject
+	// signal additionally enqueues the pending_firing itself so the intent
+	// is never dropped.
 	ConversationSignalAckGone = "gone"
 	// ConversationSignalAckStale means the signal was a legal duplicate whose target
 	// state was already reached: a second cancel/interrupt for an already-

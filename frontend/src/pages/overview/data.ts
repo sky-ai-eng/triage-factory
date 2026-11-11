@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
 import type { Conversation, Task } from '../../types'
 import {
+  ACTIVE_STATUSES,
   activeProse,
   isFailedStatus,
-  isWorkingStatus,
   retryingAt,
   retryingAtLabel,
   workStartedAt,
@@ -67,7 +67,7 @@ export function refOf(task: Task | undefined): string | null {
 
 export function lifecycleOf(conv: Conversation): RunLifecycle {
   if (conv.Status === 'queued') return 'queued'
-  if (isWorkingStatus(conv.Status)) return 'working'
+  if ((ACTIVE_STATUSES as readonly string[]).includes(conv.Status)) return 'working'
   if (isFailedStatus(conv.Status)) return 'failed'
   return 'done'
 }
