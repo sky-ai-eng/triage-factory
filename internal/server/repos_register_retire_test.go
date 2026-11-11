@@ -234,6 +234,6 @@ func (r repositoriesByIDResolver) BaseURLFor(context.Context, string) (string, e
 	return r.url, nil
 }
 
-func (repositoriesByIDResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
+func (repositoriesByIDResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
 }

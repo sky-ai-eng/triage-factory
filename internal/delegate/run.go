@@ -78,65 +78,81 @@ func errorResultSummary(result, subtype string) string {
 // The identity is commitsigner.Resolver's: the org's commit signer when it has
 // one, in any status, else the App's bot or the PAT's owner. The second value
 // is the whole resolution, whose Mode says whether the run signs as that
-// signer. It is resolved here each time a run's process starts: at launch,
-// and again at a cold resume, which starts a new process.
+// signer. It is resolved each time a run's process starts: at launch, and
+// again at a cold resume, which starts a new process.
 //
-// Returns the zero CommitIdentity (stamp nothing) when no org identity
-// resolves — no signer, no App, no stored PAT login, or neither stores nor a
-// GitHub resolver wired (unit tests). The caller then leaves git identity
-// unset and the agent inherits ambient config — never a fabricated identity;
-// it self-heals once the org's PAT login is (re)persisted. A signer that
-// cannot be read is the same, and never answered with the identity the signer
-// would have replaced.
+// Returns the zero CommitIdentity (stamp nothing) when the org has no identity
+// — no signer, no App, no stored PAT login, or neither stores nor a GitHub
+// resolver wired (unit tests). The process then commits under ambient git
+// config, never a fabricated identity; it self-heals once the org's PAT login
+// is (re)persisted.
+//
+// An error is a read that failed, of the signer or of the org's GitHub
+// identity, and the caller does not start the process: answering it with no
+// identity would commit as the ambient config while the org's credential
+// pushes the commits.
 //
 // This is also the single seam for a future per-team commit-author NAME: a
 // team_agents name override would replace id.Name here only (the email stays the
 // org-account noreply form so commits still link to the org identity).
-func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType, creatorUserID string) (githooks.CommitIdentity, commitsigner.Identity) {
-	id := s.orgCommitIdentity(ctx, orgID)
+func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType, creatorUserID string) (githooks.CommitIdentity, commitsigner.Identity, error) {
+	id, err := s.orgCommitIdentity(ctx, orgID)
+	if err != nil {
+		return githooks.CommitIdentity{}, commitsigner.Identity{}, err
+	}
+	return s.signerCommitIdentity(ctx, orgID, id, triggerType, creatorUserID), id, nil
+}
+
+// signerCommitIdentity is the commit identity of a run whose org identity
+// resolved to id: id's name and email, plus the co-author trailer on a manual
+// run, and nothing when id has no name.
+func (s *Spawner) signerCommitIdentity(ctx context.Context, orgID string, id commitsigner.Identity, triggerType, creatorUserID string) githooks.CommitIdentity {
 	if id.Name == "" {
-		return githooks.CommitIdentity{}, id
+		return githooks.CommitIdentity{}
 	}
 	org := ghclient.OrgIdentity{Name: id.Name, Email: id.Email, AccountID: id.AccountID}
-	return s.commitIdentityFor(ctx, orgID, org, triggerType, creatorUserID), id
+	return s.commitIdentityFor(ctx, orgID, org, triggerType, creatorUserID)
 }
 
 // orgCommitIdentity is the org's commit identity, resolved through
-// commitsigner.Resolver. With no signer store wired it is the org's GitHub
-// identity alone, unsigned; with neither that nor a GitHub resolver, none.
-func (s *Spawner) orgCommitIdentity(ctx context.Context, orgID string) commitsigner.Identity {
+// commitsigner.Resolver, and an error when a read it needs fails. With no
+// signer store wired it is the org's GitHub identity alone, unsigned; with
+// neither that nor a GitHub resolver, none.
+func (s *Spawner) orgCommitIdentity(ctx context.Context, orgID string) (commitsigner.Identity, error) {
 	none := commitsigner.Identity{Mode: domain.CommitSigningNone}
 	stores, ok := s.getStores()
 	if !ok || stores.OrgCommitSigners == nil {
 		if s.ghResolver == nil {
-			return none
+			return none, nil
 		}
-		org, found := ghclient.OrgIdentityAccount(ctx, s.ghResolver, orgID)
+		org, found, err := ghclient.OrgIdentityAccount(ctx, s.ghResolver, orgID)
+		if err != nil {
+			return commitsigner.Identity{}, fmt.Errorf("resolve the org's commit identity: %w", err)
+		}
 		if !found {
-			return none
+			return none, nil
 		}
 		none.Name, none.Email, none.AccountID = org.Name, org.Email, org.AccountID
-		return none
+		return none, nil
 	}
 	id, err := commitsigner.Resolver{Signers: stores.OrgCommitSigners, GitHub: s.ghResolver}.Resolve(ctx, orgID)
 	if err != nil {
-		delegateLog.Warn("resolving the org's commit identity failed; the run commits under ambient git config, unsigned",
-			"org", orgID, "error", err)
-		return none
+		return commitsigner.Identity{}, fmt.Errorf("resolve the org's commit identity: %w", err)
 	}
-	return id
+	return id, nil
 }
 
 // runCommitIdentity is the commit identity of a run that may have a credential
 // sidecar. With one, the org identity is the one the sidecar stamped into the
 // jail's git config from the bundle the brain sealed. Without one, this
-// process holds the org's credentials and resolves it itself.
-func (s *Spawner) runCommitIdentity(ctx context.Context, orgID string, sidecar *runSidecar, triggerType, creatorUserID string) githooks.CommitIdentity {
+// process holds the org's credentials and resolves it itself, and an error is
+// resolveCommitIdentity's.
+func (s *Spawner) runCommitIdentity(ctx context.Context, orgID string, sidecar *runSidecar, triggerType, creatorUserID string) (githooks.CommitIdentity, error) {
 	if sidecar == nil {
-		id, _ := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
-		return id
+		id, _, err := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
+		return id, err
 	}
-	return s.commitIdentityFor(ctx, orgID, sidecar.commitIdentity(), triggerType, creatorUserID)
+	return s.commitIdentityFor(ctx, orgID, sidecar.commitIdentity(), triggerType, creatorUserID), nil
 }
 
 // commitIdentityFor is the commit identity of a run whose org identity is org:
@@ -448,6 +464,28 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// on a warm step, where the run tree belongs to the sandbox identity.
 	writeTaskContextFile(memoryDir, taskContext)
 
+	// Resolve the org's GitHub commit identity once for this run, stamped on
+	// baseOpts below (stampCommitIdentity). The org identity authors + commits
+	// every agent commit; a manual run whose delegating human differs
+	// additionally co-attributes them through the prepare-commit-msg hook. A
+	// zero identity (resolver/stores unwired, or the org has none) leaves git
+	// config ambient — no fabricated identity. One resolution feeds both the
+	// GitHub-PR and Jira-branch paths; it carries across blueprint steps via
+	// the copied creator/trigger.
+	//
+	// A read that failed is a launch failure, handed back for another attempt
+	// before anything about this launch is written, rather than a run that
+	// commits as whatever the ambient config says. The session file stays: the
+	// conversation is still live, and the next claim resumes from it.
+	commitIdentity, signer, err := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return cancelled("", 0)
+		}
+		parked = true
+		return engagementDisposition{launchErr: err}
+	}
+
 	// The stop is read before the two fenced writes below, so a run stopped
 	// during bring-up parks here without ever asking the fence — their refusal
 	// is then reserved for a claim that went away with no cancel behind it.
@@ -486,15 +524,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// review passes) name their directory through this.
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
-	// Resolve the org's GitHub commit identity once for this run, stamped on
-	// baseOpts below (stampCommitIdentity). The org identity authors + commits
-	// every agent commit; a manual run whose delegating human differs
-	// additionally co-attributes them through the prepare-commit-msg hook. A
-	// zero identity (resolver/stores unwired, or no org identity resolves)
-	// leaves git config ambient — no fabricated identity. One resolution feeds
-	// both the GitHub-PR and Jira-branch paths; it carries across blueprint
-	// steps via the copied creator/trigger.
-	commitIdentity, signer := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
 	// An org whose signer is active when the run starts has the run's commits
 	// signed as it: git config naming the ssh-sign shim, the allowed-signers
 	// file it checks the run's own commits against, and what the run's daemon

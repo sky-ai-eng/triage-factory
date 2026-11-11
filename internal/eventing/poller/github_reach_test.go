@@ -225,8 +225,8 @@ func (r *tokenPerInstallationResolver) BaseURLFor(ctx context.Context, orgID str
 	return ghbase.DefaultBaseURL(), nil
 }
 
-func (r *tokenPerInstallationResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool) {
-	return "", "", false
+func (r *tokenPerInstallationResolver) OrgIdentityFor(ctx context.Context, orgID string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // newReachManager is a multi-mode Manager for an org on an active App with

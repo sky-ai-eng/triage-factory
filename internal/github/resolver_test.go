@@ -42,10 +42,14 @@ type fakeApps struct {
 	db.GitHubAppsStore
 	app     *domain.OrgGitHubApp
 	insts   []domain.OrgGitHubAppInstallation
+	getErr  error // when set, the registration row is unreadable
 	listErr error // when set, the installation mirror is unreadable
 }
 
 func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitHubApp, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return f.app, nil
 }
 
@@ -119,9 +123,13 @@ func newTestResolver(secrets db.SecretStore, apps *fakeApps, orgs *fakeOrgs, age
 type fakeAgents struct {
 	db.AgentStore
 	agent *domain.Agent
+	err   error // when set, the agents row is unreadable
 }
 
 func (f *fakeAgents) GetForOrgSystem(_ context.Context, _ string) (*domain.Agent, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.agent, nil
 }
 
@@ -939,8 +947,8 @@ func TestResolver_AppMintFails_Errors(t *testing.T) {
 // noreply email when org_github_apps.bot_user_id is set and the plain form when
 // it's 0 (unknown); an inactive/absent App falls through to the stored
 // agents.github_org_login + github_org_email — but ONLY while
-// the org still has a PAT — and an all-miss yields ok=false (the caller stamps
-// no identity).
+// the org still has a PAT — and an all-miss yields ok=false with no error (the
+// caller stamps no identity).
 func TestResolver_OrgIdentityFor(t *testing.T) {
 	// withPAT is the fakeSecrets an org with a live PAT presents; the PAT tier is
 	// gated on this presence so a cached login can't outlive the credential.
@@ -948,10 +956,16 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		return &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
 	}
 
-	assertIdentity := func(t *testing.T, gotName, gotEmail string, gotOK bool, wantName, wantEmail string) {
+	assertIdentity := func(t *testing.T, gotName, gotEmail string, gotOK bool, gotErr error, wantName, wantEmail string) {
 		t.Helper()
-		if !gotOK || gotName != wantName || gotEmail != wantEmail {
-			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (%q, %q, true)", gotName, gotEmail, gotOK, wantName, wantEmail)
+		if gotErr != nil || !gotOK || gotName != wantName || gotEmail != wantEmail {
+			t.Fatalf("OrgIdentityFor = (%q, %q, %v, %v), want (%q, %q, true, nil)", gotName, gotEmail, gotOK, gotErr, wantName, wantEmail)
+		}
+	}
+	assertAbsent := func(t *testing.T, gotName, gotEmail string, gotOK bool, gotErr error) {
+		t.Helper()
+		if gotErr != nil || gotOK || gotName != "" || gotEmail != "" {
+			t.Fatalf("OrgIdentityFor = (%q, %q, %v, %v), want (\"\", \"\", false, nil)", gotName, gotEmail, gotOK, gotErr)
 		}
 	}
 
@@ -965,8 +979,8 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{},
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		assertIdentity(t, name, email, ok, "acme-bot[bot]", "acme-bot[bot]@users.noreply.github.com")
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, err, "acme-bot[bot]", "acme-bot[bot]@users.noreply.github.com")
 	})
 
 	t.Run("App tier with bot_user_id -> numeric-id noreply email", func(t *testing.T) {
@@ -979,8 +993,8 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{},
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		assertIdentity(t, name, email, ok, "acme-bot[bot]", "41898282+acme-bot[bot]@users.noreply.github.com")
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, err, "acme-bot[bot]", "41898282+acme-bot[bot]@users.noreply.github.com")
 	})
 
 	t.Run("App preferred over stored PAT login", func(t *testing.T) {
@@ -991,8 +1005,8 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "pat-login", GitHubOrgEmail: "pat@example.com"}},
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		assertIdentity(t, name, email, ok, "acme-bot[bot]", "999+acme-bot[bot]@users.noreply.github.com")
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, err, "acme-bot[bot]", "999+acme-bot[bot]@users.noreply.github.com")
 	})
 
 	t.Run("inactive App falls through to stored PAT identity", func(t *testing.T) {
@@ -1003,9 +1017,9 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}},
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
 		// The PAT tier ignores the inactive App's bot identity.
-		assertIdentity(t, name, email, ok, "octocat", "octocat@example.com")
+		assertIdentity(t, name, email, ok, err, "octocat", "octocat@example.com")
 	})
 
 	t.Run("PAT tier (no App) resolves stored identity", func(t *testing.T) {
@@ -1016,8 +1030,8 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}},
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		assertIdentity(t, name, email, ok, "octocat", "octocat@example.com")
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertIdentity(t, name, email, ok, err, "octocat", "octocat@example.com")
 	})
 
 	t.Run("the account id rides with the identity on both tiers", func(t *testing.T) {
@@ -1044,9 +1058,9 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				r := newTestResolver(withPAT(), tc.apps, &fakeOrgs{base: "https://github.com"}, tc.agents, nil)
-				got, ok := r.(OrgIdentityAccountResolver).OrgIdentityAccountFor(context.Background(), "org-1")
-				if !ok || got != tc.want {
-					t.Errorf("OrgIdentityAccountFor = (%+v, %v), want (%+v, true)", got, ok, tc.want)
+				got, ok, err := r.(OrgIdentityAccountResolver).OrgIdentityAccountFor(context.Background(), "org-1")
+				if err != nil || !ok || got != tc.want {
+					t.Errorf("OrgIdentityAccountFor = (%+v, %v, %v), want (%+v, true, nil)", got, ok, err, tc.want)
 				}
 			})
 		}
@@ -1064,10 +1078,8 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if ok || name != "" || email != "" {
-			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (\"\", \"\", false) for a cleared PAT with a stale login", name, email, ok)
-		}
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertAbsent(t, name, email, ok, err)
 	})
 
 	t.Run("neither yields ok=false", func(t *testing.T) {
@@ -1078,11 +1090,110 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 			&fakeAgents{agent: &domain.Agent{}}, // no stored login
 			nil,
 		)
-		name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-		if ok || name != "" || email != "" {
-			t.Fatalf("OrgIdentityFor = (%q, %q, %v), want (\"\", \"\", false)", name, email, ok)
-		}
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertAbsent(t, name, email, ok, err)
 	})
+
+	t.Run("an org with no GitHub credential has no identity", func(t *testing.T) {
+		// No GitHub URL, so no credential, whatever the stored login says.
+		r := newTestResolver(
+			withPAT(),
+			&fakeApps{app: nil},
+			&fakeOrgs{},
+			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}},
+			nil,
+		)
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertAbsent(t, name, email, ok, err)
+	})
+
+	t.Run("a staged App with no PAT behind it has no identity", func(t *testing.T) {
+		r := newTestResolver(
+			&fakeSecrets{},
+			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot", BotUserID: 12345}},
+			&fakeOrgs{base: "https://github.com"},
+			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}},
+			nil,
+		)
+		name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+		assertAbsent(t, name, email, ok, err)
+	})
+}
+
+// TestResolver_OrgIdentityFor_FailedReadIsAnError pins that a read the
+// identity needs and could not make is an error, never the absence a caller
+// would answer with the placeholder or its own git config, and never the next
+// tier's identity.
+func TestResolver_OrgIdentityFor_FailedReadIsAnError(t *testing.T) {
+	readErr := errors.New("store unavailable")
+	withPAT := func() *fakeSecrets {
+		return &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
+	}
+	storedLogin := func() *fakeAgents {
+		return &fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}}
+	}
+	for _, tc := range []struct {
+		name    string
+		secrets *fakeSecrets
+		apps    *fakeApps
+		orgs    *fakeOrgs
+		agents  *fakeAgents
+	}{
+		{
+			name:    "the credential class",
+			secrets: withPAT(),
+			apps:    &fakeApps{},
+			orgs:    &fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClassPAT, settingsErr: readErr},
+			agents:  storedLogin(),
+		},
+		{
+			// The App org on its own App with a PAT and its login still stored:
+			// falling through would author the run's commits as the PAT's owner.
+			name:    "the App, with a PAT stored",
+			secrets: withPAT(),
+			apps:    &fakeApps{getErr: readErr},
+			orgs:    &fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClassBYOApp},
+			agents:  storedLogin(),
+		},
+		{
+			name:    "the PAT secret",
+			secrets: &fakeSecrets{err: readErr},
+			apps:    &fakeApps{},
+			orgs:    &fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClassPAT},
+			agents:  storedLogin(),
+		},
+		{
+			name:    "the agents row",
+			secrets: withPAT(),
+			apps:    &fakeApps{},
+			orgs:    &fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClassPAT},
+			agents:  &fakeAgents{err: readErr},
+		},
+		{
+			// A staged App hands over to the PAT tier, whose reads fail the
+			// same way.
+			name:    "the agents row behind a staged App",
+			secrets: withPAT(),
+			apps:    &fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot"}},
+			orgs:    &fakeOrgs{base: "https://github.com", class: domain.GitHubCredentialClassBYOApp},
+			agents:  &fakeAgents{err: readErr},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestResolver(tc.secrets, tc.apps, tc.orgs, tc.agents, nil)
+			got, ok, err := r.(OrgIdentityAccountResolver).OrgIdentityAccountFor(context.Background(), "org-1")
+			if !errors.Is(err, readErr) {
+				t.Errorf("OrgIdentityAccountFor err = %v, want the failed read", err)
+			}
+			if ok || got != (OrgIdentity{}) {
+				t.Errorf("OrgIdentityAccountFor = (%+v, %v), want no identity alongside the error", got, ok)
+			}
+			name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+			if !errors.Is(err, readErr) || ok || name != "" || email != "" {
+				t.Errorf("OrgIdentityFor = (%q, %q, %v, %v), want the failed read and no identity", name, email, ok, err)
+			}
+		})
+	}
 }
 
 // TestResolver_AppBotAccountFor pins whose account the App credential

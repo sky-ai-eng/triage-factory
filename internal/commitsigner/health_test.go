@@ -131,8 +131,8 @@ func (healthResolver) TokenFor(context.Context, string, string) (githubapp.Token
 
 func (r healthResolver) BaseURLFor(context.Context, string) (string, error) { return r.url, nil }
 
-func (healthResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return "", "", false
+func (healthResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 // healthChecker is a checker over the fixture's stores and a fake GitHub

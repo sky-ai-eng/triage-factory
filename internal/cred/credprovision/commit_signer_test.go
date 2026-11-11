@@ -175,6 +175,25 @@ func TestResolveGitHub_UnreadableSignerFailsTheSeal(t *testing.T) {
 	}
 }
 
+// TestResolveGitHub_UnreadableIdentityFailsTheSeal: an org identity that
+// cannot be read fails the seal, with or without a signer store, rather than
+// sealing no identity, which the jail would commit as its placeholder.
+func TestResolveGitHub_UnreadableIdentityFailsTheSeal(t *testing.T) {
+	readErr := errors.New("agents row read failed")
+	for name, signers := range map[string]db.OrgCommitSignerStore{
+		"no signer":       fakeSigners{},
+		"no signer store": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := signerManager(signers, nil)
+			m.ghResolver.(*fakeScopedResolver).identityErr = readErr
+			if gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1"); !errors.Is(err, readErr) || gh != nil {
+				t.Fatalf("resolveGitHub = (%+v, %v), want no credentials and the identity read's error", gh, err)
+			}
+		})
+	}
+}
+
 // fakeDeploymentHealth answers the deployment signer's health row.
 type fakeDeploymentHealth struct {
 	db.DeploymentCommitSignerStore

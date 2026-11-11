@@ -239,8 +239,8 @@ func (r *benchResolver) BaseURLFor(ctx context.Context, orgID string) (string, e
 	return r.base, nil
 }
 
-func (r *benchResolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
-	return "", "", false
+func (r *benchResolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool, err error) {
+	return "", "", false, nil
 }
 
 // Run executes one benchmark: generate the dataset, start the fake server,
