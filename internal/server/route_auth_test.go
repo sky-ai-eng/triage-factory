@@ -112,8 +112,9 @@ func TestAllMutatingRoutes_RejectCrossOrigin(t *testing.T) {
 // TestAllProtectedRoutes_UnavailableBeforeAuthWired: in multi mode, every route
 // mounted through s.api / s.apiMutating answers 503 while SetAuthDeps has not
 // run, so a request that reaches the listener before auth is wired is refused
-// rather than handed to its handler with no identity. /api/ws is in the set,
-// so the handshake opens no socket either.
+// rather than handed to its handler with no identity. A live handshake against
+// /api/ws is refused the same way and registers nothing with the hub; the
+// recorder sweep cannot show that, since a recorder cannot be upgraded.
 func TestAllProtectedRoutes_UnavailableBeforeAuthWired(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -137,9 +138,10 @@ func TestAllProtectedRoutes_UnavailableBeforeAuthWired(t *testing.T) {
 			}
 		})
 	}
-	if n := s.ws.ClientCount(); n != 0 {
-		t.Errorf("hub has %d clients, want 0", n)
-	}
+
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+	assertWSRefused(t, s, ts.URL, http.StatusServiceUnavailable)
 }
 
 // protectedRoutes returns every route s mounted through api or apiMutating.
