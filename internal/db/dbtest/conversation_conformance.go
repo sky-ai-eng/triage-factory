@@ -3063,11 +3063,20 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if got := filter(phase); len(got) != 1 || got[0] != queued {
 				t.Errorf("statuses=[%s] = %v, want [%s]", phase, got, queued)
 			}
-			// The live set is what the rail counts as `running`, and every
-			// phase belongs to it.
+			// Every phase belongs to the live set; the working set is the live
+			// set without the idle wait.
 			live := append([]string{domain.StatusRunning}, domain.AllClaimPhases()...)
 			if got := filter(live...); len(got) != 1 || got[0] != queued {
 				t.Errorf("phase %s missing from the live status set: %v", phase, got)
+			}
+			var working []string
+			for _, s := range live {
+				if domain.IsWorkingConversationStatus(s) {
+					working = append(working, s)
+				}
+			}
+			if got, want := len(filter(working...)) == 1, phase != domain.ClaimPhaseIdle; got != want {
+				t.Errorf("phase %s in the working status set = %v, want %v", phase, got, want)
 			}
 		}
 	})
@@ -3339,6 +3348,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if got := attention(); len(got) != 1 || got[0] != drafted {
 			t.Errorf("a live conversation's draft PR counted as attention: %v", got)
+		}
+		// An engagement waiting idle for a person is live but not working, so
+		// its draft PR is the person's move, as an `open` conversation's is.
+		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, domain.ClaimPhaseIdle); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem(idle): %v", err)
+		}
+		if got := attention(); len(got) != 2 {
+			t.Errorf("attention with an idle conversation's draft PR = %v, want it beside %s", got, drafted)
+		}
+		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, ""); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem(clear): %v", err)
 		}
 
 		// A prompt owned by the live claim IS a human's move, whatever the

@@ -25,6 +25,11 @@ func TestConversationStatusClassification(t *testing.T) {
 		if !IsActiveConversationStatus(s) {
 			t.Errorf("%q should be active", s)
 		}
+		// Working is every active status but the idle wait: an engagement
+		// waiting for a person holds its slot without an agent working.
+		if got, want := IsWorkingConversationStatus(s), s != ClaimPhaseIdle; got != want {
+			t.Errorf("IsWorkingConversationStatus(%q) = %v, want %v", s, got, want)
+		}
 	}
 
 	// Neither active nor terminal: queued (not yet claimed) and open (parked).
@@ -34,6 +39,9 @@ func TestConversationStatusClassification(t *testing.T) {
 		}
 		if IsActiveConversationStatus(s) {
 			t.Errorf("%q should NOT be active (queued/parked)", s)
+		}
+		if IsWorkingConversationStatus(s) {
+			t.Errorf("%q should NOT be working (queued/parked)", s)
 		}
 	}
 }

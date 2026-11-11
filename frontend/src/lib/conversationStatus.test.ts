@@ -18,6 +18,7 @@ import {
   isPermissionTerminalStatus,
   isResumableConversation,
   isTerminalStatus,
+  isWorkingStatus,
   queueDwellMs,
   resumeBlockedCopy,
   retryingAt,
@@ -49,6 +50,15 @@ describe('status classification', () => {
     }
     expect(isActiveStatus('running')).toBe(true)
     expect(ACTIVE_STATUSES).toHaveLength(CLAIM_PHASES.length + 1)
+  })
+
+  it('counts every active status but idle as working, mirroring domain.IsWorkingConversationStatus', () => {
+    for (const status of ACTIVE_STATUSES) {
+      expect(isWorkingStatus(status), `${status} working`).toBe(status !== 'idle')
+    }
+    for (const status of ['queued', 'open', ...TERMINAL_CONVERSATION_STATUSES]) {
+      expect(isWorkingStatus(status), `${status} should not be working`).toBe(false)
+    }
   })
 
   it('leaves queued, open and the terminals out of the active set', () => {

@@ -46,6 +46,7 @@ describe('no-ghost-conversation-status', () => {
         'cloning',
         'failed',
         'fetching',
+        'idle',
         'open',
         'queued',
         'running',

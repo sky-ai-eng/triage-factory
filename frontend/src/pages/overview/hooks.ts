@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { HttpError, apiJSON, apiList } from '../../lib/apiClient'
-import { ACTIVE_STATUSES, retryingAt } from '../../lib/conversationStatus'
+import { WORKING_STATUSES, retryingAt } from '../../lib/conversationStatus'
 import { TASK_LIST_PATH, TASK_PAGE_SIZE } from '../../lib/taskList'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
@@ -174,7 +174,7 @@ export function useConversationSets(
     let live = true
     void readConversationSet({
       team_ids: [teamId],
-      statuses: [...ACTIVE_STATUSES, 'queued'],
+      statuses: [...WORKING_STATUSES, 'queued'],
       page_size: 20,
     }).then(
       (running) => {

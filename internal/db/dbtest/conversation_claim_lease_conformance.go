@@ -466,6 +466,57 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("IdlePhase_DisplaysIdleAndKeepsTheClaim", func(t *testing.T) {
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		if _, err := f.Stores.Conversations.SetClaimPhaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, domain.ClaimPhaseIdle); err != nil {
+			t.Fatalf("SetClaimPhaseSystem(idle): %v", err)
+		}
+		if got, err := f.Stores.Conversations.GetSystem(ctx, f.OrgID, conversationID); err != nil || got == nil || got.Status != domain.ClaimPhaseIdle {
+			t.Fatalf("GetSystem = (%+v, %v), want status %s", got, err, domain.ClaimPhaseIdle)
+		}
+		// The engagement still holds the conversation: no second claim, by
+		// any executor.
+		for _, exec := range []string{claimLeaseExecutor, "idle-other-exec"} {
+			if next, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, exec, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease); err != nil || next != nil {
+				t.Errorf("ClaimNextConversation(%s) on an idle claim = (%+v, %v), want none", exec, next, err)
+			}
+		}
+	})
+
+	t.Run("Gauges_SkipAnIdleClaim", func(t *testing.T) {
+		f := mk(t)
+		q := f.Stores.ConversationQueue
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		age := 30 * time.Second
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{Idle: age, CheckpointAge: &age}); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		gauges := func() (idle, checkpoint time.Duration) {
+			t.Helper()
+			idle, err := q.OldestIdleClaimSystem(ctx)
+			if err != nil {
+				t.Fatalf("OldestIdleClaimSystem: %v", err)
+			}
+			checkpoint, err = q.OldestCheckpointAgeSystem(ctx)
+			if err != nil {
+				t.Fatalf("OldestCheckpointAgeSystem: %v", err)
+			}
+			return idle, checkpoint
+		}
+		if idle, checkpoint := gauges(); idle < 29*time.Second || checkpoint < 29*time.Second {
+			t.Fatalf("gauges on a working claim = (idle %s, checkpoint %s), want about 30s each", idle, checkpoint)
+		}
+		if _, err := f.Stores.Conversations.SetClaimPhaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, domain.ClaimPhaseIdle); err != nil {
+			t.Fatalf("SetClaimPhaseSystem(idle): %v", err)
+		}
+		if idle, checkpoint := gauges(); idle != 0 || checkpoint != 0 {
+			t.Errorf("gauges on an idle claim = (idle %s, checkpoint %s), want 0s each: it waits for a person by design", idle, checkpoint)
+		}
+	})
+
 	t.Run("Fence_NamesALapseApartFromARelease", func(t *testing.T) {
 		// The lapse wraps the release, so every caller that treats the two
 		// alike keeps doing so.

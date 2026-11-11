@@ -298,6 +298,80 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	// idleClaimed stages and claims one step, then puts its engagement in the
+	// idle wait: the turn ended and the claim is held for a person's message.
+	idleClaimed := func(t *testing.T, f ClaimLeaseFixture, executorID string, bootEpoch int64) *domain.Conversation {
+		t.Helper()
+		c := stageClaimed(t, f, executorID, bootEpoch)
+		if _, err := f.Stores.Conversations.SetClaimPhaseSystem(ctx, f.OrgID, c.ID, c.ClaimID, domain.ClaimPhaseIdle); err != nil {
+			t.Fatalf("SetClaimPhaseSystem(idle): %v", err)
+		}
+		return c
+	}
+	// parkedIdle checks what a crashed idle claim leaves behind: the claim
+	// released 'parked', the conversation parked `open` as a turn that ended,
+	// no budget spent, and nothing to drive until a person writes to it.
+	parkedIdle := func(t *testing.T, f ClaimLeaseFixture, c *domain.Conversation) {
+		t.Helper()
+		parked := db.ParkIdle().ClaimOutcome()
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != parked {
+			t.Errorf("idle claim after the release = (released %v, %q), want (true, %s)", released, outcome, parked)
+		}
+		if got := get(t, f, c.ID); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
+			t.Errorf("conversation after the release = (%q, %q), want (open, idle)", got.Status, got.ParkReason)
+		}
+		q := f.Stores.ConversationQueue
+		if next, err := q.ClaimNextConversation(ctx, takeoverOtherExecutor, 1, db.ClaimPlacement{}, testClaimLease); err != nil || next != nil {
+			t.Fatalf("claim with no message waiting = (%+v, %v), want none: the turn the claim served had ended", next, err)
+		}
+		pending := false
+		if _, err := f.Stores.Conversations.InsertMessage(ctx, f.OrgID, &domain.Message{
+			ConversationID: c.ID, Role: "user", Content: "one more thing",
+			Delivered: &pending, WindowState: domain.MessageWindowActive,
+		}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		next, err := q.ClaimNextConversation(ctx, takeoverOtherExecutor, 1, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || next == nil || next.ID != c.ID {
+			t.Fatalf("claim after a person's message = (%+v, %v), want conversation %s", next, err, c.ID)
+		}
+		if next.Attempts != c.Attempts || next.SetupFailures != c.SetupFailures || next.LostEngagements != c.LostEngagements ||
+			next.UpstreamHandBacks != c.UpstreamHandBacks || next.JailLosses != c.JailLosses {
+			t.Errorf("budgets after the idle release = (attempts %d, setup %d, lost %d, upstream %d, jail %d), want the first claim's (%d, %d, %d, %d, %d)",
+				next.Attempts, next.SetupFailures, next.LostEngagements, next.UpstreamHandBacks, next.JailLosses,
+				c.Attempts, c.SetupFailures, c.LostEngagements, c.UpstreamHandBacks, c.JailLosses)
+		}
+	}
+
+	t.Run("Takeover_ParksAnIdleClaim", func(t *testing.T) {
+		f := mk(t)
+		c := idleClaimed(t, f, takeoverOtherExecutor, 1)
+		f.SetLease(t, c.ClaimID, -time.Second)
+		if got := takeOver(t, f, 100); len(got) != 1 || got[0] != c.ClaimID {
+			t.Fatalf("taken over = %v, want [%s]", got, c.ClaimID)
+		}
+		parkedIdle(t, f, c)
+	})
+
+	t.Run("OwnRelease_ParksAnIdleClaim", func(t *testing.T) {
+		f := mk(t)
+		c := idleClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		f.SetLease(t, c.ClaimID, -time.Second)
+		if released, err := f.Stores.ConversationQueue.ReleaseExpiredClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID); err != nil || !released {
+			t.Fatalf("ReleaseExpiredClaimSystem = (%v, %v), want (true, nil)", released, err)
+		}
+		parkedIdle(t, f, c)
+	})
+
+	t.Run("BootReset_ParksAnIdleClaim", func(t *testing.T) {
+		f := mk(t)
+		c := idleClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)
+		if n, err := f.Stores.ConversationQueue.ResetProcessingConversations(ctx, claimLeaseExecutor, claimLeaseBootEpoch); err != nil || n != 1 {
+			t.Fatalf("ResetProcessingConversations = (%d, %v), want (1, nil)", n, err)
+		}
+		parkedIdle(t, f, c)
+	})
+
 	t.Run("Settle_ParksAQueuedStepACancelNeverReachedAndCancelsItsRun", func(t *testing.T) {
 		f := mk(t)
 		id, _ := f.StageStep(t)

@@ -5,9 +5,9 @@ import {
   completionKind,
   formatDurationMs,
   formatElapsed,
-  isActiveStatus,
   isConcluded,
   isFailedStatus,
+  isWorkingStatus,
   retryingAt,
   retryingAtLabel,
   workStartedAt,
@@ -184,7 +184,7 @@ function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
   // run on it, simply done.
   if (!run) return task.status === 'done' ? 'done' : 'queued'
   const s = run.Status
-  if (s === 'queued' || isActiveStatus(s)) return 'working'
+  if (s === 'queued' || isWorkingStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'
   // A concluded conversation means three things (lib/conversationStatus
   // completionKind): the work is over, a step handed off, or the work stopped

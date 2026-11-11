@@ -16,7 +16,7 @@ import "slices"
 // came through the display ladder, never on a raw column read.
 //
 //	queued | fetching | cloning | agent_starting |
-//	awaiting_credentials | running | open            (non-terminal)
+//	awaiting_credentials | idle | running | open     (non-terminal)
 //	failed                                           (terminal)
 //
 // The status says whether the transcript can be driven, and the one terminal
@@ -55,9 +55,10 @@ import "slices"
 // fails the lint. The two together are what closes the loop: the arrays are
 // not what component code reads.
 
-// The claim `phase` vocabulary: the setup/parked sub-states of a LIVE
-// engagement, stored on claims.phase and coalesced over the conversation's
-// stored status on display reads. Empty phase = the agent process is live.
+// The claim `phase` vocabulary: the setup, parked and waiting sub-states of a
+// LIVE engagement, stored on claims.phase and coalesced over the
+// conversation's stored status on display reads. Empty phase = the agent
+// process is live.
 const (
 	// ClaimPhaseFetching — assembling the task context the agent starts from.
 	ClaimPhaseFetching = "fetching"
@@ -68,6 +69,11 @@ const (
 	// ClaimPhaseAwaitingCredentials — parked with a published sidecar key,
 	// waiting on the control plane to seal this engagement's bundle.
 	ClaimPhaseAwaitingCredentials = "awaiting_credentials"
+	// ClaimPhaseIdle — the engagement's turn ended, and it is holding its
+	// claim and everything the claim holds while it waits for a person's
+	// message. Live (IsActiveConversationStatus) but not working
+	// (IsWorkingConversationStatus).
+	ClaimPhaseIdle = "idle"
 )
 
 // The displayed conversation statuses that are not claim phases: the two
@@ -97,14 +103,15 @@ func AllClaimPhases() []string {
 		ClaimPhaseCloning,
 		ClaimPhaseAgentStarting,
 		ClaimPhaseAwaitingCredentials,
+		ClaimPhaseIdle,
 	}
 }
 
-// IsClaimPhase reports whether status names a live engagement's setup/parked
-// sub-state rather than a conversation-level status.
+// IsClaimPhase reports whether status names a live engagement's sub-state
+// rather than a conversation-level status.
 func IsClaimPhase(status string) bool {
 	switch status {
-	case ClaimPhaseFetching, ClaimPhaseCloning, ClaimPhaseAgentStarting, ClaimPhaseAwaitingCredentials:
+	case ClaimPhaseFetching, ClaimPhaseCloning, ClaimPhaseAgentStarting, ClaimPhaseAwaitingCredentials, ClaimPhaseIdle:
 		return true
 	}
 	return false
@@ -302,9 +309,9 @@ type ConversationAwaitingPerson struct {
 }
 
 // IsActiveConversationStatus reports whether a conversation is in flight — claimed and setting
-// up or executing, occupying an executor slot. So: `running`, or any claim
-// phase. `queued` (waiting, counted as queue depth instead) and `open`
-// (parked) are excluded, as is every terminal.
+// up, executing, or waiting idle for a person's message, occupying an executor
+// slot. So: `running`, or any claim phase. `queued` (waiting, counted as queue
+// depth instead) and `open` (parked) are excluded, as is every terminal.
 //
 // It says what active IS rather than what it is not, which makes it
 // closed-world: the empty string and any unrecognized value classify as NOT
@@ -314,4 +321,14 @@ type ConversationAwaitingPerson struct {
 // inflates the fleet console's live-slot number rather than failing loudly.
 func IsActiveConversationStatus(status string) bool {
 	return status == StatusRunning || IsClaimPhase(status)
+}
+
+// IsWorkingConversationStatus reports whether an agent is working on the
+// conversation: it is active and not waiting idle for a person. Every light,
+// count and filter that answers "is an agent working" reads this, so an idle
+// engagement, which holds a live claim and an executor slot, is not lit as
+// working, not held as working by a close, and needs the person when it holds
+// an unresolved deliverable.
+func IsWorkingConversationStatus(status string) bool {
+	return IsActiveConversationStatus(status) && status != ClaimPhaseIdle
 }

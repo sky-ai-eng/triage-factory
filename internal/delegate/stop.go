@@ -381,13 +381,15 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	//
 	// The plain stop verb skips an already-parked conversation: re-stopping a
 	// parked row is a gesture with nothing to stop, so there is nothing to
-	// record. A lifecycle teardown is the opposite — it reaches parked
+	// record. An engagement waiting idle for a person reads the same way: its
+	// turn had ended, so the stop interrupts no work. A lifecycle teardown is
+	// the opposite — it reaches parked
 	// conversations routinely, because every caller enumerates non-terminal
 	// runs and `open` is non-terminal — and for those it is the first and
 	// last thing the transcript will ever say about why the work ended. Skip
 	// it there and a swiped or closed task silently ends a conversation with
 	// no explanation at all, which is the case this note exists for.
-	if cancelBlueprint || conv.Status != domain.StatusOpen {
+	if cancelBlueprint || (conv.Status != domain.StatusOpen && conv.Status != domain.ClaimPhaseIdle) {
 		s.insertStopNote(orgID, conversationID, userID, note)
 	}
 
