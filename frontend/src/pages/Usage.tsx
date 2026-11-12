@@ -273,14 +273,15 @@ function ruleBars(rows: UsageRuleBucket[] | undefined): BarDatum[] {
 // --- instrument primitives (borderless; separated by light + hairlines) ---
 
 const tooltipStyle = {
-  background: 'rgba(255,255,255,0.9)',
-  backdropFilter: 'blur(12px)',
-  border: '1px solid rgba(255,255,255,0.7)',
-  borderRadius: '6px',
-  fontSize: '11px',
+  background: 'var(--color-raised)',
+  border: '1px solid var(--color-line-2)',
+  borderRadius: 'var(--radius-float)',
+  fontSize: 'var(--text-reported)',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-  boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+  boxShadow: 'var(--shadow-float)',
 } as const
+const tooltipLabelStyle = { color: 'var(--color-ink-3)' } as const
+const tooltipCursor = { stroke: 'var(--color-line-2)' } as const
 
 const shimmer = 'animate-pulse bg-tint-3 rounded'
 
@@ -657,6 +658,8 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
           <YAxis hide />
           <Tooltip
             contentStyle={tooltipStyle}
+            labelStyle={tooltipLabelStyle}
+            cursor={tooltipCursor}
             formatter={(value) => [fmtUSD(Number(value)), 'spend']}
             labelFormatter={(value) => dayLabel(Number(value))}
           />
@@ -816,6 +819,8 @@ function StackedTrace({
           <YAxis hide />
           <Tooltip
             contentStyle={tooltipStyle}
+            labelStyle={tooltipLabelStyle}
+            cursor={tooltipCursor}
             formatter={(value, name) => [fmtUSD(Number(value)), String(name)]}
             labelFormatter={(value) => dayLabel(Number(value))}
           />
