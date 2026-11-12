@@ -29,7 +29,7 @@ func TestTaskClaim_ReassignHappyPath(t *testing.T) {
 	taskID := seedLifecycleTask(t, s.db, "re", lifecycleTaskOpts{claimedByUserID: fromUser})
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
-		map[string]any{"target_user_id": toUser})
+		withTaskVersion(t, s, taskID, map[string]any{"target_user_id": toUser}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -80,7 +80,7 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 			execSQL(t, s.db, `INSERT INTO users (id, display_name) VALUES (?, 'Other')`, otherUserID)
 			taskID := seedLifecycleTask(t, s.db, tc.name, tc.opts)
 			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
-				map[string]any{"target_user_id": tc.target})
+				withTaskVersion(t, s, taskID, map[string]any{"target_user_id": tc.target}))
 			if rec.Code != http.StatusConflict {
 				t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -97,13 +97,13 @@ func TestTaskClaim_RejectsBlankTarget(t *testing.T) {
 
 	for _, blank := range []string{"", "   "} {
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
-			map[string]any{"target_user_id": blank})
+			withTaskVersion(t, s, taskID, map[string]any{"target_user_id": blank}))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("target_user_id=%q: status = %d, want 400; body=%s", blank, rec.Code, rec.Body.String())
 		}
 	}
 	// Omitting it entirely is the self-claim, and still works.
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{})); rec.Code != http.StatusOK {
 		t.Fatalf("self-claim = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
@@ -115,7 +115,7 @@ func TestTaskClaim_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	taskID := seedLifecycleTask(t, s.db, "rei", lifecycleTaskOpts{claimedByUserID: runmode.LocalDefaultUserID})
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
-		map[string]any{"target_user_id": runmode.LocalDefaultUserID})
+		withTaskVersion(t, s, taskID, map[string]any{"target_user_id": runmode.LocalDefaultUserID}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -167,7 +167,7 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 
 	t.Run("non_claimant_non_admin_member_refused", func(t *testing.T) {
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"target_user_id": bystander}
+		body := withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": bystander})
 		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", bystander, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 
 	t.Run("team_admin_override_succeeds", func(t *testing.T) {
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"target_user_id": bystander}
+		body := withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": bystander})
 		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.admin, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
@@ -200,7 +200,7 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 
 	t.Run("current_claimant_handoff_succeeds", func(t *testing.T) {
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"target_user_id": bystander}
+		body := withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": bystander})
 		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
@@ -225,7 +225,7 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 		pgtest.MustExec(t, r.h.AdminDB,
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, teamB)
 
-		body := map[string]any{"target_user_id": crossTarget}
+		body := withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": crossTarget})
 		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.admin, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
@@ -266,7 +266,7 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 	t.Run("target_with_no_relevant_team_refused", func(t *testing.T) {
 		unrelated := pgtest.SeedUser(t, r.h, "unrelated-target")
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"target_user_id": unrelated}
+		body := withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": unrelated})
 		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()

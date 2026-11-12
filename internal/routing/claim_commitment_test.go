@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -143,7 +144,7 @@ func TestFire_UserClaimMidFireWinsAndTheRunStillLands(t *testing.T) {
 	// A human takes the task over before the fire commits. tryAutoDelegate's
 	// cross-team guard only reads the BOT claim, so the trigger proceeds and
 	// the stamp is what has to refuse.
-	if ok, err := testTaskStore(s.db).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID); err != nil || !ok {
+	if ok, err := testTaskStore(s.db).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, testTaskStore(s.db), runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 	}
 
@@ -176,7 +177,7 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	// Clear the claim the fire wrote so the deferral's own stamp is what the
 	// assertion sees — this is the "user requeued while the run stayed live"
 	// state, which a NEW event legitimately re-commits.
-	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, dbtest.TaskVersion(t, sqlitestore.New(s.db).Tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
 	s.task.ClaimedByAgentID = ""
@@ -230,7 +231,7 @@ func TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
 	if fired := mustAutoDelegate(t, s.router, s.task, s.trigger, s.entity, s.event, runmode.LocalDefaultTeamID); !fired {
 		t.Fatal("expected the first trigger to fire")
 	}
-	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, dbtest.TaskVersion(t, sqlitestore.New(s.db).Tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
 	s.task.ClaimedByAgentID = ""
@@ -290,7 +291,7 @@ func TestFiringWorker_DoesNotReStampAClearedClaim(t *testing.T) {
 		t.Fatalf("record queued event: %v", err)
 	}
 	enqueueFiring(t, s.db, s.entity, s.task.ID, s.trigger.ID, queuedEvent)
-	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, dbtest.TaskVersion(t, sqlitestore.New(s.db).Tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
 	// End the run so the task's gate opens and the firing is claimable.

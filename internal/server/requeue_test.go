@@ -244,7 +244,7 @@ func TestRequeue_ConcludedRun(t *testing.T) {
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -295,7 +295,7 @@ func TestTaskPatch_EndingATask(t *testing.T) {
 			prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": status})
+				withTaskVersion(t, s, taskID, map[string]any{"status": status}))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
@@ -359,7 +359,7 @@ func TestTaskClaim_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/claim",
-		map[string]any{})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000009", map[string]any{}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -417,7 +417,7 @@ func TestTaskDelegate_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/delegate",
-		map[string]any{"blueprint_id": "any"})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000007", map[string]any{"blueprint_id": "any"}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -469,7 +469,7 @@ func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 			}
 
 			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/claim",
-				map[string]any{})
+				withTaskVersion(t, s, "00000000-0000-4000-8000-000000000012", map[string]any{}))
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -527,7 +527,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed terminal task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/delegate",
-			map[string]any{"blueprint_id": "any"})
+			withTaskVersion(t, s, "00000000-0000-4000-8000-000000000011", map[string]any{"blueprint_id": "any"}))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -568,7 +568,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/delegate",
-			map[string]any{"blueprint_id": "any"})
+			withTaskVersion(t, s, "00000000-0000-4000-8000-000000000006", map[string]any{"blueprint_id": "any"}))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -614,7 +614,7 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/delegate",
-		map[string]any{"blueprint_id": "any"})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000005", map[string]any{"blueprint_id": "any"}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}
@@ -663,7 +663,7 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/00000000-0000-4000-8000-000000000010",
-		map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000010", map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
 	}
@@ -722,9 +722,9 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 
 	// A blueprint id that won't resolve: the claim moves before the spawn,
 	// which then fails with a 422.
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", withTaskVersion(t, s, "00000000-0000-4000-8000-000000000004", map[string]any{
 		"blueprint_id": "no-such-prompt",
-	})
+	}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
 	}
@@ -793,7 +793,7 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/claim",
-		map[string]any{})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000003", map[string]any{}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -827,7 +827,7 @@ func TestHandleRequeue_404OnMissingTask(t *testing.T) {
 func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 	s := newTestServer(t)
 
-	ok, err := s.tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task")
+	ok, err := s.tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task", dbtest.TaskVersion(t, s.tasks, runmode.LocalDefaultOrgID, "no-such-task"))
 	if err != nil {
 		t.Fatalf("RequeueTask: %v", err)
 	}
@@ -865,7 +865,7 @@ func TestHandleRequeue_ClearsClaimColumns(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/requeue", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/requeue", withTaskVersion(t, s, "00000000-0000-4000-8000-000000000013", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1033,7 +1033,7 @@ func TestRequeue_StopsTheRunWorkingTheTask(t *testing.T) {
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "requeue_live")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

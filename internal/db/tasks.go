@@ -379,6 +379,18 @@ func taskKeyTime(t *time.Time) string {
 //     state hole — the row can change in between — so these predicates are
 //     the enforcement; a handler's pre-read only buys the common case a more
 //     specific answer.
+//   - The writes a person makes take the task version the person read
+//     (domain.Task.Version) as their last argument: CloseByUser, SnoozeTask,
+//     ClearSnooze, AdvanceStatusForUser, RequeueTask, and the claim
+//     mutations a person drives (TakeoverClaimFromAgent, ClaimQueuedForUser,
+//     ReassignClaimToUser, HandoffAgentClaim). The comparison is one more
+//     predicate on the write's own UPDATE, and a task at another version
+//     answers ErrTaskVersion with nothing written, ahead of every other
+//     refusal, since those would judge a row the caller never saw. Every
+//     other writer is the system's and takes none.
+//   - Every task writer renders its SET list through TaskSetSQL, so a write
+//     that changes one of TaskVersionColumns raises the version, and one
+//     that doesn't leaves it, in every writer of both dialects.
 //
 // Returned-row shape: Get's point read projects a task joined to
 // its entity (title, url, source fields, the open-subtask and Slack-message
@@ -580,17 +592,20 @@ type TaskStore interface {
 	SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
 
 	// AdvanceStatusForUser re-asserts a user-claimed task's stage. Guards:
+	//   - task must be at version
 	//   - task must be claimed by userID
 	//   - current status must be in_progress
 	//   - newStatus must be in_progress
 	// The claim itself is what lands a task in progress, so this is the
 	// idempotent arm of that transition rather than the transition: a task
-	// whose claim the caller holds is already there. Refuses all other
+	// whose claim the caller holds is already there, and the write changes
+	// nothing, so the version stays where it is. Refuses all other
 	// shapes — terminal transitions (done / dismissed) go through Close +
 	// handleTaskPatch, and requeue clears the claim entirely. Returns
 	// ok=true when the update actually matched a row; false means a guard
-	// tripped (caller surfaces 409).
-	AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error)
+	// tripped (caller surfaces 409), and ErrTaskVersion a task at another
+	// version.
+	AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string, version int64) (bool, error)
 
 	// CloseByUser closes a task on a person's word: status is "dismissed"
 	// (walked away) or "done" (resolved), and the close reason is
@@ -601,36 +616,36 @@ type TaskStore interface {
 	// ErrInvalidUserCloseStatus and writes nothing.
 	//
 	// A closed task takes no second close: the UPDATE carries the status
-	// predicate, so a row that went done/dismissed since the caller read it
-	// answers ErrNoSuchTask, as a missing id does, with nothing written. That
-	// predicate is the only thing standing between two concurrent closes and
-	// a rewritten closed_at / close_reason. A caller that read the task
-	// before writing maps ErrNoSuchTask to "already closed".
-	CloseByUser(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
+	// predicate, so a row that went done/dismissed at the version the caller
+	// read answers ErrNoSuchTask, as a missing id does, with nothing written.
+	// A task at another version answers ErrTaskVersion. A caller that read
+	// the task before writing maps ErrNoSuchTask to "already closed".
+	CloseByUser(ctx context.Context, orgID, taskID, status string, version int64) (domain.Task, error)
 
 	// SnoozeTask parks a task until the given wake time: status 'snoozed'
 	// with snooze_until set. Snooze is queue-only ("snoozed ↔ both claim
 	// cols NULL"), and a closed task is never parked, so the UPDATE carries
 	// both predicates and returns ok=false when either refuses — a claimed
-	// task, or one that went done/dismissed since the caller read it — with
-	// nothing written. Handlers map ok=false to 409.
-	SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time) (ok bool, err error)
+	// task, or a closed one — with nothing written. Handlers map ok=false to
+	// 409. A task at another version answers ErrTaskVersion.
+	SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time, version int64) (ok bool, err error)
 
 	// ClearSnooze wakes a snoozed task early: status 'snoozed' → 'queued'
 	// with snooze_until cleared. Guarded on the current status: a clear
 	// against a task that isn't snoozed returns ok=false rather than
 	// dragging an in_progress or closed row back into the queue. Handlers
-	// map ok=false to 409.
-	ClearSnooze(ctx context.Context, orgID, taskID string) (ok bool, err error)
+	// map ok=false to 409. A task at another version answers ErrTaskVersion.
+	ClearSnooze(ctx context.Context, orgID, taskID string, version int64) (ok bool, err error)
 
 	// RequeueTask sends a task back to the queue, whatever its status. It
 	// clears the claim and the source_status the claim recorded with it, the
 	// close, and any held close: putting the task back in the queue overrides
 	// the event that resolved it, as reopening a closed task does, and the
 	// requeue's handler ends the conversations the close waited on. Returning
-	// it to the queue is the whole job, so there is nothing to refuse:
-	// ok=false means only that no such row exists.
-	RequeueTask(ctx context.Context, orgID, taskID string) (ok bool, err error)
+	// it to the queue is the whole job, so the only state it refuses is a
+	// version the caller did not read (ErrTaskVersion): ok=false means only
+	// that no such row exists.
+	RequeueTask(ctx context.Context, orgID, taskID string, version int64) (ok bool, err error)
 
 	// RecordEvent inserts into the task_events junction (task_id,
 	// event_id, kind). Idempotent on (task_id, event_id).
@@ -671,7 +686,12 @@ type TaskStore interface {
 	// wrote on HandoffChanged, and the row as it stands on HandoffNoOp,
 	// both in the bare projection every TaskStore write returns. It is the
 	// zero value on HandoffRefused.
-	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (HandoffResult, domain.Task, error)
+	//
+	// A task at another version than the caller read is refused with
+	// ErrTaskVersion, the no-op included: a re-delegation stops and replaces
+	// the task's runs, which a caller that has not seen the task's latest
+	// state must not do.
+	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string, version int64) (HandoffResult, domain.Task, error)
 
 	// ResolveClaimTeam returns the team a user→bot handoff WOULD
 	// consolidate the task onto, without mutating anything — the same
@@ -689,21 +709,23 @@ type TaskStore interface {
 
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
 	// to a user claim, landing the row in_progress. Race-safe: guards on
-	// the bot still holding the claim AND no other user owning it. Returns
-	// ok=true on success; false means the race was lost (caller surfaces
-	// 409).
+	// the version the caller read, the bot still holding the claim AND no
+	// other user owning it. Returns ok=true on success; false means the race
+	// was lost (caller surfaces 409), and ErrTaskVersion a task at another
+	// version.
 	// On success the owning team_id consolidates to the acting team
 	// derived from userID (see ClaimQueuedForUser), and source_status
 	// records the entity snapshot's state the same way. With no acting
 	// team it refuses with ErrNoActiveClaimTeam, as ClaimQueuedForUser
 	// does.
-	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error)
+	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error)
 
 	// ClaimQueuedForUser is the user-claim handler's atomic "take
 	// this task off the queue" — succeeds only on (queued|snoozed)
-	// + both claim cols NULL, and lands the row in_progress, which is
-	// what taking it off the queue means. Returns ok=true when the claim
-	// landed; false means another claimant won or the task is closed.
+	// + both claim cols NULL, at the version the caller read, and lands the
+	// row in_progress, which is what taking it off the queue means. Returns
+	// ok=true when the claim landed; false means another claimant won or the
+	// task is closed, and ErrTaskVersion a task at another version.
 	//
 	// On success the owning team_id consolidates to the acting team:
 	// the claimer's active team in the task's visibility set
@@ -719,7 +741,7 @@ type TaskStore interface {
 	// status and assignee the task's Jira or Linear entity snapshot holds,
 	// which a requeue reads to put the issue back. NULL for any
 	// other source.
-	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
+	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error)
 
 	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the
 	// other claim mutations don't cover: an atomic CAS that requires the
@@ -731,7 +753,8 @@ type TaskStore interface {
 	// the claim moved; false means either guard tripped — a genuine race
 	// (someone else changed the claim/status between the caller's read and
 	// this call) or toUserID sharing no team with the task — and the
-	// caller re-reads to tell the two apart before surfacing 409. It does
+	// caller re-reads to tell the two apart before surfacing 409. A task at
+	// another version than the caller read answers ErrTaskVersion. It does
 	// NOT accept an unclaimed or bot-claimed task as a valid "from" state —
 	// those go through ClaimQueuedForUser / TakeoverClaimFromAgent
 	// instead, so the caller pre-checks task.ClaimedByUserID != "" before
@@ -759,7 +782,7 @@ type TaskStore interface {
 	// cross-team handoff/override even though both guards above already
 	// authorized it in Go. This method stays on the interface for
 	// conformance testing and same-team callers where RLS naturally holds.
-	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
+	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -1020,7 +1043,7 @@ type TaskStore interface {
 	// admin pool (BYPASSRLS) in Postgres — see the doc comment on
 	// ReassignClaimToUser for why the reassign handler needs this instead
 	// of the app-pool variant every other request-path caller uses.
-	ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
+	ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error)
 
 	// OwnerTeamForLatestTaskInTypesSystem returns the team_id of the most
 	// recent task on the entity whose event_type is in eventTypes AND whose

@@ -180,6 +180,11 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		if d := held(t, stores.Tasks, orgID, working); d == nil || d.EventID != second {
 			t.Errorf("held close = %+v, want event %s", d, second)
 		}
+		// A held close is the system's bookkeeping: it changes nothing a
+		// person acts on, so a person's pending write on the task stays good.
+		if v := TaskVersion(t, stores.Tasks, orgID, working); v != 1 {
+			t.Errorf("held task version = %d, want 1 (unchanged by the holds)", v)
+		}
 
 		out, err = stores.Tasks.CloseOrHoldSystem(ctx, orgID, idle, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, idleEvent)
 		if err != nil {
@@ -191,6 +196,9 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 		if s := seed.TaskStatus(t, idle); s != "done" {
 			t.Errorf("idle task status = %q, want done", s)
+		}
+		if v := TaskVersion(t, stores.Tasks, orgID, idle); v != 2 {
+			t.Errorf("closed task version = %d, want 2", v)
 		}
 		if n := seed.CloseAuditCount(t, idle); n != 1 {
 			t.Errorf("idle task close audit rows = %d, want 1", n)
@@ -328,11 +336,11 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 				t.Fatalf("%s: CloseOrHoldSystem = %+v (err %v), want held", door, out, err)
 			}
 			if door != "requeue" {
-				if _, err := stores.Tasks.CloseByUser(ctx, orgID, taskID, "dismissed"); err != nil {
+				if _, err := stores.Tasks.CloseByUser(ctx, orgID, taskID, "dismissed", TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil {
 					t.Fatalf("%s: CloseByUser = %v", door, err)
 				}
 			}
-			ok, err := stores.Tasks.RequeueTask(ctx, orgID, taskID)
+			ok, err := stores.Tasks.RequeueTask(ctx, orgID, taskID, TaskVersion(t, stores.Tasks, orgID, taskID))
 			if err != nil || !ok {
 				t.Fatalf("%s = %v (err %v), want the task back in the queue", door, ok, err)
 			}

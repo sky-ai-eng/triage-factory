@@ -160,7 +160,7 @@ func TestViewer_EventHandlerCreate_Forbidden(t *testing.T) {
 func TestViewer_TaskPatch_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
 	taskID := r.seedTask(t)
-	body := map[string]any{"status": "dismissed"}
+	body := withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"status": "dismissed"})
 
 	rec := httptest.NewRecorder()
 	req := r.req(http.MethodPatch, "/api/tasks/"+taskID, r.viewer, body)
@@ -185,13 +185,13 @@ func TestViewer_TaskClaim_Forbidden(t *testing.T) {
 	taskID := r.seedTask(t)
 
 	rec := httptest.NewRecorder()
-	req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.viewer, map[string]any{})
+	req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.viewer, withTaskVersionIn(t, r.s, r.orgID, taskID, nil))
 	req.SetPathValue("id", taskID)
 	r.s.handleTaskClaim(rec, req)
 	assertViewOnly403(t, rec, "viewer claim")
 
 	rec = httptest.NewRecorder()
-	req = r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, map[string]any{})
+	req = r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, withTaskVersionIn(t, r.s, r.orgID, taskID, nil))
 	req.SetPathValue("id", taskID)
 	r.s.handleTaskClaim(rec, req)
 	if rec.Code == http.StatusForbidden {
