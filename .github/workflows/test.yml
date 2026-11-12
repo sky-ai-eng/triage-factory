@@ -160,8 +160,9 @@ jobs:
   # tests pass there too; the Linux job cannot see a Windows-only break (path
   # separators, file locking, process spawn, build-tagged files). Only what the
   # Windows port needs is mirrored from `test`: no staged gh binary (the
-  # Linux sandbox image's pin), no image prefetch, and no Postgres leg (pgtest
-  # skips when Docker is unavailable, as it is on this runner). No -race: the
+  # Linux sandbox image's pin), no image prefetch, and no Postgres leg (the
+  # runner's Docker runs Windows containers only, so the step below stops it
+  # and the container-backed tests skip). No -race: the
   # detector needs cgo and a C toolchain, and `test` already runs it over the
   # same code. Same docs-only skip as `test`, so the job still reports success
   # on a docs-only PR.
@@ -227,6 +228,17 @@ jobs:
       - name: Go vet
         if: steps.docs.outputs.only != 'true'
         run: go vet ./...
+
+      # windows-latest ships a Docker daemon in Windows-container mode. It
+      # answers the testcontainers health probe but cannot run the Linux
+      # Postgres and SeaweedFS images, so those suites would fail at bring-up
+      # instead of skipping. Stopped, the daemon is unreachable and they skip,
+      # as they do on a machine with no Docker.
+      - name: Stop the Windows-container Docker daemon
+        if: steps.docs.outputs.only != 'true'
+        shell: pwsh
+        run: |
+          if (Get-Service docker -ErrorAction SilentlyContinue) { Stop-Service docker -Force }
 
       # Same gotestsum rerun backstop as `test`, minus -race. The 30m timeout
       # is wider than Linux's 20m because process spawn and file I/O are slower
