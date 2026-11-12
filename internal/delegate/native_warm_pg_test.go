@@ -364,6 +364,47 @@ func TestWarmClaim_KeepsTheClaimAfterAPersonsTurn(t *testing.T) {
 	}
 }
 
+// With TF_SNAPSHOT_INTERVAL_SEC=0 and a blob store, a person's turn still keeps
+// its claim warm: the interval governs only the checkpoints at batch
+// boundaries, and the turn-end capture the window waits on is taken anyway.
+// The blob it stored is that capture, at the turn's newest row, not a park's.
+func TestWarmClaim_ZeroSnapshotIntervalStillKeepsTheClaim(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Minute, turns: []gateTurn{{text: "fixed it"}},
+		beforeStart: func(f *warmEngagement) { f.x.SetSnapshotInterval(0) }})
+	f.awaitWarm(t, 1)
+
+	f.assertConcluded(t, domain.ConversationOutcomeContinue, "fixed it")
+	if released, _, _ := f.claimRelease(t); released {
+		t.Error("the claim was released; it should be kept warm")
+	}
+	if f.jailStopped.Load() {
+		t.Error("the jail was stopped while the claim is warm")
+	}
+
+	rows, err := f.stores.Conversations.ListForAssemblySystem(context.Background(), f.orgID, f.conversationID)
+	if err != nil {
+		t.Fatalf("list transcript: %v", err)
+	}
+	var answer *float64
+	for _, r := range rows {
+		if r.Role == "assistant" && r.Content == "fixed it" {
+			key := float64(r.ID)
+			if r.Seq != nil {
+				key = *r.Seq
+			}
+			answer = &key
+		}
+	}
+	if answer == nil {
+		t.Fatal("the turn's answer is not in the transcript")
+	}
+	man, _ := unpackSnapshotBlob(t, f.blobs, snapshotKey(f.orgID, f.keyID))
+	if man.TranscriptPosition == nil || *man.TranscriptPosition != *answer || man.ConversationID != f.conversationID {
+		t.Errorf("manifest position = (%v, %q), want (%v, %q): the turn-end capture at the turn's answer",
+			man.TranscriptPosition, man.ConversationID, *answer, f.conversationID)
+	}
+}
+
 // A second message within the window resumes the conversation as any message
 // does, and the turn runs on the same claim, in the same sandbox.
 func TestWarmClaim_SecondMessageRunsOnTheSameClaim(t *testing.T) {

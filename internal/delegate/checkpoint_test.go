@@ -49,21 +49,88 @@ func TestParseSnapshotInterval(t *testing.T) {
 	}
 }
 
-// TestCheckpoint_ZeroIntervalTakesNone: TF_SNAPSHOT_INTERVAL_SEC=0 disables
-// checkpoints outright — no checkpointer, and the engagement runs the hooks it
-// always ran, with no barrier and no batch hook.
-func TestCheckpoint_ZeroIntervalTakesNone(t *testing.T) {
-	f := newCheckpointFixture(t, "r-ckpt-disabled")
+// TestCheckpoint_ZeroIntervalStillBuildsACheckpointer: TF_SNAPSHOT_INTERVAL_SEC=0
+// turns off the checkpoints at batch boundaries, not the checkpointer. The
+// turn-end capture a warm claim waits on is the checkpointer's, so an
+// engagement with a blob store, a claim and a tree still gets one.
+func TestCheckpoint_ZeroIntervalStillBuildsACheckpointer(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-zero-built")
 	f.s.SetSnapshotInterval(0)
-	if c := f.start(); c != nil {
-		t.Fatal("a zero interval must take no checkpoints")
+	c := f.start()
+	if c == nil {
+		t.Fatal("a zero interval must still build a checkpointer")
 	}
-	hooks := checkpointHooks(nil, agentloop.Hooks{})
+	defer c.stop()
+	if f.s.checkpointerFor(f.conversationID) != c {
+		t.Error("the checkpointer must be registered under its conversation")
+	}
+}
+
+// TestCheckpoint_ZeroIntervalLeavesTheHooksAsTheyWere: with a zero interval
+// the engagement runs the hooks it would run with no checkpointer, with no
+// barrier and no batch hook.
+func TestCheckpoint_ZeroIntervalLeavesTheHooksAsTheyWere(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-zero-hooks")
+	f.s.SetSnapshotInterval(0)
+	c := f.start()
+	defer c.stop()
+	hooks := checkpointHooks(c, agentloop.Hooks{})
 	if hooks.BeforeToolCall != nil || hooks.AfterToolCall != nil || hooks.AfterToolBatch != nil {
-		t.Error("with no checkpointer the engagement's hooks must be left exactly as they were")
+		t.Error("with a zero interval the engagement's hooks must be left exactly as they were")
 	}
-	if f.s.checkpointerFor(f.conversationID) != nil {
-		t.Error("nothing may be registered for the renewal to report")
+}
+
+// TestCheckpoint_ZeroIntervalReportsNoAge: an engagement that takes no
+// boundary checkpoints has no checkpoint age for the renewal to stamp, even
+// once a turn-end capture has covered its tree.
+func TestCheckpoint_ZeroIntervalReportsNoAge(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-zero-age")
+	f.s.SetSnapshotInterval(0)
+	c := f.start()
+	defer c.stop()
+	if age, ok := f.s.checkpointerFor(f.conversationID).age(); ok {
+		t.Errorf("checkpoint age = %s, want no reading", age)
+	}
+	if !c.checkpointTurnEnd(1) {
+		t.Fatal("the turn-end capture did not cover the tree")
+	}
+	if age, ok := f.s.checkpointerFor(f.conversationID).age(); ok {
+		t.Errorf("checkpoint age after a turn-end capture = %s, want no reading", age)
+	}
+}
+
+// TestCheckpoint_ZeroIntervalTakesNoneAtABoundary: through the real loop, a
+// batch that ran a tool in the jail is followed by no checkpoint. Wired, the
+// batch hook would read a zero interval as always elapsed and take one at
+// every boundary.
+func TestCheckpoint_ZeroIntervalTakesNoneAtABoundary(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-zero-boundary")
+	f.s.SetSnapshotInterval(0)
+	c := f.start()
+	tools := &treeToolHost{root: f.tree}
+	provider := &scriptedGateProvider{turns: []gateTurn{
+		{calls: []domain.ToolCall{bashCall("c1", "write one.txt")}},
+		{calls: []domain.ToolCall{bashCall("c2", "write two.txt")}},
+		{text: "done"},
+	}}
+
+	result := f.runEngine(t, context.Background(), c, provider, tools, agentloop.Params{})
+	if result.Kind != agentloop.ResultConcluded {
+		t.Fatalf("result = %v (err %v), want concluded", result.Kind, result.Err)
+	}
+	c.wg.Wait()
+	c.stop()
+
+	if got := tools.commands(); len(got) != 2 {
+		t.Fatalf("the jail ran %v, want both writes: without them there was no boundary to checkpoint at", got)
+	}
+	for _, o := range checkpointOutcomes {
+		if got := f.outcomes(o); got != 0 {
+			t.Errorf("%s checkpoints = %d, want none", o, got)
+		}
+	}
+	if f.blobExists(t) {
+		t.Error("a checkpoint was stored at a batch boundary")
 	}
 }
 
@@ -752,7 +819,7 @@ func TestRenewClaimLease_ReportsTheCheckpointAge(t *testing.T) {
 			s := leaseTestSpawner(t, fake, 10*time.Millisecond, time.Second, 90*time.Second)
 			conv := leaseTestConversation()
 			if tc.checkpoints {
-				s.checkpointers = map[string]*checkpointer{conv.ID: {s: s, coveredAt: time.Now().Add(-90 * time.Second)}}
+				s.checkpointers = map[string]*checkpointer{conv.ID: {s: s, interval: DefaultSnapshotInterval, coveredAt: time.Now().Add(-90 * time.Second)}}
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -844,7 +911,14 @@ func (f checkpointFixture) blobExists(t *testing.T) bool {
 // blob reads the key's blob back: its manifest and its scratch files.
 func (f checkpointFixture) blob(t *testing.T) (snapshotManifest, map[string]string) {
 	t.Helper()
-	rc, err := f.s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, f.keyID))
+	return unpackSnapshotBlob(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.keyID))
+}
+
+// unpackSnapshotBlob reads the blob at key back: its manifest and its scratch
+// files.
+func unpackSnapshotBlob(t *testing.T, blobs storage.Storage, key string) (snapshotManifest, map[string]string) {
+	t.Helper()
+	rc, err := blobs.Get(context.Background(), key)
 	if err != nil {
 		t.Fatalf("get blob: %v", err)
 	}
