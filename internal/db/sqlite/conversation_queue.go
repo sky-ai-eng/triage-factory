@@ -197,11 +197,24 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // names whatever its status, why only the task's live conversation is
 // drivable at all, and why a task still owing a memory drives nothing — is
 // the Postgres twin's; this is the same predicate in the other dialect.
-var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
-	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
-	        AND r.blueprint_step_index = br.current_step_index))
+var blueprintDrivableSQL = `(` + blueprintStepDrivableSQL + `
 	   AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `)
 	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
+
+// blueprintStepDrivableSQL and orphanedConversationSQL are the Postgres twins'
+// predicates in this dialect: the blueprint clause of the claim gate, and an
+// orphan as that clause's refusal, less what the settlement and a live claim's
+// holder own.
+const blueprintStepDrivableSQL = `(r.blueprint_run_id IS NULL
+	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
+	        AND r.blueprint_step_index = br.current_step_index))`
+
+const orphanedConversationSQL = `r.status IS NULL
+	  AND r.blueprint_run_id IS NOT NULL
+	  AND NOT COALESCE(` + blueprintStepDrivableSQL + `, 0)
+	  AND r.stop_requested_at IS NULL
+	  AND NOT (br.status = 'running' AND br.cancel_requested = 1)
+	  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)`
 
 // taskLiveConversationSQL is the SQLite spelling of the conversation that owns
 // the task's tree: the newest row of liveTopLevelConversationSQL
@@ -766,97 +779,75 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 	return out, rows.Err()
 }
 
-func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedStepCheck, error) {
-	// Boot self-heal: park child conversations left mid-flight under a
-	// blueprint_run that is already terminal. The boot reset beside it
-	// releases claims and writes no status, and a child alive under a
-	// terminal parent will never be claimed (ClaimNextConversation gates on a
-	// running parent), so without this it sits mid-flight forever —
-	// the dispatcher treats it as live work and its worktree pins the feature
-	// branch, requeuing any sibling fetch into a forever-failing loop.
-	//
-	// `open`, not a terminal: nothing about an orphan failed, and nothing
-	// about it concluded either. Read the park as "stopped without
-	// concluding", NOT as "resumable" — its blueprint is terminal, so the
-	// claim gate refuses it and no resume path will wake it. The scope is
-	// status IS NULL alone (mid-flight is exactly what "still looks live"
-	// means); an already-parked orphan is already in the state this writes,
-	// and re-stamping it every boot would just churn the row and its
-	// snapshot-retention clock.
-	// Any active claim on a parked row releases as 'cancelled' with it — the
-	// engagement was ended from outside, which is what the claim outcome
-	// vocabulary calls a cancellation.
-	var count int
+func (s *conversationQueueStore) ParkOrphanedConversationsSystem(ctx context.Context) ([]db.OrphanedConversation, error) {
+	// One IMMEDIATE transaction holds the write lock from the read to the
+	// last park, so nothing changes a row between the two.
+	var out []db.OrphanedConversation
 	err := inTx(ctx, s.conn, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE conversations
-			SET status = 'open',
-			    parked_at = COALESCE(parked_at, ?),
-			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-			    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
-			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
-			WHERE status IS NULL
-			  AND blueprint_run_id IN (
-			      SELECT id FROM blueprint_runs
-			      WHERE status IN ('completed','aborted','failed','cancelled')
-			  )
-		`, time.Now().UTC(), "Stopped: owning blueprint run reached a terminal state")
+		rows, err := q.QueryContext(ctx, `
+			SELECT r.id, r.org_id, r.blueprint_run_id, r.blueprint_step_index,
+			       br.status, br.cancel_requested, br.current_step_index
+			FROM conversations r
+			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			WHERE `+orphanedConversationSQL+`
+			ORDER BY r.id
+		`)
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
+		for rows.Next() {
+			var o db.OrphanedConversation
+			var step sql.NullInt64
+			if err := rows.Scan(&o.ConversationID, &o.OrgID, &o.BlueprintRunID, &step,
+				&o.RunStatus, &o.RunCancelRequested, &o.RunCurrentStepIndex); err != nil {
+				rows.Close()
+				return err
+			}
+			if step.Valid {
+				v := int(step.Int64)
+				o.StepIndex = &v
+			}
+			out = append(out, o)
+		}
+		err = rows.Err()
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
 		if err != nil {
 			return err
 		}
-		count = int(n)
-		if count == 0 {
-			return nil
+		now := time.Now().UTC()
+		for _, o := range out {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE conversations
+				SET status = 'open',
+				    parked_at = COALESCE(parked_at, ?),
+				    park_reason = ?,
+				    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+				WHERE id = ?
+			`, now, string(o.ParkReason()), o.ParkSummary(), o.ConversationID); err != nil {
+				return err
+			}
 		}
-		_, err = q.ExecContext(ctx, `
-			UPDATE claims SET released_at = ?, outcome = 'cancelled'
-			WHERE released_at IS NULL
-			  AND conversation_id IN (
-			      SELECT id FROM conversations
-			      WHERE status = 'open'
-			        AND blueprint_run_id IN (
-			            SELECT id FROM blueprint_runs
-			            WHERE status IN ('completed','aborted','failed','cancelled')
-			        )
-			  )
-		`, time.Now().UTC())
-		return err
+		return nil
 	})
 	if err != nil {
-		return 0, db.OrphanedStepCheck{}, err
+		return nil, err
 	}
+	return out, nil
+}
 
-	// Claim-desync CHECKER — the SQLite mirror of the Postgres twin's
-	// countClaimDesyncs. It repairs nothing: every status write releases its
-	// claim on the same transaction, so a survivor here is a bug to look at.
-	desyncs, err := countClaimDesyncs(ctx, s.conn)
-	if err != nil {
-		return count, db.OrphanedStepCheck{}, err
-	}
-
-	// Orphaned-step CHECKER — the shape the park above cannot see, one level
-	// up: that arm heals a live child under a dead parent, this one only
-	// REPORTS a live parent with no child at the step it is pointing at. It
-	// repairs nothing, and its count stays out of the healed total, because
-	// counting is not healing.
-	//
-	// A firing commits its blueprint_run and its first step in one
-	// transaction, and an advance commits its pointer and the step it names in
-	// another, so no reader can observe one without the other and there is no
-	// window for the shape to appear in — which is why there is no grace here.
-	// What an installed database can still hold is a survivor from before that
-	// was true; the forward migration that fails those is what makes one
-	// turning up here worth shouting about rather than sweeping.
+func (s *conversationQueueStore) CheckOrphanedStepsSystem(ctx context.Context) (db.OrphanedStepCheck, error) {
 	check, err := countBlueprintRunsMissingCurrentStep(ctx, s.conn)
 	if err != nil {
-		return count, db.OrphanedStepCheck{}, err
+		return db.OrphanedStepCheck{}, err
+	}
+	desyncs, err := countClaimDesyncs(ctx, s.conn)
+	if err != nil {
+		return db.OrphanedStepCheck{}, err
 	}
 	check.ClaimDesyncs, check.ClaimDesyncSample = desyncs.ClaimDesyncs, desyncs.ClaimDesyncSample
-	return count, check, nil
+	return check, nil
 }
 
 // countClaimDesyncs counts terminal conversations still holding an unreleased

@@ -167,21 +167,19 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	}
 }
 
-// TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint is the
-// boot-reconcile integration check: a child run left mid-flight under an
-// already-terminal blueprint_run (the desync) must be healed by the boot
-// sweep, so the dispatcher stops treating it as live work and its feature
-// branch is no longer pinned in a worktree.
+// TestOrphanSweep_ParksOrphanUnderCancelledBlueprint: a child left mid-flight
+// under a cancelled blueprint_run is parked by the brain's orphan sweep, so it
+// stops looking like live work.
 //
 // It parks `open` rather than writing a terminal, because nothing about an
 // orphan failed and nothing about it concluded. The park is NOT a claim that
-// the row is resumable: its blueprint is terminal, so the claim gate refuses
-// it — which the second half of this test pins.
-func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
+// the row is resumable: its blueprint was called off, so the claim gate
+// refuses it, which the second half of this test pins.
+func TestOrphanSweep_ParksOrphanUnderCancelledBlueprint(t *testing.T) {
 	s, database, brID, _, step0ConversationID := reactorFixture(t, "recon-orphan", 1, "running", "")
 
-	// Force the desync directly, mimicking a DB broken before the atomic park
-	// in MarkRunStatus landed: terminal parent, child still mid-flight.
+	// Force the desync directly, bypassing the atomic park in MarkRunStatus:
+	// cancelled parent, child still mid-flight.
 	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("force child mid-flight: %v", err)
 	}
@@ -189,14 +187,14 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 		t.Fatalf("force blueprint cancelled: %v", err)
 	}
 
-	s.reconcileConversationQueue(context.Background())
+	parkOrphanedConversations(context.Background(), s.conversationQueue)
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, step0ConversationID).Scan(&status); err != nil {
+	var status, reason string
+	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, step0ConversationID).Scan(&status, &reason); err != nil {
 		t.Fatalf("read child status: %v", err)
 	}
-	if status != "open" {
-		t.Errorf("orphan child status = %q, want open after boot reconcile", status)
+	if status != "open" || reason != string(domain.ParkReasonBlueprintCancelled) {
+		t.Errorf("orphan child = (%q, %q), want (open, blueprint_cancelled) after the sweep", status, reason)
 	}
 
 	// An `open` row with undelivered input is the one shape the claim
@@ -212,7 +210,59 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 	if claimed != nil {
-		t.Errorf("claimed %q — a parked orphan under a terminal blueprint must never be driven", claimed.ID)
+		t.Errorf("claimed %q — a parked orphan under a cancelled blueprint must never be driven", claimed.ID)
+	}
+}
+
+// TestReconcileConversationQueue_LeavesFollowUpOnFinishedBlueprint: an executor's boot
+// leaves a follow-up on a finished blueprint's final step alone, both one
+// another executor is running and one waiting for a claim. The claim gate
+// drives that step whatever the run's terminal, so neither is an orphan, and
+// neither is the booting executor's to settle.
+func TestReconcileConversationQueue_LeavesFollowUpOnFinishedBlueprint(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		name := "waiting"
+		if held {
+			name = "held"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, database, brID, _, step0ConversationID := reactorFixture(t, "recon-followup-"+name, 1, dbtest.SeedConcluded, "finish")
+			if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, brID); err != nil {
+				t.Fatalf("complete blueprint: %v", err)
+			}
+			// The follow-up re-queued the final step.
+			if _, err := database.Exec(`UPDATE conversations SET status = NULL, completed_at = NULL WHERE id = ?`, step0ConversationID); err != nil {
+				t.Fatalf("re-queue the final step: %v", err)
+			}
+			if held {
+				if _, err := database.Exec(`
+					INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
+					VALUES ('followup-claim', ?, 'exec-other', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
+				`, step0ConversationID); err != nil {
+					t.Fatalf("seed the other executor's claim: %v", err)
+				}
+			}
+
+			s.reconcileConversationQueue(context.Background())
+			parkOrphanedConversations(context.Background(), s.conversationQueue)
+
+			var status sql.NullString
+			if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, step0ConversationID).Scan(&status); err != nil {
+				t.Fatalf("read follow-up status: %v", err)
+			}
+			if status.Valid {
+				t.Errorf("follow-up status = %q, want none (still mid-flight)", status.String)
+			}
+			if held {
+				var released bool
+				if err := database.QueryRow(`SELECT released_at IS NOT NULL FROM claims WHERE id = 'followup-claim'`).Scan(&released); err != nil {
+					t.Fatalf("read claim: %v", err)
+				}
+				if released {
+					t.Error("the other executor's claim was released")
+				}
+			}
+		})
 	}
 }
 

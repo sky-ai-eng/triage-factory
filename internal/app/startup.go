@@ -281,8 +281,8 @@ func (a *App) startWorkers(ctx context.Context) {
 // Conversations that will be continued — parked `open`, or mid-flight when
 // the process stopped — are preserved whole: their worktree dir and
 // ~/.claude/projects session JSONL are the warm resume cache. A load failure
-// just forgoes that optimization; those conversations still resume by
-// rehydrating from snapshot.
+// sweeps those too; they still resume by rehydrating from snapshot, but from
+// the last one their task wrote, without what a mid-flight turn did since.
 //
 // Non-local modes get the worktree-dir + bare-repo sweep but skip
 // ~/.claude/projects entirely: the preserve set is keyed by the synthetic
