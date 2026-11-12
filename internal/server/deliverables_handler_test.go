@@ -258,24 +258,21 @@ func TestDeliverableApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose(t *testi
 	}
 }
 
-// TestDeliverableAbandon_ClosesDraftPR: dismissing a task resolves its
-// conversation's deliverables: the draft PR is closed on GitHub, and the staged
-// review, which has no GitHub object, is dismissed with no GitHub call.
-func TestDeliverableAbandon_ClosesDraftPR(t *testing.T) {
+// TestTaskDismiss_LeavesItsDeliverables: dismissing a task touches none of
+// its conversation's deliverables. The draft PR stays open on GitHub for a
+// person to decide, and the staged review stays pending.
+func TestTaskDismiss_LeavesItsDeliverables(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	var closeState string
-	var reviewTouchedGitHub bool
+	var touchedGitHub bool
 	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		closeState, _ = body["state"].(string)
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed"})
-	})
-	for _, pattern := range []string{"POST /api/graphql", "DELETE /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews/{rid}"} {
+	for _, pattern := range []string{
+		"PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}",
+		"POST /api/graphql",
+		"DELETE /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews/{rid}",
+	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			reviewTouchedGitHub = true
+			touchedGitHub = true
 			_, _ = w.Write([]byte(`{"data":{}}`))
 		})
 	}
@@ -302,17 +299,14 @@ func TestDeliverableAbandon_ClosesDraftPR(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if closeState != "closed" {
-		t.Errorf("ClosePR sent state=%q, want closed", closeState)
+	if touchedGitHub {
+		t.Error("dismissing the task wrote to GitHub")
 	}
-	if reviewTouchedGitHub {
-		t.Error("dismissing the task made a GitHub call for the staged review")
+	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStatePRDraft {
+		t.Errorf("draft PR deliverable state = %q, want draft", got)
 	}
-	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStatePRClosed {
-		t.Errorf("deliverable state = %q, want closed", got)
-	}
-	if got := getDeliverable(t, srv, review.ID).State; got != domain.DeliverableStateReviewDismissed {
-		t.Errorf("review deliverable state = %q, want dismissed", got)
+	if got := getDeliverable(t, srv, review.ID).State; got != domain.DeliverableStateReviewPending {
+		t.Errorf("review deliverable state = %q, want pending", got)
 	}
 }
 

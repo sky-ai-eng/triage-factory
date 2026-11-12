@@ -140,9 +140,6 @@ func TestCloseHold_WorkingConversationHoldsTheClose(t *testing.T) {
 	if status, reason, _ := taskRow(t, f.database, f.otherID); status != "done" || reason != "auto_closed_by_event" {
 		t.Errorf("other task = (%q, %q), want closed by the event", status, reason)
 	}
-	if got := f.sp.tornDownCopy(); !slices.Equal(got, []string{f.otherID}) {
-		t.Errorf("teardowns = %v, want only the closed task %s", got, f.otherID)
-	}
 }
 
 // TestCloseHold_SecondClosingEventSendsNoSecondNote: a later closing event
@@ -295,7 +292,7 @@ func TestCloseHoldSweep_LeavesAWorkingTaskHeld(t *testing.T) {
 
 // TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks: the close applies
 // through the ordinary path once the conversation stops working: the event's
-// reason and type, its audit row, and the deliverable teardown.
+// reason and type, and its audit row.
 func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-applies")
 	failRun(t, f.database, f.runID, f.convID)
@@ -313,15 +310,11 @@ func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	if audit != 1 {
 		t.Errorf("close audit rows naming the pass = %d, want 1", audit)
 	}
-	if !slices.Contains(f.sp.tornDownCopy(), f.taskID) {
-		t.Errorf("teardowns = %v, want the held task %s among them", f.sp.tornDownCopy(), f.taskID)
-	}
 }
 
 // TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson: once nothing works,
-// a draft pull request the run left for a person keeps the close held, with
-// nothing torn down, until the person resolves it; the next pass then closes
-// the task.
+// a draft pull request the run left for a person keeps the close held until
+// the person resolves it; the next pass then closes the task.
 func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-awaiting")
 	failRun(t, f.database, f.runID, f.convID)
@@ -334,9 +327,6 @@ func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
 	}
 	if heldClose(t, f.database, f.taskID) != f.eventID {
 		t.Error("the sweep dropped the close a draft awaiting a person holds")
-	}
-	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
-		t.Error("the sweep tore down the draft awaiting a person")
 	}
 
 	if _, err := f.database.Exec(`UPDATE deliverables SET state = 'open' WHERE conversation_id = ?`, f.convID); err != nil {

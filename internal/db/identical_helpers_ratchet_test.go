@@ -102,6 +102,7 @@ var identicalHelperRatchet = map[string]helperTier{
 	"scanOperator":           tierScanner,
 	"scanOrgEventSourceRow":  tierScanner,
 	"scanPendingBind":        tierScanner,
+	"scanPendingReviews":     tierScanner,
 	"scanReachableRepos":     tierScanner,
 	"scanSpendRow":           tierScanner,
 	"scanTaskBareRow":        tierScanner,

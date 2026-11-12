@@ -105,10 +105,10 @@ type ExternalAction struct {
 	ActorUserID string `json:"actor_user_id,omitempty"`
 	// PerformedBy says who performed the act — one of the PerformedBy*
 	// consts. It is what tells a run's agent's own action apart from a
-	// person's approval of that run's deliverable or TF's teardown of it:
-	// both carry the run's ConversationID, and ActorUserID is set on a
-	// person's row and on a manual run's agent row alike. Required on every
-	// write; the writer sets it, and nothing defaults it.
+	// person's approval of that run's deliverable: both carry the run's
+	// ConversationID, and ActorUserID is set on a person's row and on a
+	// manual run's agent row alike. Required on every write; the writer sets
+	// it, and nothing defaults it.
 	PerformedBy string `json:"performed_by"`
 	// Credential names the org credential used — one of the Credential* consts.
 	Credential string `json:"credential"`
@@ -415,14 +415,13 @@ const (
 	// channel and its git path make, and every refusal of one of them.
 	PerformedByAgent = "agent"
 	// PerformedByPerson is a person acting through TF: an approval, edit,
-	// dismissal or rejection of a run's deliverable, a board drag, a task
-	// close. A person row that names a conversation acts on that
-	// conversation's own deliverables, which is what makes it part of the
-	// run's artifacts (ArtifactPerformers); a person's act on anything else
-	// names no conversation.
+	// dismissal or rejection of a run's deliverable, or a board drag. A person
+	// row that names a conversation acts on that conversation's own
+	// deliverables, which is what makes it part of the run's artifacts
+	// (ArtifactPerformers); a person's act on anything else names no
+	// conversation.
 	PerformedByPerson = "person"
-	// PerformedBySystem is TF acting on its own: the board mirrors and the
-	// teardown an event-driven task close runs.
+	// PerformedBySystem is TF acting on its own, as the board mirrors do.
 	PerformedBySystem = "system"
 )
 

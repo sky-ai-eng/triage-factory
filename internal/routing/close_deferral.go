@@ -147,8 +147,8 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context, holdTimeout time.Durat
 // hold, or a newer closing event replaced it. Either way nothing closes, and
 // a replaced hold is the next pass's. A conversation that started working
 // since keeps the hold as it is, so nobody is told twice. The stop, the
-// cancel intent, the teardown and the audit row naming the stored event are
-// what an unheld close writes.
+// cancel intent and the audit row naming the stored event are what an unheld
+// close writes.
 func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral) (closed bool, err error) {
 	evt, reason, admitted, err := r.readHeldClose(ctx, d)
 	if err != nil || evt == nil {
@@ -166,7 +166,7 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 	if !out.Closed {
 		return false, nil
 	}
-	r.finishTaskClose(ctx, d.OrgID, d.TaskID, out.ActiveConversationIDs)
+	r.stopConversationsOnClosedTask(d.OrgID, d.TaskID, out.ActiveConversationIDs)
 	routerLog.InfoContext(ctx, "closed task on its held close", "task_id", d.TaskID, "on_event", evt.EventType, "reason", reason)
 	return true, nil
 }

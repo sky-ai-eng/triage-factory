@@ -375,6 +375,46 @@ describe('returning a task to the queue', () => {
   })
 })
 
+describe('ending a task', () => {
+  it('completes a task whose run left deliverables without asking', async () => {
+    held = {
+      ...conversation('completed'),
+      has_unresolved_deliverables: true,
+      pending_deliverable_ids: ['d1', 'd2'],
+      unresolved_pr_count: 1,
+      unresolved_review_count: 1,
+    } as Conversation
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    await act(async () => {
+      await dnd.drop!(HELD.id, 'done')
+    })
+
+    // One call, the task's own close: no dialog stands in front of it, and no
+    // deliverable route is reached, because a close leaves them all as they are.
+    expect(writes).toEqual([
+      { path: `/api/tasks/${HELD.id}`, body: { status: 'done', version: HELD.version } },
+    ])
+    const reached = [...api.apiFetch.mock.calls, ...api.apiJSON.mock.calls].map((c) => String(c[0]))
+    expect(reached.some((p) => p.startsWith('/api/deliverables/'))).toBe(false)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('dismisses a queued task without asking', async () => {
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'done')
+    })
+
+    expect(writes).toEqual([
+      { path: `/api/tasks/${FREE.id}`, body: { status: 'dismissed', version: FREE.version } },
+    ])
+  })
+})
+
 describe('a permission prompt on a card', () => {
   afterEach(() => {
     ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {}

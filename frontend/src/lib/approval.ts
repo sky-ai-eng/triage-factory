@@ -4,8 +4,8 @@ import type { Conversation } from '../types'
 // approval; the "needs approval" state is a *view* over the
 // conversation's unresolved-deliverable set, projected onto the conversation as has_unresolved_deliverables
 // + pending_deliverable_ids + the per-kind counts. These helpers keep the
-// count-aware labels and the resolve-all copy in one place so every surface
-// that raises them reads the same.
+// count-aware labels in one place so every surface that raises them reads the
+// same.
 
 export interface ApprovalCounts {
   pr: number
@@ -59,20 +59,4 @@ export function approvalAction({ pr, review, total }: ApprovalCounts): string {
   if (pr > 0 && review > 0) return `Review ${total} items`
   if (pr > 0) return pr === 1 ? 'Open PR' : `Open ${pr} PRs`
   return review === 1 ? 'Review' : `Review ${review} items`
-}
-
-// resolveAllSummary is the resolve-all confirmation copy the task-end gesture
-// raises: "Close 2 draft PRs and discard 1 pending review? Pushed
-// branches are kept." A clause is dropped when its count is 0; the live note is
-// appended only when the conversation is still executing (the teardown cancels it).
-export function resolveAllSummary(pr: number, review: number, isLive: boolean): string {
-  const parts: string[] = []
-  if (pr > 0) parts.push(`close ${pr} draft PR${pr === 1 ? '' : 's'}`)
-  if (review > 0) parts.push(`discard ${review} pending review${review === 1 ? '' : 's'}`)
-  const body =
-    parts.length > 0
-      ? parts.join(' and ').replace(/^./, (c) => c.toUpperCase())
-      : 'Resolve all open deliverables'
-  const live = isLive ? ' The in-progress run will be cancelled.' : ''
-  return `${body}? Pushed branches are kept.${live}`
 }

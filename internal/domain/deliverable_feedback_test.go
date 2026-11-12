@@ -183,3 +183,81 @@ func TestDeliverableResolutionNote_ReadsResolution(t *testing.T) {
 		t.Errorf("ledger block %q should carry the rejection line", block)
 	}
 }
+
+// TestDeliverableResolutionNote_ReviewDismissedByItsPullRequestEnding pins that
+// a review the pull request's end dismissed says so, naming how it ended, and
+// never credits a person; a review with no resolution keeps the person's copy.
+func TestDeliverableResolutionNote_ReviewDismissedByItsPullRequestEnding(t *testing.T) {
+	review := func(resolution string) Deliverable {
+		return Deliverable{
+			ID:          "rev-abc",
+			Kind:        DeliverableKindReview,
+			Target:      "octo/repo#42",
+			State:       DeliverableStateReviewDismissed,
+			DetailsJSON: MarshalReviewDeliverableDetails(ReviewDeliverableDetails{ReviewEvent: "COMMENT", Resolution: resolution}),
+		}
+	}
+	cases := []struct {
+		name          string
+		a             Deliverable
+		want, notWant []string
+	}{
+		{"merged", review(ReviewResolutionPullRequestMerged), []string{"rev-abc", "octo/repo#42", "the pull request was merged"}, []string{"human", "closed"}},
+		{"closed", review(ReviewResolutionPullRequestClosed), []string{"the pull request was closed without merging"}, []string{"human"}},
+		{"unreachable", review(ReviewResolutionPullRequestUnreachable), []string{"can no longer read the pull request"}, []string{"human"}},
+		{"ended", review(ReviewResolutionPullRequestEnded), []string{"the pull request was merged or closed"}, []string{"human"}},
+		{"dismissed by a person", review(""), []string{"A human dismissed your pending review rev-abc"}, []string{"pull request was"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DeliverableResolutionNote(tc.a)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("note %q lacks %q", got, w)
+				}
+			}
+			for _, nw := range tc.notWant {
+				if strings.Contains(got, nw) {
+					t.Errorf("note %q must not contain %q", got, nw)
+				}
+			}
+		})
+	}
+	block := DeliverableLedgerBlock([]Deliverable{review(ReviewResolutionPullRequestMerged)})
+	if !strings.Contains(block, "the pull request was merged") || strings.Contains(block, "human") {
+		t.Errorf("ledger block %q should say the pull request merged and credit no person", block)
+	}
+}
+
+func TestReviewResolutionForClose(t *testing.T) {
+	for eventType, want := range map[string]string{
+		EventGitHubPRMerged:        ReviewResolutionPullRequestMerged,
+		EventGitHubPRClosed:        ReviewResolutionPullRequestClosed,
+		EventGitHubPRUnreachable:   ReviewResolutionPullRequestUnreachable,
+		EventSystemEntityCloseOwed: ReviewResolutionPullRequestEnded,
+		EventJiraIssueCompleted:    ReviewResolutionPullRequestEnded,
+	} {
+		if got := ReviewResolutionForClose(eventType); got != want {
+			t.Errorf("ReviewResolutionForClose(%q) = %q, want %q", eventType, got, want)
+		}
+	}
+}
+
+// TestStampReviewResolution pins that the stamp sets the resolution and keeps
+// the rest of the draft, and leaves details it cannot parse as they are.
+func TestStampReviewResolution(t *testing.T) {
+	in := MarshalReviewDeliverableDetails(ReviewDeliverableDetails{
+		ReviewBody: "body", ReviewEvent: "COMMENT",
+		StagedComments: []ReviewDeliverableComment{{ID: "c1", Body: "nit"}},
+	})
+	got, err := ParseReviewDeliverableDetails(StampReviewResolution(in, ReviewResolutionPullRequestMerged))
+	if err != nil {
+		t.Fatalf("parse stamped details: %v", err)
+	}
+	if got.Resolution != ReviewResolutionPullRequestMerged || got.ReviewBody != "body" || got.ReviewEvent != "COMMENT" || len(got.StagedComments) != 1 {
+		t.Errorf("stamped details = %+v, want the draft kept with the resolution set", got)
+	}
+	if out := StampReviewResolution("{not json", ReviewResolutionPullRequestMerged); out != "{not json" {
+		t.Errorf("unparseable details = %q, want them unchanged", out)
+	}
+}

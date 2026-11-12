@@ -58,8 +58,8 @@ func TestCloseHoldExpiry_LeavesAYoungHoldAlone(t *testing.T) {
 // TestCloseHoldExpiry_StopsTheWorkThenClosesTheTask: past the limit, the
 // pass calls the run off and stops it on the limit's own cause, and leaves
 // the close held. With nothing else holding the task, the next pass closes it
-// the way any held close applies: the event's reason and type, its audit row,
-// the teardown.
+// the way any held close applies: the event's reason and type, and its audit
+// row.
 func TestCloseHoldExpiry_StopsTheWorkThenClosesTheTask(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#expiry-closes")
 	startedByEvent(t, f.database, f.runID, f.convID)
@@ -86,9 +86,6 @@ func TestCloseHoldExpiry_StopsTheWorkThenClosesTheTask(t *testing.T) {
 	if n := closeAuditCount(t, f.database, f.taskID); n != 1 {
 		t.Errorf("close audit rows = %d, want 1", n)
 	}
-	if !slices.Contains(f.sp.tornDownCopy(), f.taskID) {
-		t.Errorf("teardowns = %v, want the task %s among them", f.sp.tornDownCopy(), f.taskID)
-	}
 	if ev := heldClose(t, f.database, f.taskID); ev != "" {
 		t.Errorf("held close = %q after the close, want none", ev)
 	}
@@ -96,8 +93,7 @@ func TestCloseHoldExpiry_StopsTheWorkThenClosesTheTask(t *testing.T) {
 
 // TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds: a draft
 // pull request awaiting a person does not run out. The run is stopped on the
-// limit's own cause, and the close stays held across passes, with nothing
-// torn down.
+// limit's own cause, and the close stays held across passes.
 func TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#expiry-awaiting")
 	startedByEvent(t, f.database, f.runID, f.convID)
@@ -118,9 +114,6 @@ func TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds(t *testin
 	}
 	if got, causes := f.sp.stoppedIDs(), f.sp.stopCauses(); !slices.Equal(got, []string{f.convID}) || !slices.Equal(causes, []delegate.StopCause{delegate.StopCauseCloseHoldExpired}) {
 		t.Errorf("stopped = %v for %v, want [%s] once, for the expired hold", got, causes, f.convID)
-	}
-	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
-		t.Error("the sweep tore down the draft awaiting a person")
 	}
 }
 

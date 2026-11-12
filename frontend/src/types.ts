@@ -326,8 +326,8 @@ export interface Conversation {
   // set was read; undefined under the transient-failure guard.
   pending_deliverable_ids?: string[]
   // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
-  // "Review N items →") and the resolve-all confirmation copy. unresolved_pr_count
-  // draft PRs + unresolved_review_count ready reviews === pending_deliverable_ids.length.
+  // "Review N items →"). unresolved_pr_count draft PRs + unresolved_review_count
+  // ready reviews === pending_deliverable_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
   // artifact_count is the number of objects this conversation changed,

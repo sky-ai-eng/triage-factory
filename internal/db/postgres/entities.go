@@ -1207,6 +1207,9 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return errors.New("close entity: row changed under the lock")
 		}
 		res.Closed = true
+		if res.DismissedReviews, err = dismissPendingReviewsOf(ctx, q, orgID, entityID, domain.ReviewResolutionForClose(closeEventType)); err != nil {
+			return fmt.Errorf("dismiss pending reviews: %w", err)
+		}
 
 		taskIDs, err := openTaskIDsByEntityAndTypes(ctx, q, orgID, entityID, closeTypes)
 		if err != nil {
@@ -1237,6 +1240,61 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 		return db.TerminalCloseResult{}, nil
 	}
 	return res, nil
+}
+
+// dismissPendingReviewsOf dismisses every pending review deliverable about
+// entity entityID, recording resolution on each (domain.StampReviewResolution),
+// and returns them, ordered by id. A review's entity is the pull request it
+// reviews. The rows are locked as they are read, so a person's submit or
+// dismiss racing the close lands before it or finds the review dismissed. No
+// audit row: a review is staged TF-side, so the dismissal writes nothing on
+// GitHub.
+func dismissPendingReviewsOf(ctx context.Context, q queryer, orgID, entityID, resolution string) ([]db.DismissedReview, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id::text, COALESCE(details_json, '') FROM deliverables
+		 WHERE org_id = $1 AND entity_id = $2 AND kind = $3 AND state = $4
+		 ORDER BY id
+		 FOR UPDATE
+	`, orgID, entityID, domain.DeliverableKindReview, domain.DeliverableStateReviewPending)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := scanPendingReviews(rows)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]db.DismissedReview, 0, len(pending))
+	for _, p := range pending {
+		var d db.DismissedReview
+		if err := q.QueryRowContext(ctx, `
+			UPDATE deliverables
+			   SET state = $1, details_json = COALESCE(NULLIF($2, ''), details_json), updated_at = now()
+			 WHERE org_id = $3 AND id = $4
+			RETURNING id::text, COALESCE(conversation_id::text, '')
+		`, domain.DeliverableStateReviewDismissed, domain.StampReviewResolution(p.details, resolution), orgID, p.id,
+		).Scan(&d.DeliverableID, &d.ConversationID); err != nil {
+			return nil, fmt.Errorf("dismiss review %s: %w", p.id, err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// pendingReview is one review dismissPendingReviewsOf read: its id and the
+// details it stamps.
+type pendingReview struct{ id, details string }
+
+func scanPendingReviews(rows *sql.Rows) ([]pendingReview, error) {
+	defer rows.Close()
+	var out []pendingReview
+	for rows.Next() {
+		var p pendingReview
+		if err := rows.Scan(&p.id, &p.details); err != nil {
+			return nil, fmt.Errorf("scan pending review: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // openTaskIDsByEntityAndTypes lists the entity's non-terminal tasks of the

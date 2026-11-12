@@ -203,9 +203,9 @@ func FirstDraftPullRequest(arts []Deliverable) *Deliverable {
 // AllDraftPullRequests returns every draft pull_request deliverable in arts (the
 // plural of FirstDraftPullRequest), in slice order. The deliverable set is plural
 // per conversation — a conversation can open several draft PRs — so the projection
-// (pending_deliverable_ids) and the task-level resolve-all teardown both iterate the
-// whole set rather than just the first. Shares isDraftPullRequest so it can't
-// drift from the single-deliverable predicate.
+// (pending_deliverable_ids) iterates the whole set rather than just the first.
+// Shares isDraftPullRequest so it can't drift from the single-deliverable
+// predicate.
 func AllDraftPullRequests(arts []Deliverable) []Deliverable {
 	var out []Deliverable
 	for i := range arts {

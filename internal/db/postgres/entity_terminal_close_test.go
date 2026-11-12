@@ -91,6 +91,35 @@ func newPgTerminalCloseSeeder(conn *sql.DB, orgID, userID string) dbtest.EntityT
 				t.Fatalf("close entity %s around the guard: %v", entityID, err)
 			}
 		},
+		Review: func(t *testing.T, conversationID, entityID, state string) string {
+			t.Helper()
+			var id string
+			if err := conn.QueryRow(`
+				INSERT INTO deliverables (conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id, details_json)
+				SELECT id, org_id, team_id, 'github', 'review', 'github.com', 'acme/widget#7', $3, 'review-' || gen_random_uuid()::text, $4, '{"review_event":"COMMENT"}'
+				  FROM conversations WHERE org_id = $1 AND id = $2
+				RETURNING id::text
+			`, orgID, conversationID, state, entityID).Scan(&id); err != nil {
+				t.Fatalf("seed review: %v", err)
+			}
+			return id
+		},
+		DeliverableState: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var state string
+			if err := conn.QueryRow(`SELECT state FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, deliverableID).Scan(&state); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return state
+		},
+		DeliverableDetails: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var details sql.NullString
+			if err := conn.QueryRow(`SELECT details_json FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, deliverableID).Scan(&details); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return details.String
+		},
 	}
 }
 

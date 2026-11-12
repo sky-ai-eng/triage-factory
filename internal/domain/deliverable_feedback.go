@@ -5,9 +5,10 @@ import (
 	"strings"
 )
 
-// Deliverable-change agent feedback (TFAC-493). When a human resolves a deliverable
-// a conversation produced — approving or dismissing a draft PR, submitting or dismissing
-// a pending review — the agent that drafted it gets a concise, agent-facing note
+// Deliverable-change agent feedback (TFAC-493). When a deliverable a conversation
+// produced is resolved — a human approving or dismissing a draft PR or submitting or
+// dismissing a pending review, GitHub showing a draft PR resolved, or the pull request
+// a pending review is about ending — the agent that drafted it gets a concise, agent-facing note
 // referencing the id it already knows (the PR number / the review handle it spoke
 // to start-review/finalize-review). The note is delivered live (steered into a
 // warm process) or, for a terminal/paused conversation, bundled into the next resume from
@@ -35,9 +36,10 @@ func WrapSystemNote(body string) string {
 }
 
 // DeliverableResolutionNote returns the one-line, agent-facing note for a deliverable
-// a human just resolved, or "" if the deliverable is not in one of the four reported
-// human-resolution states. The four strings are deliberately distinct so the
-// agent can tell which of (PR | review) × (approved | dismissed) happened:
+// just resolved, or "" if the deliverable is not in one of the four reported
+// resolution states. The strings are deliberately distinct so the agent can
+// tell which of (PR | review) × (approved | dismissed) happened, and who or
+// what did it:
 //
 //   - pull_request → open      : approved, marked ready for review — or, when
 //     the details' resolution is github, marked ready on GitHub by someone
@@ -45,7 +47,9 @@ func WrapSystemNote(body string) string {
 //     per the details' resolution, rejected (closed AND its branch deleted
 //     from the upstream) or closed on GitHub by someone
 //   - review       → submitted : approved, submitted to GitHub
-//   - review       → dismissed : dismissed, discarded unsubmitted
+//   - review       → dismissed : dismissed, discarded unsubmitted — or, per the
+//     details' resolution, discarded because the pull request it reviews
+//     ended
 //
 // A pull request settled foreign gets no note: no person resolved it, and its
 // run did not open it.
@@ -80,13 +84,17 @@ func DeliverableResolutionNote(a Deliverable) string {
 		case DeliverableStateReviewSubmitted:
 			return fmt.Sprintf("A human approved your pending review %s on %s and submitted it to GitHub.", reviewResolutionHandle(a), a.Target)
 		case DeliverableStateReviewDismissed:
+			d, _ := ParseReviewDeliverableDetails(a.DetailsJSON)
+			if why := reviewEndedReason(d.Resolution); why != "" {
+				return fmt.Sprintf("Your pending review %s on %s was discarded without being submitted: %s.", reviewResolutionHandle(a), a.Target, why)
+			}
 			return fmt.Sprintf("A human dismissed your pending review %s on %s without submitting it.", reviewResolutionHandle(a), a.Target)
 		}
 	}
 	return ""
 }
 
-// IsResolutionNoteState reports whether (Kind, State) is one of the four human-
+// IsResolutionNoteState reports whether (Kind, State) is one of the four
 // resolution states DeliverableResolutionNote renders copy for. The ledger
 // derivation uses it to filter a conversation's deliverables down to the resolved ones
 // before formatting (equivalent to DeliverableResolutionNote(a) != "", named for
@@ -101,10 +109,11 @@ func IsResolutionNoteState(a Deliverable) bool {
 // arts is in a reported resolution state, so a resume with no pending changes
 // prepends nothing.
 //
-// The lead-in frames these as out-of-band human actions taken while the agent was
-// not running, and points at the natural-failure contract: a later step that
-// depended on a now-dismissed deliverable just fails and reports it — this block is
-// the explanation, not a guard (TFAC-493).
+// The lead-in frames these as out-of-band changes made while the agent was not
+// running — each bullet says who or what made it — and points at the
+// natural-failure contract: a later step that depended on a now-dismissed
+// deliverable just fails and reports it — this block is the explanation, not a
+// guard (TFAC-493).
 func DeliverableLedgerBlock(arts []Deliverable) string {
 	lines := make([]string, 0, len(arts))
 	for i := range arts {
@@ -115,7 +124,7 @@ func DeliverableLedgerBlock(arts []Deliverable) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	body := "While you were not running, a human resolved deliverables you produced:\n\n" +
+	body := "While you were not running, deliverables you produced were resolved:\n\n" +
 		strings.Join(lines, "\n") +
 		"\n\nThese are informational. A later step that relied on a dismissed deliverable will simply fail and report it."
 	return WrapSystemNote(body)
@@ -135,6 +144,23 @@ func prResolutionRef(a Deliverable) string {
 		return "#" + a.ExternalID
 	}
 	return "(reference unavailable)"
+}
+
+// reviewEndedReason is the clause saying how the pull request a dismissed
+// review was about ended, for a review its resolution says that dismissed; ""
+// for one a person dismissed.
+func reviewEndedReason(resolution string) string {
+	switch resolution {
+	case ReviewResolutionPullRequestMerged:
+		return "the pull request was merged"
+	case ReviewResolutionPullRequestClosed:
+		return "the pull request was closed without merging"
+	case ReviewResolutionPullRequestUnreachable:
+		return "Triage Factory can no longer read the pull request on GitHub"
+	case ReviewResolutionPullRequestEnded:
+		return "the pull request was merged or closed"
+	}
+	return ""
 }
 
 // reviewResolutionHandle is the review id the agent already knows — the deliverable's

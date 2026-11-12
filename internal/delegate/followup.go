@@ -1083,8 +1083,8 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 //     agnostic injection staged while the run wasn't running (e.g. the new-commits
 //     freshness injection), destructively flushed (delivered exactly once); and
 //   - the deliverable-change ledger (TFAC-493) — every deliverable this run produced
-//     that a human resolved while it wasn't running, derived from the deliverable
-//     rows (no ledger table).
+//     that was resolved while it wasn't running, derived from the deliverable rows
+//     (no ledger table).
 //
 // The deliverable ledger is composed first and the staged-injection flush second, so
 // the injection block lands FIRST in the returned prefix (each step writes to the

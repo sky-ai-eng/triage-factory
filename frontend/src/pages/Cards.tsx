@@ -189,8 +189,8 @@ export default function Cards() {
 
     // Each gesture addresses its own route: the two lifecycle ones are field
     // writes on the task, and claim/delegate are verbs because of what they
-    // reach — Jira, the spawner, deliverable teardown. Every one names the
-    // version the deck read and answers the version it left.
+    // reach — Jira and the spawner. Every one names the version the deck read
+    // and answers the version it left.
     let version: number
     try {
       version =

@@ -14,11 +14,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
-	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -1380,15 +1378,11 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 		internalError(w, "tasks", err)
 		return 0, false
 	}
-	// A closed task is over, so this is the one disposition that retires what
-	// the work left behind: stop any in-flight run, then resolve every
-	// unresolved deliverable the task holds. Stop first — the stop parks each
-	// conversation and releases its claim, so the teardown behind it operates
-	// on a settled conversation rather than racing a live agent that can still
-	// land a fresh draft PR into the window between the two.
+	// Stop any in-flight run. The task's deliverables are left as they are: a
+	// draft PR stays on GitHub for the person to decide, and a staged review
+	// is dismissed only when the pull request it reviews merges or closes.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
-	s.teardownTaskDeliverables(cleanupCtx, orgID, userID, id)
 	s.broadcastTaskStatus(orgID)
 	return closed.Version, true
 }
@@ -1564,83 +1558,6 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 			Data:  map[string]any{},
 		})
 	}
-}
-
-// teardownTaskDeliverables retires every unresolved deliverable the task's
-// conversations hold — each draft PR closed on GitHub and flipped to closed,
-// each pending review dismissed. It is the task-END pass and has exactly one
-// caller, patchClose: a task that is done or dismissed is over, so nothing will
-// come back for its draft PR. Every other disposition — requeue, claim,
-// re-delegate — leaves the deliverables standing for whoever picks the task up.
-//
-// This never flips conversations.status. A live conversation is stopped by
-// stopTaskConversations one step ahead of this pass, which owns that
-// transition; a terminal conversation simply stays terminal.
-//
-// The adapter is the app pool under the closing user's claims, so every audit
-// row names that user as the authorizer — the same identity the deliverable verbs
-// record when they retire one deliverable at a time. All failures are logged, not
-// fatal: the calling handler has already flipped the task to its new state, and
-// the deliverables stay unresolved for a retry on the next close.
-func (s *Server) teardownTaskDeliverables(ctx context.Context, orgID, userID, taskID string) {
-	if err := deliverableteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, domain.PerformedByPerson, userID); err != nil {
-		approvalDiscardLog.Error("task deliverable teardown failed; deliverables left unresolved for retry", "task", taskID, "error", err)
-	}
-}
-
-// userTeardownDeps is the deliverable teardown's app-pool adapter: every read and
-// write runs inside one claims-bearing transaction as the closing user, so the
-// flips and their audit rows commit together and RLS scopes them exactly as the
-// per-deliverable verbs are scoped.
-type userTeardownDeps struct {
-	s      *Server
-	userID string
-}
-
-// Batch binds one transaction per call. The teardown makes two — a read pass
-// for credential attribution and the write pass — which is what keeps the
-// GitHub probe between them out of a write transaction.
-func (d userTeardownDeps) Batch(ctx context.Context, orgID string, fn func(deliverableteardown.Stores) error) error {
-	return d.s.tx.WithTx(ctx, orgID, d.userID, func(tx db.TxStores) error {
-		return fn(txTeardownStores{tx: tx})
-	})
-}
-
-func (d userTeardownDeps) GitHub() ghclient.Resolver { return d.s.ghResolver }
-
-func (d userTeardownDeps) SettlePullRequest(ctx context.Context, orgID string, a domain.Deliverable) {
-	if d.s.reconciler != nil {
-		d.s.reconciler.SettleDeliverable(ctx, orgID, a)
-	}
-}
-
-// txTeardownStores binds the teardown's store surface to one transaction.
-type txTeardownStores struct{ tx db.TxStores }
-
-func (t txTeardownStores) ConversationsForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
-	return t.tx.Conversations.ListForTask(ctx, orgID, taskID)
-}
-
-func (t txTeardownStores) DeliverablesForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Deliverable, error) {
-	out, _, err := t.tx.Deliverables.ListByConversation(ctx, orgID, conversationID, db.Unwindowed)
-	return out, err
-}
-
-func (t txTeardownStores) UpsertDeliverable(ctx context.Context, orgID string, a domain.Deliverable) error {
-	_, err := t.tx.Deliverables.Upsert(ctx, orgID, a)
-	return err
-}
-
-func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
-	return t.tx.ExternalActions.Record(ctx, orgID, act)
-}
-
-func (t txTeardownStores) Entity(ctx context.Context, orgID, id string) (*domain.Entity, error) {
-	return t.tx.Entities.Get(ctx, orgID, id)
-}
-
-func (t txTeardownStores) Repository(ctx context.Context, orgID, id string) (*domain.Repository, error) {
-	return t.tx.Repos.Get(ctx, orgID, id)
 }
 
 // revertJiraStateIfApplicable reverses a Jira-backed task's claim as the task
