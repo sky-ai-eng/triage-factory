@@ -390,7 +390,7 @@ func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domai
 	model, err := s.modelForClaim(ctx, n.orgID, br, *conv)
 	if err != nil {
 		delegateLog.Info("the model check refused a warm resume; letting the claim go for a cold claim to decide",
-			"conversation", n.conversationID, "claim", n.cfg.claimID, "model", n.params.Model, "error", err)
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "error", err)
 		return nil
 	}
 	if model != n.params.Model {
