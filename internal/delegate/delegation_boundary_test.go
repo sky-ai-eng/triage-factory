@@ -96,6 +96,37 @@ func TestDelegate_EndsTheTasksConcludedConversations(t *testing.T) {
 	}
 }
 
+// Delegate wakes a warm claim on each conversation its boundary ends, so the
+// claim releases the task's tree for step 0 without waiting for its backstop
+// poll. The wait is registered in this spawner, so Delegate wakes it
+// in-process.
+func TestDelegate_WakesTheWarmClaimOfEachEndedConversation(t *testing.T) {
+	database := newCostCapTestDB(t)
+	task, bpID := delegatableFixture(t, database, "delegate-warm-wake")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	opts := DelegateOpts{
+		OrgID:               runmode.LocalDefaultOrgID,
+		ExplicitBlueprintID: bpID,
+		TriggerType:         "manual",
+		CreatorUserID:       runmode.LocalDefaultUserID,
+	}
+	if _, err := s.Delegate(task, opts); err != nil {
+		t.Fatalf("first Delegate: %v", err)
+	}
+	concluded := concludeRun(t, database, task.ID)
+	wait := s.warmWaits.Register(concluded, runmode.LocalDefaultOrgID)
+	t.Cleanup(wait.Unregister)
+
+	if _, err := s.Delegate(task, opts); err != nil {
+		t.Fatalf("second Delegate: %v", err)
+	}
+	select {
+	case <-wait.Wake():
+	default:
+		t.Error("Delegate ended the conversation without waking the warm claim on it")
+	}
+}
+
 // TestDelegate_TaskBusyRefusal_EndsNothing: a delegation the one-active-run
 // index refuses must leave the live engagement it lost to exactly as it found
 // it. The stamp reaches terminal rows only, which is what makes running it

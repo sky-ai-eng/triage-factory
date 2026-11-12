@@ -203,10 +203,10 @@ const (
 	// cancelled, so the step it would have run is moot.
 	ParkReasonBlueprintCancelled ParkReason = "blueprint_cancelled"
 	// ParkReasonBlueprintTerminal — the blueprint behind the step ended on
-	// its own (concluded, failed, aborted) while this child was still
-	// mid-flight. Distinct from the cancel above because nobody stopped this
-	// work: it was simply overtaken, which is a different thing to read on a
-	// RunStation and a different thing to go looking for.
+	// its own (concluded, failed, aborted), or moved on past the step, while
+	// this child was still mid-flight. Distinct from the cancel above because
+	// nobody stopped this work: it was simply overtaken, which is a different
+	// thing to read on a RunStation and a different thing to go looking for.
 	ParkReasonBlueprintTerminal ParkReason = "blueprint_terminal"
 	// ParkReasonLaunchFailed — the runtime never started, and the claim's
 	// retry budget for this loss episode is spent. The conversation parks

@@ -32,7 +32,7 @@ const (
 // SDK runtime reports one process-wide total instead, settled as a single
 // lump on the engagement's newest own row when the engagement lets go of the
 // conversation — a park (idle, pause, cancel) or a terminal write
-// (completion, infra-failure, a boot-time orphan sweep) — so its other rows
+// (completion, infra-failure) — so its other rows
 // read 0 and its lump row carries the whole engagement. Either way the
 // conversation's spend is the SUM over its rows, and a parked-and-resumed
 // conversation is the sum of its engagements. System rows are always

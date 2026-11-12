@@ -364,6 +364,44 @@ func TestWarmClaim_KeepsTheClaimAfterAPersonsTurn(t *testing.T) {
 	}
 }
 
+// With TF_SNAPSHOT_INTERVAL_SEC=0 and a blob store, a person's turn still keeps
+// its claim warm: the interval governs only the checkpoints at batch
+// boundaries, and the turn-end capture the window waits on is taken anyway.
+// The blob it stored is that capture, at the turn's newest row, not a park's.
+func TestWarmClaim_ZeroSnapshotIntervalStillKeepsTheClaim(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Minute, turns: []gateTurn{{text: "fixed it"}},
+		beforeStart: func(f *warmEngagement) { f.x.SetSnapshotInterval(0) }})
+	f.awaitWarm(t, 1)
+
+	f.assertConcluded(t, domain.ConversationOutcomeContinue, "fixed it")
+	if released, _, _ := f.claimRelease(t); released {
+		t.Error("the claim was released; it should be kept warm")
+	}
+	if f.jailStopped.Load() {
+		t.Error("the jail was stopped while the claim is warm")
+	}
+
+	rows, err := f.stores.Conversations.ListForAssemblySystem(context.Background(), f.orgID, f.conversationID)
+	if err != nil {
+		t.Fatalf("list transcript: %v", err)
+	}
+	var answer *float64
+	for _, r := range rows {
+		if r.Role == "assistant" && r.Content == "fixed it" {
+			key := assemblyKey(r)
+			answer = &key
+		}
+	}
+	if answer == nil {
+		t.Fatal("the turn's answer is not in the transcript")
+	}
+	man, _ := unpackSnapshotBlob(t, f.blobs, snapshotKey(f.orgID, f.keyID))
+	if man.TranscriptPosition == nil || *man.TranscriptPosition != *answer || man.ConversationID != f.conversationID {
+		t.Errorf("manifest position = (%v, %q), want (%v, %q): the turn-end capture at the turn's answer",
+			man.TranscriptPosition, man.ConversationID, *answer, f.conversationID)
+	}
+}
+
 // A second message within the window resumes the conversation as any message
 // does, and the turn runs on the same claim, in the same sandbox.
 func TestWarmClaim_SecondMessageRunsOnTheSameClaim(t *testing.T) {
@@ -599,17 +637,11 @@ func TestWarmClaim_EventIsNotFoldedIntoTheConversation(t *testing.T) {
 	}
 }
 
-// A new delegation on the task ends the warm conversation, which no follow-up
-// resumes, and the warm claim lets go of the task's tree for the run that
-// replaces it. Until then the run is not claimed into a tree a jail is still
-// running in.
+// A new run on the task ends the warm conversation. Until the warm claim is
+// released, the run can't be claimed into the tree. Passing the ended rows to
+// RingWarmWaitsForEnded releases it well inside the backstop interval, and the
+// run is then claimable.
 func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
-	// Long enough that the claim below runs before the first tick, and short
-	// enough that the tick is what lets go.
-	saved := warmWaitBackstop
-	warmWaitBackstop = 3 * time.Second
-	t.Cleanup(func() { warmWaitBackstop = saved })
-
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
 	f.awaitWarm(t, 1)
 
@@ -627,23 +659,25 @@ func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
 	}
 	step0 := 0
 	next, nextRun := uuid.New().String(), uuid.New().String()
-	if _, _, _, _, err := f.stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), f.orgID, domain.BlueprintRun{
+	_, _, _, ended, err := f.stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), f.orgID, domain.BlueprintRun{
 		ID: nextRun, BlueprintID: blueprintID, TaskID: f.taskID,
 		TriggerType: domain.BlueprintTriggerManual, WorktreePath: f.wtPath,
 	}, db.AgentClaimStamp{}, "", domain.Conversation{
 		ID: next, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: f.userID, BlueprintRunID: nextRun, BlueprintStepIndex: &step0,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("start another run on the task: %v", err)
 	}
-	if ended := f.read(t); ended.EndedAt == nil {
-		t.Fatal("the new run did not end the warm conversation")
+	if len(ended) != 1 || ended[0].ID != f.conversationID {
+		t.Fatalf("the new run ended %+v, want the warm conversation %s", ended, f.conversationID)
 	}
 	if got := f.parkFleet.claim(t, f.y); got != nil {
 		t.Fatalf("another executor claimed %s while the warm claim held the task's tree", got.ID)
 	}
 
-	if d := f.await(t, 10*time.Second); d.fenced || d.handedBack {
+	f.control.RingWarmWaitsForEnded(context.Background(), f.orgID, ended)
+	if d := f.await(t, 5*time.Second); d.fenced || d.handedBack {
 		t.Fatalf("disposition = %+v, want the ordinary ending", d)
 	}
 	f.assertReleased(t)
@@ -651,6 +685,32 @@ func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
 	got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), id, epoch, f.y.claimPlacement(), db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != next {
 		t.Fatalf("claim once the warm claim let go = (%+v, %v), want conversation %s", got, err, next)
+	}
+}
+
+// A conversation already ended when the wait starts is let go on the wait's
+// first read. The test ends it with SQL, which wakes nothing, while the
+// turn-end snapshot is held.
+func TestWarmClaim_EndingBeforeTheWaitIsNotMissed(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}},
+		beforeStart: func(f *warmEngagement) { f.gate.hold() }})
+
+	select {
+	case <-f.gate.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the turn-end snapshot never uploaded")
+	}
+	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET ended_at = now(), ended_reason = $1 WHERE id = $2`,
+		string(domain.EndedDelegated), f.conversationID)
+	f.gate.let()
+
+	if d := f.await(t, warmWaitBackstop/3); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the ordinary ending", d)
+	}
+	f.assertConcluded(t, domain.ConversationOutcomeContinue, "fixed it")
+	f.assertReleased(t)
+	if phase := f.claimPhase(t); phase != domain.ClaimPhaseWarm {
+		t.Errorf("released claim's phase = %q, want %q: the turn ended without keeping its claim warm", phase, domain.ClaimPhaseWarm)
 	}
 }
 

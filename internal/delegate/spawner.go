@@ -500,9 +500,9 @@ type Spawner struct {
 	// with a real ladder behind it still runs in milliseconds.
 	snapshotWaitPollInterval time.Duration
 	// snapshotInterval is how often a live native engagement checkpoints its
-	// workspace (checkpoint.go). Zero disables checkpoints. NewSpawner sets
-	// DefaultSnapshotInterval; SetSnapshotInterval (TF_SNAPSHOT_INTERVAL_SEC)
-	// overrides it once at startup.
+	// workspace at batch boundaries (checkpoint.go). Zero takes none there.
+	// NewSpawner sets DefaultSnapshotInterval; SetSnapshotInterval
+	// (TF_SNAPSHOT_INTERVAL_SEC) overrides it once at startup.
 	snapshotInterval time.Duration
 	// claimWarmWindow is how long an engagement waits warm after a person's
 	// turn (warm_window.go). Zero turns warm claims off. NewSpawner sets

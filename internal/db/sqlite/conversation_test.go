@@ -145,13 +145,17 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	if conv.CompletedAt != nil {
 		completedAt = conv.CompletedAt.UTC()
 	}
+	var stepIdx any
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
-		                           creator_user_id, blueprint_run_id, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
+		                           creator_user_id, blueprint_run_id, blueprint_step_index, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
 	`, id, conv.TaskID, conv.PromptID, status, conv.Model,
-		trigger, triggerID, teamID, creator, conv.BlueprintRunID, completedAt); err != nil {
+		trigger, triggerID, teamID, creator, conv.BlueprintRunID, stepIdx, completedAt); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
@@ -437,6 +441,12 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			// BlueprintStore.MarkRunStatus), so the parked child stays parked.
 			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, blueprintRunID); err != nil {
 				t.Fatalf("set blueprint_run status: %v", err)
+			}
+		},
+		SetBlueprintRunCurrentStep: func(t *testing.T, blueprintRunID string, stepIndex int) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE blueprint_runs SET current_step_index = ? WHERE id = ?`, stepIndex, blueprintRunID); err != nil {
+				t.Fatalf("set blueprint_run current_step_index: %v", err)
 			}
 		},
 		SetConversationMemory: func(t *testing.T, conversationID, content string, source domain.MemorySource) {

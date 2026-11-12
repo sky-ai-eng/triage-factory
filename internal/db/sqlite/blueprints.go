@@ -1233,10 +1233,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 
 // parkOrphanedChildConversations parks every still-mid-flight child
 // conversation of blueprintRunID `open` and releases those children's active
-// claims. Called by MarkRunStatus's atomic flip;
-// ConversationQueueStore.ReconcileOrphanedConversations applies the same
-// predicate in its own boot sweep (it can't share this body — different store,
-// different scope).
+// claims. Called by MarkRunStatus's atomic flip.
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without

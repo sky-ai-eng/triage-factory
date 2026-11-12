@@ -132,16 +132,16 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedConversations heals the exact desync: a child conversation
-// left 'running' under an already-terminal blueprint_run. The boot sweep must
-// cancel it (and only it), leaving children under a still-running parent alone.
-func TestReconcileOrphanedConversations(t *testing.T) {
+// TestParkOrphanedConversations parks the conversations left mid-flight under a
+// cancelled blueprint_run, and leaves a claimed child under a still-running
+// parent alone.
+func TestParkOrphanedConversations(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	// Desynced: terminal (cancelled) blueprint_run, child still running.
+	// Desynced: cancelled blueprint_run, child still mid-flight.
 	taskA := seedEntityEventTask(t, conn, "recon-a")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "ra-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "ra-bp", "Recon A BP")
@@ -164,8 +164,8 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = 'ra-br'`); err != nil {
 		t.Fatalf("set br A cancelled: %v", err)
 	}
-	// ra-child streamed two token-bearing messages before the crash; the boot
-	// sweep must roll them up onto the run, not leave the columns at 0 (TFAC-473).
+	// ra-child streamed two token-bearing messages before the crash; the park
+	// must leave them readable through the ledger.
 	if _, err := conn.Exec(`
 		INSERT INTO messages (conversation_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
 		VALUES ('ra-child', 'assistant', 100, 20, 1000, 7),
@@ -175,9 +175,9 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	}
 
 	// A second orphan that never started: a mid-flight child under the same
-	// terminal parent that no claim ever picked up (the parent went terminal
-	// first). Must also be parked — a claimable step under a non-running parent
-	// is never actually claimed, so it would sit in the queue forever.
+	// cancelled parent that no claim ever picked up (the parent was cancelled
+	// first). Must also be parked: the claim gate refuses it, so it would sit
+	// in the queue forever.
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "ra-child-queued", TaskID: taskA.ID, PromptID: "ra-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brA, BlueprintStepIndex: &step0,
@@ -203,9 +203,8 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'rb-child'`); err != nil {
 		t.Fatalf("set child B running: %v", err)
 	}
-	// A genuinely running child holds an active claim (ClaimNextConversation mints
-	// it); without one, the claim-desync requeue arm would rightly treat the
-	// row as stranded.
+	// A genuinely running child holds an active claim (ClaimNextConversation
+	// mints it).
 	if _, err := conn.Exec(`
 		INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
 		VALUES ('rb-claim', 'rb-child', 'exec-b', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
@@ -213,12 +212,12 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 		t.Fatalf("seed rb-child claim: %v", err)
 	}
 
-	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	parked, err := stores.ConversationQueue.ParkOrphanedConversationsSystem(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedConversations: %v", err)
+		t.Fatalf("ParkOrphanedConversationsSystem: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("reconciled count = %d, want 2 (both mid-flight orphans under the terminal parent)", n)
+	if len(parked) != 2 {
+		t.Errorf("parked %d conversations, want 2 (both mid-flight orphans under the cancelled parent)", len(parked))
 	}
 	if got := childConversationStatusDB(t, conn, "ra-child"); got != "open" {
 		t.Errorf("orphan child status = %q, want open", got)
@@ -246,18 +245,18 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
-		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
+	if again, err := stores.ConversationQueue.ParkOrphanedConversationsSystem(ctx); err != nil || len(again) != 0 {
+		t.Errorf("second ParkOrphanedConversationsSystem = (%d parked, %v), want (0, nil)", len(again), err)
 	}
 }
 
-// TestReconcileOrphanedConversations_CountsClaimDesyncs pins the checker on the
+// TestCheckOrphanedSteps_CountsClaimDesyncs pins the checker on the
 // SQLite side: a terminal conversation with a live claim is counted and
 // sampled, and nothing — its claim included — is repaired. No writer produces
 // the shape, so a survivor is a bug report rather than a queue to drain. A
 // mid-flight conversation with no active claim is not a desync at all — that
 // shape IS the claimable state.
-func TestReconcileOrphanedConversations_CountsClaimDesyncs(t *testing.T) {
+func TestCheckOrphanedSteps_CountsClaimDesyncs(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -313,12 +312,9 @@ func TestReconcileOrphanedConversations_CountsClaimDesyncs(t *testing.T) {
 	activeClaim("ds-healthy-cl", "ds-healthy")
 	seedChild("ds-queued", "")
 
-	n, check, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	check, err := stores.ConversationQueue.CheckOrphanedStepsSystem(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedConversations: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("healed count = %d, want 0 (a desync is counted, never healed)", n)
+		t.Fatalf("CheckOrphanedStepsSystem: %v", err)
 	}
 	if check.ClaimDesyncs != 2 {
 		t.Errorf("claim desyncs = %d, want 2", check.ClaimDesyncs)
@@ -354,8 +350,8 @@ func TestReconcileOrphanedConversations_CountsClaimDesyncs(t *testing.T) {
 		t.Errorf("claimless row status = %q, want no stored status (already claimable, nothing to heal)", got)
 	}
 
-	// Counting is idempotent: a second sweep finds the same two.
-	if n2, check2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 || check2.ClaimDesyncs != 2 {
-		t.Errorf("second sweep = (%d, %d desyncs, %v), want (0, 2, nil)", n2, check2.ClaimDesyncs, err)
+	// Counting is idempotent: a second check finds the same two.
+	if check2, err := stores.ConversationQueue.CheckOrphanedStepsSystem(ctx); err != nil || check2.ClaimDesyncs != 2 {
+		t.Errorf("second check = (%d desyncs, %v), want (2, nil)", check2.ClaimDesyncs, err)
 	}
 }
