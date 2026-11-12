@@ -76,7 +76,14 @@ async function dismissTopCard() {
     </MemoryRouter>,
   )
   await screen.findByText(CARD.title)
-  fireEvent.keyDown(window, { key: 'ArrowLeft' })
+  // The deck binds its keys in an effect that runs after the render that drew
+  // the card, so a key pressed in between reaches the handler bound to the
+  // empty deck. Pressing until the dismiss is sent waits for the bound one;
+  // the write is recorded synchronously, so it is sent once.
+  await waitFor(() => {
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(writes).toHaveLength(1)
+  })
   return screen.findByRole('button', { name: 'Undo' })
 }
 
