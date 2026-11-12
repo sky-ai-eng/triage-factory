@@ -272,8 +272,7 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	connectOrgProviders(t, s, true, false)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{
-		"hesitation_ms": 0,
-		"blueprint_id":  blueprintID,
+		"blueprint_id": blueprintID,
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("delegate = %d, want 422 (the refusal is the request's fault, not a spawn fault); body=%s", rec.Code, rec.Body.String())
@@ -293,8 +292,7 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	// about the credential, and it left nothing behind.
 	connectOrgProviders(t, s, true, true)
 	again := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{
-		"hesitation_ms": 0,
-		"blueprint_id":  blueprintID,
+		"blueprint_id": blueprintID,
 	})
 	if again.Code != http.StatusOK {
 		t.Fatalf("delegate after reconnecting = %d, want 200; body=%s", again.Code, again.Body.String())

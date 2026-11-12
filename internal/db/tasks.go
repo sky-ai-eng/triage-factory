@@ -38,6 +38,30 @@ var ErrNoActiveClaimTeam = errors.New("db: the claim has no active team to land 
 // insert can no longer strand a task on an entity nothing will close again.
 var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
 
+// ErrInvalidUserCloseStatus is CloseByUser's refusal of a status that does
+// not close a task: only "dismissed" and "done" do.
+var ErrInvalidUserCloseStatus = errors.New("db: a person closes a task as dismissed or done")
+
+// The close_reason values a person's close stamps: CloseByUser writes them,
+// and nothing else does.
+const (
+	UserDismissedCloseReason = "user_dismissed"
+	UserCompletedCloseReason = "user_completed"
+)
+
+// UserCloseReason is the close reason CloseByUser stamps for status, one
+// rule for both dialects: dismissed and done each have their own, and any
+// other status is ErrInvalidUserCloseStatus.
+func UserCloseReason(status string) (string, error) {
+	switch status {
+	case "dismissed":
+		return UserDismissedCloseReason, nil
+	case "done":
+		return UserCompletedCloseReason, nil
+	}
+	return "", ErrInvalidUserCloseStatus
+}
+
 // TaskCloseOutcome is what TaskStore.CloseOrHoldSystem or
 // ApplyHeldCloseSystem did to one task: closed it, held its close, or
 // neither.
@@ -319,8 +343,8 @@ func taskKeyTime(t *time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-// TaskStore owns the tasks table — lifecycle, claims, dedup,
-// swipe-triggered transitions, plus the conversation-history queries that
+// TaskStore owns the tasks table — lifecycle, claims, dedup, a person's
+// close, snooze, wake and requeue, plus the conversation-history queries that
 // power the auto-delegate breaker.
 //
 // All methods take orgID. Local mode passes runmode.LocalDefaultOrgID
@@ -342,11 +366,19 @@ func taskKeyTime(t *time.Time) string {
 //     to are recorded as a visibility set via SetVisibilityTeams; the
 //     caller-supplied teamID is the owning/attributed team stamped on a
 //     newly created row.
-//   - Claim mutations return ok=true when the row actually changed.
+//   - Claim mutations, SnoozeTask, ClearSnooze and RequeueTask return
+//     ok=true when the row actually changed, not the row: each caller acts
+//     on whether the write landed and serves the task through Get.
 //     False means a guard tripped (caller doesn't broadcast,
 //     usually surfaces 409). HandoffAgentClaim returns the
 //     three-state HandoffResult so callers can distinguish no-op
-//     from refused.
+//     from refused, alongside the row it leaves.
+//   - Where a write refuses on task state, the predicate rides its own
+//     UPDATE's WHERE clause rather than a check before it. A handler that
+//     reads the task in one statement and writes in another cannot close a
+//     state hole — the row can change in between — so these predicates are
+//     the enforcement; a handler's pre-read only buys the common case a more
+//     specific answer.
 //
 // Returned-row shape: Get's point read projects a task joined to
 // its entity (title, url, source fields, the open-subtask and Slack-message
@@ -560,6 +592,46 @@ type TaskStore interface {
 	// tripped (caller surfaces 409).
 	AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error)
 
+	// CloseByUser closes a task on a person's word: status is "dismissed"
+	// (walked away) or "done" (resolved), and the close reason is
+	// UserDismissedCloseReason or UserCompletedCloseReason to match, with
+	// closed_at stamped, and snooze_until and close_event_type cleared: a
+	// person's close names no event, whatever an earlier close of a since
+	// requeued task left there. Any other status returns
+	// ErrInvalidUserCloseStatus and writes nothing.
+	//
+	// A closed task takes no second close: the UPDATE carries the status
+	// predicate, so a row that went done/dismissed since the caller read it
+	// answers ErrNoSuchTask, as a missing id does, with nothing written. That
+	// predicate is the only thing standing between two concurrent closes and
+	// a rewritten closed_at / close_reason. A caller that read the task
+	// before writing maps ErrNoSuchTask to "already closed".
+	CloseByUser(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
+
+	// SnoozeTask parks a task until the given wake time: status 'snoozed'
+	// with snooze_until set. Snooze is queue-only ("snoozed ↔ both claim
+	// cols NULL"), and a closed task is never parked, so the UPDATE carries
+	// both predicates and returns ok=false when either refuses — a claimed
+	// task, or one that went done/dismissed since the caller read it — with
+	// nothing written. Handlers map ok=false to 409.
+	SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time) (ok bool, err error)
+
+	// ClearSnooze wakes a snoozed task early: status 'snoozed' → 'queued'
+	// with snooze_until cleared. Guarded on the current status: a clear
+	// against a task that isn't snoozed returns ok=false rather than
+	// dragging an in_progress or closed row back into the queue. Handlers
+	// map ok=false to 409.
+	ClearSnooze(ctx context.Context, orgID, taskID string) (ok bool, err error)
+
+	// RequeueTask sends a task back to the queue, whatever its status. It
+	// clears the claim and the source_status the claim recorded with it, the
+	// close, and any held close: putting the task back in the queue overrides
+	// the event that resolved it, as reopening a closed task does, and the
+	// requeue's handler ends the conversations the close waited on. Returning
+	// it to the queue is the whole job, so there is nothing to refuse:
+	// ok=false means only that no such row exists.
+	RequeueTask(ctx context.Context, orgID, taskID string) (ok bool, err error)
+
 	// RecordEvent inserts into the task_events junction (task_id,
 	// event_id, kind). Idempotent on (task_id, event_id).
 	//
@@ -594,7 +666,12 @@ type TaskStore interface {
 	// team derived from the delegating user (see ClaimQueuedForUser),
 	// and with no such team the handoff is refused with
 	// ErrNoActiveClaimTeam, ahead of the same-agent no-op.
-	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (HandoffResult, error)
+	//
+	// The returned task is the row the handoff leaves: the one its UPDATE
+	// wrote on HandoffChanged, and the row as it stands on HandoffNoOp,
+	// both in the bare projection every TaskStore write returns. It is the
+	// zero value on HandoffRefused.
+	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (HandoffResult, domain.Task, error)
 
 	// ResolveClaimTeam returns the team a user→bot handoff WOULD
 	// consolidate the task onto, without mutating anything — the same
@@ -640,7 +717,7 @@ type TaskStore interface {
 	//
 	// The same UPDATE records source_status (domain.SourceStatus): the
 	// status and assignee the task's Jira or Linear entity snapshot holds,
-	// which a requeue or undo reads to put the issue back. NULL for any
+	// which a requeue reads to put the issue back. NULL for any
 	// other source.
 	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
 

@@ -38,7 +38,6 @@ func New(conn *sql.DB) db.Stores {
 	s.stores = db.Stores{
 		Scores:         newScoreStore(conn),
 		Prompts:        newPromptStore(conn),
-		Swipes:         newSwipeStore(conn),
 		Dashboard:      newDashboardStore(conn),
 		Secrets:        secrets,
 		EventHandlers:  eventHandlers,

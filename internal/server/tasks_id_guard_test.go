@@ -99,7 +99,6 @@ func TestTaskRoutes_404OnMalformedID(t *testing.T) {
 		{"patch", http.MethodPatch, "/api/tasks/not-a-uuid", map[string]any{"status": "dismissed"}},
 		{"claim", http.MethodPost, "/api/tasks/not-a-uuid/claim", map[string]any{}},
 		{"delegate", http.MethodPost, "/api/tasks/not-a-uuid/delegate", map[string]any{}},
-		{"undo", http.MethodPost, "/api/tasks/not-a-uuid/undo", nil},
 		{"requeue", http.MethodPost, "/api/tasks/not-a-uuid/requeue", nil},
 	}
 	for _, tc := range cases {

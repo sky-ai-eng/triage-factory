@@ -13,82 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTaskUndo_RefusesAGestureAnotherUserHasActedPast: undo is refused with 409
-// when another user acted on the task later, under real RLS, where a user can
-// SELECT only their own swipe_events rows and so cannot see the later gesture.
-func TestTaskUndo_RefusesAGestureAnotherUserHasActedPast(t *testing.T) {
-	r := newViewerRig(t)
-
-	var entityID string
-	repoID := dbseed.GitHubRepository(t, r.h.AdminDB, r.orgID, "https://github.com", "octo", "undo")
-	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title, scope, repository_id)
-		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com', $3) RETURNING id
-	`, r.orgID, "octo/undo#"+t.Name(), repoID).Scan(&entityID); err != nil {
-		t.Fatalf("seed entity: %v", err)
-	}
-	var evtID string
-	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
-	`, r.orgID, entityID).Scan(&evtID); err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	var taskID string
-	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
-		VALUES ($1, $2, $3, $4, 'github:pr:opened', $5) RETURNING id
-	`, r.orgID, r.admin, r.teamID, entityID, evtID).Scan(&taskID); err != nil {
-		t.Fatalf("seed task: %v", err)
-	}
-
-	// The member's own gesture: a real claim through the route, so the audit
-	// row carries their id.
-	call := func(method, path, caller string, body any) *httptest.ResponseRecorder {
-		t.Helper()
-		req := r.req(method, path, caller, body)
-		req.SetPathValue("id", taskID)
-		rec := httptest.NewRecorder()
-		switch {
-		case strings.HasSuffix(path, "/claim"):
-			r.s.handleTaskClaim(rec, req)
-		case strings.HasSuffix(path, "/undo"):
-			r.s.handleUndo(rec, req)
-		default:
-			r.s.handleTaskPatch(rec, req)
-		}
-		return rec
-	}
-
-	if rec := call(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, map[string]any{}); rec.Code != http.StatusOK {
-		t.Fatalf("member claim = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	// The founder then closes it — a later gesture by a different user, which
-	// is exactly the row the member's session cannot see.
-	if rec := call(http.MethodPatch, "/api/tasks/"+taskID, r.admin,
-		map[string]any{"status": "dismissed"}); rec.Code != http.StatusOK {
-		t.Fatalf("admin dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	rec := call(http.MethodPost, "/api/tasks/"+taskID+"/undo", r.member, nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("member undo = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	var status string
-	var closedAt sql.NullTime
-	if err := r.h.AdminDB.QueryRow(
-		`SELECT status, closed_at FROM tasks WHERE id = $1`, taskID,
-	).Scan(&status, &closedAt); err != nil {
-		t.Fatalf("scan task: %v", err)
-	}
-	if status != "dismissed" || !closedAt.Valid {
-		t.Fatalf("task = (%q, closed_at valid=%v) after a refused undo; want the founder's close intact",
-			status, closedAt.Valid)
-	}
-}
-
 // TestTaskClaim_ReassignHappyPath: a task another user holds is handed to a
-// third user on the task's team, leaving the lifecycle status alone and
-// recording a reassign swipe event.
+// third user on the task's team, leaving the lifecycle status alone.
 func TestTaskClaim_ReassignHappyPath(t *testing.T) {
 	s := newTestServer(t)
 	const fromUser = "00000000-0000-0000-0000-0000000000f1"
@@ -123,16 +49,6 @@ func TestTaskClaim_ReassignHappyPath(t *testing.T) {
 	}
 	if status != "in_progress" {
 		t.Errorf("status = %q, want preserved 'in_progress'", status)
-	}
-
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action = 'reassign'`, taskID,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 1 {
-		t.Errorf("reassign swipe_events count = %d, want 1", swipeCount)
 	}
 }
 

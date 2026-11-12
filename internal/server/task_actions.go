@@ -20,23 +20,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// The task verb routes: claim, delegate, requeue and undo. Each earns its
-// verb by carrying an effect a field write can't express — an external Jira or
-// Linear write, a spawned run, deliverable teardown, an audit reversal. The
-// lifecycle axis (dismissed / done / snoozed) is a field write and lives on
-// PATCH /api/tasks/{id} in tasks.go; requeue and undo live there too, next to
-// the finalizer they share.
+// The task verb routes: claim, delegate and requeue. Each earns its verb by
+// carrying an effect a field write can't express — an external Jira or Linear
+// write, a spawned run, a stopped one. The lifecycle axis (dismissed / done /
+// snoozed) is a field write and lives on PATCH /api/tasks/{id} in tasks.go;
+// requeue lives there too, next to its finalizer.
 //
 // Claim and delegate both move a column, and by the same mechanism: assigning
 // a task is what lands it in_progress, so the claim doors write the stage in
 // the same UPDATE. Nothing the run does afterwards moves it again.
-//
-// swipe_events is a "state-change log," not a "user-gesture log." For
-// lifecycle actions the write IS the state change, so the audit + lifecycle
-// UPDATE land together. For responsibility-axis actions (claim / reassign /
-// delegate) the real state change is a separate guarded UPDATE that can refuse
-// the gesture; audit only lands after that UPDATE accepts, so a refused
-// gesture leaves no trace.
 
 // taskClaimRequest is the body of POST /api/tasks/{id}/claim. An absent
 // target_user_id is a self-claim; a present one is a handoff to that user.
@@ -50,9 +42,6 @@ type taskClaimRequest struct {
 	// self-claim would hand the task to whoever asked instead of erroring on
 	// a client that lost track of its target.
 	TargetUserID *string `json:"target_user_id,omitempty"`
-	// HesitationMs is the dwell time before the gesture, recorded on the
-	// swipe_events row this route writes.
-	HesitationMs int `json:"hesitation_ms,omitempty"`
 }
 
 // handleTaskClaim moves a task's user claim. Self-claim (no target) takes
@@ -82,7 +71,6 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if req.TargetUserID != nil && strings.TrimSpace(*req.TargetUserID) == "" {
 		v.Invalid("target_user_id", "target_user_id must name a user; omit it to claim the task yourself")
 	}
-	validateHesitation(&v, req.HesitationMs)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -96,7 +84,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.TargetUserID != nil {
-		if !s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID, req.HesitationMs) {
+		if !s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID) {
 			return
 		}
 		// Admin-pool read, deliberately: a handoff can consolidate team_id
@@ -106,7 +94,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jiraUserClient, linearUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
+	jiraUserClient, linearUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -168,7 +156,7 @@ const (
 // Jira-backed), the resolved Linear client (nil unless it is Linear-backed),
 // which accept path landed, and ok=false when it already wrote an error
 // response.
-func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, *linear.Client, claimLanding, bool) {
+func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (*jira.Client, *linear.Client, claimLanding, bool) {
 	var task *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -183,9 +171,9 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		return nil, nil, claimLandingIdempotent, false
 	}
 	// Terminal-status refusal: claim transitions on done/dismissed rows are
-	// meaningless. RecordSwipe refuses them too, so this is the answer the
-	// caller gets either way — but saying it here keeps the refusal a 409
-	// about the task rather than a silently unaudited claim.
+	// meaningless. The claim writes refuse a closed task as a lost race, and
+	// the same-user arm below writes nothing at all, so this is what answers
+	// that the task is closed.
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
 		return nil, nil, claimLandingIdempotent, false
@@ -288,23 +276,6 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		landing = claimLandingFromUnclaimed
 	}
 
-	// Audit post-mutation, best-effort: the claim helpers already cleared
-	// snooze_until and landed the row in_progress atomically, so RecordSwipe is
-	// a no-op on lifecycle and the load-bearing effect is the swipe_events row.
-	// If it doesn't land — an insert failure, or the task closing under us,
-	// which RecordSwipe's own status predicate refuses — the claim still
-	// landed, so log and continue rather than 500-ing on a committed state
-	// change.
-	var audited bool
-	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		_, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionClaim, hesitationMs, nil)
-		return e
-	})
-	if swipeErr != nil || !audited {
-		taskActionLog.Warn("audit write did not land for claim, claim mutation already did",
-			"task", id, "refused", swipeErr == nil, "error", swipeErr)
-	}
 	if landing != claimLandingIdempotent {
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
@@ -371,7 +342,7 @@ func linearUserCredentialMissingMessage(err error) string {
 // interacts with it — an accepted divergence in the same family as the
 // TF/GitHub drift specs/multi-team-task-model.md already calls out,
 // not a bug this method needs to close.
-func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string, hesitationMs int) bool {
+func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string) bool {
 	var task *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -468,17 +439,6 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		}
 	}
 
-	// Audit post-mutation, best-effort — mirrors selfClaim.
-	var audited bool
-	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		_, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionReassign, hesitationMs, nil)
-		return e
-	})
-	if swipeErr != nil || !audited {
-		taskActionLog.Warn("audit write did not land for reassign, claim mutation already did",
-			"task", id, "refused", swipeErr == nil, "error", swipeErr)
-	}
 	if claimChanged {
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
@@ -494,9 +454,6 @@ type taskDelegateRequest struct {
 	// BlueprintID names the blueprint the run executes. Absent lets the
 	// spawner resolve the team's default.
 	BlueprintID string `json:"blueprint_id,omitempty"`
-	// HesitationMs is the dwell time before the gesture, recorded on the
-	// swipe_events row this route writes.
-	HesitationMs int `json:"hesitation_ms,omitempty"`
 }
 
 // handleTaskDelegate hands a task to the agent and spawns its run.
@@ -515,11 +472,6 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 
 	var req taskDelegateRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	var v httpx.Validation
-	validateHesitation(&v, req.HesitationMs)
-	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -578,8 +530,8 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 // unclaimed→bot, my-claim→bot and idempotent bot-owns, and refuses a
 // different-user claim. It re-checks team_agents.enabled at request time,
 // gating on the team the claim consolidates onto rather than the pre-handoff
-// task.TeamID. Returns the new status and ok=false when it already wrote an
-// error response.
+// task.TeamID. Returns the status of the row the handoff left, and ok=false
+// when it already wrote an error response.
 func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req taskDelegateRequest) (string, bool) {
 	// Pre-load to disambiguate HandoffRefused (404 missing / 409 terminal /
 	// 409 theft) and to gate the bot-enablement check on the task's own team.
@@ -638,9 +590,10 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		return "", false
 	}
 	var result db.HandoffResult
+	var handed domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		result, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, a.ID, userID)
+		result, handed, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, a.ID, userID)
 		return e
 	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
 		// The owner team was archived since the read above.
@@ -663,19 +616,6 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		return "", false
 	}
 
-	// Accepted (Changed or NoOp). Audit post-mutation, best-effort.
-	var newStatus string
-	var audited bool
-	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		newStatus, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionDelegate, req.HesitationMs, nil)
-		return e
-	})
-	if swipeErr != nil || !audited {
-		taskActionLog.Warn("audit write did not land for delegate, claim mutation already did",
-			"task", id, "refused", swipeErr == nil, "error", swipeErr)
-		newStatus = taskStatusQueued
-	}
 	if result == db.HandoffChanged {
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_claimed",
@@ -683,7 +623,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 			Data:  map[string]any{},
 		})
 	}
-	return newStatus, true
+	return handed.Status, true
 }
 
 // stopTaskConversations stops every active run on a task and cancels the
@@ -733,7 +673,7 @@ func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskI
 // endTaskConversations stamps the task's boundary: every conversation still
 // live on the task stops being the one the task is about, with the reason it
 // stopped being it. One door for the three gestures that move a task off
-// whoever was working it (requeue/undo, takeover, delegate), because the row
+// whoever was working it (requeue, takeover, delegate), because the row
 // they each write is identical and only the reason differs.
 //
 // It runs behind stopTaskConversations, never instead of it: the stop ends the

@@ -94,7 +94,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		})
 		t.Run("HandoffAgentClaim", func(t *testing.T) {
 			taskID := seed(t)
-			result, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID)
+			result, _, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID)
 			if err != nil || result != db.HandoffChanged {
 				t.Fatalf("HandoffAgentClaim = (%v, %v), want (HandoffChanged, nil)", result, err)
 			}
@@ -157,7 +157,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		t.Run("HandoffAgentClaim", func(t *testing.T) {
 			taskID := seed(t)
 			before := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID)
-			result, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID)
+			result, _, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID)
 			if result != db.HandoffRefused || !errors.Is(err, db.ErrNoActiveClaimTeam) {
 				t.Errorf("HandoffAgentClaim = (%v, %v), want (HandoffRefused, ErrNoActiveClaimTeam)", result, err)
 			}

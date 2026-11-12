@@ -356,24 +356,6 @@ func claimedBy(t *testing.T, db *sql.DB, taskID string) string {
 	return claim.String
 }
 
-func swipeActions(t *testing.T, db *sql.DB, taskID string) []string {
-	t.Helper()
-	rows, err := db.Query(`SELECT action FROM swipe_events WHERE task_id = ? ORDER BY id`, taskID)
-	if err != nil {
-		t.Fatalf("query swipe_events: %v", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err != nil {
-			t.Fatalf("scan swipe_events: %v", err)
-		}
-		out = append(out, a)
-	}
-	return out
-}
-
 // TestTaskClaim_LinearTask_NoUserCredential_Returns409: a user with no usable
 // Linear credential is refused before the claim lands, whatever client sent it,
 // with a message naming why; the org's credential is never used in its place.
@@ -396,7 +378,7 @@ func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
 			const taskID = "00000000-0000-4000-8000-000000000300"
 			seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -412,9 +394,6 @@ func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
 
 			if got := claimedBy(t, s.db, taskID); got != "" {
 				t.Errorf("claimed_by_user_id = %q, want unclaimed (the refusal must not mutate)", got)
-			}
-			if got := swipeActions(t, s.db, taskID); len(got) != 0 {
-				t.Errorf("swipe_events = %v, want none (a refused claim leaves no audit)", got)
 			}
 			if _, system, _, _ := res.snapshot(); system != 0 {
 				t.Errorf("the org's credential was reached for %d times, want never", system)
@@ -432,7 +411,7 @@ func TestTaskClaim_LinearTask_ResolverBackendError_Returns500(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000301"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
@@ -454,7 +433,7 @@ func TestTaskClaim_LinearTask_ClearedSnapshotStillFindsTheRule(t *testing.T) {
 		t.Fatalf("clear snapshot: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -474,7 +453,7 @@ func TestTaskClaim_LinearTask_NoRule_NoLinearWrites(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000303"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -625,7 +604,7 @@ func TestApplyLinearUnclaim(t *testing.T) {
 	})
 }
 
-// TestTaskRequeue_LinearTask_UndoesTheClaim: an audited claim writes through the
+// TestTaskRequeue_LinearTask_UndoesTheClaim: a claim writes through the
 // acting user's client, never the org's; the requeue restores the recorded state
 // (not the first pickup state), unassigned, by UUID after the issue moved team.
 func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
@@ -635,11 +614,8 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000305"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateBacklogRef)
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{}); rec.Code != http.StatusOK {
 		t.Fatalf("claim status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := swipeActions(t, s.db, taskID); !slices.Equal(got, []string{swipeActionClaim}) {
-		t.Errorf("swipe_events = %v, want one claim", got)
 	}
 	fake.waitForWrites(t, 2)
 	fake.moveIssue("OPS-3")
@@ -710,7 +686,7 @@ func TestTaskClaim_GitHubTask_SkipsLinearResolver(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000304/claim", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000304/claim", map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

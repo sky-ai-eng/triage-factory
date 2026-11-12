@@ -212,8 +212,8 @@ func seedPgOrgForEvents(t *testing.T, h *pgtest.Harness) string {
 
 // seedPgEntityForEvents inserts an active GitHub PR entity in the
 // given org. Direct INSERT (not EntityStore) so the conformance
-// fixture path is schema-coupled and short — matches the SwipeStore
-// / RepositoryStore seed pattern.
+// fixture path is schema-coupled and short — matches the
+// RepositoryStore seed pattern.
 func seedPgEntityForEvents(t *testing.T, h *pgtest.Harness, orgID, suffix string) string {
 	t.Helper()
 	id := uuid.New().String()

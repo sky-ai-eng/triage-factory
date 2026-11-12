@@ -25,7 +25,6 @@ func TestSourceStatus_SQLite(t *testing.T) {
 		stores := sqlitestore.New(conn)
 		return dbtest.SourceStatusHarness{
 			Tasks:   stores.Tasks,
-			Swipes:  stores.Swipes,
 			OrgID:   runmode.LocalDefaultOrgID,
 			UserID:  runmode.LocalDefaultUserID,
 			AgentID: runmode.LocalDefaultAgentID,

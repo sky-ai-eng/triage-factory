@@ -77,9 +77,8 @@ func TestTaskCloseDeferral_SQLite(t *testing.T) {
 			Tasks:            stores.Tasks,
 			Entities:         stores.Entities,
 			StagedInjections: stores.StagedInjections,
-			Swipes:           stores.Swipes,
 			Conversations:    stores.Conversations,
-			SwipeUserID:      runmode.LocalDefaultUserID,
+			UserID:           runmode.LocalDefaultUserID,
 		}, runmode.LocalDefaultOrgID, seed
 	})
 }

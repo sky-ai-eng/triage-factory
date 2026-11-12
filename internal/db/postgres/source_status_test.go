@@ -12,9 +12,8 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// TestSourceStatus_Postgres wires the suite against AdminDB, like the swipe
-// suite: a swipe written there is attributed to the org owner, who is the
-// claimant here, so UndoLastSwipe's guard holds.
+// TestSourceStatus_Postgres wires the suite against AdminDB, so the claims
+// and requeues it stages need no request claims.
 func TestSourceStatus_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	dbtest.RunSourceStatusConformance(t, func(t *testing.T) dbtest.SourceStatusHarness {
@@ -24,7 +23,6 @@ func TestSourceStatus_Postgres(t *testing.T) {
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SourceStatusHarness{
 			Tasks:   stores.Tasks,
-			Swipes:  stores.Swipes,
 			OrgID:   orgID,
 			UserID:  userID,
 			AgentID: agentID,

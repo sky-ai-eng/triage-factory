@@ -497,7 +497,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		// The user requeues the task while the run stays live — the documented,
 		// deliberate "unclaimed with a live run" state. A replayed event must
 		// not quietly put the bot's claim back.
-		if ok, err := stores.Swipes.RequeueTask(ctx, org, task.ID); err != nil || !ok {
+		if ok, err := stores.Tasks.RequeueTask(ctx, org, task.ID); err != nil || !ok {
 			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 		}
 		inserted, claimed, conv, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID}, "",

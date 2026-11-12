@@ -56,7 +56,6 @@ import (
 type Server struct {
 	db               *sql.DB
 	prompts          db.PromptStore
-	swipes           db.SwipeStore
 	agents           db.AgentStore           // resolves the org's agent for claim stamps
 	teamAgents       db.TeamAgentStore       // re-checks team_agents.enabled on task-delegate / factory-delegate
 	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
@@ -178,7 +177,7 @@ type Server struct {
 	ghTokenCache ghclient.TokenCache
 	// jiraResolver routes Jira writes by provenance: ForSystem for the org/bot
 	// service cred, ForUser for the acting user's own stored credential.
-	// User-initiated board claim / undo / requeue resolve via ForUser so the
+	// User-initiated board claim / requeue resolve via ForUser so the
 	// write is attributed to the user, not the service account. Built in New
 	// from the stores, so it's never nil — handlers don't guard.
 	jiraResolver jira.Resolver
@@ -559,7 +558,6 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s := &Server{
 		db:                 database,
 		prompts:            stores.Prompts,
-		swipes:             stores.Swipes,
 		agents:             stores.Agents,
 		teamAgents:         stores.TeamAgents,
 		users:              stores.Users,

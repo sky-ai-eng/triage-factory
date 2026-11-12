@@ -404,7 +404,7 @@ footer {
   <table class="matrix">
     <thead><tr><th>Boundary</th><th>Who</th><th>What it does to the conversation</th><th>Today</th></tr></thead>
     <tbody>
-      <tr><td>Requeue / undo</td><td>human</td><td>stop if live; ends it; memory recorded</td><td>stops the run (#1048); the conversation stays resumable</td></tr>
+      <tr><td>Requeue</td><td>human</td><td>stop if live; ends it; memory recorded</td><td>stops the run (#1048); the conversation stays resumable</td></tr>
       <tr><td>Delegate / re-delegate</td><td>human, or an event handler</td><td>stop if live; ends it; the blueprint's step 0 is the next conversation</td><td>stops; tears artifacts down</td></tr>
       <tr><td>Takeover — the assignee picker moves a bot claim to a person<sup>†</sup></td><td>human</td><td>stop, which cancels the blueprint; ends it; memory generation <strong>kicked at the flip</strong>; the task is blocked until it lands (§6); the human's next message opens a new conversation</td><td>stops; tears artifacts down</td></tr>
       <tr><td>Complete / dismiss</td><td>human</td><td>stop if live; <strong>not a boundary</strong> — the conversation is not ended and owes no memory; task ends</td><td>same, plus teardown (kept — nothing is coming back)</td></tr>
@@ -593,7 +593,6 @@ This task has {K} prior conversations. Their memory files are at _tfac/entity-me
   <ul class="tight">
     <li>Stop (already lands: parks the conversation <code>open</code>, cancels the blueprint) → record memory (§6) → stamp the boundary (§11) → flip the task row as today → broadcast. Jira reversal unchanged. Artifacts untouched.</li>
     <li>The resumability ladder gains <code>ResumeBlockedTaskRequeued</code>: the conversation's resumability read answers with that rung, so a message to it is refused with the reason named. Its rows are untouched — the conversation and its transcript stay readable through the reads that exist today; nothing is hidden or scrubbed.</li>
-    <li>Undo takes the same path (it shares the finalizer).</li>
   </ul>
 
   <div class="callout callout--warn">
