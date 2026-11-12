@@ -595,7 +595,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			// command the prompt tells the model to write.
 			SelfBin: agentproc.LocalAgentBinary(selfBin),
 			Extras:  cfg.extraAllowedTools,
-			GH:      ghChannel != nil,
+			GH:      ghChannel.Live(),
 		}),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,

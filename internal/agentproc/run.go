@@ -398,7 +398,24 @@ type GHChannelParams struct {
 	// only: a local run executes under the user's real HOME, so without this gh
 	// would read their ~/.config/gh, personal credential included. The sandbox
 	// has no such directory to reach (HOME is the run's own /work).
+	//
+	// A local run whose channel could not start carries this field alone: gh
+	// then finds an empty config dir instead of the user's, and nothing else of
+	// the channel exists. Live tells the two apart.
 	ConfigDir string
+}
+
+// Live reports whether gc is a working channel — an injector the agent's gh
+// can reach — rather than nil or the isolation-only params a run gets when its
+// channel could not start. Anything that grants or advertises real `gh` keys on
+// Live, never on gc being non-nil: an isolation-only run has no TF-owned gh,
+// so the gh on its PATH is the user's.
+//
+// The host alone decides it, because a sidecar's channel carries no trust-file
+// path (its gh trusts the injector through the run's CA bundle); the direct
+// path's own need for one is directGHChannelEnv's to check.
+func (gc *GHChannelParams) Live() bool {
+	return gc != nil && gc.Host != ""
 }
 
 // NoopSink discards all stream events. Suitable for one-shot agent
@@ -749,6 +766,9 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// an inherited value would decide whether the agent's checkouts download
 	// LFS content, which is TF's call to make the same way in every run.
 	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar})
+	if opts.GHChannel != nil {
+		parentEnv = dropEnvKeysFold(parentEnv, ghInheritedEnvKeys)
+	}
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
 	// On Windows, the Git Bash the preflight approved; nothing elsewhere.
 	hookEnv = append(hookEnv, gitBashEnv()...)

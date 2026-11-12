@@ -492,7 +492,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 			// command the prompt tells the model to write.
 			SelfBin: agentproc.LocalAgentBinary(selfBin),
 			Extras:  opts.ExtraAllowedTools,
-			GH:      ghChannel != nil,
+			GH:      ghChannel.Live(),
 		}),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,

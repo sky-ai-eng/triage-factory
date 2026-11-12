@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -17,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -26,6 +28,28 @@ type noopChannelCloser struct{}
 
 func (noopChannelCloser) Close() error { return nil }
 
+// isolatedChannelCloser removes the per-run directory an isolation-only channel
+// created.
+type isolatedChannelCloser struct{ dir string }
+
+func (c isolatedChannelCloser) Close() error { return os.RemoveAll(c.dir) }
+
+// isolatedGHConfig is what a local run gets when its gh channel cannot start:
+// no listener and no TF-owned binary, only an empty per-run gh config dir. A
+// gh the agent finds on PATH is then the user's own, and without this it would
+// read the user's config dir and act as the user, outside the exec verbs and
+// their audit. The dir is named even when it cannot be created, because gh
+// reading a missing config dir finds no login either; the failure is logged
+// rather than returned, as every other degrade of this channel is.
+func isolatedGHConfig(conversationID string) (*agentproc.GHChannelParams, io.Closer) {
+	channelDir := paths.GHChannelDir(conversationID)
+	configDir := filepath.Join(channelDir, "config")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		delegateLog.Warn("create isolated gh config dir failed; gh still points at it and finds no login", "conversation", conversationID, "error", err)
+	}
+	return &agentproc.GHChannelParams{ConfigDir: configDir}, isolatedChannelCloser{dir: channelDir}
+}
+
 // startLocalGHChannel provisions the real-`gh` credential channel for a
 // local-mode run: the TF-owned pinned binary, a loopback injector holding the
 // org's live credential, and the per-run placeholder + trust file the agent's gh
@@ -33,13 +57,14 @@ func (noopChannelCloser) Close() error { return nil }
 // the same agentproc.GHChannelParams shape, so the agent-facing surface is one
 // surface in both modes.
 //
-// Returns (nil, no-op closer) — never an error — whenever the channel can't be
-// stood up: outside local mode (multi brings its own via the sidecar, and its
-// executors deliberately hold no live secret store to resolve a credential
-// from), with no credential resolver wired, on a platform with no pinned gh, or
-// when the fetch itself fails. Every one of those degrades the run to the scoped
-// `exec gh` verbs, which still work; failing the run instead would trade a
-// missing convenience for a dead task.
+// Returns (nil, no-op closer) outside local mode (multi brings its own via the
+// sidecar, and its executors deliberately hold no live secret store to resolve
+// a credential from) and for a call with no conversation. Inside local mode it
+// never fails the run: with no credential resolver wired, on a platform with no
+// pinned gh, when the fetch fails, with no GitHub URL, or when the channel
+// itself fails to start, it returns isolatedGHConfig's params instead. Every one
+// of those degrades the run to the scoped `exec gh` verbs, which still work;
+// failing the run instead would trade a missing convenience for a dead task.
 //
 // owner is the run's primary repo owner, used to resolve which credential the
 // injector injects. Empty (a Jira run with no repo yet) still resolves the org's
@@ -56,7 +81,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 	resolver := s.ghResolver
 	s.mu.Unlock()
 	if resolver == nil {
-		return nil, noopChannelCloser{}
+		return isolatedGHConfig(conversationID)
 	}
 	stores, storesSet := s.getStores()
 
@@ -69,7 +94,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		} else {
 			delegateLog.Warn("provision pinned gh failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)
 		}
-		return nil, noopChannelCloser{}
+		return isolatedGHConfig(conversationID)
 	}
 
 	// Which credential the injector will attach, settled once here rather than
@@ -85,7 +110,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 	upstream := s.githubAPIUpstreamFor(ctx, orgID)
 	if upstream == "" {
 		delegateLog.Warn("no GitHub URL for the local gh channel; the agent continues on the scoped exec verbs", "conversation", conversationID)
-		return nil, noopChannelCloser{}
+		return isolatedGHConfig(conversationID)
 	}
 
 	var gitHandler http.Handler
@@ -128,7 +153,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 	})
 	if err != nil {
 		delegateLog.Warn("start local gh channel failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)
-		return nil, noopChannelCloser{}
+		return isolatedGHConfig(conversationID)
 	}
 
 	delegateLog.Info("local gh channel up", "conversation", conversationID, "host", ch.Host)
