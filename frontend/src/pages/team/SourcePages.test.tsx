@@ -501,14 +501,24 @@ describe('GitHub source page', () => {
     vi.stubGlobal('fetch', fetchMock)
     render(<GitHubSource {...BODY} />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '1 more · show them' }))
-    await waitFor(() => expect(screen.getByText('sky/second-page')).toBeInTheDocument())
+    const more = await screen.findByRole('button', { name: '1 more · show them' })
+    // The ping lands the moment the second page is on screen, before React
+    // runs any effect it deferred past that commit, so the refresh has to
+    // count the rows the reader sees from the commit alone.
+    let before: number | undefined
+    const observer = new MutationObserver(() => {
+      if (!screen.queryByText('sky/second-page')) return
+      observer.disconnect()
+      before = catalogBodies(fetchMock).length
+      ws.handlers.forEach((h) => h({ type: 'github_repos_updated' }))
+    })
+    observer.observe(document.body, { subtree: true, childList: true, characterData: true })
+    fireEvent.click(more)
+    await waitFor(() => expect(before).toBe(2))
 
-    const before = catalogBodies(fetchMock).length
-    act(() => ws.handlers.forEach((h) => h({ type: 'github_repos_updated' })))
     // Both pages are read again, and both stay on screen.
-    await waitFor(() => expect(catalogBodies(fetchMock).length).toBe(before + 2))
-    expect(catalogBodies(fetchMock).slice(before)).toEqual([
+    await waitFor(() => expect(catalogBodies(fetchMock).length).toBe(4))
+    expect(catalogBodies(fetchMock).slice(2)).toEqual([
       { search: '', page_size: 100 },
       { search: '', page_size: 100, page_token: 'tok-2' },
     ])

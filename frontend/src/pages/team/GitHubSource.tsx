@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import { Odometer, Ticker } from '../../ui/odometer/Odometer'
@@ -158,9 +158,12 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   const wanted = useRef('')
 
   // How many rows of which search the reader holds, for a refresh that
-  // re-reads them all.
+  // re-reads them all. Written in the commit that renders the rows: a page
+  // that lands from a fetch commits in a default-priority render, whose
+  // passive effects React may run a task later, and a ping handled in between
+  // would re-read fewer pages than are on screen.
   const held = useRef({ search: '', count: 0 })
-  useEffect(() => {
+  useLayoutEffect(() => {
     held.current = { search: catalog?.search ?? '', count: catalog?.items.length ?? 0 }
   }, [catalog])
 
