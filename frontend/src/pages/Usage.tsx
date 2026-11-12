@@ -277,7 +277,7 @@ const tooltipStyle = {
   border: '1px solid var(--color-line-2)',
   borderRadius: 'var(--radius-float)',
   fontSize: 'var(--text-reported)',
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  fontFamily: 'var(--font-mono)',
   boxShadow: 'var(--shadow-float)',
 } as const
 const tooltipLabelStyle = { color: 'var(--color-ink-3)' } as const
