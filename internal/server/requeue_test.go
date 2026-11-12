@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -155,19 +154,6 @@ func assertPendingApprovalCleanedUp(
 	}
 }
 
-// seedCallerGesture records a swipe_events row by the acting user, the gesture
-// /undo reverses: a fixture that inserts a claimed task directly skips it, and
-// undo refuses when the caller has nothing of their own to reverse.
-func seedCallerGesture(t *testing.T, database *sql.DB, taskID, action string) {
-	t.Helper()
-	if _, err := database.Exec(
-		`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, ?, 0)`,
-		taskID, action,
-	); err != nil {
-		t.Fatalf("seed %s gesture on %s: %v", action, taskID, err)
-	}
-}
-
 // seedCarriedDraftPR stages a draft pull request on conversationID, the
 // deliverable a next attempt pushes to instead of opening a second PR for the
 // same task. Returns the deliverable id.
@@ -247,69 +233,53 @@ func assertPendingApprovalCarried(
 	}
 }
 
-// TestRequeueRoutes_ConcludedRun pins /requeue and /undo on a task whose run
-// concluded: the task returns to the queue carrying the draft PR and staged
-// review, the conversation is stamped requeued but not stopped, and only /undo
-// adds a swipe row.
-func TestRequeueRoutes_ConcludedRun(t *testing.T) {
-	for _, route := range []string{"requeue", "undo"} {
-		t.Run(route, func(t *testing.T) {
-			s := newTestServer(t)
-			// A real spawner: what proves no stop happened is that the spawner had
-			// every means to do one.
-			s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
-			taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
-			prID := seedCarriedDraftPR(t, s.db, conversationID)
-			var wantSwipes []string
-			if route == "undo" {
-				// The fixture's task is agent-held, the state a delegate leaves.
-				seedCallerGesture(t, s.db, taskID, "delegate")
-				wantSwipes = []string{"delegate", "undo"}
-			}
+// TestRequeue_ConcludedRun pins /requeue on a task whose run concluded: the
+// task returns to the queue carrying the draft PR and staged review, and the
+// conversation is stamped requeued but not stopped.
+func TestRequeue_ConcludedRun(t *testing.T) {
+	s := newTestServer(t)
+	// A real spawner: what proves no stop happened is that the spawner had
+	// every means to do one.
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/"+route, nil)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-			}
-			assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
-			// Whoever claims the task next starts fresh.
-			assertStamped(t, s.db, conversationID, domain.EndedRequeued)
-			// A drag to the Queue column is not a swipe, so /requeue adds nothing
-			// to the swipe analytics.
-			if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, wantSwipes) {
-				t.Errorf("swipe_events actions = %v, want %v", got, wantSwipes)
-			}
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
+	// Whoever claims the task next starts fresh.
+	assertStamped(t, s.db, conversationID, domain.EndedRequeued)
 
-			// The stop pass enumerates active conversations, so the concluded one
-			// is not parked, given a stop note, or cancelled.
-			var parkReason sql.NullString
-			if err := s.db.QueryRow(`SELECT park_reason FROM conversations WHERE id = ?`, conversationID).Scan(&parkReason); err != nil {
-				t.Fatalf("read conversation: %v", err)
-			}
-			if parkReason.Valid {
-				t.Errorf("park_reason = %q; a conversation that already concluded has nothing to stop", parkReason.String)
-			}
-			var stopNotes int
-			if err := s.db.QueryRow(
-				`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ?`,
-				conversationID, domain.MessageSubtypeStopNote,
-			).Scan(&stopNotes); err != nil {
-				t.Fatalf("count stop notes: %v", err)
-			}
-			if stopNotes != 0 {
-				t.Errorf("stop notes = %d, want 0", stopNotes)
-			}
-			var bpStatus string
-			if err := s.db.QueryRow(
-				`SELECT br.status FROM blueprint_runs br JOIN conversations c ON c.blueprint_run_id = br.id WHERE c.id = ?`,
-				conversationID,
-			).Scan(&bpStatus); err != nil {
-				t.Fatalf("read blueprint run: %v", err)
-			}
-			if bpStatus == "cancelled" {
-				t.Error("blueprint_run status = cancelled; the stop pass reached a conversation it should not have enumerated")
-			}
-		})
+	// The stop pass enumerates active conversations, so the concluded one
+	// is not parked, given a stop note, or cancelled.
+	var parkReason sql.NullString
+	if err := s.db.QueryRow(`SELECT park_reason FROM conversations WHERE id = ?`, conversationID).Scan(&parkReason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if parkReason.Valid {
+		t.Errorf("park_reason = %q; a conversation that already concluded has nothing to stop", parkReason.String)
+	}
+	var stopNotes int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ?`,
+		conversationID, domain.MessageSubtypeStopNote,
+	).Scan(&stopNotes); err != nil {
+		t.Fatalf("count stop notes: %v", err)
+	}
+	if stopNotes != 0 {
+		t.Errorf("stop notes = %d, want 0", stopNotes)
+	}
+	var bpStatus string
+	if err := s.db.QueryRow(
+		`SELECT br.status FROM blueprint_runs br JOIN conversations c ON c.blueprint_run_id = br.id WHERE c.id = ?`,
+		conversationID,
+	).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	if bpStatus == "cancelled" {
+		t.Error("blueprint_run status = cancelled; the stop pass reached a conversation it should not have enumerated")
 	}
 }
 
@@ -325,7 +295,7 @@ func TestTaskPatch_EndingATask(t *testing.T) {
 			prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": status, "hesitation_ms": 0})
+				map[string]any{"status": status})
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
@@ -353,10 +323,9 @@ func TestTaskPatch_EndingATask(t *testing.T) {
 	}
 }
 
-// TestTaskClaim_RefusedLeavesNoAuditRow: swipe_events records state changes,
-// not attempts, so a claim refused because another user holds the task is a
-// 409 with no audit row and the task unchanged.
-func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
+// TestTaskClaim_RefusedLeavesTheTaskUnchanged: a claim refused because another
+// user holds the task is a 409 with the task unchanged.
+func TestTaskClaim_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004cc"
@@ -390,20 +359,9 @@ func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/claim",
-		map[string]any{"hesitation_ms": 0})
+		map[string]any{})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-
-	// No swipe_events row written — refused gesture leaves no trace.
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000009'`,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 0 {
-		t.Errorf("swipe_events count = %d, want 0 (refused claim must not audit)", swipeCount)
 	}
 
 	// State unchanged — other user still owns it, status unchanged.
@@ -422,9 +380,9 @@ func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
-// TestTaskDelegate_RefusedLeavesNoAuditRow is the delegate half: a task another
-// user holds refuses the delegate with a 409, no swipe row and no claim change.
-func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
+// TestTaskDelegate_RefusedLeavesTheTaskUnchanged is the delegate half: a task
+// another user holds refuses the delegate with a 409 and no claim change.
+func TestTaskDelegate_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	const eventType = "github:pr:opened"
@@ -459,20 +417,11 @@ func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/delegate",
-		map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
+		map[string]any{"blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000007'`,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 0 {
-		t.Errorf("swipe_events count = %d, want 0 (refused delegate must not audit)", swipeCount)
-	}
 	var claimUser sql.NullString
 	var claimAgent sql.NullString
 	if err := s.db.QueryRow(
@@ -490,7 +439,7 @@ func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 
 // TestTaskClaim_RefusedOnTerminalTask: a closed task still claimed by the caller
 // reaches the same-user arm, which calls no store helper, so the handler's own
-// status check is what refuses it with a 409, no reopen and no swipe row.
+// status check is what refuses it with a 409 and no reopen.
 func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 	for _, terminalStatus := range []string{"done", "dismissed"} {
 		t.Run(terminalStatus, func(t *testing.T) {
@@ -520,7 +469,7 @@ func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 			}
 
 			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/claim",
-				map[string]any{"hesitation_ms": 0})
+				map[string]any{})
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -536,16 +485,6 @@ func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 				t.Errorf("status = %q, want %q (refused claim reopened terminal task)", status, terminalStatus)
 			}
 
-			// Audit must be silent on the refusal.
-			var swipeCount int
-			if err := s.db.QueryRow(
-				`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000012'`,
-			).Scan(&swipeCount); err != nil {
-				t.Fatalf("scan swipe_events: %v", err)
-			}
-			if swipeCount != 0 {
-				t.Errorf("swipe_events count = %d, want 0 (refused gesture must leave no trace)", swipeCount)
-			}
 		})
 	}
 }
@@ -557,7 +496,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 	t.Run("missing_task_404", func(t *testing.T) {
 		s := newTestServer(t)
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/delegate",
-			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
+			map[string]any{"blueprint_id": "any"})
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
@@ -588,7 +527,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed terminal task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/delegate",
-			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
+			map[string]any{"blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -629,7 +568,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/delegate",
-			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
+			map[string]any{"blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -640,7 +579,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 }
 
 // TestTaskDelegate_RefusedWhenBotDisabled: with the team's agent disabled, a
-// delegate is a 409 with no claim stamped and no swipe row. No route writes
+// delegate is a 409 with no claim stamped. No route writes
 // team_agents.enabled, so the fixture writes it directly.
 func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
@@ -675,12 +614,12 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/delegate",
-		map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
+		map[string]any{"blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}
 
-	// No state changes — claim cols untouched, no swipe_events row.
+	// No state changes — claim cols untouched.
 	var claimAgent, claimUser sql.NullString
 	if err := s.db.QueryRow(
 		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000005'`,
@@ -692,15 +631,6 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	}
 	if claimUser.Valid {
 		t.Errorf("user claim disturbed: %q", claimUser.String)
-	}
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000005'`,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 0 {
-		t.Errorf("swipe_events count = %d, want 0", swipeCount)
 	}
 }
 
@@ -733,13 +663,13 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/00000000-0000-4000-8000-000000000010",
-		map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "hesitation_ms": 0})
+		map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Unchanged: still in progress, no snooze_until, the claim still the
-	// user's, and no swipe row.
+	// Unchanged: still in progress, no snooze_until, and the claim still the
+	// user's.
 	var status string
 	var snoozeUntil sql.NullTime
 	var claim sql.NullString
@@ -756,15 +686,6 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 	if !claim.Valid || claim.String != runmode.LocalDefaultUserID {
 		t.Errorf("claim was disturbed by refused snooze: got %v", claim)
-	}
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000010'`,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 0 {
-		t.Errorf("swipe_events count = %d, want 0 (refused gesture should leave no audit)", swipeCount)
 	}
 }
 
@@ -802,8 +723,7 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	// A blueprint id that won't resolve: the claim moves before the spawn,
 	// which then fails with a 422.
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", map[string]any{
-		"hesitation_ms": 0,
-		"blueprint_id":  "no-such-prompt",
+		"blueprint_id": "no-such-prompt",
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
@@ -873,12 +793,12 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/claim",
-		map[string]any{"hesitation_ms": 0})
+		map[string]any{})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Claim must be unchanged — the swipe refused to overwrite.
+	// Claim must be unchanged — the claim refused to overwrite it.
 	var claimedUser sql.NullString
 	if err := s.db.QueryRow(
 		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000003'`,
@@ -888,57 +808,6 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	if !claimedUser.Valid || claimedUser.String != otherUserID {
 		t.Errorf("claimed_by_user_id = %v; want preserved as %q (handler must not steal)",
 			claimedUser, otherUserID)
-	}
-}
-
-// TestHandleUndo_404OnMissingTask: /undo on an unknown task is a 404, not the
-// 500 the swipe_events FK would raise if the handler reached the insert.
-func TestHandleUndo_404OnMissingTask(t *testing.T) {
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/undo", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestHandleUndo_RefusesWithNothingOfTheCallersToReverse: /undo reverses the
-// caller's own last gesture and is a 409 when there is none, including a second
-// undo of one already reversed. Putting any task back in the queue is /requeue.
-func TestHandleUndo_RefusesWithNothingOfTheCallersToReverse(t *testing.T) {
-	s := newTestServer(t)
-	taskID := seedLifecycleTask(t, s.db, "undo-guard", lifecycleTaskOpts{status: "dismissed"})
-	// Closed the way a dismiss closes it, so what refuses below is the missing
-	// gesture and not the task's state.
-	if _, err := s.db.Exec(`UPDATE tasks SET close_reason = ?, closed_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		db.UserDismissedCloseReason, taskID); err != nil {
-		t.Fatalf("stamp the dismiss's close: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("undo with no gesture = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	// The refusal changes nothing — in particular it does not re-open the
-	// closed task, which is the whole point of the guard.
-	if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
-		t.Errorf("task.status = %q, want dismissed (a refused undo must not re-open a closed task)", got)
-	}
-	if got := readSwipeActions(t, s.db, taskID); len(got) != 0 {
-		t.Errorf("swipe_events actions = %v, want none (a refused undo leaves no trace)", got)
-	}
-
-	// With a gesture of the caller's own to reverse, the same call succeeds —
-	// and a second one is refused, because the first already reversed it.
-	seedCallerGesture(t, s.db, taskID, "dismiss")
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil); rec.Code != http.StatusOK {
-		t.Fatalf("undo with a gesture to reverse = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := readTaskStatus(t, s.db, taskID); got != "queued" {
-		t.Errorf("task.status = %q, want queued after the undo", got)
-	}
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil); rec.Code != http.StatusConflict {
-		t.Fatalf("second undo = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -958,7 +827,7 @@ func TestHandleRequeue_404OnMissingTask(t *testing.T) {
 func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 	s := newTestServer(t)
 
-	ok, err := s.swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task")
+	ok, err := s.tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task")
 	if err != nil {
 		t.Fatalf("RequeueTask: %v", err)
 	}
@@ -967,37 +836,36 @@ func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 	}
 }
 
-// TestHandleUndo_ClearsClaimColumns: undoing a claim returns the task to the
-// unclaimed queue with both claim columns cleared, since the queue view requires
-// both NULL and a status reset alone would leave the card in the owner's lane.
-func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
+// TestHandleRequeue_ClearsClaimColumns: requeueing a claimed task returns it to
+// the unclaimed queue with both claim columns cleared, since the queue view
+// requires both NULL and a status reset alone would leave the card in the
+// owner's lane.
+func TestHandleRequeue_ClearsClaimColumns(t *testing.T) {
 	s := newTestServer(t)
 
-	// A user-claimed task, the state a claim swipe leaves.
+	// A user-claimed task, the state a claim leaves.
 	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "owner", "repo")
 	if _, err := s.db.Exec(
 		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
-		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active', 'https://github.com', ?)`, repoID,
+		 VALUES ('e_requeue_claim', 'github', 'owner/repo#u1', 'pr', 'active', 'https://github.com', ?)`, repoID,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO events (id, entity_id, event_type, dedup_key)
-		 VALUES ('ev_undo_claim', 'e_undo_claim', 'github:pr:opened', '')`,
+		 VALUES ('ev_requeue_claim', 'e_requeue_claim', 'github:pr:opened', '')`,
 	); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('00000000-0000-4000-8000-000000000013', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'in_progress', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000013', 'e_requeue_claim', 'github:pr:opened', 'ev_requeue_claim', 'in_progress', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	seedCallerGesture(t, s.db, "00000000-0000-4000-8000-000000000013", "claim")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/undo", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/requeue", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1014,10 +882,10 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 		t.Errorf("status = %q, want %q", status.String, "queued")
 	}
 	if claimedAgent.Valid {
-		t.Errorf("claimed_by_agent_id = %q; want NULL (undo must clear claim)", claimedAgent.String)
+		t.Errorf("claimed_by_agent_id = %q; want NULL (requeue must clear claim)", claimedAgent.String)
 	}
 	if claimedUser.Valid {
-		t.Errorf("claimed_by_user_id = %q; want NULL (undo must clear claim)", claimedUser.String)
+		t.Errorf("claimed_by_user_id = %q; want NULL (requeue must clear claim)", claimedUser.String)
 	}
 	if snoozeUntil.Valid {
 		t.Errorf("snooze_until = %v; want NULL", snoozeUntil.Time)
@@ -1158,23 +1026,16 @@ func assertRequeueStoppedTheRun(t *testing.T, database *sql.DB, taskID, conversa
 	}
 }
 
-// TestRequeueRoutes_StopTheRunWorkingTheTask: /requeue and /undo stop the run
-// working the task, so no agent keeps executing against a task nobody owns.
-func TestRequeueRoutes_StopTheRunWorkingTheTask(t *testing.T) {
-	for _, route := range []string{"requeue", "undo"} {
-		t.Run(route, func(t *testing.T) {
-			s := newTestServer(t)
-			s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
-			taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, route+"_live")
-			if route == "undo" {
-				seedCallerGesture(t, s.db, taskID, "delegate")
-			}
+// TestRequeue_StopsTheRunWorkingTheTask: /requeue stops the run working the
+// task, so no agent keeps executing against a task nobody owns.
+func TestRequeue_StopsTheRunWorkingTheTask(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "requeue_live")
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/"+route, nil)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-			}
-			assertRequeueStoppedTheRun(t, s.db, taskID, conversationID, blueprintRunID)
-		})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	assertRequeueStoppedTheRun(t, s.db, taskID, conversationID, blueprintRunID)
 }

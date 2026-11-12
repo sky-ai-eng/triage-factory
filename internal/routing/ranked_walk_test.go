@@ -453,7 +453,7 @@ func TestRankedWalk_RequeueBeforeScoring_DoesNotReplanAFiredTrigger(t *testing.T
 		t.Fatalf("%d fire(s) at event time, want the immediate trigger", stub.calls)
 	}
 	task := onlyTask(t, database, entityID)
-	if ok, err := sqlitestore.New(database).Swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(database).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || !ok {
 		t.Fatalf("requeue: ok=%v err=%v", ok, err)
 	}
 
@@ -498,7 +498,7 @@ func TestRankedWalk_RequeueBeforeScoring_PassesOverTheTeamsAboveTheHold(t *testi
 		t.Fatalf("%d fire(s) at event time, want the top team's immediate trigger", stub.calls)
 	}
 	task := onlyTask(t, database, entity.ID)
-	if ok, err := st.Swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || !ok {
+	if ok, err := st.Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || !ok {
 		t.Fatalf("requeue: ok=%v err=%v", ok, err)
 	}
 

@@ -41,7 +41,6 @@ export default function Cards() {
   const { load: loadDeck, loadMore: loadMoreDeck, setItems: setDeckItems } = deck
   const tasks = deck.items
   const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [cardStart, setCardStart] = useState(() => Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
@@ -130,8 +129,6 @@ export default function Cards() {
           items.find((t) => t.id === current.id) ?? current,
           ...items.filter((t) => t.id !== current.id),
         ])
-      } else {
-        setCardStart(Date.now())
       }
       hasFetched.current = true
       setLoadState(page.items.length === 0 ? 'empty' : 'ready')
@@ -183,7 +180,6 @@ export default function Cards() {
       return
     }
 
-    const hesitationMs = Date.now() - cardStart
     // Each gesture addresses its own route: the two lifecycle ones are field
     // writes on the task, and claim/delegate are verbs because of what they
     // reach — Jira, the spawner, deliverable teardown.
@@ -193,10 +189,7 @@ export default function Cards() {
             `/api/tasks/${task.id}`,
             {
               method: 'PATCH',
-              body: JSON.stringify({
-                snooze_until: snoozeUntilFromPreset(DECK_SNOOZE_PRESET),
-                hesitation_ms: hesitationMs,
-              }),
+              body: JSON.stringify({ snooze_until: snoozeUntilFromPreset(DECK_SNOOZE_PRESET) }),
             },
           ]
         : action === 'dismiss'
@@ -204,22 +197,16 @@ export default function Cards() {
               `/api/tasks/${task.id}`,
               {
                 method: 'PATCH',
-                body: JSON.stringify({ status: 'dismissed', hesitation_ms: hesitationMs }),
+                body: JSON.stringify({ status: 'dismissed' }),
               },
             ]
           : action === 'claim'
-            ? [
-                `/api/tasks/${task.id}/claim`,
-                { method: 'POST', body: JSON.stringify({ hesitation_ms: hesitationMs }) },
-              ]
+            ? [`/api/tasks/${task.id}/claim`, { method: 'POST', body: '{}' }]
             : [
                 `/api/tasks/${task.id}/delegate`,
                 {
                   method: 'POST',
-                  body: JSON.stringify({
-                    hesitation_ms: hesitationMs,
-                    ...(promptId && { blueprint_id: promptId }),
-                  }),
+                  body: JSON.stringify({ ...(promptId && { blueprint_id: promptId }) }),
                 },
               ]
 
@@ -232,7 +219,6 @@ export default function Cards() {
 
     setUndoTask({ id: task.id, action })
     setDeckItems((prev) => prev.slice(1))
-    setCardStart(Date.now())
     setTimeout(() => setUndoTask(null), 5000)
     // Top the deck up before it runs dry. A page holds the first 200 pickable
     // tasks; without this, a triage run long enough to swipe through them
@@ -245,10 +231,12 @@ export default function Cards() {
     swipe('delegate', promptId)
   }
 
+  // Undo puts the task back in the queue, which is where every card in the
+  // deck came from.
   const undo = async () => {
     if (!undoTask) return
     try {
-      await apiFetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
+      await apiFetch(`/api/tasks/${undoTask.id}/requeue`, { method: 'POST' })
     } catch {
       return
     }

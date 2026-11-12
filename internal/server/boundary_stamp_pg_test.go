@@ -59,7 +59,7 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 	`, conversationID, r.orgID, r.admin, r.teamID, taskID)
 
 	req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.admin,
-		map[string]any{"target_user_id": r.member, "hesitation_ms": 0})
+		map[string]any{"target_user_id": r.member})
 	req.SetPathValue("id", taskID)
 	rec := httptest.NewRecorder()
 	r.s.handleTaskClaim(rec, req)

@@ -12,11 +12,9 @@ import (
 // The suite is schema-blind: SeedTask owns the entity, event and task rows in
 // the backend's own dialect.
 type SourceStatusHarness struct {
-	Tasks  db.TaskStore
-	Swipes db.SwipeStore
-	OrgID  string
-	// UserID is the claimant, and the user a swipe written through Swipes is
-	// attributed to, which UndoLastSwipe's guard is keyed on.
+	Tasks db.TaskStore
+	OrgID string
+	// UserID is the claimant.
 	UserID  string
 	AgentID string
 	// SeedTask creates a queued, unclaimed task on a fresh entity of source
@@ -104,26 +102,11 @@ func RunSourceStatusConformance(t *testing.T, factory func(t *testing.T) SourceS
 		h := factory(t)
 		taskID := h.SeedTask(t, "linear", linearSnapshot)
 		claim(t, h, taskID)
-		if ok, err := h.Swipes.RequeueTask(ctx, h.OrgID, taskID); err != nil || !ok {
+		if ok, err := h.Tasks.RequeueTask(ctx, h.OrgID, taskID); err != nil || !ok {
 			t.Fatalf("RequeueTask = (%v, %v)", ok, err)
 		}
 		if got := sourceStatus(t, h, taskID); got != nil {
 			t.Errorf("source_status after requeue = %+v, want nil", got)
-		}
-	})
-
-	t.Run("UndoLastSwipe_clears_it", func(t *testing.T) {
-		h := factory(t)
-		taskID := h.SeedTask(t, "jira", jiraSnapshot)
-		claim(t, h, taskID)
-		if _, audited, err := h.Swipes.RecordSwipe(ctx, h.OrgID, taskID, "claim", 0, nil); err != nil || !audited {
-			t.Fatalf("RecordSwipe = (%v, %v)", audited, err)
-		}
-		if ok, err := h.Swipes.UndoLastSwipe(ctx, h.OrgID, taskID, h.UserID); err != nil || !ok {
-			t.Fatalf("UndoLastSwipe = (%v, %v)", ok, err)
-		}
-		if got := sourceStatus(t, h, taskID); got != nil {
-			t.Errorf("source_status after undo = %+v, want nil", got)
 		}
 	})
 }

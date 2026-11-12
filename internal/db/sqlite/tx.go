@@ -133,7 +133,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 	return db.TxStores{
 		Scores:                   newScoreStore(tx),
 		Prompts:                  newPromptStore(tx),
-		Swipes:                   newSwipeStore(tx),
 		Dashboard:                newDashboardStore(tx),
 		Secrets:                  newSecretStore(),
 		EventHandlers:            newEventHandlerStore(tx),

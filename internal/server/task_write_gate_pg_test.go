@@ -17,7 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// taskGateRig is the viewer rig plus the five routes RequireTaskWrite gates,
+// taskGateRig is the viewer rig plus the four routes RequireTaskWrite gates,
 // a spawner, so delegate runs its check for a task an executor holds, and two
 // more callers: an org member on another team, who can see none of the rig
 // team's tasks, and a viewer of the rig team who writes on a side team, which
@@ -69,7 +69,6 @@ func newTaskGateRig(t *testing.T) *taskGateRig {
 	mux.HandleFunc("POST /api/tasks/{id}/claim", r.s.handleTaskClaim)
 	mux.HandleFunc("POST /api/tasks/{id}/delegate", r.s.handleTaskDelegate)
 	mux.HandleFunc("POST /api/tasks/{id}/requeue", r.s.handleRequeue)
-	mux.HandleFunc("POST /api/tasks/{id}/undo", r.s.handleUndo)
 
 	return &taskGateRig{
 		viewerRig: r, mux: mux, sideTeam: sideTeam,
@@ -165,10 +164,9 @@ var taskGateRoutes = []struct {
 	{"claim", http.MethodPost, "/claim", map[string]any{}},
 	{"delegate", http.MethodPost, "/delegate", map[string]any{}},
 	{"requeue", http.MethodPost, "/requeue", nil},
-	{"undo", http.MethodPost, "/undo", nil},
 }
 
-// TestTaskWriteGate_Postgres: the five task write routes answer a task the
+// TestTaskWriteGate_Postgres: the four task write routes answer a task the
 // caller cannot see exactly as they answer an id that does not exist, so none
 // of them says whether the task exists. A task the caller can see and may not
 // write is 403, and a writer of one of a task's task_teams may write it only

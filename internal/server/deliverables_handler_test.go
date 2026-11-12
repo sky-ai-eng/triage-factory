@@ -298,7 +298,7 @@ func TestDeliverableAbandon_ClosesDraftPR(t *testing.T) {
 	}
 
 	rec := doJSON(t, srv, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "dismissed", "hesitation_ms": 0})
+		map[string]any{"status": "dismissed"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

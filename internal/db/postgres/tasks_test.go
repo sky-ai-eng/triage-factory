@@ -34,7 +34,7 @@ func TestTaskStore_Postgres(t *testing.T) {
 	// even without the per-request tf_app grant. RLS bypass on
 	// AdminDB is fine for behavior conformance; the cross-org leakage
 	// test below exercises the defense-in-depth org_id filter
-	// directly. Same pattern as TestSwipeStore_Postgres.
+	// directly.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {

@@ -71,7 +71,7 @@ func TestTaskClaim_Boundary(t *testing.T) {
 				execSQL(t, s.db, c.setup, append(c.args, taskID)...)
 			}
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
@@ -112,7 +112,7 @@ func TestTaskDelegate_StampsBeforeStepZeroExists(t *testing.T) {
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

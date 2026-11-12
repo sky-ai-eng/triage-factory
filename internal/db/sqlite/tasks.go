@@ -1502,6 +1502,112 @@ func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, use
 	return n > 0, nil
 }
 
+func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.Task{}, err
+	}
+	reason, err := db.UserCloseReason(status)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	// The status predicate is what makes a second close a no-op rather than
+	// a rewrite: two callers closing the same task concurrently both pass
+	// their own pre-read, and only the one that gets here first finds a row.
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+		UPDATE tasks
+		   SET status = ?,
+		       snooze_until = NULL,
+		       closed_at = ?,
+		       close_reason = ?
+		 WHERE id = ?
+		   AND status NOT IN ('done', 'dismissed')
+		RETURNING `+sqliteTaskBareColumns,
+		status, time.Now().UTC(), reason, taskID), &t)
+}
+
+func (s *taskStore) SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	// The claim guard keeps snooze queue-only: a claimed task parked in the
+	// snoozed lane is a state no flow handles (the drain skips it, re-derive
+	// skips it, the Board renders no SnoozedBadge in a claimed lane). The
+	// status predicate is the other half: a closed task can have both claim
+	// columns NULL, so without it a dismiss landing between the caller's
+	// read and this write would park a closed task for the wake sweep to
+	// resurrect.
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET status = 'snoozed', snooze_until = ?
+		 WHERE id = ?
+		   AND claimed_by_agent_id IS NULL
+		   AND claimed_by_user_id  IS NULL
+		   AND status NOT IN ('done', 'dismissed')`,
+		until.UTC(), taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *taskStore) ClearSnooze(ctx context.Context, orgID, taskID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET status = 'queued',
+		       snooze_until = NULL
+		 WHERE id = ?
+		   AND status = 'snoozed'`,
+		taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *taskStore) RequeueTask(ctx context.Context, orgID, taskID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	// Both claim columns clear because the queue is the unclaimed lane, and
+	// closed_at with them because the Board's Done-column cap reads it.
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET status = 'queued',
+		       snooze_until = NULL,
+		       claimed_by_agent_id = NULL,
+		       claimed_by_user_id  = NULL,
+		       source_status = NULL,
+		       closed_at = NULL,
+		       close_reason = NULL,
+		       close_deferred_event_id = NULL,
+		       close_deferred_at = NULL
+		 WHERE id = ?`,
+		taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kind string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -1692,18 +1798,19 @@ func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, taskID, agentID,
 	return n > 0, nil
 }
 
-func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (db.HandoffResult, error) {
+func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (db.HandoffResult, domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return db.HandoffRefused, err
+		return db.HandoffRefused, domain.Task{}, err
 	}
 	if agentID == "" {
-		return db.HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty agentID")
+		return db.HandoffRefused, domain.Task{}, fmt.Errorf("HandoffAgentClaim: empty agentID")
 	}
 	if userID == "" {
-		return db.HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty userID")
+		return db.HandoffRefused, domain.Task{}, fmt.Errorf("HandoffAgentClaim: empty userID")
 	}
 	claimTeam := sqliteClaimTeamExpr("?2", "?3")
-	res, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	row, err := scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?1,
 		       claimed_by_user_id  = NULL,
@@ -1715,46 +1822,46 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?1)
 		   AND status NOT IN ('done', 'dismissed')
 		   AND `+claimTeam+` IS NOT NULL
-	`, agentID, taskID, userID)
-	if err != nil {
-		return db.HandoffRefused, err
+		RETURNING `+sqliteTaskBareColumns,
+		agentID, taskID, userID), &t)
+	if err == nil {
+		return db.HandoffChanged, row, nil
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return db.HandoffRefused, err
+	if err != db.ErrNoSuchTask {
+		return db.HandoffRefused, domain.Task{}, err
 	}
-	if n > 0 {
-		return db.HandoffChanged, nil
-	}
-	// 0 rows — re-read to figure out which guard tripped. Terminal-status
+	// No row written — re-read to figure out which guard tripped. Terminal-status
 	// check takes precedence over the no-op check so a sticky-bot-claim
 	// on a closed task doesn't fall through to HandoffNoOp and let the
 	// caller proceed past a row that mustn't be reopened; a missing team
 	// comes next, so a caller never proceeds to a run on a task it could
-	// not have handed off.
-	var curUser, curAgent, team sql.NullString
-	var curStatus string
+	// not have handed off. The re-read projects the bare columns too, so a
+	// no-op answers with the row it left as it stands.
+	var cur domain.Task
+	var st taskScanState
+	var team sql.NullString
 	err = s.q.QueryRowContext(ctx, `
-		SELECT claimed_by_user_id, claimed_by_agent_id, status, `+sqliteClaimTeamExpr("?1", "?2")+`
+		SELECT `+sqliteTaskBareColumns+`, `+sqliteClaimTeamExpr("?1", "?2")+`
 		  FROM tasks WHERE id = ?1`,
 		taskID, userID,
-	).Scan(&curUser, &curAgent, &curStatus, &team)
+	).Scan(append(st.bareTargets(&cur), &team)...)
 	if err == sql.ErrNoRows {
-		return db.HandoffRefused, nil
+		return db.HandoffRefused, domain.Task{}, nil
 	}
 	if err != nil {
-		return db.HandoffRefused, err
+		return db.HandoffRefused, domain.Task{}, err
 	}
-	if curStatus == "done" || curStatus == "dismissed" {
-		return db.HandoffRefused, nil
+	st.finalize(&cur)
+	if cur.Status == "done" || cur.Status == "dismissed" {
+		return db.HandoffRefused, domain.Task{}, nil
 	}
 	if !team.Valid {
-		return db.HandoffRefused, db.ErrNoActiveClaimTeam
+		return db.HandoffRefused, domain.Task{}, db.ErrNoActiveClaimTeam
 	}
-	if curAgent.Valid && curAgent.String == agentID {
-		return db.HandoffNoOp, nil
+	if cur.ClaimedByAgentID == agentID {
+		return db.HandoffNoOp, cur, nil
 	}
-	return db.HandoffRefused, nil
+	return db.HandoffRefused, domain.Task{}, nil
 }
 
 func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error) {

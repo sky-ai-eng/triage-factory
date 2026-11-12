@@ -346,7 +346,7 @@ func TestBlueprintStore_Postgres_FiringCarriesTaskClaim(t *testing.T) {
 		// The user requeues while the run stays live — the deliberate
 		// "unclaimed with a live run" state. A replayed event must not put the
 		// bot's claim back.
-		if ok, err := stores.Swipes.RequeueTask(ctx, fx.orgID, taskID); err != nil || !ok {
+		if ok, err := stores.Tasks.RequeueTask(ctx, fx.orgID, taskID); err != nil || !ok {
 			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 		}
 		replay := br

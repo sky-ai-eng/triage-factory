@@ -106,8 +106,8 @@ func TestTaskCreate_400OnBadBody(t *testing.T) {
 }
 
 // TestFactoryDropGesture_CreateThenDelegate walks the drop as the frontend does,
-// POST /api/tasks then /delegate: when the spawn fails, the claim and the swipe
-// row still land, and SPAWN_FAILED tells the client to retry on the same task.
+// POST /api/tasks then /delegate: when the spawn fails, the claim still lands,
+// and SPAWN_FAILED tells the client to retry on the same task.
 func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
@@ -126,8 +126,7 @@ func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	}
 
 	rec = doJSON(t, s, http.MethodPost, "/api/tasks/"+task.ID+"/delegate", map[string]any{
-		"hesitation_ms": 0,
-		"blueprint_id":  "no-such-prompt",
+		"blueprint_id": "no-such-prompt",
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("delegate = %d, want 422 (bad blueprint reference; claim stamped, run didn't fire); body=%s", rec.Code, rec.Body.String())
@@ -143,21 +142,11 @@ func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	if stored.ClaimedByAgentID == "" {
 		t.Errorf("task.ClaimedByAgentID empty; the claim should survive a failed spawn")
 	}
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action = 'delegate'`,
-		task.ID,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 1 {
-		t.Errorf("swipe_events count = %d, want 1 (the gesture is audited even when the run doesn't fire)", swipeCount)
-	}
 }
 
 // TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed: with the agent
 // disabled the task is still created, and the delegate is a 409 that leaves no
-// claim and no swipe row.
+// claim.
 func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
@@ -184,8 +173,7 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	}
 
 	rec = doJSON(t, s, http.MethodPost, "/api/tasks/"+task.ID+"/delegate", map[string]any{
-		"hesitation_ms": 0,
-		"blueprint_id":  "any-prompt",
+		"blueprint_id": "any-prompt",
 	})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("delegate = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
@@ -199,15 +187,6 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	}
 	if claimAgent.Valid && claimAgent.String != "" {
 		t.Errorf("bot claim landed despite the disabled flag: %q", claimAgent.String)
-	}
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action = 'delegate'`, task.ID,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 0 {
-		t.Errorf("swipe_events count = %d, want 0 (a refused gesture leaves no trace)", swipeCount)
 	}
 }
 
