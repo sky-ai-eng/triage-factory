@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -29,6 +30,16 @@ type nativeTranscript struct {
 	orgID        string
 	conversation string
 	claimID      string
+
+	mu sync.Mutex
+	// waitingPeople is the ids of the person's messages the last
+	// ListForAssembly found waiting. The loop's drain lists the window and
+	// flushes rows out of it, so a flush finds the person's rows it marks
+	// here.
+	waitingPeople map[int]bool
+	// personDelivered is whether a flush has delivered a person's message
+	// since takePersonDelivered last read it.
+	personDelivered bool
 }
 
 var _ agentloop.Transcript = (*nativeTranscript)(nil)
@@ -48,7 +59,22 @@ func newNativeTranscript(s *Spawner, orgID, conversationID, claimID string) *nat
 // Reads are deliberately unfenced — a stale read corrupts nothing, and the
 // write fence is what protects the transcript.
 func (t *nativeTranscript) ListForAssembly(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	return t.spawner.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	rows, err := t.spawner.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	if err == nil {
+		var waiting map[int]bool
+		for _, r := range rows {
+			if r.Delivered != nil && !*r.Delivered && isPersonMessage(r) {
+				if waiting == nil {
+					waiting = make(map[int]bool)
+				}
+				waiting[r.ID] = true
+			}
+		}
+		t.mu.Lock()
+		t.waitingPeople = waiting
+		t.mu.Unlock()
+	}
+	return rows, err
 }
 
 func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
@@ -56,7 +82,34 @@ func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversatio
 		return err
 	}
 	t.spawner.activityFor(t.conversation).touch()
+	t.notePersonDelivered(ids)
 	return nil
+}
+
+// notePersonDelivered records whether the rows a flush just delivered include
+// a person's message, which is what decides whether the turn may open a warm
+// window. A row the last listing did not find waiting is not counted: the
+// mistake that leaves is a window that does not open, never one that opens
+// for a turn no person took part in.
+func (t *nativeTranscript) notePersonDelivered(ids []int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, id := range ids {
+		if t.waitingPeople[id] {
+			t.personDelivered = true
+			return
+		}
+	}
+}
+
+// takePersonDelivered reports whether a person's message was delivered since
+// the last call, and starts the count again.
+func (t *nativeTranscript) takePersonDelivered() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delivered := t.personDelivered
+	t.personDelivered = false
+	return delivered
 }
 
 // Insert appends a row and broadcasts it. The row is attributed to this

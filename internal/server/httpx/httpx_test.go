@@ -108,6 +108,9 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		On     *bool             `json:"on"`
 		Ratio  float64           `json:"ratio"`
 		Ref    textRef           `json:"ref"`
+		A      any               `json:"a"`
+		M      map[string]any    `json:"m"`
+		L      []any             `json:"l"`
 		// Spelled like the embedded Filter's Go name, and a JSON key all the same.
 		Collides int `json:"Filter"`
 		Count    int `json:"Count"`
@@ -137,6 +140,12 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		// A float refuses a number only for its range.
 		{`{"ratio": 1e400}`, "ratio", "ratio must be a number from -1.7976931348623157e+308 to 1.7976931348623157e+308"},
 		{`{"low": 1e39}`, "low", "low must be a number from -3.4028235e+38 to 3.4028235e+38"},
+		// A free-form field reads a number as a float64, so it refuses one
+		// beyond float64's range, however deep in the value the number is.
+		{`{"a": 1e400}`, "a", "a must be any JSON value with every number from -1.7976931348623157e+308 to 1.7976931348623157e+308"},
+		{`{"a": {"x": [1, -1e400]}}`, "a", "a must be any JSON value with every number from -1.7976931348623157e+308 to 1.7976931348623157e+308"},
+		{`{"m": {"x": 1e400}}`, "m", "m must be an object of JSON values with every number from -1.7976931348623157e+308 to 1.7976931348623157e+308"},
+		{`{"l": [1, 1e400]}`, "l", "l must be an array of JSON values with every number from -1.7976931348623157e+308 to 1.7976931348623157e+308"},
 		{`{"page_token": 7}`, "page_token", "page_token must be a string"},
 		{`{"statuses": "x"}`, "statuses", "statuses must be an array of strings"},
 		// A bad element reports the list's type, not the element's.

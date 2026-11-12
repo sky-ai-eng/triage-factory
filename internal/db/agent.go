@@ -258,7 +258,11 @@ type ConversationStore interface {
 	// ordinary claimable work instead of spawning an in-process goroutine.
 	// Releases any still-active claim with outcome 'requeued' (ownership is
 	// re-established by ClaimNextConversation minting a fresh claim at the actual
-	// claim, exactly like a freshly minted row). Clears parked_at and
+	// claim, exactly like a freshly minted row), except a warm claim
+	// (domain.ClaimPhaseWarm) with its lease still live: its engagement is
+	// waiting for this resume and takes the conversation back itself
+	// (ResumeWarmClaimSystem). One whose lease has lapsed has no engagement
+	// left and is released 'completed'. Clears parked_at and
 	// park_reason together — both describe a park this call is undoing, and a
 	// resumed conversation that went on to conclude must not still name the
 	// stop it was picked back up from.
@@ -793,6 +797,24 @@ type ConversationStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error)
+
+	// ConversationFrameRecipientsSystem resolves who may receive a websocket
+	// frame about conversationID in orgID: the audience of the REST read of
+	// that conversation, which conversations_select decides. An org-visible
+	// conversation answers orgWide = true and nil userIDs, because every
+	// member of the org may read it. A team-visible one answers every user
+	// with a membership row of any role on its team, while that team is not
+	// archived, who is also a member of the org. A private one answers its
+	// creator, while the creator is a member of the org. No such
+	// conversation, or any other visibility, answers nobody.
+	//
+	// userIDs are distinct and sorted ascending, and empty but non-nil when
+	// nobody qualifies. Admin pool: the emitters are executor and control
+	// paths with no request claims, and the audience crosses the team
+	// boundaries the membership policies would hide. The answer is read
+	// fresh on every call so a membership change applies from the next
+	// frame.
+	ConversationFrameRecipientsSystem(ctx context.Context, orgID, conversationID string) (orgWide bool, userIDs []string, err error)
 
 	// RequestStopSystem records that a stop was asked for. by is the user who
 	// asked, or "" for a system stop. signalTarget is the executor id a
@@ -1447,4 +1469,52 @@ type ConversationStore interface {
 	// dispatcher in the same process can claim a conversation on the key in
 	// between. Admin pool, for the same claims-less caller.
 	HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// HasEngagedClaimForTaskSystem is HasActiveClaimForTaskSystem without idle
+	// warm claims: whether an engagement on taskID has a turn in progress or
+	// about to start. A warm claim (domain.ClaimPhaseWarm) whose conversation
+	// still holds its turn's verdict is idle, and a new run on the task ends
+	// that conversation, which lets the claim go, so it does not stand in the
+	// way of one. Once a follow-up resumes the conversation, the claim's
+	// engagement is about to drive it, and the claim counts.
+	HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// ConcludeKeepingClaimSystem is CompleteForClaimSystem's `open` verdict for
+	// a turn whose engagement stays warm: the same fence, the same conversation
+	// write and the same returned row, with the claim kept in phase
+	// domain.ClaimPhaseWarm instead of released. The claim records the
+	// engagement's turn time and turns so far. No cost lump is taken: the
+	// native runtime, the only one that keeps a claim warm, settles spend per
+	// assistant row.
+	ConcludeKeepingClaimSystem(ctx context.Context, orgID, conversationID, claimID string, durationMs, numTurns int, resultSummary, outcome, outcomeReason string) (*domain.Conversation, error)
+
+	// ResumeWarmClaimSystem takes a warm claim's conversation back for its next
+	// turn, in one transaction: the resume flip MarkQueuedForResume makes, when
+	// a follow-up has not made it already, and the claim out of the warm phase.
+	// resumed is false when the conversation is not one the claim scan would
+	// drive: ended or archived, a stop pending, its run called off, or no
+	// longer the task's live conversation. The claim then stays warm.
+	// ErrClaimReleased when claimID is not live.
+	ResumeWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (resumed bool, err error)
+
+	// ReleaseWarmClaimSystem releases a warm claim as `completed`, the outcome
+	// its turn's own write would have given it, and writes nothing to the
+	// conversation. released is false when claimID is not a live warm claim.
+	ReleaseWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
+
+	// WarmWaitStateSystem is what an engagement keeping its claim warm asks
+	// of its conversation while it waits, in one read sized by neither the
+	// transcript nor the conversation's history. ErrNoSuchConversation when
+	// there is no such conversation.
+	WarmWaitStateSystem(ctx context.Context, orgID, conversationID string) (WarmWaitState, error)
+}
+
+// WarmWaitState is ConversationStore.WarmWaitStateSystem's answer.
+type WarmWaitState struct {
+	// PersonMessageWaiting is a message a person wrote that has not been
+	// delivered yet: what resumes the conversation on the warm claim.
+	PersonMessageWaiting bool
+	// Ended is the conversation's boundary stamp being written. No follow-up
+	// resumes an ended conversation, so its warm claim serves nothing.
+	Ended bool
 }

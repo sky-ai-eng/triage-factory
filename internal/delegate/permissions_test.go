@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -360,9 +361,16 @@ func dialHubClient(t *testing.T, h *websocket.Hub) (*ws.Conn, func()) {
 // runner (observed in CI as readPermissionResolved timing out).
 func dialHubClientOrg(t *testing.T, h *websocket.Hub, orgID string) (*ws.Conn, func()) {
 	t.Helper()
+	return dialHubClientAs(t, h, "user", orgID)
+}
+
+// dialHubClientAs is dialHubClientOrg with an explicit user on the registered
+// connection, for the presence tests that decide on whose tab it is.
+func dialHubClientAs(t *testing.T, h *websocket.Hub, userID, orgID string) (*ws.Conn, func()) {
+	t.Helper()
 	before := h.ClientCount()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h.HandleWS(w, r, websocket.ConnIdentity{UserID: "user", OrgID: orgID})
+		h.HandleWS(w, r, websocket.ConnIdentity{UserID: userID, OrgID: orgID})
 	}))
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)
 	conn, _, err := ws.Dial(context.Background(), url, nil)
@@ -399,7 +407,7 @@ func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, conversa
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.PresentFor(orgID, conversationID) == want {
+		if h.PresentFor(orgID, conversationID, nil) == want {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -573,7 +581,7 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 	// A present, focused board tab — but in the wrong org.
 	sendPresence(t, conn, hub, otherOrg, "run-1", "board", true, true)
 	// It must not register as present for our run's org.
-	if hub.PresentFor(presenceTestOrg, "run-1") {
+	if hub.PresentFor(presenceTestOrg, "run-1", nil) {
 		t.Fatal("a present tab in another org satisfied PresentFor for this org")
 	}
 
@@ -586,6 +594,208 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("a cross-org present tab delayed the absent deny to the full window")
+	}
+}
+
+// fixedAudience is a conversationframe.AudienceFunc that answers the same
+// thing for every conversation and records the conversation it was asked
+// about.
+func fixedAudience(orgWide bool, userIDs []string, err error, asked *[]string) func(context.Context, string, string) (bool, []string, error) {
+	return func(_ context.Context, _, conversationID string) (bool, []string, error) {
+		if asked != nil {
+			*asked = append(*asked, conversationID)
+		}
+		return orgWide, userIDs, err
+	}
+}
+
+// TestPresentFor_CountsOnlyTheConversationsReaders pins the audience rule on
+// the hub path: a focused tab counts only when its user may read the
+// conversation, whether it is on the board or reports this run's own page;
+// an org-visible conversation counts any member's tab; and a failed or empty
+// resolution counts nobody, even with a reader's tab open.
+func TestPresentFor_CountsOnlyTheConversationsReaders(t *testing.T) {
+	cases := []struct {
+		name     string
+		tabUser  string
+		viewing  string
+		orgWide  bool
+		audience []string
+		err      error
+		want     bool
+	}{
+		{"reader on the board", "reader", "board", false, []string{"reader"}, nil, true},
+		{"reader on the run page", "reader", "run:run-1", false, []string{"reader"}, nil, true},
+		{"outsider on the board", "outsider", "board", false, []string{"reader"}, nil, false},
+		{"outsider reporting the run page", "outsider", "run:run-1", false, []string{"reader"}, nil, false},
+		{"any member, org-visible conversation", "outsider", "board", true, nil, nil, true},
+		{"resolution error", "reader", "board", false, nil, errors.New("db down"), false},
+		{"empty audience", "reader", "board", false, []string{}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := websocket.NewHub()
+			conn, cleanup := dialHubClientAs(t, hub, tc.tabUser, presenceTestOrg)
+			defer cleanup()
+			sendPresence(t, conn, hub, presenceTestOrg, "run-1", tc.viewing, true, true)
+
+			s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+			var asked []string
+			s.SetConversationFrameAudience(fixedAudience(tc.orgWide, tc.audience, tc.err, &asked))
+			got, err := s.presentFor(presenceTestOrg, "run-1")
+			if got != tc.want {
+				t.Errorf("presentFor = %v, want %v", got, tc.want)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("presentFor error = %v, want %v", err, tc.err)
+			}
+			if len(asked) != 1 || asked[0] != "run-1" {
+				t.Errorf("audience asked about %v, want [run-1]", asked)
+			}
+		})
+	}
+}
+
+// recordingPresence is a PresenceChecker that records the set it was asked
+// with.
+type recordingPresence struct {
+	calls   int
+	userIDs []string
+}
+
+func (r *recordingPresence) PresentFor(_ context.Context, _, _ string, userIDs []string) bool {
+	r.calls++
+	r.userIDs = userIDs
+	return true
+}
+
+// TestPresentFor_HandsTheAudienceToTheFleetCheck pins that the fleet-wide
+// checker gets the same set the hub path would: the resolved readers for a
+// team or private conversation, nil for an org-visible one, and no call at
+// all when nobody may read it.
+func TestPresentFor_HandsTheAudienceToTheFleetCheck(t *testing.T) {
+	t.Run("team or private", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+		pc := &recordingPresence{}
+		s.SetPresenceChecker(pc)
+		s.SetConversationFrameAudience(fixedAudience(false, []string{"user-a", "user-b"}, nil, nil))
+		if present, _ := s.presentFor(presenceTestOrg, "run-1"); !present {
+			t.Fatal("presentFor = false, want the checker's answer")
+		}
+		if pc.calls != 1 || strings.Join(pc.userIDs, ",") != "user-a,user-b" {
+			t.Errorf("checker called %d times with %v, want once with [user-a user-b]", pc.calls, pc.userIDs)
+		}
+	})
+	t.Run("org-visible", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+		pc := &recordingPresence{}
+		s.SetPresenceChecker(pc)
+		s.SetConversationFrameAudience(fixedAudience(true, nil, nil, nil))
+		_, _ = s.presentFor(presenceTestOrg, "run-1")
+		if pc.calls != 1 || pc.userIDs != nil {
+			t.Errorf("checker called %d times with %v, want once with a nil set", pc.calls, pc.userIDs)
+		}
+	})
+	t.Run("nobody may read it", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+		pc := &recordingPresence{}
+		s.SetPresenceChecker(pc)
+		s.SetConversationFrameAudience(fixedAudience(false, []string{}, nil, nil))
+		if present, _ := s.presentFor(presenceTestOrg, "run-1"); present {
+			t.Error("presentFor = true for a conversation nobody may read")
+		}
+		if pc.calls != 0 {
+			t.Errorf("checker called %d times, want none", pc.calls)
+		}
+	})
+	t.Run("no audience wired", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+		pc := &recordingPresence{}
+		s.SetPresenceChecker(pc)
+		_, _ = s.presentFor(presenceTestOrg, "run-1")
+		if pc.calls != 1 || pc.userIDs != nil {
+			t.Errorf("checker called %d times with %v, want once with a nil set", pc.calls, pc.userIDs)
+		}
+	})
+}
+
+// TestBrowserPermissionHandler_OutsiderTabDeniesAfterGrace: a focused board
+// tab belonging to someone who cannot read the conversation does not keep its
+// prompt waiting; it denies on the grace clock as unattended.
+func TestBrowserPermissionHandler_OutsiderTabDeniesAfterGrace(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClientAs(t, hub, "outsider", presenceTestOrg)
+	defer cleanup()
+
+	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+	s.setActivityTimings(activityTimings{permission: 15 * time.Second})
+	s.SetPresencePollInterval(5 * time.Millisecond)
+	s.SetConversationFrameAudience(fixedAudience(false, []string{"reader"}, nil, nil))
+
+	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", true, true)
+
+	const grace = 40 * time.Millisecond
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", "", AbsentAutoDeny{enabled: true, grace: grace})
+	start := time.Now()
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-outsider", ToolName: "Bash"})
+	if d.Behavior != "deny" || d.Message != permDenyNoOperator(grace) {
+		t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, permDenyNoOperator(grace))
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Error("an outsider's tab delayed the absent deny to the full window")
+	}
+}
+
+// TestBrowserPermissionHandler_ReaderRemovedMidWaitDeniesAfterGrace: a
+// reader's focused tab keeps the prompt waiting past the grace, and once the
+// reader leaves the conversation's audience mid-wait, the next poll stops
+// counting them and the grace clock runs out. The audience is read on every
+// poll, not once at wait start.
+func TestBrowserPermissionHandler_ReaderRemovedMidWaitDeniesAfterGrace(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClientAs(t, hub, "reader", presenceTestOrg)
+	defer cleanup()
+
+	var mu sync.Mutex
+	audience := []string{"reader"}
+	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+	s.setActivityTimings(activityTimings{permission: 15 * time.Second})
+	s.SetPresencePollInterval(5 * time.Millisecond)
+	s.SetConversationFrameAudience(func(context.Context, string, string) (bool, []string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return false, audience, nil
+	})
+
+	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", true, true)
+
+	const grace = 100 * time.Millisecond
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", "", AbsentAutoDeny{enabled: true, grace: grace})
+	got := make(chan agentproc.PermissionDecision, 1)
+	go func() {
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-removed", ToolName: "Bash"})
+	}()
+
+	// Well past the grace, the reader's tab still holds the prompt open.
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case d := <-got:
+		t.Fatalf("prompt resolved early (%q/%q) with a reader's tab present", d.Behavior, d.Message)
+	default:
+	}
+
+	// The reader leaves the team: the tab is still focused, but no longer counts.
+	mu.Lock()
+	audience = []string{"someone-else"}
+	mu.Unlock()
+
+	select {
+	case d := <-got:
+		if d.Behavior != "deny" || d.Message != permDenyNoOperator(grace) {
+			t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, permDenyNoOperator(grace))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt not denied after the reader left the audience and the grace elapsed")
 	}
 }
 

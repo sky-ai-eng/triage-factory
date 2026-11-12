@@ -99,7 +99,7 @@ func (s *Spawner) takeOverExpiredClaims(ctx context.Context) {
 		return
 	}
 	for _, c := range released {
-		dispatchLog.Warn("took over an expired claim; the conversation returns to the queue",
+		dispatchLog.Warn("took over an expired claim; a conversation mid-turn returns to the queue, and one a warm claim held keeps its state",
 			"conversation", c.ConversationID, "claim", c.ClaimID, "org_id", c.OrgID)
 	}
 }

@@ -14,6 +14,8 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestHandleMe_LocalMode_SynthesizesSentinelResponse: in local mode withSession
@@ -79,33 +81,31 @@ func TestHandleMe_LocalMode_SynthesizesSentinelResponse(t *testing.T) {
 	}
 }
 
-// TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims: a multi-mode
-// request arriving before SetAuthDeps gets no sentinel claims or org, so the
-// handler answers 401 itself rather than serving the synthetic local user.
-func TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims(t *testing.T) {
+// TestWithSession_MultiMode_NilAuthDeps_AnswersUnavailable: a multi-mode
+// request arriving before SetAuthDeps is answered 503 without reaching the
+// handler, so no handler ever runs with neither a real identity nor the
+// local sentinel.
+func TestWithSession_MultiMode_NilAuthDeps_AnswersUnavailable(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
 	s := &Server{}
 
-	var sawClaims, sawOrgID bool
+	var reached bool
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawClaims = ClaimsFrom(r.Context()) != nil
-		sawOrgID = OrgIDFrom(r.Context()) != ""
+		reached = true
 		w.WriteHeader(http.StatusOK)
 	})
 
 	rec := httptest.NewRecorder()
 	s.withSession(inner).ServeHTTP(rec, httptest.NewRequest("GET", "/api/anything", nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (multi-mode pre-deps boot race should pass through)", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (multi mode must not serve requests before auth is wired)", rec.Code)
 	}
-	if sawClaims {
-		t.Error("ClaimsFrom() returned non-nil in multi mode with nil authDeps; sentinel must NOT bleed across modes")
+	if reached {
+		t.Error("handler ran in multi mode with nil authDeps; withSession must answer before it")
 	}
-	if sawOrgID {
-		t.Error("OrgIDFrom() returned non-empty in multi mode with nil authDeps; sentinel must NOT bleed across modes")
-	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 }
 
 // TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin: local /api/me reports the one

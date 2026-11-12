@@ -37,6 +37,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -77,13 +78,15 @@ type EventPublisher interface {
 	Publish(evt domain.Event)
 }
 
-// PresenceChecker is the multi-mode fleet-wide presence check (TFAC-584):
-// the plain *wsbackplane.Backplane satisfies this directly, combining
-// this pod's local Hub state with the fleet-wide ws_presence table so a
-// reviewer connected to a different pod than the one running a
-// permission check still counts as present. See presentFor.
+// PresenceChecker is the multi-mode fleet-wide presence check: the plain
+// *wsbackplane.Backplane satisfies this directly, combining this pod's
+// local Hub state with the fleet-wide ws_presence table so a reviewer
+// connected to a different pod than the one running a permission check
+// still counts as present. userIDs follows websocket.Hub.PresentFor: nil
+// is the org-wide check, a non-nil set counts only those users. See
+// presentFor.
 type PresenceChecker interface {
-	PresentFor(ctx context.Context, orgID, conversationID string) bool
+	PresentFor(ctx context.Context, orgID, conversationID string, userIDs []string) bool
 }
 
 // Spawner manages delegated agent runs.
@@ -261,6 +264,13 @@ type Spawner struct {
 	// (..., creatorUserID, fn) } else { s.x.MethodSystem(...) }`.
 	tx    db.TxRunner
 	wsHub *websocket.Hub
+	// frameAudience is who a frame about one conversation goes to (see
+	// frames), and so whose tabs may count as present for its permission
+	// prompts (see presentFor). Nil, the default and always the case in
+	// local mode, sends those frames to the whole org and counts any tab in
+	// it; multi mode wires the per-frame resolution through
+	// SetConversationFrameAudience.
+	frameAudience conversationframe.AudienceFunc
 	// presence is the optional multi-mode presence checker (TFAC-584),
 	// wired via SetPresenceChecker. When set, presentFor consults it
 	// (local Hub state OR the fleet-wide ws_presence table) instead of
@@ -494,6 +504,16 @@ type Spawner struct {
 	// DefaultSnapshotInterval; SetSnapshotInterval (TF_SNAPSHOT_INTERVAL_SEC)
 	// overrides it once at startup.
 	snapshotInterval time.Duration
+	// claimWarmWindow is how long an engagement waits warm after a person's
+	// turn (warm_window.go). Zero turns warm claims off. NewSpawner sets
+	// DefaultWarmWindow; SetWarmWindow (TF_CLAIM_WARM_WINDOW) overrides it
+	// once at startup. A native engagement reads it at each turn end
+	// (native_warm.go). An SDK engagement lets go at every turn end: a local
+	// respawn reuses the tree on disk and builds no cell, so a window would
+	// hold a claim slot to save little.
+	claimWarmWindow time.Duration
+	// warmWaits is the engagements on this executor waiting warm.
+	warmWaits *WarmWaits
 
 	// unquietTrees holds, by run-tree root, the jails that did not stop when an
 	// ending asked: a func reporting whether each has exited. See treeQuiet.
@@ -700,6 +720,8 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		memAvailMB:            sysinfo.MemAvailableMB,
 		diskAvailMB:           executorDiskAvailableMB,
 		snapshotInterval:      DefaultSnapshotInterval,
+		claimWarmWindow:       DefaultWarmWindow,
+		warmWaits:             NewWarmWaits(),
 	}
 	s.controller = inProcessController{s: s}
 	// Every engagement write goes through s.conversations, from both runtimes,
@@ -854,6 +876,24 @@ func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
 		return
 	}
 	fn(orgID, conversationID)
+}
+
+// SetConversationFrameAudience scopes the spawner's conversation frames to
+// each conversation's REST audience, resolved per frame, and the presence
+// check behind its permission prompts to the same audience, resolved per
+// check. Multi-mode wiring only, once at boot before any run starts;
+// without it the frames go to the whole org and any tab in it counts as
+// present, which is right only at N=1.
+func (s *Spawner) SetConversationFrameAudience(audience conversationframe.AudienceFunc) {
+	s.frameAudience = audience
+}
+
+// frames is the notifier every websocket frame about one conversation goes
+// through (message, conversation_update, the permission frames). It is
+// built over the spawner's current hub, so a hub replaced after
+// construction is the one the frame reaches.
+func (s *Spawner) frames() *conversationframe.Notifier {
+	return conversationframe.NewNotifier(s.wsHub, s.frameAudience)
 }
 
 // SetPresenceChecker wires the multi-mode fleet-wide presence check
@@ -1662,7 +1702,7 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	if task.Status == "done" || task.Status == "dismissed" {
 		return
 	}
-	s.broadcastTaskUpdate(orgID, taskID, task.Status)
+	s.broadcastTaskUpdate(orgID)
 
 	// Mirror the move onto the task's Jira ticket or Linear issue under the
 	// org's system credential, so a watcher there sees the bot pick it up.
@@ -1677,37 +1717,30 @@ func (s *Spawner) announceTaskPlacement(orgID, taskID string) {
 	}
 }
 
-// broadcastTaskUpdate emits a task_updated WS event so the
-// board can refetch / patch the card without polling. Payload
-// matches the shared event shape (task_id + status) the other
-// emitters use (broadcastTaskStatus on the task PATCH arms,
-// finalizeRequeue), so the FE's typed WSEvent ('task_updated':
-// {task_id, status}) holds across producers.
-func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {
+// broadcastTaskUpdate emits a task_updated WS event so the board refetches
+// without polling. Like every other task_updated producer it is a
+// payload-free ping: the hub scopes it to the org only, and the board's REST
+// read is what carries the task's visibility.
+func (s *Spawner) broadcastTaskUpdate(orgID string) {
 	if s.wsHub == nil {
 		return
 	}
 	s.wsHub.Broadcast(websocket.Event{
 		Type:  "task_updated",
 		OrgID: orgID,
-		Data:  map[string]string{"task_id": taskID, "status": status},
+		Data:  map[string]any{},
 	})
 }
 
-// broadcastConversationUpdate stamps the run's owning org on the event so the
-// hub's per-connection scoping filter routes it only to clients
-// authed against that tenant. Every caller is inside a goroutine
-// that already has orgID in scope (the run's tenant, set at
-// Delegate() entry and threaded through every helper).
+// broadcastConversationUpdate sends the conversation_update frame to the
+// conversation's audience and mirrors the status onto the bus. Every caller
+// is inside a goroutine that already has orgID in scope (the run's tenant,
+// set at Delegate() entry and threaded through every helper). The frame
+// takes a background context because several callers run after the run's
+// own context is cancelled, and a terminal status is the frame that most
+// needs to land.
 func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status string) {
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "conversation_update",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           map[string]string{"status": status},
-		})
-	}
+	s.frames().ConversationUpdate(context.Background(), orgID, conversationID, conversationframe.StatusUpdate{Status: status})
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
 		ConversationID: conversationID,
 		Status:         status,
@@ -1721,18 +1754,11 @@ func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status stri
 // for an unclassified failure — consumers treat absence as "generic
 // failed", which keeps the payload backward compatible.
 func (s *Spawner) broadcastConversationFailed(orgID, conversationID string, kind domain.ConversationFailureKind) {
-	data := map[string]string{"status": "failed"}
+	upd := conversationframe.StatusUpdate{Status: "failed"}
 	if kind != domain.ConversationFailureUnclassified {
-		data["failure_kind"] = string(kind)
+		upd.FailureKind = string(kind)
 	}
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "conversation_update",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           data,
-		})
-	}
+	s.frames().ConversationUpdate(context.Background(), orgID, conversationID, upd)
 	meta := events.SystemConversationStatusMetadata{ConversationID: conversationID, Status: "failed"}
 	if kind != domain.ConversationFailureUnclassified {
 		meta.FailureKind = string(kind)
@@ -1740,15 +1766,10 @@ func (s *Spawner) broadcastConversationFailed(orgID, conversationID string, kind
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, meta)
 }
 
+// broadcastMessage sends one transcript row to the conversation's audience,
+// then publishes a tool-calling assistant turn on the bus.
 func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Message) {
-	if s.wsHub != nil {
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "message",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           msg.ToDTO(),
-		})
-	}
+	s.frames().Message(context.Background(), orgID, conversationID, msg.ToDTO())
 	// Only a tool-calling assistant turn is published — a plain text or
 	// reasoning turn is noise for bus consumers, and this bounds volume.
 	//

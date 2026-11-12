@@ -137,7 +137,9 @@ const activeClaimExistsSQL = `EXISTS (
 // liveClaimExistsSQL is the narrower question the DISPLAY asks: is an
 // engagement actually alive on this conversation right now. An unreleased
 // claim whose lease has lapsed answers no — whatever process held it is gone,
-// and the row is waiting to be taken over.
+// and the row is waiting to be taken over. A warm claim answers no as well: its
+// turn has ended, and the conversation shows the state that turn wrote
+// (domain.ClaimPhaseWarm).
 //
 // It is deliberately not what the ownership predicates read. Those ask "may a
 // second claim exist", and the answer to that is still no: idx_claims_one_active
@@ -152,7 +154,8 @@ const activeClaimExistsSQL = `EXISTS (
 const liveClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
-		  AND cl_a.lease_expires_at > statement_timestamp())`
+		  AND cl_a.lease_expires_at > statement_timestamp()
+		  AND cl_a.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections (subtype 'injection:…', including a
@@ -215,9 +218,51 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
+// lapsedClaimOutcomeSQL is the outcome a claim whose holder is gone is
+// released with. A claim lost mid-work is reaped, which the loss budget
+// counts. A warm claim (domain.ClaimPhaseWarm) lost nothing: its turn had
+// ended and written its state, so it is released as completed, as the turn's
+// own write would have released it, and its conversation is left as it is.
+const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
+
+// idleWarmClaimSQL is claim alias cl being a warm claim (domain.ClaimPhaseWarm)
+// whose conversation r still holds the verdict its turn wrote. Its turn has
+// ended and nothing has resumed it, so no agent works under it. A follow-up
+// that resumes the conversation leaves the claim warm until its engagement
+// takes it back up, and from the resume on the claim is the one about to
+// drive the conversation, so it is not idle. A resumed conversation keeps its
+// completed_at, and its NULL status would make the bare test NULL, so the
+// result is coalesced and negates cleanly.
+func idleWarmClaimSQL(cl string) string {
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, false)`
+}
+
+// workingClaimExistsSQL is activeClaimExistsSQL without an idle warm claim
+// (idleWarmClaimSQL): whether an agent is at work on conversation r, or about
+// to be. An idle warm claim still holds its conversation, so
+// activeClaimExistsSQL keeps a second claim off it, but no agent works under
+// it, and a reader asking about work must not count it.
+var workingClaimExistsSQL = `EXISTS (
+		SELECT 1 FROM claims cl_w
+		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
+		  AND NOT ` + idleWarmClaimSQL("cl_w") + `)`
+
+// warmTreeHeldSQL is conversation r's task tree held by a warm claim on
+// another of the task's conversations. Every conversation on a task shares one
+// run tree, and a warm claim's jail is still running in it, so r waits for
+// that claim to let go rather than start a second engagement in the tree. The
+// warm engagement lets go once its conversation has ended, which a new
+// delegation on the task does as it queues r, or once its window closes.
+const warmTreeHeldSQL = `EXISTS (
+		SELECT 1 FROM conversations sib
+		JOIN claims cl_t ON cl_t.conversation_id = sib.id AND cl_t.released_at IS NULL
+		WHERE sib.org_id = r.org_id AND sib.task_id = r.task_id AND sib.id <> r.id
+		  AND cl_t.phase = '` + domain.ClaimPhaseWarm + `')`
+
 // workingConversationSQL is a conversation still working on its task, with
 // no person needed for it to go on: a top-level conversation that has not
-// ended and either holds an active claim, is waiting to be driven
+// ended and either holds an active claim an agent works under
+// (workingClaimExistsSQL), is waiting to be driven
 // (awaitingDrivingSQL, whatever a hand-back's wait) under a blueprint nobody
 // called off, on either of the two columns blueprintDrivableSQL checks, or is
 // the current step of a running blueprint nobody called off that has given it
@@ -231,7 +276,7 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 // one predicate.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
-	  AND (` + activeClaimExistsSQL + `
+	  AND (` + workingClaimExistsSQL + `
 	       OR (` + awaitingDrivingSQL + `
 	           AND NOT EXISTS (
 	               SELECT 1 FROM blueprint_runs br_w
@@ -512,6 +557,88 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	          ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.id DESC
 	          LIMIT 1), '') AS last_hand_back_outcome`
 
+// orgActiveCTE counts each org's engagements rather than its stored
+// statuses: an unreleased claim is an occupied slot, a warm one included.
+// Read straight off claims (whose org_id is the conversation's), the count is
+// an index-only scan of idx_claims_one_active rather than a pass over
+// conversation history. claimScanSQL joins it as oa.
+const orgActiveCTE = `org_active AS (
+			SELECT org_id, count(*)::int AS active
+			FROM claims
+			WHERE released_at IS NULL
+			GROUP BY org_id
+		)`
+
+// underOrgCapSQL is the claim scan's cap clause: conversation r's org has no
+// cap, or fewer engagements than its cap. It is never NULL, so NOT
+// underOrgCapSQL is exactly an org at its cap.
+const underOrgCapSQL = `(os.max_concurrent_runs IS NULL
+			    OR os.max_concurrent_runs <= 0
+			    OR COALESCE(oa.active, 0) < os.max_concurrent_runs)`
+
+// preferredIsSQL is conversation r preferring the executor executorArg
+// names, which is placement's tier 1 for that executor.
+func preferredIsSQL(executorArg string) string {
+	return `(r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = ` + executorArg + `)`
+}
+
+// claimScanSQL is the FROM and WHERE of the claim scan: every conversation
+// ClaimNextConversation may take, before it orders them and takes one. The
+// probes that ask whether the scan would find something
+// (ClaimableExistsSystem, OrgCapBlockedWorkExistsSystem) read it too, so a
+// probe cannot answer for a predicate the claim no longer has.
+//
+// capSQL is the org cap clause: underOrgCapSQL, or its negation for work only
+// the cap holds back. The statement must define orgActiveCTE. bind appends a
+// value to the statement's arguments and returns its placeholder, and
+// executorArg is the claiming executor's placeholder, which only placement
+// reads.
+func claimScanSQL(capSQL string, placement db.ClaimPlacement, executorArg string, bind func(any) string) string {
+	q := `
+			FROM conversations r
+			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			LEFT JOIN org_active oa ON oa.org_id = r.org_id
+			LEFT JOIN org_settings os ON os.org_id = r.org_id
+			WHERE ` + eligibleForDrivingSQL + `
+			  AND ` + blueprintDrivableSQL + `
+			  AND NOT ` + warmTreeHeldSQL + `
+			  AND ` + capSQL
+	if !placement.Enabled {
+		return q
+	}
+	// A conversation is claimable by this executor when it is its own (tier
+	// 1), unowned, aged past the tier-2 window, or its stamped preferred is
+	// not a live claimant: dead (heartbeat stale past liveness), draining, or
+	// dispatch-gated. Tier 1 sorts first, so a fresh conversation with a live
+	// owner is exclusively that owner's until it ages (warm cache), while a
+	// saturated or dead owner never head-of-line-blocks its shard.
+	//
+	// The aging arm anchors on queued_at — the moment the row entered the
+	// queue in THIS episode (the enqueue for a fresh conversation, the wake
+	// for a resume) — never on started_at, which is stamped once at mint. The
+	// window bounds how long a claimable conversation waits for its
+	// preferred executor, so it has to open when the wait begins: anchored on
+	// the mint stamp, a resume older than the window would have no exclusive
+	// period at all and the re-stamped affinity would only order its owner's
+	// own scan. started_at is the fallback for rows that predate the queue
+	// column.
+	aging := bind(placement.AgingInterval.Seconds())
+	liveness := bind(placement.Liveness.Seconds())
+	return q + `
+			  AND (
+			    ` + preferredIsSQL(executorArg) + `
+			    OR r.preferred_executor_id IS NULL
+			    OR COALESCE(r.queued_at, r.started_at) < now() - make_interval(secs => ` + aging + `)
+			    OR NOT EXISTS (
+			        SELECT 1 FROM instances i
+			        WHERE i.id = r.preferred_executor_id
+			          AND i.last_heartbeat_at >= now() - make_interval(secs => ` + liveness + `)
+			          AND NOT ` + drainingSQL("i.") + `
+			          AND i.dispatch_gated IS NOT TRUE
+			    )
+			  )`
+}
+
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic
 	// and the blueprint gate for delegation rides alongside it. An empty
@@ -541,7 +668,10 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	// placement: the org_active CTE counts each org's active (slot-occupying)
 	// runs once per statement, the cap filter hides a queued conversation whose org is
 	// at or above its max_concurrent_runs, and the fairness key orders
-	// claimable rows fewest-active-org first. Both degrade to a no-op at N=1 /
+	// claimable rows fewest-active-org first. A warm claim counts toward its
+	// org's active runs, because it holds an executor slot.
+	//
+	// Both degrade to a no-op at N=1 /
 	// single org — the fairness key is constant across all candidates (so the
 	// order collapses to started_at, id — the old global-oldest) and the
 	// default NULL cap never filters — so existing single-org callers see the
@@ -549,79 +679,27 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	// burst of concurrent claimers an org can momentarily exceed its cap by the
 	// number of in-flight claims (a soft ceiling); sequential claims are exact.
 	//
-	// candidatePredicate + the tier prefix on the order are the only things
-	// placement changes. Placement composes with fairness by
-	// prefixing the tier term to the ORDER BY — fairness then orders WITHIN
-	// each tier. Disabled: no tier term, no candidate predicate — the claim is
-	// the globally-oldest claimable conversation modulo fairness/cap. Enabled: the
-	// two-tier claim (see the SQL below).
-	candidatePredicate := ""
-	tierPrefix := "" // placement tier ordering, prepended to the fairness key
+	// The scan's FROM and WHERE are claimScanSQL's. Beyond the predicate it
+	// adds there, placement changes only the order: the tier term prefixes
+	// the fairness key, so fairness orders within each tier. Disabled, the
+	// claim is the globally-oldest claimable conversation modulo fairness and
+	// the cap.
 	args := []any{executorID, bootEpoch}
-	// The lease binds after whatever placement appends, so the placement
-	// predicate below keeps naming $3/$4 literally.
-	leaseArg := func() string { args = append(args, lease.Seconds()); return "$" + strconv.Itoa(len(args)) }
+	bind := func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) }
+	scan := claimScanSQL(underOrgCapSQL, placement, "$1", bind)
+	tierPrefix := "" // placement tier ordering, prepended to the fairness key
 	if placement.Enabled {
-		// $3 = aging seconds, $4 = liveness seconds. A conversation is claimable by me
-		// when it is mine (tier 1), unowned, aged past the tier-2 window, or
-		// its stamped preferred is not a live claimant — dead (heartbeat
-		// stale past liveness), draining, or dispatch-gated. Tier 1 sorts
-		// first, so a fresh conversation with a live owner is exclusively that owner's
-		// until it ages (warm cache), while a saturated/dead owner never
-		// head-of-line-blocks its shard.
-		//
-		// The aging arm anchors on queued_at — the moment the row entered the
-		// queue in THIS episode (the enqueue for a fresh conversation, the
-		// wake for a resume) — never on started_at, which is stamped once at
-		// mint. The window bounds how long a claimable conversation waits for
-		// its preferred executor, so it has to open when the wait begins:
-		// anchored on the mint stamp, a resume older than the window would
-		// have no exclusive period at all and the re-stamped affinity would
-		// only order its owner's own scan. started_at is the fallback for
-		// rows that predate the queue column.
-		candidatePredicate = `
-			  AND (
-			    (r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1)
-			    OR r.preferred_executor_id IS NULL
-			    OR COALESCE(r.queued_at, r.started_at) < now() - make_interval(secs => $3)
-			    OR NOT EXISTS (
-			        SELECT 1 FROM instances i
-			        WHERE i.id = r.preferred_executor_id
-			          AND i.last_heartbeat_at >= now() - make_interval(secs => $4)
-			          AND NOT ` + drainingSQL("i.") + `
-			          AND i.dispatch_gated IS NOT TRUE
-			    )
-			  )`
-		tierPrefix = "(r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1) DESC, "
-		args = append(args, placement.AgingInterval.Seconds(), placement.Liveness.Seconds())
+		tierPrefix = preferredIsSQL("$1") + " DESC, "
 	}
 	// Fairness orders WITHIN each placement tier: fewest-active-org first, then
 	// oldest. COALESCE covers an org with zero active conversations (no org_active row).
 	orderBy := tierPrefix + "COALESCE(oa.active, 0), r.started_at, r.id"
-	// org_active counts engagements, not stored statuses: an unreleased claim
-	// IS an occupied slot, on either surface. Read straight off claims (whose
-	// org_id is the conversation's) so the count is an index-only scan of
-	// idx_claims_one_active rather than a pass over conversation history.
+	// The lease binds after everything the scan bound.
+	leaseArg := bind(lease.Seconds())
 	query := `
-		WITH org_active AS (
-			SELECT org_id, count(*)::int AS active
-			FROM claims
-			WHERE released_at IS NULL
-			GROUP BY org_id
-		),
+		WITH ` + orgActiveCTE + `,
 		candidate AS (
-			SELECT ` + conversationQueueClaimSelect + `
-			FROM conversations r
-			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-			LEFT JOIN org_active oa ON oa.org_id = r.org_id
-			LEFT JOIN org_settings os ON os.org_id = r.org_id
-			WHERE ` + eligibleForDrivingSQL + `
-			  AND ` + blueprintDrivableSQL + `
-			  AND (
-			    os.max_concurrent_runs IS NULL
-			    OR os.max_concurrent_runs <= 0
-			    OR COALESCE(oa.active, 0) < os.max_concurrent_runs
-			  )` + candidatePredicate + `
+			SELECT ` + conversationQueueClaimSelect + scan + `
 			ORDER BY ` + orderBy + `
 			FOR UPDATE OF r SKIP LOCKED
 			LIMIT 1
@@ -648,7 +726,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			-- a live claim never exists without one, which is the invariant
 			-- claims_live_has_lease states and every fenced write presents.
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
-			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), statement_timestamp() + make_interval(secs => ` + leaseArg() + `) FROM candidate
+			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), statement_timestamp() + make_interval(secs => ` + leaseArg + `) FROM candidate
 			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
 		SELECT ` + conversationQueueClaimReturning + `
@@ -671,6 +749,38 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		}
 		return conv, wrapAdminPoolPermErr(err, "conversation_queue.ClaimNextConversation")
 	}
+}
+
+func (s *conversationQueueStore) ClaimableExistsSystem(ctx context.Context, executorID string, placement db.ClaimPlacement, minWait time.Duration) (bool, error) {
+	args := []any{executorID}
+	bind := func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) }
+	scan := claimScanSQL(underOrgCapSQL, placement, "$1", bind)
+	waited := bind(minWait.Seconds())
+	query := `
+		WITH ` + orgActiveCTE + `
+		SELECT EXISTS (
+			SELECT 1` + scan + `
+			  AND (` + preferredIsSQL("$1") + `
+			    OR COALESCE(r.queued_at, r.started_at) < now() - make_interval(secs => ` + waited + `))
+		)`
+	var exists bool
+	err := s.conn.QueryRowContext(ctx, query, args...).Scan(&exists)
+	return exists, wrapAdminPoolPermErr(err, "conversation_queue.ClaimableExistsSystem")
+}
+
+func (s *conversationQueueStore) OrgCapBlockedWorkExistsSystem(ctx context.Context, orgID string) (bool, error) {
+	args := []any{orgID}
+	bind := func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) }
+	scan := claimScanSQL("NOT "+underOrgCapSQL, db.ClaimPlacement{}, "", bind)
+	query := `
+		WITH ` + orgActiveCTE + `
+		SELECT EXISTS (
+			SELECT 1` + scan + `
+			  AND r.org_id = $1
+		)`
+	var exists bool
+	err := s.conn.QueryRowContext(ctx, query, args...).Scan(&exists)
+	return exists, wrapAdminPoolPermErr(err, "conversation_queue.OrgCapBlockedWorkExistsSystem")
 }
 
 // claimRetryAttempts bounds the re-scan after a lost race on
@@ -1006,6 +1116,7 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
 		  AND last_activity_at IS NOT NULL
+		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseWarm+`'
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestIdleClaimSystem")
@@ -1025,6 +1136,7 @@ func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) 
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
 		  AND last_checkpoint_at IS NOT NULL
+		  AND phase IS DISTINCT FROM '`+domain.ClaimPhaseWarm+`'
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestCheckpointAgeSystem")
@@ -1063,7 +1175,7 @@ func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, 
 		return false, nil
 	}
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(), outcome = 'reaped'
+		UPDATE claims SET released_at = now(), outcome = `+lapsedClaimOutcomeSQL+`
 		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
 		  AND released_at IS NULL AND lease_expires_at <= statement_timestamp()
 	`, claimID, orgID, conversationID)
@@ -1100,7 +1212,7 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 				LIMIT $3
 				FOR UPDATE SKIP LOCKED
 			)
-			UPDATE claims c SET released_at = now(), outcome = 'reaped'
+			UPDATE claims c SET released_at = now(), outcome = `+lapsedClaimOutcomeSQL+`
 			FROM expired e WHERE c.id = e.id
 			RETURNING c.id::text, c.org_id::text, c.conversation_id::text
 		`, executorID, bootEpoch, limit)
@@ -1542,7 +1654,8 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// Every live claim this executor minted in an earlier boot, whatever its
 	// conversation's state: the flock proves the process that minted it is
-	// gone, and a clean shutdown releases its own, so each one is a loss.
+	// gone, and a clean shutdown releases its own, so each one is a loss,
+	// except a warm claim, whose turn had already written its state.
 	// Scoped by boot epoch rather than by lease — the epoch is the stronger
 	// proof here, and a claim of the previous boot can still carry a lease
 	// its dead holder renewed seconds ago.
@@ -1553,7 +1666,7 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 	var released []string
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			UPDATE claims SET released_at = now(), outcome = 'reaped'
+			UPDATE claims SET released_at = now(), outcome = `+lapsedClaimOutcomeSQL+`
 			WHERE released_at IS NULL AND executor_id = $1 AND boot_epoch < $2
 			RETURNING conversation_id::text
 		`, executorID, bootEpoch)

@@ -367,7 +367,8 @@ Grafana opens on the **Triage Factory — Overview** dashboard: recent GitHub,
 Jira and Linear poll cycles, slow API requests and errored spans; request rate,
 errors and p95 latency by span (click an exemplar dot to open its trace);
 per-pod runtime; event routing, deferred firings and score re-evaluations; run
-setup phases; run completions and in-run agent activity; workspace snapshots;
+setup phases; run completions and in-run agent activity; the native agent
+loop's turns, provider calls, tool calls and compactions; workspace snapshots;
 dropped audit records; upstream connections and rate-limit waits; and sandbox
 memory.
 Dashboards are read-only, provisioned from
@@ -382,6 +383,9 @@ To use your own pieces: for Prometheus, scrape each pod's `:9464`, load
 `docker/observability/rules/`, and repoint `grafana-datasources.yaml` and
 Tempo's `remote_write`; for Grafana, copy the data sources, correlations and
 dashboards; for a trace backend, delete `tempo` and set `TF_TRACES_ENDPOINT`.
+On your own Tempo, the native-loop latency panels need span metrics with
+`dimensions: [model, tool]`, as in `docker/observability/tempo.yaml`; without
+it they draw one unlabelled line.
 To drop tracing, delete `tempo` **and** set `TF_TRACES_ENDPOINT=off`, or TF
 logs an export error every batch.
 

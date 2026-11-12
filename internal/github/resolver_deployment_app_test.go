@@ -467,9 +467,9 @@ func TestResolver_ManagedClass_CommitIdentity(t *testing.T) {
 			gh.botStatus = tc.botStatus
 			r := newManagedResolver(t, gh.srv.URL, testDeploymentApp(t))
 
-			name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
-			if !ok {
-				t.Fatal("OrgIdentityFor reported no identity; a managed org commits as the deployment App's bot")
+			name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+			if err != nil || !ok {
+				t.Fatalf("OrgIdentityFor = (%v, %v); a managed org commits as the deployment App's bot", ok, err)
 			}
 			if name != "tf-deployment[bot]" {
 				t.Errorf("name = %q; want the deployment App's bot login", name)
@@ -481,11 +481,12 @@ func TestResolver_ManagedClass_CommitIdentity(t *testing.T) {
 	}
 }
 
-// TestResolver_ManagedClass_UnusableApp_StampsNoIdentity covers the one entry
-// point that cannot return an error. A managed org whose deployment App fails
-// its preflight must stamp NOTHING — never the PAT tier's cached login, which
-// would be an identity for a credential the org is not acting as.
-func TestResolver_ManagedClass_UnusableApp_StampsNoIdentity(t *testing.T) {
+// TestResolver_ManagedClass_UnusableApp_IdentityIsAnError: a managed org whose
+// deployment App fails its preflight has an identity this resolution could not
+// establish, which is an error — never the PAT tier's cached login, which
+// would be an identity for a credential the org is not acting as, and never
+// absence, which a run would commit as its placeholder.
+func TestResolver_ManagedClass_UnusableApp_IdentityIsAnError(t *testing.T) {
 	gh := newDeploymentGH(t)
 	gh.appStatus = http.StatusUnauthorized
 	r := NewResolver(
@@ -497,9 +498,34 @@ func TestResolver_ManagedClass_UnusableApp_StampsNoIdentity(t *testing.T) {
 		WithDeploymentApp(testDeploymentApp(t)),
 	)
 
-	name, email, ok := r.OrgIdentityFor(context.Background(), "org-1")
+	name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+	if !errors.Is(err, ErrDeploymentAppUnavailable) {
+		t.Errorf("OrgIdentityFor err = %v; want ErrDeploymentAppUnavailable", err)
+	}
 	if ok || name != "" || email != "" {
 		t.Errorf("OrgIdentityFor = (%q, %q, %v); want no identity — the PAT login belongs to a credential this org does not use", name, email, ok)
+	}
+}
+
+// TestResolver_ManagedClass_AppNotReady_HasNoIdentity: a deployment App
+// established with no slug has no bot account to commit as, which is the
+// managed org having no identity — absence, with no error, and still never
+// the PAT tier's cached login.
+func TestResolver_ManagedClass_AppNotReady_HasNoIdentity(t *testing.T) {
+	gh := newDeploymentGH(t)
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_present"}},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: gh.srv.URL, class: domain.GitHubCredentialClassManagedApp},
+		&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "acme-bot", GitHubOrgEmail: "bot@acme.test"}},
+		nil,
+		WithDeploymentApp(testDeploymentApp(t)),
+	)
+	r.(*resolver).deployment.store(&deploymentAppState{}, nil)
+
+	name, email, ok, err := r.OrgIdentityFor(context.Background(), "org-1")
+	if err != nil || ok || name != "" || email != "" {
+		t.Errorf("OrgIdentityFor = (%q, %q, %v, %v); want no identity and no error", name, email, ok, err)
 	}
 }
 

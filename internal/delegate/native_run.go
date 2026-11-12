@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // toolHostDialTimeout bounds how long setup waits for the in-jail server to
@@ -203,6 +204,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	if runCell == nil {
 		return launchFailed(errors.New("launch tool host: no cell was provisioned for this engagement — multi mode is always per-run-isolated"))
 	}
+	env, err := s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID)
+	if err != nil {
+		return launchFailed(err)
+	}
 	// One resolution of the claim's memory ceiling for the jail and the bash
 	// budget derived from it, so the two cannot disagree.
 	memoryLimitMB := agentproc.ClaimMemoryLimitMB()
@@ -213,7 +218,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	launched, err := launchRestartableJail(ctx, runCell, cell.LaunchSpec{
 		WorkspaceKey:     namespace,
 		RunTree:          claudeCwd,
-		Env:              s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
+		Env:              env,
 		ProxyEnv:         cfg.sidecar.jailEnv(),
 		SidecarEndpoints: cfg.sidecar.jailEndpoints(),
 		AgentHostSocket:  agenthost.SocketPathFor(conversationID),
@@ -258,6 +263,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 
 	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, "")
+	// That write ended the engagement's root. What follows runs for as long as
+	// the engagement does, so none of it may hang off that span: the loop's
+	// spans are roots linked to it, and the rest opens roots of its own.
+	engagementSpan := s.engagementSpanContext(conversationID)
+	ctx = detachEngagement(ctx)
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
 	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
@@ -278,11 +288,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// resolvable.
 	coldModel := agentloop.DefaultColdCompactionModel
 
-	// Checkpoints, for as long as the loop runs and not a moment longer.
-	// recordNativeResult stops this before any ending writes, because a
-	// checkpoint still in flight is the same writer to the key as that
-	// ending's snapshot; the deferred stop only covers an exit that never
-	// reaches it.
+	// Checkpoints, for as long as the engagement's turns and the warm waits
+	// between them run, and not a moment longer. recordNativeResult stops this
+	// before any ending writes, because a checkpoint still in flight is the same
+	// writer to the key as that ending's snapshot; the deferred stop only covers
+	// an exit that never reaches it.
 	ckpt := s.startCheckpointer(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd)
 	ckpt.freezeWith(jail)
 	defer ckpt.stop()
@@ -307,10 +317,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Log: delegateLog,
 	}
 
-	result := engine.Run(ctx, agentloop.Params{
+	params := agentloop.Params{
 		OrgID:          orgID,
 		ConversationID: conversationID,
 		ClaimID:        cfg.claimID,
+		EngagementSpan: engagementSpan,
 		Model:          model,
 		SystemPrompt:   systemPrompt,
 		SystemAddendum: launchText.systemBlock,
@@ -331,17 +342,46 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		// The jail was launched above for this engagement, so no process an
 		// earlier one started runs in it, and its /tmp starts empty.
 		NewSandbox: true,
+	}
+
+	return s.runNativeTail(ctx, nativeTail{
+		orgID:          orgID,
+		conversationID: conversationID,
+		task:           task,
+		cfg:            cfg,
+		namespace:      namespace,
+		claudeCwd:      claudeCwd,
+		creatorUserID:  creatorUserID,
+		startTime:      startTime,
+		mirror:         mirror,
+		run:            engine.Run,
+		params:         params,
+		transcript:     transcript,
+		ckpt:           ckpt,
+		// The loop is over, and every ending may read the run's tree. The jail
+		// is stopped first, until its runtime is gone: a process the agent
+		// backgrounded would otherwise still be writing while the snapshot is
+		// taken. A jail that will not stop leaves its tree uncaptured until it
+		// has exited, and the ending proceeds on the last checkpoint.
+		release: func() {
+			_ = tools.Close()
+			stopJail()
+		},
 	})
+}
 
-	// The loop is over, and every ending below may read the run's tree. The
-	// jail is stopped first, until its runtime is gone: a process the agent
-	// backgrounded would otherwise still be writing while the snapshot is taken. A
-	// jail that will not stop leaves its tree uncaptured until it has exited, and
-	// the ending proceeds on the last checkpoint.
-	_ = tools.Close()
-	stopJail()
-
-	return s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, creatorUserID, startTime, result, mirror)
+// startNativeEngagementSpan starts a native engagement's terminal span,
+// processCompletion's on the other runtime: the same attributes, with the
+// loop's own accounting, summed over every turn the engagement ran, as the
+// run's figures. The caller sets the outcome and ends it.
+func (s *Spawner) startNativeEngagementSpan(ctx context.Context, orgID, conversationID, taskID string, result agentloop.Result) (context.Context, trace.Span) {
+	return s.startPunctual(ctx, conversationID, "engagement.complete",
+		telemetry.OrgID(orgID),
+		telemetry.TaskID(taskID),
+		telemetry.Runtime(domain.ConversationRuntimeNative),
+		telemetry.AgentCostUSD(result.CostUSD),
+		telemetry.AgentDuration(int64(result.DurationMs)),
+		telemetry.Count(result.NumTurns))
 }
 
 // executorChangedSince reports whether the engagement before this one ran on
@@ -586,17 +626,21 @@ func prepareInheritedMemory(cwd string, handedOff, opened bool) *memoryFingerpri
 // nativeAgentEnv is the env the jail's tool host exports to every `bash`
 // command it runs — the same run-identity variables the SDK path exports, so
 // a `tfac`/`triagefactory exec` invocation from inside a tool resolves the
-// same run.
-func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, namespace string, cfg runConfig, triggerType, creatorUserID string) []string {
+// same run. An error is runCommitIdentity's.
+func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, namespace string, cfg runConfig, triggerType, creatorUserID string) ([]string, error) {
 	env := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot,
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
-	if id := s.runCommitIdentity(ctx, orgID, cfg.sidecar, triggerType, creatorUserID); id.CoAuthorTrailer != "" {
+	id, err := s.runCommitIdentity(ctx, orgID, cfg.sidecar, triggerType, creatorUserID)
+	if err != nil {
+		return nil, err
+	}
+	if id.CoAuthorTrailer != "" {
 		env = append(env, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+id.CoAuthorTrailer)
 	}
-	return env
+	return env, nil
 }
 
 // nativeCredentials resolves the loop's provider account per call.
@@ -807,18 +851,10 @@ func (s *Spawner) recordNativeResult(
 	result agentloop.Result,
 	mirror *memoryMirror,
 ) (disp engagementDisposition) {
-	// The engagement's terminal span, processCompletion's on the other
-	// runtime: the same attributes, with the loop's own accounting as the
-	// run's figures. Every exit below names its outcome, except a fenced one:
-	// the fence can refuse a write inside any of the helpers below, and
-	// whichever write it refused, nothing was recorded.
-	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
-		telemetry.OrgID(orgID),
-		telemetry.TaskID(task.ID),
-		telemetry.Runtime(domain.ConversationRuntimeNative),
-		telemetry.AgentCostUSD(result.CostUSD),
-		telemetry.AgentDuration(int64(result.DurationMs)),
-		telemetry.Count(result.NumTurns))
+	// Every exit below names its outcome, except a fenced one: the fence can
+	// refuse a write inside any of the helpers below, and whichever write it
+	// refused, nothing was recorded.
+	ctx, span := s.startNativeEngagementSpan(ctx, orgID, conversationID, task.ID, result)
 	var terminal string
 	defer func() {
 		if disp.fenced {

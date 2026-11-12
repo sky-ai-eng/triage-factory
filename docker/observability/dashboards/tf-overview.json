@@ -3167,12 +3167,806 @@
     },
     {
       "collapsed": false,
-      "description": "Every park and every non-failed terminal writes the run's workspace to the blob store, and the status flip that follows is serialized behind that write \u2014 so a stop that sat in WORKING for a minute is answerable here. One punctual `workspace.snapshot` trace per snapshot, linked back to its engagement, with three children naming where the time went: `capture` (the git delta + transcript read), `archive` (the tar walk + gzip), `put` (the blob write). Coverage is both modes \u2014 tracing is gated solely on TF_TRACES_ENDPOINT, and local mode emits this family in full. The capture phase is the one that differs by mode: local runs it in-process, multi routes it through the privileged capture child, which is span-free by standing decision \u2014 the executor-side `capture` span IS its measurement. `runtime` rides on every span because the members are not runtime-agnostic: only a delegated SDK run snapshots a session transcript, so transcript sizes are SDK-run data, never a property of all snapshots.",
+      "description": "The native agent loop, which runs every delegated run on a multi-mode deployment. Each turn of a run is a short trace of its own, `agent.turn`, linked to the run's `engagement.setup` trace and carrying `conversation.id`, so `{ name = \"agent.turn\" && span.conversation.id = \"\u2026\" }` in Explore lists every turn of one run in order. Inside a turn: `llm.stream` for each provider call (one per attempt, with `llm.retry.backoff` between retries), `agent.tool` for each tool call, and `agent.compact` when the conversation was compacted. A run's preparation (repairing the transcript, compacting it on resume) is `agent.prepare`. Native runs only, so this row is empty in local mode, which runs the SDK.",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 119
+      },
+      "id": 61,
+      "panels": [],
+      "title": "Delegated runs \u2014 the native loop",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per iteration of a native run's loop, most recent first; `Duration` is the whole iteration: its provider call, its tool calls and its writes. `turn` is the provider call's number within the engagement, and with `stop_reason` is blank on an iteration whose call never returned a reply: one that only compacted, a guard that parked before the call, or a call that failed (its `llm.stream` child says how). `stop_reason` is the loop's reading of why the provider stopped: `end_turn`, `tool_calls`, `length` (the output cap), `window_wall` (the context window), `decline` (a refusal or a guardrail) or `unknown`. `outcome` is how the iteration ended. The run went on after `tool_calls`, `compacted`, `truncated_batch` (the reply hit the output cap mid-call, and its calls were answered without running), `retry_larger_cap` (the reply hit the cap with nothing written, and the next call gets a larger one), `pending_input` (a message arrived while it streamed) and `nudged`. The engagement ended on `concluded`, `stopped` (the agent called stop_blueprint), `parked` (with `reason`: `guard`, `decline`, `unknown_stop` or `empty_tool_batch`), `upstream_unavailable`, `tool_host_lost`, `cancelled` and `failed`, the only one that is an error status.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "turn"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stop_reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conversation.id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 120
+      },
+      "id": 62,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"agent.turn\" } | select(span.turn, span.outcome, span.stop_reason, span.reason, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Turns",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "p95 of one provider call, `llm.stream`, by the model it asked for: native turns, their compactions, and the system jobs' calls alike. A call is one HTTP request, streamed to its end, so a long reply is a slow call; for the wait before anything came back, see `llm.first_chunk_ms` in the table below. Retries are separate calls. The `model` label comes from Tempo's span-metrics `dimensions`; without that setting on your own Tempo this draws one unlabelled series.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 128
+      },
+      "id": 63,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(traces_spanmetrics_latency_bucket{span_name=\"llm.stream\"}[$__rate_interval])))",
+          "legendFormat": "{{model}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Provider call latency by model (p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "p95 of one tool call, `agent.tool`, by tool: from the gate that may deny it to its result being recorded. `unknown` is a tool the model called that does not exist; the sandbox answers it at once. The `tool` label comes from Tempo's span-metrics `dimensions`; without that setting on your own Tempo this draws one unlabelled series.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 128
+      },
+      "id": 64,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(traces_spanmetrics_latency_bucket{span_name=\"agent.tool\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Tool call latency by tool (p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per provider call, most recent first; `Duration` is the call, from the request to the end of the stream. `model` is the model asked for. `llm.first_chunk_ms` is how long the call waited before the provider sent anything. The four token columns are the ledger's: `tokens.input` is the input billed at the plain rate, and the cache reads and writes are separate, so the four add up to the prompt plus the reply. `llm.cost_usd` is that call's price, blank when the model has no price. `max_tokens` is the output cap the call was sent with. `outcome` is `ok`, `cancelled`, or the class of failure: a native run retries `rate_limited` and `transient`, never `auth` or `rejected`; a system job retries none of them, and leaves the work for its next cycle. A failure is an error status whose message is its class; the provider's own message is never on the span.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "provider"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "llm.first_chunk_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "llm.cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 136
+      },
+      "id": 65,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"llm.stream\" } | select(span.provider, span.model, span.outcome, span.llm.first_chunk_ms, span.tokens.input, span.tokens.output, span.tokens.cache_read, span.tokens.cache_write, span.llm.cost_usd, span.max_tokens)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Provider calls",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per tool call that did not end `ok`, most recent first; open a row for the turn it was part of. `tool_error` is a tool that ran and failed, the model's to deal with, and `reason` is `memory_budget` when the per-command memory budget killed the command. `denied` was refused by the gate before it ran. `protocol_error` is a call the sandbox could not take, an unknown tool among them. `host_lost` is the sandbox dying during the call, the only error status here, with `reason` saying why: `memory_ceiling`, `overran` (past the limit on one tool call), `refused` or `stopped`; its child `agent.tool_host.restart` says whether the sandbox came back. `memory.kills` counts processes the sandbox's memory limit killed that the call's result reported.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 144
+      },
+      "id": 66,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"agent.tool\" && span.outcome != \"ok\" } | select(span.tool, span.outcome, span.reason, span.memory.kills)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Tool calls that did not end ok",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per compaction, most recent first; `Duration` includes its provider calls. `reason`: `trip` (the window crossed its threshold), `resume` (a resumed conversation that was already full), `overflow` (the provider refused a request as too long) or `window_wall` (the provider stopped at the window mid-reply). `outcome` is the way it was done: `warm` (the model summarized on its warm cache), `cold` (a separate, cheaper call did), or `recovered` (a summary an earlier engagement wrote was committed); a failure is `failed`, `upstream_unavailable` or `cancelled`.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 144
+      },
+      "id": 67,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"agent.compact\" } | select(span.reason, span.outcome)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Compactions",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Every park and every non-failed terminal writes the run's workspace to the blob store, and the status flip that follows is serialized behind that write \u2014 so a stop that sat in WORKING for a minute is answerable here. One punctual `workspace.snapshot` trace per snapshot, linked back to its engagement, with three children naming where the time went: `capture` (the git delta + transcript read), `archive` (the tar walk + gzip), `put` (the blob write). Coverage is both modes \u2014 tracing is gated solely on TF_TRACES_ENDPOINT, and local mode emits this family in full. The capture phase is the one that differs by mode: local runs it in-process, multi routes it through the privileged capture child, which is span-free by standing decision \u2014 the executor-side `capture` span IS its measurement. `runtime` rides on every span because the members are not runtime-agnostic: only a delegated SDK run snapshots a session transcript, so transcript sizes are SDK-run data, never a property of all snapshots.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 152
       },
       "id": 31,
       "panels": [],
@@ -3307,7 +4101,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 153
       },
       "id": 32,
       "options": {
@@ -3384,7 +4178,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 128
+        "y": 161
       },
       "id": 33,
       "options": {
@@ -3524,7 +4318,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 128
+        "y": 161
       },
       "id": 34,
       "options": {
@@ -3640,7 +4434,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 128
+        "y": 161
       },
       "id": 35,
       "options": {
@@ -3671,7 +4465,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 136
+        "y": 169
       },
       "id": 27,
       "panels": [],
@@ -3711,7 +4505,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 137
+        "y": 170
       },
       "id": 28,
       "options": {
@@ -3797,7 +4591,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 137
+        "y": 170
       },
       "id": 29,
       "options": {
@@ -3852,7 +4646,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 137
+        "y": 170
       },
       "id": 30,
       "options": {
@@ -3904,7 +4698,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 145
+        "y": 178
       },
       "id": 36,
       "panels": [],
@@ -3964,7 +4758,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 146
+        "y": 179
       },
       "id": 37,
       "options": {
@@ -4052,7 +4846,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 146
+        "y": 179
       },
       "id": 38,
       "options": {
@@ -4140,7 +4934,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 146
+        "y": 179
       },
       "id": 39,
       "options": {
@@ -4229,7 +5023,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 154
+        "y": 187
       },
       "id": 40,
       "options": {
@@ -4285,7 +5079,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 154
+        "y": 187
       },
       "id": 41,
       "options": {
@@ -4385,7 +5179,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 162
+        "y": 195
       },
       "id": 42,
       "options": {
@@ -4474,7 +5268,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 162
+        "y": 195
       },
       "id": 43,
       "options": {
@@ -4515,7 +5309,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Seconds spent asleep per second, deployment-wide, by kind of wait. `github.ratelimit.await` is a GitHub call held back because its rate-limit budget is spent; `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry. These are inline waits of up to five minutes for GitHub and 30 seconds for Jira, and without them a call waiting out a limit looks identical to slow HTTP. A value of 1 is, on average, one call asleep at every moment. A wait counts once it ends. GitHub and Jira only: Linear and Slack start no span for a wait, and their rate-limit waits are counted, with GitHub's and Jira's, in tf_upstream_rate_limit_wait_seconds_total. For one wait and the call it held up, use the table beside this one.",
+      "description": "Seconds spent asleep per second, deployment-wide, by kind of wait. `github.ratelimit.await` is a GitHub call held back because its rate-limit budget is spent; `github.ratelimit.backoff`, `jira.retry.backoff` and `llm.retry.backoff` (a native run's provider call) are the wait before a retry. These are inline waits of up to five minutes for GitHub and 30 seconds for Jira and the model provider, and without them a call waiting out a limit looks identical to a slow one. A value of 1 is, on average, one call asleep at every moment. A wait counts once it ends. GitHub, Jira and the model provider only: Linear and Slack start no span for a wait, and their rate-limit waits are counted, with GitHub's and Jira's, in tf_upstream_rate_limit_wait_seconds_total. For one wait and the call it held up, use the table beside this one.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4563,7 +5357,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 170
+        "y": 203
       },
       "id": 54,
       "options": {
@@ -4590,7 +5384,7 @@
             "uid": "tf-prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (span_name) (rate(traces_spanmetrics_latency_sum{span_name=~\"github\\\\.ratelimit\\\\.(await|backoff)|jira\\\\.retry\\\\.backoff\"}[$__rate_interval]))",
+          "expr": "sum by (span_name) (rate(traces_spanmetrics_latency_sum{span_name=~\"github\\\\.ratelimit\\\\.(await|backoff)|jira\\\\.retry\\\\.backoff|llm\\\\.retry\\\\.backoff\"}[$__rate_interval]))",
           "legendFormat": "{{span_name}}",
           "range": true,
           "refId": "A"
@@ -4604,7 +5398,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per wait, most recent first; `Duration` is the time spent asleep. `github.ratelimit.await` holds a GitHub call until its spent budget resets: `waited`, or `refused` when the reset is more than five minutes off and the call fails as rate-limited instead. `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry: `attempt` is the attempt that failed, so 3 is a call's third wait, and `disposition` is why, `rate_limited` or `transient` for GitHub and `throttled` or `transport_error` for Jira. `cancelled` on any of them is the caller leaving mid-wait. None of these is an error status. Open a row for the call or poll cycle the wait sat inside. GitHub and Jira only: Linear and Slack start no span for a wait. Empty is the healthy state.",
+      "description": "One row per wait, most recent first; `Duration` is the time spent asleep. `github.ratelimit.await` holds a GitHub call until its spent budget resets: `waited`, or `refused` when the reset is more than five minutes off and the call fails as rate-limited instead. `github.ratelimit.backoff`, `jira.retry.backoff` and `llm.retry.backoff` are the wait before a retry: `attempt` is the attempt that failed, so 3 is a call's third wait, and `disposition` is why, `rate_limited` or `transient` for GitHub and the model provider and `throttled` or `transport_error` for Jira. `cancelled` on any of them is the caller leaving mid-wait. None of these is an error status. Open a row for the call, poll cycle or native turn the wait sat inside. GitHub, Jira and the model provider only: Linear and Slack start no span for a wait. Empty is the healthy state.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -4715,7 +5509,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 170
+        "y": 203
       },
       "id": 55,
       "options": {
@@ -4730,7 +5524,7 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name =~ \"github\\\\.ratelimit\\\\.(await|backoff)|jira\\\\.retry\\\\.backoff\" } | select(span.outcome, span.attempt, span.disposition)",
+          "query": "{ name =~ \"github\\\\.ratelimit\\\\.(await|backoff)|jira\\\\.retry\\\\.backoff|llm\\\\.retry\\\\.backoff\" } | select(span.outcome, span.attempt, span.disposition)",
           "queryType": "traceql",
           "refId": "A",
           "spss": 10,
@@ -4793,7 +5587,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 178
+        "y": 211
       },
       "id": 60,
       "options": {
@@ -4834,7 +5628,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 186
+        "y": 219
       },
       "id": 56,
       "panels": [],
@@ -4894,7 +5688,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 187
+        "y": 220
       },
       "id": 57,
       "options": {
@@ -4983,7 +5777,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 187
+        "y": 220
       },
       "id": 58,
       "options": {
@@ -5083,7 +5877,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 187
+        "y": 220
       },
       "id": 59,
       "options": {

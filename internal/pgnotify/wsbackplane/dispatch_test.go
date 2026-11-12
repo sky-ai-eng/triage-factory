@@ -149,6 +149,31 @@ func TestHandleWSNotification_ScopesToMatchingOrgOnly(t *testing.T) {
 	}
 }
 
+// TestHandleWSNotification_AppliesRecipientSet asserts the receiving pod
+// delivers a remote event addressed to a recipient set only to the
+// connections in it: the set crossed the hop, and DeliverRemote applies it
+// there as Broadcast does on the publishing pod.
+func TestHandleWSNotification_AppliesRecipientSet(t *testing.T) {
+	hub := websocket.NewHub()
+	inSet := dialTestClient(t, hub, "user-1", "org-A", "sid-1")
+	sameOrg := dialTestClient(t, hub, "user-2", "org-A", "sid-2")
+	waitClientCount(t, hub, 2)
+
+	b := &Backplane{originID: "pod-b", hub: hub}
+	we, _ := newWireEvent(websocket.Event{Type: "message", OrgID: "org-A", UserIDs: []string{"user-1"}})
+	env := wsEnvelope{OriginInstanceID: "pod-a", Event: &we}
+	payload, _ := json.Marshal(env)
+
+	b.handleWSNotification(string(payload))
+
+	if _, ok := readOrTimeout(t, inSet, 500*time.Millisecond); !ok {
+		t.Fatal("the connection in the recipient set should have received the event")
+	}
+	if _, ok := readOrTimeout(t, sameOrg, 200*time.Millisecond); ok {
+		t.Fatal("a same-org connection outside the recipient set received the event")
+	}
+}
+
 // TestHandleWSNotification_MalformedPayloadDropsSilently asserts a
 // corrupt NOTIFY payload never panics — it's dropped with a warning.
 func TestHandleWSNotification_MalformedPayloadDropsSilently(t *testing.T) {

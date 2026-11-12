@@ -63,7 +63,7 @@ func TestEventStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 // seedSQLiteEntityForEvents inserts an active GitHub PR entity for
 // EventStore conformance fixtures. Direct INSERT (not the
 // EntityStore) so the conformance harness stays close to the
-// SwipeStore/RepositoryStore seeding pattern — small, schema-coupled, and
+// RepositoryStore seeding pattern — small, schema-coupled, and
 // independent of other stores' behavior changes.
 func seedSQLiteEntityForEvents(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()

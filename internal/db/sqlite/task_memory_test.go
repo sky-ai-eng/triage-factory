@@ -192,8 +192,8 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 
 // seedSQLiteConversationForTaskMemory seeds the entity + event + prompt +
 // task + conversation FK chain conversation_memory needs. Direct INSERTs
-// keep the fixture path schema-coupled and short — matches the SwipeStore
-// / EventStore conformance seed pattern.
+// keep the fixture path schema-coupled and short — matches the
+// EventStore conformance seed pattern.
 func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conversationID, entityID string) {
 	t.Helper()
 	entityID = uuid.New().String()

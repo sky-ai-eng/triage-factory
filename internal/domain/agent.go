@@ -106,15 +106,16 @@ const (
 
 // The conversations.type vocabulary — which surface owns a conversation.
 // App-validated (no schema CHECK, the house pattern for open vocabularies).
-// One claim loop drives every one of them; the type is what selects the
-// execution arm once a claim is minted.
+// One claim loop drives every type. The dispatcher has one execution arm, the
+// blueprint step's, and fails a claimed conversation with no blueprint run as
+// blueprint_missing.
 const (
 	// ConversationTypeDelegation is a task-driven conversation — every
 	// blueprint step today.
 	ConversationTypeDelegation = "delegation"
-	// ConversationTypeInteractive is reserved: the taskless "pick repos and
-	// type" surface. The claim predicate already admits it; nothing mints
-	// one yet.
+	// ConversationTypeInteractive is reserved for a conversation a person
+	// drives, on a task or with no task. The claim predicate admits it;
+	// nothing mints one yet.
 	ConversationTypeInteractive = "interactive"
 )
 
@@ -622,14 +623,6 @@ type Conversation struct {
 	// call. Empty on rows hydrated by the per-org Get paths, which already
 	// carry org in their call args.
 	OrgID string `json:"-"`
-
-	// ClaimMessageID is the queued input row the claim was minted to drive —
-	// the claim's mint intent, so a pickup that fails before attaching any
-	// message stays attributable to its exact turn. Populated by
-	// ConversationQueueStore.ClaimNextConversation for surfaces whose work unit is one queued
-	// message (interactive, reserved); 0 for a delegation conversation, whose
-	// work unit is the conversation itself.
-	ClaimMessageID int64 `json:"-"`
 
 	// ClaimID is the claims row minted for this engagement, populated only by
 	// ConversationQueueStore.ClaimNextConversation (which returns the row it just reserved

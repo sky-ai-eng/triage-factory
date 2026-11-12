@@ -857,13 +857,14 @@ func (s *Spawner) beginSnapshotState(ctx context.Context, orgID, keyID, claimID 
 	return snapshotOwned
 }
 
-// finishSnapshotState closes out this engagement's write. An unmatched CAS is
-// the ordinary outcome of losing the key to a successor mid-write, not an
-// error: the successor owns the row and its own finish is the one that counts,
-// so this says so at INFO and leaves the row alone.
-func (s *Spawner) finishSnapshotState(ctx context.Context, orgID, keyID, claimID string, ok bool) {
+// finishSnapshotState closes out this engagement's write, and reports whether
+// the outcome is on the record. An unmatched CAS is the ordinary outcome of
+// losing the key to a successor mid-write, not an error: the successor owns
+// the row and its own finish is the one that counts, so this says so at INFO
+// and leaves the row alone.
+func (s *Spawner) finishSnapshotState(ctx context.Context, orgID, keyID, claimID string, ok bool) (recorded bool) {
 	if s.workspaceSnapshots == nil {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, snapshotRecordTimeout)
 	defer cancel()
@@ -871,12 +872,13 @@ func (s *Spawner) finishSnapshotState(ctx context.Context, orgID, keyID, claimID
 	if err != nil {
 		delegateLog.Warn("record workspace snapshot outcome failed",
 			"org", orgID, "key_id", keyID, "claim_id", claimID, "written", ok, "error", err)
-		return
+		return false
 	}
 	if !matched {
 		delegateLog.Info("workspace snapshot state was re-owned by a newer engagement; outcome not recorded",
 			"org", orgID, "key_id", keyID, "claim_id", claimID, "written", ok)
 	}
+	return matched
 }
 
 // snapshotStateFor reads one key's lifecycle row. (nil, nil) means no persist
@@ -899,9 +901,11 @@ func (s *Spawner) snapshotStateFor(ctx context.Context, orgID, keyID string) (*d
 // Detached from the checkpoint's context, as the record writes are: a stop
 // that lands after the capture does not make the position untrue, and the
 // ending that follows clears it with its own begin.
-func (s *Spawner) coverSnapshotState(ctx context.Context, w snapshotWrite, fingerprint string) {
+//
+// recorded reports whether the position is on the record.
+func (s *Spawner) coverSnapshotState(ctx context.Context, w snapshotWrite, fingerprint string) (recorded bool) {
 	if s.workspaceSnapshots == nil || w.claimID == "" || w.position == nil {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotRecordTimeout)
 	defer cancel()
@@ -909,12 +913,13 @@ func (s *Spawner) coverSnapshotState(ctx context.Context, w snapshotWrite, finge
 	if err != nil {
 		delegateLog.Warn("record an unchanged checkpoint's position failed; a restore reads the blob's older one",
 			"org", w.orgID, "key_id", w.keyID, "claim_id", w.claimID, "error", err)
-		return
+		return false
 	}
 	if !matched {
 		delegateLog.Info("the key no longer holds this engagement's written checkpoint; position not recorded",
 			"org", w.orgID, "key_id", w.keyID, "claim_id", w.claimID)
 	}
+	return matched
 }
 
 // coveredStateFor reads the key's lifecycle row for positionFor, when the

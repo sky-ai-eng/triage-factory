@@ -31,10 +31,6 @@ type Stores struct {
 	// pool; the ...System reads route through the admin pool in Postgres.
 	Prompts PromptStore
 
-	// Swipes owns the swipe_events audit log + the task-status
-	// transitions that follow each swipe.
-	Swipes SwipeStore
-
 	// Dashboard is a read-only projection over entities + their
 	// snapshot_json blobs. Owns no table.
 	Dashboard DashboardStore
@@ -78,8 +74,8 @@ type Stores struct {
 	// backs the predicate-matcher allowlists, keyed on (user, host).
 	Users UsersStore
 
-	// Tasks owns the tasks table — lifecycle, claims, dedup,
-	// swipe-triggered transitions, plus the conversation-history queries
+	// Tasks owns the tasks table — lifecycle, claims, dedup, a person's
+	// close, snooze, wake and requeue, plus the conversation-history queries
 	// powering the auto-delegate breaker. App pool in Postgres
 	// (RLS-active) since the queue + per-task surface is request-
 	// driven; the AI scorer reads tasks via the admin-pooled
@@ -596,7 +592,6 @@ type Stores struct {
 type TxStores struct {
 	Scores                   ScoreStore
 	Prompts                  PromptStore
-	Swipes                   SwipeStore
 	Dashboard                DashboardStore
 	Secrets                  SecretStore
 	EventHandlers            EventHandlerStore

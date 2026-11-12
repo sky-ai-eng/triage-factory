@@ -76,7 +76,7 @@ func TestSSOGate_SweepClosesBarredSessionSocket(t *testing.T) {
 	r.srv.revalidateCredentialsOnce(context.Background())
 
 	expectServerCloseCode(t, barredConn, websocket.CloseMembershipChanged)
-	if !r.srv.ws.PresentFor(openOrg.String(), "still-open-probe") {
+	if !r.srv.ws.PresentFor(openOrg.String(), "still-open-probe", nil) {
 		t.Error("the socket on an org that still admits the session was closed too")
 	}
 }

@@ -49,7 +49,7 @@ func TestPresentFor_TruthTable(t *testing.T) {
 		h := NewHub()
 		c := addBareClient(h, "userA", org)
 		setPresence(h, c, tc.viewing, tc.visible)
-		if got := h.PresentFor(org, conversationID); got != tc.want {
+		if got := h.PresentFor(org, conversationID, nil); got != tc.want {
 			t.Errorf("PresentFor(viewing=%q, visible=%v) = %v, want %v", tc.viewing, tc.visible, got, tc.want)
 		}
 	}
@@ -70,10 +70,10 @@ func TestPresentFor_OrgScoping(t *testing.T) {
 	h := NewHub()
 	b := addBareClient(h, "userB", orgB)
 	setPresence(h, b, "board", true)
-	if h.PresentFor(orgA, conversationID) {
+	if h.PresentFor(orgA, conversationID, nil) {
 		t.Error("a present board tab in org B satisfied a prompt in org A")
 	}
-	if !h.PresentFor(orgB, conversationID) {
+	if !h.PresentFor(orgB, conversationID, nil) {
 		t.Error("org B's own present board tab should satisfy org B")
 	}
 
@@ -81,8 +81,44 @@ func TestPresentFor_OrgScoping(t *testing.T) {
 	h2 := NewHub()
 	u := addBareClient(h2, "", "")
 	setPresence(h2, u, "board", true)
-	if !h2.PresentFor(orgA, conversationID) {
+	if !h2.PresentFor(orgA, conversationID, nil) {
 		t.Error("an unscoped present client should satisfy any org")
+	}
+}
+
+// TestPresentFor_UserSet pins the audience filter: with a recipient set, a
+// focused board or run tab counts only when its user is in the set. The
+// tab's viewing report doesn't widen it: a run tab naming this conversation
+// still needs its user in the set. An unscoped client never matches a set,
+// an empty set matches nobody, and a nil set is the org-wide check.
+func TestPresentFor_UserSet(t *testing.T) {
+	const (
+		org            = "orgA"
+		conversationID = "run-1"
+	)
+	runView := "run:" + conversationID
+	cases := []struct {
+		name    string
+		userID  string
+		viewing string
+		set     []string
+		want    bool
+	}{
+		{"board tab, user in set", "reader", "board", []string{"other", "reader"}, true},
+		{"run tab, user in set", "reader", runView, []string{"reader"}, true},
+		{"board tab, user outside set", "outsider", "board", []string{"reader"}, false},
+		{"run tab, user outside set", "outsider", runView, []string{"reader"}, false},
+		{"unscoped client against a set", "", "board", []string{"reader"}, false},
+		{"empty set", "reader", "board", []string{}, false},
+		{"nil set is org-wide", "outsider", "board", nil, true},
+	}
+	for _, tc := range cases {
+		h := NewHub()
+		c := addBareClient(h, tc.userID, org)
+		setPresence(h, c, tc.viewing, true)
+		if got := h.PresentFor(org, conversationID, tc.set); got != tc.want {
+			t.Errorf("%s: PresentFor = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -90,7 +126,7 @@ func TestPresentFor_OrgScoping(t *testing.T) {
 // test spawner reads as "nobody present" without a guard at the call site.
 func TestPresentFor_NilHub(t *testing.T) {
 	var h *Hub
-	if h.PresentFor("orgA", "run-1") {
+	if h.PresentFor("orgA", "run-1", nil) {
 		t.Error("nil hub PresentFor must return false")
 	}
 }
@@ -123,7 +159,7 @@ func waitPresent(t *testing.T, h *Hub, orgID, conversationID string, want bool) 
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.PresentFor(orgID, conversationID) == want {
+		if h.PresentFor(orgID, conversationID, nil) == want {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -169,7 +205,7 @@ func TestReadPump_PresenceFrame(t *testing.T) {
 	write(`{"type":"something-else","viewing":"other","visible":false}`)
 	// Give readPump a beat to process (and prove it did NOT mutate state).
 	time.Sleep(20 * time.Millisecond)
-	if !h.PresentFor(org, conversationID) {
+	if !h.PresentFor(org, conversationID, nil) {
 		t.Error("a non-presence / non-JSON frame must not clear presence")
 	}
 }

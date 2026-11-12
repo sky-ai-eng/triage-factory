@@ -360,6 +360,7 @@ func TestNotificationList_Sort(t *testing.T) {
 	localNotification(t, s, "b")
 	localNotification(t, s, "c")
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "b"}, false)
+	awaitClockTick()
 	fixableCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "a"}, false)
 
 	titles := func(page httpxtest.ListEnvelope[notificationItemWire]) string {

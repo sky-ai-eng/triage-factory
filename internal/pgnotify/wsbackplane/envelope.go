@@ -8,17 +8,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// wireEvent mirrors websocket.Event but ALSO serializes OrgID/UserID.
-// Event deliberately hides those from the browser-facing wire JSON (see
-// Event's doc comment in pkg/websocket) — but the backplane needs them on
-// the wire between pods so the receiving pod's DeliverRemote can reapply
-// the same per-connection scope filter Broadcast would have applied
-// locally.
+// wireEvent mirrors websocket.Event but ALSO serializes OrgID, UserID and
+// UserIDs. Event deliberately hides those from the browser-facing wire
+// JSON (see Event's doc comment in pkg/websocket) — but the backplane
+// needs them on the wire between pods so the receiving pod's
+// DeliverRemote can reapply the same per-connection scope filter
+// Broadcast would have applied locally.
+//
+// omitempty on UserIDs loses nothing: Broadcast drops an event with an
+// empty non-nil set before it reaches Publish, so an absent user_ids is
+// always an event that had no set.
 type wireEvent struct {
 	Type           string          `json:"type"`
 	ConversationID string          `json:"conversation_id,omitempty"`
 	OrgID          string          `json:"org_id,omitempty"`
 	UserID         string          `json:"user_id,omitempty"`
+	UserIDs        []string        `json:"user_ids,omitempty"`
 	Data           json.RawMessage `json:"data"`
 }
 
@@ -32,6 +37,7 @@ func newWireEvent(evt websocket.Event) (wireEvent, error) {
 		ConversationID: evt.ConversationID,
 		OrgID:          evt.OrgID,
 		UserID:         evt.UserID,
+		UserIDs:        evt.UserIDs,
 		Data:           data,
 	}, nil
 }
@@ -47,6 +53,7 @@ func (w wireEvent) toEvent() websocket.Event {
 		ConversationID: w.ConversationID,
 		OrgID:          w.OrgID,
 		UserID:         w.UserID,
+		UserIDs:        w.UserIDs,
 		Data:           data,
 	}
 }

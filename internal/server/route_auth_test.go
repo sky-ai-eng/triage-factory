@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -105,6 +107,41 @@ func TestAllMutatingRoutes_RejectCrossOrigin(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAllProtectedRoutes_UnavailableBeforeAuthWired: in multi mode, every route
+// mounted through s.api / s.apiMutating answers 503 while SetAuthDeps has not
+// run, so a request that reaches the listener before auth is wired is refused
+// rather than handed to its handler with no identity. A live handshake against
+// /api/ws is refused the same way and registers nothing with the hub; the
+// recorder sweep cannot show that, since a recorder cannot be upgraded.
+func TestAllProtectedRoutes_UnavailableBeforeAuthWired(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	s := New(h.AdminDB, pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey))
+
+	protected := protectedRoutes(s)
+	if len(protected) == 0 {
+		t.Fatalf("server mounted no protected routes")
+	}
+
+	for _, route := range protected {
+		method, pattern := splitMethodAndPath(route.pattern)
+		concrete := substitutePathParams(pattern)
+		t.Run(method+" "+pattern, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, httptest.NewRequest(method, concrete, nil))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("status=%d body=%q, want 503 (via=%s)",
+					rec.Code, strings.TrimSpace(rec.Body.String()), route.via)
+			}
+		})
+	}
+
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+	assertWSRefused(t, s, ts.URL, http.StatusServiceUnavailable)
 }
 
 // protectedRoutes returns every route s mounted through api or apiMutating.

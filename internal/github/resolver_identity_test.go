@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -31,10 +32,14 @@ func TestIdentityCredential(t *testing.T) {
 type identityOnlyResolver struct {
 	Resolver
 	name, email string
+	err         error
 }
 
-func (r identityOnlyResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return r.name, r.email, r.name != ""
+func (r identityOnlyResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	if r.err != nil {
+		return "", "", false, r.err
+	}
+	return r.name, r.email, r.name != "", nil
 }
 
 // identityAccountResolver adds the account-id extension to identityOnlyResolver.
@@ -43,28 +48,43 @@ type identityAccountResolver struct {
 	accountID string
 }
 
-func (r identityAccountResolver) OrgIdentityAccountFor(context.Context, string) (OrgIdentity, bool) {
-	return OrgIdentity{Name: r.name, Email: r.email, AccountID: r.accountID}, r.name != ""
+func (r identityAccountResolver) OrgIdentityAccountFor(context.Context, string) (OrgIdentity, bool, error) {
+	if r.err != nil {
+		return OrgIdentity{}, false, r.err
+	}
+	return OrgIdentity{Name: r.name, Email: r.email, AccountID: r.accountID}, r.name != "", nil
 }
 
 // TestOrgIdentityAccount pins the helper's two arms: the account id comes
 // through the extension when the resolver has it, and a resolver without it
-// still yields the name and email, with no account id.
+// still yields the name and email, with no account id. A failed read comes
+// through either arm as the error.
 func TestOrgIdentityAccount(t *testing.T) {
 	ctx := context.Background()
 	base := identityOnlyResolver{name: "acme[bot]", email: "316798692+acme[bot]@users.noreply.github.com"}
 
-	got, ok := OrgIdentityAccount(ctx, identityAccountResolver{base, "316798692"}, "org-1")
-	if want := (OrgIdentity{Name: base.name, Email: base.email, AccountID: "316798692"}); !ok || got != want {
-		t.Errorf("with the extension = (%+v, %v), want (%+v, true)", got, ok, want)
+	got, ok, err := OrgIdentityAccount(ctx, identityAccountResolver{base, "316798692"}, "org-1")
+	if want := (OrgIdentity{Name: base.name, Email: base.email, AccountID: "316798692"}); err != nil || !ok || got != want {
+		t.Errorf("with the extension = (%+v, %v, %v), want (%+v, true, nil)", got, ok, err, want)
 	}
 
-	got, ok = OrgIdentityAccount(ctx, base, "org-1")
-	if want := (OrgIdentity{Name: base.name, Email: base.email}); !ok || got != want {
-		t.Errorf("without the extension = (%+v, %v), want (%+v, true)", got, ok, want)
+	got, ok, err = OrgIdentityAccount(ctx, base, "org-1")
+	if want := (OrgIdentity{Name: base.name, Email: base.email}); err != nil || !ok || got != want {
+		t.Errorf("without the extension = (%+v, %v, %v), want (%+v, true, nil)", got, ok, err, want)
 	}
 
-	if _, ok := OrgIdentityAccount(ctx, identityOnlyResolver{}, "org-1"); ok {
-		t.Error("an org with no identity resolved one")
+	if _, ok, err := OrgIdentityAccount(ctx, identityOnlyResolver{}, "org-1"); ok || err != nil {
+		t.Errorf("an org with no identity = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	readErr := errors.New("store unavailable")
+	failing := identityOnlyResolver{name: base.name, email: base.email, err: readErr}
+	for name, r := range map[string]Resolver{
+		"with the extension":    identityAccountResolver{failing, "316798692"},
+		"without the extension": failing,
+	} {
+		if got, ok, err := OrgIdentityAccount(ctx, r, "org-1"); !errors.Is(err, readErr) || ok || got != (OrgIdentity{}) {
+			t.Errorf("%s, a failed read = (%+v, %v, %v), want the error and no identity", name, got, ok, err)
+		}
 	}
 }

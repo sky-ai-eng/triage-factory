@@ -48,8 +48,8 @@ func seedTaskOnArchivedLocalTeam(t *testing.T, s *Server, tag string) string {
 	return taskID
 }
 
-// assertNoClaimLanded fails unless the task is still unclaimed and queued and
-// no swipe was recorded for it: a refused claim writes nothing.
+// assertNoClaimLanded fails unless the task is still unclaimed and queued: a
+// refused claim writes nothing.
 func assertNoClaimLanded(t *testing.T, database *sql.DB, taskID string) {
 	t.Helper()
 	var user, agent sql.NullString
@@ -62,13 +62,6 @@ func assertNoClaimLanded(t *testing.T, database *sql.DB, taskID string) {
 	if user.Valid || agent.Valid || status != "queued" {
 		t.Errorf("task = (user %v, agent %v, status %q), want unclaimed and queued", user, agent, status)
 	}
-	var swipes int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM swipe_events WHERE task_id = ?`, taskID).Scan(&swipes); err != nil {
-		t.Fatalf("count swipes: %v", err)
-	}
-	if swipes != 0 {
-		t.Errorf("swipe_events = %d, want 0 for a refused claim", swipes)
-	}
 }
 
 // TestTaskClaim_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo: a claim with
@@ -78,7 +71,7 @@ func TestTaskClaim_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo(t *testing.T)
 	s := newTestServer(t)
 	taskID := seedTaskOnArchivedLocalTeam(t, s, "claim-archived")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
 	if rec.Code != http.StatusForbidden || firstErrorReason(t, rec) != httpx.ReasonTeamArchived {
 		t.Fatalf("claim = %d %s, want 403 TEAM_ARCHIVED", rec.Code, rec.Body.String())
 	}
@@ -94,7 +87,7 @@ func TestTaskDelegate_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo(t *testing
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	taskID := seedTaskOnArchivedLocalTeam(t, s, "delegate-archived")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{"hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{})
 	if rec.Code != http.StatusForbidden || firstErrorReason(t, rec) != httpx.ReasonTeamArchived {
 		t.Fatalf("delegate = %d %s, want 403 TEAM_ARCHIVED", rec.Code, rec.Body.String())
 	}
@@ -176,7 +169,7 @@ func (r *archivedOwnerRig) seedTask(t *testing.T) string {
 func (r *archivedOwnerRig) post(t *testing.T, handler http.HandlerFunc, path, taskID string) *httptest.ResponseRecorder {
 	t.Helper()
 	vr := &viewerRig{orgID: r.orgID}
-	req := vr.req(http.MethodPost, path, r.user, map[string]any{"hesitation_ms": 0})
+	req := vr.req(http.MethodPost, path, r.user, map[string]any{})
 	req.SetPathValue("id", taskID)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -248,7 +241,7 @@ func TestTaskReassign_RefusesATargetWhoseOnlyTeamOnTheTaskIsArchived(t *testing.
 
 	vr := &viewerRig{orgID: r.orgID}
 	req := vr.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.user,
-		map[string]any{"target_user_id": target, "hesitation_ms": 0})
+		map[string]any{"target_user_id": target})
 	req.SetPathValue("id", taskID)
 	rec := httptest.NewRecorder()
 	r.s.handleTaskClaim(rec, req)

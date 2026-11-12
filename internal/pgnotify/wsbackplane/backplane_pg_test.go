@@ -412,12 +412,12 @@ func testPresenceCrossPod(t *testing.T, adminDB *sql.DB) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if hubA.PresentFor("org-presence", "some-run") {
+		if hubA.PresentFor("org-presence", "some-run", nil) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !hubA.PresentFor("org-presence", "some-run") {
+	if !hubA.PresentFor("org-presence", "some-run", nil) {
 		t.Fatal("pod A's own hub never observed the presence frame")
 	}
 
@@ -429,13 +429,36 @@ func testPresenceCrossPod(t *testing.T, adminDB *sql.DB) {
 	// Pod B — which has NO local socket for this user at all — must see
 	// the viewer as present via the ws_presence fallback.
 	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if bpB.PresentFor(context.Background(), "org-presence", "some-run") {
-			return
+	for !bpB.PresentFor(context.Background(), "org-presence", "some-run", nil) {
+		if time.Now().After(deadline) {
+			t.Fatal("pod B never observed pod A's presence via ws_presence")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("pod B never observed pod A's presence via ws_presence")
+
+	// A recipient set gives the same answer from pod A's own hub and from
+	// pod B's ws_presence read: the viewer counts when they are in it and
+	// not otherwise.
+	ctxBg := context.Background()
+	for _, tc := range []struct {
+		name string
+		set  []string
+		want bool
+	}{
+		{"viewer in the set", []string{"someone-else", "user-presence"}, true},
+		{"viewer outside the set", []string{"someone-else"}, false},
+		{"empty set", []string{}, false},
+	} {
+		if got := hubA.PresentFor("org-presence", "some-run", tc.set); got != tc.want {
+			t.Errorf("%s: pod A's hub PresentFor = %v, want %v", tc.name, got, tc.want)
+		}
+		if got := bpA.PresentFor(ctxBg, "org-presence", "some-run", tc.set); got != tc.want {
+			t.Errorf("%s: pod A's backplane PresentFor = %v, want %v", tc.name, got, tc.want)
+		}
+		if got := bpB.PresentFor(ctxBg, "org-presence", "some-run", tc.set); got != tc.want {
+			t.Errorf("%s: pod B's ws_presence PresentFor = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
 
 func testSentinelBrainRelay(t *testing.T, adminDB *sql.DB, dsn string) {

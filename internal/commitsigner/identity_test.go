@@ -31,16 +31,17 @@ func (f fakeSigners) GetSystem(context.Context, string) (*domain.OrgCommitSigner
 // else is called.
 type fakeGitHub struct {
 	ghclient.Resolver
-	id ghclient.OrgIdentity
-	ok bool
+	id  ghclient.OrgIdentity
+	ok  bool
+	err error
 }
 
-func (f fakeGitHub) OrgIdentityFor(context.Context, string) (string, string, bool) {
-	return f.id.Name, f.id.Email, f.ok
+func (f fakeGitHub) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
+	return f.id.Name, f.id.Email, f.ok, f.err
 }
 
-func (f fakeGitHub) OrgIdentityAccountFor(context.Context, string) (ghclient.OrgIdentity, bool) {
-	return f.id, f.ok
+func (f fakeGitHub) OrgIdentityAccountFor(context.Context, string) (ghclient.OrgIdentity, bool, error) {
+	return f.id, f.ok, f.err
 }
 
 func signer(status domain.CommitSignerStatus) *domain.OrgCommitSigner {
@@ -142,6 +143,31 @@ func TestResolve_SignerReadFailureIsAnError(t *testing.T) {
 	r := Resolver{Signers: fakeSigners{err: boom}, GitHub: fakeGitHub{id: ghclient.OrgIdentity{Name: "acme[bot]", Email: "a@b"}, ok: true}}
 	if _, err := r.Resolve(t.Context(), testOrg); !errors.Is(err, boom) {
 		t.Fatalf("Resolve = %v, want the read's error", err)
+	}
+}
+
+// TestResolve_GitHubIdentityReadFailureIsAnError pins that an org's GitHub
+// identity that could not be read is an error from every arm that reaches it,
+// never the nameless identity a run would commit as its placeholder or its
+// own git config.
+func TestResolve_GitHubIdentityReadFailureIsAnError(t *testing.T) {
+	boom := errors.New("connection reset")
+	failing := fakeGitHub{err: boom}
+	noAddress := signer(domain.CommitSignerActive)
+	noAddress.Host = "https://ghe.acme.example"
+	for name, row := range map[string]*domain.OrgCommitSigner{
+		"no signer":                       nil,
+		"a signer with no commit address": noAddress,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := Resolver{Signers: fakeSigners{row: row}, GitHub: failing}.Resolve(t.Context(), testOrg)
+			if !errors.Is(err, boom) {
+				t.Fatalf("Resolve = %v, want the read's error", err)
+			}
+			if got != (Identity{}) {
+				t.Errorf("Resolve = %+v alongside the error, want the zero identity", got)
+			}
+		})
 	}
 }
 

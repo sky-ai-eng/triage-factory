@@ -149,16 +149,16 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
 
-	s.drainConversationQueue(ctx) // drain whatever survived the restart / boot reconcile
+	s.drainConversationQueue(ctx, scanInterval) // drain whatever survived the restart / boot reconcile
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.dispatchWake:
-			s.drainConversationQueue(ctx)
+			s.drainConversationQueue(ctx, scanInterval)
 		case <-scan.C:
-			s.drainConversationQueue(ctx)
+			s.scanConversationQueue(ctx, scanInterval)
 		}
 	}
 }
@@ -343,7 +343,7 @@ func (s *Spawner) releaseOwnExpiredClaims(ctx context.Context) {
 			continue
 		}
 		if released {
-			dispatchLog.Warn("released an expired claim no engagement drives; the conversation returns to the queue",
+			dispatchLog.Warn("released an expired claim no engagement drives; a conversation mid-turn returns to the queue, and one a warm claim held keeps its state",
 				"conversation", c.ConversationID, "claim", c.ClaimID, "org_id", c.OrgID)
 		}
 	}
@@ -398,14 +398,29 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 // so this is the same mechanism a future N-worker dispatcher uses; the
 // semaphore is what keeps a burst of queued steps from fanning into an
 // unbounded number of agent subprocesses on one host.
-func (s *Spawner) drainConversationQueue(ctx context.Context) {
+//
+// It reports whether it stopped at the memory or disk gate. scanInterval is
+// the dispatcher's, which paces the checks a blocked acquire makes for work a
+// warm claim holds back (awaitSlot).
+func (s *Spawner) drainConversationQueue(ctx context.Context, scanInterval time.Duration) (gated bool) {
 	// Capture the semaphore once and use it for both acquire and release so a
 	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
 	// channel.
 	sem := s.semaphore()
 	for {
 		if ctx.Err() != nil {
-			return
+			return false
+		}
+		// Drain: an operator asked this instance to quiesce (the CLI drain
+		// verb flips instances.draining; the next heartbeat reads it back —
+		// see heartbeatOnce). Live runs finish or park at their turn end, and
+		// every claim kept warm is let go, since it holds a slot for a
+		// message that may never come; no new claims start. Read before the
+		// gates so a gated host drains too, and on every pass, so a claim
+		// that went warm as the drain latched is let go on the next one.
+		if s.Draining() {
+			s.warmWaits.LetGoAll()
+			return false
 		}
 		// Memory guardrail: when available memory (cgroup-aware) is below the floor,
 		// stop claiming — runs stay queued and the next scan tick (or a
@@ -414,36 +429,29 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// BEFORE the semaphore acquire so a gated host parks with no
 		// slot held.
 		if s.dispatchMemGated() {
-			return
+			return true
 		}
 		// Disk guardrail, the same shape: a claimed run writes a tree, so a
 		// disk below the floor takes no more of them.
 		if s.dispatchDiskGated() {
-			return
+			return true
 		}
 		// Identity fence: a superseded instance identity (another process
 		// re-registered this id — see fenceIdentity) must not stamp new
 		// claims. Sticky until restart; in-flight runs finish untouched.
 		if s.IdentityFenced() {
-			return
+			return false
 		}
 		// Partition self-fence: a heartbeat WRITE failure past the
 		// self-fence deadline (checkPartitionSelfFence) — reversible, un-
 		// fences on the next successful write. In-flight runs are untouched;
 		// their own leases decide whether they keep running.
 		if s.PartitionFenced() {
-			return
-		}
-		// Drain: an operator asked this instance to quiesce (the CLI drain
-		// verb flips instances.draining; the next heartbeat reads it back —
-		// see heartbeatOnce). Live runs finish or park at their turn end; no
-		// new claims start.
-		if s.Draining() {
-			return
+			return false
 		}
 		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to
 		// 'running' that then sits idle waiting for a slot. Blocks at capacity
-		// until a finishing run releases its slot; a shutdown breaks the wait
+		// until a slot frees (awaitSlot); a shutdown breaks the wait
 		// (in-flight runs are ctx-cancelled, and the shutdown release hands
 		// back anything left mid-flight). The try-then-block split exists only to
 		// observe which of the two happened: saturation episodes are
@@ -454,11 +462,15 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 			s.noteCapAcquireImmediate(cap(sem))
 		default:
 			s.noteCapAcquireBlocked(ctx, cap(sem))
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
+			if !s.awaitSlot(ctx, sem, scanInterval) {
+				return false
 			}
+			// The wait can be long, and the drain, the gates, and the fences
+			// may have changed during it, so the slot goes back and the pass
+			// reads them again before claiming. This loop is the only
+			// acquirer, so the next pass takes the slot at once.
+			<-sem
+			continue
 		}
 		executorID, bootEpoch := s.executorIdentity()
 		// The lease anchor is taken BEFORE the call, not after: the claim's
@@ -470,11 +482,11 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next conversation failed; retrying on the next scan", "error", err)
-			return
+			return false
 		}
 		if conv == nil {
 			<-sem
-			return // queue drained — release the slot we acquired but didn't use
+			return false // queue drained — release the slot we acquired but didn't use
 		}
 		// Fleet telemetry: count the claim for this sampler interval (TFAC-589).
 		s.claimCount.Add(1)
@@ -1440,6 +1452,17 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
+	// The identity the resumed process commits and signs as, resolved for this
+	// resume (see ResumeWithMessage). A read that failed is the resume's
+	// runtime failing to come up: handed back before the queued input is
+	// taken, rather than a process that commits as whatever its git config
+	// says.
+	commitSigner, cerr := s.orgCommitIdentity(stepCtx, orgID)
+	if cerr != nil {
+		handBack(cerr)
+		return
+	}
+
 	// The mirror for this turn. No inherited fingerprint: a resume continues
 	// this conversation's own work in its own tree, so the file at the fixed
 	// path is its own however many engagements ago it was written. Built here
@@ -1503,6 +1526,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
 		nudge:             turnEndNudge(s.artifactContractNudge(orgID, conv.ID, *task, s.resumedStepIsFinal(stepCtx, orgID, conv))),
+		commitSigner:      &commitSigner,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		if leaseFenced(stepCtx) {

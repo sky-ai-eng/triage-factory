@@ -129,6 +129,7 @@ func (w *memoryKillWatch) Call(name string, args map[string]any) (ToolOutcome, e
 	}
 	if n := during + background; n > 0 {
 		w.count(MemoryKillCeiling, n)
+		out.CeilingKills = n
 	}
 
 	var notices []string

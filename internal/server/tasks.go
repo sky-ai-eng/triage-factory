@@ -89,6 +89,14 @@ type taskJSON struct {
 	// MemoryAttempt is the newest try at that memory — absent when none has
 	// run yet, which is the ordinary case for a wait that has just begun.
 	MemoryAttempt *memoryAttemptJSON `json:"memory_attempt,omitempty"`
+	// CanWrite is whether the caller may write the task (PATCH, claim,
+	// delegate, requeue), from the check those routes run
+	// (authz.Checker.UserCanWriteTask, and WritableTasks for a page of them),
+	// so a client offers a task write only to a caller the route would
+	// accept. On the detail read and on each row of the list. Absent from the
+	// task a write answers with, and when the check fails, which a client
+	// reads as unknown.
+	CanWrite *bool `json:"can_write,omitempty"`
 }
 
 // memoryAttemptJSON is the wire shape of the newest memory-generation attempt
@@ -735,7 +743,36 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	for i, t := range tasks {
 		items[i] = taskToJSON(t)
 	}
+	s.addTaskCanWrite(r.Context(), orgID, userID, items)
 	httpx.WriteListKeyset(w, page, items, total, nextKey)
+}
+
+// addTaskCanWrite puts the write gate's answer on each task of a list page,
+// as `can_write`, so the board offers the assignee picker and the drag only
+// on a card the claim, requeue, and delegate routes would accept. One query
+// for the page (authz.Checker.WritableTasks), the predicate the detail read's
+// probe runs.
+//
+// Best-effort, like the detail read's: a failed probe omits the key on every
+// row, which a client reads as unknown rather than as a refusal. It runs after
+// the read's transaction because the probe opens its own.
+func (s *Server) addTaskCanWrite(ctx context.Context, orgID, userID string, items []taskJSON) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	writable, err := s.az.WritableTasks(ctx, userID, orgID, ids)
+	if err != nil {
+		serverLog.Warn("task-write probe failed; omitting can_write", "error", err)
+		return
+	}
+	for i := range items {
+		canWrite := writable[items[i].ID]
+		items[i].CanWrite = &canWrite
+	}
 }
 
 // taskFacetsRequest is the body of POST /api/tasks/facets: the lane, and
@@ -874,7 +911,17 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "task")
 		return
 	}
-	writeJSON(w, http.StatusOK, taskToJSON(*task))
+	out := taskToJSON(*task)
+	// Best-effort, like the other display enrichment on a read: a failed
+	// probe omits the field rather than failing the read of a row the caller
+	// can see. It runs after the read's transaction because the probe opens
+	// its own.
+	if canWrite, err := s.az.UserCanWriteTask(r.Context(), userID, orgID, task.ID); err != nil {
+		serverLog.Warn("task-write probe failed; omitting can_write", "task", task.ID, "error", err)
+	} else {
+		out.CanWrite = &canWrite
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // Task status vocabulary, split by who owns each write. Terminal statuses
@@ -889,22 +936,9 @@ const (
 	taskStatusDismissed  = "dismissed"
 )
 
-// The swipe_events action vocabulary. These strings are stored data — every
-// row written since the swipe deck shipped carries one of them, and the
-// analytics views group on them — so a route may change which gesture writes
-// which string, but never the strings themselves.
-const (
-	swipeActionClaim    = "claim"
-	swipeActionDismiss  = "dismiss"
-	swipeActionSnooze   = "snooze"
-	swipeActionDelegate = "delegate"
-	swipeActionComplete = "complete"
-	swipeActionReassign = "reassign"
-)
-
 // isTerminalTaskStatus reports whether a task is closed. A closed task takes
-// no further mutation except the two routes that re-open it (requeue / undo),
-// so every other handler refuses on this predicate rather than writing over
+// no further mutation except the route that re-opens it (requeue), so every
+// other handler refuses on this predicate rather than writing over
 // closed_at / close_reason.
 func isTerminalTaskStatus(status string) bool {
 	return status == taskStatusDone || status == taskStatusDismissed
@@ -927,18 +961,13 @@ func writeTaskTerminal(w http.ResponseWriter, verb string) {
 type taskPatchRequest struct {
 	Status      json.RawMessage `json:"status,omitempty"`
 	SnoozeUntil json.RawMessage `json:"snooze_until,omitempty"`
-	// HesitationMs is the dwell time before the gesture, recorded on the
-	// swipe_events row the dismiss / complete / snooze arms write. The stage
-	// arm (in_progress) writes no audit row, so carrying it there would be a
-	// field the server accepts and silently drops.
-	HesitationMs int `json:"hesitation_ms,omitempty"`
 }
 
 // handleTaskPatch is the task's field-write path: the lifecycle axis (done,
 // dismissed, the in_progress stage) and the wake time. Effects
 // that a field write can't express keep their own verb routes — claim and
-// delegate reach external systems and spawn runs, requeue and undo tear down
-// deliverables and reverse an audit row.
+// delegate reach external systems and spawn runs, and requeue stops the
+// task's runs and puts back what a claim changed in Jira or Linear.
 //
 // Guards apply in two rounds, and the order is deliberate: the body is
 // validated first (400 for shape, 422 for a value out of range), and only a
@@ -949,7 +978,7 @@ type taskPatchRequest struct {
 // client can't tell from a real write.
 //
 // Then the state round: a closed task refuses everything (409
-// ALREADY_TERMINAL — requeue and undo are how a task re-opens), and the stage
+// ALREADY_TERMINAL — requeue is how a task re-opens), and the stage
 // status requires the caller's own active claim (403). Neither round is the
 // last word on safety; the store carries its own predicates, because the row
 // can change between this handler's read and its write.
@@ -1000,13 +1029,6 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		shape.Invalid("status", "status must be one of: "+strings.Join(patchableTaskStatuses, ", "))
 	}
 	snoozeUntil, snoozeState := parseSnoozeUntilPatch(&shape, &semantic, req.SnoozeUntil)
-	validateHesitation(&shape, req.HesitationMs)
-	// hesitation_ms is the dwell time behind a card gesture, and only the
-	// arms that write a swipe_events row have somewhere to put it. Rejecting
-	// it elsewhere beats accepting a number and dropping it.
-	if req.HesitationMs != 0 && !patchWritesAudit(status, statusState, snoozeState) {
-		shape.Invalid("hesitation_ms", "hesitation_ms applies to the dismissed / done / snooze gestures only")
-	}
 	if shape.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -1041,7 +1063,7 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case snoozeState == httpx.PatchSet:
-		if !s.patchSnooze(w, r, orgID, userID, id, snoozeUntil, req.HesitationMs) {
+		if !s.patchSnooze(w, r, orgID, userID, id, snoozeUntil) {
 			return
 		}
 	case snoozeState == httpx.PatchClear:
@@ -1053,7 +1075,7 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		if !s.patchClose(w, r, orgID, userID, id, status, req.HesitationMs) {
+		if !s.patchClose(w, r, orgID, userID, id, status) {
 			return
 		}
 	}
@@ -1118,45 +1140,24 @@ func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request,
 }
 
 // patchableTaskStatuses is the set PATCH accepts. 'queued' isn't among them:
-// a task returns to the queue through requeue / undo, which also release the
-// claim and tear down whatever the agent left behind — a bare status write
-// would strand both. 'snoozed' isn't either: it is what setting snooze_until
+// a task returns to the queue through requeue, which also releases the claim
+// and stops whatever the agent was running — a bare status write would strand
+// both. 'snoozed' isn't either: it is what setting snooze_until
 // means, and accepting it as a status would be a second way to say it, one
 // that can't carry the wake time the row needs.
 var patchableTaskStatuses = []string{taskStatusInProgress, taskStatusDone, taskStatusDismissed}
-
-// patchWritesAudit reports whether the PATCH body describes a gesture that
-// lands a swipe_events row — the dismiss / complete / snooze arms. The stage
-// advances and the wake are field writes with no gesture behind them.
-func patchWritesAudit(status string, statusState, snoozeState httpx.PatchState) bool {
-	if snoozeState == httpx.PatchSet {
-		return true
-	}
-	return statusState == httpx.PatchSet && (status == taskStatusDone || status == taskStatusDismissed)
-}
 
 // patchSnooze parks a task until the given wake time. Snooze is queue-only
 // ("snoozed ↔ both claim cols NULL") and never applies to a closed task, so
 // the store's atomic UPDATE carries both predicates and the caller gets a 409
 // telling them to requeue first.
-func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, userID, id string, until time.Time, hesitationMs int) bool {
-	// errSnoozeRefusedSentinel rolls the outer tx back when SnoozeTask returns
-	// (false, nil): the swipes store relies on a tx-level rollback to discard
-	// the audit row it inserted before the claim-guard UPDATE refused, and a
-	// flat (no-error) return here would commit that audit row.
-	errSnoozeRefusedSentinel := errors.New("snooze refused")
+func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, userID, id string, until time.Time) bool {
 	var snoozed bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		snoozed, e = tx.Swipes.SnoozeTask(r.Context(), orgID, id, until, hesitationMs)
-		if e != nil {
-			return e
-		}
-		if !snoozed {
-			return errSnoozeRefusedSentinel
-		}
-		return nil
-	}); err != nil && !errors.Is(err, errSnoozeRefusedSentinel) {
+		snoozed, e = tx.Tasks.SnoozeTask(r.Context(), orgID, id, until)
+		return e
+	}); err != nil {
 		internalError(w, "tasks", err)
 		return false
 	}
@@ -1169,7 +1170,7 @@ func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, user
 		})
 		return false
 	}
-	s.broadcastTaskStatus(orgID, id, taskStatusSnoozed)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
@@ -1180,7 +1181,7 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 	var woke bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		woke, e = tx.Swipes.ClearSnooze(r.Context(), orgID, id)
+		woke, e = tx.Tasks.ClearSnooze(r.Context(), orgID, id)
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
@@ -1194,7 +1195,7 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 		})
 		return false
 	}
-	s.broadcastTaskStatus(orgID, id, taskStatusQueued)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
@@ -1228,35 +1229,29 @@ func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userI
 		})
 		return false
 	}
-	s.broadcastTaskStatus(orgID, id, status)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
 // patchClose is the terminal arm: dismissed (walked away) or done (resolved).
-// The write and its audit row land in one store call, and that call carries the
-// terminal predicate itself — the pre-read in the handler answers the common
-// case early, but only the predicate rules out a close landing between the two,
-// which is what a second close rewriting closed_at / close_reason would be.
-func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string, hesitationMs int) bool {
-	action := swipeActionDismiss
-	if status == taskStatusDone {
-		action = swipeActionComplete
-	}
-	var newStatus string
-	var closed bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		newStatus, closed, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, action, hesitationMs, nil)
+// The store's close carries the terminal predicate itself — the pre-read in
+// the handler answers the common case early, but only the predicate rules out
+// a close landing between the two, which is what a second close rewriting
+// closed_at / close_reason would be.
+func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string) bool {
+	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		_, e := tx.Tasks.CloseByUser(r.Context(), orgID, id, status)
 		return e
-	}); err != nil {
-		internalError(w, "tasks", err)
-		return false
-	}
-	if !closed {
+	})
+	if errors.Is(err, db.ErrNoSuchTask) {
 		// Someone else closed it in the window since the pre-read. Same
 		// answer the pre-read would have given a moment later, and nothing
 		// was written.
 		writeTaskTerminal(w, "status")
+		return false
+	}
+	if err != nil {
+		internalError(w, "tasks", err)
 		return false
 	}
 	// A closed task is over, so this is the one disposition that retires what
@@ -1268,103 +1263,31 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
 	s.teardownTaskDeliverables(cleanupCtx, orgID, userID, id)
-	s.broadcastTaskStatus(orgID, id, newStatus)
+	s.broadcastTaskStatus(orgID)
 	return true
 }
 
 // broadcastTaskStatus nudges peer sessions onto a task's new lane. Without it
 // a dismissed / completed / snoozed / advanced task stays where it was on
-// other browsers until the next user-driven refresh.
-func (s *Server) broadcastTaskStatus(orgID, id, status string) {
+// other browsers until the next user-driven refresh. The frame is a
+// payload-free ping, so it is safe under the hub's org-only scope: the board
+// refetches through the REST read, which carries the task's visibility.
+func (s *Server) broadcastTaskStatus(orgID string) {
 	if s.ws == nil {
 		return
 	}
 	s.ws.Broadcast(websocket.Event{
 		Type:  "task_updated",
 		OrgID: orgID,
-		Data:  map[string]any{"task_id": id, "status": status},
+		Data:  map[string]any{},
 	})
 }
 
-// handleUndo backs the Cards swipe-toast UX: the user just swiped
-// claim/dismiss/delegate/snooze, sees the 5s "Undo" toast (or hits
-// Cmd-Z), and we reverse the swipe. This endpoint is specifically
-// for undoing a discrete user gesture — it records a swipe_events
-// row tagged 'undo' for the swipe analytics, then runs the same
-// requeue cleanup that /requeue does.
-//
-// It reverses the CALLER'S OWN last gesture and nothing else: with no such
-// gesture on the task, or with the caller's last one already reversed, the
-// store refuses and the route answers 409. Without that the route is a
-// force-reset for any task the caller can address, and the deliberate
-// version of that gesture — "put this back in the queue" — already exists at
-// /requeue, which skips the swipe row. Same finalizer, same observable
-// outcome, different audit shape.
-//
-// POST /api/tasks/{id}/undo
-func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := taskIDOr404(w, r)
-	if !ok {
-		return
-	}
-
-	// Undo reverses a swipe — a task mutation a viewer can't make (TFAC-447).
-	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
-		return
-	}
-
-	// GetTask up front does double duty: existence check for the
-	// 404 response AND loads the row needed for finalizeRequeue's
-	// Jira reversal context. Without the explicit nil check
-	// UndoLastSwipe would still fail on the swipe_events FK, but
-	// we'd surface the SQLite error string as a 500 — leaking
-	// implementation detail and confusing legitimate 404 callers.
-	var task *domain.Task
-	var undone bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		task, e = tx.Tasks.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		if task == nil {
-			return nil
-		}
-		undone, e = tx.Swipes.UndoLastSwipe(r.Context(), orgID, id, userID)
-		return e
-	}); err != nil {
-		internalError(w, "tasks", err)
-		return
-	}
-	if task == nil {
-		notFound(w, "task")
-		return
-	}
-	if !undone {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-			Reason:  httpx.ReasonConflict,
-			Message: "no gesture of yours on this task to undo; use requeue to return it to the queue",
-		})
-		return
-	}
-
-	s.finalizeRequeue(r, orgID, userID, id, task)
-
-	s.writeTaskResource(w, r, orgID, userID, id)
-}
-
-// handleRequeue is the state-driven counterpart to handleUndo: same
-// task-back-to-queue outcome, no swipe_events row. Used by Board's
-// drag-to-Queue gesture and the AgentCard's "Return to queue" button
-// on a conversation awaiting approval of its deliverable. Both of those
-// are deliberate state changes, not "reverse my last swipe," so
-// audit-logging them as undo events would muddy the swipe-UX
-// analytics.
+// handleRequeue puts a task back in the queue, whatever its status, and
+// runs the cleanup that goes with it (finalizeRequeue). Used by Board's
+// drag-to-Queue gesture, the AgentCard's "Return to queue" button on a
+// conversation awaiting approval of its deliverable, and the Cards deck's
+// undo toast.
 //
 // Belt-and-suspenders existence check: GetTask up front catches the
 // common bogus-id case and returns 404 with a clean error body;
@@ -1399,7 +1322,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		if task == nil {
 			return nil
 		}
-		requeued, e = tx.Swipes.RequeueTask(r.Context(), orgID, id)
+		requeued, e = tx.Tasks.RequeueTask(r.Context(), orgID, id)
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
@@ -1419,16 +1342,16 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
-// finalizeRequeue runs the side-effect cleanup that both /undo and
-// /requeue need after the task status flips back to queued. Three steps, in
+// finalizeRequeue runs the side-effect cleanup /requeue needs after the task
+// status flips back to queued. Three steps, in
 // this order:
 //
 //   - stop: every run still working the task is stopped and the blueprint
 //     behind it cancelled. A requeued task is unclaimed and unowned, so an
 //     agent left executing against it keeps writing messages and landing
 //     deliverables on a task whose columns say nobody owns it. The stop is what
-//     makes returning a live run to the queue safe, which is why the routes
-//     above take every status rather than guarding on one.
+//     makes returning a live run to the queue safe, which is why /requeue
+//     takes every status rather than guarding on one.
 //
 //     The deliverables the stopped runs left are deliberately NOT resolved: a
 //     requeued task carries its draft PRs and staged reviews to whoever picks
@@ -1466,8 +1389,8 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 // (possibly nil-claimed) context post-cancel.
 func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, task *domain.Task) {
 	// One context for the whole cleanup, and it outlives the request: the user
-	// already committed to requeueing via the surrounding /undo or /requeue
-	// handler, so bailing on browser close would leave a live agent running
+	// already committed to requeueing via the surrounding /requeue handler, so
+	// bailing on browser close would leave a live agent running
 	// against a queued task. WithoutCancel inherits the request's values
 	// (claims among them) while breaking the cancel chain.
 	cleanupCtx := context.WithoutCancel(r.Context())
@@ -1486,7 +1409,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 		s.ws.Broadcast(websocket.Event{
 			Type:  "task_updated",
 			OrgID: orgID,
-			Data:  map[string]any{"task_id": taskID, "status": "queued"},
+			Data:  map[string]any{},
 		})
 	}
 }
@@ -1569,8 +1492,8 @@ func (t txTeardownStores) Repository(ctx context.Context, orgID, id string) (*do
 }
 
 // revertJiraStateIfApplicable reverses a Jira-backed task's claim as the task
-// goes back to the queue, acting as the requesting user: /undo and /requeue
-// both reach it through finalizeRequeue. task is the row as it stood before
+// goes back to the queue, acting as the requesting user: /requeue reaches it
+// through finalizeRequeue. task is the row as it stood before
 // the requeue, so its SourceStatus is the state the claim recorded; a task
 // with none recorded has nothing to put back. applyJiraUnclaim decides what
 // to write.
@@ -1680,7 +1603,7 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issue, issueKey strin
 }
 
 // revertLinearStateIfApplicable is revertJiraStateIfApplicable's Linear
-// sibling: a requeue or undo of a Linear-backed task reverses what the claim
+// sibling: a requeue of a Linear-backed task reverses what the claim
 // changed in Linear, acting as the requesting user. task is the row as it
 // stood before the requeue, so its SourceStatus is the state the claim
 // recorded; a task with none recorded has nothing to put back.
@@ -1778,18 +1701,6 @@ func parseSnoozeUntilPatch(shape, semantic *httpx.Validation, raw json.RawMessag
 	return until.UTC(), state
 }
 
-// validateHesitation rejects a negative hesitation. It is the milliseconds a
-// user spent deciding before the gesture, so below zero is not a slow decision
-// but a broken clock or a hand-written body — and it lands in swipe_events,
-// where it skews the dwell-time aggregates nothing downstream re-validates.
-// Shared by every route that accepts the field, so the three gestures reject
-// the same values with the same fault.
-func validateHesitation(v *httpx.Validation, ms int) {
-	if ms < 0 {
-		v.OutOfRange("hesitation_ms", "hesitation_ms must be zero or greater")
-	}
-}
-
 func (s *Server) registerTaskRoutes() {
 	// Find-or-create the task at a station. The Factory's drop gesture is this
 	// plus POST /api/tasks/{id}/delegate: the task is the row, delegating is
@@ -1813,11 +1724,9 @@ func (s *Server) registerTaskRoutes() {
 	// route per value is how one gesture grows arms with different required
 	// fields, different authz and different response shapes. Each verb below
 	// earns its own route by carrying an effect a field write cannot express:
-	// an external Jira write, a spawned run, deliverable teardown, an audit
-	// reversal.
+	// an external Jira write, a spawned run, a stopped one.
 	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
 	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
 	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
-	s.apiMutating("POST /api/tasks/{id}/undo", s.handleUndo)
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
 }

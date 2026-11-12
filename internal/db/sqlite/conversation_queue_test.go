@@ -849,7 +849,49 @@ func TestClaimTakeover_SQLite(t *testing.T) {
 	dbtest.RunClaimTakeoverConformance(t, sqliteClaimLeaseFixture)
 }
 
+// TestWarmClaim_SQLite runs the shared warm-claim conformance on the same
+// fixture.
+func TestWarmClaim_SQLite(t *testing.T) {
+	dbtest.RunWarmClaimConformance(t, sqliteClaimLeaseFixture)
+}
+
+// TestClaimableProbe_SQLite runs the shared claimability-probe conformance on
+// the claim-lease fixture's database.
+func TestClaimableProbe_SQLite(t *testing.T) {
+	dbtest.RunClaimableProbeConformance(t, func(t *testing.T) dbtest.ClaimableProbeFixture {
+		f, conn := sqliteClaimLeaseFixtureOn(t)
+		return dbtest.ClaimableProbeFixture{
+			ClaimLeaseFixture: f,
+			SetQueued: func(t *testing.T, conversationID, preferredExecutorID string, ago time.Duration) {
+				t.Helper()
+				// Bound as a Go time, the way a wake stamps the column.
+				if _, err := conn.Exec(`UPDATE conversations SET preferred_executor_id = NULLIF(?, ''), queued_at = ? WHERE id = ?`,
+					preferredExecutorID, time.Now().UTC().Add(-ago), conversationID); err != nil {
+					t.Fatalf("stage queue position on %s: %v", conversationID, err)
+				}
+			},
+			SetMaxConcurrentRuns: func(t *testing.T, limit int) {
+				t.Helper()
+				if _, err := conn.Exec(`
+					INSERT INTO org_settings (org_id, max_concurrent_runs) VALUES (?, ?)
+					ON CONFLICT(org_id) DO UPDATE SET max_concurrent_runs = excluded.max_concurrent_runs`,
+					f.OrgID, limit); err != nil {
+					t.Fatalf("set max_concurrent_runs: %v", err)
+				}
+			},
+		}
+	})
+}
+
 func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
+	t.Helper()
+	f, _ := sqliteClaimLeaseFixtureOn(t)
+	return f
+}
+
+// sqliteClaimLeaseFixtureOn is sqliteClaimLeaseFixture with the connection it
+// opened, for a suite that stages more than the fixture does.
+func sqliteClaimLeaseFixtureOn(t *testing.T) (dbtest.ClaimLeaseFixture, *sql.DB) {
 	t.Helper()
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -982,5 +1024,5 @@ func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 			}
 			return parse(at.String), parse(now), true
 		},
-	}
+	}, conn
 }

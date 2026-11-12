@@ -74,7 +74,8 @@ func sqliteLeaseModifier(d time.Duration) string {
 const liveClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
-		  AND cl_a.lease_expires_at > ` + sqliteNowExpr + `)`
+		  AND cl_a.lease_expires_at > ` + sqliteNowExpr + `
+		  AND cl_a.phase IS NOT '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections ride whatever engagement runs next and
@@ -115,12 +116,36 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
+// lapsedClaimOutcomeSQL is the outcome a claim whose holder is gone is
+// released with: completed for a warm claim, reaped for any other. The
+// Postgres twin carries why.
+const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
+
+// idleWarmClaimSQL and workingClaimExistsSQL are the Postgres twins'
+// predicates in this dialect, which carry why.
+func idleWarmClaimSQL(cl string) string {
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, 0)`
+}
+
+var workingClaimExistsSQL = `EXISTS (
+		SELECT 1 FROM claims cl_w
+		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
+		  AND NOT ` + idleWarmClaimSQL("cl_w") + `)`
+
+// warmTreeHeldSQL is conversation r's task tree held by a warm claim on
+// another of the task's conversations. The Postgres twin carries why.
+const warmTreeHeldSQL = `EXISTS (
+		SELECT 1 FROM conversations sib
+		JOIN claims cl_t ON cl_t.conversation_id = sib.id AND cl_t.released_at IS NULL
+		WHERE sib.task_id = r.task_id AND sib.id <> r.id
+		  AND cl_t.phase = '` + domain.ClaimPhaseWarm + `')`
+
 // workingConversationSQL is a conversation still working on its task, with
 // no person needed for it to go on. The Postgres twin carries the model; this
 // is the same predicate in the other dialect.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
-	  AND (` + activeClaimExistsSQL + `
+	  AND (` + workingClaimExistsSQL + `
 	       OR (` + awaitingDrivingSQL + `
 	           AND NOT EXISTS (
 	               SELECT 1 FROM blueprint_runs br_w
@@ -302,6 +327,17 @@ func insertConversation(ctx context.Context, q queryer, orgID string, conv domai
 	return scanConversationReturning(row)
 }
 
+// claimScanSQL is the FROM and WHERE of the claim scan: every conversation
+// ClaimNextConversation may take, before it orders them and takes one.
+// ClaimableExistsSystem reads it too, so the probe cannot answer for a
+// predicate the claim no longer has.
+var claimScanSQL = `
+			FROM conversations r
+			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			WHERE ` + eligibleForDrivingSQL + `
+			  AND ` + blueprintDrivableSQL + `
+			  AND NOT ` + warmTreeHeldSQL
+
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	// One scan, every surface: pick the oldest conversation matching the
 	// needs-driving predicate (plus the blueprint gate — a
@@ -328,11 +364,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	claimedAt := time.Now().UTC()
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		row := q.QueryRowContext(ctx, `
-			SELECT `+conversationQueueClaimCols+`
-			FROM conversations r
-			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-			WHERE `+eligibleForDrivingSQL+`
-			  AND `+blueprintDrivableSQL+`
+			SELECT `+conversationQueueClaimCols+claimScanSQL+`
 			ORDER BY r.started_at, r.id
 			LIMIT 1`)
 		claimed, err := scanSqliteClaimedConversation(row)
@@ -416,6 +448,28 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		return nil, err
 	}
 	return conv, nil
+}
+
+// ClaimableExistsSystem reads the claim scan with the probe's wait added.
+// SQLite ignores placement, as its claim does, but keeps the wait so the
+// probe means the same thing in both dialects. The wait compares through
+// julianday because queued_at is written in two layouts (see
+// episodeHandBacksSQL), and julianday reads both.
+func (s *conversationQueueStore) ClaimableExistsSystem(ctx context.Context, executorID string, _ db.ClaimPlacement, minWait time.Duration) (bool, error) {
+	var exists bool
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1`+claimScanSQL+`
+			  AND ((r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = ?)
+			    OR julianday(COALESCE(r.queued_at, r.started_at)) < julianday('now') - ? / 86400.0)
+		)`, executorID, minWait.Seconds()).Scan(&exists)
+	return exists, err
+}
+
+// OrgCapBlockedWorkExistsSystem answers false: SQLite has no org cap, so no
+// work waits behind one.
+func (s *conversationQueueStore) OrgCapBlockedWorkExistsSystem(context.Context, string) (bool, error) {
+	return false, nil
 }
 
 // RequeueConversation releases the claim FIRST and writes the conversation
@@ -654,7 +708,7 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 		now := time.Now().UTC()
 		for i := range claimIDs {
 			if _, err := q.ExecContext(ctx, `
-				UPDATE claims SET released_at = ?, outcome = 'reaped' WHERE id = ?
+				UPDATE claims SET released_at = ?, outcome = `+lapsedClaimOutcomeSQL+` WHERE id = ?
 			`, now, claimIDs[i]); err != nil {
 				return err
 			}
@@ -1309,7 +1363,8 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		SELECT COALESCE((julianday('now') - julianday(min(last_activity_at))) * 86400.0, 0)
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
-		  AND last_activity_at IS NOT NULL`).Scan(&seconds)
+		  AND last_activity_at IS NOT NULL
+		  AND phase IS NOT '`+domain.ClaimPhaseWarm+`'`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}
@@ -1327,7 +1382,8 @@ func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) 
 		SELECT COALESCE((julianday('now') - julianday(min(last_checkpoint_at))) * 86400.0, 0)
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
-		  AND last_checkpoint_at IS NOT NULL`).Scan(&seconds)
+		  AND last_checkpoint_at IS NOT NULL
+		  AND phase IS NOT '`+domain.ClaimPhaseWarm+`'`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}
@@ -1365,7 +1421,7 @@ func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, 
 		return false, err
 	}
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE claims SET released_at = ?, outcome = 'reaped'
+		UPDATE claims SET released_at = ?, outcome = `+lapsedClaimOutcomeSQL+`
 		WHERE id = ? AND org_id = ? AND conversation_id = ?
 		  AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
 	`, time.Now().UTC(), claimID, orgID, conversationID)
@@ -1416,7 +1472,7 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 		now := time.Now().UTC()
 		for _, c := range candidates {
 			res, err := q.ExecContext(ctx, `
-				UPDATE claims SET released_at = ?, outcome = 'reaped'
+				UPDATE claims SET released_at = ?, outcome = `+lapsedClaimOutcomeSQL+`
 				WHERE id = ? AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
 			`, now, c.ClaimID)
 			if err != nil {

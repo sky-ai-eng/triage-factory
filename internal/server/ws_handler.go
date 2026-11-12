@@ -20,24 +20,24 @@ import (
 // can set the handshake's Authorization header, so Bearer works here by
 // construction, and the org this scopes to is the one the token is sealed to).
 //
-// Three identity shapes flow through here:
+// Every socket this handler opens is scoped to a (user, org) pair. The
+// hub delivers every event to a client with no identity, whatever its
+// org, so a handshake that would register one is refused instead; that
+// unscoped shape is for hub tests that construct clients directly, never
+// for a request. Three identity shapes reach here:
 //
-//   - Both empty (no claims, no orgID): pre-auth or test-harness path.
-//     Falls through to the hub as an unscoped client that receives
-//     every event — matches pre-D9b behavior.
+//   - No user: no credential resolved. Rejected with 401, and nothing
+//     registers with the hub.
 //   - Both set: normal local-mode (sentinels) or normal multi-mode
 //     (authenticated user with an active org). Scoped to that (user,
 //     org) pair by the hub filter.
 //   - userID set, orgID empty: authenticated multi-mode session whose
 //     active_org_id is NULL (user has zero memberships, or hasn't
 //     called POST /api/me/active-org yet). Rejected here with 409 +
-//     no_active_org rather than registered as unscoped — the
-//     unscoped carveout exists for the no-identity path, not for
-//     authenticated callers with no org. Without this gate such a
-//     client would receive every tenant's broadcasts. A credential
-//     withSession found barred from its org (the org requires SSO it
-//     was not signed in through) lands here too, and gets the 403
-//     SSO_REQUIRED every other route gives it.
+//     no_active_org. A credential withSession found barred from its
+//     org (the org requires SSO it was not signed in through) lands
+//     here too, and gets the 403 SSO_REQUIRED every other route gives
+//     it.
 //
 // Stale-active-org gate (TFAC-75): withSession resolves orgID from the
 // session's active_org_id WITHOUT re-checking membership (the FK only
@@ -65,8 +65,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if claims := ClaimsFrom(r.Context()); claims != nil {
 		userID = claims.Subject
 	}
+	if userID == "" {
+		writeUnauth(w)
+		return
+	}
 	orgID := OrgIDFrom(r.Context())
-	if userID != "" && orgID == "" {
+	if orgID == "" {
 		// The same split RequireOrg makes: an org this credential is barred
 		// from is not an org to re-pick, it is one to sign in to differently.
 		if httpx.BarredOrgFrom(r.Context()) != "" {
@@ -78,21 +82,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-validate that the resolved active org is still one the user belongs
 	// to; a membership revoked mid-session must not keep a socket scoped to it.
-	if userID != "" && orgID != "" {
-		ok, err := s.az.UserHasOrgAccess(r.Context(), userID, orgID)
-		if err != nil {
-			internalError(w, "ws", err)
-			return
-		}
-		if !ok {
-			s.writeNoActiveOrg(w)
-			return
-		}
+	ok, err := s.az.UserHasOrgAccess(r.Context(), userID, orgID)
+	if err != nil {
+		internalError(w, "ws", err)
+		return
+	}
+	if !ok {
+		s.writeNoActiveOrg(w)
+		return
 	}
 
 	// Which credential authorized the handshake, so the revalidation backstop
 	// can close this socket when that credential dies. Exactly one of the two
-	// is set on an authenticated request, and neither on the unscoped path.
+	// is set on a multi-mode request, and neither on local mode's sentinel.
 	id := websocket.ConnIdentity{UserID: userID, OrgID: orgID}
 	if sess := SessionFrom(r.Context()); sess != nil {
 		id.SessionID = sess.ID.String()

@@ -15,8 +15,10 @@ const (
 	// ConversationSignalInterrupt stops the conversation's current turn, leaving the process
 	// alive for further input.
 	ConversationSignalInterrupt ConversationSignalKind = "interrupt"
-	// ConversationSignalSteer delivers a free-form user message to a live conversation.
-	// Payload: {"text": "..."}.
+	// ConversationSignalSteer rings an engagement keeping a conversation's
+	// claim warm (ClaimPhaseWarm): a person's message resumed the
+	// conversation, and the owner wakes the engagement to drive it. No
+	// payload; fire-and-forget.
 	ConversationSignalSteer ConversationSignalKind = "steer"
 	// ConversationSignalPermission answers a pending tool-permission prompt. Payload:
 	// {"request_id","behavior","message","updated_input"}.
@@ -32,16 +34,18 @@ const (
 // call sites don't hand-spell the strings.
 const (
 	// ConversationSignalAckOK is the generic success result for cancel/interrupt/
-	// steer/permission: the local RunController op was applied (or, for
-	// cancel, the DB-only fallback already covers correctness and this
-	// just records that the signal was seen).
+	// steer/permission: the local RunController op was applied, or for steer
+	// a warm claim's engagement was rung (or, for cancel, the DB-only
+	// fallback already covers correctness and this just records that the
+	// signal was seen).
 	ConversationSignalAckOK = "ok"
 	// ConversationSignalAckDelivered means an inject signal was steered into the
 	// still-live process.
 	ConversationSignalAckDelivered = "delivered"
 	// ConversationSignalAckGone means the owner found the conversation no longer live by the
-	// time it looked — an interrupt/steer/permission signal simply lost the
-	// race (the caller sees this as "no live process" and 409s); an inject
+	// time it looked — an interrupt/permission signal simply lost the
+	// race (the caller sees this as "no live process" and 409s); a steer
+	// signal found no warm claim to ring, which its sender never reads; an inject
 	// signal additionally enqueues the pending_firing itself so the intent
 	// is never dropped.
 	ConversationSignalAckGone = "gone"

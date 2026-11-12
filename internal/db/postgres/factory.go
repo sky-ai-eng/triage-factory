@@ -128,8 +128,9 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 
 // ActiveConversations lists the conversations the factory view treats as in flight:
 // exactly those an engagement is actually driving (an unreleased claim — the
-// setup sub-states ride that claim's phase). Mirrors the X-button window in
-// AgentCard. Duplicated in sqlite/factory.go; intentional per-backend copy.
+// setup sub-states ride that claim's phase — that is not an idle warm one).
+// Mirrors the X-button window in AgentCard. Duplicated in sqlite/factory.go;
+// intentional per-backend copy.
 func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
 	// memory_missing derivation: the agent has not produced its memory file
 	// iff the conversation has no conversation_memory row whose source is
@@ -157,7 +158,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE r.org_id = $1 AND ` + activeClaimExistsSQL + `
+		WHERE r.org_id = $1 AND ` + workingClaimExistsSQL + `
 		ORDER BY r.started_at DESC
 	`
 

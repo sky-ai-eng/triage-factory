@@ -587,14 +587,19 @@ func (m *Manager) SetDeploymentSigner(d *commitsigner.DeploymentSigner) {
 // commitIdentity is the identity the run's commits are authored and committed
 // as, and how they are signed (commitsigner.Resolver): the org's signer when
 // it has one, else, for an org on the deployment App, the deployment's
-// signer, else the App's bot or the PAT's owner. A signer that cannot be read
-// fails the seal rather than sealing the identity the signer would have
-// replaced; the sweeps seal again. With no signer store wired it is the org's
-// GitHub identity, unsigned.
+// signer, else the App's bot or the PAT's owner. A signer or an identity that
+// cannot be read fails the seal rather than sealing another identity — the
+// one the signer would have replaced, or none, which the jail commits as its
+// placeholder; the sweeps seal again. With no signer store wired it is the
+// org's GitHub identity, unsigned.
 func (m *Manager) commitIdentity(ctx context.Context, orgID string) (commitsigner.Identity, error) {
 	if m.stores.OrgCommitSigners == nil {
 		id := commitsigner.Identity{Mode: domain.CommitSigningNone}
-		if org, ok := ghclient.OrgIdentityAccount(ctx, m.ghResolver, orgID); ok {
+		org, ok, err := ghclient.OrgIdentityAccount(ctx, m.ghResolver, orgID)
+		if err != nil {
+			return commitsigner.Identity{}, err
+		}
+		if ok {
 			id.Name, id.Email, id.AccountID = org.Name, org.Email, org.AccountID
 		}
 		return id, nil

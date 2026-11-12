@@ -15,6 +15,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
@@ -322,6 +323,13 @@ type ResumeOptions struct {
 	// by the dispatcher, which holds the task and the step's position; nil
 	// asks nothing.
 	nudge func(context.Context) string
+
+	// commitSigner is the org's commit identity and how it signs
+	// (orgCommitIdentity), which the resumed process commits and signs as.
+	// The dispatcher resolves it before it takes the queued input, so a read
+	// that fails hands the claim back with the message still queued. Required:
+	// nil is refused rather than read as an org with no identity.
+	commitSigner *commitsigner.Identity
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -411,6 +419,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		return nil, fmt.Errorf("resume: missing namespace (caller must pass the workspace namespace captured at run start)")
 	}
 	extraEnv = append(extraEnv, "TRIAGE_FACTORY_WORKSPACE_KEY="+opts.Namespace)
+	if opts.commitSigner == nil {
+		return nil, fmt.Errorf("resume: missing commit identity (caller must resolve the org's commit identity for this resume)")
+	}
+	signer := *opts.commitSigner
 
 	// A resumed run gets the same gh channel shape the initial invocation had:
 	// the sidecar's in multi, a fresh loopback injector in local (the channel is
@@ -440,11 +452,13 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	// A cold resume starts a new process, which commits and signs as runAgent's
 	// does: the commit identity and co-author trailer are stamped on baseOpts
 	// below, and a run whose org's signer is active signs. The identity is
-	// resolved now rather than captured at run start, unlike the values in
-	// ResumeOptions: a signing run must sign as the signer that is current, and
-	// git can sign only a commit whose committer is that signer. The unsigned
-	// identity follows the same rule, so there is one rule for both.
-	commitIdentity, signer := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
+	// resolved for this resume (opts.commitSigner) rather than captured at run
+	// start: a signing run must sign as the signer that is current, and git
+	// can sign only a commit whose committer is that signer. The unsigned
+	// identity follows the same rule, so there is one rule for both. The
+	// trailer is resolved here, for the user whose queued message this turn
+	// delivers.
+	commitIdentity := s.signerCommitIdentity(ctx, orgID, signer, triggerType, creatorUserID)
 	commitSigning := s.prepareLocalCommitSigning(ctx, orgID, conversationID, opts.claimID, signer)
 	defer commitSigning.Close()
 	extraEnv = append(extraEnv, commitSigning.env()...)

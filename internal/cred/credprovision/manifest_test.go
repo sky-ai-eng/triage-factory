@@ -283,6 +283,24 @@ func TestProvision_AvailabilityFailureWritesNothing(t *testing.T) {
 	}
 }
 
+// TestProvision_IdentityReadFailureWritesNothing: a seal whose commit identity
+// read fails writes no bundle, so the claim keeps waiting for credentials and
+// the sweep seals again, rather than a bundle whose jail commits as its
+// placeholder.
+func TestProvision_IdentityReadFailureWritesNothing(t *testing.T) {
+	rig := newProvisionRig(t, eventsource.Availability{
+		eventsource.NewSource(eventsource.KindGitHub, eventsource.StateAvailable),
+	}, &installTokens{})
+	boom := errors.New("org_github_apps unreachable")
+	rig.m.ghResolver.(*fakeScopedResolver).identityErr = boom
+	if err := rig.m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); !errors.Is(err, boom) {
+		t.Fatalf("ProvisionForConversation = %v, want the identity read's failure", err)
+	}
+	if rig.claims.puts != 0 {
+		t.Error("a bundle was written without the org's commit identity")
+	}
+}
+
 // TestGithubEntry pins the GitHub entry's expiry: the earliest token sealed
 // for it, and none for a PAT.
 func TestGithubEntry(t *testing.T) {

@@ -777,7 +777,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("ws_backplane", func(t *testing.T) {
 		b := wsbackplane.New(h.SystemDB, "", executorID, websocket.NewHub())
-		if present := b.PresentFor(ctx, orgID, "some-run-id"); present {
+		if present := b.PresentFor(ctx, orgID, "some-run-id", nil); present {
 			t.Errorf("PresentFor = true on an empty hub + no presence rows, want false")
 		}
 		_ = b
@@ -813,7 +813,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			INSERT INTO ws_presence (user_id, conn_id, org_id, instance_id, viewing, visible, last_seen)
 			VALUES ($1, 'conn-1', $2, 'control-pod-1', $3, true, now())
 		`, userID, orgID, "run:some-run-id")
-		if present := b.PresentFor(ctx, orgID, "some-run-id"); !present {
+		if present := b.PresentFor(ctx, orgID, "some-run-id", nil); !present {
 			t.Errorf("PresentFor = false after seeding a live ws_presence row, want true")
 		}
 		if _, err := h.SystemDB.ExecContext(ctx,

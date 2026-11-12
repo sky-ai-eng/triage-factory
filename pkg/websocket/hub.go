@@ -18,20 +18,28 @@ import (
 // conversation_update). Events that broadcast to the whole UI
 // (tasks_updated, scoring_*) leave it empty.
 //
-// OrgID and UserID are server-side routing fields used by the hub's
-// per-connection scoping. They are intentionally NOT serialised on the
-// wire (json:"-"): the frontend filters by ConversationID, and
+// OrgID, UserID and UserIDs are server-side routing fields used by the
+// hub's per-connection scoping. They are intentionally NOT serialised on
+// the wire (json:"-"): the frontend filters by ConversationID, and
 // coupling it to server-side identity would leak who-owns-what to
 // other tabs/extensions parsing the WS stream. Empty OrgID means
 // "system event, deliver to every connection"; empty UserID means
-// "not user-specific". The hub's filter only kicks in when both
-// event-side and client-side values are set — see Broadcast.
+// "not user-specific". The OrgID and UserID filters only kick in when
+// both event-side and client-side values are set — see Broadcast.
+//
+// UserIDs is a recipient set, and unlike UserID it is strict: when it is
+// non-nil, only a connection whose user id is non-empty and in the set
+// receives the event. It lets one envelope reach a resolved audience,
+// so a high-rate frame costs one publish rather than one per recipient.
+// A nil set is no set; an empty non-nil set, or a set alongside UserID,
+// is a caller fault that Broadcast drops.
 type Event struct {
-	Type           string `json:"type"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	OrgID          string `json:"-"`
-	UserID         string `json:"-"`
-	Data           any    `json:"data"`
+	Type           string   `json:"type"`
+	ConversationID string   `json:"conversation_id,omitempty"`
+	OrgID          string   `json:"-"`
+	UserID         string   `json:"-"`
+	UserIDs        []string `json:"-"`
+	Data           any      `json:"data"`
 }
 
 // Close codes the hub sends when it actively kicks a connection
@@ -95,10 +103,11 @@ type client struct {
 	send   chan []byte
 	closed chan struct{} // signals writePump to exit
 	// userID + orgID are captured at handshake by HandleWS. Empty means
-	// "unscoped client" (pre-auth, tests that hit the hub without the
-	// full server pipeline); such a client receives every event,
-	// matching the pre-D9b behavior. The filter in Broadcast only
-	// kicks in when both event and client carry values.
+	// "unscoped client" (a test that hits the hub without the server
+	// pipeline); such a client receives every event that
+	// carries no recipient set. The org and user filters in Broadcast
+	// only kick in when both event and client carry values; a recipient
+	// set never reaches a client with no userID.
 	userID string
 	orgID  string
 	// sid is the opaque session id backing this connection (TFAC-75),
@@ -157,9 +166,9 @@ func NewHub() *Hub {
 // UserID and OrgID drive Broadcast's scoping filter. SessionID and TokenID name
 // the credential, so a revalidation sweep can close exactly the connections
 // whose credential died; at most one is set, since a request authenticates one
-// way. Every field empty is the "unscoped" client — pre-auth, local mode, a
-// test hitting the hub without the server pipeline — which receives every event
-// and no sweep targets.
+// way. Every field empty is the "unscoped" client — a test hitting the hub
+// without the server pipeline — which receives every event but one addressed
+// to a recipient set, and no sweep targets.
 type ConnIdentity struct {
 	UserID    string
 	OrgID     string
@@ -236,14 +245,21 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) 
 //   - evt.OrgID == "" — system-wide event, delivers to every client
 //     regardless of their org. Used for system:poll:* sentinels,
 //     deployment-level toasts, etc.
-//   - c.orgID == "" — unscoped client (pre-auth, test harness),
-//     receives every event. Matches pre-D9b behavior.
+//   - c.orgID == "" — unscoped client (test harness), receives every
+//     event.
 //   - Both set + mismatch → skip. This is the multi-tenant case.
 //
 // The per-user filter has the same shape: evt.UserID != "" AND
-// c.userID != "" AND they differ → skip. UserID is reserved for
-// per-user events (e.g. "another user took over your run"); today
-// every caller leaves it empty.
+// c.userID != "" AND they differ → skip. It addresses one user's
+// connections.
+//
+// The recipient-set filter is strict: evt.UserIDs != nil delivers only to
+// a connection whose userID is non-empty and in the set, so an unscoped
+// client receives none of it. Broadcast refuses the two malformed shapes
+// before anything is delivered or published: an empty non-nil set (an
+// audience of nobody, which a caller should not have sent at all) and a
+// set together with UserID (two audiences, neither of which is clearly
+// meant). Each is logged at Error and dropped.
 //
 // Nil-receiver-safe: a nil *Hub silently drops the event so callers
 // that conditionally have a hub (tests, pre-wired packages) don't
@@ -258,6 +274,14 @@ func (h *Hub) Broadcast(evt Event) {
 	if h == nil {
 		return
 	}
+	if evt.UserIDs != nil && len(evt.UserIDs) == 0 {
+		wsLog.Error("dropping event with an empty recipient set", "type", evt.Type)
+		return
+	}
+	if evt.UserIDs != nil && evt.UserID != "" {
+		wsLog.Error("dropping event that sets both a user and a recipient set", "type", evt.Type)
+		return
+	}
 	h.DeliverRemote(evt)
 	if h.backplane != nil {
 		h.backplane.Publish(evt)
@@ -265,9 +289,9 @@ func (h *Hub) Broadcast(evt Event) {
 }
 
 // DeliverRemote fans evt to this pod's locally-connected sockets only,
-// applying the same per-connection (orgID, userID) scope as Broadcast —
-// see Broadcast's doc comment for the filter semantics. It never touches
-// the backplane.
+// applying the same per-connection scope as Broadcast (orgID, userID, and
+// the recipient set) — see Broadcast's doc comment for the filter
+// semantics. It never touches the backplane.
 //
 // This is the local half Broadcast always performed, split out so a
 // multi-pod backplane's tf_ws LISTEN dispatcher can apply a REMOTE pod's
@@ -285,6 +309,14 @@ func (h *Hub) DeliverRemote(evt Event) {
 		return
 	}
 
+	var recipients map[string]struct{}
+	if evt.UserIDs != nil {
+		recipients = make(map[string]struct{}, len(evt.UserIDs))
+		for _, id := range evt.UserIDs {
+			recipients[id] = struct{}{}
+		}
+	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -294,6 +326,11 @@ func (h *Hub) DeliverRemote(evt Event) {
 		}
 		if evt.UserID != "" && c.userID != "" && evt.UserID != c.userID {
 			continue
+		}
+		if recipients != nil {
+			if _, ok := recipients[c.userID]; !ok || c.userID == "" {
+				continue
+			}
 		}
 		select {
 		case c.send <- data:
@@ -422,18 +459,32 @@ func (h *Hub) readPump(c *client) {
 }
 
 // PresentFor reports whether any connected client is "present" for a prompt
-// raised by conversationID in orgID (TFAC-392): an answer-capable, focused tab. A client
+// raised by conversationID in orgID: an answer-capable, focused tab. A client
 // qualifies iff it is in the run's org (or unscoped, matching Broadcast's
 // tolerance for pre-auth / test clients) AND its tab is visible/focused AND it
 // is viewing the board or this run's own detail page. A backgrounded tab, or a
 // tab on Settings (viewing "other"), never qualifies.
 //
+// userIDs narrows the check to the people who may read the conversation, under
+// the same strict rule as Event.UserIDs: when it is non-nil, only a connection
+// whose user id is non-empty and in the set qualifies, so an unscoped client
+// never does and an empty set matches nobody. A nil set is the org-wide check.
+// The viewing value is the tab's own report, so the set is what keeps a tab
+// naming a conversation its user cannot read from counting.
+//
 // Nil-receiver-safe (returns false) so the hub-less test spawner and any
 // conditionally-wired caller read as "nobody present" without guarding the call
 // site, consistent with Broadcast.
-func (h *Hub) PresentFor(orgID, conversationID string) bool {
+func (h *Hub) PresentFor(orgID, conversationID string, userIDs []string) bool {
 	if h == nil {
 		return false
+	}
+	var allowed map[string]struct{}
+	if userIDs != nil {
+		allowed = make(map[string]struct{}, len(userIDs))
+		for _, id := range userIDs {
+			allowed[id] = struct{}{}
+		}
 	}
 	runView := "run:" + conversationID
 	h.mu.RLock()
@@ -441,6 +492,11 @@ func (h *Hub) PresentFor(orgID, conversationID string) bool {
 	for c := range h.clients {
 		if orgID != "" && c.orgID != "" && c.orgID != orgID {
 			continue
+		}
+		if allowed != nil {
+			if _, ok := allowed[c.userID]; !ok || c.userID == "" {
+				continue
+			}
 		}
 		if !c.visible {
 			continue

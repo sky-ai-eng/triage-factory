@@ -574,6 +574,43 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 	// dispatcher nudge. Cross-pod there is no wake nudge by design — the
 	// claiming executor's own scan-interval backstop picks the row up.
 	s.wakeDispatcher()
+	// The flip keeps a warm claim rather than release it, and the engagement
+	// holding it is the one to drive the conversation now.
+	if undeliveredRowsFor(conv.Runtime) == inputRoleLiveQueue {
+		s.ringWarmWait(ctx, orgID, &conv)
+	}
+}
+
+// ringWarmWait tells the engagement keeping conv's claim warm that the
+// conversation was resumed, without waiting for an answer. One in this process
+// is rung directly; otherwise the claim's executor is sent a steer signal,
+// which its apply loop answers by ringing the engagement there
+// (deliverSignal). conv is the conversation as read before the resume, while
+// its warm claim was the one it named. A ring nothing answers costs nothing:
+// no claim is warm, or the engagement finds the message on its backstop poll.
+func (s *Spawner) ringWarmWait(ctx context.Context, orgID string, conv *domain.Conversation) {
+	if s.warmWaits.Wake(conv.ID) {
+		return
+	}
+	s.mu.Lock()
+	conversationSignals := s.conversationSignals
+	s.mu.Unlock()
+	if conversationSignals == nil {
+		return
+	}
+	executorID, ok := s.liveOwnerOf(ctx, conv)
+	if !ok {
+		return
+	}
+	id, err := conversationSignals.Insert(ctx, orgID, conv.ID, domain.ConversationSignalSteer, "", executorID)
+	if err != nil {
+		delegateLog.Warn("insert the doorbell for a warm claim failed; its engagement's backstop poll finds the message",
+			"conversation", conv.ID, "error", err)
+		return
+	}
+	if err := s.notifyCtl(ctx, "new", id); err != nil {
+		delegateLog.Warn("notify tf_ctl for the doorbell failed; the owner's backstop scan still finds it", "signal_id", id, "error", err)
+	}
 }
 
 // wakeForUnreadInput wakes a conversation that concluded with a person's

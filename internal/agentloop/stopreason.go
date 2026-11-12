@@ -71,6 +71,24 @@ func classifyStop(reason string) stopClass {
 	}
 }
 
+// String is the class as the agent.turn span's stop_reason names it.
+func (c stopClass) String() string {
+	switch c {
+	case stopEndTurn:
+		return "end_turn"
+	case stopToolCalls:
+		return "tool_calls"
+	case stopLength:
+		return "length"
+	case stopWindowWall:
+		return "window_wall"
+	case stopDecline:
+		return "decline"
+	default:
+		return "unknown"
+	}
+}
+
 // interrupted reports a stop that ended the message before the model chose to
 // end it — a limit cut it short, or the provider took it away. The classes
 // differ entirely in remedy and not at all in the state they leave behind,

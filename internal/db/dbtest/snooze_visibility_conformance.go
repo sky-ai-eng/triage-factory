@@ -9,18 +9,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// SnoozeVisibilityFactory wires the two stores that jointly own the snooze
-// gesture — SwipeStore writes the wake time, TaskStore is what filters on it —
-// against one org, plus the seeder that produces a queued task to snooze.
+// QueuedTaskSeeder creates one task row in 'queued' state, unclaimed, and
+// returns its ID.
+type QueuedTaskSeeder func(t *testing.T) string
+
+// SnoozeVisibilityFactory wires the task store against one org, plus the
+// seeder that produces a queued task to snooze.
 //
-// It is its own factory rather than an arm of SwipeStoreFactory or
-// TaskStoreFactory because the invariant below lives in the seam between them:
-// each store's own suite can pass while the pair is broken.
+// It is its own factory rather than an arm of TaskStoreFactory because the
+// invariant below lives in the seam between two halves of the store — the
+// write that stores the wake time and the list filter that reads it — and
+// each half's own assertions can pass while the pair is broken.
 type SnoozeVisibilityFactory func(t *testing.T) (
-	swipes db.SwipeStore,
 	tasks db.TaskStore,
 	orgID string,
-	seedTask TaskSeederForSwipes,
+	seedTask QueuedTaskSeeder,
 )
 
 // RunSnoozeVisibilityConformance pins the one thing a snooze is for: a task
@@ -79,13 +82,13 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 
 	for _, z := range zones {
 		t.Run("FutureSnoozeHidesTheTask/"+z.name, func(t *testing.T) {
-			swipes, tasks, orgID, seedTask := mk(t)
+			tasks, orgID, seedTask := mk(t)
 			taskID := seedTask(t)
 
 			// An hour out — the shortest preset the UI offers, and the one a
 			// user notices immediately when it does nothing.
 			until := time.Now().Add(time.Hour).In(z.loc)
-			ok, err := swipes.SnoozeTask(ctx, orgID, taskID, until, 0)
+			ok, err := tasks.SnoozeTask(ctx, orgID, taskID, until)
 			if err != nil {
 				t.Fatalf("SnoozeTask: %v", err)
 			}
@@ -105,14 +108,14 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 		})
 
 		t.Run("ElapsedSnoozeWakesTheTask/"+z.name, func(t *testing.T) {
-			swipes, tasks, orgID, seedTask := mk(t)
+			tasks, orgID, seedTask := mk(t)
 			taskID := seedTask(t)
 
 			// A wake time already past: the row is snoozed, but its hour is up.
 			// This is the half a broken comparison passes by accident when the
 			// offset happens to push every value into the past.
 			until := time.Now().Add(-time.Hour).In(z.loc)
-			if _, err := swipes.SnoozeTask(ctx, orgID, taskID, until, 0); err != nil {
+			if _, err := tasks.SnoozeTask(ctx, orgID, taskID, until); err != nil {
 				t.Fatalf("SnoozeTask: %v", err)
 			}
 
@@ -125,11 +128,11 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 
 	t.Run("SnoozeIsNotAffectedByTheCallersZone", func(t *testing.T) {
 		// The same instant, handed over three ways. Visibility must not move.
-		swipes, tasks, orgID, seedTask := mk(t)
+		tasks, orgID, seedTask := mk(t)
 		base := time.Now().Add(90 * time.Minute)
 		for _, z := range zones {
 			taskID := seedTask(t)
-			if _, err := swipes.SnoozeTask(ctx, orgID, taskID, base.In(z.loc), 0); err != nil {
+			if _, err := tasks.SnoozeTask(ctx, orgID, taskID, base.In(z.loc)); err != nil {
 				t.Fatalf("SnoozeTask (%s): %v", z.name, err)
 			}
 		}
@@ -147,10 +150,10 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 		// through Get rather than the raw column so this holds for both
 		// dialects' scan paths; the second-level tolerance is SQLite's
 		// millisecond storage precision plus the driver's own truncation.
-		swipes, tasks, orgID, seedTask := mk(t)
+		tasks, orgID, seedTask := mk(t)
 		taskID := seedTask(t)
 		until := time.Now().Add(3 * time.Hour).In(time.FixedZone("TEST-0400", -4*60*60))
-		if _, err := swipes.SnoozeTask(ctx, orgID, taskID, until, 0); err != nil {
+		if _, err := tasks.SnoozeTask(ctx, orgID, taskID, until); err != nil {
 			t.Fatalf("SnoozeTask: %v", err)
 		}
 		task, err := tasks.Get(ctx, orgID, taskID)

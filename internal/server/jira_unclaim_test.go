@@ -312,7 +312,7 @@ func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{}); rec.Code != http.StatusOK {
 		t.Fatalf("claim status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	fake.waitForWrites(t, 2)

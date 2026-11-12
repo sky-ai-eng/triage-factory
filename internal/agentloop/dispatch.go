@@ -43,107 +43,155 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, 
 	var terminal *Result
 	at := toolResultPositions(ownerID, len(calls))
 
-	for i, call := range calls {
+	for i := range calls {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Result{}, false, 0, ctxErr
 		}
-
-		// A TF tool resolves loop-side and never enters the sandbox. Its
-		// result row still lands, so the transcript stays legal and a later
-		// reader sees why the run ended.
-		if out, ran, ok := e.resolveLoopSide(ctx, call, params); ok {
-			if out.Terminal != "" && len(calls) > 1 {
-				out = tooldefs.Outcome{Content: tooldefs.StopBlueprintNotAlone, IsError: true}
-			}
-			key, err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i), &ran)
-			if err != nil {
-				return Result{}, false, 0, err
-			}
-			position = key
-			if out.Terminal != "" {
-				terminal = &Result{
-					Kind:          ResultConcluded,
-					Outcome:       out.Terminal,
-					OutcomeReason: out.Reason,
-					ResultSummary: out.Summary,
-				}
-			}
-			continue
+		d := e.dispatchCall(ctx, params, calls, i, at, deaths)
+		if d.err != nil {
+			return Result{}, false, 0, d.err
 		}
-
-		// The gate. A denial becomes an is_error result in-band: the model
-		// sees why it was refused and can choose differently, which is
-		// strictly more useful than killing the run.
-		if e.Hooks.BeforeToolCall != nil {
-			if deny := e.Hooks.BeforeToolCall(ctx, call); deny != "" {
-				key, err := e.insertToolResult(ctx, params, call, deny, true, at(i), nil)
-				if err != nil {
-					return Result{}, false, 0, err
-				}
-				position = key
-				continue
-			}
+		position = d.position
+		if d.terminal != nil {
+			terminal = d.terminal
 		}
-
-		out, ran, dispatchErr := e.callTool(ctx, call)
-		if e.Hooks.AfterToolCall != nil {
-			out = e.Hooks.AfterToolCall(ctx, call, out)
+		if d.batchOver {
+			return Result{}, false, position, nil
 		}
-
-		// A transport failure with no frame to classify is treated exactly
-		// as a fatal protocol error: the connection is unusable either way.
-		fatal := dispatchErr != nil || (out.Protocol != nil && out.Protocol.Fatal())
-		if fatal {
-			// A stopped engagement kills its jail, so a stop that lands
-			// during a call ends it this way too. That is the stop's to
-			// report, and the next claim's repair pass answers the calls.
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return Result{}, false, 0, ctxErr
-			}
-			// The restart comes before the answers, so each answer can say
-			// where the conversation goes on. The lost call's duration was
-			// taken when it failed, so the restart is not in it.
-			lost := toolHostLostFor(dispatchErr, out.Protocol)
-			restarted := e.restartToolHost(ctx, params, call, deaths)
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return Result{}, false, 0, ctxErr
-			}
-			key, err := e.answerLostBatch(ctx, params, calls, at, i, lost, restarted, ran)
-			if err != nil {
-				return Result{}, false, 0, err
-			}
-			if !restarted {
-				return Result{}, false, 0, lost
-			}
-			return Result{}, false, key, nil
-		}
-		deaths.sinceCompleted = 0
-
-		var key float64
-		var insertErr error
-		switch {
-		case out.Protocol != nil:
-			// Survivable: an unknown tool, a malformed frame, an over-cap
-			// response. The model gets the message and the loop reads the
-			// next frame.
-			key, insertErr = e.insertToolResult(ctx, params, call, out.Protocol.Error(), true, at(i), &ran)
-		case out.ToolError != "":
-			key, insertErr = e.insertToolResult(ctx, params, call, out.ToolError, true, at(i), &ran)
-		case len(out.Images) > 0:
-			key, insertErr = e.insertToolResultWithImages(ctx, params, call, out.Content, out.Images, at(i), &ran)
-		default:
-			key, insertErr = e.insertToolResult(ctx, params, call, out.Content, false, at(i), &ran)
-		}
-		if insertErr != nil {
-			return Result{}, false, 0, insertErr
-		}
-		position = key
 	}
 
 	if terminal != nil {
 		return *terminal, true, position, nil
 	}
 	return Result{}, false, position, nil
+}
+
+// dispatched is what answering one call of a batch decided for the batch.
+type dispatched struct {
+	// position is the assembly key of the last result the call wrote.
+	position float64
+	// terminal is the engagement's ending, when a flow-control call set one.
+	terminal *Result
+	// batchOver reports that the tool host died during the call and was
+	// restarted, and that every later call of the batch has been answered.
+	batchOver bool
+	// err ends the engagement: a dead tool host that could not be restarted
+	// (a *ToolHostLostError), a cancellation, or a result that could not be
+	// recorded.
+	err error
+}
+
+// dispatchCall answers calls[i] — loop-side, by the gate's denial, or in the
+// jail — and records its result, under the call's own agent.tool span.
+func (e *Engine) dispatchCall(ctx context.Context, params Params, calls []domain.ToolCall, i int, at func(int) *float64, deaths *toolHostDeaths) (d dispatched) {
+	call := calls[i]
+	ctx, span := e.startTool(ctx, params, call)
+	var t toolTrace
+	defer func() { t.end(ctx, span, d.err) }()
+
+	// A TF tool resolves loop-side and never enters the sandbox. Its
+	// result row still lands, so the transcript stays legal and a later
+	// reader sees why the run ended.
+	if out, ran, ok := e.resolveLoopSide(ctx, call, params); ok {
+		if out.Terminal != "" && len(calls) > 1 {
+			out = tooldefs.Outcome{Content: tooldefs.StopBlueprintNotAlone, IsError: true}
+		}
+		t.outcome = toolOK
+		if out.IsError {
+			t.outcome = toolErrored
+		}
+		key, err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i), &ran)
+		if err != nil {
+			return dispatched{err: err}
+		}
+		d.position = key
+		if out.Terminal != "" {
+			d.terminal = &Result{
+				Kind:          ResultConcluded,
+				Outcome:       out.Terminal,
+				OutcomeReason: out.Reason,
+				ResultSummary: out.Summary,
+			}
+		}
+		return d
+	}
+
+	// The gate. A denial becomes an is_error result in-band: the model
+	// sees why it was refused and can choose differently, which is
+	// strictly more useful than killing the run.
+	if e.Hooks.BeforeToolCall != nil {
+		if deny := e.Hooks.BeforeToolCall(ctx, call); deny != "" {
+			t.outcome = toolDenied
+			key, err := e.insertToolResult(ctx, params, call, deny, true, at(i), nil)
+			if err != nil {
+				return dispatched{err: err}
+			}
+			return dispatched{position: key}
+		}
+	}
+
+	out, ran, dispatchErr := e.callTool(ctx, call)
+	t.kills = out.CeilingKills
+	if e.Hooks.AfterToolCall != nil {
+		out = e.Hooks.AfterToolCall(ctx, call, out)
+	}
+
+	// A transport failure with no frame to classify is treated exactly
+	// as a fatal protocol error: the connection is unusable either way.
+	fatal := dispatchErr != nil || (out.Protocol != nil && out.Protocol.Fatal())
+	if fatal {
+		// A stopped engagement kills its jail, so a stop that lands
+		// during a call ends it this way too. That is the stop's to
+		// report, and the next claim's repair pass answers the calls.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return dispatched{err: ctxErr}
+		}
+		// The restart comes before the answers, so each answer can say
+		// where the conversation goes on. The lost call's duration was
+		// taken when it failed, so the restart is not in it.
+		lost := toolHostLostFor(dispatchErr, out.Protocol)
+		t.outcome, t.reason = toolHostLost, lost.cause()
+		restarted := e.restartToolHost(ctx, params, call, deaths)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return dispatched{err: ctxErr}
+		}
+		key, err := e.answerLostBatch(ctx, params, calls, at, i, lost, restarted, ran)
+		if err != nil {
+			return dispatched{err: err}
+		}
+		if !restarted {
+			return dispatched{err: lost}
+		}
+		return dispatched{position: key, batchOver: true}
+	}
+	deaths.sinceCompleted = 0
+
+	var key float64
+	var insertErr error
+	switch {
+	case out.Protocol != nil:
+		// Survivable: an unknown tool, a malformed frame, an over-cap
+		// response. The model gets the message and the loop reads the
+		// next frame.
+		t.outcome = toolProtocolError
+		key, insertErr = e.insertToolResult(ctx, params, call, out.Protocol.Error(), true, at(i), &ran)
+	case out.ToolError != "":
+		t.outcome = toolErrored
+		if out.Cause == ToolErrorCauseMemoryBudget {
+			t.reason = ToolErrorCauseMemoryBudget
+		}
+		key, insertErr = e.insertToolResult(ctx, params, call, out.ToolError, true, at(i), &ran)
+	case len(out.Images) > 0:
+		t.outcome = toolOK
+		key, insertErr = e.insertToolResultWithImages(ctx, params, call, out.Content, out.Images, at(i), &ran)
+	default:
+		t.outcome = toolOK
+		key, insertErr = e.insertToolResult(ctx, params, call, out.Content, false, at(i), &ran)
+	}
+	if insertErr != nil {
+		return dispatched{err: insertErr}
+	}
+	return dispatched{position: key}
 }
 
 // callTool dispatches into the jail, or reports that no tool host is wired.

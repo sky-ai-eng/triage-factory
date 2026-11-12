@@ -99,7 +99,7 @@ func (e *Engine) streamWithRetry(ctx context.Context, orgID string, client Provi
 		}
 		e.warn("provider call failed; retrying same provider and model",
 			"model", req.Model, "attempt", attempt, "delay", delay, "error", err)
-		if serr := sleep(ctx, delay); serr != nil {
+		if serr := e.backoff(ctx, sleep, delay, attempt, string(req.Provider), class); serr != nil {
 			return nil, serr
 		}
 		if delay *= 2; delay > p.MaxDelay {

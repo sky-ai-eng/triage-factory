@@ -55,6 +55,9 @@ interface ArtifactSet {
   deliverables: Deliverable[]
   artifacts: ConversationArtifact[]
   refused: number
+  /** Every deliverable the caller may not act on, by id, from the
+   *  deliverables list: an artifact's deliverable ref does not say. */
+  viewOnly: Set<string>
 }
 
 // loadArtifactSet reads the section's three sources. Both lists are read
@@ -73,6 +76,7 @@ async function loadArtifactSet(conversationId: string): Promise<ArtifactSet> {
     deliverables: deliverables.filter((d) => !named.has(d.id)),
     artifacts,
     refused: refused.total_count ?? 0,
+    viewOnly: new Set(deliverables.filter((d) => d.can_write === false).map((d) => d.id)),
   }
 }
 
@@ -164,6 +168,10 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
   if (shown.deliverables.length === 0 && shown.artifacts.length === 0 && shown.refused === 0) {
     return null
   }
+  // The [x] is for a pending deliverable the caller may write. One the
+  // dismiss route refuses (a team viewer, an org admin off the team) keeps its
+  // highlight and its Open, which only reads.
+  const dismissable = (id: string) => pending.has(id) && !shown.viewOnly.has(id)
 
   return (
     <RailSection label="Artifacts">
@@ -174,7 +182,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
             deliverable={d}
             highlighted={pending.has(d.id)}
             onOpenApproval={onOpenDeliverable}
-            onDismiss={pending.has(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
+            onDismiss={dismissable(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
             dismissing={!!dismissing[d.id]}
           />
         ))}
@@ -187,7 +195,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
               artifact={a}
               highlighted={!!d && pending.has(d.id)}
               onOpenDeliverable={onOpenDeliverable}
-              onDismiss={d && pending.has(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
+              onDismiss={d && dismissable(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
               dismissing={!!(d && dismissing[d.id])}
             />
           )

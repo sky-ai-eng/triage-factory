@@ -181,6 +181,15 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				t.Fatalf("finish conversation %s: %v", conversationID, err)
 			}
 		},
+		WarmClaim: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE claims SET phase = ? WHERE conversation_id = ? AND released_at IS NULL`,
+				domain.ClaimPhaseWarm, conversationID,
+			); err != nil {
+				t.Fatalf("warm claim %s: %v", conversationID, err)
+			}
+		},
 		CloseEntity: func(t *testing.T, entityID string, closedAt time.Time) {
 			t.Helper()
 			if _, err := conn.Exec(

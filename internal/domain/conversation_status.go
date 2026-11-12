@@ -70,6 +70,17 @@ const (
 	ClaimPhaseAwaitingCredentials = "awaiting_credentials"
 )
 
+// ClaimPhaseWarm marks a claim kept warm: its engagement's turn ended, the
+// conversation has its turn-end state like any other, and the engagement holds
+// the claim, its cell and its jail for a window so a person's next message
+// resumes on it instead of on a new claim.
+//
+// It is a fact about the claim and never about the conversation, so it is not
+// in AllClaimPhases and is never displayed: the display ladder reads past a
+// warm claim to the conversation's own status. A warm claim still holds its
+// conversation and its task's tree, so it keeps a second claim off both.
+const ClaimPhaseWarm = "warm"
+
 // The displayed conversation statuses that are not claim phases: the two
 // derived states, the parked state, and the terminal.
 const (

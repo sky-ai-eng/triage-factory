@@ -67,6 +67,13 @@ export interface Task {
     error_message?: string
     started_at: string
   }
+  // can_write is whether the caller may write the task: claim, delegate,
+  // requeue, undo, or PATCH it. The server derives it from the rule those
+  // routes enforce, so a team viewer reads false. On the detail read
+  // (GET /api/tasks/{id}) and each row of POST /api/tasks/list; ABSENT means
+  // the server did not answer, and consumers offer the control, whose route
+  // still refuses with a 403.
+  can_write?: boolean
 }
 
 // TranscriptPage is GET /api/agent/conversations/{id}/messages.
@@ -380,6 +387,14 @@ export interface Conversation {
   // the conversations that skip it. It is a read, not a promise — the send's
   // own 409/410 stays the enforcement.
   resumable?: boolean
+  // can_write is whether the caller may act on this conversation: stop it,
+  // message it, and answer its permission prompts. The server derives it from
+  // the rule the three routes enforce (a team writer for a team conversation,
+  // an org admin for an org-visible one, the creator for a private one), so a
+  // team viewer reads false. On both the detail and the list reads. ABSENT
+  // means the server did not answer, and consumers offer the controls, whose
+  // routes still refuse with a 403.
+  can_write?: boolean
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
   // 'blueprint_cancelled' | 'session_missing' | 'worktree_missing' |
@@ -420,6 +435,13 @@ export interface Deliverable {
   url: string
   details: unknown
   created_at: string
+  // can_write is whether the caller may act on the deliverable: approve,
+  // reject, dismiss, or edit it. The server derives it from the rule those
+  // routes enforce (a writer of the deliverable's team), so a team viewer and
+  // an org admin who is not on the team read false. On this list and on
+  // GET /api/deliverables/{id}; ABSENT means the server did not answer, and
+  // consumers offer the controls, whose routes still refuse with a 403.
+  can_write?: boolean
 }
 
 // ObjectKind is the closed set of object kinds an external action can name
@@ -646,18 +668,13 @@ export interface TriageEvent {
   created_at: string
 }
 
-/** Shape of `data` on a `{ type: "event" }` WS frame — matches Go's
- *  `domain.Event`. The frontend factory uses entity_id + event_type
- *  to drive chip animations between stations. */
+/** Shape of `data` on a `{ type: "event" }` WS frame: the type of an event
+ *  the backend just recorded, and nothing about the entity it is on. The
+ *  frame is org-scoped, so it carries no entity data a viewer's teams may not
+ *  read; a surface that needs the event's entity refetches through the REST
+ *  read, which carries the scoping. */
 export interface DomainEvent {
-  id?: string
   event_type: string
-  /** FK to entities.id; null for system events (poll markers, etc.). */
-  entity_id?: string | null
-  dedup_key?: string
-  metadata_json?: string
-  occurred_at?: string
-  created_at?: string
 }
 
 export interface Prompt {
@@ -1416,27 +1433,14 @@ export type WSEvent =
   // scoping — the cheap tier, and what turns a first-ever open's "discovering
   // repositories…" into a list without the client polling for it.
   | { type: 'github_repos_updated'; data: Record<string, never> }
-  | {
-      // Claim-axis change. Exactly one of the two ID fields
-      // is populated when claim landed; both empty when claim was
-      // cleared (Requeue, revert). Status is NOT in the payload —
-      // status changes fire as task_updated. The two channels stay
-      // orthogonal, matching the three-axis design.
-      type: 'task_claimed'
-      data: {
-        task_id: string
-        claimed_by_agent_id: string
-        claimed_by_user_id: string
-      }
-    }
-  | {
-      // Genuine status transitions (done, dismissed, snoozed) — NOT
-      // responsibility changes. Responsibility lives on task_claimed.
-      type: 'task_updated'
-      data: { task_id: string; status: string }
-    }
-  | { type: 'scoring_started'; data: { task_ids: string[] } }
-  | { type: 'scoring_completed'; data: { task_ids: string[] } }
+  // The task and scoring frames are payload-free, org-scoped pings: the
+  // client refetches through the REST reads, which carry the scoping.
+  // task_claimed says a task's claim moved, task_updated says its status
+  // moved, and scoring_started / scoring_completed bracket a scoring cycle.
+  | { type: 'task_claimed'; data: Record<string, never> }
+  | { type: 'task_updated'; data: Record<string, never> }
+  | { type: 'scoring_started'; data: Record<string, never> }
+  | { type: 'scoring_completed'; data: Record<string, never> }
   | {
       // One sparse-diff event for the repositories table (mirrors Go's
       // repoevent.Update allowlist): only the fields the backend just

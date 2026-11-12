@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
@@ -28,6 +29,7 @@ import (
 // instance, (re)wired onto the server after construction.
 type agentHandler struct {
 	tx         db.TxRunner
+	az         *authz.Checker
 	ws         *websocket.Hub
 	spawner    func() *delegate.Spawner
 	reconciler func() *reconcile.Reconciler
@@ -121,7 +123,33 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		return
 	}
 	addResumability(r.Context(), resp, orgID, conv, ag.spawner())
+	ag.addCanWrite(r.Context(), orgID, userID, []string{conv.ID}, []map[string]any{resp})
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// addCanWrite puts requireWritableConversation's answer on each conversation
+// a read returns, as `can_write`, so a client offers the composer, Stop, and
+// Allow/Deny only to a caller the routes would accept. It is the same probe
+// the gate runs (authz.Checker.WritableConversations), batched over the rows,
+// so the control a client renders and the answer the route gives cannot
+// disagree; the routes still decide.
+//
+// ids and rows are index-aligned. Best-effort, like the read's other display
+// enrichment: a failed probe omits the key on every row, which a client reads
+// as unknown rather than as a refusal. It runs outside the read's transaction
+// because the probe opens its own.
+func (ag *agentHandler) addCanWrite(ctx context.Context, orgID, userID string, ids []string, rows []map[string]any) {
+	if len(ids) == 0 {
+		return
+	}
+	writable, err := ag.az.WritableConversations(ctx, userID, orgID, ids)
+	if err != nil {
+		serverLog.Warn("conversation-write probe failed; omitting can_write", "error", err)
+		return
+	}
+	for i, id := range ids {
+		rows[i]["can_write"] = writable[id]
+	}
 }
 
 // addResumability puts the server's answer to "can a follow-up land on this
@@ -295,6 +323,7 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 	for i, a := range arts {
 		out[i] = deliverables.ToJSON(a)
 	}
+	deliverables.AddCanWrite(r.Context(), ag.az, orgID, userID, arts, out)
 	httpx.WriteList(w, page, out, total)
 }
 
@@ -788,15 +817,26 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var conv *domain.Conversation
 	var messages []domain.Message
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
+		// The messages read alone cannot tell an invisible or nonexistent
+		// conversation from an empty transcript: RLS hides the rows either way.
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil || conv == nil {
+			return e
+		}
 		messages, e = tx.Conversations.MessagesWindow(r.Context(), orgID, conversationID, db.MessageWindow{
 			SinceID: sinceID, BeforeID: beforeID, Limit: transcriptPageSize,
 		})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
+		return
+	}
+	if conv == nil {
+		notFound(w, "conversation")
 		return
 	}
 
@@ -847,13 +887,11 @@ func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int 
 // meanings of `open` that a user could only tell apart by which button they
 // pressed.
 //
-// A conversation not visible to the caller's org is 404 and discloses
-// nothing — the visibility read is RLS-scoped, so an id from another tenant
-// is indistinguishable from one that never existed. A conversation the caller
-// CAN see that has already concluded is 409 ALREADY_TERMINAL, the same answer
-// its sibling /message gives for the same state: the two verbs used to
-// disagree (404 here, 409 there) about one condition on one resource.
-// Anything else Stop returns is an internal fault on the way to stopping a conversation
+// The caller is checked by requireWritableConversation: 404 for a
+// conversation they cannot see, 403 for one they may only read. A
+// conversation the caller may act on that has already concluded is 409
+// ALREADY_TERMINAL, the same answer its sibling /message gives for the same
+// state. Anything else Stop returns is an internal fault on the way to stopping a conversation
 // that really was active — a failed read, a failed intent write — and goes through
 // internalError, which logs it and redacts the detail in multi mode. Reporting
 // those as 404 would tell the user their conversation is gone when it is still running.
@@ -872,13 +910,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteDelegationUnavailable(w)
 		return
 	}
-	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
-	if err != nil {
-		internalError(w, "agent", err)
-		return
-	}
-	if !visible {
-		notFound(w, "conversation")
+	if !ag.requireWritableConversation(w, r, orgID, userID, conversationID) {
 		return
 	}
 	if err := spawner.Stop(orgID, conversationID, userID); err != nil {
@@ -895,11 +927,53 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	ag.writeConversationResource(w, r, orgID, userID, conversationID)
 }
 
-// conversationVisible reports whether conversationID exists and is visible to the caller's org
-// (and team, under RLS). The steering control ops resolve a conversation by id against
-// in-memory state (the process registry, the permission broker), so this is the
-// authorization gate that stops a known conversation id from one tenant being acted on by
-// another: a non-existent or not-visible conversation reads as false → the caller 404s.
+// conversationViewOnlyMessage is the 403 body for a caller who can read a
+// conversation and may not act on it.
+const conversationViewOnlyMessage = "view-only access: you can read this conversation but not stop it, message it, or answer its prompts"
+
+// requireWritableConversation is the gate every route that acts on a
+// conversation runs first: stop, message, and a permission answer. Reading a
+// conversation does not imply acting on it, because an agent acts with its
+// team's credentials, so the rule is the conversations_update policy's
+// (authz.Checker.WritableConversations): a team viewer, an org member who is
+// not an admin on an org-visible conversation, and anyone but the creator of
+// a private one may read and may not act.
+//
+// The two refusals follow the disclosure rule. A conversation the caller
+// cannot see is 404, the same as one that never existed; one they can see and
+// may not act on is 403, since 404 for a row they can open reads as a bug.
+// Visibility is read first so the 403 never answers for an id the caller
+// cannot see.
+//
+// The steering ops resolve a conversation by id against in-memory state (the
+// process registry, the permission broker), which carries no claims, so this
+// gate is the whole authorization for them. It answers before anything is
+// recorded or broadcast. Writes a response and returns false when the request
+// may not proceed.
+func (ag *agentHandler) requireWritableConversation(w http.ResponseWriter, r *http.Request, orgID, userID, conversationID string) bool {
+	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
+	if err != nil {
+		internalError(w, "agent", err)
+		return false
+	}
+	if !visible {
+		notFound(w, "conversation")
+		return false
+	}
+	canWrite, err := ag.az.UserCanWriteConversation(r.Context(), userID, orgID, conversationID)
+	if err != nil {
+		internalError(w, "agent", fmt.Errorf("conversation-write check for %s: %w", conversationID, err))
+		return false
+	}
+	if !canWrite {
+		httpx.Forbidden(w, conversationViewOnlyMessage)
+		return false
+	}
+	return true
+}
+
+// conversationVisible reports whether conversationID exists and is visible to
+// the caller, read under their claims (RLS in multi mode).
 func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
 	var exists bool
 	err := ag.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -914,9 +988,9 @@ func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, 
 }
 
 // handleMessage routes a free-form user message to a conversation: a live conversation is
-// steered in place, a parked conversation is woken via resume. The conversation is read under
-// the caller's org first, so a conversation not visible to this org is 404 — the authz
-// gate before any control op.
+// steered in place, a parked conversation is woken via resume. requireWritableConversation
+// runs before any control op: 404 for a conversation the caller cannot see, 403 for one
+// they may only read, and neither records or broadcasts the message.
 //
 // Recording belongs to the delegate layer, and it happens only when the
 // message actually goes somewhere: a live steer records and broadcasts the
@@ -956,13 +1030,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
-	if err != nil {
-		internalError(w, "agent", err)
-		return
-	}
-	if !visible {
-		notFound(w, "conversation")
+	if !ag.requireWritableConversation(w, r, orgID, userID, conversationID) {
 		return
 	}
 
@@ -1053,10 +1121,10 @@ func steerErrorStatus(err error) (int, string) {
 // handleAgentPermission answers a pending tool-permission prompt a conversation surfaced
 // via a `permission_request` WS event. Body: {"behavior":"allow"|"deny",
 // "message"?:string,"updated_input"?:object}. The path's tool call id is the
-// tool_use id the prompt was raised for. The conversation is authorized under the
-// caller's org (RLS) first — like the message/interrupt endpoints — so a conversation not
-// visible to this org is 404; a prompt that isn't pending (already answered,
-// timed out, or never existed) is also 404. A 200 always answers with
+// tool_use id the prompt was raised for. requireWritableConversation runs first,
+// as it does for stop and message: a conversation the caller cannot see is 404,
+// and one they may only read is 403. A prompt that isn't pending (already
+// answered, timed out, or never existed) is also 404. A 200 always answers with
 // agentPermissionResolvedResponse — see its doc for why `permission` is
 // sometimes absent.
 func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Request) {
@@ -1092,15 +1160,9 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Authorize the conversation under the caller's org before touching the broker — the
-	// broker's own org check is a backstop, not a team-level RLS gate.
-	exists, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
-	if err != nil {
-		internalError(w, "agent", err)
-		return
-	}
-	if !exists {
-		notFound(w, "conversation")
+	// Authorize the conversation before touching the broker — the broker's own
+	// org check is a backstop, not a team-level gate.
+	if !ag.requireWritableConversation(w, r, orgID, userID, conversationID) {
 		return
 	}
 
@@ -1172,9 +1234,10 @@ type agentPermissionResolvedResponse struct {
 // Pending only. A history read is for the audit UI, which doesn't exist yet;
 // an ?include=all now would be a filter with no caller.
 //
-// Authorized exactly like handleAgentPermission: conversationVisible under the caller's
-// org before touching anything, so a conversation this org can't see is 404
-// rather than an empty list (which would confirm the id exists).
+// A read, so it asks only that the caller can see the conversation: a reader
+// who may not answer the prompts still learns that the agent is waiting. A
+// conversation the caller can't see is 404 rather than an empty list (which
+// would confirm the id exists).
 func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -1485,6 +1548,10 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	if req.IncludeMessages {
 		resp.Messages = map[string][]domain.MessageDTO{}
 	}
+	var (
+		pageIDs  []string
+		pageRows []map[string]any
+	)
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		convs, total, e := tx.Conversations.List(r.Context(), orgID,
 			db.ConversationListFilter{TaskIDs: taskIDs, TeamIDs: teamIDs, Statuses: statuses, Attention: req.Attention},
@@ -1499,6 +1566,11 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		enriched, e := enrichConversations(r.Context(), tx, orgID, convs)
 		if e != nil {
 			return e
+		}
+		pageRows = enriched
+		pageIDs = make([]string, len(convs))
+		for i := range convs {
+			pageIDs[i] = convs[i].ID
 		}
 		var primaryConversationIDs []string
 		seenTask := map[string]bool{}
@@ -1529,6 +1601,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		internalError(w, "agent", err)
 		return
 	}
+	ag.addCanWrite(r.Context(), orgID, userID, pageIDs, pageRows)
 	resp.NextPageToken = httpx.NextPageToken(page, len(flattenConversationGroups(resp.Runs)), resp.TotalCount)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1549,7 +1622,7 @@ func (s *Server) WSHub() *websocket.Hub {
 }
 
 func (s *Server) registerAgentRoutes() {
-	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
+	ag := &agentHandler{tx: s.tx, az: s.az, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
 	// Conversation-scoped deliverable read: the conversation's deliverables across

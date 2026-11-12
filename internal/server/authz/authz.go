@@ -322,34 +322,87 @@ func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgI
 
 // RequireTaskWrite is the front gate for a write against an existing task whose
 // team isn't in the URL (the swipe / snooze / requeue / advance family). It
-// mirrors the team branches of the tasks_update write RLS policy: the caller may
-// write the task when they can write at least one of its teams (its own team_id
-// or any of its task_teams), own it as a private task, or are an org admin of an
-// org-visible task. A viewer of every team the task belongs to gets a 403
-// "view-only access".
+// follows the tasks_update write RLS policy: the caller may write the task when
+// they can write its own team, can write one of its task_teams while it is
+// unclaimed, own it as a private task, or are an org admin of an org-visible
+// task.
 //
-// Crucially it does NOT mask a 404: when the task isn't visible to the caller at
-// all (no read access, or it doesn't exist) the gate returns true and lets the
-// handler's own not-found path render the 404 — so a viewer probing for a
-// task they can't see never learns whether it exists.
+// The two refusals follow the disclosure rule. A task the caller cannot see
+// (the tasks_select policy) is 404 with the same body as an id that does not
+// exist, so a caller probing for a task never learns whether it exists. One
+// they can see and may not write is 403 "view-only access". The gate writes
+// the 404 itself rather than leave it to the handler, because a handler may do
+// work keyed by the task id before its own read under the caller's claims, and
+// any answer that work gives for an invisible task would say the task exists.
 func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgID, userID, taskID string) bool {
 	if _, err := uuid.Parse(taskID); err != nil {
-		// A malformed id is "not found" downstream, not a role failure — let
-		// the handler's own uuid/preload path render it (404 parity).
-		return true
+		httpx.NotFound(w, "task")
+		return false
 	}
 	visible, canWrite, err := az.members().taskWritable(r.Context(), orgID, userID, taskID)
 	if err != nil {
 		httpx.InternalError(w, "authz", fmt.Errorf("task-write check %s/%s/%s: %w", userID, orgID, taskID, err))
 		return false
 	}
-	// Not visible → let the handler 404 (don't disclose existence). Visible but
-	// not writable → the role boundary; 403.
-	if visible && !canWrite {
+	if !visible {
+		httpx.NotFound(w, "task")
+		return false
+	}
+	if !canWrite {
 		writeForbidden(w, viewOnlyMessage)
 		return false
 	}
 	return true
+}
+
+// WritableConversations reports which of conversationIDs the caller may act
+// on: stop, message, or answer a permission prompt for. The rule is the
+// conversations_update policy's: the creator of a private conversation, a
+// writer of a team conversation's team (tf.user_can_write_team, so not a
+// viewer and not an archived team), and an org admin for an org-visible one.
+// The answer is the set of writable ids, keyed as the store spells them.
+//
+// An id the caller cannot see is never in the set, so a false answer does not
+// say whether the conversation exists. A route that owes a 404 for an
+// invisible conversation reads its visibility first and answers 403 only for
+// a conversation it has seen.
+func (az *Checker) WritableConversations(ctx context.Context, userID, orgID string, conversationIDs []string) (map[string]bool, error) {
+	return az.members().conversationsWritable(ctx, orgID, userID, conversationIDs)
+}
+
+// UserCanWriteConversation is WritableConversations for one id, in any
+// spelling uuid.Parse accepts: a path segment is not canonicalized before it
+// reaches here, and the set comes back keyed by the stored form.
+func (az *Checker) UserCanWriteConversation(ctx context.Context, userID, orgID, conversationID string) (bool, error) {
+	parsed, err := uuid.Parse(conversationID)
+	if err != nil {
+		return false, nil
+	}
+	id := parsed.String()
+	writable, err := az.WritableConversations(ctx, userID, orgID, []string{id})
+	if err != nil {
+		return false, err
+	}
+	return writable[id], nil
+}
+
+// UserCanWriteTask reports whether the caller may write taskID: the write half
+// of RequireTaskWrite, for a read that tells a client whether to offer a task
+// write. It is the same check the write routes run, so the control a client
+// shows and the route's answer agree. Every arm that admits the write also
+// admits the read, so a task the caller cannot see answers false.
+func (az *Checker) UserCanWriteTask(ctx context.Context, userID, orgID, taskID string) (bool, error) {
+	_, canWrite, err := az.members().taskWritable(ctx, orgID, userID, taskID)
+	return canWrite, err
+}
+
+// WritableTasks is UserCanWriteTask over many tasks, as the set of writable
+// ids keyed as the store spells them, for a list read that answers per row in
+// one query. It runs the predicate RequireTaskWrite's write half runs, so a
+// row on a list, the task's detail read, and the write routes give one answer.
+// An id the caller cannot see is never in the set.
+func (az *Checker) WritableTasks(ctx context.Context, userID, orgID string, taskIDs []string) (map[string]bool, error) {
+	return az.members().tasksWritable(ctx, orgID, userID, taskIDs)
 }
 
 // UserOwnsOrg returns true when the calling user is the founder/owner of the

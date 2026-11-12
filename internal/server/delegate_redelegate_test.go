@@ -67,7 +67,7 @@ func redelegateFixture(t *testing.T, s *Server, tag string) (taskID, blueprintID
 func delegateOnce(t *testing.T, s *Server, taskID, blueprintID string) string {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate",
-		map[string]any{"hesitation_ms": 0, "blueprint_id": blueprintID})
+		map[string]any{"blueprint_id": blueprintID})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delegate = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestTaskDelegate_RefusesAHeldRunWithoutTouchingIt(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate",
-		map[string]any{"hesitation_ms": 0, "blueprint_id": blueprintID})
+		map[string]any{"blueprint_id": blueprintID})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("re-delegate onto a held run = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}

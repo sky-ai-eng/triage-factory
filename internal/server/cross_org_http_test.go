@@ -159,7 +159,7 @@ func TestCrossOrgHTTP_TaskClaim(t *testing.T) {
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	taskA := seedTaskInOrg(t, r, orgA, alice, "task-claim")
 
-	body := map[string]any{"hesitation_ms": 0}
+	body := map[string]any{}
 	if got := r.postJSONWithSid("POST", "/api/tasks/"+taskA+"/claim", sidA, body).StatusCode; got != http.StatusOK {
 		t.Errorf("alice POST claim on own task = %d, want 200", got)
 	}

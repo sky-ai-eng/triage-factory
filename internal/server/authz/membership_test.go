@@ -48,3 +48,26 @@ func TestLocalMembership_OrgFacts(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalMembership_BatchedWriteProbes: N=1's sole user writes every task
+// and acts on every conversation, so every id asked about comes back writable.
+func TestLocalMembership_BatchedWriteProbes(t *testing.T) {
+	ids := []string{"00000000-0000-0000-0000-0000000000a1", "00000000-0000-0000-0000-0000000000a2"}
+	for name, probe := range map[string]func(context.Context, string, string, []string) (map[string]bool, error){
+		"conversationsWritable": localMembership{}.conversationsWritable,
+		"tasksWritable":         localMembership{}.tasksWritable,
+	} {
+		got, err := probe(context.Background(), runmode.LocalDefaultOrgID, "u1", ids)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) != len(ids) {
+			t.Fatalf("%s = %v, want every id", name, got)
+		}
+		for _, id := range ids {
+			if !got[id] {
+				t.Errorf("%s[%s] = false, want true", name, id)
+			}
+		}
+	}
+}

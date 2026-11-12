@@ -12,18 +12,16 @@ import (
 
 // TaskCloseDeferralStores are the stores the held-close suite drives: the
 // hold's writes and reads on TaskStore, the terminating close that holds in
-// its transaction, the staged notes a cleared hold withdraws, the requeue
-// and undo that return a task to the queue, and the person's message and the
-// stop request that keep a conversation from expiring.
+// its transaction, the staged notes a cleared hold withdraws, the requeue that
+// returns a task to the queue, and the person's message and the stop request
+// that keep a conversation from expiring.
 type TaskCloseDeferralStores struct {
 	Tasks            db.TaskStore
 	Entities         db.EntityStore
 	StagedInjections db.StagedInjectionStore
-	Swipes           db.SwipeStore
 	Conversations    db.ConversationStore
-	// SwipeUserID is who a swipe written through Swipes is attributed to,
-	// which an undo's guard keys on, and who writes a person's message.
-	SwipeUserID string
+	// UserID is the person who writes a message to a conversation.
+	UserID string
 }
 
 // TaskCloseDeferralSeeder stages the graph a held close spans — task, closing
@@ -59,7 +57,7 @@ type TaskCloseDeferralFactory func(t *testing.T) (stores TaskCloseDeferralStores
 // RunTaskCloseDeferralConformance is the shared suite for a task's held
 // close: TaskStore.CloseOrHoldSystem, ApplyHeldCloseSystem,
 // CloseDeferralForTaskSystem, ListActiveCloseDeferralsSystem,
-// ClearCloseDeferralSystem, the clear a bump, a requeue or an undo makes, the
+// ClearCloseDeferralSystem, the clear a bump or a requeue makes, the
 // hold arm of EntityStore.CloseTerminalSystem, what holds a close: a working
 // conversation, and a deliverable awaiting a person, and the expiry of the
 // work an event started under a hold kept too long: when the hold began,
@@ -82,14 +80,24 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 	t.Run("Working_predicate", func(t *testing.T) {
 		// run is the blueprint's status, "" for running.
 		cases := []struct {
-			name    string
-			run     string
-			status  string
-			stage   func(t *testing.T, seed TaskCloseDeferralSeeder, runID, convID string)
+			name   string
+			run    string
+			status string
+			stage  func(t *testing.T, seed TaskCloseDeferralSeeder, runID, convID string)
+			// phase is the active claim's phase, set after stage.
+			phase   string
 			working bool
 		}{
 			{name: "mid_flight", status: "", working: true},
 			{name: "active_claim", status: domain.StatusOpen, working: true,
+				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
+			// A warm claim holds its conversation, but its turn ended and wrote
+			// its verdict, so nothing works under it.
+			{name: "warm_claim", run: string(domain.BlueprintRunStatusCompleted), status: SeedConcluded, phase: domain.ClaimPhaseWarm,
+				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
+			// A follow-up resumed the conversation onto its warm claim, whose
+			// engagement is about to drive it.
+			{name: "warm_claim_resumed", run: string(domain.BlueprintRunStatusCompleted), status: "", phase: domain.ClaimPhaseWarm, working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			{name: "held_by_a_hand_back", status: "", working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.HoldUntilLater(t, convID) }},
@@ -111,6 +119,11 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 				runID, convID := seed.BlueprintAndConversation(t, taskID, run, tc.status)
 				if tc.stage != nil {
 					tc.stage(t, seed, runID, convID)
+				}
+				if tc.phase != "" {
+					if _, err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, orgID, convID, tc.phase); err != nil {
+						t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", tc.phase, err)
+					}
 				}
 				// Nothing else holds the task, so the close holds exactly
 				// when the conversation is working.
@@ -306,24 +319,20 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 
 	t.Run("Returning_a_task_to_the_queue_cancels_its_hold", func(t *testing.T) {
 		stores, orgID, seed := mk(t)
-		// A requeue of a task still working, and an undo of a person's
+		// A requeue of a task still working, and a requeue of a person's
 		// dismiss of one: either way the person's gesture outranks the event.
-		for _, door := range []string{"requeue", "undo"} {
+		for _, door := range []string{"requeue", "requeue after a dismiss"} {
 			taskID := seed.Task(t)
 			seed.BlueprintAndConversation(t, taskID, "running", "")
 			if out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, taskID)); err != nil || !out.Held {
 				t.Fatalf("%s: CloseOrHoldSystem = %+v (err %v), want held", door, out, err)
 			}
-			var ok bool
-			var err error
-			if door == "requeue" {
-				ok, err = stores.Swipes.RequeueTask(ctx, orgID, taskID)
-			} else {
-				if _, dismissed, derr := stores.Swipes.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); derr != nil || !dismissed {
-					t.Fatalf("undo: dismiss = %v (err %v)", dismissed, derr)
+			if door != "requeue" {
+				if _, err := stores.Tasks.CloseByUser(ctx, orgID, taskID, "dismissed"); err != nil {
+					t.Fatalf("%s: CloseByUser = %v", door, err)
 				}
-				ok, err = stores.Swipes.UndoLastSwipe(ctx, orgID, taskID, stores.SwipeUserID)
 			}
+			ok, err := stores.Tasks.RequeueTask(ctx, orgID, taskID)
 			if err != nil || !ok {
 				t.Fatalf("%s = %v (err %v), want the task back in the queue", door, ok, err)
 			}
@@ -619,7 +628,7 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 	personWrites := func(t *testing.T, stores TaskCloseDeferralStores, orgID, conversationID string) {
 		t.Helper()
 		if _, err := stores.Conversations.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: conversationID, UserID: stores.SwipeUserID, Role: "user", Content: "one more thing",
+			ConversationID: conversationID, UserID: stores.UserID, Role: "user", Content: "one more thing",
 		}); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -35,7 +37,7 @@ func TestTaskPatchStage_RejectsUnclaimedTask(t *testing.T) {
 }
 
 // TestTaskPatch_RejectsEveryMutationOnATerminalTask: a closed task takes no
-// PATCH at all, a second close included; re-opening is requeue's and undo's job.
+// PATCH at all, a second close included; re-opening is requeue's job.
 func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 	s := newTestServer(t)
 
@@ -84,24 +86,17 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 		t.Fatalf("after the first close: closed_at=%q close_reason=%q; want both stamped", closedAt, closeReason)
 	}
 
-	for _, action := range []string{"complete", "dismiss"} {
-		_, ok, err := s.swipes.RecordSwipe(t.Context(), runmode.LocalDefaultOrgID, taskID, action, 0, nil)
-		if err != nil {
-			t.Fatalf("RecordSwipe(%s) on a closed task: %v", action, err)
-		}
-		if ok {
-			t.Fatalf("RecordSwipe(%s) returned ok=true against a closed task", action)
+	for _, status := range []string{"done", "dismissed"} {
+		if _, err := s.tasks.CloseByUser(t.Context(), runmode.LocalDefaultOrgID, taskID, status); !errors.Is(err, db.ErrNoSuchTask) {
+			t.Fatalf("CloseByUser(%s) on a closed task = %v, want db.ErrNoSuchTask", status, err)
 		}
 		gotAt, gotReason := readTaskClose(t, s.db, taskID)
 		if gotAt != closedAt || gotReason != closeReason {
-			t.Fatalf("close metadata rewritten by a second %s: (%q, %q) want (%q, %q)",
-				action, gotAt, gotReason, closedAt, closeReason)
+			t.Fatalf("close metadata rewritten by a second close as %s: (%q, %q) want (%q, %q)",
+				status, gotAt, gotReason, closedAt, closeReason)
 		}
 		if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
-			t.Fatalf("status = %q after a refused %s, want the original dismissed", got, action)
-		}
-		if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, []string{"dismiss"}) {
-			t.Fatalf("swipe_events actions = %v, want [dismiss] (a refused close leaves no trace)", got)
+			t.Fatalf("status = %q after a refused close as %s, want the original dismissed", got, status)
 		}
 	}
 }
@@ -120,7 +115,7 @@ func readTaskClose(t *testing.T, database *sql.DB, taskID string) (closedAt, clo
 }
 
 // TestTaskPatch_RejectsUnwritableStatuses pins the accepted set: 'queued' is
-// requeue's and undo's, 'snoozed' is spelled by snooze_until, and any word outside
+// requeue's, 'snoozed' is spelled by snooze_until, and any word outside
 // the vocabulary is a 400.
 func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	s := newTestServer(t)
@@ -151,7 +146,7 @@ func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 		want int
 	}{
 		"empty_body":          {map[string]any{}, http.StatusBadRequest},
-		"hesitation_only":     {map[string]any{"hesitation_ms": 400}, http.StatusBadRequest},
+		"unknown_field_only":  {map[string]any{"hesitation_ms": 400}, http.StatusBadRequest},
 		"unwritable_status":   {map[string]any{"status": "queued"}, http.StatusBadRequest},
 		"both_axes":           {map[string]any{"status": "done", "snooze_until": nil}, http.StatusBadRequest},
 		"both_axes_with_wake": {map[string]any{"status": "done", "snooze_until": "2999-01-01T00:00:00Z"}, http.StatusBadRequest},
@@ -169,33 +164,6 @@ func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestTaskPatch_RejectsHesitationWhereNoGestureLands: hesitation_ms is refused
-// rather than dropped on an arm with no swipe_events row to carry it, and a
-// negative one is refused everywhere.
-func TestTaskPatch_RejectsHesitationWhereNoGestureLands(t *testing.T) {
-	s := newTestServer(t)
-
-	t.Run("stage", func(t *testing.T) {
-		taskID := seedLifecycleTask(t, s.db, "hesitation-stage", lifecycleTaskOpts{
-			claimedByUserID: runmode.LocalDefaultUserID,
-		})
-		rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-			map[string]any{"status": "in_progress", "hesitation_ms": 250})
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-	})
-
-	t.Run("negative_on_a_gesture_arm", func(t *testing.T) {
-		taskID := seedLifecycleTask(t, s.db, "hesitation-negative", lifecycleTaskOpts{})
-		rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-			map[string]any{"status": "dismissed", "hesitation_ms": -1})
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-	})
 }
 
 // TestTaskPatchStage_HappyPath_ReassertsInProgress: the holder re-asserts
@@ -224,11 +192,6 @@ func TestTaskPatchStage_HappyPath_ReassertsInProgress(t *testing.T) {
 	}
 	if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
 		t.Errorf("task.status = %q, want %q", got, "in_progress")
-	}
-	// A stage move is a field write, not a card gesture: nothing lands in the
-	// swipe analytics.
-	if got := readSwipeActions(t, s.db, taskID); len(got) != 0 {
-		t.Errorf("swipe_events actions = %v, want none for a stage move", got)
 	}
 }
 

@@ -138,6 +138,27 @@ describe('DeliverableList', () => {
     expect(screen.getByRole('button', { name: /dismiss review/i })).toBeInTheDocument()
   })
 
+  it('offers no dismiss on a pending row the caller may not write, and still opens it', async () => {
+    const onOpen = vi.fn()
+    mockDeliverables([
+      art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'pr-row', can_write: false }),
+      art({ id: 'rv1', kind: 'review', state: 'pending', target: 'review-row', can_write: true }),
+    ])
+    render(
+      <DeliverableList
+        conversationId="r1"
+        onOpenApproval={onOpen}
+        pendingDeliverableIds={['pr1', 'rv1']}
+      />,
+    )
+
+    // The overlay only reads, so a view-only row still opens it.
+    fireEvent.click(await screen.findByRole('button', { name: /Open pull request/ }))
+    expect(onOpen).toHaveBeenCalledWith('pr', 'pr1')
+    expect(screen.queryByRole('button', { name: /dismiss pull request/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /dismiss review/i })).toBeInTheDocument()
+  })
+
   it('dismisses a pending row in place: POST, refetch, onResolved', async () => {
     const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
     const onResolved = vi.fn()

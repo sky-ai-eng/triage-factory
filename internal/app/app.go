@@ -80,6 +80,10 @@ type App struct {
 	// wait on work an event started.
 	closeHoldTimeout time.Duration
 
+	// claimWarmWindow is TF_CLAIM_WARM_WINDOW, read in New on a dispatching
+	// process: how long an engagement waits warm after a person's turn.
+	claimWarmWindow time.Duration
+
 	// identity is this process's persistent instance identity — resolved
 	// first thing in New, held for the process lifetime via an
 	// exclusive file lock, released in Close. bootEpoch is the fleet
@@ -366,6 +370,11 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	}
 	if a.plan.brain {
 		if a.closeHoldTimeout, err = routing.ParseCloseHoldTimeout(os.Getenv("TF_CLOSE_HOLD_TIMEOUT")); err != nil {
+			return nil, err
+		}
+	}
+	if a.plan.dispatcher {
+		if a.claimWarmWindow, err = delegate.ParseWarmWindow(os.Getenv("TF_CLAIM_WARM_WINDOW")); err != nil {
 			return nil, err
 		}
 	}
@@ -678,7 +687,7 @@ func (a *App) wire() {
 		// The GitHub webhook receivers, after a delivery's refresh marks
 		// commit.
 		a.srv.SetOnGitHubRefreshMarked(a.githubRefreshMarked)
-		// The boundaries the server itself stamps (requeue/undo, takeover,
+		// The boundaries the server itself stamps (requeue, takeover,
 		// delegate, team archive) and the configuration saves that may have
 		// fixed what a failed generation was waiting on.
 		a.srv.SetOnMemoryOwed(a.memoryOwed)

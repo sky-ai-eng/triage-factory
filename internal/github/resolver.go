@@ -172,20 +172,21 @@ type OrgIdentity struct {
 // identity together with the account id it belongs to, from the same
 // resolution. A caller that has to tell the org's account apart from a
 // person's compares the ids; a Resolver that doesn't implement it leaves the
-// caller with OrgIdentityFor and the login alone.
+// caller with OrgIdentityFor and the login alone. ok and the error mean what
+// they mean on OrgIdentityFor.
 type OrgIdentityAccountResolver interface {
-	OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool)
+	OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool, error)
 }
 
 // OrgIdentityAccount is the org's commit identity with its account id: through
 // OrgIdentityAccountResolver when resolver implements it, and through
 // OrgIdentityFor, with no account id, when it does not.
-func OrgIdentityAccount(ctx context.Context, resolver Resolver, orgID string) (OrgIdentity, bool) {
+func OrgIdentityAccount(ctx context.Context, resolver Resolver, orgID string) (OrgIdentity, bool, error) {
 	if ar, ok := resolver.(OrgIdentityAccountResolver); ok {
 		return ar.OrgIdentityAccountFor(ctx, orgID)
 	}
-	name, email, ok := resolver.OrgIdentityFor(ctx, orgID)
-	return OrgIdentity{Name: name, Email: email}, ok
+	name, email, ok, err := resolver.OrgIdentityFor(ctx, orgID)
+	return OrgIdentity{Name: name, Email: email}, ok, err
 }
 
 // BotAccount is the GitHub account an App acts as: its bot user's login,
@@ -422,14 +423,23 @@ type Resolver interface {
 	//	       resolver uses, so a value left behind when the PAT was cleared can't
 	//	       resurface as a stale identity for an org that no longer has it.
 	//
-	// ok=false when neither resolves — no App, or no live PAT / no stored PAT
-	// login (an org bound before TFAC-452, or a read error). The caller then
-	// leaves git identity unset and the agent inherits ambient config, never a
-	// fabricated identity; it self-heals on the next PAT re-save / App re-register.
+	// ok=false with no error is an org that has no identity: no GitHub
+	// credential, a staged or inactive App with no PAT behind it, no stored PAT
+	// login (a PAT bound before the login was captured carries none), or a
+	// managed org whose established deployment App has no bot to commit as. The
+	// caller stamps no identity, never a fabricated one; it self-heals on the
+	// next PAT re-save / App re-register.
+	//
+	// An error is a read that failed — the credential class, the org's App
+	// registration or the deployment App's preflight, the PAT, or the stored
+	// login — or a credential class this build does not know
+	// (ErrUnknownCredentialClass). It never reads as absence: an org that has
+	// an identity this call could not read would otherwise commit as something
+	// else, so the caller refuses whatever needed the identity instead.
 	//
 	// OrgIdentityAccountResolver reports the same identity together with the
 	// GitHub account id it belongs to.
-	OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool)
+	OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool, err error)
 }
 
 type resolver struct {
@@ -1202,19 +1212,16 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // Resolver interface doc for the tier semantics. App is probed first (the bot
 // account "<slug>[bot]") and PAT (agents.github_org_login) second, matching
 // ClientFor's App-preferred order. Both reads use the System (claims-free)
-// door like the rest of the resolver. A read error on either tier is
-// non-fatal — it falls through, and an all-miss returns ok=false so the caller
-// stamps no identity rather than a fabricated one.
+// door like the rest of the resolver.
 //
 // Which tier is even eligible follows the org's credential CLASS, the same gate
 // activeApp uses, so the identity stamped on a commit always describes the
-// credential system that produced it. A class this build doesn't know (or that
-// can't be read) yields no identity at all rather than the PAT tier's login:
-// the whole posture of this function is to refuse a fabricated identity, and
-// under an unrecognised class the PAT login would be exactly that.
-func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
-	id, ok := r.OrgIdentityAccountFor(ctx, orgID)
-	return id.Name, id.Email, ok
+// credential system that produced it. A class this build doesn't know is an
+// error rather than the PAT tier's login, which under an unrecognised class
+// would be an identity for a credential nobody can say the org holds.
+func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool, err error) {
+	id, ok, err := r.OrgIdentityAccountFor(ctx, orgID)
+	return id.Name, id.Email, ok, err
 }
 
 // AppBotAccountFor is the bot account of the App activeApp resolves for the
@@ -1240,21 +1247,37 @@ func (r *resolver) AppBotAccountFor(ctx context.Context, orgID string) (BotAccou
 // it resolves: the App's bot user id (org_github_apps.bot_user_id, or the
 // deployment App's) on the App tier, and agents.github_org_user_id on the PAT
 // tier, "" where it is not stored.
-func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool) {
+//
+// No tier falls through on an error. The App tier hands over to the PAT tier
+// only when it has read that the org is not committing as an App — a staged
+// App during a PAT→App switch, when the org is in the App system but still
+// commits as its PAT. An App it could not read is not that answer: for an org
+// on its own App with a PAT still stored, falling through would author the
+// run's commits as the PAT's owner, a person, while every token it pushes
+// with is the App's.
+func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (OrgIdentity, bool, error) {
 	class, host, err := r.credentialClassFor(ctx, orgID)
-	if err != nil || !class.Known() {
-		ghResolverLog.Warn("resolve credential class failed or unknown; stamping no org identity",
-			"org", orgID, "class", class, "error", err)
-		return OrgIdentity{}, false
+	if err != nil {
+		return OrgIdentity{}, false, err
+	}
+	if !class.Known() {
+		return OrgIdentity{}, false, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
 
 	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
 	// from the App registration, resolved live — no stored column, and
 	// installation-independent (the bot is one global account however many
-	// installations the App has). A staged/inactive App or a read error skips to
-	// PAT rather than claiming an identity the org isn't acting as — during a
-	// PAT→App switch the org is in the App system but still committing as its PAT.
-	if app, err := r.appForIdentity(ctx, orgID, class, host); err == nil && app.commitIdentityReady() {
+	// installations the App has).
+	app, err := r.appForIdentity(ctx, orgID, class, host)
+	switch {
+	case errors.Is(err, ErrNoGitHubCredentials):
+		// Only the managed arm reads the host: a managed org with no GitHub
+		// URL has no credential, so it has no identity.
+		return OrgIdentity{}, false, nil
+	case err != nil:
+		return OrgIdentity{}, false, fmt.Errorf("resolve the app commit identity for org %s: %w", orgID, err)
+	}
+	if app.commitIdentityReady() {
 		out := OrgIdentity{Name: app.slug() + "[bot]"}
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain
@@ -1267,16 +1290,14 @@ func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (Org
 		} else {
 			out.Email = out.Name + "@users.noreply.github.com"
 		}
-		return out, true
+		return out, true, nil
 	}
 	// A managed org has no PAT tier to fall to. Its credential is the deployment
 	// App — activeApp refuses rather than borrowing a PAT — so the cached PAT
 	// login below would be an identity for a credential the org is not
-	// acting as, stamped precisely when the shared App is unusable and nobody is
-	// looking at commit authorship. Stamp nothing instead, exactly as an
-	// unrecognised class does, and let the agent inherit ambient git config.
+	// acting as.
 	if class == domain.GitHubCredentialClassManagedApp {
-		return OrgIdentity{}, false
+		return OrgIdentity{}, false, nil
 	}
 
 	// PAT tier: the identity the org PAT authenticates as. The agents columns
@@ -1288,23 +1309,33 @@ func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (Org
 	// resolver's tier-3 uses (tier3PATClient / TokenFor): the login can only
 	// resurface while the credential it describes still exists, so a stale value
 	// left behind after a PAT clear (or a GitHub disconnect) never becomes a
-	// commit identity for an org that no longer has a PAT. A read error is
-	// conservative (treated as no PAT → no identity), never a fabricated one.
+	// commit identity for an org that no longer has a PAT.
 	//
 	// A PAT with no GitHub URL to send it to authenticates as nobody, so it
 	// lends no identity.
 	if _, err := host(); err != nil {
-		return OrgIdentity{}, false
+		if errors.Is(err, ErrNoGitHubCredentials) {
+			return OrgIdentity{}, false, nil
+		}
+		return OrgIdentity{}, false, err
 	}
-	if pat, err := r.orgPAT(ctx, orgID); err != nil || pat == "" {
-		return OrgIdentity{}, false
+	pat, err := r.orgPAT(ctx, orgID)
+	if err != nil {
+		return OrgIdentity{}, false, err
+	}
+	if pat == "" {
+		return OrgIdentity{}, false, nil
+	}
+	agent, err := r.agents.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		return OrgIdentity{}, false, fmt.Errorf("read the pat commit identity for org %s: %w", orgID, err)
 	}
 	// PAT present: trust the captured pair. A partial identity cannot stamp a
 	// commit; it self-heals on the next PAT save.
-	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" && agent.GitHubOrgEmail != "" {
-		return OrgIdentity{Name: agent.GitHubOrgLogin, Email: agent.GitHubOrgEmail, AccountID: agent.GitHubOrgUserID}, true
+	if agent == nil || agent.GitHubOrgLogin == "" || agent.GitHubOrgEmail == "" {
+		return OrgIdentity{}, false, nil
 	}
-	return OrgIdentity{}, false
+	return OrgIdentity{Name: agent.GitHubOrgLogin, Email: agent.GitHubOrgEmail, AccountID: agent.GitHubOrgUserID}, true, nil
 }
 
 // accountRef names the GitHub account whose installation a caller needs. The

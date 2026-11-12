@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"net/http"
 	"testing"
 
@@ -81,10 +82,10 @@ func TestSnooze_PastWakeTimeRejected(t *testing.T) {
 	}
 }
 
-// TestTaskGestures_NegativeHesitationRejected: every route that takes
-// hesitation_ms refuses a negative value with 400 OUT_OF_RANGE, since it would
-// land in swipe_events and skew dwell-time aggregates nothing re-validates.
-func TestTaskGestures_NegativeHesitationRejected(t *testing.T) {
+// TestTaskGestures_RefuseHesitation: hesitation_ms is not a field of the
+// PATCH, claim, or delegate body, so strict decoding refuses it as unknown on
+// every arm, whatever its value, and nothing is written.
+func TestTaskGestures_RefuseHesitation(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
@@ -94,18 +95,26 @@ func TestTaskGestures_NegativeHesitationRejected(t *testing.T) {
 		path   string
 		body   map[string]any
 	}{
-		{"patch_dismiss", http.MethodPatch, "", map[string]any{"status": "dismissed", "hesitation_ms": -1}},
-		{"patch_snooze", http.MethodPatch, "", map[string]any{"snooze_until": "2999-01-01T00:00:00Z", "hesitation_ms": -1}},
-		{"claim", http.MethodPost, "/claim", map[string]any{"hesitation_ms": -1}},
-		{"delegate", http.MethodPost, "/delegate", map[string]any{"hesitation_ms": -1}},
+		{"patch_dismiss", http.MethodPatch, "", map[string]any{"status": "dismissed", "hesitation_ms": 0}},
+		{"patch_snooze", http.MethodPatch, "", map[string]any{"snooze_until": "2999-01-01T00:00:00Z", "hesitation_ms": 250}},
+		{"claim", http.MethodPost, "/claim", map[string]any{"hesitation_ms": 250}},
+		{"delegate", http.MethodPost, "/delegate", map[string]any{"hesitation_ms": 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			taskID := seedLifecycleTask(t, s.db, "hesitation-"+tc.name, lifecycleTaskOpts{})
 			rec := doJSON(t, s, tc.method, "/api/tasks/"+taskID+tc.path, tc.body)
 			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("%s with hesitation_ms=-1 = %d, want 400; body=%s", tc.name, rec.Code, rec.Body.String())
+				t.Fatalf("%s with hesitation_ms = %d, want 400; body=%s", tc.name, rec.Code, rec.Body.String())
 			}
-			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "hesitation_ms")
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, "hesitation_ms")
+			var status string
+			var claimedBy sql.NullString
+			if err := s.db.QueryRow(`SELECT status, COALESCE(claimed_by_user_id, claimed_by_agent_id) FROM tasks WHERE id = ?`, taskID).Scan(&status, &claimedBy); err != nil {
+				t.Fatalf("read task: %v", err)
+			}
+			if status != "queued" || claimedBy.Valid {
+				t.Errorf("task = (%s, claimed by %v) after a refused body, want it untouched (queued, unclaimed)", status, claimedBy)
+			}
 		})
 	}
 }

@@ -46,7 +46,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 )
 
 // The two terminal deny messages a surfaced prompt can resolve to without a
@@ -62,8 +62,8 @@ import (
 // retrying is futile, and what to do instead.
 
 // permDenyNoOperator is the deny reason for a prompt nobody could have
-// answered: no answer-capable, focused tab was open in the run's org for the
-// whole grace window.
+// answered: nobody who may read the conversation had an answer-capable,
+// focused tab open for the whole grace window.
 func permDenyNoOperator(grace time.Duration) string {
 	return "This tool call required permission from a human, but nobody is watching this run — " +
 		"there was no operator on the board or the run's page to approve it. " +
@@ -117,9 +117,10 @@ func countOf(n int, unit string) string {
 }
 
 // defaultPresencePollInterval is how often the presence-gated wait re-checks
-// whether an answer-capable, focused tab is present in the run's org. 1s is
-// fine-grained enough for a 15s-default grace while staying cheap (an RLock +
-// map scan over the hub's clients). Tests inject a shorter value via
+// whether an answer-capable, focused tab is present for the conversation. 1s
+// is fine-grained enough for a 15s-default grace while staying cheap: an
+// RLock + map scan over the hub's clients, plus in multi mode the audience
+// read and the ws_presence read. Tests inject a shorter value via
 // SetPresencePollInterval to drive the absent/present paths deterministically.
 const defaultPresencePollInterval = time.Second
 
@@ -338,19 +339,13 @@ func (s *Spawner) BrowserPermissionHandler(orgID, conversationID, claimID string
 		// all (refresh, second tab, cold load) finds it too.
 		s.recordPermissionRequest(orgID, conversationID, claimID, full, req)
 
-		// Hub.Broadcast is nil-receiver-safe, so no guard is needed for the
-		// hub-less test spawner. The payload is deliberately just the id: the
-		// prompt itself is read from
-		// GET /api/agent/conversations/{id}/permissions, so the socket is a
-		// refetch trigger like deliverable_updated rather than the sole carrier of
-		// state no other path can reach. That costs one round-trip before a
-		// prompt renders, which is nothing against a human-paced, rare event.
-		s.wsHub.Broadcast(websocket.Event{
-			Type:           "permission_request",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           map[string]any{"tool_call_id": req.ToolCallID},
-		})
+		// The payload is deliberately just the id: the prompt itself is read
+		// from GET /api/agent/conversations/{id}/permissions, so the socket is
+		// a refetch trigger like deliverable_updated rather than the sole
+		// carrier of state no other path can reach. That costs one round-trip
+		// before a prompt renders, which is nothing against a human-paced,
+		// rare event.
+		s.frames().PermissionRequest(context.Background(), orgID, conversationID, conversationframe.PermissionUpdate{ToolCallID: req.ToolCallID})
 
 		decision, got, reason, why := s.awaitPermission(ch, orgID, conversationID, full, deadline, absent)
 		if got {
@@ -514,8 +509,9 @@ func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
 //
 // With absent.enabled false this is the exact legacy select: ch vs the full
 // window. With it enabled the wait polls presence on a short ticker and tracks
-// two deadlines: the full window (always), and the grace clock (only while no
-// answer-capable, focused tab is present in the run's org). The effective
+// two deadlines: the full window (always), and the grace clock (only while
+// nobody who may read the conversation has an answer-capable, focused tab
+// open; see presentFor). The effective
 // deadline is whichever is sooner; presence flipping to present re-arms the wait
 // to the full window (disarming graceTimer), and flipping back restarts the
 // grace clock. The grace deadline never exceeds the full window (clampGrace), so the
@@ -545,7 +541,20 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, c
 	ticker := time.NewTicker(s.presencePollInterval())
 	defer ticker.Stop()
 
-	present := s.presentFor(orgID, conversationID)
+	// A failed audience read reads as absent on every poll until it
+	// recovers; logging only its first failure keeps an outage to one line
+	// per wait rather than one per poll.
+	audienceFailing := false
+	checkPresent := func() bool {
+		present, err := s.presentFor(orgID, conversationID)
+		if err != nil && !audienceFailing {
+			delegateLog.Warn("resolve presence audience failed; counting nobody present until it succeeds", "org", orgID, "conversation", conversationID, "error", err)
+		}
+		audienceFailing = err != nil
+		return present
+	}
+
+	present := checkPresent()
 	graceTimer := time.NewTimer(absent.grace)
 	defer graceTimer.Stop()
 	if present {
@@ -570,7 +579,7 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, c
 			// not from when the prompt was raised.
 			return agentproc.PermissionDecision{}, false, permDenyNoOperator(absent.grace), domain.PermissionReasonAbsent
 		case <-ticker.C:
-			now := s.presentFor(orgID, conversationID)
+			now := checkPresent()
 			switch {
 			case now && !present:
 				// became present: stop the absent clock, re-arm to full window.
@@ -608,22 +617,33 @@ func resetTimer(t *time.Timer, d time.Duration) {
 	t.Reset(d)
 }
 
-// presentFor reports whether any answer-capable, focused tab in orgID is on the
-// board or this run's detail page (TFAC-392). In multi mode, once
-// SetPresenceChecker has wired a fleet-wide checker (TFAC-584), this
-// consults it — local Hub state OR the ws_presence table — so a reviewer
-// connected to a different pod than the one running this run still
-// counts. Otherwise (local mode, or before wiring) it falls back to the
-// hub directly, which is nil-receiver-safe (the hub-less test spawner
+// presentFor reports whether anyone who may read conversationID has an
+// answer-capable, focused tab on the board or this run's detail page. Who
+// may read it is the audience its permission frames go to, read fresh on
+// every check (conversationframe.AudienceFunc.Readers), since a tab that
+// never receives the prompt cannot answer it; local mode wires no audience,
+// so any tab in the org counts. Nobody may read it when the read fails (err
+// is the failure) or names nobody, and that reads as absent, the direction
+// the fast-deny already fails in.
+//
+// In multi mode, once SetPresenceChecker has wired a fleet-wide checker,
+// this consults it — local Hub state OR the ws_presence table — so a
+// reviewer connected to a different pod than the one running this run
+// still counts. Otherwise (local mode, or before wiring) it falls back to
+// the hub directly, which is nil-receiver-safe (the hub-less test spawner
 // reads as "nobody present").
-func (s *Spawner) presentFor(orgID, conversationID string) bool {
+func (s *Spawner) presentFor(orgID, conversationID string) (bool, error) {
+	userIDs, ok, err := s.frameAudience.Readers(context.Background(), orgID, conversationID)
+	if !ok {
+		return false, err
+	}
 	s.mu.Lock()
 	pc := s.presence
 	s.mu.Unlock()
 	if pc != nil {
-		return pc.PresentFor(context.Background(), orgID, conversationID)
+		return pc.PresentFor(context.Background(), orgID, conversationID, userIDs), nil
 	}
-	return s.wsHub.PresentFor(orgID, conversationID)
+	return s.wsHub.PresentFor(orgID, conversationID, userIDs), nil
 }
 
 // presencePollInterval is the absent-deny presence poll cadence, falling back to
@@ -650,16 +670,9 @@ func (s *Spawner) SetPresencePollInterval(d time.Duration) {
 // terminal resolution (answered or timed out) so every surface rendering it —
 // the board card and the run-detail dock, or two board tabs — drops it promptly
 // instead of waiting out its own client-side TTL. The client TTL stays as a
-// backstop for a dropped/missed event. Hub.Broadcast is nil-receiver-safe.
+// backstop for a dropped/missed event.
 func (s *Spawner) broadcastPermissionResolved(orgID, conversationID, toolCallID string) {
-	s.wsHub.Broadcast(websocket.Event{
-		Type:           "permission_resolved",
-		OrgID:          orgID,
-		ConversationID: conversationID,
-		Data: map[string]any{
-			"tool_call_id": toolCallID,
-		},
-	})
+	s.frames().PermissionResolved(context.Background(), orgID, conversationID, conversationframe.PermissionUpdate{ToolCallID: toolCallID})
 }
 
 // AutoApprovePermissionHandler returns a PermissionHandler for gVisor-sandboxed

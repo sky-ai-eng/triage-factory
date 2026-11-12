@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -391,6 +392,30 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		targets := lookup(t, store, orgID, query(entityID, eventID, ""))
 		if target := requireOneCoherenceTarget(t, targets, conversationID); !target.Active {
 			t.Error("Active = false with an unreleased claim open")
+		}
+	})
+
+	t.Run("ActiveSkipsAnIdleWarmClaim", func(t *testing.T) {
+		store, orgID, seed, extra := factory(t)
+
+		entityID := seed.Entity(t, "warm")
+		eventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckPassed)
+		taskID := seed.Task(t, entityID, domain.EventGitHubPRCICheckPassed, eventID)
+		conversationID := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPromptID, Status: "open",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		extra.ActiveClaim(t, conversationID)
+		// The turn concluded and its engagement kept the claim warm: nothing
+		// is live to read a note.
+		seed.BackdateCompletedAt(t, conversationID, time.Minute)
+		if _, err := store.SetActiveClaimPhaseSystem(context.Background(), orgID, conversationID, domain.ClaimPhaseWarm); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem(warm): %v", err)
+		}
+
+		targets := lookup(t, store, orgID, query(entityID, eventID, ""))
+		if target := requireOneCoherenceTarget(t, targets, conversationID); target.Active {
+			t.Error("Active = true for a warm claim on a concluded conversation")
 		}
 	})
 

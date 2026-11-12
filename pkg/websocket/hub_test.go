@@ -162,6 +162,63 @@ func TestBroadcast_UserScoping(t *testing.T) {
 	}
 }
 
+// TestBroadcast_RecipientSet pins the set axis: an event carrying UserIDs
+// reaches only the connections whose user id is in the set. Unlike the
+// UserID filter it is strict, so a connection with no user id (which
+// UserID lets through) receives nothing.
+func TestBroadcast_RecipientSet(t *testing.T) {
+	h := NewHub()
+	const org = "orgA"
+	inA := addBareClient(h, "userA", org)
+	inB := addBareClient(h, "userB", org)
+	outside := addBareClient(h, "userC", org)
+	unscoped := addBareClient(h, "", "")
+
+	h.Broadcast(Event{Type: "message", OrgID: org, UserIDs: []string{"userA", "userB"}, Data: "x"})
+
+	for label, c := range map[string]*client{"userA": inA, "userB": inB} {
+		if got := drain(t, c, 50*time.Millisecond); len(got) != 1 {
+			t.Errorf("%s expected 1 event, got %d", label, len(got))
+		}
+	}
+	for label, c := range map[string]*client{"userC": outside, "unscoped": unscoped} {
+		if got := drain(t, c, 50*time.Millisecond); len(got) != 0 {
+			t.Errorf("%s received %d events addressed to a set it is not in", label, len(got))
+		}
+	}
+}
+
+// TestBroadcast_MalformedRecipientSetDeliversAndPublishesNothing pins the
+// two shapes Broadcast refuses: an empty non-nil set, and a set alongside
+// UserID. Neither reaches any connection, the unscoped one included, and
+// neither is published to the backplane.
+func TestBroadcast_MalformedRecipientSetDeliversAndPublishesNothing(t *testing.T) {
+	cases := map[string]Event{
+		"empty set":        {Type: "message", OrgID: "orgA", UserIDs: []string{}},
+		"set and user too": {Type: "message", OrgID: "orgA", UserID: "userA", UserIDs: []string{"userA"}},
+	}
+	for name, evt := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := NewHub()
+			bp := &fakeBackplane{}
+			h.SetBackplane(bp)
+			scoped := addBareClient(h, "userA", "orgA")
+			unscoped := addBareClient(h, "", "")
+
+			h.Broadcast(evt)
+
+			for label, c := range map[string]*client{"userA": scoped, "unscoped": unscoped} {
+				if got := drain(t, c, 50*time.Millisecond); len(got) != 0 {
+					t.Errorf("%s received %d events", label, len(got))
+				}
+			}
+			if got := bp.count(); got != 0 {
+				t.Errorf("backplane saw %d published events, want 0", got)
+			}
+		})
+	}
+}
+
 // TestBroadcast_NilHub matches the documented "nil-receiver-safe"
 // contract: a nil *Hub silently drops the event so callers that
 // conditionally have a hub (tests, pre-wired packages) don't have to

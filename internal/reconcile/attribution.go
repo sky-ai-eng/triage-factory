@@ -361,7 +361,7 @@ func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a dom
 	if !moved || v != verdictForeign {
 		return
 	}
-	rc.broadcast(orgID, settled)
+	rc.broadcast(writeCtx, orgID, settled)
 	if rc.prResolved != nil && a.ConversationID != "" && isDraftResolved(a, settled.State) {
 		rc.prResolved(writeCtx, orgID, a.ConversationID)
 	}

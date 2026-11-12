@@ -221,3 +221,145 @@ func TestViewer_TaskCreate_Forbidden(t *testing.T) {
 		t.Fatalf("member task create: got 403 (role gate must allow members); body=%s", rec.Body.String())
 	}
 }
+
+// TestViewer_TaskGet_CanWrite: the task detail read answers can_write from the
+// check the task write routes run, so the run station offers "Return to
+// queue" to the team's writers and not to its viewer.
+func TestViewer_TaskGet_CanWrite(t *testing.T) {
+	r := newViewerRig(t)
+	taskID := r.seedTask(t)
+
+	for _, tc := range []struct {
+		name, caller string
+		want         bool
+	}{
+		{"admin", r.admin, true},
+		{"member", r.member, true},
+		{"viewer", r.viewer, false},
+	} {
+		rec := httptest.NewRecorder()
+		req := r.req(http.MethodGet, "/api/tasks/"+taskID, tc.caller, nil)
+		req.SetPathValue("id", taskID)
+		r.s.handleTaskGet(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s GET task: status = %d, want 200; body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s GET task: decode: %v", tc.name, err)
+		}
+		if body["can_write"] != tc.want {
+			t.Errorf("%s GET task: can_write = %v, want %v", tc.name, body["can_write"], tc.want)
+		}
+	}
+}
+
+// TestViewer_TaskList_CanWrite: each row of the task list carries the write
+// gate's answer, from the one predicate the detail read's probe runs, so the
+// board offers the assignee picker and the drag only to a caller the claim and
+// requeue routes accept. A team task is its team's writers'; an org-visible
+// one is an org admin's; a writer of a team the task shares through task_teams
+// may write it only while it is unclaimed, as tasks_update says.
+func TestViewer_TaskList_CanWrite(t *testing.T) {
+	r := newViewerRig(t)
+	sideTeam := pgtest.SeedTeam(t, r.h, r.orgID, "side-team")
+	split := pgtest.SeedUser(t, r.h, "split")
+	pgtest.AddOrgMember(t, r.h, split, r.orgID, r.teamID, "member", "viewer")
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, split, sideTeam)
+
+	teamTask := r.seedTask(t)
+	// copyTask seeds another task on teamTask's entity, kept apart from it by
+	// dedup_key under the one-active-task index.
+	copyTask := func(dedup, visibility, status string, claimedBy any) string {
+		t.Helper()
+		var id string
+		if err := r.h.AdminDB.QueryRow(`
+			INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id,
+			                   dedup_key, visibility, status, claimed_by_user_id)
+			SELECT org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id, $2, $3, $4, $5
+			  FROM tasks WHERE id = $1
+			RETURNING id
+		`, teamTask, dedup, visibility, status, claimedBy).Scan(&id); err != nil {
+			t.Fatalf("seed task %s: %v", dedup, err)
+		}
+		return id
+	}
+	orgTask := copyTask("org-copy", "org", "queued", nil)
+	unclaimedShared := copyTask("unclaimed-shared", "team", "queued", nil)
+	claimedShared := copyTask("claimed-shared", "team", "in_progress", r.member)
+	for _, id := range []string{unclaimedShared, claimedShared} {
+		pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, id, sideTeam)
+	}
+
+	listed := func(caller string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		r.s.handleTaskList(rec, r.req(http.MethodPost, "/api/tasks/list", caller, map[string]any{}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list tasks as %s = %d; body=%s", caller, rec.Code, rec.Body.String())
+		}
+		var page struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+			t.Fatalf("decode list: %v", err)
+		}
+		out := map[string]any{}
+		for _, row := range page.Items {
+			out[row["id"].(string)] = row["can_write"]
+		}
+		return out
+	}
+	detail := func(caller, taskID string) any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := r.req(http.MethodGet, "/api/tasks/"+taskID, caller, nil)
+		req.SetPathValue("id", taskID)
+		r.s.handleTaskGet(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET task %s as %s = %d; body=%s", taskID, caller, rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode task: %v", err)
+		}
+		return body["can_write"]
+	}
+
+	for _, tc := range []struct {
+		name, caller string
+		team, org    bool
+		// The answers on the task shared with the side team, unclaimed and
+		// claimed.
+		unclaimed, claimed bool
+	}{
+		{"admin", r.admin, true, true, true, true},
+		{"member", r.member, true, false, true, true},
+		{"viewer", r.viewer, false, false, false, false},
+		{"team viewer, side-team writer", split, false, false, true, false},
+	} {
+		rows := listed(tc.caller)
+		for _, task := range []struct {
+			label, id string
+			want      bool
+		}{
+			{"team task", teamTask, tc.team},
+			{"org task", orgTask, tc.org},
+			{"unclaimed shared task", unclaimedShared, tc.unclaimed},
+			{"claimed shared task", claimedShared, tc.claimed},
+		} {
+			got, ok := rows[task.id]
+			if !ok {
+				t.Errorf("%s: %s missing from the list", tc.name, task.label)
+				continue
+			}
+			if got != task.want {
+				t.Errorf("%s: %s list can_write = %v, want %v", tc.name, task.label, got, task.want)
+			}
+			if d := detail(tc.caller, task.id); d != got {
+				t.Errorf("%s: %s detail can_write = %v, list = %v; want one answer", tc.name, task.label, d, got)
+			}
+		}
+	}
+}

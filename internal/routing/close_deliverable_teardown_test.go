@@ -51,7 +51,7 @@ func (r teardownResolver) BaseURLFor(context.Context, string) (string, error) {
 	panic("BaseURLFor is not used by the deliverable teardown")
 }
 
-func (r teardownResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
+func (r teardownResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
 	panic("OrgIdentityFor is not used by the deliverable teardown")
 }
 

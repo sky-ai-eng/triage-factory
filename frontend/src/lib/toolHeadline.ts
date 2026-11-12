@@ -1,4 +1,12 @@
-// toolHeadline — the sentence a bash row shows in place of its command.
+// toolHeadline — the line a transcript row shows for one tool call.
+//
+// Each runtime names its tools its own way. A native conversation calls them
+// `read`, `write`, `edit`, `grep`, `find`, `ls`, and `bash`, and passes a file
+// as `path`; the Claude Code SDK calls them `Read`, `Write`, `Edit`, `Grep`,
+// `Glob`, and `Bash`, and passes a file as `file_path`. Neither set can be
+// renamed — the native names are part of the tool schemas sent on every model
+// call, and the SDK's are Claude Code's — so the two meet here, and a call
+// heads with the same line whichever runtime made it.
 //
 // A shell command is the only tool argument that is not already legible to a
 // person: a path, a pattern, a directory each describe themselves, while
@@ -8,14 +16,12 @@
 // place that picks between them. The choice is a chain rather than a field
 // read, and a surface that reimplemented it would drift.
 //
-// Two spellings arrive here and both are real: a native conversation calls
-// the tool `bash`, the Claude Code SDK calls it `Bash`. Both carry
-// `description` — the SDK declares that param itself, so the chain's first
-// step works on either runtime. `description_past` is native-only and
-// permanently so: local mode passes the SDK its tool names, not their
-// schemas, so there is no way to add a param to a tool we do not define. An
-// SDK row that settles keeps whatever voice the model chose. That is the end
-// state, not a gap.
+// Both bash spellings carry `description` — the SDK declares that param
+// itself, so the chain's first step works on either runtime.
+// `description_past` is native-only and permanently so: local mode passes the
+// SDK its tool names, not their schemas, so there is no way to add a param to
+// a tool we do not define. An SDK row that settles keeps whatever voice the
+// model chose. That is the end state, not a gap.
 
 /** Where a bash call stands, which is what decides the tense. */
 export type BashCallState = 'running' | 'succeeded' | 'failed'
@@ -46,6 +52,39 @@ export function bashHeadline(
   const present = summary(input.description)
   const past = state === 'succeeded' ? summary(input.description_past) : ''
   return past || present || renderCommand(String(input.command ?? ''))
+}
+
+/**
+ * The headline for one tool call: the argument that says what the call is
+ * about. The file tools head with their path and the search tools with their
+ * pattern, under either runtime's spelling. Any other tool heads with its
+ * first short string argument, since nothing here knows its shape.
+ */
+export function toolHeadline(
+  name: string,
+  input: Record<string, unknown>,
+  state: BashCallState,
+): string {
+  if (isBashTool(name)) return bashHeadline(input, state) || '(no command)'
+  switch (name) {
+    case 'read':
+    case 'Read':
+    case 'write':
+    case 'Write':
+    case 'edit':
+    case 'Edit':
+    case 'ls':
+      return String(input.file_path || input.path || '(no path)')
+    case 'grep':
+    case 'Grep':
+    case 'find':
+    case 'Glob':
+      return String(input.pattern || '(no pattern)')
+  }
+  for (const v of Object.values(input)) {
+    if (typeof v === 'string' && v.length < 200) return v
+  }
+  return ''
 }
 
 /** The first line of a command, trimmed, marked when more lines follow. */

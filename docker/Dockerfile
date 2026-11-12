@@ -95,7 +95,7 @@ RUN set -eu; \
 # The tag's version is go.mod's `go` line exactly, guarded by a drift test
 # (dockerfile_go_test.go), so CI, a local build, and this image all build with
 # the same Go. A Go bump moves both lines in one change.
-FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS go-builder
 RUN apk add --no-cache git
 WORKDIR /src
 # Pre-download deps so the source-copy layer rebuilds fast on edits.

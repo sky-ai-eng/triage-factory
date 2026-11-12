@@ -8,6 +8,8 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { HttpError, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { Dialog } from '../ui/dialog/Dialog'
 import { toast } from './Toast/toastStore'
+import ViewOnlyBadge from './ViewOnlyBadge'
+import { DELIVERABLE_VIEW_ONLY } from './deliverableMeta'
 
 // PRDeliverable mirrors GET /api/deliverables/{id} for a pull_request deliverable: the
 // shared deliverable envelope, with the PR-shaped payload under `details`.
@@ -18,6 +20,9 @@ interface PRDeliverable {
   kind: string
   url: string
   state: string
+  // False for a caller the routes refuse (a team viewer, an org admin off the
+  // deliverable's team); absent is unknown, and offers the verbs.
+  can_write?: boolean
   details: {
     owner: string
     repo: string
@@ -53,6 +58,10 @@ interface Props {
 // which is the one thing in this flow that cannot be undone. So it goes through
 // a destructive Dialog that names the branch, cancels on Escape and on the
 // backdrop, and confirms only on a held press — never a single keystroke.
+//
+// A caller who may read the draft and not act on it (can_write false: a team
+// viewer, an org admin off the deliverable's team) gets it read-only, under a
+// "View only" badge: none of the three outcomes, and no edits.
 export default function PendingPROverlay({ deliverableId, open, onClose }: Props) {
   const [pr, setPR] = useState<PRDeliverable | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
@@ -272,6 +281,10 @@ export default function PendingPROverlay({ deliverableId, open, onClose }: Props
     }
   }, [deliverableId, onClose, resolvedElsewhere])
 
+  // A reader who may not act on the draft gets it as text: no edits, no Open
+  // PR, no Reject.
+  const readOnly = pr?.can_write === false
+
   // Close on Escape. The Dialog claims Escape first (capture + stopPropagation)
   // while the reject confirmation is up, so cancelling it never closes the
   // overlay underneath.
@@ -326,6 +339,7 @@ export default function PendingPROverlay({ deliverableId, open, onClose }: Props
                     {pr.details.owner}/{pr.details.repo} #{pr.details.number}
                   </span>
                 )}
+                {readOnly && <ViewOnlyBadge title={DELIVERABLE_VIEW_ONLY} />}
               </div>
               <button
                 ref={closeRef}
@@ -374,6 +388,7 @@ export default function PendingPROverlay({ deliverableId, open, onClose }: Props
                     onReject={() => setConfirmingReject(true)}
                     onClose={onClose}
                     submitting={submitting || rejecting}
+                    readOnly={readOnly}
                   />
 
                   {submitError && (
@@ -394,8 +409,10 @@ export default function PendingPROverlay({ deliverableId, open, onClose }: Props
                   {diffError && (
                     <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-3 text-ui text-ink-2">
                       <span className="font-semibold text-ink-1">Diff unavailable:</span>{' '}
-                      {diffError}. You can still edit and open the PR — the diff just couldn't be
-                      loaded right now.
+                      {diffError}.{' '}
+                      {readOnly
+                        ? "The diff just couldn't be loaded right now."
+                        : "You can still edit and open the PR — the diff just couldn't be loaded right now."}
                     </div>
                   )}
 

@@ -7,6 +7,8 @@ import type { FileComment } from './DiffFile'
 import ReviewSummary from './ReviewSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import ViewOnlyBadge from './ViewOnlyBadge'
+import { DELIVERABLE_VIEW_ONLY } from './deliverableMeta'
 
 // ReviewDeliverable mirrors GET /api/deliverables/{id} for a review deliverable: the
 // shared deliverable envelope, with the review-shaped payload under `details`.
@@ -20,6 +22,9 @@ interface ReviewDeliverable {
   id: string
   kind: string
   state: string
+  // False for a caller the routes refuse (a team viewer, an org admin off the
+  // deliverable's team); absent is unknown, and offers the verbs.
+  can_write?: boolean
   // The posted review's GitHub deep link, stamped at approval; empty while the
   // draft is pending (nothing exists on GitHub yet).
   url: string
@@ -66,7 +71,9 @@ interface Props {
 // edits, a link out to the posted review instead. The deliverables list stops
 // routing resolved reviews here, but the overlay can still land on one — it was
 // already open when someone else approved, or an approval-roster row raced its
-// fetch — and must not present a dead (or worse, double-posting) Submit.
+// fetch — and must not present a dead (or worse, double-posting) Submit. A
+// pending review renders the same way for a caller who may read it and not act
+// on it (can_write false), under a "View only" badge.
 export default function ReviewOverlay({ deliverableId, open, onClose }: Props) {
   const [review, setReview] = useState<ReviewDeliverable | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
@@ -302,8 +309,11 @@ export default function ReviewOverlay({ deliverableId, open, onClose }: Props) {
     (c) => c.freshness === 'outdated',
   ).length
 
-  // A resolved review is view-only; every mutating affordance below keys off this.
-  const readOnly = review != null && review.state !== 'pending'
+  // A resolved review is history, and a caller the routes refuse may only
+  // read; every mutating affordance below keys off readOnly.
+  const resolved = review != null && review.state !== 'pending'
+  const viewOnly = review?.can_write === false
+  const readOnly = resolved || viewOnly
 
   // Group comments by file path for the diff renderer. The overlay renders the
   // finalize-time frame, so a comment anchors by the path + line it was written
@@ -368,9 +378,9 @@ export default function ReviewOverlay({ deliverableId, open, onClose }: Props) {
             {/* Top bar */}
             <div className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-line-1">
               <div className="flex items-center gap-3">
-                {!readOnly && <div className="w-2 h-2 rounded-full bg-warm animate-pulse" />}
+                {!resolved && <div className="w-2 h-2 rounded-full bg-warm animate-pulse" />}
                 <h1 id={titleId} className="text-column font-semibold text-ink-1 tracking-tight">
-                  {readOnly
+                  {resolved
                     ? review.state === 'submitted'
                       ? 'Submitted Review'
                       : 'Dismissed Review'
@@ -381,6 +391,7 @@ export default function ReviewOverlay({ deliverableId, open, onClose }: Props) {
                     {review.details.owner}/{review.details.repo} #{review.details.pr_number}
                   </span>
                 )}
+                {viewOnly && !resolved && <ViewOnlyBadge title={DELIVERABLE_VIEW_ONLY} />}
               </div>
               <button
                 ref={closeRef}
@@ -454,8 +465,10 @@ export default function ReviewOverlay({ deliverableId, open, onClose }: Props) {
                   {diffError && (
                     <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-3 text-ui text-ink-2">
                       <span className="font-semibold text-ink-1">Diff unavailable:</span>{' '}
-                      {diffError}. You can still edit and submit the review — the diff just couldn't
-                      be loaded right now.
+                      {diffError}.{' '}
+                      {readOnly
+                        ? "The diff just couldn't be loaded right now."
+                        : "You can still edit and submit the review — the diff just couldn't be loaded right now."}
                     </div>
                   )}
 

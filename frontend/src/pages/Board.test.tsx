@@ -121,11 +121,14 @@ function conversation(status: string): Conversation {
 let listBodies: Array<Record<string, unknown>> = []
 let facetBodies: Array<Record<string, unknown>> = []
 let held: Conversation
+/** The can_write every listed task carries; undefined leaves the key off. */
+let taskCanWrite: boolean | undefined
 
 beforeEach(() => {
   listBodies = []
   facetBodies = []
   held = conversation('completed')
+  taskCanWrite = undefined
   api.apiList.mockReset()
   api.apiJSON.mockReset()
   api.apiFetch.mockReset()
@@ -134,11 +137,14 @@ beforeEach(() => {
     if (path !== '/api/tasks/list') throw new Error('unexpected apiList ' + path)
     listBodies.push(body)
     const statuses = (body.statuses as string[] | undefined) ?? []
-    const items = statuses.includes('in_progress')
+    const lane = statuses.includes('in_progress')
       ? [HELD]
       : statuses.includes('queued')
         ? [FREE]
         : []
+    const items = lane.map((t) =>
+      taskCanWrite === undefined ? t : { ...t, can_write: taskCanWrite },
+    )
     return { items, next_page_token: '', total_count: items.length }
   })
   api.apiJSON.mockImplementation(async (path: string, init?: { body?: string }) => {
@@ -172,6 +178,11 @@ function renderBoard() {
  *  asked for and nothing else. */
 function laterBodies(): Array<Record<string, unknown>> {
   return listBodies.slice(3)
+}
+
+/** Every /api/tasks/… path the board asked for, in call order. */
+function taskCalls(): string[] {
+  return api.apiFetch.mock.calls.map((c) => String(c[0])).filter((p) => p.startsWith('/api/tasks/'))
 }
 
 /** Opens one card's assignee picker and returns a scope over it — every card
@@ -269,13 +280,6 @@ describe('the lane read runs on the server', () => {
 })
 
 describe('starting a queued task', () => {
-  /** Every /api/tasks/… path the board asked for, in call order. */
-  function taskCalls(): string[] {
-    return api.apiFetch.mock.calls
-      .map((c) => String(c[0]))
-      .filter((p) => p.startsWith('/api/tasks/'))
-  }
-
   it('makes the drag one call: the claim is what moves the card', async () => {
     renderBoard()
     await waitFor(() => expect(listBodies.length).toBe(3))
@@ -341,5 +345,85 @@ describe('returning a task to the queue', () => {
     expect(
       screen.queryByText('This stops the run. Its work stays with the task.'),
     ).not.toBeInTheDocument()
+  })
+})
+
+describe('a permission prompt on a card', () => {
+  afterEach(() => {
+    ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {}
+  })
+
+  function parkOnPrompt(canWrite: boolean) {
+    held = { ...conversation('running'), can_write: canWrite }
+    ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
+      [held.ID]: [{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'make test' } }],
+    }
+  }
+
+  it('offers Allow and Deny to a caller who may answer', async () => {
+    parkOnPrompt(true)
+    renderBoard()
+    expect(await screen.findByText('make test')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Allow' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeInTheDocument()
+  })
+
+  it('shows the ask without the verbs to a caller who may not', async () => {
+    parkOnPrompt(false)
+    renderBoard()
+    expect(await screen.findByText('make test')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Allow' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+})
+
+describe('a card the caller may not write', () => {
+  /** The sortable wrapper the card's drag rides on. */
+  function dragHandle(title: string) {
+    return screen.getByText(title).closest('[aria-roledescription="sortable"]')
+  }
+
+  it('keeps the assignee mark and drops the picker and the drag', async () => {
+    taskCanWrite = false
+    renderBoard()
+    expect(await screen.findByText(FREE.title)).toBeInTheDocument()
+    expect(screen.getByText(HELD.title)).toBeInTheDocument()
+
+    // The marks still say who holds what; neither opens a picker.
+    expect(screen.getByTitle('Unassigned')).toBeInTheDocument()
+    expect(screen.getByTitle('Aidan')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Unassigned' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Assigned to Aidan' })).not.toBeInTheDocument()
+
+    expect(dragHandle(FREE.title)).toHaveAttribute('aria-disabled', 'true')
+    expect(dragHandle(HELD.title)).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('claims and requeues nothing when its card is dropped', async () => {
+    taskCanWrite = false
+    renderBoard()
+    await screen.findByText(FREE.title)
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+      await dnd.drop!(HELD.id, 'queued')
+    })
+    expect(taskCalls()).toEqual([])
+    expect(
+      screen.queryByText('This stops the run. Its work stays with the task.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the picker and the drag to a writer', async () => {
+    taskCanWrite = true
+    renderBoard()
+    expect(await screen.findByRole('button', { name: 'Unassigned' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Assigned to Aidan' })).toBeInTheDocument()
+    expect(dragHandle(FREE.title)).toHaveAttribute('aria-disabled', 'false')
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+    expect(taskCalls()).toEqual([`/api/tasks/${FREE.id}/claim`])
   })
 })

@@ -261,7 +261,7 @@ type userWriteRig struct {
 
 func (r userWriteRig) claim(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
-	return doJSON(t, r.s, http.MethodPost, "/api/tasks/"+r.taskID+"/claim", map[string]any{"hesitation_ms": 0})
+	return doJSON(t, r.s, http.MethodPost, "/api/tasks/"+r.taskID+"/claim", map[string]any{})
 }
 
 func (r userWriteRig) mustClaim(t *testing.T) {

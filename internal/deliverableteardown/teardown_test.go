@@ -134,7 +134,7 @@ func (r oneClientResolver) BaseURLFor(context.Context, string) (string, error) {
 	panic("BaseURLFor is not used by the deliverable teardown")
 }
 
-func (r oneClientResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
+func (r oneClientResolver) OrgIdentityFor(context.Context, string) (string, string, bool, error) {
 	panic("OrgIdentityFor is not used by the deliverable teardown")
 }
 

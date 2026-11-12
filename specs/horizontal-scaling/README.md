@@ -603,7 +603,8 @@ claim → execute); three additions to the claim:
   signal.
 - **Graceful drain** (deploys, scale-down): set `draining=true` → the
   executor stops claiming; live runs finish or park at their turn end
-  (TFAC-305) — the fleet's natural quiesce; when `active_runs=0` the
+  (TFAC-305), and every claim kept warm after a turn is let go at once —
+  the fleet's natural quiesce; when `active_runs=0` the
   operator retires it. Dashboard badge + one CLI/API verb.
 
 ### 4.4 Executor DB access (least privilege)
@@ -835,7 +836,7 @@ conversation_signals (
   org_id       uuid NOT NULL,
   conversation_id text NOT NULL,
   kind         text NOT NULL,      -- cancel | interrupt | steer | permission | inject
-  payload      jsonb,              -- steer text, permission decision, injection body, ...
+  payload      jsonb,              -- permission decision, injection body, ... (steer carries none)
   target       text NOT NULL,      -- executor id owning the run
   created_at   timestamptz NOT NULL,
   acked_at     timestamptz
@@ -852,6 +853,13 @@ staged-and-probably-never-delivered (active auto-runs usually
 terminate without another resume). Under `conversation_signals`, the owner
 delivers into its live process; the staged fallback remains for
 genuinely parked runs.
+
+`steer` carries no message. A person's message is a transcript row the
+control pod writes, and the resume it causes keeps a warm claim rather than
+releasing it: the engagement that held the conversation's last turn is still
+up, waiting for its window to end. The signal is the doorbell for that
+engagement, and the owner acks `gone` when no claim is warm, which the sender
+never waits for.
 
 Control-pod handler logic (`message` / `interrupt` / `cancel` /
 `permissions/{id}`):
@@ -1084,6 +1092,15 @@ should be the cheapest self-healing thing available:
   `started_at` stays the scheduler's fairness order and the UI's
   "started" time. The liveness spills (dead/draining/gated) never
   consult the anchor.
+- **A warm claim gives way to queued work.** A native engagement kept
+  after a person's turn holds a slot, memory, and its org's cap place
+  only while no claimable work waits behind them. A full or gated
+  executor lets go of its oldest warm claim, one per scan, when work it
+  could claim is queued; work outside its own tier 1 counts only once it
+  has been queued for a scan interval, so an executor with a free slot
+  takes it first. When an org is at its cap with work waiting behind it,
+  each executor holding a warm claim in that org lets go of the org's
+  oldest one there.
 - At N=1 the hash always returns self; tier 1 always hits. No-op.
 
 ### 6.3 Curator homing — removed (TFAC-894)

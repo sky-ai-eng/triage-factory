@@ -110,14 +110,14 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	forceClaimable(t, database, "run-drain-skip")
 
 	s.SetDraining(true)
-	s.drainConversationQueue(context.Background())
+	s.drainConversationQueue(context.Background(), DefaultDispatchScanInterval)
 
 	if claims := claimCountFor(t, database, "run-drain-skip"); claims != 0 {
 		t.Errorf("claims = %d, want 0 — a draining instance must not claim", claims)
 	}
 
 	s.SetDraining(false)
-	s.drainConversationQueue(context.Background())
+	s.drainConversationQueue(context.Background(), DefaultDispatchScanInterval)
 	// The claim is minted synchronously; drainConversationQueue then dispatches the
 	// claimed run on a goroutine. This fixture's blueprint has an empty step
 	// plan, so that goroutine deterministically cancels the run — and may
@@ -160,7 +160,7 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	forceClaimable(t, database, "run-pfence-skip")
 
 	s.partitionFenced.Store(true)
-	s.drainConversationQueue(context.Background())
+	s.drainConversationQueue(context.Background(), DefaultDispatchScanInterval)
 
 	if claims := claimCountFor(t, database, "run-pfence-skip"); claims != 0 {
 		t.Errorf("claims = %d, want 0 — a partition-fenced instance must not claim", claims)
