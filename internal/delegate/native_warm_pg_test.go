@@ -388,10 +388,7 @@ func TestWarmClaim_ZeroSnapshotIntervalStillKeepsTheClaim(t *testing.T) {
 	var answer *float64
 	for _, r := range rows {
 		if r.Role == "assistant" && r.Content == "fixed it" {
-			key := float64(r.ID)
-			if r.Seq != nil {
-				key = *r.Seq
-			}
+			key := assemblyKey(r)
 			answer = &key
 		}
 	}

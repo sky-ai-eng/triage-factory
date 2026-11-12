@@ -482,10 +482,10 @@ func (c *checkpointer) awaitCapture(ctx context.Context) (deny string) {
 // checkpointHooks composes the checkpointer into the engine's hooks around
 // the ones the engagement already has. A nil checkpointer, or one with a zero
 // interval, leaves them as they were, so an engagement that takes no boundary
-// checkpoints runs exactly the hooks it always did. The zero-interval case has
-// to be refused here: afterToolBatch reads a zero interval as always elapsed.
-// The turn-end capture needs no barrier, because it runs after the loop has
-// returned, with no tool call beside it.
+// checkpoints runs exactly the hooks it always did; wired at a zero interval,
+// they would take a checkpoint at every boundary. The turn-end capture needs no
+// barrier, because it runs after the loop has returned, with no tool call
+// beside it.
 func checkpointHooks(c *checkpointer, hooks agentloop.Hooks) agentloop.Hooks {
 	if c == nil || c.interval <= 0 {
 		return hooks

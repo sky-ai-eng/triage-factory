@@ -68,15 +68,17 @@ func TestCheckpoint_ZeroIntervalStillBuildsACheckpointer(t *testing.T) {
 
 // TestCheckpoint_ZeroIntervalLeavesTheHooksAsTheyWere: with a zero interval
 // the engagement runs the hooks it would run with no checkpointer, with no
-// barrier and no batch hook.
+// barrier and no batch hook. So does an engagement with no checkpointer.
 func TestCheckpoint_ZeroIntervalLeavesTheHooksAsTheyWere(t *testing.T) {
 	f := newCheckpointFixture(t, "r-ckpt-zero-hooks")
 	f.s.SetSnapshotInterval(0)
 	c := f.start()
 	defer c.stop()
-	hooks := checkpointHooks(c, agentloop.Hooks{})
-	if hooks.BeforeToolCall != nil || hooks.AfterToolCall != nil || hooks.AfterToolBatch != nil {
-		t.Error("with a zero interval the engagement's hooks must be left exactly as they were")
+	for name, c := range map[string]*checkpointer{"zero interval": c, "no checkpointer": nil} {
+		hooks := checkpointHooks(c, agentloop.Hooks{})
+		if hooks.BeforeToolCall != nil || hooks.AfterToolCall != nil || hooks.AfterToolBatch != nil {
+			t.Errorf("%s: the engagement's hooks must be left exactly as they were", name)
+		}
 	}
 }
 
