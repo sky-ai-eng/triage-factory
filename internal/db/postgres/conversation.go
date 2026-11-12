@@ -484,6 +484,19 @@ func resumeFlip(ctx context.Context, q queryer, orgID, conversationID string, ca
 	return n > 0, err
 }
 
+// warmResumableSQL is conversation r being one a warm claim's engagement may
+// drive into another turn. The engagement resumes it without the claim scan,
+// so this asks the scan's questions of it: not ended or archived, no stop
+// pending, its run not called off, and still the task's live conversation, the
+// one that owns the tree. A follow-up's flip checked some of these when it
+// queued the conversation, and any of them can have changed since.
+var warmResumableSQL = `(r.ended_at IS NULL AND r.archived_at IS NULL AND r.stop_requested_at IS NULL
+	AND NOT EXISTS (
+		SELECT 1 FROM blueprint_runs br
+		WHERE br.org_id = r.org_id AND br.id = r.blueprint_run_id
+		  AND (br.cancel_requested OR br.status = 'cancelled'))
+	AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `))`
+
 // releaseActiveClaimUnlessWarm is releaseActiveClaim for every claim but a
 // warm one (domain.ClaimPhaseWarm).
 func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
@@ -528,29 +541,32 @@ func (s *conversationStore) ConcludeKeepingClaimSystem(ctx context.Context, orgI
 // ResumeWarmClaimSystem takes a warm claim's conversation back for its next
 // turn: the resume flip, when a follow-up has not already made it, and the
 // claim out of the warm phase, in one transaction. resumed is false when the
-// conversation cannot be resumed (ended, its run called off), and the claim
-// then stays warm for its engagement to let go.
+// conversation is not one to drive (warmResumableSQL), and the claim then
+// stays warm for its engagement to let go.
 func (s *conversationStore) ResumeWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (resumed bool, err error) {
 	err = inTx(ctx, s.admin, func(q queryer) error {
+		// The fence locks the conversation, so its row reads the same
+		// until this commits.
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var status sql.NullString
+		var drivable bool
 		if err := q.QueryRowContext(ctx, `
-			SELECT status FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
-		`, orgID, conversationID).Scan(&status); err != nil {
+			SELECT r.status, `+warmResumableSQL+`
+			FROM conversations r WHERE r.org_id = $1 AND r.id = $2
+		`, orgID, conversationID).Scan(&status, &drivable); err != nil {
 			return err
 		}
-		resumed = !status.Valid
-		if !resumed {
-			calledOff, err := conversationRunCalledOff(ctx, q, orgID, conversationID)
-			if err != nil {
-				return err
-			}
-			if resumed, err = resumeFlip(ctx, q, orgID, conversationID, calledOff); err != nil || !resumed {
+		if !drivable {
+			return nil
+		}
+		if status.Valid {
+			if resumed, err = resumeFlip(ctx, q, orgID, conversationID, false); err != nil || !resumed {
 				return err
 			}
 		}
+		resumed = true
 		_, err := q.ExecContext(ctx, `
 			UPDATE claims SET phase = NULL
 			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL AND phase = $4
@@ -858,29 +874,26 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return s.taskHasClaim(ctx, orgID, taskID, true)
+	return s.taskHasClaim(ctx, orgID, taskID, activeClaimExistsSQL)
 }
 
 func (s *conversationStore) HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return s.taskHasClaim(ctx, orgID, taskID, false)
+	return s.taskHasClaim(ctx, orgID, taskID, workingClaimExistsSQL)
 }
 
-// taskHasClaim reports whether a conversation on taskID holds a live claim,
-// warm claims counted only when includeWarm is set.
-func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID string, includeWarm bool) (bool, error) {
+// taskHasClaim reports whether a conversation on taskID holds a claim that
+// claimExists, a predicate over the conversation alias r, admits.
+func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID, claimExists string) (bool, error) {
 	if !isValidUUID(taskID) {
 		return false, nil
 	}
 	var exists bool
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1
-			FROM conversations c
-			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
-			WHERE c.org_id = $1 AND c.task_id = $2
-			  AND ($3 OR cl.phase IS DISTINCT FROM $4)
+			SELECT 1 FROM conversations r
+			WHERE r.org_id = $1 AND r.task_id = $2 AND `+claimExists+`
 		)
-	`, orgID, taskID, includeWarm, domain.ClaimPhaseWarm).Scan(&exists)
+	`, orgID, taskID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
@@ -1954,7 +1967,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.id::text, COALESCE(r.task_id::text, ''), COALESCE(r.status, ''),
 		       COALESCE(`+db.ConcludedConversationSQL("r")+`, false), COALESCE(r.outcome, ''),
-		       EXISTS (SELECT 1 FROM claims cl WHERE cl.org_id = $1 AND cl.conversation_id = r.id AND cl.released_at IS NULL)
+		       `+workingClaimExistsSQL+`
 		FROM conversations r
 		LEFT JOIN tasks t ON t.org_id = $1 AND t.id = r.task_id
 		WHERE r.org_id = $1
@@ -2269,6 +2282,26 @@ func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, c
 		)
 	`, orgID, conversationID).Scan(&wrote)
 	return wrote, err
+}
+
+func (s *conversationStore) WarmWaitStateSystem(ctx context.Context, orgID, conversationID string) (db.WarmWaitState, error) {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
+		return db.WarmWaitState{}, db.ErrNoSuchConversation
+	}
+	var st db.WarmWaitState
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT c.ended_at IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM messages m_p
+		           WHERE m_p.org_id = c.org_id AND m_p.conversation_id = c.id
+		             AND m_p.delivered = false AND `+personMessageSQL+`)
+		FROM conversations c
+		WHERE c.org_id = $1 AND c.id = $2
+	`, orgID, conversationID).Scan(&st.Ended, &st.PersonMessageWaiting)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.WarmWaitState{}, db.ErrNoSuchConversation
+	}
+	return st, err
 }
 
 // insertConversationMessage attributes the row to an engagement: an explicit

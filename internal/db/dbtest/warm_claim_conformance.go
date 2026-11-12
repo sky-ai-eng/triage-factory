@@ -142,6 +142,11 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("status after the resume = %q, want queued: resumed, and nothing running yet", got.Status)
 		}
 		noSecondClaim(t, f)
+		// The claim's engagement is about to drive the conversation, so the
+		// claim holds the task from the resume on.
+		if warm(t, f, taskID) {
+			t.Error("a warm claim whose conversation was resumed does not hold the task")
+		}
 
 		resumed, err := f.Stores.Conversations.ResumeWarmClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID)
 		if err != nil || !resumed {
@@ -177,6 +182,46 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("ResumeWarmClaimSystem on a released claim = %v, want ErrClaimReleased", err)
 		}
 	})
+
+	// The engagement resumes without the claim scan, so a conversation that
+	// changed after the follow-up's flip is checked again: once ended, or
+	// with a stop pending, it is not resumed and the claim stays warm for the
+	// engagement to let go.
+	for _, after := range []struct {
+		name  string
+		apply func(t *testing.T, f ClaimLeaseFixture, conversationID string)
+	}{
+		{"Ended", func(t *testing.T, f ClaimLeaseFixture, conversationID string) {
+			if _, err := f.Stores.Conversations.EndConversationSystem(ctx, f.OrgID, conversationID, domain.EndedDelegated); err != nil {
+				t.Fatalf("EndConversationSystem: %v", err)
+			}
+		}},
+		{"StopPending", func(t *testing.T, f ClaimLeaseFixture, conversationID string) {
+			if requested, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, conversationID, "", "", ""); err != nil || !requested {
+				t.Fatalf("RequestStopSystem = (%v, %v), want (true, nil)", requested, err)
+			}
+		}},
+	} {
+		t.Run("ResumeWarmClaim_RefusedAfterTheFlip_"+after.name, func(t *testing.T) {
+			f := mk(t)
+			c, taskID := warmStep(t, f)
+			if flipped, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !flipped {
+				t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", flipped, err)
+			}
+			after.apply(t, f, c.ID)
+			resumed, err := f.Stores.Conversations.ResumeWarmClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID)
+			if err != nil || resumed {
+				t.Fatalf("ResumeWarmClaimSystem = (%v, %v), want (false, nil)", resumed, err)
+			}
+			active, err := f.Stores.Conversations.HasActiveClaimForTaskSystem(ctx, f.OrgID, taskID)
+			if err != nil || !active {
+				t.Fatalf("HasActiveClaimForTaskSystem = (%v, %v), want the claim kept", active, err)
+			}
+			if released, err := f.Stores.Conversations.ReleaseWarmClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID); err != nil || !released {
+				t.Errorf("ReleaseWarmClaimSystem after the refusal = (%v, %v), want the claim still warm to let go", released, err)
+			}
+		})
+	}
 
 	t.Run("ReleaseWarmClaim_ReleasesCompletedAndLeavesTheConversation", func(t *testing.T) {
 		f := mk(t)
@@ -270,6 +315,65 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 			}
 		})
 	}
+
+	t.Run("WarmWaitState_SeesAPersonsWaitingMessageAndTheEnd", func(t *testing.T) {
+		f := mk(t)
+		c, _ := warmStep(t, f)
+		state := func(t *testing.T) db.WarmWaitState {
+			t.Helper()
+			st, err := f.Stores.Conversations.WarmWaitStateSystem(ctx, f.OrgID, c.ID)
+			if err != nil {
+				t.Fatalf("WarmWaitStateSystem: %v", err)
+			}
+			return st
+		}
+		if st := state(t); st != (db.WarmWaitState{}) {
+			t.Fatalf("state after the turn = %+v, want nothing waiting and not ended", st)
+		}
+
+		person := get(t, f, c.ID).CreatorUserID
+		pending := false
+		insert := func(t *testing.T, subtype string) int64 {
+			t.Helper()
+			id, err := f.Stores.Conversations.InsertMessageSystem(ctx, f.OrgID, &domain.Message{
+				ConversationID: c.ID, UserID: person, Role: "user", Content: "x", Subtype: subtype,
+				Delivered: &pending, WindowState: domain.MessageWindowActive,
+			})
+			if err != nil {
+				t.Fatalf("InsertMessageSystem(%q): %v", subtype, err)
+			}
+			return id
+		}
+		// A row TF wrote is not a person's message, whoever it names.
+		insert(t, domain.MessageSubtypeInjectionEvent)
+		if st := state(t); st.PersonMessageWaiting {
+			t.Error("an event injection read as a person's message waiting")
+		}
+		id := insert(t, "")
+		if st := state(t); !st.PersonMessageWaiting {
+			t.Error("a person's undelivered message did not read as waiting")
+		}
+		if err := f.Stores.Conversations.MarkDeliveredForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, []int{int(id)}, ""); err != nil {
+			t.Fatalf("MarkDeliveredForClaimSystem: %v", err)
+		}
+		if st := state(t); st.PersonMessageWaiting {
+			t.Error("a delivered message still read as waiting")
+		}
+
+		if _, err := f.Stores.Conversations.EndConversationSystem(ctx, f.OrgID, c.ID, domain.EndedDelegated); err != nil {
+			t.Fatalf("EndConversationSystem: %v", err)
+		}
+		if st := state(t); !st.Ended {
+			t.Error("an ended conversation did not read as ended")
+		}
+	})
+
+	t.Run("WarmWaitState_NoSuchConversation", func(t *testing.T) {
+		f := mk(t)
+		if _, err := f.Stores.Conversations.WarmWaitStateSystem(ctx, f.OrgID, "00000000-0000-4000-8000-000000000000"); !errors.Is(err, db.ErrNoSuchConversation) {
+			t.Errorf("WarmWaitStateSystem for no conversation = %v, want ErrNoSuchConversation", err)
+		}
+	})
 
 	t.Run("Gauges_SkipAWarmClaim", func(t *testing.T) {
 		f := mk(t)

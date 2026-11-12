@@ -121,12 +121,16 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 // Postgres twin carries why.
 const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
 
-// workingClaimExistsSQL is activeClaimExistsSQL without warm claims. The
-// Postgres twin carries why.
-const workingClaimExistsSQL = `EXISTS (
+// idleWarmClaimSQL and workingClaimExistsSQL are the Postgres twins'
+// predicates in this dialect, which carry why.
+func idleWarmClaimSQL(cl string) string {
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, 0)`
+}
+
+var workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
-		  AND cl_w.phase IS NOT '` + domain.ClaimPhaseWarm + `')`
+		  AND NOT ` + idleWarmClaimSQL("cl_w") + `)`
 
 // warmTreeHeldSQL is conversation r's task tree held by a warm claim on
 // another of the task's conversations. The Postgres twin carries why.

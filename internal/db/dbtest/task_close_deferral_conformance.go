@@ -97,6 +97,10 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			// its verdict, so nothing works under it.
 			{name: "warm_claim", run: string(domain.BlueprintRunStatusCompleted), status: SeedConcluded, phase: domain.ClaimPhaseWarm,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
+			// A follow-up resumed the conversation onto its warm claim, whose
+			// engagement is about to drive it.
+			{name: "warm_claim_resumed", run: string(domain.BlueprintRunStatusCompleted), status: "", phase: domain.ClaimPhaseWarm, working: true,
+				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			{name: "held_by_a_hand_back", status: "", working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.HoldUntilLater(t, convID) }},
 			{name: "between_steps", status: SeedConcluded, working: true},

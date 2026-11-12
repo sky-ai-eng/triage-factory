@@ -338,7 +338,7 @@ func (f *warmEngagement) assertConcluded(t *testing.T, outcome domain.Conversati
 }
 
 // assertReleased checks that the engagement let go of its claim the way a
-// turn end does, and ran no turn after the first.
+// turn end does, with its jail stopped first.
 func (f *warmEngagement) assertReleased(t *testing.T) {
 	t.Helper()
 	if released, outcome, _ := f.claimRelease(t); !released || outcome != "completed" {
@@ -595,7 +595,7 @@ func TestWarmClaim_EventIsNotFoldedIntoTheConversation(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 	if n := f.provider.calls(); n != 1 {
-		t.Errorf("provider calls = %d, want 1: a turn ran on the warm claim", n)
+		t.Errorf("provider calls = %d, want 1: the event started a turn on the warm claim", n)
 	}
 }
 
@@ -698,6 +698,7 @@ func TestWarmClaim_ExpiryReadsAMessageItWasNeverRungFor(t *testing.T) {
 
 // The claim's duration is the time its turns ran, not the time it was held.
 func TestWarmClaim_DurationIsTheTurnsNotTheWait(t *testing.T) {
+	spans := recordSpans(t)
 	f := startWarmEngagement(t, warmOpts{window: 3 * time.Second, turns: []gateTurn{{text: "fixed it"}, {text: "done that too"}}})
 	f.awaitWarm(t, 1)
 	const waited = time.Second
@@ -719,4 +720,13 @@ func TestWarmClaim_DurationIsTheTurnsNotTheWait(t *testing.T) {
 		t.Errorf("claims.duration_ms = %d, which counts the %s the claim was held", durationMs, waited)
 	}
 	f.assertReleased(t)
+
+	// One terminal span for the engagement, at the let-go, carrying both turns.
+	span := completionSpanFor(t, spans(), f.conversationID)
+	if got := spanAttr(t, span, "outcome").AsString(); got != "concluded_continue" {
+		t.Errorf("engagement.complete outcome = %q, want concluded_continue", got)
+	}
+	if got := spanAttr(t, span, "agent.duration_ms").AsInt64(); got != turns {
+		t.Errorf("engagement.complete agent.duration_ms = %d, want the two turns' %d", got, turns)
+	}
 }

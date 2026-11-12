@@ -98,14 +98,14 @@ var (
 )
 
 // CheckTaskUnheld reports whether a new run could replace the task's current
-// one in the same request: nil when no live claim holds any conversation on
-// the task, else ErrTaskHeld or ErrTaskStopping. A held row is one whose
-// claim is unreleased, the test the settlement uses, so a row this answers
-// unheld for is one SettleTaskStops will settle.
+// one in the same request: nil when no engaged claim holds any conversation on
+// the task, else ErrTaskHeld or ErrTaskStopping. An engaged claim is any
+// unreleased one but an idle warm claim (HasEngagedClaimForTaskSystem).
 //
-// A warm claim does not hold the task. Its conversation already has its
-// turn-end state, so there is nothing to stop, and it lets go of the task's
-// tree once the new run is waiting for it.
+// An idle warm claim does not hold the task. Its conversation has its
+// turn-end verdict, so there is nothing to stop or settle, and the new run
+// ends that conversation, which lets the claim go. A warm claim whose
+// conversation a follow-up has resumed holds the task like any claim.
 func (s *Spawner) CheckTaskUnheld(ctx context.Context, orgID, taskID string) error {
 	if s.conversations == nil {
 		return nil

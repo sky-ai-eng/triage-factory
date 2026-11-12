@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
@@ -79,7 +80,7 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 		}
 		switch held := s.concludeKeepingClaim(ctx, n, result); held {
 		case holdFenced:
-			return s.endWarmFenced(n)
+			return s.endWarmFenced(n, result)
 		case holdNotKept:
 			// A stop or a shutdown that cancelled the turn-end snapshot
 			// reached a turn that had already concluded, and the conclusion
@@ -96,14 +97,14 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 		case warmResumed:
 			resumed, err := s.conversations.ResumeWarmClaimSystem(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.cfg.claimID)
 			if errors.Is(err, db.ErrClaimReleased) {
-				return s.endWarmFenced(n)
+				return s.endWarmFenced(n, result)
 			}
 			if err != nil || !resumed {
 				if err != nil {
 					delegateLog.Warn("resume the conversation on its warm claim failed; letting the claim go",
 						"conversation", n.conversationID, "claim", n.cfg.claimID, "error", err)
 				}
-				return s.letGoWarm(context.WithoutCancel(ctx), n)
+				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
 			}
 			s.broadcastConversationUpdate(n.orgID, n.conversationID, domain.StatusRunning)
 			// The first turn's params say how this engagement started: in a
@@ -116,13 +117,13 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 			params.ExecutorChanged = false
 			result = accumulateTurns(result, n.run(ctx, params))
 		case warmLetGo:
-			return s.letGoWarm(ctx, n)
+			return s.letGoWarm(ctx, n, result)
 		case warmShutdown:
-			return s.letGoWarm(context.WithoutCancel(ctx), n)
+			return s.letGoWarm(context.WithoutCancel(ctx), n, result)
 		case warmStopped:
 			return s.endWarmStopped(ctx, n, result)
 		case warmFenced:
-			return s.endWarmFenced(n)
+			return s.endWarmFenced(n, result)
 		}
 	}
 }
@@ -285,7 +286,7 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
 
-	if s.personMessagePending(ctx, n.orgID, n.conversationID) {
+	if s.readWarmWait(ctx, n).PersonMessageWaiting {
 		return warmResumed
 	}
 	window := time.NewTimer(time.Until(deadline))
@@ -295,21 +296,22 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	for {
 		select {
 		case <-wait.Wake():
-			if s.personMessagePending(ctx, n.orgID, n.conversationID) {
+			if s.readWarmWait(ctx, n).PersonMessageWaiting {
 				return warmResumed
 			}
 		case <-backstop.C:
-			if s.personMessagePending(ctx, n.orgID, n.conversationID) {
-				return warmResumed
-			}
-			if s.warmClaimSpent(ctx, n) {
+			st := s.readWarmWait(ctx, n)
+			if st.Ended {
 				return warmLetGo
+			}
+			if st.PersonMessageWaiting {
+				return warmResumed
 			}
 		case <-window.C:
 			// One last look. A message whose ring is still on its way, or
 			// that landed as the timer fired, is read rather than left to a
 			// cold claim.
-			if s.personMessagePending(ctx, n.orgID, n.conversationID) {
+			if s.readWarmWait(ctx, n).PersonMessageWaiting {
 				return warmResumed
 			}
 			return warmLetGo
@@ -328,18 +330,22 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	}
 }
 
-// warmClaimSpent reports whether the conversation has ended, which no
-// follow-up resumes, so a warm claim on it serves nothing. A new delegation on
-// the task ends it, and so does the task closing. A read that fails answers
-// no, and the next backstop tick asks again.
-func (s *Spawner) warmClaimSpent(ctx context.Context, n nativeTail) bool {
-	conv, err := s.conversations.GetSystem(ctx, n.orgID, n.conversationID)
-	if err != nil {
-		delegateLog.Warn("read whether the conversation has ended failed; asking again on the next tick",
-			"conversation", n.conversationID, "error", err)
-		return false
+// readWarmWait reads what the wait acts on: a person's message waiting, and
+// the conversation having ended, which no follow-up resumes, so a warm claim
+// on it serves nothing. A new delegation on the task ends it, and so does the
+// task closing. A conversation that is gone reads as ended. A read that fails
+// answers that neither holds, and the next ring or backstop tick asks again.
+func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitState {
+	st, err := s.conversations.WarmWaitStateSystem(ctx, n.orgID, n.conversationID)
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return db.WarmWaitState{Ended: true}
 	}
-	return conv == nil || conv.EndedAt != nil
+	if err != nil {
+		delegateLog.Warn("read the warm claim's conversation failed; asking again on the next ring or tick",
+			"conversation", n.conversationID, "error", err)
+		return db.WarmWaitState{}
+	}
+	return st
 }
 
 // letGoWarm ends an engagement keeping its claim warm: the jail stopped, then
@@ -351,7 +357,20 @@ func (s *Spawner) warmClaimSpent(ctx context.Context, n nativeTail) bool {
 // tree. A message that resumes the conversation while the jail stops resumes
 // it onto a claim about to go, and the release then leaves the conversation
 // for the queue.
-func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail) engagementDisposition {
+//
+// It records the engagement's terminal span, as recordNativeResult does for
+// every other ending. result is the last turn's ending, carrying the turns,
+// time and spend of the whole engagement.
+func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.Result) (disp engagementDisposition) {
+	_, span := s.startNativeEngagementSpan(ctx, n.orgID, n.conversationID, n.task.ID, result)
+	defer func() {
+		terminal := "concluded_" + string(result.Outcome)
+		if disp.fenced {
+			terminal = "fenced"
+		}
+		span.SetAttributes(telemetry.Outcome(terminal))
+		span.End()
+	}()
 	n.release()
 	n.ckpt.stop()
 	s.releaseActivity(n.conversationID, n.cfg.claimID)
@@ -382,34 +401,20 @@ func (s *Spawner) endWarmStopped(ctx context.Context, n nativeTail, result agent
 			CostUSD:    result.CostUSD,
 		})
 	}
-	return s.letGoWarm(context.WithoutCancel(ctx), n)
+	return s.letGoWarm(context.WithoutCancel(ctx), n, result)
 }
 
 // endWarmFenced ends an engagement whose claim went to a successor: the jail
-// stopped and the checkpointer and watchdog ended, with nothing written.
-func (s *Spawner) endWarmFenced(n nativeTail) engagementDisposition {
+// stopped and the checkpointer and watchdog ended, with nothing written but
+// the engagement's terminal span.
+func (s *Spawner) endWarmFenced(n nativeTail, result agentloop.Result) engagementDisposition {
+	_, span := s.startNativeEngagementSpan(context.Background(), n.orgID, n.conversationID, n.task.ID, result)
+	span.SetAttributes(telemetry.Outcome("fenced"))
+	span.End()
 	n.release()
 	n.ckpt.stop()
 	s.releaseActivity(n.conversationID, n.cfg.claimID)
 	return engagementDisposition{fenced: true}
-}
-
-// personMessagePending reports whether a person's message is waiting on the
-// conversation. A read that fails answers no, and the next ring or backstop
-// tick asks again.
-func (s *Spawner) personMessagePending(ctx context.Context, orgID, conversationID string) bool {
-	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
-	if err != nil {
-		delegateLog.Warn("read the transcript for a waiting message failed; asking again on the next ring",
-			"conversation", conversationID, "error", err)
-		return false
-	}
-	for _, r := range rows {
-		if r.Delivered != nil && !*r.Delivered && isPersonMessage(r) {
-			return true
-		}
-	}
-	return false
 }
 
 // isPersonMessage reports whether a transcript row is a message a person

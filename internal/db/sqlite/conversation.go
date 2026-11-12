@@ -389,6 +389,15 @@ func sqliteResumeFlip(ctx context.Context, q queryer, conversationID string) (bo
 	return n > 0, err
 }
 
+// warmResumableSQL is the Postgres twin's predicate in this dialect, which
+// carries why.
+var warmResumableSQL = `(r.ended_at IS NULL AND r.archived_at IS NULL AND r.stop_requested_at IS NULL
+	AND NOT EXISTS (
+		SELECT 1 FROM blueprint_runs br
+		WHERE br.id = r.blueprint_run_id
+		  AND (br.cancel_requested = 1 OR br.status = 'cancelled'))
+	AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `))`
+
 // releaseActiveClaimUnlessWarm is releaseActiveClaim for every claim but a
 // warm one (domain.ClaimPhaseWarm).
 func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, conversationID, outcome string) error {
@@ -1188,7 +1197,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT r.id, COALESCE(r.task_id, ''), COALESCE(r.status, ''),
 		       COALESCE(`+db.ConcludedConversationSQL("r")+`, 0), COALESCE(r.outcome, ''),
-		       EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+		       `+workingClaimExistsSQL+`
 		FROM conversations r
 		LEFT JOIN tasks t ON t.id = r.task_id
 		WHERE r.type = 'delegation'
@@ -1682,16 +1691,16 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return s.taskHasClaim(ctx, orgID, taskID, true)
+	return s.taskHasClaim(ctx, orgID, taskID, activeClaimExistsSQL)
 }
 
 func (s *conversationStore) HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return s.taskHasClaim(ctx, orgID, taskID, false)
+	return s.taskHasClaim(ctx, orgID, taskID, workingClaimExistsSQL)
 }
 
-// taskHasClaim reports whether a conversation on taskID holds a live claim,
-// warm claims counted only when includeWarm is set.
-func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID string, includeWarm bool) (bool, error) {
+// taskHasClaim reports whether a conversation on taskID holds a claim that
+// claimExists, a predicate over the conversation alias r, admits.
+func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID, claimExists string) (bool, error) {
 	// The eviction sweep reads this immediately before a privileged removal,
 	// and an org that cannot exist here would answer a confident `false` off
 	// the org_id predicate alone — "nobody is in that tree" for a question
@@ -1703,13 +1712,10 @@ func (s *conversationStore) taskHasClaim(ctx context.Context, orgID, taskID stri
 	var exists int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1
-			FROM conversations c
-			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
-			WHERE c.org_id = ? AND c.task_id = ?
-			  AND (? OR cl.phase IS NOT ?)
+			SELECT 1 FROM conversations r
+			WHERE r.org_id = ? AND r.task_id = ? AND `+claimExists+`
 		)
-	`, orgID, taskID, includeWarm, domain.ClaimPhaseWarm).Scan(&exists)
+	`, orgID, taskID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
@@ -1934,16 +1940,22 @@ func (s *conversationStore) ResumeWarmClaimSystem(ctx context.Context, orgID, co
 			return err
 		}
 		var status sql.NullString
-		if err := q.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
+		var drivable bool
+		if err := q.QueryRowContext(ctx, `
+			SELECT r.status, `+warmResumableSQL+` FROM conversations r WHERE r.id = ?
+		`, conversationID).Scan(&status, &drivable); err != nil {
 			return err
 		}
-		resumed = !status.Valid
-		if !resumed {
+		if !drivable {
+			return nil
+		}
+		if status.Valid {
 			var err error
 			if resumed, err = sqliteResumeFlip(ctx, q, conversationID); err != nil || !resumed {
 				return err
 			}
 		}
+		resumed = true
 		_, err := q.ExecContext(ctx, `
 			UPDATE claims SET phase = NULL
 			WHERE id = ? AND conversation_id = ? AND released_at IS NULL AND phase = ?
@@ -2100,6 +2112,26 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 		return time.Time{}, false, err
 	}
 	return at, true, nil
+}
+
+func (s *conversationStore) WarmWaitStateSystem(ctx context.Context, orgID, conversationID string) (db.WarmWaitState, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.WarmWaitState{}, err
+	}
+	var st db.WarmWaitState
+	err := s.q.QueryRowContext(ctx, `
+		SELECT c.ended_at IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM messages m_p
+		           WHERE m_p.conversation_id = c.id
+		             AND m_p.delivered = 0 AND `+personMessageSQL+`)
+		FROM conversations c
+		WHERE c.org_id = ? AND c.id = ?
+	`, orgID, conversationID).Scan(&st.Ended, &st.PersonMessageWaiting)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.WarmWaitState{}, db.ErrNoSuchConversation
+	}
+	return st, err
 }
 
 func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {

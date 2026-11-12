@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // toolHostDialTimeout bounds how long setup waits for the in-jail server to
@@ -367,6 +368,20 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			stopJail()
 		},
 	})
+}
+
+// startNativeEngagementSpan starts a native engagement's terminal span,
+// processCompletion's on the other runtime: the same attributes, with the
+// loop's own accounting, summed over every turn the engagement ran, as the
+// run's figures. The caller sets the outcome and ends it.
+func (s *Spawner) startNativeEngagementSpan(ctx context.Context, orgID, conversationID, taskID string, result agentloop.Result) (context.Context, trace.Span) {
+	return s.startPunctual(ctx, conversationID, "engagement.complete",
+		telemetry.OrgID(orgID),
+		telemetry.TaskID(taskID),
+		telemetry.Runtime(domain.ConversationRuntimeNative),
+		telemetry.AgentCostUSD(result.CostUSD),
+		telemetry.AgentDuration(int64(result.DurationMs)),
+		telemetry.Count(result.NumTurns))
 }
 
 // executorChangedSince reports whether the engagement before this one ran on
@@ -836,18 +851,10 @@ func (s *Spawner) recordNativeResult(
 	result agentloop.Result,
 	mirror *memoryMirror,
 ) (disp engagementDisposition) {
-	// The engagement's terminal span, processCompletion's on the other
-	// runtime: the same attributes, with the loop's own accounting as the
-	// run's figures. Every exit below names its outcome, except a fenced one:
-	// the fence can refuse a write inside any of the helpers below, and
-	// whichever write it refused, nothing was recorded.
-	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
-		telemetry.OrgID(orgID),
-		telemetry.TaskID(task.ID),
-		telemetry.Runtime(domain.ConversationRuntimeNative),
-		telemetry.AgentCostUSD(result.CostUSD),
-		telemetry.AgentDuration(int64(result.DurationMs)),
-		telemetry.Count(result.NumTurns))
+	// Every exit below names its outcome, except a fenced one: the fence can
+	// refuse a write inside any of the helpers below, and whichever write it
+	// refused, nothing was recorded.
+	ctx, span := s.startNativeEngagementSpan(ctx, orgID, conversationID, task.ID, result)
 	var terminal string
 	defer func() {
 		if disp.fenced {

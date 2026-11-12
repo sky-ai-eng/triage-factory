@@ -225,14 +225,28 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 // own write would have released it, and its conversation is left as it is.
 const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
 
-// workingClaimExistsSQL is activeClaimExistsSQL without warm claims
-// (domain.ClaimPhaseWarm). A warm claim still holds its conversation, so
-// activeClaimExistsSQL keeps a second claim off it, but its turn has ended and
-// no agent works under it.
-const workingClaimExistsSQL = `EXISTS (
+// idleWarmClaimSQL is claim alias cl being a warm claim (domain.ClaimPhaseWarm)
+// whose conversation r still holds the verdict its turn wrote. Its turn has
+// ended and nothing has resumed it, so no agent works under it. A follow-up
+// that resumes the conversation leaves the claim warm until its engagement
+// takes it back up, and from the resume on the claim is the one about to
+// drive the conversation, so it is not idle. A resumed conversation keeps its
+// completed_at, and its NULL status would make the bare test NULL, so the
+// result is coalesced and negates cleanly.
+func idleWarmClaimSQL(cl string) string {
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, false)`
+}
+
+// workingClaimExistsSQL is activeClaimExistsSQL without an idle warm claim
+// (idleWarmClaimSQL). Such a claim still holds its conversation, so
+// activeClaimExistsSQL keeps a second claim off it, but no agent works under
+// it. Everything that asks whether an agent is at work on a conversation or a
+// task reads this: the held close, re-delegation, the factory belt, and the
+// PR coherence notes.
+var workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
-		  AND cl_w.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `')`
+		  AND NOT ` + idleWarmClaimSQL("cl_w") + `)`
 
 // warmTreeHeldSQL is conversation r's task tree held by a warm claim on
 // another of the task's conversations. Every conversation on a task shares one
@@ -573,7 +587,14 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	// placement: the org_active CTE counts each org's active (slot-occupying)
 	// runs once per statement, the cap filter hides a queued conversation whose org is
 	// at or above its max_concurrent_runs, and the fairness key orders
-	// claimable rows fewest-active-org first. Both degrade to a no-op at N=1 /
+	// claimable rows fewest-active-org first. A warm claim counts toward its
+	// org's active runs, because it holds an executor slot.
+	//
+	// TODO(TFAC-1372): an org at its cap only because of its own warm claims
+	// keeps its queued work hidden here until their windows end; that org's
+	// oldest warm claim should let go when work is waiting behind the cap.
+	//
+	// Both degrade to a no-op at N=1 /
 	// single org — the fairness key is constant across all candidates (so the
 	// order collapses to started_at, id — the old global-oldest) and the
 	// default NULL cap never filters — so existing single-org callers see the

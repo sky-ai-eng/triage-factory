@@ -413,6 +413,11 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// each claimed run consumes memory as it spawns. Deliberately
 		// BEFORE the semaphore acquire so a gated host parks with no
 		// slot held.
+		//
+		// TODO(TFAC-1372): engagements keeping claims warm hold host memory
+		// and disk through their windows, so a gate tripped by them leaves
+		// queued work waiting until a window ends; the oldest warm claim
+		// should let go when claimable work is waiting.
 		if s.dispatchMemGated() {
 			return
 		}
@@ -436,8 +441,9 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		}
 		// Drain: an operator asked this instance to quiesce (the CLI drain
 		// verb flips instances.draining; the next heartbeat reads it back —
-		// see heartbeatOnce). Live runs finish or park at their turn end; no
-		// new claims start.
+		// see heartbeatOnce). Live runs finish or park at their turn end, and a
+		// claim kept warm is let go when its window ends (the drain does not
+		// shorten it yet, see SetDraining); no new claims start.
 		if s.Draining() {
 			return
 		}
@@ -454,6 +460,9 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 			s.noteCapAcquireImmediate(cap(sem))
 		default:
 			s.noteCapAcquireBlocked(ctx, cap(sem))
+			// TODO(TFAC-1372): a slot a warm claim holds frees only when its
+			// window ends, so a full executor waits here with claimable work
+			// queued; the oldest warm claim should let go instead.
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():

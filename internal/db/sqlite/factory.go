@@ -109,8 +109,9 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 
 // ActiveConversations lists the conversations the factory view treats as in flight:
 // exactly those an engagement is actually driving (an unreleased claim — the
-// setup sub-states ride that claim's phase). Mirrors the X-button window in
-// AgentCard. Duplicated in postgres/factory.go; intentional per-backend copy.
+// setup sub-states ride that claim's phase — that is not an idle warm one).
+// Mirrors the X-button window in AgentCard. Duplicated in postgres/factory.go;
+// intentional per-backend copy.
 func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -143,7 +144,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
-		WHERE ` + activeClaimExistsSQL + `
+		WHERE ` + workingClaimExistsSQL + `
 		ORDER BY r.started_at DESC
 	`
 
