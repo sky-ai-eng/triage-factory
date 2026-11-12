@@ -136,11 +136,8 @@ export default function Cards() {
     [loadDeck, setDeckItems],
   )
 
-  // Initial queue load on mount. fetchQueue calls setState internally, which
-  // the lint rule flags transitively — but fetching data on mount is the
-  // canonical use of an effect and the safe pattern here.
+  // Initial queue load on mount.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchQueue()
   }, [fetchQueue])
 
@@ -148,7 +145,6 @@ export default function Cards() {
   // filter via its ref, so the call here picks up the new scope.
   useEffect(() => {
     if (!hasFetched.current) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchQueue()
   }, [teamFilter, fetchQueue])
 
@@ -232,13 +228,21 @@ export default function Cards() {
   }
 
   // Undo puts the task back in the queue, which is where every card in the
-  // deck came from.
+  // deck came from. One at a time: a held or repeated Cmd-Z would otherwise
+  // send requeues that race, each putting the claim back in Jira or Linear.
+  const undoInFlight = useRef(false)
   const undo = async () => {
-    if (!undoTask) return
+    if (!undoTask || undoInFlight.current) return
+    undoInFlight.current = true
     try {
+      // TODO(TFAC-1384): send the version the swipe's write returned, so an
+      // undo of a task that changed since the swipe is refused rather than
+      // requeueing over the change.
       await apiFetch(`/api/tasks/${undoTask.id}/requeue`, { method: 'POST' })
     } catch {
       return
+    } finally {
+      undoInFlight.current = false
     }
     setUndoTask(null)
     fetchQueue()

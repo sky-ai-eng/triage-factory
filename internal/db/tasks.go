@@ -366,7 +366,9 @@ func taskKeyTime(t *time.Time) string {
 //     to are recorded as a visibility set via SetVisibilityTeams; the
 //     caller-supplied teamID is the owning/attributed team stamped on a
 //     newly created row.
-//   - Claim mutations return ok=true when the row actually changed.
+//   - Claim mutations, SnoozeTask, ClearSnooze and RequeueTask return
+//     ok=true when the row actually changed, not the row: each caller acts
+//     on whether the write landed and serves the task through Get.
 //     False means a guard tripped (caller doesn't broadcast,
 //     usually surfaces 409). HandoffAgentClaim returns the
 //     three-state HandoffResult so callers can distinguish no-op
@@ -593,7 +595,9 @@ type TaskStore interface {
 	// CloseByUser closes a task on a person's word: status is "dismissed"
 	// (walked away) or "done" (resolved), and the close reason is
 	// UserDismissedCloseReason or UserCompletedCloseReason to match, with
-	// closed_at stamped and snooze_until cleared. Any other status returns
+	// closed_at stamped, and snooze_until and close_event_type cleared: a
+	// person's close names no event, whatever an earlier close of a since
+	// requeued task left there. Any other status returns
 	// ErrInvalidUserCloseStatus and writes nothing.
 	//
 	// A closed task takes no second close: the UPDATE carries the status

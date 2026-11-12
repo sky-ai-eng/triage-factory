@@ -1350,8 +1350,8 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 //     behind it cancelled. A requeued task is unclaimed and unowned, so an
 //     agent left executing against it keeps writing messages and landing
 //     deliverables on a task whose columns say nobody owns it. The stop is what
-//     makes returning a live run to the queue safe, which is why the routes
-//     above take every status rather than guarding on one.
+//     makes returning a live run to the queue safe, which is why /requeue
+//     takes every status rather than guarding on one.
 //
 //     The deliverables the stopped runs left are deliberately NOT resolved: a
 //     requeued task carries its draft PRs and staged reviews to whoever picks

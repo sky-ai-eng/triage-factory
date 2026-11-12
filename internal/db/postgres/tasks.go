@@ -1410,7 +1410,8 @@ func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status strin
 		   SET status = $1,
 		       snooze_until = NULL,
 		       closed_at = NOW(),
-		       close_reason = $2
+		       close_reason = $2,
+		       close_event_type = NULL
 		 WHERE org_id = $3 AND id = $4
 		   AND status NOT IN ('done', 'dismissed')
 		RETURNING `+pgTaskBareColumns,

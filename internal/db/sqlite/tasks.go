@@ -1519,7 +1519,8 @@ func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status strin
 		   SET status = ?,
 		       snooze_until = NULL,
 		       closed_at = ?,
-		       close_reason = ?
+		       close_reason = ?,
+		       close_event_type = NULL
 		 WHERE id = ?
 		   AND status NOT IN ('done', 'dismissed')
 		RETURNING `+sqliteTaskBareColumns,

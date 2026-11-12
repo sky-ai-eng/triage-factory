@@ -239,6 +239,40 @@ func seedPgTaskChainOfType(t *testing.T, conn *sql.DB, orgID, userID, suffix, ev
 	return entityID, eventID, taskID
 }
 
+// TestTaskStore_Postgres_ReturnedRowUnderRLS runs the request-path writes that
+// return a row inside a claims-carrying transaction, as the PATCH close and the
+// delegate route call them. The conformance suite wires both pools to the
+// BYPASSRLS connection, where RETURNING hands back its row unconditionally;
+// only under the caller's own RLS does the row the write leaves have to satisfy
+// tasks_select, which a handoff moving team_id makes worth checking.
+func TestTaskStore_Postgres_ReturnedRowUnderRLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+	_, _, handedID := seedPgTaskChain(t, h.AdminDB, orgID, userID, "rls-handoff")
+	_, _, closedID := seedPgTaskChain(t, h.AdminDB, orgID, userID, "rls-close")
+	ctx := context.Background()
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		tasks := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
+		for _, want := range []db.HandoffResult{db.HandoffChanged, db.HandoffNoOp} {
+			result, got, err := tasks.HandoffAgentClaim(ctx, orgID, handedID, agentID, userID)
+			if err != nil || result != want {
+				t.Fatalf("HandoffAgentClaim = (%v, %v), want result %v", result, err, want)
+			}
+			dbtest.AssertWriteReturnedStoredRow(t, "Tasks.HandoffAgentClaim under RLS", got, dbtest.BareTaskRead(tasks, orgID, handedID))
+		}
+		got, err := tasks.CloseByUser(ctx, orgID, closedID, "dismissed")
+		if err != nil {
+			t.Fatalf("CloseByUser under RLS: %v", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.CloseByUser under RLS", got, dbtest.BareTaskRead(tasks, orgID, closedID))
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
+}
+
 // TestTaskStore_Postgres_CrossOrgLeakage pins the defense-in-depth
 // guarantee: even with the org_id filter as the only line of defense
 // (AdminDB bypasses RLS), org A's queries can't see org B's tasks.

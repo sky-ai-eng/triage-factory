@@ -1143,7 +1143,15 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			"done":      db.UserCompletedCloseReason,
 		} {
 			_, _, taskID := seed(t, "user-close-"+status)
-			// From snoozed, so the close is seen to take the wake time with it.
+			// An event closed the task once and it was requeued since, so the
+			// close is seen to drop the event type that close left; and it is
+			// snoozed, so the close is seen to take the wake time with it.
+			if _, err := s.Close(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if ok, err := s.RequeueTask(ctx, orgID, taskID); err != nil || !ok {
+				t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
+			}
 			if ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour)); err != nil || !ok {
 				t.Fatalf("SnoozeTask: ok=%v err=%v", ok, err)
 			}
@@ -1151,9 +1159,9 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			if err != nil {
 				t.Fatalf("CloseByUser(%s): %v", status, err)
 			}
-			if got.Status != status || got.CloseReason != reason || got.ClosedAt == nil || got.SnoozeUntil != nil {
-				t.Errorf("CloseByUser(%s) = (status %q, reason %q, closed_at %v, snooze_until %v), want (%s, %s, a timestamp, nil)",
-					status, got.Status, got.CloseReason, got.ClosedAt, got.SnoozeUntil, status, reason)
+			if got.Status != status || got.CloseReason != reason || got.ClosedAt == nil || got.SnoozeUntil != nil || got.CloseEventType != "" {
+				t.Errorf("CloseByUser(%s) = (status %q, reason %q, closed_at %v, snooze_until %v, close_event_type %q), want (%s, %s, a timestamp, nil, empty)",
+					status, got.Status, got.CloseReason, got.ClosedAt, got.SnoozeUntil, got.CloseEventType, status, reason)
 			}
 		}
 	})
@@ -1179,12 +1187,16 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				if err := closeFirst(taskID); err != nil {
 					t.Fatalf("close %s: %v", name, err)
 				}
-				before, _ := s.Get(ctx, orgID, taskID)
+				before := mustGetTask(t, s, orgID, taskID)
+				if before.ClosedAt == nil {
+					t.Fatalf("close %s left closed_at NULL", name)
+				}
 				if _, err := s.CloseByUser(ctx, orgID, taskID, status); !errors.Is(err, db.ErrNoSuchTask) {
 					t.Errorf("CloseByUser(%s) on a task closed %s = %v, want db.ErrNoSuchTask", status, name, err)
 				}
-				after, _ := s.Get(ctx, orgID, taskID)
-				if after.Status != before.Status || after.CloseReason != before.CloseReason || !after.ClosedAt.Equal(*before.ClosedAt) {
+				after := mustGetTask(t, s, orgID, taskID)
+				if after.Status != before.Status || after.CloseReason != before.CloseReason ||
+					after.ClosedAt == nil || !after.ClosedAt.Equal(*before.ClosedAt) {
 					t.Errorf("a refused close rewrote the close: (%s, %s, %v) → (%s, %s, %v)",
 						before.Status, before.CloseReason, before.ClosedAt, after.Status, after.CloseReason, after.ClosedAt)
 				}
@@ -1380,17 +1392,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// per-user column no write can see (settings_conformance.go).
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		bareRead := func(taskID string) func() (*domain.Task, error) {
-			return func() (*domain.Task, error) {
-				full, err := s.Get(ctx, orgID, taskID)
-				if err != nil || full == nil {
-					return full, err
-				}
-				bare := *full
-				bare.Title, bare.SourceURL, bare.EntitySourceID = "", "", ""
-				bare.EntitySource, bare.EntityKind = "", ""
-				bare.OpenSubtaskCount, bare.SlackMessageCount = 0, 0
-				return &bare, nil
-			}
+			return BareTaskRead(s, orgID, taskID)
 		}
 
 		// Bump / BumpSystem: wakes a snoozed task.
@@ -2034,6 +2036,36 @@ func runTaskFacetConformance(ctx context.Context, t *testing.T, mk TaskStoreFact
 
 // titlesOf / idsOf render a page for a failure message — the assertion is on
 // the order, so the message has to show it.
+// BareTaskRead is the point read a TaskStore write's returned row is compared
+// against: Get with the entity-joined display fields blanked, since a write
+// returns tasks' own columns only (the shape note on db.TaskStore). It reads
+// through whatever connection s is bound to, so a store bound to a
+// claims-carrying transaction reads under the caller's RLS.
+func BareTaskRead(s db.TaskStore, orgID, taskID string) func() (*domain.Task, error) {
+	return func() (*domain.Task, error) {
+		full, err := s.Get(context.Background(), orgID, taskID)
+		if err != nil || full == nil {
+			return full, err
+		}
+		bare := *full
+		bare.Title, bare.SourceURL, bare.EntitySourceID = "", "", ""
+		bare.EntitySource, bare.EntityKind = "", ""
+		bare.OpenSubtaskCount, bare.SlackMessageCount = 0, 0
+		return &bare, nil
+	}
+}
+
+// mustGetTask reads a task that must exist, failing the test rather than
+// handing back a nil the caller would dereference.
+func mustGetTask(t *testing.T, s db.TaskStore, orgID, taskID string) *domain.Task {
+	t.Helper()
+	task, err := s.Get(context.Background(), orgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("Get(%s) = (%v, %v), want the task", taskID, task, err)
+	}
+	return task
+}
+
 func titlesOf(tasks []domain.Task) []string {
 	out := make([]string, len(tasks))
 	for i, task := range tasks {
