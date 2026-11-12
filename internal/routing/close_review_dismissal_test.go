@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -181,6 +182,16 @@ func TestCloseCascade_LeavesTheDraftAndDismissesTheMergedPullRequestsReview(t *t
 	}
 	if got := deliverableState(t, database, reviewID); got != domain.DeliverableStateReviewDismissed {
 		t.Errorf("review deliverable state = %q, want %q", got, domain.DeliverableStateReviewDismissed)
+	}
+	// What the agent that staged the review is told on its next resume, read
+	// from the row as the ledger reads it: the merge, and no person.
+	review, err := sqlitestore.New(database).Deliverables.Get(t.Context(), runmode.LocalDefaultOrgID, reviewID)
+	if err != nil || review == nil {
+		t.Fatalf("read review deliverable: %v", err)
+	}
+	note := domain.DeliverableResolutionNote(*review)
+	if !strings.Contains(note, "the pull request was merged") || strings.Contains(note, "human") {
+		t.Errorf("resolution note = %q, want it to say the pull request was merged and credit no person", note)
 	}
 	if n := externalActionCount(t, database, convID); n != 0 {
 		t.Errorf("audit rows = %d, want 0 — the close wrote nothing on GitHub", n)

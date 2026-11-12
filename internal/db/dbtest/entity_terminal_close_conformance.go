@@ -58,6 +58,9 @@ type EntityTerminalCloseSeeder struct {
 
 	// DeliverableState reads a deliverable's state.
 	DeliverableState func(t *testing.T, deliverableID string) string
+
+	// DeliverableDetails reads a deliverable's details_json.
+	DeliverableDetails func(t *testing.T, deliverableID string) string
 }
 
 // RunEntityTerminalCloseConformance is the shared suite for
@@ -168,6 +171,20 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 			if got := seed.DeliverableState(t, id); got != wantState {
 				t.Errorf("deliverable %s state = %q, want %q", id, got, wantState)
 			}
+		}
+		// Each dismissal records how the pull request ended, so the agent that
+		// staged it is not told a person dismissed it, and keeps the draft.
+		for _, id := range []string{pendingA, pendingB} {
+			d, err := domain.ParseReviewDeliverableDetails(seed.DeliverableDetails(t, id))
+			if err != nil {
+				t.Fatalf("parse details of %s: %v", id, err)
+			}
+			if d.Resolution != domain.ReviewResolutionPullRequestMerged || d.ReviewEvent != "COMMENT" {
+				t.Errorf("review %s details = %+v, want resolution %q with the draft kept", id, d, domain.ReviewResolutionPullRequestMerged)
+			}
+		}
+		if d, _ := domain.ParseReviewDeliverableDetails(seed.DeliverableDetails(t, submitted)); d.Resolution != "" {
+			t.Errorf("submitted review resolution = %q, want none — the close did not write it", d.Resolution)
 		}
 		if got := seed.TaskStatus(t, taskB); got != "queued" {
 			t.Errorf("task %s status = %q, want queued — dismissing its review is not a close of it", taskB, got)

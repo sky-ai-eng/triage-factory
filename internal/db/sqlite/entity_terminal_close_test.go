@@ -113,5 +113,13 @@ func newSQLiteTerminalCloseSeeder(conn *sql.DB) dbtest.EntityTerminalCloseSeeder
 			}
 			return state
 		},
+		DeliverableDetails: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var details sql.NullString
+			if err := conn.QueryRow(`SELECT details_json FROM deliverables WHERE id = ?`, deliverableID).Scan(&details); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return details.String
+		},
 	}
 }

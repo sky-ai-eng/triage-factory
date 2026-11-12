@@ -92,6 +92,10 @@ type ReviewDeliverableProposed struct {
 //     snapshotted at finalize-review and never modified — the baseline the
 //     approve-time human-feedback diff renders against (proposed vs. the final
 //     StagedComments).
+//   - Resolution: what dismissed the review when it was not a person — the
+//     pull request it reviews ending (ReviewResolution*). Empty on a review a
+//     person resolved, which is every review resolved through TF's verbs; the
+//     resume ledger reads it to say which happened.
 //
 // NodeID is retained for backward compatibility with rows written before the
 // local-staging rework; it is no longer populated (review reconciliation is moot
@@ -106,6 +110,46 @@ type ReviewDeliverableDetails struct {
 	ReviewEvent      string                     `json:"review_event"`
 	StagedComments   []ReviewDeliverableComment `json:"staged_comments,omitempty"`
 	Proposed         ReviewDeliverableProposed  `json:"proposed"`
+	Resolution       string                     `json:"resolution,omitempty"`
+}
+
+// ReviewResolution* is the closed vocabulary of ReviewDeliverableDetails.Resolution.
+// Each names how the pull request a dismissed review was about ended, which is
+// what dismissed it: a review of an ended pull request can no longer be posted.
+const (
+	ReviewResolutionPullRequestMerged      = "pull_request_merged"
+	ReviewResolutionPullRequestClosed      = "pull_request_closed"
+	ReviewResolutionPullRequestUnreachable = "pull_request_unreachable"
+	// ReviewResolutionPullRequestEnded is the close obligation's: the entity's
+	// snapshot was already terminal, merged or closed, when nothing had closed
+	// it, and the obligation does not say which.
+	ReviewResolutionPullRequestEnded = "pull_request_ended"
+)
+
+// ReviewResolutionForClose is the resolution a terminating close stamps on the
+// pending reviews of the pull request it closes, from the closing event's type.
+func ReviewResolutionForClose(closeEventType string) string {
+	switch closeEventType {
+	case EventGitHubPRMerged:
+		return ReviewResolutionPullRequestMerged
+	case EventGitHubPRClosed:
+		return ReviewResolutionPullRequestClosed
+	case EventGitHubPRUnreachable:
+		return ReviewResolutionPullRequestUnreachable
+	}
+	return ReviewResolutionPullRequestEnded
+}
+
+// StampReviewResolution returns detailsJSON with Resolution set to resolution.
+// Unparseable details are returned unchanged, as StampPRResolution returns
+// them.
+func StampReviewResolution(detailsJSON, resolution string) string {
+	d, err := ParseReviewDeliverableDetails(detailsJSON)
+	if err != nil {
+		return detailsJSON
+	}
+	d.Resolution = resolution
+	return MarshalReviewDeliverableDetails(d)
 }
 
 // ReviewTarget is the deliverable Target for a review: owner/repo#<number> — the PR

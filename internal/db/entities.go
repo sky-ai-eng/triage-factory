@@ -698,10 +698,12 @@ type EntityStore interface {
 	//
 	// Right after the entity flips, every pending review deliverable about it
 	// is dismissed in the same transaction and reported in DismissedReviews,
-	// whichever task's conversation staged it: the caller announces each one
-	// and re-checks its task for closing after the commit. No other
-	// deliverable is written here: a pull request deliverable follows GitHub
-	// through the reconciler.
+	// whichever task's conversation staged it. Each records the resolution
+	// closeEventType names (domain.ReviewResolutionForClose), so the agent that
+	// staged it is told the pull request ended rather than that a person
+	// dismissed it. The caller announces each one and re-checks its task for
+	// closing after the commit. No other deliverable is written here: a pull
+	// request deliverable follows GitHub through the reconciler.
 	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)
 
 	// ClearSnapshotsForSourceSystem blanks snapshot_json for every ACTIVE

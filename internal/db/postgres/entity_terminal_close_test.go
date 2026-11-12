@@ -112,6 +112,14 @@ func newPgTerminalCloseSeeder(conn *sql.DB, orgID, userID string) dbtest.EntityT
 			}
 			return state
 		},
+		DeliverableDetails: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var details sql.NullString
+			if err := conn.QueryRow(`SELECT details_json FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, deliverableID).Scan(&details); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return details.String
+		},
 	}
 }
 

@@ -64,14 +64,14 @@ func (s *Spawner) InjectDeliverableNote(orgID, conversationID string, a domain.D
 }
 
 // deliverableLedgerForResume derives the bundled <system-note> block to prepend ahead
-// of a resuming run's user message: every deliverable this run produced that a human
+// of a resuming run's user message: every deliverable this run produced that was
 // resolved while the agent was NOT running, since the run's last agent activity.
 // Returns "" (prepend nothing) when there's no pending change.
 //
 // Derived, not stored (TFAC-493): the watermark is the run's last non-user message
 // (LastAgentActivityAtSystem) — falling back to the run's start when it has no
 // agent message yet — and the entries are the run's deliverables whose updated_at is
-// strictly after it AND whose terminal state is a reported human resolution. User
+// strictly after it AND whose terminal state is a reported resolution. User
 // messages are excluded from the watermark, so the resume message the server just
 // recorded can't suppress the ledger.
 //
