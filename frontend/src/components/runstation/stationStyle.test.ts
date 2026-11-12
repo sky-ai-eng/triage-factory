@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { Conversation } from '../../types'
 import { CONVERSATION_STATUSES } from '../../types'
-import { isWorkingStatus } from '../../lib/conversationStatus'
+import { isActiveStatus } from '../../lib/conversationStatus'
 import { HMI_CYAN, stationState, type StationKey } from './stationStyle'
 
 const conversation = (over: Partial<Conversation>): Conversation =>
@@ -29,7 +29,7 @@ describe('stationState', () => {
     expect(state.belt).toBeGreaterThan(0)
   })
 
-  it('gives every setup phase the one working light', () => {
+  it('gives every claim phase the one working light', () => {
     for (const status of ['fetching', 'cloning', 'agent_starting', 'awaiting_credentials']) {
       const state = stationState(conversation({ Status: status }))
       expect(state.key, `${status} should read as working`).toBe('working')
@@ -45,11 +45,10 @@ describe('stationState', () => {
     const expected: Record<string, StationKey> = {
       queued: 'queued',
       open: 'open',
-      awaiting_message: 'open',
       failed: 'failed',
     }
     for (const status of CONVERSATION_STATUSES) {
-      const want = isWorkingStatus(status) ? 'working' : expected[status]
+      const want = isActiveStatus(status) ? 'working' : expected[status]
       expect(want, `${status} has no decided station light`).toBeDefined()
       expect(stationState(conversation({ Status: status })).key, status).toBe(want)
     }

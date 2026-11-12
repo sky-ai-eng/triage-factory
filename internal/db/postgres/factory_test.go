@@ -263,6 +263,15 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("finish conversation: %v", err)
 			}
 		},
+		WarmClaim: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE claims SET phase = $1 WHERE conversation_id = $2 AND org_id = $3 AND released_at IS NULL`,
+				domain.ClaimPhaseWarm, conversationID, orgID,
+			); err != nil {
+				t.Fatalf("warm claim: %v", err)
+			}
+		},
 		CloseEntity: func(t *testing.T, entityID string, closedAt time.Time) {
 			t.Helper()
 			if _, err := conn.Exec(

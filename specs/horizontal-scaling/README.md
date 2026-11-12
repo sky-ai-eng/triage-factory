@@ -835,7 +835,7 @@ conversation_signals (
   org_id       uuid NOT NULL,
   conversation_id text NOT NULL,
   kind         text NOT NULL,      -- cancel | interrupt | steer | permission | inject
-  payload      jsonb,              -- steer text, permission decision, injection body, ...
+  payload      jsonb,              -- permission decision, injection body, ... (steer carries none)
   target       text NOT NULL,      -- executor id owning the run
   created_at   timestamptz NOT NULL,
   acked_at     timestamptz
@@ -852,6 +852,13 @@ staged-and-probably-never-delivered (active auto-runs usually
 terminate without another resume). Under `conversation_signals`, the owner
 delivers into its live process; the staged fallback remains for
 genuinely parked runs.
+
+`steer` carries no message. A person's message is a transcript row the
+control pod writes, and the resume it causes keeps a warm claim rather than
+releasing it: the engagement that held the conversation's last turn is still
+up, waiting for its window to end. The signal is the doorbell for that
+engagement, and the owner acks `gone` when no claim is warm, which the sender
+never waits for.
 
 Control-pod handler logic (`message` / `interrupt` / `cancel` /
 `permissions/{id}`):

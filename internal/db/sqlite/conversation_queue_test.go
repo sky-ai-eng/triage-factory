@@ -849,6 +849,12 @@ func TestClaimTakeover_SQLite(t *testing.T) {
 	dbtest.RunClaimTakeoverConformance(t, sqliteClaimLeaseFixture)
 }
 
+// TestWarmClaim_SQLite runs the shared warm-claim conformance on the same
+// fixture.
+func TestWarmClaim_SQLite(t *testing.T) {
+	dbtest.RunWarmClaimConformance(t, sqliteClaimLeaseFixture)
+}
+
 func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 	t.Helper()
 	conn := openSQLiteForTest(t)

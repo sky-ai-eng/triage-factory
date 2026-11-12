@@ -6,9 +6,8 @@ import (
 )
 
 // WarmWaits is this executor's set of engagements waiting warm: each one's
-// turn ended and it holds its claim, in phase domain.ClaimPhaseAwaitingMessage,
-// while it waits for a person's message.
-// An engagement registers when its wait begins and unregisters when the wait
+// turn ended and it holds its claim, in phase domain.ClaimPhaseWarm, while it
+// waits for a person's message. An engagement registers when its wait begins and unregisters when the wait
 // ends, however it ends. The registry is how the rest of the executor reaches
 // a waiting engagement without holding a reference to it: a person's message
 // rings its wake channel, and reclaiming its slot signals its let-go channel.

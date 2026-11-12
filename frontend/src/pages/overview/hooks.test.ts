@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useConversationSets, useRetryClock, useTasksIndex, useTranscriptTick } from './hooks'
-import { WORKING_STATUSES, retryingAt } from '../../lib/conversationStatus'
+import { ACTIVE_STATUSES, retryingAt } from '../../lib/conversationStatus'
 import type { Conversation, Message, Task, WSEvent } from '../../types'
 import { jsonBody, listBody } from '../../test/apiResponse'
 
@@ -176,7 +176,7 @@ describe('useConversationSets', () => {
     expect(runningBodies()).toHaveLength(2)
     expect(runningBodies()[1]).toEqual({
       team_ids: ['t1'],
-      statuses: [...WORKING_STATUSES, 'queued'],
+      statuses: [...ACTIVE_STATUSES, 'queued'],
       page_size: 20,
     })
   })

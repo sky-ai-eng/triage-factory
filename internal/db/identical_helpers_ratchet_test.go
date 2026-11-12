@@ -96,7 +96,6 @@ var identicalHelperRatchet = map[string]helperTier{
 	"scanExternalActionRows": tierScanner,
 	"scanIntIDs":             tierScanner,
 	"scanJiraStatusRules":    tierScanner,
-	"scanLapsedClaims":       tierScanner,
 	"scanMessageRow":         tierScanner,
 	"scanMessageRows":        tierScanner,
 	"scanOneExecutorClaim":   tierScanner,

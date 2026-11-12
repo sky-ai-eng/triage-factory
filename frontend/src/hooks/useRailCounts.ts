@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiList } from '../lib/apiClient'
 import { queueCountBody, TASK_LIST_PATH } from '../lib/taskList'
-import { WORKING_STATUSES } from '../lib/conversationStatus'
+import { ACTIVE_STATUSES } from '../lib/conversationStatus'
 import { useApiOrgId } from './useApiOrgId'
 import { useWebSocket } from './useWebSocket'
 import type { WSEvent } from '../types'
@@ -58,8 +58,7 @@ const HINTS = new Set<WSEvent['type']>([
 export interface RailCounts {
   /** Conversations waiting on a person, counted per conversation. */
   needs: number | null
-  /** Conversations an agent is working on — running, or any claim phase but
-   *  awaiting_message. */
+  /** Conversations with a live engagement — running, or any claim phase. */
   running: number | null
   /** The pickable queue's depth: the Queued column's own filter set. */
   queued: number | null
@@ -69,13 +68,12 @@ export interface RailCounts {
  *  and shared: it is only ever spread from, never written. */
 const BLANK: RailCounts = { needs: null, running: null, queued: null }
 
-/** The rail's `running`: the working display statuses, which is what the run
- *  view lights as WORKING. WORKING_STATUSES is derived from the status
- *  vocabulary a Go test pins to the backend's, so a new claim phase joins this
- *  count on both sides at once. An engagement awaiting a person's message
- *  holds its slot but is not counted: no agent is working on it. */
+/** The rail's `running`: the live display statuses, which is what the run view
+ *  lights as WORKING. ACTIVE_STATUSES is derived from the status vocabulary a
+ *  Go test pins to the backend's, so a new claim phase joins this count on
+ *  both sides at once. */
 function runningCountBody() {
-  return { statuses: [...WORKING_STATUSES], page_size: 0 }
+  return { statuses: [...ACTIVE_STATUSES], page_size: 0 }
 }
 
 /** The rail's `needs`: the server-side "YOUR MOVE" predicate — an unanswered

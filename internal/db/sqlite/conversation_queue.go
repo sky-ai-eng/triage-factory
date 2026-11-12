@@ -74,7 +74,8 @@ func sqliteLeaseModifier(d time.Duration) string {
 const liveClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_a
 		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL
-		  AND cl_a.lease_expires_at > ` + sqliteNowExpr + `)`
+		  AND cl_a.lease_expires_at > ` + sqliteNowExpr + `
+		  AND cl_a.phase IS NOT '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
 // still awaiting delivery. Injections ride whatever engagement runs next and
@@ -115,12 +116,29 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
-// workingClaimExistsSQL is activeClaimExistsSQL without the engagements
-// awaiting a person's message; the Postgres twin carries the model.
-const workingClaimExistsSQL = `EXISTS (
+// lapsedClaimOutcomeSQL is the outcome a claim whose holder is gone is
+// released with: completed for a warm claim, reaped for any other. The
+// Postgres twin carries why.
+const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
+
+// idleWarmClaimSQL and workingClaimExistsSQL are the Postgres twins'
+// predicates in this dialect, which carry why.
+func idleWarmClaimSQL(cl string) string {
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, 0)`
+}
+
+var workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
-		  AND cl_w.phase IS NOT '` + domain.ClaimPhaseAwaitingMessage + `')`
+		  AND NOT ` + idleWarmClaimSQL("cl_w") + `)`
+
+// warmTreeHeldSQL is conversation r's task tree held by a warm claim on
+// another of the task's conversations. The Postgres twin carries why.
+const warmTreeHeldSQL = `EXISTS (
+		SELECT 1 FROM conversations sib
+		JOIN claims cl_t ON cl_t.conversation_id = sib.id AND cl_t.released_at IS NULL
+		WHERE sib.task_id = r.task_id AND sib.id <> r.id
+		  AND cl_t.phase = '` + domain.ClaimPhaseWarm + `')`
 
 // workingConversationSQL is a conversation still working on its task, with
 // no person needed for it to go on. The Postgres twin carries the model; this
@@ -340,6 +358,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 			WHERE `+eligibleForDrivingSQL+`
 			  AND `+blueprintDrivableSQL+`
+			  AND NOT `+warmTreeHeldSQL+`
 			ORDER BY r.started_at, r.id
 			LIMIT 1`)
 		claimed, err := scanSqliteClaimedConversation(row)
@@ -636,7 +655,7 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 	var count int
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			SELECT id, org_id, conversation_id, COALESCE(phase, '')
+			SELECT id, conversation_id
 			FROM claims
 			WHERE released_at IS NULL
 			  AND executor_id = ?
@@ -645,89 +664,36 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 		if err != nil {
 			return err
 		}
-		prior, err := scanLapsedClaims(rows)
-		if err != nil {
+		var claimIDs, convIDs []string
+		for rows.Next() {
+			var claimID, convID string
+			if err := rows.Scan(&claimID, &convID); err != nil {
+				rows.Close()
+				return err
+			}
+			claimIDs = append(claimIDs, claimID)
+			convIDs = append(convIDs, convID)
+		}
+		if err := rows.Close(); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
-		for _, c := range prior {
-			released, err := releaseLapsedClaim(ctx, q, c, ``, now)
-			if err != nil {
+		for i := range claimIDs {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE claims SET released_at = ?, outcome = `+lapsedClaimOutcomeSQL+` WHERE id = ?
+			`, now, claimIDs[i]); err != nil {
 				return err
-			}
-			if !released {
-				continue
 			}
 			if _, err := q.ExecContext(ctx, `
 				UPDATE conversations SET preferred_executor_id = NULL WHERE id = ?
-			`, c.ConversationID); err != nil {
+			`, convIDs[i]); err != nil {
 				return err
 			}
-			count++
 		}
+		count = len(claimIDs)
 		return nil
 	})
 	return count, err
-}
-
-// lapsedClaim is a live claim whose holder is gone, with the phase it was in
-// when the holder went.
-type lapsedClaim struct {
-	db.ClaimRef
-	phase string
-}
-
-// scanLapsedClaims reads (id, org_id, conversation_id, phase) rows.
-func scanLapsedClaims(rows *sql.Rows) ([]lapsedClaim, error) {
-	defer rows.Close()
-	var out []lapsedClaim
-	for rows.Next() {
-		var c lapsedClaim
-		if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID, &c.phase); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
-// releaseLapsedClaim releases one claim whose holder is gone, while it is
-// still live and guard (extra SQL on the claims row) holds, and reports
-// whether it did. A claim lost mid-work is reaped; one lost while its
-// engagement awaited a person's message is parked, its conversation with it,
-// as db.ParkIdle() parks a turn that ended, unless a stop is pending on the
-// conversation, which the settlement pass then settles. The Postgres twin,
-// releaseLapsedClaims, carries why.
-func releaseLapsedClaim(ctx context.Context, q queryer, c lapsedClaim, guard string, at time.Time) (bool, error) {
-	awaiting := c.phase == domain.ClaimPhaseAwaitingMessage
-	outcome := db.HandBackReaped
-	if awaiting {
-		outcome = db.ParkIdle().ClaimOutcome()
-	}
-	res, err := q.ExecContext(ctx, `
-		UPDATE claims SET released_at = ?, outcome = ?
-		WHERE id = ? AND released_at IS NULL`+guard, at, outcome, c.ClaimID)
-	if err != nil {
-		return false, err
-	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
-		return false, err
-	}
-	if !awaiting {
-		return true, nil
-	}
-	var stopPending bool
-	if err := q.QueryRowContext(ctx, `
-		SELECT stop_requested_at IS NOT NULL FROM conversations WHERE id = ?
-	`, c.ConversationID).Scan(&stopPending); err != nil {
-		return false, err
-	}
-	if !stopPending {
-		if _, err := parkOpen(ctx, q, c.ConversationID, db.ParkIdle()); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
 }
 
 func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShare, error) {
@@ -1370,7 +1336,7 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		  AND last_activity_at IS NOT NULL
-		  AND phase IS NOT '`+domain.ClaimPhaseAwaitingMessage+`'`).Scan(&seconds)
+		  AND phase IS NOT '`+domain.ClaimPhaseWarm+`'`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}
@@ -1389,7 +1355,7 @@ func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) 
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		  AND last_checkpoint_at IS NOT NULL
-		  AND phase IS NOT '`+domain.ClaimPhaseAwaitingMessage+`'`).Scan(&seconds)
+		  AND phase IS NOT '`+domain.ClaimPhaseWarm+`'`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}
@@ -1426,25 +1392,19 @@ func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	var released bool
-	err := inTx(ctx, s.conn, func(q queryer) error {
-		var phase string
-		err := q.QueryRowContext(ctx, `
-			SELECT COALESCE(phase, '') FROM claims
-			WHERE id = ? AND org_id = ? AND conversation_id = ?
-			  AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr,
-			claimID, orgID, conversationID).Scan(&phase)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		c := lapsedClaim{ClaimRef: db.ClaimRef{ClaimID: claimID, OrgID: orgID, ConversationID: conversationID}, phase: phase}
-		released, err = releaseLapsedClaim(ctx, q, c, ` AND lease_expires_at <= `+sqliteNowExpr, time.Now().UTC())
-		return err
-	})
-	return released, err
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = `+lapsedClaimOutcomeSQL+`
+		WHERE id = ? AND org_id = ? AND conversation_id = ?
+		  AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
+	`, time.Now().UTC(), claimID, orgID, conversationID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // TakeOverExpiredClaimsSystem is the Postgres twin's takeover as a read then
@@ -1458,7 +1418,7 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 	var out []db.ClaimRef
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			SELECT id, org_id, conversation_id, COALESCE(phase, '')
+			SELECT id, org_id, conversation_id
 			FROM claims
 			WHERE released_at IS NULL
 			  AND lease_expires_at <= `+sqliteNowExpr+`
@@ -1469,17 +1429,30 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 		if err != nil {
 			return err
 		}
-		candidates, err := scanLapsedClaims(rows)
-		if err != nil {
+		var candidates []db.ClaimRef
+		for rows.Next() {
+			var c db.ClaimRef
+			if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID); err != nil {
+				rows.Close()
+				return err
+			}
+			candidates = append(candidates, c)
+		}
+		if err := rows.Close(); err != nil {
 			return err
 		}
 		now := time.Now().UTC()
 		for _, c := range candidates {
-			released, err := releaseLapsedClaim(ctx, q, c, ` AND lease_expires_at <= `+sqliteNowExpr, now)
+			res, err := q.ExecContext(ctx, `
+				UPDATE claims SET released_at = ?, outcome = `+lapsedClaimOutcomeSQL+`
+				WHERE id = ? AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
+			`, now, c.ClaimID)
 			if err != nil {
 				return err
 			}
-			if !released {
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n == 0 {
 				continue
 			}
 			if _, err := q.ExecContext(ctx, `
@@ -1487,7 +1460,7 @@ func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context
 			`, c.ConversationID); err != nil {
 				return err
 			}
-			out = append(out, c.ClaimRef)
+			out = append(out, c)
 		}
 		return nil
 	})

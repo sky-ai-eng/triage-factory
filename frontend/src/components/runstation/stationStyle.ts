@@ -1,5 +1,5 @@
 import type { Conversation } from '../../types'
-import { chainPosition, completionKind, isWorkingStatus } from '../../lib/conversationStatus'
+import { chainPosition, completionKind, isActiveConversation } from '../../lib/conversationStatus'
 import { hasUnresolvedDeliverables } from '../../lib/approval'
 
 // stationStyle — the design system for the run-station HMI. It maps a
@@ -46,12 +46,10 @@ export interface StationState {
 export const HMI_CYAN = 'var(--hmi-cyan)'
 
 // stationState collapses the conversation lifecycle into the machine's lit
-// state. Every working status — each setup phase and running alike — reads as
-// one thing: the machine is hot and scanning. An engagement awaiting a
-// person's message is live but not working, so it wears the light an `open`
-// conversation does: the turn is over and the move is the person's.
+// state. Every active status — each setup phase and running alike — reads as
+// one thing: the machine is hot and scanning.
 export function stationState(conversation: Conversation): StationState {
-  if (isWorkingStatus(conversation.Status)) {
+  if (isActiveConversation(conversation)) {
     return {
       key: 'working',
       light: 'var(--color-cool)',
@@ -62,12 +60,12 @@ export function stationState(conversation: Conversation): StationState {
       belt: 1,
     }
   }
-  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a
-  // conversation no agent is working on (parked, awaiting a message, or
-  // terminal) that still holds unresolved draft PRs or ready reviews wears the
-  // amber "your move" light, regardless of its stored status. A working
-  // conversation keeps WORKING (handled above) — the dock surfaces the
-  // approval affordance without recoloring the whole machine mid-turn.
+  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled
+  // conversation (idle / terminal) that still holds unresolved draft PRs or
+  // ready reviews wears the amber "your move" light, regardless of its stored
+  // status. A live conversation keeps WORKING (handled above) — the dock
+  // surfaces the approval affordance without recoloring the whole machine
+  // mid-turn.
   if (hasUnresolvedDeliverables(conversation)) {
     return {
       key: 'attention',
@@ -126,7 +124,6 @@ export function stationState(conversation: Conversation): StationState {
   }
   switch (conversation.Status) {
     case 'open':
-    case 'awaiting_message':
       // Honest idle: not executing, no verdict. Powered, waiting — the
       // machine glows its baseline cyan, belt idling, vents barely warm.
       return {

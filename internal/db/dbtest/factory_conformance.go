@@ -71,6 +71,10 @@ type FactorySeeder struct {
 	// when it started.
 	FinishConversation func(t *testing.T, conversationID, status string, completedAt time.Time)
 
+	// WarmClaim puts the conversation's active claim in phase
+	// domain.ClaimPhaseWarm, the claim an engagement keeps after its turn.
+	WarmClaim func(t *testing.T, conversationID string)
+
 	// SetConversationMemory inserts a conversation_memory row with the given
 	// agent_content and source. content=NullMemorySentinel stores SQL NULL,
 	// which is the shape a `none` row has.
@@ -259,6 +263,11 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		conversationGenerated := seed.Conversation(t, taskID, "running")
 		conversationPopulated := seed.Conversation(t, taskID, "running")
 		conversationTerminal := seed.Conversation(t, taskID, SeedConcluded) // must NOT appear
+		// A turn that concluded with its engagement keeping the claim warm:
+		// the claim is unreleased, but nothing is in flight. Must NOT appear.
+		conversationWarm := seed.Conversation(t, taskID, "running")
+		seed.FinishConversation(t, conversationWarm, domain.StatusOpen, now)
+		seed.WarmClaim(t, conversationWarm)
 
 		seed.SetConversationMemory(t, conversationNone, nullSentinel, domain.MemorySourceNone)
 		seed.SetConversationMemory(t, conversationGenerated, "a summary nobody's agent wrote", domain.MemorySourceGenerated)
@@ -278,6 +287,9 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 
 		if gotIDs[conversationTerminal] {
 			t.Errorf("terminal conversation %s leaked into ActiveConversations — status filter failed", conversationTerminal)
+		}
+		if gotIDs[conversationWarm] {
+			t.Errorf("concluded conversation %s on a warm claim listed as in flight", conversationWarm)
 		}
 		for _, id := range []string{conversationNoRow, conversationNone, conversationGenerated, conversationPopulated} {
 			if !gotIDs[id] {

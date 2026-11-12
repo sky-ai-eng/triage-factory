@@ -3063,20 +3063,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if got := filter(phase); len(got) != 1 || got[0] != queued {
 				t.Errorf("statuses=[%s] = %v, want [%s]", phase, got, queued)
 			}
-			// Every phase belongs to the live set; the working set is the live
-			// set without awaiting_message.
+			// The live set is what the rail counts as `running`, and every
+			// phase belongs to it.
 			live := append([]string{domain.StatusRunning}, domain.AllClaimPhases()...)
 			if got := filter(live...); len(got) != 1 || got[0] != queued {
 				t.Errorf("phase %s missing from the live status set: %v", phase, got)
-			}
-			var working []string
-			for _, s := range live {
-				if domain.IsWorkingConversationStatus(s) {
-					working = append(working, s)
-				}
-			}
-			if got, want := len(filter(working...)) == 1, phase != domain.ClaimPhaseAwaitingMessage; got != want {
-				t.Errorf("phase %s in the working status set = %v, want %v", phase, got, want)
 			}
 		}
 	})
@@ -3348,17 +3339,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if got := attention(); len(got) != 1 || got[0] != drafted {
 			t.Errorf("a live conversation's draft PR counted as attention: %v", got)
-		}
-		// An engagement awaiting a person's message is live but not working,
-		// so its draft PR is the person's move, as an `open` conversation's is.
-		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, domain.ClaimPhaseAwaitingMessage); err != nil {
-			t.Fatalf("SetActiveClaimPhaseSystem(awaiting_message): %v", err)
-		}
-		if got := attention(); len(got) != 2 || !slices.Contains(got, live) || !slices.Contains(got, drafted) {
-			t.Errorf("attention with the draft PR of a conversation awaiting a message = %v, want [%s %s]", got, drafted, live)
-		}
-		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, live, ""); err != nil {
-			t.Fatalf("SetActiveClaimPhaseSystem(clear): %v", err)
 		}
 
 		// A prompt owned by the live claim IS a human's move, whatever the

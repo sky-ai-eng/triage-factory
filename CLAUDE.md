@@ -78,12 +78,12 @@ status (stored vocabulary `queued|running|open|terminals` — spend and KV-cache
 warmth are derived from `messages`, never stored), `runtime` ratchet
 (`sdk`|`native`), `sdk_session_id`, archive timestamp. A *claim* is one executor
 engagement (executor id + boot epoch, sealed-credential pubkey, `phase` — the
-live engagement's setup/parked/waiting sub-state, `fetching|cloning|agent_starting|
-awaiting_credentials|awaiting_message` (the last is live but not working: the turn
-ended and the claim is held for a person's message), coalesced over the
-conversation's stored status on display reads so a retry never rewrites the
-conversation row — at most one active per
-conversation, schema-enforced). The transcript itself is the
+live engagement's setup/parked sub-state, `fetching|cloning|agent_starting|
+awaiting_credentials`, coalesced over the conversation's stored status on display
+reads so a retry never rewrites the conversation row, or `warm`, a native
+engagement kept after its turn ended so a person's next message starts on it,
+which display reads skip and which never writes the conversation — at most one
+active per conversation, schema-enforced). The transcript itself is the
 `messages` table: one row per neutral API message, `delivered=false` rows are the
 universal pending-input queue (follow-ups, staged injections — the former two
 side-tables), `window_state`/`seq` are the native

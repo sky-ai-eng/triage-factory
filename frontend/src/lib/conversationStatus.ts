@@ -11,17 +11,10 @@ import type {
 // one place therefore lands in every predicate below at once.
 
 // ACTIVE_STATUSES — the conversation is claimed and occupying an executor slot: setting
-// up, executing a turn, or awaiting a person's message. Mirrors domain.IsActiveConversationStatus, which is likewise
+// up, or executing a turn. Mirrors domain.IsActiveConversationStatus, which is likewise
 // `running` plus every claim phase. `queued` is excluded (waiting, not
 // working) and so is `open` (parked between turns).
 export const ACTIVE_STATUSES = ['running', ...CLAIM_PHASES] as const
-
-// WORKING_STATUSES — an agent is working on the conversation: every active
-// status but `awaiting_message`, an engagement waiting for a person's message.
-// Mirrors domain.IsWorkingConversationStatus. The lights, counts and filters
-// that answer "is an agent working" read this; the ones that answer "is an
-// engagement live" (the composer, message routing) read ACTIVE_STATUSES.
-export const WORKING_STATUSES = ACTIVE_STATUSES.filter((s) => s !== 'awaiting_message')
 
 // FAILED_STATUSES — the terminals, styled rose rather than neutral. Every
 // terminal is a failure: a conversation never concludes, so the only state it
@@ -65,11 +58,7 @@ export function isActiveStatus(status: ConversationStatusValue): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(status)
 }
 
-export function isWorkingStatus(status: ConversationStatusValue): boolean {
-  return isActiveStatus(status) && status !== 'awaiting_message'
-}
-
-// PHASE_PROSE — what a conversation in a claim phase is doing, in the words the
+// PHASE_PROSE — what a setting-up conversation is doing, in the words the
 // state actually means. One table for every surface that narrates a live
 // conversation (an Overview row, a board card), so the same run never reads
 // as two different procedures on two pages.
@@ -78,7 +67,6 @@ export const PHASE_PROSE: Record<ClaimPhase, string> = {
   cloning: 'Cloning the repository',
   agent_starting: 'Starting the agent',
   awaiting_credentials: 'Waiting on credentials',
-  awaiting_message: 'Waiting for a message',
 }
 
 // activeProse — the one prose line an ACTIVE conversation shows in place of

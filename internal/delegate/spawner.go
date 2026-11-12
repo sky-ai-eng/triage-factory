@@ -507,11 +507,10 @@ type Spawner struct {
 	// claimWarmWindow is how long an engagement waits warm after a person's
 	// turn (warm_window.go). Zero turns warm claims off. NewSpawner sets
 	// DefaultWarmWindow; SetWarmWindow (TF_CLAIM_WARM_WINDOW) overrides it
-	// once at startup.
-	//
-	// TODO(TFAC-1370): no engagement waits warm yet. A native engagement
-	// whose turn ends reads WarmWindow() and registers in warmWaits.
-	// TODO(TFAC-1371): the same for an SDK engagement, the local twin.
+	// once at startup. A native engagement reads it at each turn end
+	// (native_warm.go). An SDK engagement lets go at every turn end: a local
+	// respawn reuses the tree on disk and builds no cell, so a window would
+	// hold a claim slot to save little.
 	claimWarmWindow time.Duration
 	// warmWaits is the engagements on this executor waiting warm.
 	warmWaits *WarmWaits
