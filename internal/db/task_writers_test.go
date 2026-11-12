@@ -86,7 +86,8 @@ var taskWriters = map[string]taskWriter{
 // TestTaskWriters_EveryWriterIsListed finds every function in the two
 // dialects whose SQL writes the tasks table, and checks it against
 // taskWriters: each is listed, and one listed as moving the version builds
-// its SET list with db.TaskSetSQL. What each writer does to the version is
+// its SET list with db.TaskSetSQL, and none of that SQL sits at package level,
+// where no function owns it. What each writer does to the version is
 // RunTaskVersionConformance's business; this keeps the set of writers it has
 // to cover from growing unseen.
 func TestTaskWriters_EveryWriterIsListed(t *testing.T) {
@@ -110,7 +111,22 @@ func TestTaskWriters_EveryWriterIsListed(t *testing.T) {
 			}
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
+				if !ok {
+					// A writer is listed by the function that runs it, so SQL
+					// held at package level would write the table from a
+					// function this scan cannot name.
+					ast.Inspect(decl, func(n ast.Node) bool {
+						if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							if s, err := strconv.Unquote(lit.Value); err == nil && taskUpdateRE.MatchString(s) {
+								t.Errorf("%s holds a statement that writes the tasks table outside a function: "+
+									"keep it in the function that runs it, so this test can list that writer", filepath.ToSlash(path))
+							}
+						}
+						return true
+					})
+					continue
+				}
+				if fn.Body == nil {
 					continue
 				}
 				writes, renders := false, false

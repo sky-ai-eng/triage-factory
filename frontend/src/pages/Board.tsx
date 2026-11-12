@@ -961,18 +961,20 @@ export default function Board() {
   }, [queued, inProgress, done])
 
   // The version each of this board's task writes left, by task id. A write
-  // names the newer of it and the lane's copy, so a gesture made before the
-  // refetch after the last one lands sends the version that write returned
-  // rather than the read it already moved past. Versions only rise, so the
-  // larger of the two is the current one.
+  // names the newest of it, the lane's copy, and the copy the gesture was
+  // handed (a picker's task, which a refetch can drop from the lanes while it
+  // is open), so a gesture made before the refetch after the last write lands
+  // sends the version that write returned rather than the read it already
+  // moved past. Versions only rise, so the largest is the current one.
   const writtenVersions = useRef(new Map<string, number>())
   const noteWritten = useCallback((task: TaskRef) => {
     writtenVersions.current.set(task.id, task.version)
   }, [])
   const taskRefFor = useCallback(
-    (taskId: string): TaskRef => {
+    (taskId: string, handed = 0): TaskRef => {
       const listed = allTasks.get(taskId)?.version ?? 0
-      return { id: taskId, version: Math.max(listed, writtenVersions.current.get(taskId) ?? 0) }
+      const written = writtenVersions.current.get(taskId) ?? 0
+      return { id: taskId, version: Math.max(listed, written, handed) }
     },
     [allTasks],
   )
@@ -1279,8 +1281,11 @@ export default function Board() {
     } catch (err) {
       // A failed status/claim/requeue mutation would otherwise leave the board
       // silently in the wrong state; surface it and let the next fetchTasks
-      // reconcile.
+      // reconcile. A refusal over the version means this board's copy is the
+      // stale one, so that fetch is now: a retry from the same copy is refused
+      // the same way.
       toast.failed(err, 'Could not move the task — please try again.')
+      if (isVersionConflict(err)) fetchTasks()
     }
   }
 
@@ -1289,7 +1294,7 @@ export default function Board() {
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       try {
-        noteWritten(await claimTask(taskRefFor(task.id)))
+        noteWritten(await claimTask(taskRefFor(task.id, task.version)))
       } catch (err) {
         toast.failed(err, 'Could not claim the task.')
       }
@@ -1316,7 +1321,7 @@ export default function Board() {
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
       try {
-        noteWritten(await reassignTask(taskRefFor(task.id), targetUserID))
+        noteWritten(await reassignTask(taskRefFor(task.id, task.version), targetUserID))
       } catch (err) {
         toast.failed(err, 'Could not reassign the task.')
       }
@@ -1332,7 +1337,7 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await delegateTask(taskRefFor(task.id), promptId)
+        const body = await delegateTask(taskRefFor(task.id, task.version), promptId)
         noteWritten({ id: task.id, version: body.version })
         const conversationID = body.conversation_id
         if (conversationID) {

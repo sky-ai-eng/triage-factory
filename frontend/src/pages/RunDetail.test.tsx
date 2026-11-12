@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import RunDetail from './RunDetail'
 import type { Conversation, Task } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 const stopping = {
   ID: 'c1',
@@ -19,6 +20,7 @@ const detail: { conversation: Conversation; task: Task | null } = {
   conversation: stopping,
   task: null,
 }
+const refetch = vi.hoisted(() => vi.fn())
 
 vi.mock('../hooks/useConversationDetail', () => ({
   useConversationDetail: () => ({
@@ -28,6 +30,7 @@ vi.mock('../hooks/useConversationDetail', () => ({
     loading: false,
     notFound: false,
     error: null,
+    refetch,
     pendingPermissions: [],
     resolvePermission: () => {},
     softRefresh: () => {},
@@ -59,6 +62,7 @@ beforeEach(() => {
   )
   detail.conversation = stopping
   detail.task = null
+  refetch.mockReset()
 })
 
 describe('RunDetail stop controls', () => {
@@ -94,5 +98,32 @@ describe('RunDetail return to queue', () => {
     parkedOn({ can_write: false })
     renderRunDetail()
     expect(screen.queryByRole('button', { name: 'Return to queue' })).not.toBeInTheDocument()
+  })
+
+  it('withholds it from a page whose task did not load, which has no version to name', () => {
+    parkedOn({})
+    detail.task = null
+    renderRunDetail()
+    expect(screen.queryByRole('button', { name: 'Return to queue' })).not.toBeInTheDocument()
+  })
+
+  it('reloads the task when the server says it changed since the page read it', async () => {
+    parkedOn({ version: 3 })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      ...jsonBody({
+        errors: [{ reason: 'VERSION_CONFLICT', message: 'this task changed', field: 'version' }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderRunDetail()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Return to queue' }))
+    await waitFor(() => expect(refetch).toHaveBeenCalledTimes(1))
+    const requeue = (fetchMock.mock.calls as [string, RequestInit][]).find(
+      ([path]) => path === '/api/tasks/t1/requeue',
+    )
+    expect(requeue && JSON.parse(String(requeue[1].body))).toEqual({ version: 3 })
   })
 })

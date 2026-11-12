@@ -20,21 +20,28 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// raceBeforeWriteTx lands *race once, just before the request opens its first
-// write transaction: a write by someone else that commits between the
-// handler's read of the task and the route's own first write, which only the
-// version predicate on that write can refuse.
-type raceBeforeWriteTx struct {
+// raceAroundWriteTx lands a write by someone else around the request's first
+// write transaction, each hook once. *before runs just before it opens: a
+// change between the handler's read of the task and the route's own first
+// write, which only the version predicate on that write can refuse. *after
+// runs just after it commits: a change the route's response must not report
+// as its own write's.
+type raceAroundWriteTx struct {
 	db.TxRunner
-	race *func()
+	before, after *func()
 }
 
-func (w raceBeforeWriteTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
-	if race := *w.race; race != nil {
-		*w.race = nil
+func (w raceAroundWriteTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	if race := *w.before; race != nil {
+		*w.before = nil
 		race()
 	}
-	return w.TxRunner.WithTx(ctx, orgID, userID, fn)
+	err := w.TxRunner.WithTx(ctx, orgID, userID, fn)
+	if race := *w.after; err == nil && race != nil {
+		*w.after = nil
+		race()
+	}
+	return err
 }
 
 // moveTaskOn is another writer's change to the task: one column a person acts
@@ -107,6 +114,7 @@ func taskVersionCases(otherUserID string) []taskVersionCase {
 		{name: "patch stage", setup: mine, method: http.MethodPatch, body: map[string]any{"status": "in_progress"}},
 		{name: "claim from the queue", setup: unclaimed, method: http.MethodPost, suffix: "/claim", body: map[string]any{}},
 		{name: "claim from the agent", method: http.MethodPost, suffix: "/claim", body: map[string]any{}},
+		{name: "claim it already holds", setup: mine, method: http.MethodPost, suffix: "/claim", body: map[string]any{}},
 		{name: "claim's reassign arm", setup: mine, method: http.MethodPost, suffix: "/claim",
 			body: map[string]any{"target_user_id": otherUserID}},
 		{name: "delegate", setup: unclaimed, method: http.MethodPost, suffix: "/delegate", body: map[string]any{}},
@@ -146,12 +154,16 @@ func wantVersionRefusal(t *testing.T, rec *httptest.ResponseRecorder, status int
 // between the handler's read and its first write (409 VERSION_CONFLICT, from
 // that write's own predicate). Each refusal writes nothing and starts nothing:
 // no claim stamped, no run stopped, ended or spawned, no deliverable retired.
+// At the version the task holds, the write lands and answers the version it
+// left, even when another write lands before the route's response is read.
 func TestTaskWrites_RequireTheVersionTheCallerRead(t *testing.T) {
 	const otherUserID = "00000000-0000-0000-0000-0000000007aa"
 	for _, c := range taskVersionCases(otherUserID) {
 		t.Run(c.name, func(t *testing.T) {
-			var race func()
-			s := newTestServerWithTx(t, func(tx db.TxRunner) db.TxRunner { return raceBeforeWriteTx{TxRunner: tx, race: &race} })
+			var race, after func()
+			s := newTestServerWithTx(t, func(tx db.TxRunner) db.TxRunner {
+				return raceAroundWriteTx{TxRunner: tx, before: &race, after: &after}
+			})
 			// The reassign arm's target, on the task's team, so the handoff
 			// lands once the version is right.
 			execSQL(t, s.db, `INSERT INTO users (id, display_name) VALUES (?, 'Other User')`, otherUserID)
@@ -194,11 +206,20 @@ func TestTaskWrites_RequireTheVersionTheCallerRead(t *testing.T) {
 				t.Errorf("a write that lost the race changed the task\nbefore %s\nafter  %s", raced, after)
 			}
 
-			// At the version the task holds, the same request lands, and its
-			// answer carries the version the next write names.
+			// At the version the task holds, the same request lands. Its answer
+			// carries the version its own write left, which the next write
+			// names, and not the version of a write landing after it.
+			var left int64
+			after = func() {
+				left = taskVersionNow(t, s, runmode.LocalDefaultOrgID, taskID)
+				moveTaskOn(t, s.db, taskID)
+			}
 			rec = doJSON(t, s, c.method, path, withVersion(c.body, taskVersionNow(t, s, runmode.LocalDefaultOrgID, taskID)))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("at the current version: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if after != nil {
+				t.Fatal("the write transaction never committed for the later write to land after")
 			}
 			var landed struct {
 				Version *int64 `json:"version"`
@@ -206,8 +227,13 @@ func TestTaskWrites_RequireTheVersionTheCallerRead(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &landed); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if now := taskVersionNow(t, s, runmode.LocalDefaultOrgID, taskID); landed.Version == nil || *landed.Version != now {
-				t.Errorf("response version = %v, want the task's version now, %d", landed.Version, now)
+			if landed.Version == nil {
+				t.Errorf("response carries no version, want %d, the version the write left", left)
+			} else if *landed.Version != left {
+				t.Errorf("response version = %d, want %d, the version the write left", *landed.Version, left)
+			}
+			if now := taskVersionNow(t, s, runmode.LocalDefaultOrgID, taskID); now != left+1 {
+				t.Errorf("task version = %d, want %d: the later write should have moved it past the write's", now, left+1)
 			}
 		})
 	}
@@ -259,8 +285,10 @@ func TestTaskReads_CarryTheVersion(t *testing.T) {
 // past, leave the ticket alone: no assignment, no transition.
 func TestTaskWrites_VersionRefusalAsksJiraNothing(t *testing.T) {
 	fake := newJiraIssueFake(t, statusToDoID, "")
-	var race func()
-	s := newTestServerWithTx(t, func(tx db.TxRunner) db.TxRunner { return raceBeforeWriteTx{TxRunner: tx, race: &race} })
+	var race, after func()
+	s := newTestServerWithTx(t, func(tx db.TxRunner) db.TxRunner {
+		return raceAroundWriteTx{TxRunner: tx, before: &race, after: &after}
+	})
 	s.jiraResolver = &recordingJiraResolver{userClient: fake.client()}
 	ctx := t.Context()
 	seedSourceHost(t, s, eventsource.KindJira, "https://jira.example.com")
