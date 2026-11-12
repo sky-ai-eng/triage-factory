@@ -395,3 +395,44 @@ func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) strin
 	}
 	return blueprintRunID
 }
+
+// taskVersionNow is the version the task stands at now: what a caller holding
+// a fresh read of it sends with a task write. A test about something other
+// than the version sends it, so the write meets only the checks the test is
+// about. Read on the admin pool, so it names the task whoever the caller is. A
+// task that doesn't exist answers 1, a well-formed version no read of it
+// handed out, so the request still reaches the check that finds it missing.
+func taskVersionNow(t *testing.T, s *Server, orgID, taskID string) int64 {
+	t.Helper()
+	task, err := s.tasks.GetSystem(context.Background(), orgID, taskID)
+	if err != nil {
+		t.Fatalf("read task %s version: %v", taskID, err)
+	}
+	if task == nil {
+		return 1
+	}
+	return task.Version
+}
+
+// withTaskVersion is a task write's body with the version the task stands at
+// now (taskVersionNow) in the local org. body is a map[string]any or nil, which
+// is an empty body; the original is not modified.
+func withTaskVersion(t *testing.T, s *Server, taskID string, body any) map[string]any {
+	t.Helper()
+	return withTaskVersionIn(t, s, runmode.LocalDefaultOrgID, taskID, body)
+}
+
+// withTaskVersionIn is withTaskVersion for a task in orgID.
+func withTaskVersionIn(t *testing.T, s *Server, orgID, taskID string, body any) map[string]any {
+	t.Helper()
+	out := map[string]any{}
+	switch b := body.(type) {
+	case nil:
+	case map[string]any:
+		maps.Copy(out, b)
+	default:
+		t.Fatalf("withTaskVersion: body is %T, want map[string]any or nil", body)
+	}
+	out["version"] = taskVersionNow(t, s, orgID, taskID)
+	return out
+}

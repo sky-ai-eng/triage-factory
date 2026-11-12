@@ -295,7 +295,7 @@ func TestTaskDismiss_LeavesItsDeliverables(t *testing.T) {
 	}
 
 	rec := doJSON(t, srv, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "dismissed"})
+		withTaskVersion(t, srv, taskID, map[string]any{"status": "dismissed"}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

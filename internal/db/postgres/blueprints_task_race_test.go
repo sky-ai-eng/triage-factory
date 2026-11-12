@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -310,7 +311,7 @@ func TestBlueprintStore_Postgres_FiringCarriesTaskClaim(t *testing.T) {
 		taskID := fx.newTask(t)
 		// The user claims the task in the window before the insert: they win
 		// the claim, and the run must still commit.
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, fx.orgID, taskID, fx.userID); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, fx.orgID, taskID, fx.userID, dbtest.TaskVersion(t, stores.Tasks, fx.orgID, taskID)); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 		br := fx.firing(t, taskID)
@@ -346,7 +347,7 @@ func TestBlueprintStore_Postgres_FiringCarriesTaskClaim(t *testing.T) {
 		// The user requeues while the run stays live — the deliberate
 		// "unclaimed with a live run" state. A replayed event must not put the
 		// bot's claim back.
-		if ok, err := stores.Tasks.RequeueTask(ctx, fx.orgID, taskID); err != nil || !ok {
+		if ok, err := stores.Tasks.RequeueTask(ctx, fx.orgID, taskID, dbtest.TaskVersion(t, stores.Tasks, fx.orgID, taskID)); err != nil || !ok {
 			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 		}
 		replay := br

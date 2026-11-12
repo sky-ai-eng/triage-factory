@@ -17,8 +17,17 @@ import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import NotifyRulesPanel from '../components/NotifyRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
-import { apiFetch } from '../lib/apiClient'
 import { snoozeUntilFromPreset } from '../lib/snooze'
+import {
+  claimTask,
+  delegateTask,
+  isVersionConflict,
+  patchTaskStatus,
+  requeueTask,
+  snoozeTask,
+  type TaskRef,
+} from '../lib/taskWrites'
+import { toast } from '../components/Toast/toastStore'
 
 type SwipeAction = 'claim' | 'dismiss' | 'snooze' | 'delegate'
 type LoadState = 'loading' | 'empty' | 'ready'
@@ -41,7 +50,9 @@ export default function Cards() {
   const { load: loadDeck, loadMore: loadMoreDeck, setItems: setDeckItems } = deck
   const tasks = deck.items
   const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
+  // The swiped task as the swipe's write left it: its id and the version that
+  // write returned, which is what the undo's requeue names.
+  const [undoTask, setUndoTask] = useState<(TaskRef & { action: SwipeAction }) | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
   // A notification links to a task rule as ?rule=…: the rules panel opens on
@@ -178,42 +189,28 @@ export default function Cards() {
 
     // Each gesture addresses its own route: the two lifecycle ones are field
     // writes on the task, and claim/delegate are verbs because of what they
-    // reach — Jira and the spawner.
-    const request: [string, RequestInit] =
-      action === 'snooze'
-        ? [
-            `/api/tasks/${task.id}`,
-            {
-              method: 'PATCH',
-              body: JSON.stringify({ snooze_until: snoozeUntilFromPreset(DECK_SNOOZE_PRESET) }),
-            },
-          ]
-        : action === 'dismiss'
-          ? [
-              `/api/tasks/${task.id}`,
-              {
-                method: 'PATCH',
-                body: JSON.stringify({ status: 'dismissed' }),
-              },
-            ]
-          : action === 'claim'
-            ? [`/api/tasks/${task.id}/claim`, { method: 'POST', body: '{}' }]
-            : [
-                `/api/tasks/${task.id}/delegate`,
-                {
-                  method: 'POST',
-                  body: JSON.stringify({ ...(promptId && { blueprint_id: promptId }) }),
-                },
-              ]
-
+    // reach — Jira and the spawner. Every one names the version the deck read
+    // and answers the version it left.
+    let version: number
     try {
-      const [path, init] = request
-      await apiFetch(path, { ...init, headers: { 'Content-Type': 'application/json' } })
-    } catch {
+      version =
+        action === 'snooze'
+          ? (await snoozeTask(task, snoozeUntilFromPreset(DECK_SNOOZE_PRESET))).version
+          : action === 'dismiss'
+            ? (await patchTaskStatus(task, 'dismissed')).version
+            : action === 'claim'
+              ? (await claimTask(task)).version
+              : (await delegateTask(task, promptId)).version
+    } catch (err) {
+      // A card the server says changed since the deck read it is reloaded
+      // whole, so the next gesture on it decides against what changed. The
+      // top card is not kept: the stale copy is the one that was refused.
+      if (isVersionConflict(err)) fetchQueue()
+      toast.failed(err, 'Could not act on the task.')
       return
     }
 
-    setUndoTask({ id: task.id, action })
+    setUndoTask({ id: task.id, version, action })
     setDeckItems((prev) => prev.slice(1))
     setTimeout(() => setUndoTask(null), 5000)
     // Top the deck up before it runs dry. A page holds the first 200 pickable
@@ -235,11 +232,13 @@ export default function Cards() {
     if (!undoTask || undoInFlight.current) return
     undoInFlight.current = true
     try {
-      // TODO(TFAC-1384): send the version the swipe's write returned, so an
-      // undo of a task that changed since the swipe is refused rather than
-      // requeueing over the change.
-      await apiFetch(`/api/tasks/${undoTask.id}/requeue`, { method: 'POST' })
-    } catch {
+      // The version the swipe's write returned, so an undo of a task that
+      // changed since the swipe is refused rather than requeueing over the
+      // change. Refused, there is nothing left to undo.
+      await requeueTask(undoTask)
+    } catch (err) {
+      if (isVersionConflict(err)) setUndoTask(null)
+      toast.failed(err, 'Could not undo.')
       return
     } finally {
       undoInFlight.current = false

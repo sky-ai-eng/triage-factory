@@ -261,7 +261,7 @@ type userWriteRig struct {
 
 func (r userWriteRig) claim(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
-	return doJSON(t, r.s, http.MethodPost, "/api/tasks/"+r.taskID+"/claim", map[string]any{})
+	return doJSON(t, r.s, http.MethodPost, "/api/tasks/"+r.taskID+"/claim", withTaskVersion(t, r.s, r.taskID, map[string]any{}))
 }
 
 func (r userWriteRig) mustClaim(t *testing.T) {
@@ -273,7 +273,7 @@ func (r userWriteRig) mustClaim(t *testing.T) {
 
 func (r userWriteRig) requeue(t *testing.T) {
 	t.Helper()
-	if rec := doJSON(t, r.s, http.MethodPost, "/api/tasks/"+r.taskID+"/requeue", map[string]any{}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, r.s, http.MethodPost, "/api/tasks/"+r.taskID+"/requeue", withTaskVersion(t, r.s, r.taskID, map[string]any{})); rec.Code != http.StatusOK {
 		t.Fatalf("requeue = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 }

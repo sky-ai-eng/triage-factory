@@ -125,9 +125,9 @@ func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 		t.Fatalf("decode task: %v", err)
 	}
 
-	rec = doJSON(t, s, http.MethodPost, "/api/tasks/"+task.ID+"/delegate", map[string]any{
+	rec = doJSON(t, s, http.MethodPost, "/api/tasks/"+task.ID+"/delegate", withTaskVersion(t, s, task.ID, map[string]any{
 		"blueprint_id": "no-such-prompt",
-	})
+	}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("delegate = %d, want 422 (bad blueprint reference; claim stamped, run didn't fire); body=%s", rec.Code, rec.Body.String())
 	}
@@ -172,9 +172,9 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 		t.Fatalf("decode task: %v", err)
 	}
 
-	rec = doJSON(t, s, http.MethodPost, "/api/tasks/"+task.ID+"/delegate", map[string]any{
+	rec = doJSON(t, s, http.MethodPost, "/api/tasks/"+task.ID+"/delegate", withTaskVersion(t, s, task.ID, map[string]any{
 		"blueprint_id": "any-prompt",
-	})
+	}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("delegate = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}

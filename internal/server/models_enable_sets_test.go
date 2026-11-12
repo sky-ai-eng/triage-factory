@@ -271,9 +271,9 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	// The org holds Anthropic only — the step's pinned provider is gone.
 	connectOrgProviders(t, s, true, false)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", withTaskVersion(t, s, taskID, map[string]any{
 		"blueprint_id": blueprintID,
-	})
+	}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("delegate = %d, want 422 (the refusal is the request's fault, not a spawn fault); body=%s", rec.Code, rec.Body.String())
 	}
@@ -291,9 +291,9 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	// Reconnecting the provider makes the same gesture work: the refusal was
 	// about the credential, and it left nothing behind.
 	connectOrgProviders(t, s, true, true)
-	again := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{
+	again := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", withTaskVersion(t, s, taskID, map[string]any{
 		"blueprint_id": blueprintID,
-	})
+	}))
 	if again.Code != http.StatusOK {
 		t.Fatalf("delegate after reconnecting = %d, want 200; body=%s", again.Code, again.Body.String())
 	}

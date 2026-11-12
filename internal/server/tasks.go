@@ -71,6 +71,12 @@ type taskJSON struct {
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
 	// TODO: board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
+	// Version is the task's optimistic-concurrency token (domain.Task.Version).
+	// Every task write requires the value the caller read and is refused with
+	// 409 VERSION_CONFLICT once the task has moved past it; every write's
+	// response carries the new one, so a client can chain writes without a
+	// read between them. Not omitempty: it is what the next write sends.
+	Version int64 `json:"version"`
 	// RequestedReviewer is, on a github:pr:review_requested task, the
 	// requested user's login or team's org/slug as the event that spawned the
 	// task named it, for display. dedup_key identifies the reviewer, by
@@ -156,6 +162,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
 		TeamID:              teamIDString(t.TeamID),
+		Version:             t.Version,
 		MemoryPending:       t.MemoryPending,
 		MemoryAttempt:       memoryAttemptToJSON(t.MemoryAttempt),
 	}
@@ -959,6 +966,58 @@ func writeTaskTerminal(w http.ResponseWriter, verb string) {
 type taskPatchRequest struct {
 	Status      json.RawMessage `json:"status,omitempty"`
 	SnoozeUntil json.RawMessage `json:"snooze_until,omitempty"`
+	// Version is the task version the caller read (taskJSON.Version). Not a
+	// patch field: it cannot be cleared, and it says which task the fields
+	// above were decided against.
+	Version *int64 `json:"version"`
+}
+
+// taskWriteVersion reads the version a task write names: the one the
+// caller's read of the task returned. Every task write route requires it,
+// because without it the write lands on whatever the task has become since
+// the caller read it. One rule for every route, so the four cannot disagree
+// about what a version is. Faults land on v.
+func taskWriteVersion(v *httpx.Validation, version *int64) int64 {
+	if version == nil {
+		v.Add(httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "version is required: send the version your read of the task returned",
+			Field:   "version",
+		})
+		return 0
+	}
+	// Versions start at 1 and only rise, so anything below names no read.
+	if *version < 1 {
+		v.Invalid("version", "version must be the version your read of the task returned, a positive integer")
+		return 0
+	}
+	return *version
+}
+
+// writeTaskVersionConflict answers a task write whose version is no longer
+// the task's: something changed it since the caller read it, and nothing was
+// written. No server-side merge: the caller's decision was made against a
+// task that no longer exists, so the only honest answer is to read it again.
+func writeTaskVersionConflict(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonVersionConflict,
+		Message: "this task changed since you read it; refetch it and decide again",
+		Field:   "version",
+	})
+}
+
+// refuseStaleTaskRead answers 409 VERSION_CONFLICT when the handler's own read
+// of the task is already past the version the caller sent. It runs straight
+// after that read, ahead of every state check, because those checks judge a
+// row the caller never saw: a stale write is told it is stale, not that the
+// task is closed or claimed. The write's own version predicate is still what
+// enforces it; this only answers the common case before anything else runs.
+func refuseStaleTaskRead(w http.ResponseWriter, task *domain.Task, version int64) bool {
+	if task.Version == version {
+		return false
+	}
+	writeTaskVersionConflict(w)
+	return true
 }
 
 // handleTaskPatch is the task's field-write path: the lifecycle axis (done,
@@ -975,11 +1034,13 @@ type taskPatchRequest struct {
 // no field is a 400 too: it wrote nothing, and "updated" is the one answer a
 // client can't tell from a real write.
 //
-// Then the state round: a closed task refuses everything (409
-// ALREADY_TERMINAL — requeue is how a task re-opens), and the stage
-// status requires the caller's own active claim (403). Neither round is the
-// last word on safety; the store carries its own predicates, because the row
-// can change between this handler's read and its write.
+// Then the state round: a task past the version the body names refuses
+// first (409 VERSION_CONFLICT), since every other check would judge a row the
+// caller never saw; a closed task refuses everything (409 ALREADY_TERMINAL —
+// requeue is how a task re-opens), and the stage status requires the caller's
+// own active claim (403). Neither round is the last word on safety; the store
+// carries its own predicates, the version among them, because the row can
+// change between this handler's read and its write.
 //
 // PATCH /api/tasks/{id}
 func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
@@ -1004,11 +1065,13 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 	// flushes as a blanket status over everything it accumulated, and the
 	// shape pass goes first — a value can't be out of range until it parses.
 	var shape, semantic httpx.Validation
+	version := taskWriteVersion(&shape, req.Version)
 	if !httpx.PatchNamed(req.Status, req.SnoozeUntil) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		shape.Add(httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide status or snooze_until (null clears the snooze)",
 		})
+		shape.Flush(w, http.StatusBadRequest)
 		return
 	}
 	// One axis per request. A body carrying both says two contradictory
@@ -1052,6 +1115,9 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "task")
 		return
 	}
+	if refuseStaleTaskRead(w, task, version) {
+		return
+	}
 	// A closed task is closed: no arm of this route may write over its
 	// closed_at / close_reason, snooze it, or move it back to a stage.
 	if isTerminalTaskStatus(task.Status) {
@@ -1059,26 +1125,40 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var written int64
+	var landed bool
 	switch {
 	case snoozeState == httpx.PatchSet:
-		if !s.patchSnooze(w, r, orgID, userID, id, snoozeUntil) {
-			return
-		}
+		written, landed = s.patchSnooze(w, r, orgID, userID, id, snoozeUntil, version)
 	case snoozeState == httpx.PatchClear:
-		if !s.patchWake(w, r, orgID, userID, id) {
-			return
-		}
+		written, landed = s.patchWake(w, r, orgID, userID, id, version)
 	case status == taskStatusInProgress:
-		if !s.patchStage(w, r, orgID, userID, id, task, status) {
-			return
-		}
+		written, landed = s.patchStage(w, r, orgID, userID, id, task, status, version)
 	default:
-		if !s.patchClose(w, r, orgID, userID, id, status) {
-			return
-		}
+		written, landed = s.patchClose(w, r, orgID, userID, id, status, version)
+	}
+	if !landed {
+		return
 	}
 
-	s.writeTaskResource(w, r, orgID, userID, id)
+	s.writeTaskResource(w, r, orgID, userID, id, written)
+}
+
+// writtenTaskVersion is the version a task write left, read in the
+// transaction that made the write. The write holds the row until that
+// transaction commits, so the read sees what the write persisted and nothing
+// a later write did. Every write it follows ran under the same RLS as this
+// read, and tasks_update's WITH CHECK admits only a row the writer can still
+// see, so the row is always there to read.
+func writtenTaskVersion(ctx context.Context, tx db.TxStores, orgID, id string) (int64, error) {
+	t, err := tx.Tasks.Get(ctx, orgID, id)
+	if err != nil {
+		return 0, err
+	}
+	if t == nil {
+		return 0, fmt.Errorf("task %s is not readable in the transaction that wrote it", id)
+	}
+	return t.Version, nil
 }
 
 // writeTaskResource serves a task's current row in the shape the reads serve
@@ -1091,7 +1171,13 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 // Writes the JSON body and returns true on success; writes its own error
 // response and returns false on a store error or a task that vanished
 // between the write and this read.
-func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+//
+// The version is the one the request's own write left, not this read's. The
+// read follows the route's cleanup, and a write landing in that time shows in
+// the fields but not in the version, so a client that chains its next write
+// on this answer is refused rather than writing over a change it did not
+// decide against.
+func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID, userID, id string, written int64) bool {
 	var updated *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -1105,7 +1191,9 @@ func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID
 		notFound(w, "task")
 		return false
 	}
-	writeJSON(w, http.StatusOK, taskToJSON(*updated))
+	body := taskToJSON(*updated)
+	body.Version = written
+	writeJSON(w, http.StatusOK, body)
 	return true
 }
 
@@ -1118,8 +1206,9 @@ func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID
 // reassign's permission arms are decided in Go and the write runs on the
 // admin pool for exactly this reason (see reassignClaim) — and it discloses
 // nothing new: reassignClaim's entry read proved the actor could see this
-// task under their own RLS within this same request.
-func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+// task under their own RLS within this same request. The version is the one
+// the write left, as on writeTaskResource.
+func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request, orgID, userID, id string, written int64) bool {
 	var updated *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -1133,7 +1222,9 @@ func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request,
 		notFound(w, "task")
 		return false
 	}
-	writeJSON(w, http.StatusOK, taskToJSON(*updated))
+	body := taskToJSON(*updated)
+	body.Version = written
+	writeJSON(w, http.StatusOK, body)
 	return true
 }
 
@@ -1148,42 +1239,60 @@ var patchableTaskStatuses = []string{taskStatusInProgress, taskStatusDone, taskS
 // patchSnooze parks a task until the given wake time. Snooze is queue-only
 // ("snoozed ↔ both claim cols NULL") and never applies to a closed task, so
 // the store's atomic UPDATE carries both predicates and the caller gets a 409
-// telling them to requeue first.
-func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, userID, id string, until time.Time) bool {
+// telling them to requeue first. Returns the version the write left, and
+// false when it already wrote an error response.
+func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, userID, id string, until time.Time, version int64) (int64, bool) {
 	var snoozed bool
+	var written int64
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		snoozed, e = tx.Tasks.SnoozeTask(r.Context(), orgID, id, until)
+		snoozed, e = tx.Tasks.SnoozeTask(r.Context(), orgID, id, until, version)
+		if e != nil || !snoozed {
+			return e
+		}
+		written, e = writtenTaskVersion(r.Context(), tx, orgID, id)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrTaskVersion) {
+		writeTaskVersionConflict(w)
+		return 0, false
+	} else if err != nil {
 		internalError(w, "tasks", err)
-		return false
+		return 0, false
 	}
 	if !snoozed {
-		// Either guard in the store's predicate: the task is claimed, or it
-		// closed between the pre-read above and this write.
+		// Either guard in the store's predicate, at the version the caller
+		// read: the task is claimed, or it is closed.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
 			Message: "can't snooze this task; snoozing needs an open, unclaimed task — requeue or complete it first",
 		})
-		return false
+		return 0, false
 	}
 	s.broadcastTaskStatus(orgID)
-	return true
+	return written, true
 }
 
 // patchWake clears a wake time early, returning the task to the queue. The
 // store guards on status='snoozed' so clearing a wake time a task doesn't have
-// is a 409 rather than a silent drag out of whatever lane it was in.
-func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+// is a 409 rather than a silent drag out of whatever lane it was in. Returns
+// as patchSnooze does.
+func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64) (int64, bool) {
 	var woke bool
+	var written int64
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		woke, e = tx.Tasks.ClearSnooze(r.Context(), orgID, id)
+		woke, e = tx.Tasks.ClearSnooze(r.Context(), orgID, id, version)
+		if e != nil || !woke {
+			return e
+		}
+		written, e = writtenTaskVersion(r.Context(), tx, orgID, id)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrTaskVersion) {
+		writeTaskVersionConflict(w)
+		return 0, false
+	} else if err != nil {
 		internalError(w, "tasks", err)
-		return false
+		return 0, false
 	}
 	if !woke {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
@@ -1191,10 +1300,10 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 			Message: "task isn't snoozed, so there's no wake time to clear",
 			Field:   "snooze_until",
 		})
-		return false
+		return 0, false
 	}
 	s.broadcastTaskStatus(orgID)
-	return true
+	return written, true
 }
 
 // patchStage re-asserts that the caller is working on this task. It requires
@@ -1202,55 +1311,72 @@ func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID
 // stage, and an unclaimed one has nobody whose progress this would be. Holding
 // a claim already means in progress, so this is idempotent by construction —
 // the route stays because "in_progress" is a status a headless caller may
-// legitimately PATCH, and the guards are what make it safe.
-func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userID, id string, task *domain.Task, status string) bool {
+// legitimately PATCH, and the guards are what make it safe. Returns as
+// patchSnooze does.
+func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userID, id string, task *domain.Task, status string, version int64) (int64, bool) {
 	if task.ClaimedByUserID != userID {
 		forbidden(w, "only the user holding this task's claim can move it to in_progress")
-		return false
+		return 0, false
 	}
 	var advanced bool
+	var written int64
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		advanced, e = tx.Tasks.AdvanceStatusForUser(r.Context(), orgID, id, userID, status)
+		advanced, e = tx.Tasks.AdvanceStatusForUser(r.Context(), orgID, id, userID, status, version)
+		if e != nil || !advanced {
+			return e
+		}
+		written, e = writtenTaskVersion(r.Context(), tx, orgID, id)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrTaskVersion) {
+		writeTaskVersionConflict(w)
+		return 0, false
+	} else if err != nil {
 		internalError(w, "tasks", err)
-		return false
+		return 0, false
 	}
 	if !advanced {
 		// The pre-read said the caller holds the claim and the task isn't
-		// closed, so a refusal here means something moved underneath us.
-		// Losing is terminal for this attempt — the client refetches.
+		// closed, and the version says nothing a person acts on has changed
+		// since, so this is a task that went missing underneath us.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
 			Message: "task moved since it was read; refetch and retry",
 		})
-		return false
+		return 0, false
 	}
 	s.broadcastTaskStatus(orgID)
-	return true
+	return written, true
 }
 
 // patchClose is the terminal arm: dismissed (walked away) or done (resolved).
 // The store's close carries the terminal predicate itself — the pre-read in
 // the handler answers the common case early, but only the predicate rules out
 // a close landing between the two, which is what a second close rewriting
-// closed_at / close_reason would be.
-func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string) bool {
+// closed_at / close_reason would be. Returns as patchSnooze does.
+func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string, version int64) (int64, bool) {
+	var closed domain.Task
 	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Tasks.CloseByUser(r.Context(), orgID, id, status)
+		var e error
+		closed, e = tx.Tasks.CloseByUser(r.Context(), orgID, id, status, version)
 		return e
 	})
+	if errors.Is(err, db.ErrTaskVersion) {
+		// Changed since the pre-read, by a close or anything else a person
+		// acts on. Nothing was written, and nothing below runs: no run
+		// stopped, no deliverable torn down.
+		writeTaskVersionConflict(w)
+		return 0, false
+	}
 	if errors.Is(err, db.ErrNoSuchTask) {
-		// Someone else closed it in the window since the pre-read. Same
-		// answer the pre-read would have given a moment later, and nothing
-		// was written.
+		// Gone, or closed at the version the caller read, which the pre-read
+		// already refused. Nothing was written.
 		writeTaskTerminal(w, "status")
-		return false
+		return 0, false
 	}
 	if err != nil {
 		internalError(w, "tasks", err)
-		return false
+		return 0, false
 	}
 	// Stop any in-flight run. The task's deliverables are left as they are: a
 	// draft PR stays on GitHub for the person to decide, and a staged review
@@ -1258,7 +1384,7 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
 	s.broadcastTaskStatus(orgID)
-	return true
+	return closed.Version, true
 }
 
 // broadcastTaskStatus nudges peer sessions onto a task's new lane. Without it
@@ -1277,11 +1403,22 @@ func (s *Server) broadcastTaskStatus(orgID string) {
 	})
 }
 
+// taskRequeueRequest is the body of POST /api/tasks/{id}/requeue.
+type taskRequeueRequest struct {
+	// Version is the task version the caller read (taskJSON.Version).
+	Version *int64 `json:"version"`
+}
+
 // handleRequeue puts a task back in the queue, whatever its status, and
 // runs the cleanup that goes with it (finalizeRequeue). Used by Board's
 // drag-to-Queue gesture, the AgentCard's "Return to queue" button on a
 // conversation awaiting approval of its deliverable, and the Cards deck's
 // undo toast.
+//
+// Requeue takes any status, so the version is the one thing it refuses on: a
+// requeue decided against a task that has changed since (a stale undo toast,
+// a board that missed a refresh) answers 409 VERSION_CONFLICT before anything
+// is stopped, ended, or put back in Jira or Linear.
 //
 // Belt-and-suspenders existence check: GetTask up front catches the
 // common bogus-id case and returns 404 with a clean error body;
@@ -1300,6 +1437,16 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var req taskRequeueRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	version := taskWriteVersion(&v, req.Version)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	// Requeue moves a task back to the queue — a viewer can't (TFAC-447).
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
 		return
@@ -1307,18 +1454,23 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	var task *domain.Task
 	var requeued bool
+	var written int64
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
-		if e != nil {
+		if e != nil || task == nil {
 			return e
 		}
-		if task == nil {
-			return nil
+		requeued, e = tx.Tasks.RequeueTask(r.Context(), orgID, id, version)
+		if e != nil || !requeued {
+			return e
 		}
-		requeued, e = tx.Tasks.RequeueTask(r.Context(), orgID, id)
+		written, e = writtenTaskVersion(r.Context(), tx, orgID, id)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrTaskVersion) {
+		writeTaskVersionConflict(w)
+		return
+	} else if err != nil {
 		internalError(w, "tasks", err)
 		return
 	}
@@ -1333,7 +1485,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	s.writeTaskResource(w, r, orgID, userID, id)
+	s.writeTaskResource(w, r, orgID, userID, id, written)
 }
 
 // finalizeRequeue runs the side-effect cleanup /requeue needs after the task

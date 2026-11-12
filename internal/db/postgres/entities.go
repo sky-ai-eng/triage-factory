@@ -998,7 +998,12 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 // otherwise trip.
 func moveEntityReferences(ctx context.Context, q queryer, orgID, loserID, survivorID string) error {
 	if _, err := q.ExecContext(ctx, `
-		UPDATE tasks SET status = 'dismissed', closed_at = $1, close_reason = $2
+		UPDATE tasks
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "'dismissed'"},
+		db.TaskAssign{Col: "closed_at", Expr: "$1"},
+		db.TaskAssign{Col: "close_reason", Expr: "$2"},
+	)+`
 		WHERE org_id = $3 AND entity_id = $4 AND status NOT IN ('done','dismissed')
 		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.org_id = $3 AND s.entity_id = $5
 		              AND s.event_type = tasks.event_type AND s.dedup_key = tasks.dedup_key

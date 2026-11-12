@@ -960,9 +960,14 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 // otherwise trip.
 func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID string) error {
 	if _, err := q.ExecContext(ctx, `
-		UPDATE tasks SET status = 'dismissed', closed_at = ?, close_reason = ?
-		WHERE entity_id = ? AND status NOT IN ('done','dismissed')
-		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id = ? AND s.event_type = tasks.event_type
+		UPDATE tasks
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "'dismissed'"},
+		db.TaskAssign{Col: "closed_at", Expr: "?1"},
+		db.TaskAssign{Col: "close_reason", Expr: "?2"},
+	)+`
+		WHERE entity_id = ?3 AND status NOT IN ('done','dismissed')
+		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id = ?4 AND s.event_type = tasks.event_type
 		              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`,
 		time.Now().UTC(), db.DuplicateEntityMergedCloseReason, loserID, survivorID); err != nil {
 		return fmt.Errorf("dismiss duplicate tasks: %w", err)

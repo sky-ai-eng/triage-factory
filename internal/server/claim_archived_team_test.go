@@ -71,7 +71,7 @@ func TestTaskClaim_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo(t *testing.T)
 	s := newTestServer(t)
 	taskID := seedTaskOnArchivedLocalTeam(t, s, "claim-archived")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{}))
 	if rec.Code != http.StatusForbidden || firstErrorReason(t, rec) != httpx.ReasonTeamArchived {
 		t.Fatalf("claim = %d %s, want 403 TEAM_ARCHIVED", rec.Code, rec.Body.String())
 	}
@@ -87,7 +87,7 @@ func TestTaskDelegate_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo(t *testing
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	taskID := seedTaskOnArchivedLocalTeam(t, s, "delegate-archived")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", withTaskVersion(t, s, taskID, map[string]any{}))
 	if rec.Code != http.StatusForbidden || firstErrorReason(t, rec) != httpx.ReasonTeamArchived {
 		t.Fatalf("delegate = %d %s, want 403 TEAM_ARCHIVED", rec.Code, rec.Body.String())
 	}
@@ -169,7 +169,7 @@ func (r *archivedOwnerRig) seedTask(t *testing.T) string {
 func (r *archivedOwnerRig) post(t *testing.T, handler http.HandlerFunc, path, taskID string) *httptest.ResponseRecorder {
 	t.Helper()
 	vr := &viewerRig{orgID: r.orgID}
-	req := vr.req(http.MethodPost, path, r.user, map[string]any{})
+	req := vr.req(http.MethodPost, path, r.user, withTaskVersionIn(t, r.s, r.orgID, taskID, nil))
 	req.SetPathValue("id", taskID)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -241,7 +241,7 @@ func TestTaskReassign_RefusesATargetWhoseOnlyTeamOnTheTaskIsArchived(t *testing.
 
 	vr := &viewerRig{orgID: r.orgID}
 	req := vr.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.user,
-		map[string]any{"target_user_id": target})
+		withTaskVersionIn(t, r.s, r.orgID, taskID, map[string]any{"target_user_id": target}))
 	req.SetPathValue("id", taskID)
 	rec := httptest.NewRecorder()
 	r.s.handleTaskClaim(rec, req)
