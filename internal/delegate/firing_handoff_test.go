@@ -143,6 +143,34 @@ func TestHandOffQueuedFirings_NotesAnEventOnce(t *testing.T) {
 	}
 }
 
+// A second firing for an event an earlier pass already handed over names that
+// pass's note; the event is not staged twice.
+func TestHandOffQueuedFirings_ALaterPassSharesTheEarlierNote(t *testing.T) {
+	s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-two-passes")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	eventID := queueFiring(t, s, database, entityID, taskID, triggerID)
+	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
+
+	seedConversation(t, database, "step-other-blueprint", "sess-other", "/tmp/wt-other")
+	second := seedFakeTrigger(t, database, "step-other-blueprint")
+	if _, _, err := s.pendingFirings.Enqueue(ctx, org, entityID, taskID, second, eventID, db.AgentClaimStamp{}); err != nil {
+		t.Fatalf("enqueue second firing: %v", err)
+	}
+	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
+
+	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("firings = %d rows, err=%v, want 2", len(rows), err)
+	}
+	if rows[0].HandedNoteID == "" || rows[0].HandedNoteID != rows[1].HandedNoteID {
+		t.Errorf("firings name notes %q and %q, want the same one", rows[0].HandedNoteID, rows[1].HandedNoteID)
+	}
+	if notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID); err != nil || len(notes) != 1 {
+		t.Errorf("staged notes = %+v (err=%v), want one for the one event", notes, err)
+	}
+}
+
 // The run was briefed with the event it fired from, so a second trigger's
 // firing for that event has nothing to tell it and is left alone.
 func TestHandOffQueuedFirings_LeavesAFiringForTheRunsOwnEvent(t *testing.T) {

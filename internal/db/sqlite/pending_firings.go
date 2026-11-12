@@ -266,8 +266,12 @@ func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID s
 		if err != nil {
 			return err
 		}
-		if n, err := res.RowsAffected(); err != nil || n == 0 {
-			return errors.Join(errFiringNotHandable, err)
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errFiringNotHandable
 		}
 		return nil
 	})

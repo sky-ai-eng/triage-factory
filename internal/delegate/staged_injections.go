@@ -158,19 +158,31 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 		return
 	}
 	taskID := task.ID
+	firings, err := s.pendingFirings.ListReadyForTask(ctx, orgID, taskID)
+	if err != nil {
+		delegateLog.Warn("read the task's queued firings failed; the engagement starts without their events", "task_id", taskID, "conversation", conv.ID, "error", err)
+		return
+	}
+	// Most engagements start with nothing queued, and the hold is only worth
+	// reading for one that has something to hand over.
+	if len(firings) == 0 {
+		return
+	}
 	if hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID); err != nil {
 		delegateLog.Warn("read the task's held close failed; its queued firings are not handed over", "task_id", taskID, "conversation", conv.ID, "error", err)
 		return
 	} else if hold != nil {
 		return
 	}
-	firings, err := s.pendingFirings.ListReadyForTask(ctx, orgID, taskID)
-	if err != nil {
-		delegateLog.Warn("read the task's queued firings failed; the engagement starts without their events", "task_id", taskID, "conversation", conv.ID, "error", err)
-		return
-	}
-	// The note each event was staged as in this pass, by event id.
+	// The note each event is staged as, by event id: the ones this pass
+	// stages, and the ones firings already name. A firing an earlier pass
+	// failed on shares the note that pass staged for its event.
 	noteFor := map[string]string{}
+	for _, f := range firings {
+		if f.HandedNoteID != "" {
+			noteFor[f.TriggeringEventID] = f.HandedNoteID
+		}
+	}
 	for _, f := range firings {
 		if f.HandedNoteID != "" || f.CreatedAt.Before(br.StartedAt) || f.TriggeringEventID == br.TriggeringEventID {
 			continue

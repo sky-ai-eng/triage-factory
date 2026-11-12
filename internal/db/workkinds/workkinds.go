@@ -149,7 +149,7 @@ func PendingFirings(d workitem.Dialect) workitem.Kind {
 		},
 		Unique:      workitem.UniqueWhileUnsettled,
 		Strategy:    workitem.FencedReplay,
-		Columns:     []string{"entity_id", "task_id", "trigger_id", "triggering_event_id", "skip_reason", "fired_run_id"},
+		Columns:     []string{"entity_id", "task_id", "trigger_id", "triggering_event_id", "skip_reason", "fired_run_id", "handed_note_id"},
 		ClaimFilter: PendingFiringsClaimFilter(d),
 		Observer:    workmetrics.Observe(PendingFiringsName),
 	}
