@@ -22,9 +22,8 @@ var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is
 //
 // The lifecycle is the contract's: Enqueue admits a ready row, Claim leases
 // rows and hands back receipts, and RenewLease / MarkFired / MarkSkipped /
-// Requeue / DeferWhileTaskBusy are the holder's fenced writes. One write
-// settles a row no one holds: HandOffToConversation, for a ready row behind
-// a running blueprint. The per-task
+// Requeue / DeferWhileTaskBusy are the holder's fenced writes.
+// HandOffToConversation marks a ready row and settles nothing. The per-task
 // gate lives in the claim query itself, as the kind's claim filter: a firing
 // is claimable only while its task is not busy — no live top-level
 // conversation, and no blueprint run still marked running
@@ -123,28 +122,40 @@ type PendingFiringsStore interface {
 	HasUnsettledForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ListReadyForTask returns the task's ready firings, oldest first: the
-	// ones an engagement starting under the task's running blueprint takes
-	// over (HandOffToConversation). Leased and parked rows are absent; a
+	// ones an engagement starting under the task's running blueprint may
+	// hand over (HandOffToConversation). Leased and parked rows are absent; a
 	// holder or an operator disposes of those.
 	ListReadyForTask(ctx context.Context, orgID, taskID string) ([]domain.PendingFiring, error)
 
-	// HandOffToConversation settles a ready firing as handed to a
-	// conversation, in one transaction: the row flips done with skip reason
-	// domain.PendingFiringSkipInjected (workitem.SettleReady), note is staged
-	// for the conversation, and the task's timeline row for the firing's
-	// event becomes 'injected'. A nil note stages nothing, for a firing whose
-	// event another firing in the same pass already carried. handed is false,
-	// and nothing is written, when the row is no longer ready.
+	// HandOffToConversation records that a ready firing's event was handed
+	// to a conversation as a staged note, in one transaction: note is staged
+	// (or, with a nil note, sharedNoteID names the one another firing for
+	// the same event staged in this pass), the row's handed_note_id is set to
+	// it, and the row's unique key is released. noteID is the note the row
+	// now names. handed is false, and nothing is written, when the row is no
+	// longer ready, already names a note, or carries a cancellation request.
 	//
-	// The firing never had a holder: the claim filter keeps a row behind a
-	// running blueprint unclaimable, so the engagement that starts under
-	// that blueprint is the only party in a position to settle it. The
-	// task's claim is not stamped; the firing's admission made that
-	// commitment.
+	// The row is not settled. A staged note is a promise, and the engagement
+	// it was staged for may never run; the row stays the durable record of
+	// the event until its holder settles it. The claim filter holds it while
+	// the blueprint runs, and the firing worker then claims it and settles it
+	// by whether the note was read (WithdrawHandedNote).
 	//
-	// Exempt from the returned-row rule, as the holder verbs are: the caller
-	// acts on handed alone.
-	HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection) (handed bool, err error)
+	// The key is released because the row no longer stands for "the next
+	// event on this (task, trigger) has somewhere to go": a later event for
+	// the pair must admit a row of its own, to be handed to a later
+	// engagement, and would otherwise collapse onto this one.
+	//
+	// Exempt from the returned-row rule, as the holder verbs are.
+	HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection, sharedNoteID string) (noteID string, handed bool, err error)
+
+	// WithdrawHandedNote answers, for the holder of a firing that names a
+	// handed note, whether the note was read, and withdraws it when it was
+	// not (StagedInjectionStore.DeleteSystem): read is true for a note a
+	// conversation consumed, false for one withdrawn now or already gone.
+	// After a false the event has reached no agent and the firing is an
+	// ordinary one again.
+	WithdrawHandedNote(ctx context.Context, orgID, noteID string) (read bool, err error)
 
 	// TaskRerouted reports whether a firing on the task is already settled
 	// domain.PendingFiringSkipRerouted. A closed task is rerouted once, from

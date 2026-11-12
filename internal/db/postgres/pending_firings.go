@@ -76,7 +76,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, entityID, task
 const pgPendingFiringSelect = `
 	SELECT id, org_id,
 	       entity_id, task_id, trigger_id, triggering_event_id,
-	       COALESCE(skip_reason, ''), fired_run_id::text,
+	       COALESCE(skip_reason, ''), fired_run_id::text, COALESCE(handed_note_id, ''),
 	       status, attempt, max_attempts, next_attempt_at,
 	       lease_generation, COALESCE(lease_owner, ''), lease_epoch, leased_at, lease_expires_at,
 	       cancel_requested_at, COALESCE(cancel_requested_by, ''), COALESCE(cancel_reason, ''),
@@ -222,37 +222,47 @@ func (s *pendingFiringsStore) ListReadyForTask(ctx context.Context, orgID, taskI
 	return out, rows.Err()
 }
 
-// HandOffToConversation runs the flip first, so a row that is no longer
-// ready rolls the transaction back before the note or the timeline is
-// touched. pending_firings is written before any other table, the order
-// Enqueue keeps.
-func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection) (bool, error) {
+// errFiringNotHandable rolls a hand-off back when its row cannot take one,
+// so a note staged in the same transaction does not outlive the refusal.
+var errFiringNotHandable = errors.New("firing is not ready for a hand-off")
+
+func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection, sharedNoteID string) (string, bool, error) {
 	if s.conn == nil {
-		return false, db.ErrTxBoundStore
+		return "", false, db.ErrTxBoundStore
 	}
+	noteID := sharedNoteID
 	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
-		if err := workitem.SettleReady(ctx, tx, s.kind, orgID, firingID); err != nil {
-			return err
-		}
-		var taskID, eventID string
-		if err := tx.QueryRowContext(ctx, `
-			UPDATE public.pending_firings SET skip_reason = $1 WHERE id = $2 AND org_id = $3
-			RETURNING task_id::text, triggering_event_id::text
-		`, domain.PendingFiringSkipInjected, firingID, orgID).Scan(&taskID, &eventID); err != nil {
-			return err
-		}
 		if note != nil {
-			if _, err := newStagedInjectionStore(tx).AppendSystem(ctx, orgID, *note); err != nil {
+			stored, err := newStagedInjectionStore(tx).AppendSystem(ctx, orgID, *note)
+			if err != nil {
 				return err
 			}
+			noteID = stored.ID
 		}
-		_, err := newTaskStore(tx, tx).MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{})
-		return err
+		res, err := tx.ExecContext(ctx, `
+			UPDATE public.pending_firings SET handed_note_id = $1, unique_key = NULL
+			WHERE id = $2 AND org_id = $3 AND status = 'ready'
+			  AND handed_note_id IS NULL AND cancel_requested_at IS NULL
+		`, noteID, firingID, orgID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return errors.Join(errFiringNotHandable, err)
+		}
+		return nil
 	})
-	if errors.Is(err, workitem.ErrNotReady) {
-		return false, nil
+	if errors.Is(err, errFiringNotHandable) {
+		return "", false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return "", false, err
+	}
+	return noteID, true, nil
+}
+
+func (s *pendingFiringsStore) WithdrawHandedNote(ctx context.Context, orgID, noteID string) (bool, error) {
+	return newStagedInjectionStore(s.q).DeleteSystem(ctx, orgID, noteID)
 }
 
 func (s *pendingFiringsStore) TaskRerouted(ctx context.Context, orgID, taskID string) (bool, error) {
@@ -379,7 +389,7 @@ func scanPgPendingFiring(row interface{ Scan(...any) error }) (domain.PendingFir
 	err := row.Scan(
 		&f.ID, &f.OrgID,
 		&f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
-		&f.SkipReason, &firedRunID,
+		&f.SkipReason, &firedRunID, &f.HandedNoteID,
 		&f.Status, &f.Attempt, &f.MaxAttempts, &nextAt,
 		&f.LeaseGeneration, &f.LeaseOwner, &leaseEpoch, &leasedAt, &expiresAt,
 		&cancelAt, &f.CancelRequestedBy, &f.CancelReason,

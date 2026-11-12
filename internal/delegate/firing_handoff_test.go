@@ -59,8 +59,8 @@ func requireStillQueued(t *testing.T, s *Spawner, entityID, convID string) {
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("firings = %d rows, err=%v, want 1", len(rows), err)
 	}
-	if rows[0].Status != workitem.StatusReady {
-		t.Errorf("firing = %+v, want it still ready", rows[0])
+	if rows[0].Status != workitem.StatusReady || rows[0].HandedNoteID != "" {
+		t.Errorf("firing = %+v, want it still ready and not handed over", rows[0])
 	}
 	if notes, _ := s.stagedInjections.FlushPendingSystem(ctx, org, convID); len(notes) != 0 {
 		t.Errorf("staged notes = %+v, want none", notes)
@@ -82,7 +82,8 @@ func queueFiring(t *testing.T, s *Spawner, database *sql.DB, entityID, taskID, t
 }
 
 // An event queued while the blueprint was between steps reaches the next step
-// as the note a folded-in event is, and the firing is settled injected.
+// as the note a folded-in event is. The firing names the note and stays
+// queued for the worker to settle.
 func TestHandOffQueuedFirings_HandsTheEventToTheStartingStep(t *testing.T) {
 	s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-next")
 	ctx := context.Background()
@@ -90,15 +91,15 @@ func TestHandOffQueuedFirings_HandsTheEventToTheStartingStep(t *testing.T) {
 	eventID := queueFiring(t, s, database, entityID, taskID, triggerID)
 
 	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
-	// A second engagement finds nothing left to hand over.
+	// A second engagement finds the firing already handed over.
 	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 
 	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("firings = %d rows, err=%v, want 1", len(rows), err)
 	}
-	if rows[0].Status != workitem.StatusDone || rows[0].SkipReason != domain.PendingFiringSkipInjected {
-		t.Errorf("firing = %+v, want done with skip reason injected", rows[0])
+	if rows[0].Status != workitem.StatusReady || rows[0].HandedNoteID == "" || rows[0].SkipReason != "" {
+		t.Errorf("firing = %+v, want ready and naming the note", rows[0])
 	}
 	notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
 	if err != nil {
@@ -107,18 +108,14 @@ func TestHandOffQueuedFirings_HandsTheEventToTheStartingStep(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("staged notes = %+v, want one", notes)
 	}
-	if n := notes[0]; n.Subtype != domain.MessageSubtypeInjectionEvent || n.Provenance.EventID != eventID ||
+	if n := notes[0]; n.ID != rows[0].HandedNoteID || n.Subtype != domain.MessageSubtypeInjectionEvent || n.Provenance.EventID != eventID ||
 		!strings.Contains(n.Body, domain.EventGitHubPRCICheckFailed) {
-		t.Errorf("note = %+v, want the event injection naming the event", n)
-	}
-	var kind string
-	if err := database.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, taskID, eventID).Scan(&kind); err != nil || kind != "injected" {
-		t.Errorf("task event kind = %q (err=%v), want injected", kind, err)
+		t.Errorf("note = %+v, want the event injection the firing names", n)
 	}
 }
 
 // One event that queued a firing per trigger is told to the step once, and
-// both firings settle.
+// both firings name the one note.
 func TestHandOffQueuedFirings_NotesAnEventOnce(t *testing.T) {
 	s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-two-triggers")
 	ctx := context.Background()
@@ -138,14 +135,27 @@ func TestHandOffQueuedFirings_NotesAnEventOnce(t *testing.T) {
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("firings = %d rows, err=%v, want 2", len(rows), err)
 	}
-	for _, r := range rows {
-		if r.Status != workitem.StatusDone || r.SkipReason != domain.PendingFiringSkipInjected {
-			t.Errorf("firing = %+v, want done with skip reason injected", r)
-		}
+	if rows[0].HandedNoteID == "" || rows[0].HandedNoteID != rows[1].HandedNoteID {
+		t.Errorf("firings name notes %q and %q, want the same one", rows[0].HandedNoteID, rows[1].HandedNoteID)
 	}
 	if notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID); err != nil || len(notes) != 1 {
 		t.Errorf("staged notes = %+v (err=%v), want one for the one event", notes, err)
 	}
+}
+
+// The run was briefed with the event it fired from, so a second trigger's
+// firing for that event has nothing to tell it and is left alone.
+func TestHandOffQueuedFirings_LeavesAFiringForTheRunsOwnEvent(t *testing.T) {
+	s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-own-event")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	eventID := queueFiring(t, s, database, entityID, taskID, triggerID)
+
+	own := *br
+	own.TriggeringEventID = eventID
+	s.handOffQueuedFirings(ctx, org, &own, conv, readTask(t, s, taskID))
+
+	requireStillQueued(t, s, entityID, conv.ID)
 }
 
 // A conversation whose blueprint has finished takes nothing: the firing is the

@@ -117,7 +117,10 @@ const (
 //
 // UniqueWhileUnsettled keyed on (task, trigger): a parked firing holds its
 // key, so a later event for the same pair collapses onto the parked row
-// rather than minting a new one, and an operator redrives or cancels it.
+// rather than minting a new one, and an operator redrives or cancels it. A
+// firing whose event was handed to a conversation as a note gives its key up
+// (PendingFiringsStore.HandOffToConversation), so the pair's next event is
+// admitted as a row of its own.
 //
 // The claim filter is the per-task gate as the claim query applies it: a
 // firing is claimable only while its task is not busy (PendingFiringsTaskBusy).
@@ -130,9 +133,9 @@ const (
 // is database writes, and spawner.Delegate is a pure enqueue. Fairness
 // interleaves at batch granularity, which is why the worker claims ten at a
 // time. Frozen is empty: the kind's columns are immutable after admission
-// except skip_reason and fired_run_id, which only a settlement sets (the
-// holder's terminal write, or the hand-off of a ready row to a conversation),
-// so the store reads them by id after Claim returns.
+// except skip_reason and fired_run_id, which only the terminal write sets,
+// and handed_note_id, which a hand-off sets on a ready row together with
+// releasing its key, so the store reads them by id after Claim returns.
 func PendingFirings(d workitem.Dialect) workitem.Kind {
 	return workitem.Kind{
 		Table:   "pending_firings",

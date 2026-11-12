@@ -988,9 +988,11 @@ CREATE TABLE public.orgs (
 -- spent. The claim query admits a ready row only while its task holds no live
 -- top-level conversation and no blueprint run still marked running (the
 -- kind's claim filter), so a row behind a busy task is deferred rather than
--- ready. The six columns after the block are
+-- ready. The seven columns after the block are
 -- this kind's own: skip_reason is set on a done row that did not fire,
--- fired_run_id on one that did.
+-- fired_run_id on one that did, and handed_note_id names the staged note the
+-- firing's event was handed to a conversation as (the messages row id, in
+-- decimal) while the task's blueprint was running.
 --
 -- Admin-pool wired with org_id bound per statement; the pending_firings_all
 -- policy below is defense-in-depth, and it is FOR ALL because admission's
@@ -1023,7 +1025,8 @@ CREATE TABLE public.pending_firings (
     trigger_id           uuid NOT NULL,
     triggering_event_id  uuid NOT NULL,
     skip_reason          text,
-    fired_run_id         uuid
+    fired_run_id         uuid,
+    handed_note_id       text
 );
 
 -- The gate read: does the task have an unsettled firing? Parked is in it,

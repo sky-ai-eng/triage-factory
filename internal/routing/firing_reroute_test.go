@@ -281,3 +281,82 @@ func TestRouteEvent_Again_ATerminatingEventRoutesNothing(t *testing.T) {
 		t.Errorf("entity state = %q, want it left active: a second routing closed it", entity.State)
 	}
 }
+
+// handOffNote stages a note on the task's conversation and marks the task's
+// one ready firing with it, as an engagement's start does.
+func handOffNote(t *testing.T, database *sql.DB, entityID, taskID string) (noteID, conversationID string) {
+	t.Helper()
+	st := sqlitestore.New(database)
+	if err := database.QueryRow(`SELECT id FROM conversations WHERE task_id = ?`, taskID).Scan(&conversationID); err != nil {
+		t.Fatalf("read the task's conversation: %v", err)
+	}
+	noteID, handed, err := st.PendingFirings.HandOffToConversation(t.Context(), runmode.LocalDefaultOrgID, firingsFor(t, database, entityID)[0].ID,
+		&domain.StagedInjection{ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionEvent, Producer: "p", Body: "a new event"}, "")
+	if err != nil || !handed {
+		t.Fatalf("hand off: handed=%v err=%v", handed, err)
+	}
+	return noteID, conversationID
+}
+
+// A firing whose event was handed to a step as a note, and read, is settled
+// injected once the run ends: no second run, and no reroute.
+func TestFiringWorker_HandedNoteRead_SettlesInjected(t *testing.T) {
+	database := newTestDB(t)
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	entityID, taskID, eventID := rerouteScenario(t, database, router)
+	if err := testTaskStore(database).RecordEventSystem(t.Context(), runmode.LocalDefaultOrgID, taskID, eventID, "bumped"); err != nil {
+		t.Fatalf("record bump: %v", err)
+	}
+	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", eventID)
+	_, conversationID := handOffNote(t, database, entityID, taskID)
+	if _, err := sqlitestore.New(database).StagedInjections.FlushPendingSystem(t.Context(), runmode.LocalDefaultOrgID, conversationID); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	finishRunClosingTask(t, database, taskID)
+	drainOnce(t, router)
+
+	rows := firingsFor(t, database, entityID)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	requireSkipped(t, rows[0], domain.PendingFiringSkipInjected)
+	if stub.calls != 1 {
+		t.Errorf("Delegate called %d times, want 1: a read note started another run", stub.calls)
+	}
+	var kind string
+	if err := database.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, taskID, eventID).Scan(&kind); err != nil || kind != "injected" {
+		t.Errorf("task event kind = %q (err=%v), want injected", kind, err)
+	}
+}
+
+// A firing whose note was never read (the step it was staged for did not
+// reach its agent) is an ordinary firing again: the note is withdrawn and,
+// with the task still open, a fresh run fires.
+func TestFiringWorker_HandedNoteUnread_WithdrawsTheNoteAndFires(t *testing.T) {
+	database := newTestDB(t)
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	entityID, taskID, eventID := rerouteScenario(t, database, router)
+	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", eventID)
+	_, conversationID := handOffNote(t, database, entityID, taskID)
+
+	// The run ends without the step having read the note, and the task
+	// stays open.
+	endTaskConversations(t, database, taskID)
+	drainOnce(t, router)
+
+	rows := firingsFor(t, database, entityID)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	requireFired(t, rows[0])
+	if stub.calls != 2 {
+		t.Errorf("Delegate called %d times, want 2: the unread event started no run", stub.calls)
+	}
+	notes, err := sqlitestore.New(database).StagedInjections.FlushPendingSystem(t.Context(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil || len(notes) != 0 {
+		t.Errorf("staged notes after the worker = %+v (err=%v), want the note withdrawn", notes, err)
+	}
+}

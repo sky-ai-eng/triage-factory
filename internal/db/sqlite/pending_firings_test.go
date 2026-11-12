@@ -268,22 +268,9 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 			t.Helper()
 			execOne(t, conn, "ripen", `UPDATE pending_firings SET next_attempt_at = NULL WHERE id = ? AND status = 'ready'`, firingID)
 		},
-		TaskEvent: func(t *testing.T, taskID, eventID string) {
-			t.Helper()
-			execOne(t, conn, "seed task event",
-				`INSERT INTO task_events (task_id, event_id, kind) VALUES (?, ?, 'bumped')`, taskID, eventID)
-		},
-		TaskEventKind: func(t *testing.T, taskID, eventID string) string {
-			t.Helper()
-			var kind string
-			if err := conn.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, taskID, eventID).Scan(&kind); err != nil {
-				t.Fatalf("read task event: %v", err)
-			}
-			return kind
-		},
 		StagedNotes: func(t *testing.T, conversationID string) []string {
 			t.Helper()
-			rows, err := conn.Query(`SELECT content FROM messages WHERE conversation_id = ? AND delivered = 0 ORDER BY id`, conversationID)
+			rows, err := conn.Query(`SELECT content FROM messages WHERE conversation_id = ? AND delivered = 0 AND COALESCE(window_state, '') <> 'inactive' ORDER BY id`, conversationID)
 			if err != nil {
 				t.Fatalf("read staged notes: %v", err)
 			}
@@ -297,6 +284,12 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 				out = append(out, body)
 			}
 			return out
+		},
+		DeliverNotes: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE messages SET delivered = 1 WHERE conversation_id = ? AND delivered = 0`, conversationID); err != nil {
+				t.Fatalf("deliver notes: %v", err)
+			}
 		},
 		InTx: func(t *testing.T, fn func(s db.PendingFiringsStore) error) error {
 			t.Helper()

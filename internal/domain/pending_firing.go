@@ -8,9 +8,9 @@ import "time"
 // worker claims it under the shared work-item contract (internal/db/workitem)
 // once the task holds no live conversation and no run still marked running,
 // validates it against the world now, and fires it or skips it with a reason.
-// A firing queued while its task's blueprint is running is instead settled
-// with no claim, when the blueprint's next engagement takes its event as a
-// note.
+// A firing queued while its task's blueprint is running has its event handed
+// to the blueprint's next engagement as a note (HandedNoteID), and the worker
+// settles it as injected once the run ends, if the note was read.
 //
 // The row is the work-item block plus this kind's own columns: the four
 // identity columns are fixed at admission, and exactly one of SkipReason and
@@ -28,6 +28,11 @@ type PendingFiring struct {
 	SkipReason string `json:"skip_reason,omitempty"`
 	// FiredBlueprintRunID is the blueprint run a done row fired into.
 	FiredBlueprintRunID *string `json:"fired_run_id,omitempty"`
+	// HandedNoteID is the staged note the firing's event was handed to a
+	// conversation as, while the task's blueprint was running. The firing
+	// stays unsettled; the worker settles it once the run ends, by whether
+	// the note was read.
+	HandedNoteID string `json:"handed_note_id,omitempty"`
 
 	Status        string     `json:"status"` // workitem.StatusReady | StatusLeased | StatusDone | StatusParked | StatusCancelled
 	Attempt       int        `json:"attempt"`
@@ -66,10 +71,9 @@ const (
 
 // PendingFiring skip reasons, set on a done row that did not fire. Each is a
 // definitive answer: retrying could not come out differently, so the row is
-// settled rather than requeued. The worker's validation reaches all of them
-// but PendingFiringSkipInjected, which an engagement's start writes. A
-// failure that could come out differently — a store read, a spawner refusal —
-// is a typed requeue outcome on the block instead, never a skip reason.
+// settled rather than requeued. A failure that could come out differently —
+// a store read, a spawner refusal — is a typed requeue outcome on the block
+// instead, never a skip reason.
 const (
 	// PendingFiringSkipTaskClosed: the task is done, dismissed or snoozed, or
 	// holds a close (TaskCloseDeferral). A task its run's finish closed is
@@ -98,8 +102,8 @@ const (
 	// does not start a run; restoring the team does not bring it back.
 	PendingFiringSkipTeamArchived = "team_archived"
 	// PendingFiringSkipInjected: the task's blueprint was still working when
-	// one of its conversations started an engagement, and the firing's event
-	// was handed to that conversation as a note instead of starting a run.
+	// one of its conversations started an engagement, the firing's event was
+	// handed to that conversation as a note, and the conversation read it.
 	PendingFiringSkipInjected = "injected"
 	// PendingFiringSkipRerouted: the task's blueprint finished and its finish
 	// closed the task before anything read the firing's event, so the task's

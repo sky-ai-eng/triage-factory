@@ -41,6 +41,10 @@ import (
 // ErrTaskBusy and defers at no cost, and FIFO within a task is the claim's
 // own ORDER BY id.
 //
+// A firing whose event was handed to a conversation as a note while the
+// task's blueprint ran (HandedNoteID) is settled injected when the note was
+// read. Unread, the note is withdrawn and the firing is an ordinary one.
+//
 // A firing whose task its run's finish closed is not fired on that task: the
 // task's newest event goes back through the router (reroute, in
 // processFiring), which mints the task and run an event arriving now would
@@ -334,6 +338,26 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			requeue(workitem.OutcomePoisonSuspected, fmt.Errorf("panic: %v", rec))
 		}
 	}()
+
+	// The firing's event was handed to a conversation as a note while the
+	// task's blueprint ran. Read, it reached an agent and the firing is
+	// settled. Unread, the engagement it was staged for never got to it: the
+	// note is withdrawn so no later resume delivers it beside the run this
+	// firing may start, and the firing is validated like any other.
+	if f.HandedNoteID != "" {
+		read, err := r.firings.WithdrawHandedNote(unitCtx, f.OrgID, f.HandedNoteID)
+		if err != nil {
+			requeue(workitem.OutcomeTransient, fmt.Errorf("handed note lookup: %w", err))
+			return
+		}
+		if read {
+			if _, err := r.tasks.MarkEventInjectedSystem(unitCtx, f.OrgID, f.TaskID, f.TriggeringEventID, dbpkg.AgentClaimStamp{}); err != nil {
+				routerLog.ErrorContext(unitCtx, "firing-queue: failed to mark injected task_event", "firing_id", f.ID, "task_id", f.TaskID, "error", err)
+			}
+			skip(domain.PendingFiringSkipInjected)
+			return
+		}
+	}
 
 	// Validate against live tables, not the firing row, so the worker
 	// reflects the world now: a close, a takeover, a disabled trigger or a
