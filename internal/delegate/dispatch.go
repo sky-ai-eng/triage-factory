@@ -149,16 +149,16 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
 
-	s.drainConversationQueue(ctx) // drain whatever survived the restart / boot reconcile
+	s.drainConversationQueue(ctx, scanInterval) // drain whatever survived the restart / boot reconcile
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.dispatchWake:
-			s.drainConversationQueue(ctx)
+			s.drainConversationQueue(ctx, scanInterval)
 		case <-scan.C:
-			s.drainConversationQueue(ctx)
+			s.scanConversationQueue(ctx, scanInterval)
 		}
 	}
 }
@@ -398,14 +398,29 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 // so this is the same mechanism a future N-worker dispatcher uses; the
 // semaphore is what keeps a burst of queued steps from fanning into an
 // unbounded number of agent subprocesses on one host.
-func (s *Spawner) drainConversationQueue(ctx context.Context) {
+//
+// It reports whether it stopped at the memory or disk gate. scanInterval is
+// the dispatcher's, which paces the checks a blocked acquire makes for work a
+// warm claim holds back (awaitSlot).
+func (s *Spawner) drainConversationQueue(ctx context.Context, scanInterval time.Duration) (gated bool) {
 	// Capture the semaphore once and use it for both acquire and release so a
 	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
 	// channel.
 	sem := s.semaphore()
 	for {
 		if ctx.Err() != nil {
-			return
+			return false
+		}
+		// Drain: an operator asked this instance to quiesce (the CLI drain
+		// verb flips instances.draining; the next heartbeat reads it back —
+		// see heartbeatOnce). Live runs finish or park at their turn end, and
+		// every claim kept warm is let go, since it holds a slot for a
+		// message that may never come; no new claims start. Read before the
+		// gates so a gated host drains too, and on every pass, so a claim
+		// that went warm as the drain latched is let go on the next one.
+		if s.Draining() {
+			s.warmWaits.LetGoAll()
+			return false
 		}
 		// Memory guardrail: when available memory (cgroup-aware) is below the floor,
 		// stop claiming — runs stay queued and the next scan tick (or a
@@ -413,43 +428,30 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// each claimed run consumes memory as it spawns. Deliberately
 		// BEFORE the semaphore acquire so a gated host parks with no
 		// slot held.
-		//
-		// TODO(TFAC-1372): engagements keeping claims warm hold host memory
-		// and disk through their windows, so a gate tripped by them leaves
-		// queued work waiting until a window ends; the oldest warm claim
-		// should let go when claimable work is waiting.
 		if s.dispatchMemGated() {
-			return
+			return true
 		}
 		// Disk guardrail, the same shape: a claimed run writes a tree, so a
 		// disk below the floor takes no more of them.
 		if s.dispatchDiskGated() {
-			return
+			return true
 		}
 		// Identity fence: a superseded instance identity (another process
 		// re-registered this id — see fenceIdentity) must not stamp new
 		// claims. Sticky until restart; in-flight runs finish untouched.
 		if s.IdentityFenced() {
-			return
+			return false
 		}
 		// Partition self-fence: a heartbeat WRITE failure past the
 		// self-fence deadline (checkPartitionSelfFence) — reversible, un-
 		// fences on the next successful write. In-flight runs are untouched;
 		// their own leases decide whether they keep running.
 		if s.PartitionFenced() {
-			return
-		}
-		// Drain: an operator asked this instance to quiesce (the CLI drain
-		// verb flips instances.draining; the next heartbeat reads it back —
-		// see heartbeatOnce). Live runs finish or park at their turn end, and a
-		// claim kept warm is let go when its window ends (the drain does not
-		// shorten it yet, see SetDraining); no new claims start.
-		if s.Draining() {
-			return
+			return false
 		}
 		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to
 		// 'running' that then sits idle waiting for a slot. Blocks at capacity
-		// until a finishing run releases its slot; a shutdown breaks the wait
+		// until a slot frees (awaitSlot); a shutdown breaks the wait
 		// (in-flight runs are ctx-cancelled, and the shutdown release hands
 		// back anything left mid-flight). The try-then-block split exists only to
 		// observe which of the two happened: saturation episodes are
@@ -460,13 +462,8 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 			s.noteCapAcquireImmediate(cap(sem))
 		default:
 			s.noteCapAcquireBlocked(ctx, cap(sem))
-			// TODO(TFAC-1372): a slot a warm claim holds frees only when its
-			// window ends, so a full executor waits here with claimable work
-			// queued; the oldest warm claim should let go instead.
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
+			if !s.awaitSlot(ctx, sem, scanInterval) {
+				return false
 			}
 		}
 		executorID, bootEpoch := s.executorIdentity()
@@ -479,11 +476,11 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next conversation failed; retrying on the next scan", "error", err)
-			return
+			return false
 		}
 		if conv == nil {
 			<-sem
-			return // queue drained — release the slot we acquired but didn't use
+			return false // queue drained — release the slot we acquired but didn't use
 		}
 		// Fleet telemetry: count the claim for this sampler interval (TFAC-589).
 		s.claimCount.Add(1)

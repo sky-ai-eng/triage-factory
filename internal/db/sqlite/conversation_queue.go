@@ -327,6 +327,17 @@ func insertConversation(ctx context.Context, q queryer, orgID string, conv domai
 	return scanConversationReturning(row)
 }
 
+// claimScanSQL is the FROM and WHERE of the claim scan: every conversation
+// ClaimNextConversation may take, before it orders them and takes one.
+// ClaimableExistsSystem reads it too, so the probe cannot answer for a
+// predicate the claim no longer has.
+var claimScanSQL = `
+			FROM conversations r
+			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			WHERE ` + eligibleForDrivingSQL + `
+			  AND ` + blueprintDrivableSQL + `
+			  AND NOT ` + warmTreeHeldSQL
+
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	// One scan, every surface: pick the oldest conversation matching the
 	// needs-driving predicate (plus the blueprint gate — a
@@ -353,12 +364,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	claimedAt := time.Now().UTC()
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		row := q.QueryRowContext(ctx, `
-			SELECT `+conversationQueueClaimCols+`
-			FROM conversations r
-			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-			WHERE `+eligibleForDrivingSQL+`
-			  AND `+blueprintDrivableSQL+`
-			  AND NOT `+warmTreeHeldSQL+`
+			SELECT `+conversationQueueClaimCols+claimScanSQL+`
 			ORDER BY r.started_at, r.id
 			LIMIT 1`)
 		claimed, err := scanSqliteClaimedConversation(row)
@@ -442,6 +448,28 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		return nil, err
 	}
 	return conv, nil
+}
+
+// ClaimableExistsSystem reads the claim scan with the probe's wait added.
+// SQLite ignores placement, as its claim does, but keeps the wait so the
+// probe means the same thing in both dialects. The wait compares through
+// julianday because queued_at is written in two layouts (see
+// episodeHandBacksSQL), and julianday reads both.
+func (s *conversationQueueStore) ClaimableExistsSystem(ctx context.Context, executorID string, _ db.ClaimPlacement, minWait time.Duration) (bool, error) {
+	var exists bool
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1`+claimScanSQL+`
+			  AND ((r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = ?)
+			    OR julianday(COALESCE(r.queued_at, r.started_at)) < julianday('now') - ? / 86400.0)
+		)`, executorID, minWait.Seconds()).Scan(&exists)
+	return exists, err
+}
+
+// OrgCapBlockedWorkExistsSystem answers false: SQLite has no org cap, so no
+// work waits behind one.
+func (s *conversationQueueStore) OrgCapBlockedWorkExistsSystem(context.Context, string) (bool, error) {
+	return false, nil
 }
 
 // RequeueConversation releases the claim FIRST and writes the conversation

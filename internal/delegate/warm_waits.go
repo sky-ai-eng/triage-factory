@@ -1,6 +1,7 @@
 package delegate
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -82,14 +83,31 @@ func (r *WarmWaits) Wake(conversationID string) bool {
 }
 
 // LetGoOldest tells the engagement that has waited longest to end its window
-// now, and unregisters it. It reports whether any engagement was waiting.
-func (r *WarmWaits) LetGoOldest() bool {
+// now, and unregisters it. It returns that engagement's conversation, and
+// false when no engagement was waiting.
+func (r *WarmWaits) LetGoOldest() (conversationID string, ok bool) {
 	return r.letGoOldestWhere(func(*WarmWait) bool { return true })
 }
 
 // LetGoOldestInOrg is LetGoOldest over the engagements of one org.
-func (r *WarmWaits) LetGoOldestInOrg(orgID string) bool {
+func (r *WarmWaits) LetGoOldestInOrg(orgID string) (conversationID string, ok bool) {
 	return r.letGoOldestWhere(func(w *WarmWait) bool { return w.orgID == orgID })
+}
+
+// OrgsWaiting is the orgs with at least one engagement waiting, sorted.
+func (r *WarmWaits) OrgsWaiting() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[string]bool, len(r.entries))
+	var orgs []string
+	for _, w := range r.entries {
+		if !seen[w.orgID] {
+			seen[w.orgID] = true
+			orgs = append(orgs, w.orgID)
+		}
+	}
+	sort.Strings(orgs)
+	return orgs
 }
 
 // LetGoAll tells every waiting engagement to end its window now, and
@@ -109,7 +127,7 @@ func (r *WarmWaits) Len() int {
 	return len(r.entries)
 }
 
-func (r *WarmWaits) letGoOldestWhere(match func(*WarmWait) bool) bool {
+func (r *WarmWaits) letGoOldestWhere(match func(*WarmWait) bool) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var oldest *WarmWait
@@ -119,10 +137,10 @@ func (r *WarmWaits) letGoOldestWhere(match func(*WarmWait) bool) bool {
 		}
 	}
 	if oldest == nil {
-		return false
+		return "", false
 	}
 	r.letGoLocked(oldest)
-	return true
+	return oldest.conversationID, true
 }
 
 func (r *WarmWaits) letGoLocked(w *WarmWait) {

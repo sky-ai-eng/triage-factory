@@ -491,6 +491,29 @@ type ConversationQueueStore interface {
 	// a live claim carries no lease.
 	ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement, lease time.Duration) (*domain.Conversation, error)
 
+	// ClaimableExistsSystem reports whether ClaimNextConversation, called by
+	// executorID with the same placement, has a conversation to take, and
+	// takes nothing: it locks no row and mints no claim. It reads the claim
+	// scan's own predicate, so the two cannot disagree about what is
+	// claimable.
+	//
+	// One condition is added: a conversation that is not this executor's own
+	// (placement's tier 1, its preferred executor) counts only once it has
+	// been in the queue for minWait. An executor with a free slot is woken
+	// the moment such a conversation is queued, so within that wait it has
+	// had its chance to take it, and an executor holding warm claims gives
+	// one up only for work nobody else is taking. An executor that lets go
+	// of a warm claim on this answer then claims through
+	// ClaimNextConversation, which takes its own tier 1 first.
+	ClaimableExistsSystem(ctx context.Context, executorID string, placement ClaimPlacement, minWait time.Duration) (bool, error)
+
+	// OrgCapBlockedWorkExistsSystem reports whether orgID is at its
+	// max_concurrent_runs and holds a conversation the claim scan would take
+	// but for that cap. The cap is org-wide, so placement plays no part: a
+	// place the org frees on any executor lets any executor claim the work.
+	// SQLite has no cap and answers false.
+	OrgCapBlockedWorkExistsSystem(ctx context.Context, orgID string) (bool, error)
+
 	// RenewClaimLeaseSystem pushes the named claim's expiry out to database
 	// now plus lease. It never extends the old timestamp, so a renewal that
 	// arrives late cannot resurrect authority that already lapsed. Refused

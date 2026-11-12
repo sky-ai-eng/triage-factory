@@ -573,7 +573,7 @@ func TestWarmClaim_RegistryLetGoReleasesAtOnce(t *testing.T) {
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
 	f.awaitWarm(t, 1)
 
-	if !f.x.warmWaits.LetGoOldest() {
+	if _, ok := f.x.warmWaits.LetGoOldest(); !ok {
 		t.Fatal("the registry held no warm claim to let go")
 	}
 	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {

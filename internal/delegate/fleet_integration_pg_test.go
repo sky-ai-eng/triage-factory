@@ -139,7 +139,7 @@ func drainQueue(t *testing.T, s *Spawner) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Registered after stopWithTest's join, so it runs before it.
 	t.Cleanup(cancel)
-	s.drainConversationQueue(ctx)
+	s.drainConversationQueue(ctx, DefaultDispatchScanInterval)
 }
 
 func backdateFleetHeartbeat(t *testing.T, h *pgtest.Harness, executorID string, age time.Duration) {
