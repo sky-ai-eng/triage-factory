@@ -173,7 +173,7 @@ type App struct {
 	// through it, minting short-lived STS session creds for role-mode orgs
 	// and passing stored material through otherwise. Non-nil only in multi
 	// mode (built in buildRunCredentials alongside runSecrets); nil in local,
-	// where resolution stays on the ambient path exactly as before.
+	// where there are no role-mode orgs and resolution reads runSecrets directly.
 	llmResolver *llmcred.Resolver
 	// llmRecorder lands one system_llm_runs row per call TF makes on its own
 	// behalf — the three background jobs and the availability probe. One per

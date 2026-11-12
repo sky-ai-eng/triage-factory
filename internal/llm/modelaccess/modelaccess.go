@@ -121,10 +121,6 @@ func (c Credentials) BringsOwn() bool { return !c.host }
 //
 // It is "no provider passes Has" rather than its own rule, so it can never
 // disagree with the per-provider answer.
-//
-// TODO(TFAC-888): in local mode a bound credential is not the one a run
-// authenticates with, so this can only report that something is bound. Once
-// local reads the org's own material, bound and used are the same credential.
 func (c Credentials) Ready() error {
 	for _, provider := range modelcatalog.SupportedProviders() {
 		if c.Has(provider) {

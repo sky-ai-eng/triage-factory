@@ -24,18 +24,15 @@ import (
 // through these, so the event → router → task → delegation chain stops
 // branching on mode.
 //
-//   - runSecrets reads a run's per-org LLM credential. Multi mode uses the
-//     system/admin door (these runs are claims-free background work, and
-//     the orgID always originates from the run/entity/task, never user
-//     input). Local mode keeps it nil → the agent runs unsandboxed and
-//     inherits the host's ambient Claude subscription.
-//
-//     TODO(TFAC-888): that nil is why a local org's own bound Anthropic key
-//     is never read by a run — agentproc.anthropicEnv is reachable only with
-//     a reader, so the key is validated, stored, and then ignored while the
-//     subprocess authenticates from the operator's environment. Wiring a
-//     reader here is the fix, and it changes who pays for a local user
-//     holding both a key and a subscription.
+//   - runSecrets reads a run's per-org LLM credential, in both modes. Multi
+//     mode reads the Postgres vault through the system/admin door (these runs
+//     are claims-free background work, and the orgID always originates from the
+//     run/entity/task, never user input). Local mode reads the keychain through
+//     the same door, where the key an operator bound in Settings or the setup
+//     wizard lives. A local org that bound none resolves to an empty map, so
+//     the agent inherits the host's Claude subscription as before; binding a
+//     credential and choosing the host's are mutually exclusive, so a stored key
+//     is never shadowed by a stale one.
 //
 //   - modelFor resolves the run's team model configuration (per-(org, team)):
 //     the default an unset step inherits, and the enable-set every model the
@@ -49,12 +46,12 @@ import (
 //   - linearResolver resolves an org's Linear service credential, either
 //     shape. Shared by the poller and the credential provisioner.
 func (a *App) buildRunCredentials() error {
+	a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
 	if !a.local() {
-		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
 		// Shared LLM-credential resolver (internal/cred/llmcred, TFAC-616): the one
 		// seam every brain-side Bedrock/Anthropic resolution flows through.
-		// Multi mode only — local keeps the ambient path (runSecrets nil), so
-		// role mode there simply degrades to the host subscription. Env knobs
+		// Multi mode only — local has no STS role mode, so its runs resolve the
+		// stored material through runSecrets directly. Env knobs
 		// (mint TTL + executor egress binding) are validated here so a typo
 		// fails boot rather than shipping an unbound or always-failing mint.
 		ttl, err := llmcred.TTLFromEnv()
