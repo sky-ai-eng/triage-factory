@@ -50,7 +50,7 @@ func TestTaskPatchSnooze_RejectsUnusableWakeTimes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			taskID := seedLifecycleTask(t, s.db, "snooze-"+tc.name, lifecycleTaskOpts{})
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, tc.body)
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, tc.body))
 			if rec.Code != tc.want {
 				t.Fatalf("patch = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
 			}
@@ -71,7 +71,7 @@ func TestTaskPatchSnooze_ClearWakesTheTask(t *testing.T) {
 
 	taskID := seedLifecycleTask(t, s.db, "wake", lifecycleTaskOpts{})
 	want := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": want.Format(time.RFC3339)}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, map[string]any{"snooze_until": want.Format(time.RFC3339)})); rec.Code != http.StatusOK {
 		t.Fatalf("snooze = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	status, until := readSnoozeState(t, s.db, taskID)
@@ -79,7 +79,7 @@ func TestTaskPatchSnooze_ClearWakesTheTask(t *testing.T) {
 		t.Fatalf("task = (%q, %v) after the snooze, want (snoozed, ~%v)", status, until, want)
 	}
 
-	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": nil})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, map[string]any{"snooze_until": nil}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("clear = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -88,7 +88,7 @@ func TestTaskPatchSnooze_ClearWakesTheTask(t *testing.T) {
 		t.Fatalf("task = (%q, %v) after clearing the snooze; want (queued, NULL)", status, wake)
 	}
 
-	rec = doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": nil})
+	rec = doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, map[string]any{"snooze_until": nil}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("second clear = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -105,10 +105,10 @@ func TestTaskPatchClose_ClearsSnooze(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			taskID := seedLifecycleTask(t, s.db, "clear-"+status, lifecycleTaskOpts{})
 			until := time.Now().Add(4 * time.Hour).UTC().Format(time.RFC3339)
-			if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": until}); rec.Code != http.StatusOK {
+			if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, map[string]any{"snooze_until": until})); rec.Code != http.StatusOK {
 				t.Fatalf("seed snooze = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"status": status})
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, map[string]any{"status": status}))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("%s = %d, want 200; body=%s", status, rec.Code, rec.Body.String())
 			}

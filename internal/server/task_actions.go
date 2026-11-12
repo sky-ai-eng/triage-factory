@@ -42,6 +42,9 @@ type taskClaimRequest struct {
 	// self-claim would hand the task to whoever asked instead of erroring on
 	// a client that lost track of its target.
 	TargetUserID *string `json:"target_user_id,omitempty"`
+	// Version is the task version the caller read (taskJSON.Version), on both
+	// arms.
+	Version *int64 `json:"version"`
 }
 
 // handleTaskClaim moves a task's user claim. Self-claim (no target) takes
@@ -68,6 +71,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v httpx.Validation
+	version := taskWriteVersion(&v, req.Version)
 	if req.TargetUserID != nil && strings.TrimSpace(*req.TargetUserID) == "" {
 		v.Invalid("target_user_id", "target_user_id must name a user; omit it to claim the task yourself")
 	}
@@ -84,7 +88,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.TargetUserID != nil {
-		if !s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID) {
+		if !s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID, version) {
 			return
 		}
 		// Admin-pool read, deliberately: a handoff can consolidate team_id
@@ -94,7 +98,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jiraUserClient, linearUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id)
+	jiraUserClient, linearUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id, version)
 	if !ok {
 		return
 	}
@@ -146,17 +150,22 @@ const (
 
 // selfClaim is the claim route's no-target arm: a race-safe transition to the
 // caller's ownership with three accept paths (idempotent same-user, takeover
-// from bot, claim from unclaimed) and one refuse path (different user owns it
-// → 409). Both landing paths put the task in progress in the same UPDATE that
-// writes the claim — the claim IS the stage marker, so the queue holds nobody's
-// work. For a Jira- or Linear-backed task it resolves the acting user's own
+// from bot, claim from unclaimed) and two refuse paths (a task past the
+// version the caller read, and a different user owning it → 409). Both
+// landing paths put the task in progress in the same UPDATE that writes the
+// claim — the claim IS the stage marker, so the queue holds nobody's work. For a Jira- or Linear-backed task it resolves the acting user's own
 // client up front so a user with no connected Jira or Linear is refused BEFORE
 // the claim lands (acting as the bot here would mis-assign the issue to the
 // service account). Returns the resolved Jira client (nil unless the task is
 // Jira-backed), the resolved Linear client (nil unless it is Linear-backed),
 // which accept path landed, and ok=false when it already wrote an error
 // response.
-func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (*jira.Client, *linear.Client, claimLanding, bool) {
+//
+// The version is compared on the read before anything else, and again by the
+// claim write's own predicate. The idempotent arm writes nothing, so the read
+// is its only comparison: a caller already holding the claim at the version
+// it read re-asserts a claim that is unchanged.
+func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64) (*jira.Client, *linear.Client, claimLanding, bool) {
 	var task *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -168,6 +177,9 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	}
 	if task == nil {
 		notFound(w, "task")
+		return nil, nil, claimLandingIdempotent, false
+	}
+	if refuseStaleTaskRead(w, task, version) {
 		return nil, nil, claimLandingIdempotent, false
 	}
 	// Terminal-status refusal: claim transitions on done/dismissed rows are
@@ -232,9 +244,12 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		var claimOK bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
-			claimOK, e = tx.Tasks.TakeoverClaimFromAgent(r.Context(), orgID, id, userID)
+			claimOK, e = tx.Tasks.TakeoverClaimFromAgent(r.Context(), orgID, id, userID, version)
 			return e
-		}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+		}); errors.Is(err, db.ErrTaskVersion) {
+			writeTaskVersionConflict(w)
+			return nil, nil, claimLandingIdempotent, false
+		} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
 			writeNoActiveClaimTeam(w)
 			return nil, nil, claimLandingIdempotent, false
 		} else if err != nil {
@@ -255,9 +270,12 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		var claimOK bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
-			claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID)
+			claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID, version)
 			return e
-		}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+		}); errors.Is(err, db.ErrTaskVersion) {
+			writeTaskVersionConflict(w)
+			return nil, nil, claimLandingIdempotent, false
+		} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
 			writeNoActiveClaimTeam(w)
 			return nil, nil, claimLandingIdempotent, false
 		} else if err != nil {
@@ -309,13 +327,15 @@ func linearUserCredentialMissingMessage(err error) string {
 // even see the row (tasks_select RLS requires team membership on a claimed
 // task).
 //
-// Refuses (in order): missing/closed task (404/409), a task that isn't
+// Refuses (in order): a missing task (404), a task past the version the
+// caller read (409 VERSION_CONFLICT), a closed one (409), a task that isn't
 // currently held by a user — unclaimed or bot-claimed tasks aren't a handoff
 // target; self-claim/takeover instead (409), the caller being neither the
-// current claimant nor an admin of the task's owning team (403), a target on
-// no team that can see the task (422), and a lost CAS (409). Handing off to
-// the current claimant is treated as an idempotent no-op, matching the
-// self-claim idempotency in selfClaim.
+// current claimant nor an admin of the task's owning team (403), a task that
+// changed between that read and the CAS (409 VERSION_CONFLICT), and a target
+// on no team that can see the task (422). Handing off to the current claimant
+// is treated as an idempotent no-op, matching the self-claim idempotency in
+// selfClaim.
 //
 // Why the mutation runs on the admin pool (ReassignClaimToUserSystem, not
 // ReassignClaimToUser): every other claim mutation ties "who's authorized to
@@ -342,7 +362,7 @@ func linearUserCredentialMissingMessage(err error) string {
 // interacts with it — an accepted divergence in the same family as the
 // TF/GitHub drift specs/multi-team-task-model.md already calls out,
 // not a bug this method needs to close.
-func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string) bool {
+func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string, version int64) bool {
 	var task *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -354,6 +374,9 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 	}
 	if task == nil {
 		notFound(w, "task")
+		return false
+	}
+	if refuseStaleTaskRead(w, task, version) {
 		return false
 	}
 	if isTerminalTaskStatus(task.Status) {
@@ -400,9 +423,12 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		var ok bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
-			ok, e = tx.Tasks.ReassignClaimToUserSystem(r.Context(), orgID, id, task.ClaimedByUserID, targetUserID)
+			ok, e = tx.Tasks.ReassignClaimToUserSystem(r.Context(), orgID, id, task.ClaimedByUserID, targetUserID, version)
 			return e
-		}); err != nil {
+		}); errors.Is(err, db.ErrTaskVersion) {
+			writeTaskVersionConflict(w)
+			return false
+		} else if err != nil {
 			taskActionLog.Error("reassign claim flip failed", "task", id, "error", err)
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "reassign failed" + localDetail(err),
@@ -410,31 +436,28 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 			return false
 		}
 		if !ok {
-			// Disambiguate the two guards the CAS collapses into one
-			// ok=false: a genuine race (someone else changed the
-			// claim/status since our read above) vs. the target-team
-			// membership guard tripping (which no retry will fix).
-			// Re-reading the task tells them apart — if the claim + status
-			// we read earlier are unchanged, nothing raced; the target just
-			// isn't on a team that can see this task, which is a reference
-			// to an object in the wrong team rather than a state conflict.
+			// A task that moved since the read above answered ErrTaskVersion,
+			// so this one is still at that version, with the claim and status
+			// that read checked. What refused the CAS is the target-team
+			// guard, which no retry fixes: the target isn't on a team that can
+			// see this task, a reference to an object in the wrong team rather
+			// than a state conflict. The one other way to match no row is a
+			// task deleted in between, which the re-read tells apart.
 			var fresh *domain.Task
 			_ = s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				var e error
-				fresh, e = tx.Tasks.Get(r.Context(), orgID, id)
+				fresh, e = tx.Tasks.GetSystem(r.Context(), orgID, id)
 				return e
 			})
-			if fresh != nil && fresh.ClaimedByUserID == task.ClaimedByUserID && fresh.Status == task.Status {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-					Reason:  httpx.ReasonCrossTeamRef,
-					Message: "target user isn't on a team that can see this task",
-					Field:   "target_user_id",
-				})
-			} else {
-				httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-					Reason: httpx.ReasonConflict, Message: "reassign race lost; refetch task and retry",
-				})
+			if fresh == nil {
+				notFound(w, "task")
+				return false
 			}
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonCrossTeamRef,
+				Message: "target user isn't on a team that can see this task",
+				Field:   "target_user_id",
+			})
 			return false
 		}
 	}
@@ -454,6 +477,8 @@ type taskDelegateRequest struct {
 	// BlueprintID names the blueprint the run executes. Absent lets the
 	// spawner resolve the team's default.
 	BlueprintID string `json:"blueprint_id,omitempty"`
+	// Version is the task version the caller read (taskJSON.Version).
+	Version *int64 `json:"version"`
 }
 
 // handleTaskDelegate hands a task to the agent and spawns its run.
@@ -474,6 +499,11 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var v httpx.Validation
+	version := taskWriteVersion(&v, req.Version)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
 
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
 		return
@@ -489,7 +519,7 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	newStatus, ok := s.stampAgentClaim(w, r, orgID, userID, id, req)
+	handed, ok := s.stampAgentClaim(w, r, orgID, userID, id, version)
 	if !ok {
 		return
 	}
@@ -517,7 +547,9 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	response := map[string]any{"status": newStatus}
+	// The version is the one the handoff left, so the client's next write on
+	// the task names it without reading the task again.
+	response := map[string]any{"status": handed.Status, "version": handed.Version}
 	if s.spawner != nil {
 		if !s.triggerDelegation(w, r, orgID, userID, id, req, response) {
 			return
@@ -528,11 +560,11 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 
 // stampAgentClaim moves the task to bot ownership: HandoffAgentClaim handles
 // unclaimed→bot, my-claim→bot and idempotent bot-owns, and refuses a
-// different-user claim. It re-checks team_agents.enabled at request time,
-// gating on the team the claim consolidates onto rather than the pre-handoff
-// task.TeamID. Returns the status of the row the handoff left, and ok=false
-// when it already wrote an error response.
-func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req taskDelegateRequest) (string, bool) {
+// different-user claim and a task past the version the caller read. It
+// re-checks team_agents.enabled at request time, gating on the team the claim
+// consolidates onto rather than the pre-handoff task.TeamID. Returns the row
+// the handoff left, and ok=false when it already wrote an error response.
+func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, version int64) (domain.Task, bool) {
 	// Pre-load to disambiguate HandoffRefused (404 missing / 409 terminal /
 	// 409 theft) and to gate the bot-enablement check on the task's own team.
 	var task *domain.Task
@@ -542,15 +574,18 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return "", false
+		return domain.Task{}, false
 	}
 	if task == nil {
 		notFound(w, "task")
-		return "", false
+		return domain.Task{}, false
+	}
+	if refuseStaleTaskRead(w, task, version) {
+		return domain.Task{}, false
 	}
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "delegate")
-		return "", false
+		return domain.Task{}, false
 	}
 
 	// Gate on the team HandoffAgentClaim will consolidate onto, not the
@@ -566,13 +601,13 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		return e
 	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
 		writeNoActiveClaimTeam(w)
-		return "", false
+		return domain.Task{}, false
 	} else if err != nil {
 		taskActionLog.Error("delegate aborted", "task", id, "error", err)
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
 		})
-		return "", false
+		return domain.Task{}, false
 	}
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
@@ -580,31 +615,36 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
 		})
-		return "", false
+		return domain.Task{}, false
 	}
 	if !enabled {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
 			Message: "bot is disabled for this team; enable it in team settings to delegate",
 		})
-		return "", false
+		return domain.Task{}, false
 	}
 	var result db.HandoffResult
 	var handed domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		result, handed, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, a.ID, userID)
+		result, handed, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, a.ID, userID, version)
 		return e
-	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+	}); errors.Is(err, db.ErrTaskVersion) {
+		// Changed since the read above. Nothing was written, and the route
+		// stops and spawns nothing.
+		writeTaskVersionConflict(w)
+		return domain.Task{}, false
+	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
 		// The owner team was archived since the read above.
 		writeNoActiveClaimTeam(w)
-		return "", false
+		return domain.Task{}, false
 	} else if err != nil {
 		taskActionLog.Error("failed to stamp agent claim", "task", id, "error", err)
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 		})
-		return "", false
+		return domain.Task{}, false
 	}
 	if result == db.HandoffRefused {
 		// Pre-load ruled out missing + terminal, so the only remaining refusal
@@ -613,7 +653,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason: httpx.ReasonConflict, Message: "task is claimed by another user; refusing to steal",
 		})
-		return "", false
+		return domain.Task{}, false
 	}
 
 	if result == db.HandoffChanged {
@@ -623,7 +663,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 			Data:  map[string]any{},
 		})
 	}
-	return handed.Status, true
+	return handed, true
 }
 
 // stopTaskConversations stops every active run on a task and cancels the

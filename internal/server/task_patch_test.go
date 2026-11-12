@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
@@ -26,7 +27,7 @@ func TestTaskPatchStage_RejectsUnclaimedTask(t *testing.T) {
 	taskID := seedLifecycleTask(t, s.db, "unclaimed", lifecycleTaskOpts{})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_progress"})
+		withTaskVersion(t, s, taskID, map[string]any{"status": "in_progress"}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (unclaimed task); body=%s",
 			rec.Code, rec.Body.String())
@@ -55,7 +56,7 @@ func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 					claimedByUserID: runmode.LocalDefaultUserID,
 					status:          seeded,
 				})
-				rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, body)
+				rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, body))
 				if rec.Code != http.StatusConflict {
 					t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 				}
@@ -78,7 +79,7 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 	taskID := seedLifecycleTask(t, s.db, "double-close", lifecycleTaskOpts{})
 
 	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "dismissed"}); rec.Code != http.StatusOK {
+		withTaskVersion(t, s, taskID, map[string]any{"status": "dismissed"})); rec.Code != http.StatusOK {
 		t.Fatalf("first close = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	closedAt, closeReason := readTaskClose(t, s.db, taskID)
@@ -87,7 +88,7 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 	}
 
 	for _, status := range []string{"done", "dismissed"} {
-		if _, err := s.tasks.CloseByUser(t.Context(), runmode.LocalDefaultOrgID, taskID, status); !errors.Is(err, db.ErrNoSuchTask) {
+		if _, err := s.tasks.CloseByUser(t.Context(), runmode.LocalDefaultOrgID, taskID, status, dbtest.TaskVersion(t, s.tasks, runmode.LocalDefaultOrgID, taskID)); !errors.Is(err, db.ErrNoSuchTask) {
 			t.Fatalf("CloseByUser(%s) on a closed task = %v, want db.ErrNoSuchTask", status, err)
 		}
 		gotAt, gotReason := readTaskClose(t, s.db, taskID)
@@ -126,7 +127,7 @@ func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	for _, badStatus := range []any{"queued", "snoozed", "claimed", "in_review", "wat", "", 7, nil} {
 		t.Run(statusName(badStatus), func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": badStatus})
+				withTaskVersion(t, s, taskID, map[string]any{"status": badStatus}))
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status=%v: got %d, want 400; body=%s",
 					badStatus, rec.Code, rec.Body.String())
@@ -154,7 +155,7 @@ func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			taskID := seedLifecycleTask(t, s.db, "order-"+name, lifecycleTaskOpts{status: "dismissed"})
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, tc.body)
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, tc.body))
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d (the body's own fault, not the task's state); body=%s",
 					rec.Code, tc.want, rec.Body.String())
@@ -175,7 +176,7 @@ func TestTaskPatchStage_HappyPath_ReassertsInProgress(t *testing.T) {
 	})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_progress"})
+		withTaskVersion(t, s, taskID, map[string]any{"status": "in_progress"}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -205,7 +206,7 @@ func TestTaskPatchStage_RefusesInReview(t *testing.T) {
 	})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_review"})
+		withTaskVersion(t, s, taskID, map[string]any{"status": "in_review"}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -221,7 +222,7 @@ func TestTaskPatch_404OnUnknownTask(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPatch,
 		"/api/tasks/00000000-0000-0000-0000-000000000bad",
-		map[string]any{"status": "in_progress"})
+		withTaskVersion(t, s, "00000000-0000-0000-0000-000000000bad", map[string]any{"status": "in_progress"}))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (task not found); body=%s",
 			rec.Code, rec.Body.String())

@@ -43,7 +43,16 @@ import RequeueConfirm from '../components/board/RequeueConfirm'
 import { TaskCard } from '../components/board/TaskCard'
 import { deriveCard } from '../components/board/cardModel'
 import { toast } from '../components/Toast/toastStore'
-import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import {
+  claimTask,
+  delegateTask,
+  isVersionConflict,
+  patchTaskStatus,
+  reassignTask,
+  requeueTask,
+  type TaskRef,
+} from '../lib/taskWrites'
 import BoardColumn, { CollapsedColumn, type LanePaging } from '../components/board/BoardColumn'
 import {
   emptyLaneFilter,
@@ -951,6 +960,23 @@ export default function Board() {
     return map
   }, [queued, inProgress, done])
 
+  // The version each of this board's task writes left, by task id. A write
+  // names the newer of it and the lane's copy, so a gesture made before the
+  // refetch after the last one lands sends the version that write returned
+  // rather than the read it already moved past. Versions only rise, so the
+  // larger of the two is the current one.
+  const writtenVersions = useRef(new Map<string, number>())
+  const noteWritten = useCallback((task: TaskRef) => {
+    writtenVersions.current.set(task.id, task.version)
+  }, [])
+  const taskRefFor = useCallback(
+    (taskId: string): TaskRef => {
+      const listed = allTasks.get(taskId)?.version ?? 0
+      return { id: taskId, version: Math.max(listed, writtenVersions.current.get(taskId) ?? 0) }
+    },
+    [allTasks],
+  )
+
   // taskId → column lookup, built once per board state. getColumn is called
   // per dnd onDragOver event (which fires rapidly while dragging), so an O(1)
   // map beats re-scanning all three lists on every move.
@@ -977,17 +1003,14 @@ export default function Board() {
       try {
         // A failure (e.g. a teardown that partially failed) must surface — a
         // silent fetchTasks would repaint as if the move succeeded.
-        await apiFetch(`/api/tasks/${taskId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        })
+        noteWritten(await patchTaskStatus(taskRefFor(taskId), status))
         fetchTasks()
       } catch (err) {
         toast.failed(err, failure)
+        if (isVersionConflict(err)) fetchTasks()
       }
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const fireEnd = useCallback(
@@ -1001,13 +1024,14 @@ export default function Board() {
   const fireRequeue = useCallback(
     async (taskId: string) => {
       try {
-        await apiFetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
+        noteWritten(await requeueTask(taskRefFor(taskId)))
         fetchTasks()
       } catch (err) {
         toast.failed(err, 'Could not return the task to the queue.')
+        if (isVersionConflict(err)) fetchTasks()
       }
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   // requestRequeue is the one door every return-to-queue gesture takes — the
@@ -1229,11 +1253,7 @@ export default function Board() {
         // Queued → In Progress: the drag is a claim, and the claim is what
         // moves the card — the server lands the row in progress in the same
         // write. Idempotent when the caller already holds it.
-        await apiFetch(`/api/tasks/${taskId}/claim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        })
+        noteWritten(await claimTask(taskRefFor(taskId)))
         return
       }
 
@@ -1269,17 +1289,13 @@ export default function Board() {
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/claim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        })
+        noteWritten(await claimTask(taskRefFor(task.id)))
       } catch (err) {
         toast.failed(err, 'Could not claim the task.')
       }
       fetchTasks()
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const handlePickerUnclaim = useCallback(
@@ -1300,17 +1316,13 @@ export default function Board() {
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/claim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target_user_id: targetUserID }),
-        })
+        noteWritten(await reassignTask(taskRefFor(task.id), targetUserID))
       } catch (err) {
         toast.failed(err, 'Could not reassign the task.')
       }
       fetchTasks()
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const handlePromptSelected = useCallback(
@@ -1320,11 +1332,8 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/delegate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blueprint_id: promptId }),
-        })
+        const body = await delegateTask(taskRefFor(task.id), promptId)
+        noteWritten({ id: task.id, version: body.version })
         const conversationID = body.conversation_id
         if (conversationID) {
           setConversations((prev) => ({
@@ -1368,7 +1377,7 @@ export default function Board() {
       }
       fetchTasks()
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const activeTask = activeId ? allTasks.get(activeId) : null

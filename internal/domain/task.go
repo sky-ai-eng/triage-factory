@@ -59,6 +59,13 @@ type Task struct {
 	ClaimedByAgentID string `json:"claimed_by_agent_id,omitempty"`
 	ClaimedByUserID  string `json:"claimed_by_user_id,omitempty"`
 
+	// Version is the task's optimistic-concurrency token: every write that
+	// changes one of db.TaskVersionColumns raises it, and no other write does,
+	// so a scorer pass or a held close never makes a person's pending write
+	// stale. A person's write names the version it read and is refused
+	// (db.ErrTaskVersion) once the task has moved past it.
+	Version int64 `json:"version"`
+
 	CreatedAt time.Time `json:"created_at"`
 
 	// Join-populated display fields — from entities, NOT stored on tasks row.

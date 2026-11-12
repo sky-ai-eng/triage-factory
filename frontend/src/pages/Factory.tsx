@@ -35,6 +35,7 @@ import type {
 } from '../types'
 import { isActiveStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { delegateTask } from '../lib/taskWrites'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
 // The page itself does almost nothing visual: it fetches the snapshot,
@@ -372,7 +373,7 @@ export default function Factory() {
       //     apart.
       const label = entityLabel(pd.entity)
       try {
-        const task = await apiJSON<{ id: string }>('/api/tasks', {
+        const task = await apiJSON<Task>('/api/tasks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -382,14 +383,9 @@ export default function Factory() {
             team_id: delegateTeam,
           }),
         })
-        await apiJSON<{ conversation_id: string }>(
-          `/api/tasks/${encodeURIComponent(task.id)}/delegate`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ blueprint_id: promptId }),
-          },
-        )
+        // The create's answer carries the version the delegate names: the
+        // task as this gesture found or made it.
+        await delegateTask(task, promptId)
       } catch (err) {
         const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
         if (spawnFailed) {
