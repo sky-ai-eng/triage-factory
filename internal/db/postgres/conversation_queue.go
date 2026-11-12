@@ -238,11 +238,10 @@ func idleWarmClaimSQL(cl string) string {
 }
 
 // workingClaimExistsSQL is activeClaimExistsSQL without an idle warm claim
-// (idleWarmClaimSQL). Such a claim still holds its conversation, so
+// (idleWarmClaimSQL): whether an agent is at work on conversation r, or about
+// to be. An idle warm claim still holds its conversation, so
 // activeClaimExistsSQL keeps a second claim off it, but no agent works under
-// it. Everything that asks whether an agent is at work on a conversation or a
-// task reads this: the held close, re-delegation, the factory belt, and the
-// PR coherence notes.
+// it, and a reader asking about work must not count it.
 var workingClaimExistsSQL = `EXISTS (
 		SELECT 1 FROM claims cl_w
 		WHERE cl_w.conversation_id = r.id AND cl_w.released_at IS NULL
@@ -1598,7 +1597,8 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// Every live claim this executor minted in an earlier boot, whatever its
 	// conversation's state: the flock proves the process that minted it is
-	// gone, and a clean shutdown releases its own, so each one is a loss.
+	// gone, and a clean shutdown releases its own, so each one is a loss,
+	// except a warm claim, whose turn had already written its state.
 	// Scoped by boot epoch rather than by lease — the epoch is the stronger
 	// proof here, and a claim of the previous boot can still carry a lease
 	// its dead holder renewed seconds ago.

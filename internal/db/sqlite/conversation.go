@@ -348,8 +348,8 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		if flipped, err = sqliteResumeFlip(ctx, q, conversationID); err != nil || !flipped {
 			return err
 		}
-		// A warm claim is kept: its engagement drives the conversation from
-		// here (ResumeWarmClaimSystem).
+		// A warm claim with a live lease is kept: its engagement drives the
+		// conversation from here (ResumeWarmClaimSystem).
 		return releaseActiveClaimUnlessWarm(ctx, q, conversationID, "requeued")
 	})
 	return flipped, err
@@ -398,12 +398,15 @@ var warmResumableSQL = `(r.ended_at IS NULL AND r.archived_at IS NULL AND r.stop
 		  AND (br.cancel_requested = 1 OR br.status = 'cancelled'))
 	AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `))`
 
-// releaseActiveClaimUnlessWarm is releaseActiveClaim for every claim but a
-// warm one (domain.ClaimPhaseWarm).
+// releaseActiveClaimUnlessWarm is the Postgres twin's release in this
+// dialect, which carries why a warm claim whose lease has lapsed is released
+// too.
 func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, conversationID, outcome string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE claims SET released_at = ?, outcome = ?
-		WHERE conversation_id = ? AND released_at IS NULL AND phase IS NOT ?
+		UPDATE claims SET released_at = ?,
+		       outcome = CASE WHEN phase = '`+domain.ClaimPhaseWarm+`' THEN 'completed' ELSE ? END
+		WHERE conversation_id = ? AND released_at IS NULL
+		  AND (phase IS NOT ? OR lease_expires_at <= `+sqliteNowExpr+`)
 	`, time.Now().UTC(), outcome, conversationID, domain.ClaimPhaseWarm)
 	return err
 }

@@ -160,6 +160,25 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	// A warm claim whose lease has lapsed has no engagement left to take the
+	// conversation back, so the resume releases it and the conversation is
+	// claimable at once rather than after the takeover.
+	t.Run("Resume_ReleasesAWarmClaimWhoseLeaseLapsed", func(t *testing.T) {
+		f := mk(t)
+		c, _ := warmStep(t, f)
+		f.SetLease(t, c.ClaimID, -time.Second)
+		if flipped, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !flipped {
+			t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", flipped, err)
+		}
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != "completed" {
+			t.Errorf("lapsed warm claim after the resume = {released %v, outcome %q}, want released completed", released, outcome)
+		}
+		next, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, takeoverOtherExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || next == nil || next.ID != c.ID {
+			t.Fatalf("ClaimNextConversation after the resume = (%+v, %v), want conversation %s", next, err, c.ID)
+		}
+	})
+
 	t.Run("ResumeWarmClaim_ResumesAConversationNoFollowUpFlipped", func(t *testing.T) {
 		f := mk(t)
 		c, _ := warmStep(t, f)

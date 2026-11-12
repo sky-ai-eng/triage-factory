@@ -611,18 +611,23 @@ type ConversationQueueStore interface {
 	// only while it is still live and its lease has lapsed; false when either
 	// no longer holds. The release is the requeue: a conversation with no live
 	// claim matches the needs-driving predicate again, and a stop pending on
-	// it is settled by the next settlement pass. The caller must have seen
+	// it is settled by the next settlement pass. A warm claim
+	// (domain.ClaimPhaseWarm) is released 'completed' instead: its turn had
+	// ended and written its state, so nothing was lost, and a conversation
+	// with that state matches the needs-driving predicate only if a follow-up
+	// resumed it. The caller must have seen
 	// that no engagement of its own drives the claim — the guard here proves
 	// the lease lapsed, not that its holder has finished tearing down.
 	ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
 
 	// TakeOverExpiredClaimsSystem releases, as 'reaped', up to limit live claims
 	// whose lease has lapsed on database time and which this executor boot did
-	// not mint. The release is the takeover: a conversation with no live claim
-	// matches the needs-driving predicate again, and a stop or a cancel pending
-	// on it is settled by the settlement pass that follows. Claims under a
-	// holder's fence read are skipped and taken on a later pass. Returns the
-	// conversations released.
+	// not mint, and a warm one as 'completed', for the reason
+	// ReleaseExpiredClaimSystem gives. The release is the takeover: a
+	// conversation with no live claim matches the needs-driving predicate
+	// again, and a stop or a cancel pending on it is settled by the settlement
+	// pass that follows. Claims under a holder's fence read are skipped and
+	// taken on a later pass. Returns the conversations released.
 	//
 	// Every expired claim qualifies, whatever its conversation's state: a
 	// parked or terminal row's lapsed claim holds nothing up but the gauge,
@@ -739,9 +744,12 @@ type ConversationQueueStore interface {
 	// claims on the way out, so everything this finds belongs to a process
 	// that died — which is why it counts toward the loss budget: a
 	// conversation that kills its process is failed after
-	// TF_MAX_CLAIM_ATTEMPTS boots rather than crash-looping forever. A
-	// mid-flight conversation it releases is claimable at once; a parked or
-	// terminal one only stops holding a claim it should not.
+	// TF_MAX_CLAIM_ATTEMPTS boots rather than crash-looping forever. A warm
+	// claim is the exception: it is released 'completed' and counts toward
+	// nothing, because its turn had ended and written its state before the
+	// process died. A mid-flight conversation it releases is claimable at
+	// once; a parked, concluded or terminal one only stops holding a claim it
+	// should not.
 	//
 	// A live sibling instance's claims carry a different executor_id and are
 	// never touched, which is what makes a rolling deploy or a two-replica

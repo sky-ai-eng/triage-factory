@@ -434,8 +434,9 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		if flipped, err = resumeFlip(ctx, q, orgID, conversationID, calledOff); err != nil || !flipped {
 			return err
 		}
-		// A warm claim is kept: its engagement is waiting for exactly this,
-		// and drives the conversation from here (ResumeWarmClaimSystem).
+		// A warm claim with a live lease is kept: its engagement is waiting
+		// for exactly this, and drives the conversation from here
+		// (ResumeWarmClaimSystem).
 		if err := releaseActiveClaimUnlessWarm(ctx, s.admin, orgID, conversationID, "requeued"); err != nil {
 			return err
 		}
@@ -498,12 +499,17 @@ var warmResumableSQL = `(r.ended_at IS NULL AND r.archived_at IS NULL AND r.stop
 	AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `))`
 
 // releaseActiveClaimUnlessWarm is releaseActiveClaim for every claim but a
-// warm one (domain.ClaimPhaseWarm).
+// warm one (domain.ClaimPhaseWarm) whose engagement may still be waiting on it.
+// A warm claim whose lease has lapsed has no engagement left to resume the
+// conversation, since a live holder fences itself before its lease lapses, so
+// it is released too, completed as the takeover would release it, and the
+// resumed conversation goes to the queue now rather than after the takeover.
 func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE claims SET released_at = now(), outcome = $1
+		UPDATE claims SET released_at = now(),
+		       outcome = CASE WHEN phase = $4 THEN 'completed' ELSE $1 END
 		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
-		  AND phase IS DISTINCT FROM $4
+		  AND (phase IS DISTINCT FROM $4 OR lease_expires_at <= statement_timestamp())
 	`, outcome, orgID, conversationID, domain.ClaimPhaseWarm)
 	return err
 }

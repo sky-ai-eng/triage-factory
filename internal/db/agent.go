@@ -258,7 +258,11 @@ type ConversationStore interface {
 	// ordinary claimable work instead of spawning an in-process goroutine.
 	// Releases any still-active claim with outcome 'requeued' (ownership is
 	// re-established by ClaimNextConversation minting a fresh claim at the actual
-	// claim, exactly like a freshly minted row). Clears parked_at and
+	// claim, exactly like a freshly minted row), except a warm claim
+	// (domain.ClaimPhaseWarm) with its lease still live: its engagement is
+	// waiting for this resume and takes the conversation back itself
+	// (ResumeWarmClaimSystem). One whose lease has lapsed has no engagement
+	// left and is released 'completed'. Clears parked_at and
 	// park_reason together — both describe a park this call is undoing, and a
 	// resumed conversation that went on to conclude must not still name the
 	// stop it was picked back up from.
