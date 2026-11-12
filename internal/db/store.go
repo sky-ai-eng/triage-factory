@@ -675,6 +675,12 @@ type SystemTxStores struct {
 	GitHubDeliveries   GitHubDeliveryStore
 	GitHubRefreshMarks GitHubRefreshMarkStore
 
+	// Blueprints and Tasks join the transaction, so a blueprint run's finish
+	// and the close of its task commit together: a task is never left open
+	// with its run no longer running and nothing yet closing it.
+	Blueprints BlueprintStore
+	Tasks      TaskStore
+
 	// Ext carries the opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go) from the app pool and the
 	// transaction. Read through Extension; nil in a community build with no

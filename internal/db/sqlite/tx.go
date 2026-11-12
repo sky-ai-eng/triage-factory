@@ -69,6 +69,8 @@ func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.Syste
 			Notifications:      newNotificationStore(tx),
 			GitHubDeliveries:   newGitHubDeliveryStore(tx),
 			GitHubRefreshMarks: newGitHubRefreshMarkStore(tx),
+			Blueprints:         newBlueprintStore(tx),
+			Tasks:              newTaskStore(tx, tx),
 			Ext:                db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 		})
 	})

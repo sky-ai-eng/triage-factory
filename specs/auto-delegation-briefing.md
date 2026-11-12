@@ -95,6 +95,8 @@ cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd .. && go b
 
 When a trigger fires for an entity that **already has a live auto run**, the router doesn't always spawn a second run. The rule is **same-task absorption**: if the firing's _own task_ owns that live run, the new event folds into it — delivered as an **injection mid-run** (a fresh user message into the running conversation), and the standing claim carries over. Any _other_ firing — a different task's, or a busy state with no live run to fold into — defers onto `pending_firings` and runs when the entity frees up, exactly as before.
 
+A deferred firing does not always become a run of its own. While the task's blueprint is still running, the next engagement to start under it (the next step's launch, usually) is handed each event queued since that run started as the same injection. The firing is settled once the run ends: as injected if the note was read, and otherwise the note is withdrawn and the firing goes on as below. A task that is closed or holding a close hands nothing over. If the blueprint finishes first and its finish closes the task, the task's newest event is routed again, once, which creates a new task and a fresh run; that second routing skips the close phase, the notifications and the disposition the first one already produced. If the blueprint finishes and the task stays open, the firing starts a fresh run on that task.
+
 Two consequences if you're the agent working the run:
 
 - **Your conversation can grow mid-run.** A run isn't a snapshot of one triggering event: more same-task events (a new Slack follow-up in the thread, a re-fired CI failure) can arrive as injected user messages while you're working. Treat a later injection as the current intent.

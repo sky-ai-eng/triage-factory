@@ -108,12 +108,19 @@ const (
 // a firing whose run committed returns delegate.ErrAlreadyFired and the row
 // is skipped with that reason; (2) the one-active-run-per-task index refuses
 // a second live run, returning delegate.ErrTaskBusy, which the worker turns
-// into a deferral. A firing's only domain write is that insert, one
-// transaction, so a replay either finds it committed or repeats it whole.
+// into a deferral. A unit that fires makes one domain write, that insert, in
+// one transaction, so a replay either finds it committed or repeats it whole.
+// A unit that instead routes the task's newest event again, for a task its
+// run's finish closed, makes the router's writes behind the router's own
+// fences (the task dedup index and the two above), and a replay of it bumps
+// the task the first pass minted.
 //
 // UniqueWhileUnsettled keyed on (task, trigger): a parked firing holds its
 // key, so a later event for the same pair collapses onto the parked row
-// rather than minting a new one, and an operator redrives or cancels it.
+// rather than minting a new one, and an operator redrives or cancels it. A
+// firing whose event was handed to a conversation as a note gives its key up
+// (PendingFiringsStore.HandOffToConversation), so the pair's next event is
+// admitted as a row of its own.
 //
 // The claim filter is the per-task gate as the claim query applies it: a
 // firing is claimable only while its task is not busy (PendingFiringsTaskBusy).
@@ -127,7 +134,8 @@ const (
 // interleaves at batch granularity, which is why the worker claims ten at a
 // time. Frozen is empty: the kind's columns are immutable after admission
 // except skip_reason and fired_run_id, which only the terminal write sets,
-// so the store reads them by id after Claim returns.
+// and handed_note_id, which a hand-off sets on a ready row together with
+// releasing its key, so the store reads them by id after Claim returns.
 func PendingFirings(d workitem.Dialect) workitem.Kind {
 	return workitem.Kind{
 		Table:   "pending_firings",
@@ -141,7 +149,7 @@ func PendingFirings(d workitem.Dialect) workitem.Kind {
 		},
 		Unique:      workitem.UniqueWhileUnsettled,
 		Strategy:    workitem.FencedReplay,
-		Columns:     []string{"entity_id", "task_id", "trigger_id", "triggering_event_id", "skip_reason", "fired_run_id"},
+		Columns:     []string{"entity_id", "task_id", "trigger_id", "triggering_event_id", "skip_reason", "fired_run_id", "handed_note_id"},
 		ClaimFilter: PendingFiringsClaimFilter(d),
 		Observer:    workmetrics.Observe(PendingFiringsName),
 	}

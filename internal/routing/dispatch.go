@@ -86,7 +86,7 @@ import (
 // routeEvent with the queue row's entity_poll_seq, which is where a
 // terminating event learns the version it was judged at.
 func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
-	return r.routeEvent(ctx, evt, nil)
+	return r.routeEvent(ctx, evt, nil, false)
 }
 
 // routeEvent is HandleEvent's body. judgedAt is the entity's poll_seq at the
@@ -94,7 +94,16 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 // event carries none (an ingest-path event, or a direct call). It reaches
 // exactly one stage: the terminating close, which refuses to land against
 // any other version of the entity.
-func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int64) (err error) {
+//
+// again is the firing worker routing an event a second time, for a task its
+// run's finish closed (processFiring's reroute). The event's first routing
+// already ran its close phase, raised its notifications and published its
+// disposition, and events on the entity have been routed since, so none of
+// the three runs again: a close replayed out of order would resolve tasks
+// minted after the event, and the other two would tell people and
+// subscribers twice. A terminating event routes nothing the second time; the
+// entity it closed is either still closed or has reopened since.
+func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int64, again bool) (err error) {
 	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
 	// loud here prevents tenant-mixed writes that would silently land on the
@@ -147,7 +156,9 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 		// source what happened to its event, the span attribute tells
 		// whoever is reading the trace why it ended where it did.
 		recordDisposition(ctx, disp.Disposition)
-		r.publishDisposition(orgID, disp)
+		if !again {
+			r.publishDisposition(orgID, disp)
+		}
 	}()
 
 	// Entitlement gate (TFAC-524) — a gated-off event source (never entitled,
@@ -221,7 +232,12 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// the same newer version. The poll's close obligation returns here
 	// either way: it is a repair, not news, so it matches no handler and
 	// mints nothing.
-	if rel := terminatingRelationFor(evt.EventType); rel != nil {
+	if rel := terminatingRelationFor(evt.EventType); again {
+		if rel != nil {
+			disp.Disposition = events.DispositionStaleTerminal
+			return nil
+		}
+	} else if rel != nil {
 		closed, err := r.runTerminatingClose(ctx, orgID, evt, entityID, rel, judgedAt)
 		if err != nil {
 			disp.Disposition = events.DispositionError
@@ -271,7 +287,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// so nothing is raised about it.
 	closedUnderMint := false
 	defer func() {
-		if err == nil && !closedUnderMint {
+		if err == nil && !closedUnderMint && !again {
 			r.raiseNotifications(ctx, orgID, evt, *entity, matchedNotify, scopeCache)
 		}
 	}()

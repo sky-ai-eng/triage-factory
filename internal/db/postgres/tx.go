@@ -92,6 +92,8 @@ func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.Syste
 			Notifications:      newNotificationStore(s.app, tx),
 			GitHubDeliveries:   newGitHubDeliveryStore(tx),
 			GitHubRefreshMarks: newGitHubRefreshMarkStore(tx),
+			Blueprints:         newBlueprintStore(s.app, tx),
+			Tasks:              newTaskStore(s.app, tx),
 			Ext:                db.BuildStoreExtensions(db.DialectPostgres, s.app, tx),
 		})
 	})

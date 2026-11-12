@@ -415,3 +415,59 @@ func completeBlueprintRun(t *testing.T, database *sql.DB, blueprintRunID string)
 		t.Fatalf("complete blueprint_run: %v", err)
 	}
 }
+
+// TestTerminateBlueprint_CompletedClosesTheTaskWithTheRun pins that a clean
+// finish ends the run and closes its task together, so the task is never open
+// with no run on it.
+func TestTerminateBlueprint_CompletedClosesTheTaskWithTheRun(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-closes")
+	stampBotClaim(t, database, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
+	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("place task: %v", err)
+	}
+	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
+		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		domain.BlueprintRunStatusCompleted, "", nil, true)
+
+	var runStatus, taskStatus, closeReason string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, "bpr-"+conversationID).Scan(&runStatus); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if err := database.QueryRow(`SELECT status, COALESCE(close_reason, '') FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus, &closeReason); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if runStatus != string(domain.BlueprintRunStatusCompleted) || taskStatus != "done" || closeReason != "run_completed" {
+		t.Errorf("run = %q, task = %q (%q), want completed and done (run_completed)", runStatus, taskStatus, closeReason)
+	}
+}
+
+// TestTerminateBlueprint_RunAlreadyEndedLeavesTheTaskAlone pins the rollback:
+// a completion that loses the race to another writer's terminal (a cancel
+// here) does not close the task that writer left open.
+func TestTerminateBlueprint_RunAlreadyEndedLeavesTheTaskAlone(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-lost")
+	stampBotClaim(t, database, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
+	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("place task: %v", err)
+	}
+	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'cancelled' WHERE id = ?`, "bpr-"+conversationID); err != nil {
+		t.Fatalf("cancel the run: %v", err)
+	}
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
+		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		domain.BlueprintRunStatusCompleted, "", nil, true)
+
+	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
+		t.Errorf("task.status = %q, want in_progress: a completion that did not end the run closed the task", got)
+	}
+	var runStatus string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, "bpr-"+conversationID).Scan(&runStatus); err != nil || runStatus != "cancelled" {
+		t.Errorf("run status = %q (err=%v), want it left cancelled", runStatus, err)
+	}
+}
