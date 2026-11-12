@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useLayoutEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useSwitchOrg } from '../hooks/useSwitchOrg'
 import type { AuthOrg } from '../types'
@@ -26,8 +26,10 @@ export default function SSORequiredOrg({ org }: { org: AuthOrg }) {
   const { revalidate } = auth
 
   // Background re-reads: a failed one keeps this screen up, and the next
-  // tick or focus tries again.
-  useEffect(() => {
+  // tick or focus tries again. The listeners attach in a layout effect, which
+  // runs in the commit that puts this screen on the page; a passive effect runs
+  // in a later task, and a focus that arrives between the two is never seen.
+  useLayoutEffect(() => {
     const recheck = () => {
       if (document.visibilityState === 'visible') void revalidate()
     }
