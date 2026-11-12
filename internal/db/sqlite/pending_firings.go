@@ -215,6 +215,81 @@ func (s *pendingFiringsStore) HasUnsettledForTask(ctx context.Context, orgID, ta
 	return err == nil, err
 }
 
+func (s *pendingFiringsStore) ListReadyForTask(ctx context.Context, orgID, taskID string) ([]domain.PendingFiring, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, sqlitePendingFiringSelect+`
+		WHERE task_id = ? AND status = 'ready'
+		ORDER BY id
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.PendingFiring{}
+	for rows.Next() {
+		f, err := scanSqlitePendingFiring(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// HandOffToConversation runs the flip first, so a row that is no longer
+// ready rolls the transaction back before the note or the timeline is
+// touched. pending_firings is written before any other table, the order
+// Enqueue keeps.
+func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection) (bool, error) {
+	if s.conn == nil {
+		return false, db.ErrTxBoundStore
+	}
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		if err := workitem.SettleReady(ctx, tx, s.kind, orgID, firingID); err != nil {
+			return err
+		}
+		var taskID, eventID string
+		if err := tx.QueryRowContext(ctx, `
+			UPDATE pending_firings SET skip_reason = ? WHERE id = ? AND org_id = ?
+			RETURNING task_id, triggering_event_id
+		`, domain.PendingFiringSkipInjected, firingID, orgID).Scan(&taskID, &eventID); err != nil {
+			return err
+		}
+		if note != nil {
+			if _, err := newStagedInjectionStore(tx).AppendSystem(ctx, orgID, *note); err != nil {
+				return err
+			}
+		}
+		_, err := newTaskStore(tx, tx).MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{})
+		return err
+	})
+	if errors.Is(err, workitem.ErrNotReady) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *pendingFiringsStore) EventReroutedForTask(ctx context.Context, orgID, taskID, triggeringEventID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var one int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT 1 FROM pending_firings
+		WHERE task_id = ? AND triggering_event_id = ? AND status = 'done' AND skip_reason = ?
+		LIMIT 1
+	`, taskID, triggeringEventID, domain.PendingFiringSkipRerouted).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *pendingFiringsStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

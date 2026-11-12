@@ -62,13 +62,15 @@ const (
 )
 
 // PendingFiring skip reasons, set on a done row that did not fire. Each is a
-// definitive answer the worker's validation reached: retrying could not come
-// out differently, so the row is settled rather than requeued. A failure that
+// definitive answer: retrying could not come out differently, so the row is
+// settled rather than requeued. The worker's validation reaches all of them
+// but PendingFiringSkipInjected, which an engagement's start writes. A failure that
 // could come out differently — a store read, a spawner refusal — is a typed
 // requeue outcome on the block instead, never a skip reason.
 const (
 	// PendingFiringSkipTaskClosed: the task is done, dismissed or snoozed, or
-	// holds a close (TaskCloseDeferral). A snooze is on the same axis as a
+	// holds a close (TaskCloseDeferral). A task its run's finish closed is
+	// the exception, PendingFiringSkipRerouted. A snooze is on the same axis as a
 	// close — the person said "not now" — and a snooze wake mints a new event
 	// and a new firing if the trigger still matches, so the queued one is the
 	// wrong path to wake it. A held close is a close waiting only for the
@@ -92,4 +94,13 @@ const (
 	// fenced insert read it. Archiving stops the team's work, so the firing
 	// does not start a run; restoring the team does not bring it back.
 	PendingFiringSkipTeamArchived = "team_archived"
+	// PendingFiringSkipInjected: the task's blueprint was still working when
+	// one of its conversations started an engagement, and the firing's event
+	// was handed to that conversation as a note instead of starting a run.
+	PendingFiringSkipInjected = "injected"
+	// PendingFiringSkipRerouted: the task's blueprint finished and its finish
+	// closed the task before anything read the firing's event, so the event
+	// was routed again as if it had just arrived. The task and run it produced
+	// are the router's to name, not this row's.
+	PendingFiringSkipRerouted = "rerouted"
 )

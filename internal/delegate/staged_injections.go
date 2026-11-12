@@ -22,6 +22,7 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // stageOrDeliverInjection routes one agent-facing note for an SDK
@@ -116,6 +117,72 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 		return
 	}
 	s.tellTaskClosing(ctx, orgID, conv.ID, s.personStarted(ctx, orgID, conv), *evt)
+}
+
+// handOffQueuedFirings hands a conversation whose engagement is starting the
+// events queued on its task as pending firings, each as the note an event
+// folded into a running conversation is (domain.AdditiveEventInjection), and
+// settles the firings as injected. It applies while the conversation's
+// blueprint is still running: an event that reached the task when no
+// conversation was live to take it (between two steps, or while a crash left
+// the run between them) queued a firing the claim filter holds until the run
+// ends, and the blueprint's events go to the blueprint. Every runtime reads
+// staged notes before its agent's first model call of an engagement, so the
+// step reads them before it does anything.
+//
+// One event queues a firing per matched trigger; its note is staged once and
+// every firing settles, and the event the run itself fired from is not noted. The note, the settlement and the task's timeline row
+// commit together per firing (HandOffToConversation), so an engagement that
+// dies here leaves each firing either handed over or still queued. Best
+// effort: a firing this pass fails on stays queued, for a later engagement
+// under the run or for the firing worker once the run ends.
+func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *domain.BlueprintRun, conv *domain.Conversation, taskID string) {
+	if s.pendingFirings == nil || s.events == nil || br == nil || br.Status != domain.BlueprintRunStatusRunning {
+		return
+	}
+	firings, err := s.pendingFirings.ListReadyForTask(ctx, orgID, taskID)
+	if err != nil {
+		delegateLog.Warn("read the task's queued firings failed; the engagement starts without their events", "task_id", taskID, "conversation", conv.ID, "error", err)
+		return
+	}
+	// The run was briefed with the event it fired from, so a second trigger's
+	// firing for that event settles with no note.
+	noted := map[string]bool{}
+	if br.TriggeringEventID != "" {
+		noted[br.TriggeringEventID] = true
+	}
+	for _, f := range firings {
+		var note *domain.StagedInjection
+		if !noted[f.TriggeringEventID] {
+			evt, err := s.events.GetSystem(ctx, orgID, f.TriggeringEventID)
+			if err != nil || evt == nil {
+				delegateLog.Warn("read a queued firing's event failed; the firing stays queued", "task_id", taskID, "firing_id", f.ID, "event_id", f.TriggeringEventID, "error", err)
+				continue
+			}
+			// A failed current view hands the agent the metadata as recorded.
+			metadataJSON := evt.MetadataJSON
+			if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
+				metadataJSON = current
+			}
+			note = &domain.StagedInjection{
+				ConversationID: conv.ID,
+				Subtype:        domain.MessageSubtypeInjectionEvent,
+				Producer:       evt.EventType,
+				Body:           domain.AdditiveEventInjection(evt.EventType, metadataJSON),
+				Provenance:     domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType},
+			}
+		}
+		handed, err := s.pendingFirings.HandOffToConversation(ctx, orgID, f.ID, note)
+		if err != nil {
+			delegateLog.Warn("hand a queued firing to the starting engagement failed; the firing stays queued", "task_id", taskID, "firing_id", f.ID, "conversation", conv.ID, "error", err)
+			continue
+		}
+		if !handed {
+			continue
+		}
+		noted[f.TriggeringEventID] = true
+		delegateLog.Info("handed a queued firing's event to the starting engagement", "task_id", taskID, "firing_id", f.ID, "event_id", f.TriggeringEventID, "conversation", conv.ID, "blueprint_run", br.ID)
+	}
 }
 
 // personStarted reports whether a person drives the work on conv: they

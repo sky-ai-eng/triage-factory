@@ -82,6 +82,17 @@ type PendingFiringsSeeder struct {
 	// claimable again without waiting out the kind's backoff.
 	Ripen func(t *testing.T, firingID int64)
 
+	// TaskEvent inserts the task's timeline row for the event, kind 'bumped':
+	// what the router records when an event lands on an existing task.
+	TaskEvent func(t *testing.T, taskID, eventID string)
+
+	// TaskEventKind reads that row's kind.
+	TaskEventKind func(t *testing.T, taskID, eventID string) string
+
+	// StagedNotes reads the bodies of the conversation's undelivered
+	// messages, oldest first.
+	StagedNotes func(t *testing.T, conversationID string) []string
+
 	// InTx runs fn against a store bound to one transaction, and returns
 	// what fn returned after committing or rolling back on it.
 	InTx func(t *testing.T, fn func(s db.PendingFiringsStore) error) error
@@ -665,6 +676,145 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 			t.Fatalf("Claim: %v", err)
 		}
 		has(false, "cancelled")
+	})
+
+	t.Run("HandOffToConversation_settles_the_row_stages_the_note_and_marks_the_event", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		seed.TaskEvent(t, tup.TaskID, tup.EventID)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		conv := seed.LiveConversation(t, tup.TaskID, tup.PromptID)
+
+		ready, err := s.ListReadyForTask(ctx, orgID, tup.TaskID)
+		if err != nil || len(ready) != 1 {
+			t.Fatalf("ListReadyForTask = %d rows, err=%v, want the one queued firing", len(ready), err)
+		}
+		note := domain.StagedInjection{
+			ConversationID: conv,
+			Subtype:        domain.MessageSubtypeInjectionEvent,
+			Producer:       domain.EventGitHubPRCICheckFailed,
+			Body:           "a new event occurred",
+			Provenance:     domain.NoteProvenance{EventID: tup.EventID, EventType: domain.EventGitHubPRCICheckFailed},
+		}
+		handed, err := s.HandOffToConversation(ctx, orgID, ready[0].ID, &note)
+		if err != nil || !handed {
+			t.Fatalf("HandOffToConversation: handed=%v err=%v", handed, err)
+		}
+
+		row := one(t, s, orgID, tup.EntityID)
+		if row.Status != workitem.StatusDone || row.SkipReason != domain.PendingFiringSkipInjected || row.DoneAt == nil || row.FiredBlueprintRunID != nil {
+			t.Errorf("handed row = %+v, want done with skip reason injected and no run", row)
+		}
+		if notes := seed.StagedNotes(t, conv); len(notes) != 1 || notes[0] != note.Body {
+			t.Errorf("staged notes = %v, want the one handed over", notes)
+		}
+		if kind := seed.TaskEventKind(t, tup.TaskID, tup.EventID); kind != "injected" {
+			t.Errorf("task event kind = %q, want injected", kind)
+		}
+		// The settled row holds neither the gate nor its key.
+		if has, err := s.HasUnsettledForTask(ctx, orgID, tup.TaskID); err != nil || has {
+			t.Errorf("HasUnsettledForTask after the hand-off = %v, err=%v, want false", has, err)
+		}
+		if left, err := s.ListReadyForTask(ctx, orgID, tup.TaskID); err != nil || len(left) != 0 {
+			t.Errorf("ListReadyForTask after the hand-off = %d rows, err=%v, want none", len(left), err)
+		}
+
+		// A second hand-off of the same row finds it settled and writes
+		// nothing.
+		handed, err = s.HandOffToConversation(ctx, orgID, ready[0].ID, &note)
+		if err != nil || handed {
+			t.Fatalf("second HandOffToConversation: handed=%v err=%v, want a refusal", handed, err)
+		}
+		if notes := seed.StagedNotes(t, conv); len(notes) != 1 {
+			t.Errorf("staged notes after the refused hand-off = %v, want still one", notes)
+		}
+	})
+
+	t.Run("HandOffToConversation_with_no_note_settles_without_staging", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		seed.TaskEvent(t, tup.TaskID, tup.EventID)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		conv := seed.LiveConversation(t, tup.TaskID, tup.PromptID)
+
+		handed, err := s.HandOffToConversation(ctx, orgID, one(t, s, orgID, tup.EntityID).ID, nil)
+		if err != nil || !handed {
+			t.Fatalf("HandOffToConversation: handed=%v err=%v", handed, err)
+		}
+		if row := one(t, s, orgID, tup.EntityID); row.SkipReason != domain.PendingFiringSkipInjected {
+			t.Errorf("handed row = %+v, want skip reason injected", row)
+		}
+		if notes := seed.StagedNotes(t, conv); len(notes) != 0 {
+			t.Errorf("staged notes = %v, want none", notes)
+		}
+	})
+
+	t.Run("HandOffToConversation_leaves_a_leased_row_to_its_holder", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		seed.TaskEvent(t, tup.TaskID, tup.EventID)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		cf := claimOne(t, s)
+		conv := seed.LiveConversation(t, tup.TaskID, tup.PromptID)
+
+		if ready, err := s.ListReadyForTask(ctx, orgID, tup.TaskID); err != nil || len(ready) != 0 {
+			t.Fatalf("ListReadyForTask with the row leased = %d rows, err=%v, want none", len(ready), err)
+		}
+		note := domain.StagedInjection{ConversationID: conv, Subtype: domain.MessageSubtypeInjectionEvent, Producer: "p", Body: "b"}
+		handed, err := s.HandOffToConversation(ctx, orgID, cf.Firing.ID, &note)
+		if err != nil || handed {
+			t.Fatalf("HandOffToConversation of a leased row: handed=%v err=%v, want a refusal", handed, err)
+		}
+		if row := one(t, s, orgID, tup.EntityID); row.Status != workitem.StatusLeased || row.SkipReason != "" {
+			t.Errorf("leased row after the refused hand-off = %+v, want it untouched", row)
+		}
+		if notes := seed.StagedNotes(t, conv); len(notes) != 0 {
+			t.Errorf("staged notes = %v, want none: the refusal rolled the note back", notes)
+		}
+		if kind := seed.TaskEventKind(t, tup.TaskID, tup.EventID); kind != "bumped" {
+			t.Errorf("task event kind = %q, want bumped", kind)
+		}
+		// The holder's own terminal write still lands.
+		if err := s.MarkSkipped(ctx, cf.Receipt, domain.PendingFiringSkipTaskClosed); err != nil {
+			t.Fatalf("MarkSkipped after the refused hand-off: %v", err)
+		}
+	})
+
+	t.Run("EventReroutedForTask_reads_a_rerouted_sibling", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		other := seed.Tuple(t)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+
+		rerouted := func(taskID, eventID string) bool {
+			t.Helper()
+			got, err := s.EventReroutedForTask(ctx, orgID, taskID, eventID)
+			if err != nil {
+				t.Fatalf("EventReroutedForTask: %v", err)
+			}
+			return got
+		}
+		if rerouted(tup.TaskID, tup.EventID) {
+			t.Errorf("EventReroutedForTask with the firing still ready = true, want false")
+		}
+		if err := s.MarkSkipped(ctx, claimOne(t, s).Receipt, domain.PendingFiringSkipRerouted); err != nil {
+			t.Fatalf("MarkSkipped: %v", err)
+		}
+		if !rerouted(tup.TaskID, tup.EventID) {
+			t.Errorf("EventReroutedForTask after the reroute = false, want true")
+		}
+		if rerouted(tup.TaskID, other.EventID) || rerouted(other.TaskID, tup.EventID) {
+			t.Errorf("EventReroutedForTask answered for another event or another task")
+		}
+
+		// A skip for any other reason is not a reroute.
+		enqueue(t, s, orgID, other, other.TaskID, db.AgentClaimStamp{})
+		if err := s.MarkSkipped(ctx, claimOne(t, s).Receipt, domain.PendingFiringSkipTaskClosed); err != nil {
+			t.Fatalf("MarkSkipped: %v", err)
+		}
+		if rerouted(other.TaskID, other.EventID) {
+			t.Errorf("EventReroutedForTask for a task_closed skip = true, want false")
+		}
 	})
 
 	t.Run("ListForEntity_orders_by_id_and_stays_within_the_entity", func(t *testing.T) {

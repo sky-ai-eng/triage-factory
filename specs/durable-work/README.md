@@ -150,6 +150,13 @@ the row lock.
 - **Claims adapter:** a claim-owned write requires the claim to be unreleased and its lease
   unexpired on database time. A claim row is one acquisition, so its id is the generation (D3).
 
+One write settles a row with no lease. `SettleReady` flips a `ready` row with no cancellation
+request to `done` and moves its generation, for a party that did the row's work another way while
+the kind's claim filter kept the row unclaimable. It matches nothing on a leased, parked, or
+settled row and returns `ErrNotReady`, and the caller's domain writes in the same transaction roll
+back with it. `pending_firings` uses it when an engagement starting under a task's running
+blueprint takes the task's queued events as notes.
+
 ### 1.4 Preventing duplicate admission
 
 Each kind chooses how long its `unique_key` remains reserved:

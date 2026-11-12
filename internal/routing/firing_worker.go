@@ -41,6 +41,10 @@ import (
 // ErrTaskBusy and defers at no cost, and FIFO within a task is the claim's
 // own ORDER BY id.
 //
+// A firing whose task its run's finish closed is not fired on that task: its
+// event goes back through the router (reroute, in processFiring), which mints
+// the task and run an event arriving now would get.
+//
 // Nothing here resets, sweeps or renews on a timer. A row whose holder died
 // is reclaimed by the first claim after its lease expires, and the reclaim
 // is logged because it is the one signal that a unit was interrupted. A
@@ -142,6 +146,16 @@ func (r *Router) drainFiringQueue(ctx context.Context) error {
 	}
 }
 
+// closedByRunFinish reports whether the task was closed by its run finishing:
+// a blueprint's finish, or a person resolving the deliverable it left. That
+// close says the work is done, not that the situation went away, so an event
+// queued behind the run still describes something nobody has acted on. Every
+// other close answers the firing: an event resolved the situation, or a
+// person completed or dismissed the task after the event had reached it.
+func closedByRunFinish(task *domain.Task) bool {
+	return task.Status == "done" && task.CloseReason == "run_completed"
+}
+
 // processFiring runs one claimed firing as one unit: renew the lease,
 // validate the firing against the world now, fire it, and write its terminal
 // under the receipt's fence. Done means done — the run committed and the row
@@ -235,6 +249,47 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		})
 	}
 
+	// reroute sends the firing's event back through the router as if it had
+	// just arrived, for a task its blueprint's finish closed before anything
+	// read the event: with nothing working on that task the router mints a
+	// new one and decides its triggers afresh. The row stays leased across
+	// the routing, so a failure requeues it and a holder that dies is
+	// replayed; the replay routes the event a second time, which the
+	// router's own fences absorb as they do a replayed queue row. One event
+	// queues a firing per matched trigger, and routing it once decides all
+	// of them, so a firing whose sibling already rerouted settles without
+	// routing again.
+	reroute := func() {
+		rerouted, err := r.firings.EventReroutedForTask(unitCtx, f.OrgID, f.TaskID, f.TriggeringEventID)
+		if err != nil {
+			requeue(workitem.OutcomeTransient, fmt.Errorf("rerouted sibling lookup: %w", err))
+			return
+		}
+		if !rerouted {
+			ev, err := r.events.GetSystem(unitCtx, f.OrgID, f.TriggeringEventID)
+			if err != nil {
+				requeue(workitem.OutcomeTransient, fmt.Errorf("load event: %w", err))
+				return
+			}
+			if ev == nil {
+				skip(domain.PendingFiringSkipTaskClosed)
+				return
+			}
+			if err := r.routeEvent(unitCtx, *ev, nil); err != nil {
+				span.SetStatus(codes.Error, "reroute event")
+				routerLog.WarnContext(unitCtx, "firing-queue: rerouting the event failed, firing not consumed",
+					"firing_id", f.ID, "task_id", f.TaskID, "event_id", f.TriggeringEventID, "attempt", receipt.Attempt, "error", err)
+				outcome := workitem.OutcomeTransient
+				if errors.Is(err, context.DeadlineExceeded) {
+					outcome = workitem.OutcomeDeadline
+				}
+				requeue(outcome, fmt.Errorf("reroute: %w", err))
+				return
+			}
+		}
+		skip(domain.PendingFiringSkipRerouted)
+	}
+
 	defer func() {
 		if rec := recover(); rec != nil {
 			// The poison-pill safety net: a panic in a unit must not kill
@@ -255,7 +310,15 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		requeue(workitem.OutcomeTransient, fmt.Errorf("task lookup: %w", err))
 		return
 	}
-	if task == nil || task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
+	if task == nil {
+		skip(domain.PendingFiringSkipTaskClosed)
+		return
+	}
+	if closedByRunFinish(task) {
+		reroute()
+		return
+	}
+	if task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
 		skip(domain.PendingFiringSkipTaskClosed)
 		return
 	}
@@ -324,7 +387,17 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		return
 	case errors.Is(err, delegate.ErrTaskClosed):
 		// The task closed, or an event held its close, after the reads
-		// above: the skip they make for a closed or held task.
+		// above: the answer they give a closed or held task, decided on the
+		// task as it stands now.
+		closed, rerr := r.tasks.GetSystem(unitCtx, f.OrgID, f.TaskID)
+		if rerr != nil {
+			requeue(workitem.OutcomeTransient, fmt.Errorf("task lookup after refused fire: %w", rerr))
+			return
+		}
+		if closed != nil && closedByRunFinish(closed) {
+			reroute()
+			return
+		}
 		skip(domain.PendingFiringSkipTaskClosed)
 		return
 	case errors.Is(err, delegate.ErrTeamArchived):

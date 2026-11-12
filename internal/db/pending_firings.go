@@ -52,8 +52,8 @@ var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is
 // returned-row rule: each is fire-and-forget from its caller's side, and the
 // next claim reads the state, not this caller.
 //
-// A store bound to a caller's transaction answers Enqueue,
-// HasUnsettledForTask and ListForEntity on that transaction, and refuses
+// A store bound to a caller's transaction answers Enqueue and the reads on
+// that transaction, and refuses
 // the verbs that open their own with ErrTxBoundStore.
 type PendingFiringsStore interface {
 	// Enqueue admits a ready firing for (task, trigger) under
@@ -119,6 +119,36 @@ type PendingFiringsStore interface {
 	// its key: a later event for the same trigger collapses onto it, and one
 	// for another trigger queues behind it in order.
 	HasUnsettledForTask(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// ListReadyForTask returns the task's ready firings, oldest first: the
+	// ones an engagement starting under the task's running blueprint takes
+	// over (HandOffToConversation). Leased and parked rows are absent; a
+	// holder or an operator disposes of those.
+	ListReadyForTask(ctx context.Context, orgID, taskID string) ([]domain.PendingFiring, error)
+
+	// HandOffToConversation settles a ready firing as handed to a
+	// conversation, in one transaction: the row flips done with skip reason
+	// domain.PendingFiringSkipInjected (workitem.SettleReady), note is staged
+	// for the conversation, and the task's timeline row for the firing's
+	// event becomes 'injected'. A nil note stages nothing, for a firing whose
+	// event another firing in the same pass already carried. handed is false,
+	// and nothing is written, when the row is no longer ready.
+	//
+	// The firing never had a holder: the claim filter keeps a row behind a
+	// running blueprint unclaimable, so the engagement that starts under
+	// that blueprint is the only party in a position to settle it. The
+	// task's claim is not stamped; the firing's admission made that
+	// commitment.
+	//
+	// Exempt from the returned-row rule, as the holder verbs are: the caller
+	// acts on handed alone.
+	HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection) (handed bool, err error)
+
+	// EventReroutedForTask reports whether a firing on the task for this
+	// triggering event is already settled domain.PendingFiringSkipRerouted.
+	// One event queues a firing per matched trigger, and routing it again
+	// once decides all of them.
+	EventReroutedForTask(ctx context.Context, orgID, taskID, triggeringEventID string) (bool, error)
 
 	// ListForEntity returns every row for an entity, oldest first, in any
 	// status. Kept as the one entity-shaped read the router and delegate

@@ -419,6 +419,9 @@ var (
 	// ErrNotParked means no parked row matched. A parked row with a pending
 	// cancellation request is deliberately not redrivable; it is supersedable.
 	ErrNotParked = errors.New("workitem: not parked")
+	// ErrNotReady means SettleReady matched no ready row free of a
+	// cancellation request: the row is leased, parked or already settled.
+	ErrNotReady = errors.New("workitem: not ready")
 	// ErrAdmissionRaced means a SQLite admission conflicted with a row that was
 	// settled before its id could be read back — reachable only on a DBTX that
 	// is neither a pool nor a transaction, since either of those bounds the two
