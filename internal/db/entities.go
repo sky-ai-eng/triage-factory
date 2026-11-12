@@ -228,6 +228,19 @@ type TerminalCloseResult struct {
 	// HeldTasks are the tasks this call left open with the close held
 	// (domain.TaskCloseDeferral), in the order they were held.
 	HeldTasks []HeldTaskClose
+	// DismissedReviews are the pending reviews of the entity this call closed,
+	// which it dismissed: a review of a pull request that merged or closed
+	// can no longer be posted. Empty for an entity no review is about.
+	DismissedReviews []DismissedReview
+}
+
+// DismissedReview is one pending review deliverable a terminating close
+// dismissed.
+type DismissedReview struct {
+	DeliverableID string
+	// ConversationID is the conversation that staged the review; "" when that
+	// conversation was purged.
+	ConversationID string
 }
 
 // HeldTaskClose is one task a terminating close held rather than closed.
@@ -682,6 +695,13 @@ type EntityStore interface {
 	// nobody can act on any more. When the guard misses,
 	// nothing is held either. A hold names its closing event, so with
 	// closingEventID empty every task closes.
+	//
+	// Right after the entity flips, every pending review deliverable about it
+	// is dismissed in the same transaction and reported in DismissedReviews,
+	// whichever task's conversation staged it: the caller announces each one
+	// and re-checks its task for closing after the commit. No other
+	// deliverable is written here: a pull request deliverable follows GitHub
+	// through the reconciler.
 	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)
 
 	// ClearSnapshotsForSourceSystem blanks snapshot_json for every ACTIVE

@@ -3,6 +3,8 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -49,6 +51,13 @@ type EntityTerminalCloseSeeder struct {
 	// its tasks alone — the state no store write produces and the checker's
 	// Count B exists to find.
 	CloseEntityRaw func(t *testing.T, entityID string)
+
+	// Review gives the conversation a review deliverable in state about the
+	// pull request entityID names, and returns its id.
+	Review func(t *testing.T, conversationID, entityID, state string) (deliverableID string)
+
+	// DeliverableState reads a deliverable's state.
+	DeliverableState func(t *testing.T, deliverableID string) string
 }
 
 // RunEntityTerminalCloseConformance is the shared suite for
@@ -121,6 +130,50 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		}
 	})
 
+	t.Run("Dismisses_the_pending_reviews_of_the_closed_pull_request", func(t *testing.T) {
+		// A review of a merged pull request can no longer be posted, so the
+		// close dismisses it whichever task's conversation staged it. A review
+		// of another pull request, and one already submitted, are left alone.
+		entities, _, orgID, seed := mk(t)
+		taskA := seed.Task(t)
+		entityID := seed.EntityForTask(t, taskA)
+		taskB := seed.Task(t)
+		otherEntityID := seed.EntityForTask(t, taskB)
+		_, convA := seed.BlueprintAndConversation(t, taskA, "running", domain.StatusOpen)
+		_, convB := seed.BlueprintAndConversation(t, taskB, "running", domain.StatusOpen)
+		pendingA := seed.Review(t, convA, entityID, domain.DeliverableStateReviewPending)
+		pendingB := seed.Review(t, convB, entityID, domain.DeliverableStateReviewPending)
+		submitted := seed.Review(t, convA, entityID, domain.DeliverableStateReviewSubmitted)
+		elsewhere := seed.Review(t, convB, otherEntityID, domain.DeliverableStateReviewPending)
+		_, seq := seed.EntityRow(t, entityID)
+
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "")
+		if err != nil {
+			t.Fatalf("CloseTerminalSystem: %v", err)
+		}
+		want := []db.DismissedReview{
+			{DeliverableID: pendingA, ConversationID: convA},
+			{DeliverableID: pendingB, ConversationID: convB},
+		}
+		sort.Slice(want, func(i, j int) bool { return want[i].DeliverableID < want[j].DeliverableID })
+		if !reflect.DeepEqual(res.DismissedReviews, want) {
+			t.Errorf("DismissedReviews = %+v, want %+v", res.DismissedReviews, want)
+		}
+		for id, wantState := range map[string]string{
+			pendingA:  domain.DeliverableStateReviewDismissed,
+			pendingB:  domain.DeliverableStateReviewDismissed,
+			submitted: domain.DeliverableStateReviewSubmitted,
+			elsewhere: domain.DeliverableStateReviewPending,
+		} {
+			if got := seed.DeliverableState(t, id); got != wantState {
+				t.Errorf("deliverable %s state = %q, want %q", id, got, wantState)
+			}
+		}
+		if got := seed.TaskStatus(t, taskB); got != "queued" {
+			t.Errorf("task %s status = %q, want queued — dismissing its review is not a close of it", taskB, got)
+		}
+	})
+
 	t.Run("Version_guard_miss_writes_nothing", func(t *testing.T) {
 		// The reopen race: the event was judged at version N, and a poll
 		// has since re-judged the entity. Nothing may land — not the task,
@@ -129,7 +182,8 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		taskID := seed.Task(t)
 		entityID := seed.EntityForTask(t, taskID)
 		eventID := seed.Event(t, taskID)
-		brID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
+		brID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+		reviewID := seed.Review(t, convID, entityID, domain.DeliverableStateReviewPending)
 		_, judgedAt := seed.EntityRow(t, entityID)
 		seed.BumpPollSeq(t, entityID)
 
@@ -151,6 +205,9 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		}
 		if n := seed.CloseAuditCount(t, taskID); n != 0 {
 			t.Errorf("close-audit rows = %d, want 0", n)
+		}
+		if got := seed.DeliverableState(t, reviewID); got != domain.DeliverableStateReviewPending {
+			t.Errorf("review state = %q, want pending — the pull request it reviews was reopened", got)
 		}
 	})
 

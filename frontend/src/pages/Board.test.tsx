@@ -348,6 +348,51 @@ describe('returning a task to the queue', () => {
   })
 })
 
+describe('ending a task', () => {
+  it('completes a task whose run left deliverables without asking', async () => {
+    held = {
+      ...conversation('completed'),
+      has_unresolved_deliverables: true,
+      pending_deliverable_ids: ['d1', 'd2'],
+      unresolved_pr_count: 1,
+      unresolved_review_count: 1,
+    } as Conversation
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    await act(async () => {
+      await dnd.drop!(HELD.id, 'done')
+    })
+
+    // One call, the task's own close: no dialog stands in front of it, and no
+    // deliverable route is reached, because a close leaves them all as they are.
+    expect(taskCalls()).toEqual([`/api/tasks/${HELD.id}`])
+    expect(api.apiFetch).toHaveBeenCalledWith(
+      `/api/tasks/${HELD.id}`,
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ status: 'done' }) }),
+    )
+    expect(api.apiFetch.mock.calls.some((c) => String(c[0]).startsWith('/api/deliverables/'))).toBe(
+      false,
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('dismisses a queued task without asking', async () => {
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'done')
+    })
+
+    expect(taskCalls()).toEqual([`/api/tasks/${FREE.id}`])
+    expect(api.apiFetch).toHaveBeenCalledWith(
+      `/api/tasks/${FREE.id}`,
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }),
+    )
+  })
+})
+
 describe('a permission prompt on a card', () => {
   afterEach(() => {
     ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {}

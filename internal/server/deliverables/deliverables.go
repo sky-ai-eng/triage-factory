@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
-	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
@@ -1094,7 +1093,7 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
 	number := 0
 	if prRef != nil {
-		deliverableteardown.CloseDraftPR(cleanupCtx, ah.ghResolver, orgID, art, *prRef)
+		closeDraftPR(cleanupCtx, ah.ghResolver, orgID, art, *prRef)
 		number = prRef.Number
 	}
 	ah.pingConversationsResolved(orgID)
@@ -1107,6 +1106,35 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 		"html_url": art.URL,
 		"state":    domain.DeliverableStatePRClosed,
 	})
+}
+
+// closeDraftPR closes a dismissed draft PR on GitHub. Best-effort: every
+// failure is logged, never returned — the deliverable is already marked
+// closed, so a GitHub hiccup mustn't unwind that, and reconciliation retires
+// the pull request later. pr is the pull request the deliverable is about
+// (db.ResolveDeliverablePullRequest): its repository's current name and its
+// number. One whose repository's registry row is retired is not closed —
+// GitHub serves the name as another repository now. The per-repo client
+// resolves App-installation-token → PAT like every other PR mutation. The
+// pushed branch is never touched.
+func closeDraftPR(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Deliverable, pr db.DeliverablePullRequest) {
+	if resolver == nil {
+		deliverablesLog.Warn("no github resolver; skipping draft PR close (deliverable already marked closed)", "deliverable", art.ID)
+		return
+	}
+	if pr.Retired {
+		deliverablesLog.Warn("draft PR's repository is retired; skipping GitHub close (deliverable already marked closed)", "deliverable", art.ID, "repository_id", pr.RepositoryID)
+		return
+	}
+	owner, repo, number := pr.Owner, pr.Repo, pr.Number
+	gh, err := resolver.ClientForRepo(ctx, orgID, owner, repo)
+	if err != nil {
+		deliverablesLog.Warn("resolve github client for draft PR close failed", "deliverable", art.ID, "owner", owner, "repo", repo, "error", err)
+		return
+	}
+	if err := gh.ClosePR(ctx, owner, repo, number); err != nil {
+		deliverablesLog.Warn("close draft PR on github failed (deliverable already marked closed)", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+	}
 }
 
 // handleDeliverableReject resolves ONE draft pull request the hard way: the head
@@ -1339,10 +1367,9 @@ func (ah *Handler) pingConversationsResolved(orgID string) {
 // reaching status=completed, so only a conversation that has one can close its
 // task. A non-blueprint conversation (origin <> 'blueprint' — a future
 // interactive/ad-hoc one) may well carry a task_id, but it has no blueprint run
-// to read a terminal from, so it is a no-op here. The "anything still unresolved?" check is
-// scoped to the whole TASK (all its conversations), matching
-// the task-end teardown, so a stranded deliverable from a prior attempt blocks
-// closure.
+// to read a terminal from, so it is a no-op here. The "anything still
+// unresolved?" check is scoped to the whole TASK (all its conversations), so a
+// deliverable left by a prior attempt blocks closure.
 //
 // Detached + best-effort: the caller already mutated the GitHub object and
 // flipped the deliverable, so a failure here must not unwind that. Fails CLOSED on
@@ -1397,11 +1424,10 @@ func (ah *Handler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, us
 			return nil
 		}
 		// Step 3: unresolved check scoped to the TASK (all its conversations),
-		// matching the task-end teardown — not just the current blueprint's step
-		// conversations. A stranded deliverable from a prior attempt (e.g. a
-		// teardown that partially failed on a network blip) must block closure
-		// rather than be silently skipped, so we never close the task with an
-		// unresolved draft PR / pending review sitting on GitHub.
+		// not just the current blueprint's step conversations. A deliverable
+		// left by a prior attempt must block closure rather than be silently
+		// skipped, so we never close the task with an unresolved draft PR or
+		// pending review still waiting on a person.
 		convs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
 			return fmt.Errorf("list conversations for task: %w", e)
@@ -1505,9 +1531,7 @@ func (ah *Handler) Register(m httpx.Mounts) {
 	// lives on GitHub rather than locally: GET serves the deliverable + its live
 	// pending-review comments, PATCH stages body/event, the comment routes
 	// edit/delete inline comments on that pending review, approve submits it,
-	// and dismiss resolves a single deliverable. The task-level resolve-all runs
-	// once, when the task itself ends (drag-to-Done / dismiss), through the
-	// server's teardownTaskDeliverables.
+	// and dismiss resolves a single deliverable.
 	//
 	// One read for every kind; the writes are kind-scoped sub-resources, so a
 	// review-shaped body can never reach the PR write path.

@@ -513,11 +513,11 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 // arrives without one. See
 // EntityStore.CloseTerminalSystem for the transaction; this is the routing
 // half: the post-commit stop of the conversations the transaction stamped,
-// the deliverable teardown behind it, and the tasks-updated nudge, sequenced
-// exactly as closeTaskWithAudit sequences them for a typed close. A task with
-// a working conversation is held in that transaction rather than closed, and
-// its conversations are told after the commit, as closeOrHoldTaskWithAudit
-// tells them; the entity closes either way.
+// sequenced exactly as closeTaskWithAudit sequences it for a typed close, the
+// follow-up for the pending reviews the transaction dismissed, and the
+// tasks-updated nudge. A task with a working conversation is held in that
+// transaction rather than closed, and its conversations are told after the
+// commit, as closeOrHoldTaskWithAudit tells them; the entity closes either way.
 //
 // closed=false means the guard declined and nothing was written: the entity
 // reopened (or was re-polled) between the event's enqueue and now, so the
@@ -565,7 +565,12 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	notify.ResolveEvents(ctx, orgID, entityID, closedBy, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
-		r.finishTaskClose(ctx, orgID, taskID, res.ActiveConversationIDs[taskID])
+		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
+	}
+	if len(res.DismissedReviews) > 0 {
+		routerLog.InfoContext(ctx, "dismissed pending reviews of the closed pull request",
+			"entity_id", entityID, "on_event", evt.EventType, "count", len(res.DismissedReviews))
+		r.spawner.ReviewsDismissedSystem(ctx, orgID, res.DismissedReviews)
 	}
 	if evt.EventType == domain.EventSystemEntityCloseOwed {
 		// Worth a line every time: the obligation firing means a close was
@@ -879,7 +884,7 @@ func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID str
 	}
 	switch {
 	case out.Closed:
-		r.finishTaskClose(ctx, orgID, taskID, out.ActiveConversationIDs)
+		r.stopConversationsOnClosedTask(orgID, taskID, out.ActiveConversationIDs)
 	case out.Held && out.NewlyHeld:
 		r.tellTaskClosing(ctx, orgID, evt, taskID, out.WorkingConversationIDs)
 	}
@@ -903,36 +908,23 @@ func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID str
 // so a close that committed without the intent could leave a conversation the
 // system has forgotten it meant to stop, with no replay able to reach it.
 //
-// The kill then follows, post-commit and best-effort, and the deliverable teardown
-// behind it: a closed task is over, so the draft PRs it opened are closed and
-// its staged reviews dismissed, with the audit rows naming no actor because no
-// person asked for this. The teardown is keyed on the task rather than on the
-// conversations the close stamped — it is the deliverables of every attempt the
-// task ever made that strand, not just the live one's.
+// The kill then follows, post-commit and best-effort. The close leaves the
+// task's deliverables alone: a draft PR stays on GitHub for a person to
+// decide, and the reconciler keeps its state current whatever its task's
+// status.
 //
 // Only a close this call actually performed cascades, and closed reports
 // whether it did: an already-terminal task returns no conversation ids, so a
-// replayed close neither stamps, stops nor tears down — the conversation
-// under it may be one a user resumed after the close, which the resume
-// ladder deliberately allows.
+// replayed close neither stamps nor stops — the conversation under it may be
+// one a user resumed after the close, which the resume ladder deliberately
+// allows.
 func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) (closed bool, err error) {
 	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
 		return false, err
 	}
 	if closed {
-		r.finishTaskClose(ctx, orgID, taskID, activeConversationIDs)
+		r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
 	}
 	return closed, nil
-}
-
-// finishTaskClose is what follows a close an event performed, once it has
-// committed: the stop of the conversations it stamped, then the teardown of
-// the task's deliverables. Behind the stop, never beside it: the stop parks
-// each conversation and releases its claim, so the teardown operates on
-// settled conversations rather than racing a live agent that can still land
-// a fresh draft PR.
-func (r *Router) finishTaskClose(ctx context.Context, orgID, taskID string, activeConversationIDs []string) {
-	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
-	r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 }

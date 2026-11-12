@@ -31,16 +31,16 @@ type stubDelegator struct {
 	// mu guards the things concurrent units write: lastRunTeamID, the team
 	// the most recent Delegate call resolved for its run (tests assert a
 	// firing runs as the acting team, not the task's creation-time owner),
-	// the teardown ids below, and failFor.
+	// the calls recorded below, and failFor.
 	mu            sync.Mutex
 	lastRunTeamID string
 	failFor       map[string]bool
 	// stopped is every blueprint-run id handed to StopBlueprintRun, so a test
 	// can assert nothing tore a run down.
 	stopped []string
-	// tornDown is every task id handed to TeardownTaskDeliverablesSystem, so a
-	// test can assert a close reached the deliverable pass.
-	tornDown []string
+	// dismissed is every review handed to ReviewsDismissedSystem, so a test
+	// can assert a close reached the dismissal's follow-up.
+	dismissed []dbpkg.DismissedReview
 	// noted is every conversation id handed to TellTaskClosing, so a
 	// test can tell a close that held and told its conversations.
 	noted []string
@@ -149,23 +149,21 @@ func (s *stubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause del
 	return nil
 }
 
-// TeardownTaskDeliverablesSystem records the task whose deliverables the close asked
-// to retire. Recording only: what the real teardown writes is
-// deliverableteardown's to prove, and what a router test can prove is that the
-// close cascade reached it with the task it closed.
-func (s *stubDelegator) TeardownTaskDeliverablesSystem(_ context.Context, orgID, taskID string) {
+// ReviewsDismissedSystem records the reviews a terminating close dismissed.
+// Recording only: what the real follow-up sends and closes is the spawner's to
+// prove, and what a router test can prove is that the close handed it the
+// reviews its transaction dismissed.
+func (s *stubDelegator) ReviewsDismissedSystem(_ context.Context, orgID string, reviews []dbpkg.DismissedReview) {
 	s.mu.Lock()
-	s.tornDown = append(s.tornDown, taskID)
+	s.dismissed = append(s.dismissed, reviews...)
 	s.mu.Unlock()
 }
 
-// tornDownCopy is the task ids TeardownTaskDeliverablesSystem was called with.
-func (s *stubDelegator) tornDownCopy() []string {
+// dismissedCopy is the reviews ReviewsDismissedSystem was called with.
+func (s *stubDelegator) dismissedCopy() []dbpkg.DismissedReview {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]string, len(s.tornDown))
-	copy(out, s.tornDown)
-	return out
+	return append([]dbpkg.DismissedReview(nil), s.dismissed...)
 }
 
 // stoppedCopy is the blueprint-run ids StopBlueprintRun was called with.

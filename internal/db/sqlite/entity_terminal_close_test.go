@@ -93,5 +93,25 @@ func newSQLiteTerminalCloseSeeder(conn *sql.DB) dbtest.EntityTerminalCloseSeeder
 				t.Fatalf("close entity %s around the guard: %v", entityID, err)
 			}
 		},
+		Review: func(t *testing.T, conversationID, entityID, state string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id, details_json)
+				SELECT ?, id, org_id, team_id, 'github', 'review', 'github.com', 'acme/widget#7', ?, 'review-' || ?, ?, '{"review_event":"COMMENT"}'
+				  FROM conversations WHERE id = ?
+			`, id, state, id, entityID, conversationID); err != nil {
+				t.Fatalf("seed review: %v", err)
+			}
+			return id
+		},
+		DeliverableState: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var state string
+			if err := conn.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, deliverableID).Scan(&state); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return state
+		},
 	}
 }

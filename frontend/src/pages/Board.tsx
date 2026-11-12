@@ -3,13 +3,11 @@ import type { Task, Conversation, WSEvent, TeamMember, TeamBot } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
-  isActiveConversation,
   isActiveStatus,
   isLiveRun,
   isPermissionTerminalStatus,
   isTerminalStatus,
 } from '../lib/conversationStatus'
-import { approvalCounts, hasUnresolvedDeliverables } from '../lib/approval'
 import {
   summarizePermissionInput,
   type PendingPermission,
@@ -37,7 +35,6 @@ import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
 import PromptPicker from '../components/PromptPicker'
-import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import RequeueConfirm from '../components/board/RequeueConfirm'
 import { TaskCard } from '../components/board/TaskCard'
@@ -189,9 +186,8 @@ function loadCollapsed(userID: string): CollapseMap {
   }
 }
 
-// The two gestures that end a task, each gated behind the resolve-all
-// confirmation when the task still carries unresolved deliverables: ending a
-// task is what tears them down.
+// The two gestures that end a task. Neither touches the task's deliverables:
+// a draft PR stays open and a staged review stays pending for a person.
 type EndAction = 'complete' | 'dismiss'
 
 export default function Board() {
@@ -373,20 +369,6 @@ export default function Board() {
   // Tracks bot-claimed tasks where the delegate conversation failed
   // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
-
-  // Resolve-all confirmation: the two gestures that END a task —
-  // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
-  // force-resolve every unresolved deliverable and cancel a live conversation.
-  // When the target task has unresolved deliverables we stash the intended
-  // action here and gate the request behind the confirmation modal.
-  const [confirmResolve, setConfirmResolve] = useState<{
-    taskId: string
-    action: EndAction
-    prCount: number
-    reviewCount: number
-    isLive: boolean
-  } | null>(null)
-  const [confirmBusy, setConfirmBusy] = useState(false)
 
   // The task awaiting the return-to-queue confirmation, when its run is in
   // flight. Null the rest of the time: a requeue with nothing running fires
@@ -975,8 +957,8 @@ export default function Board() {
   const patchStatus = useCallback(
     async (taskId: string, status: 'done' | 'dismissed' | 'in_progress', failure: string) => {
       try {
-        // A failure (e.g. a teardown that partially failed) must surface — a
-        // silent fetchTasks would repaint as if the move succeeded.
+        // A failure must surface — a silent fetchTasks would repaint as if the
+        // move succeeded.
         await apiFetch(`/api/tasks/${taskId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -1026,32 +1008,6 @@ export default function Board() {
       void fireRequeue(taskId)
     },
     [conversations, fireRequeue],
-  )
-
-  // requestResolveAll gates a task-ending gesture behind the confirmation
-  // modal when the task's conversation still has unresolved deliverables.
-  // Returns true when it deferred to the modal (the caller must NOT fire its
-  // own request); false when there's nothing to resolve and the caller should
-  // proceed directly.
-  //
-  // Only the gestures that END a task reach it — ending a task is what
-  // resolves what it holds. A queued task can be carrying a draft PR back in
-  // the queue, so dismissing it is gated the same as completing.
-  const requestResolveAll = useCallback(
-    (taskId: string, action: EndAction): boolean => {
-      const conversation = conversations[taskId]
-      if (!conversation || !hasUnresolvedDeliverables(conversation)) return false
-      const c = approvalCounts(conversation)
-      setConfirmResolve({
-        taskId,
-        action,
-        prCount: c.pr,
-        reviewCount: c.review,
-        isLive: isActiveConversation(conversation),
-      })
-      return true
-    },
-    [conversations],
   )
 
   // The lane viewport (the scroller) and the strip inside it, which is
@@ -1218,11 +1174,8 @@ export default function Board() {
       if (sourceCol === targetCol) return
 
       if (sourceCol === 'queued') {
-        // Queued → Done: dismiss. Ending the task is what tears its
-        // deliverables down, and a task can be carrying a draft PR back in the
-        // queue, so the gate that guards completing guards this too.
+        // Queued → Done: dismiss.
         if (targetCol === 'done') {
-          if (requestResolveAll(taskId, 'dismiss')) return
           await fireEnd(taskId, 'dismiss')
           return
         }
@@ -1245,10 +1198,8 @@ export default function Board() {
       }
 
       // Any → Done: complete (preserves the card in Done; distinct from queued →
-      // done which dismisses). Ending the task IS what resolves its deliverables,
-      // so this gesture keeps the confirmation.
+      // done which dismisses).
       if (targetCol === 'done') {
-        if (requestResolveAll(taskId, 'complete')) return
         await fireEnd(taskId, 'complete')
         return
       }
@@ -1544,26 +1495,6 @@ export default function Board() {
           pendingDelegateTask.current = null
           window.location.href = '/prompts'
         }}
-      />
-
-      <ResolveAllConfirm
-        open={confirmResolve !== null}
-        prCount={confirmResolve?.prCount ?? 0}
-        reviewCount={confirmResolve?.reviewCount ?? 0}
-        isLive={confirmResolve?.isLive ?? false}
-        actionLabel={confirmResolve?.action === 'dismiss' ? 'Dismiss' : 'Mark done'}
-        busy={confirmBusy}
-        onConfirm={async () => {
-          if (!confirmResolve) return
-          setConfirmBusy(true)
-          try {
-            await fireEnd(confirmResolve.taskId, confirmResolve.action)
-            setConfirmResolve(null)
-          } finally {
-            setConfirmBusy(false)
-          }
-        }}
-        onCancel={() => setConfirmResolve(null)}
       />
 
       <RequeueConfirm

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1123,6 +1124,9 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return errors.New("close entity: row changed under the transaction")
 		}
 		res.Closed = true
+		if res.DismissedReviews, err = dismissPendingReviewsOf(ctx, q, entityID); err != nil {
+			return fmt.Errorf("dismiss pending reviews: %w", err)
+		}
 
 		taskIDs, err := openTaskIDsByEntityAndTypes(ctx, q, entityID, closeTypes)
 		if err != nil {
@@ -1153,6 +1157,37 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 		return db.TerminalCloseResult{}, nil
 	}
 	return res, nil
+}
+
+// dismissPendingReviewsOf dismisses every pending review deliverable about
+// entity entityID and returns them, ordered by id. A review's entity is the
+// pull request it reviews. No audit row: a review is staged TF-side, so the
+// dismissal writes nothing on GitHub.
+func dismissPendingReviewsOf(ctx context.Context, q queryer, entityID string) ([]db.DismissedReview, error) {
+	rows, err := q.QueryContext(ctx, `
+		UPDATE deliverables
+		   SET state = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE entity_id = ? AND kind = ? AND state = ?
+		RETURNING id, COALESCE(conversation_id, '')
+	`, domain.DeliverableStateReviewDismissed, entityID,
+		domain.DeliverableKindReview, domain.DeliverableStateReviewPending)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.DismissedReview
+	for rows.Next() {
+		var d db.DismissedReview
+		if err := rows.Scan(&d.DeliverableID, &d.ConversationID); err != nil {
+			return nil, fmt.Errorf("scan dismissed review: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DeliverableID < out[j].DeliverableID })
+	return out, nil
 }
 
 // openTaskIDsByEntityAndTypes lists the entity's non-terminal tasks of the

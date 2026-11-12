@@ -268,22 +268,6 @@ func FirstReadyReview(arts []Deliverable) *Deliverable {
 	return nil
 }
 
-// AllPendingReviewDeliverables returns every pending review deliverable in arts (the
-// plural of FirstPendingReviewDeliverable), in slice order — Kind==review,
-// State==pending, regardless of the ready sentinel. The task-level resolve-all
-// teardown uses this to dismiss every abandoned review (finalized or not), the
-// same "abandon whether or not it reached the ready sentinel" rule the
-// single-deliverable teardown path applied via FirstPendingReviewDeliverable.
-func AllPendingReviewDeliverables(arts []Deliverable) []Deliverable {
-	var out []Deliverable
-	for i := range arts {
-		if arts[i].Kind == DeliverableKindReview && arts[i].State == DeliverableStateReviewPending {
-			out = append(out, arts[i])
-		}
-	}
-	return out
-}
-
 // AllReadyReviews returns every finalized pending review deliverable in arts (the
 // plural of FirstReadyReview), in slice order — the ones a human can actually
 // approve (the ready sentinel is set). The projection (pending_deliverable_ids)

@@ -173,9 +173,9 @@ func entityPollSeq(t *testing.T, database *sql.DB, entityID string) int64 {
 // headline: an entity active with a terminal snapshot at test start. One poll
 // cycle enqueues exactly one obligation, judged at the version the cycle
 // advanced to; routing it closes the tasks — audit reason reconciled, audit
-// row naming the obligation, cancel intent stamped, stop and teardown
-// reached — and the entity; a second cycle enqueues nothing, because the
-// entity is closed and out of the refresh set.
+// row naming the obligation, cancel intent stamped, stop reached — and the
+// entity; a second cycle enqueues nothing, because the entity is closed and
+// out of the refresh set.
 func TestCloseOwed_PreExistingInconsistency_RepairedWithinOneCycle(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
@@ -216,9 +216,6 @@ func TestCloseOwed_PreExistingInconsistency_RepairedWithinOneCycle(t *testing.T)
 	}
 	if got := sp.stoppedIDs(); len(got) != 1 {
 		t.Errorf("conversations stopped = %v, want the one running on the task", got)
-	}
-	if got := sp.tornDownCopy(); len(got) != 1 || got[0] != taskID {
-		t.Errorf("teardown calls = %v, want exactly [%s]", got, taskID)
 	}
 	if rows := queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed); rows[0].Status != domain.QueuedEventStatusDone {
 		t.Errorf("obligation row status = %q, want done", rows[0].Status)

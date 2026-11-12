@@ -45,7 +45,8 @@ func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, caus
 	return nil
 }
 
-func (s *fenceStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
+func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []dbpkg.DismissedReview) {
+}
 
 func (s *fenceStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
 	return true

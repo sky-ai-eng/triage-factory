@@ -634,9 +634,9 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 //
 // Every gesture that moves a task off whoever was working it comes through
 // here — dismiss, complete, claim, re-delegate, return to queue — so there is
-// one stop pass rather than one per verb. What does NOT come through here is
-// the deliverable teardown: a task's draft PRs and staged reviews survive every
-// one of those gestures except the last, and only patchClose retires them.
+// one stop pass rather than one per verb. None of them touches the task's
+// deliverables: its draft PRs and staged reviews survive every one of those
+// gestures.
 //
 // cause is the lifecycle event the caller is acting on. It reaches each stopped
 // transcript verbatim, so it is the whole explanation a human reading that
