@@ -49,10 +49,6 @@ func (s *Spawner) Draining() bool {
 // SetDraining latches (or clears) the drain flag. The drain verb ticket
 // owns the caller; exposed here so the field the healthz reports has a
 // single writer.
-//
-// TODO(TFAC-1372): latching the drain does not let go of the engagements
-// waiting warm here, so each keeps its slot until its window ends. The drain
-// should call warmWaits.LetGoAll.
 func (s *Spawner) SetDraining(v bool) {
 	s.draining.Store(v)
 }

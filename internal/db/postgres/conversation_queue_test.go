@@ -1169,6 +1169,32 @@ func TestWarmClaim_Postgres(t *testing.T) {
 	dbtest.RunWarmClaimConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
 }
 
+// TestClaimableProbe_Postgres runs the shared claimability-probe conformance
+// on the claim-lease fixture.
+func TestClaimableProbe_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunClaimableProbeConformance(t, func(t *testing.T) dbtest.ClaimableProbeFixture {
+		f := pgClaimLeaseFixture(t, h)
+		return dbtest.ClaimableProbeFixture{
+			ClaimLeaseFixture: f,
+			CapAndPlacement:   true,
+			SetQueued: func(t *testing.T, conversationID, preferredExecutorID string, ago time.Duration) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE conversations SET preferred_executor_id = NULLIF($1, ''), queued_at = now() - make_interval(secs => $2) WHERE id = $3`,
+					preferredExecutorID, ago.Seconds(), conversationID)
+			},
+			SetMaxConcurrentRuns: func(t *testing.T, limit int) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO org_settings (org_id, max_concurrent_runs) VALUES ($1, $2)
+					ON CONFLICT (org_id) DO UPDATE SET max_concurrent_runs = EXCLUDED.max_concurrent_runs`,
+					f.OrgID, limit)
+			},
+		}
+	})
+}
+
 func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixture {
 	t.Helper()
 	h.Reset(t)

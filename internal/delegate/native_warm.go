@@ -286,8 +286,17 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
 
+	// A person's message is waiting. If the registry let the engagement go
+	// while it looked, the let-go stands: the message's conversation is
+	// queued, so the claim after this one drives it.
+	resume := func() warmEnd {
+		if wait.TakeForResume() {
+			return warmResumed
+		}
+		return warmLetGo
+	}
 	if s.readWarmWait(ctx, n).PersonMessageWaiting {
-		return warmResumed
+		return resume()
 	}
 	window := time.NewTimer(time.Until(deadline))
 	defer window.Stop()
@@ -297,7 +306,7 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 		select {
 		case <-wait.Wake():
 			if s.readWarmWait(ctx, n).PersonMessageWaiting {
-				return warmResumed
+				return resume()
 			}
 		case <-backstop.C:
 			st := s.readWarmWait(ctx, n)
@@ -305,14 +314,14 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 				return warmLetGo
 			}
 			if st.PersonMessageWaiting {
-				return warmResumed
+				return resume()
 			}
 		case <-window.C:
 			// One last look. A message whose ring is still on its way, or
 			// that landed as the timer fired, is read rather than left to a
 			// cold claim.
 			if s.readWarmWait(ctx, n).PersonMessageWaiting {
-				return warmResumed
+				return resume()
 			}
 			return warmLetGo
 		case <-wait.LetGo():

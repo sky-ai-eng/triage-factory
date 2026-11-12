@@ -603,7 +603,8 @@ claim → execute); three additions to the claim:
   signal.
 - **Graceful drain** (deploys, scale-down): set `draining=true` → the
   executor stops claiming; live runs finish or park at their turn end
-  (TFAC-305) — the fleet's natural quiesce; when `active_runs=0` the
+  (TFAC-305), and every claim kept warm after a turn is let go at once —
+  the fleet's natural quiesce; when `active_runs=0` the
   operator retires it. Dashboard badge + one CLI/API verb.
 
 ### 4.4 Executor DB access (least privilege)
@@ -1091,6 +1092,15 @@ should be the cheapest self-healing thing available:
   `started_at` stays the scheduler's fairness order and the UI's
   "started" time. The liveness spills (dead/draining/gated) never
   consult the anchor.
+- **A warm claim gives way to queued work.** A native engagement kept
+  after a person's turn holds a slot, memory, and its org's cap place
+  only while no claimable work waits behind them. A full or gated
+  executor lets go of its oldest warm claim, one per scan, when work it
+  could claim is queued; work outside its own tier 1 counts only once it
+  has been queued for a scan interval, so an executor with a free slot
+  takes it first. When an org is at its cap with work waiting behind it,
+  each executor holding a warm claim in that org lets go of the org's
+  oldest one there.
 - At N=1 the hash always returns self; tier 1 always hits. No-op.
 
 ### 6.3 Curator homing — removed (TFAC-894)
