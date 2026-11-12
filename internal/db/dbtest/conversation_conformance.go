@@ -182,6 +182,11 @@ type ConversationSeeder struct {
 	// exclude.
 	SetBlueprintRunStatus func(t *testing.T, blueprintRunID, status string)
 
+	// SetBlueprintRunCurrentStep raw-updates a blueprint_run's
+	// current_step_index, so a subtest can stage a conversation on a step its
+	// run has moved past without minting the steps in between.
+	SetBlueprintRunCurrentStep func(t *testing.T, blueprintRunID string, stepIndex int)
+
 	// StampAgentClaim sets the task's claimed_by_agent_id directly.
 	// Used to set up task-claim preconditions for claim-flip
 	// assertions.
@@ -3862,47 +3867,50 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		// open WITH a worktree path → included.
-		openConversation := seedConversationForTest(t, orgID, seed, "open")
-		if _, err := store.SetWorktreePath(ctx, orgID, openConversation, "/tmp/triagefactory-runs/open"); err != nil {
-			t.Fatalf("set worktree (open): %v", err)
+		// stage seeds a conversation on step 0 of a blueprint run of its own,
+		// gives it a worktree when path is not empty, and then sets the run's
+		// status (left running when runStatus is empty) and its pointer.
+		stage := func(name, status, path, runStatus string, currentStep int) {
+			t.Helper()
+			ent := seed.Entity(t, "resumable-"+name)
+			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, seed.Event(t, ent, domain.EventGitHubPROpened))
+			brID := seed.BlueprintRun(t, taskID)
+			step := 0
+			id := seed.Conversation(t, concludedSeed(domain.Conversation{
+				TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
+				BlueprintRunID: brID, BlueprintStepIndex: &step,
+			}))
+			if path != "" {
+				if _, err := store.SetWorktreePath(ctx, orgID, id, path); err != nil {
+					t.Fatalf("set worktree (%s): %v", name, err)
+				}
+			}
+			if runStatus != "" {
+				seed.SetBlueprintRunStatus(t, brID, runStatus)
+			}
+			if currentStep != 0 {
+				seed.SetBlueprintRunCurrentStep(t, brID, currentStep)
+			}
 		}
-		// completed WITH a worktree → excluded by the status filter. A completed
-		// conversation that left an unresolved deliverable no longer parks, so its
-		// worktree is not preserved as a warm resume cache.
-		completed := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		if _, err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
-			t.Fatalf("set worktree (completed): %v", err)
-		}
-		// open WITHOUT a worktree → excluded by the COALESCE filter.
-		_ = seedConversationForTest(t, orgID, seed, "open")
-		// running WITH a worktree → excluded by the status filter.
-		running := seedConversationForTest(t, orgID, seed, "running")
-		if _, err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
-			t.Fatalf("set worktree (running): %v", err)
-		}
-		// mid-flight (stored status NULL) WITH a worktree → included: an
-		// engagement was driving it when the process stopped, and the next
-		// claim continues it in this tree.
-		midFlight := seedConversationForTest(t, orgID, seed, "")
-		if _, err := store.SetWorktreePath(ctx, orgID, midFlight, "/tmp/triagefactory-runs/mid-flight"); err != nil {
-			t.Fatalf("set worktree (mid-flight): %v", err)
-		}
-		// open WITH a worktree but under an already-terminal blueprint_run →
-		// excluded: a parked conversation under a terminal parent is not
-		// resumable, so its worktree must not be preserved (else the boot
-		// reconcile orphans the row and leaves its checked-out branch on disk).
-		orphanTaskID := seed.Task(t, seed.Entity(t, "parked-orphan"), domain.EventGitHubPROpened,
-			seed.Event(t, seed.Entity(t, "parked-orphan-ev"), domain.EventGitHubPROpened))
-		orphanBR := seed.BlueprintRun(t, orphanTaskID)
-		orphan := seed.Conversation(t, domain.Conversation{
-			TaskID: orphanTaskID, PromptID: conversationTestPrompt(t), Status: "open", Model: "m",
-			BlueprintRunID: orphanBR,
-		})
-		if _, err := store.SetWorktreePath(ctx, orgID, orphan, "/tmp/triagefactory-runs/orphan"); err != nil {
-			t.Fatalf("set worktree (orphan): %v", err)
-		}
-		seed.SetBlueprintRunStatus(t, orphanBR, "cancelled")
+
+		// Kept: what the next claim or message continues, in its tree.
+		stage("open", "open", "/tmp/triagefactory-runs/open", "", 0)
+		stage("mid-flight", "", "/tmp/triagefactory-runs/mid-flight", "", 0)
+		// A follow-up on a finished blueprint's final step, mid-flight or
+		// parked: the claim gate drives the run's current step whatever its
+		// terminal, so the tree it works in is kept like any other.
+		stage("followup-completed", "", "/tmp/triagefactory-runs/followup-completed", "completed", 0)
+		stage("followup-aborted", "open", "/tmp/triagefactory-runs/followup-aborted", "aborted", 0)
+
+		// Swept: a verdict leaves nothing to continue.
+		stage("completed", SeedConcluded, "/tmp/triagefactory-runs/completed", "", 0)
+		stage("running", "running", "/tmp/triagefactory-runs/running", "", 0)
+		// No worktree recorded.
+		stage("no-worktree", "open", "", "", 0)
+		// Steps the claim gate refuses for good: under a cancelled run, and
+		// behind the pointer of a run that moved on.
+		stage("cancelled", "open", "/tmp/triagefactory-runs/cancelled", "cancelled", 0)
+		stage("moved-past", "", "/tmp/triagefactory-runs/moved-past", "completed", 1)
 
 		paths, err := store.ListResumableWorktreePathsSystem(ctx, orgID)
 		if err != nil {
@@ -3912,23 +3920,18 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		for _, p := range paths {
 			got[p] = true
 		}
-		if !got["/tmp/triagefactory-runs/open"] {
-			t.Error("open worktree missing from ListResumableWorktreePathsSystem")
+		for _, want := range []string{"open", "mid-flight", "followup-completed", "followup-aborted"} {
+			if !got["/tmp/triagefactory-runs/"+want] {
+				t.Errorf("%s worktree missing from ListResumableWorktreePathsSystem", want)
+			}
 		}
-		if !got["/tmp/triagefactory-runs/mid-flight"] {
-			t.Error("mid-flight worktree missing from ListResumableWorktreePathsSystem")
+		for _, swept := range []string{"completed", "running", "cancelled", "moved-past"} {
+			if got["/tmp/triagefactory-runs/"+swept] {
+				t.Errorf("%s worktree leaked into ListResumableWorktreePathsSystem", swept)
+			}
 		}
-		if got["/tmp/triagefactory-runs/completed"] {
-			t.Error("concluded worktree leaked — status filter failed (a verdict leaves nothing to continue)")
-		}
-		if got["/tmp/triagefactory-runs/running"] {
-			t.Error("running worktree leaked — status filter failed")
-		}
-		if got["/tmp/triagefactory-runs/orphan"] {
-			t.Error("parked worktree under a terminal blueprint_run leaked — running-parent filter failed")
-		}
-		if len(got) != 2 {
-			t.Errorf("got %d resumable paths, want 2 (%v)", len(got), paths)
+		if len(got) != 4 {
+			t.Errorf("got %d resumable paths, want 4 (%v)", len(got), paths)
 		}
 	})
 

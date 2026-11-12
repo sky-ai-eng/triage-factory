@@ -2164,12 +2164,13 @@ func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context,
 
 // ListResumableWorktreePathsSystem returns the worktree dirs the startup sweep
 // must keep warm — conversations parked `open` or left mid-flight (stored
-// status NULL) whose owning blueprint_run is still 'running'. One under an
-// already-terminal blueprint_run is NOT resumable (every resume path gates on
-// cr.Status == running), so its worktree must NOT be preserved: preserving it
-// would leave a checked-out branch on disk for a blueprint that has stopped,
-// reviving the "refusing to fetch into a branch checked out in a worktree"
-// loop. Admin pool — the startup sweep has no JWT-claims context.
+// status NULL) on a step the claim gate still drives (blueprintStepDrivableSQL):
+// the current step of a run nobody called off, whatever the run's status, so a
+// follow-up on a finished blueprint's final step keeps its tree. One the gate
+// refuses never runs again, so its worktree must NOT be preserved: preserving
+// it would leave a checked-out branch on disk that nothing will use, reviving
+// the "refusing to fetch into a branch checked out in a worktree" loop. Admin
+// pool — the startup sweep has no JWT-claims context.
 func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.worktree_path FROM conversations r
@@ -2177,7 +2178,7 @@ func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context
 		WHERE r.org_id = $1
 		  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL))
 		  AND COALESCE(r.worktree_path, '') != ''
-		  AND (br.id IS NULL OR br.status = 'running')
+		  AND `+blueprintStepDrivableSQL+`
 	`, orgID)
 	if err != nil {
 		return nil, err
