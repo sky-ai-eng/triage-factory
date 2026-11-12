@@ -223,6 +223,12 @@ func (a *App) startBrain(term int64) {
 	// whichever process parked it, and resolves here once the run leaves the
 	// park by any door.
 	go delegate.RunPausedConversationSync(brainCtx, a.stores.Conversations, delegate.DefaultPausedConversationSyncInterval)
+	// Orphan park: mid-flight conversations the claim gate will never drive
+	// again, under a run that was called off or on a step their run moved
+	// past. One sweeper across every org; the dispatchers, which start on
+	// every executor, leave them alone, since what a process starting can
+	// see says nothing about another executor's engagements.
+	go delegate.RunOrphanedConversationSweep(brainCtx, a.stores.ConversationQueue, delegate.DefaultOrphanedConversationSweepInterval)
 	// Rate-limit reading expiry: deletes every org's readings past their
 	// reset. The route already leaves them out; one sweeper is enough, and
 	// the readings themselves are written by every serving process's flusher

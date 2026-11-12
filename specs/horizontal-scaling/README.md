@@ -536,12 +536,12 @@ claim → execute); three additions to the claim:
    random uuids (or NULL) that no persistent id ever matches, so a
    one-time SQLite migration replays the old global reset once —
    without it, a run mid-flight at upgrade shutdown stayed `running`
-   forever and a mid-processing event was lost permanently. One
-   sanctioned exception stays global: `ReconcileOrphanedRuns` (park
-   children under terminal blueprints; fail `running` blueprints that
-   hold no child at all past a grace) is a cross-instance heal whose
-   arms are each guarded by state no live owner can be in — a terminal
-   parent, or a mint older than any mint takes. Fleet-wide orphan recovery
+   forever and a mid-processing event was lost permanently. The one
+   cross-instance heal is not part of a boot at all: the brain parks
+   conversations the claim gate refuses for good and no live claim
+   holds (`ParkOrphanedConversationsSystem`), in one process, on a
+   sweep. A follow-up on a finished blueprint's final step is
+   drivable, so it is never one of them. Fleet-wide orphan recovery
    moves to the **leader reaper**: runs whose executor's heartbeat is
    stale past a threshold are requeued (`attempts`-capped, then failed
    with `failure_kind='executor_lost'`).

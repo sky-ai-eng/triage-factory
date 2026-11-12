@@ -2167,10 +2167,9 @@ func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context,
 // status NULL) whose owning blueprint_run is still 'running'. One under an
 // already-terminal blueprint_run is NOT resumable (every resume path gates on
 // cr.Status == running), so its worktree must NOT be preserved: preserving it
-// would leave a checked-out branch on disk that the boot reconcile then
-// orphans by cancelling the row, reviving the "refusing to fetch into a
-// branch checked out in a worktree" loop. Admin pool — the startup sweep has
-// no JWT-claims context.
+// would leave a checked-out branch on disk for a blueprint that has stopped,
+// reviving the "refusing to fetch into a branch checked out in a worktree"
+// loop. Admin pool — the startup sweep has no JWT-claims context.
 func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.worktree_path FROM conversations r

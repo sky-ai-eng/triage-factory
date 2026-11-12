@@ -26,8 +26,8 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 	return nil
 }
 
-// OrphanedStepCheck is what ReconcileOrphanedConversations' checker arms found.
-// The first is 'running' blueprint_runs holding no conversation at the step their
+// OrphanedStepCheck is what CheckOrphanedStepsSystem found. The first finding
+// is 'running' blueprint_runs holding no conversation at the step their
 // current_step_index names. The store counts and samples; the caller logs,
 // because the store layer holds no logger and the finding is the caller's to
 // report.
@@ -348,6 +348,45 @@ type SettledStop struct {
 // OrphanedStepSampleLimit caps OrphanedStepCheck.Sample and
 // OrphanedStepCheck.ClaimDesyncSample.
 const OrphanedStepSampleLimit = 20
+
+// OrphanedConversation is one conversation ParkOrphanedConversationsSystem
+// parked, with the state of its blueprint run that made it an orphan, so the
+// caller's report says which kind it was.
+type OrphanedConversation struct {
+	OrgID, ConversationID, BlueprintRunID string
+	// StepIndex is the step the conversation was minted for; nil when it
+	// recorded none.
+	StepIndex           *int
+	RunStatus           domain.BlueprintRunStatus
+	RunCancelRequested  bool
+	RunCurrentStepIndex int
+}
+
+// CalledOff reports whether the conversation's run was called off: cancel
+// requested, or cancelled. Otherwise the run moved past the conversation's
+// step.
+func (o OrphanedConversation) CalledOff() bool {
+	return o.RunCancelRequested || o.RunStatus == domain.BlueprintRunStatusCancelled
+}
+
+// ParkReason is the reason ParkOrphanedConversationsSystem writes on the
+// conversation: the cancel when the run was called off, and being overtaken
+// when it moved past the step.
+func (o OrphanedConversation) ParkReason() domain.ParkReason {
+	if o.CalledOff() {
+		return domain.ParkReasonBlueprintCancelled
+	}
+	return domain.ParkReasonBlueprintTerminal
+}
+
+// ParkSummary is the result summary ParkOrphanedConversationsSystem writes on
+// a conversation that has none.
+func (o OrphanedConversation) ParkSummary() string {
+	if o.CalledOff() {
+		return "Stopped: its blueprint run was called off"
+	}
+	return "Stopped: its blueprint run moved past this step"
+}
 
 // ClaimPlacement configures the placement-aware, two-tier claim (TFAC-587,
 // spec §6.2). The ZERO VALUE (Enabled=false) selects the original
@@ -868,34 +907,58 @@ type ConversationQueueStore interface {
 	// same posture as ClaimNextConversation (SQLite is N=1 — at most the one local org).
 	FleetQueueShares(ctx context.Context) ([]OrgQueueShare, error)
 
-	// ReconcileOrphanedConversations is the boot self-heal beside
-	// ResetProcessingConversations: every child conversation left non-terminal under a
-	// blueprint_run that is already terminal (completed/aborted/failed/
-	// cancelled) is flipped to 'cancelled' with a completed_at stamp. Such a
-	// child is unreachable by the dispatcher — the claim only takes rows
-	// under a running parent, and the reset releases claims without writing
-	// a status — so it would otherwise sit mid-flight forever, keeping the dispatcher on phantom
-	// work and pinning its feature branch in a worktree (any sibling fetch
-	// then requeues forever). The atomic cancel in
-	// BlueprintStore.MarkRunStatus prevents the desync going forward; this
-	// heals rows already broken at boot.
+	// ParkOrphanedConversationsSystem parks every orphan: a mid-flight
+	// conversation (no stored status) that the claim gate refuses for good
+	// and that no live claim holds. The claim gate refuses a blueprint step
+	// for good in two cases, and the predicate is that gate's blueprint
+	// clause, negated, so the two cannot disagree:
 	//
-	// And it runs two CHECKERS, which repair nothing. The first counts
-	// terminal conversations still holding an unreleased claim — a shape no
-	// writer produces, since every status write releases its claim on the
-	// same transaction and a request path writes no status. The second: a 'running'
-	// blueprint_run holding no conversation at the step its current_step_index
-	// names is counted and logged at error with a sample of ids. That shape is
-	// unreachable now that a firing commits its run and its first step in one
-	// transaction and an advance commits its pointer and the step it names in
-	// another, so observing one means an invariant broke — and a repair would
-	// hide it. It is a check rather than nothing at all because the shape is
-	// invisible to every other arm: they drive or heal the step the pointer
-	// names, and this one has no such step to reach.
+	//   - its run was called off: cancel requested, or cancelled;
+	//   - its step is not the run's current step, which only ever moves
+	//     forward, so the run has moved past it.
 	//
-	// Cross-org system sweep; returns the total count of rows healed — the
-	// checker's count is not in it, because counting is not healing.
-	ReconcileOrphanedConversations(ctx context.Context) (healed int, check OrphanedStepCheck, err error)
+	// The current step of a completed, aborted, or failed run is not an
+	// orphan: a follow-up on a finished blueprint's final step re-queues it,
+	// and the claim gate drives it, whether a claim holds it yet or not.
+	//
+	// Each orphan parks `open`, with parked_at stamped, park_reason
+	// blueprint_cancelled when its run was called off and blueprint_terminal
+	// otherwise, and result_summary filled in when empty; nothing else
+	// changes, its claims included, since no live claim holds it. Parked
+	// rather than failed, because nothing about it failed: the park says
+	// "stopped without concluding". It is not resumable, since the resume
+	// refuses a follow-up on either kind.
+	//
+	// Two shapes the gate refuses are left to the dispatcher's settlement
+	// (SettleUnclaimedStopsSystem), which settles every unclaimed row of
+	// both: a conversation with a stop requested, which parks with the
+	// reason the request names, and one under a run that is still running
+	// with a cancel requested, which the settlement cancels along with the
+	// run. Parking either here would race that pass for the same row.
+	//
+	// Current writers settle a run's conversations with the run (the atomic
+	// park in BlueprintStore.MarkRunStatus, the settlement), so every row
+	// returned means one of them broke, and the caller reports each. Rows
+	// another transaction holds are skipped and taken on a later pass.
+	// Cross-org system sweep on the admin pool; the brain runs it, in one
+	// process.
+	ParkOrphanedConversationsSystem(ctx context.Context) ([]OrphanedConversation, error)
+
+	// CheckOrphanedStepsSystem runs two checks, which repair nothing. The
+	// first counts terminal conversations still holding an unreleased claim —
+	// a shape no writer produces, since every status write releases its claim
+	// on the same transaction and a request path writes no status. The
+	// second counts 'running' blueprint_runs holding no conversation at the
+	// step their current_step_index names. That shape is unreachable now that
+	// a firing commits its run and its first step in one transaction and an
+	// advance commits its pointer and the step it names in another, so
+	// observing one means an invariant broke, and a repair would hide it. It
+	// is a check rather than nothing at all because the shape is invisible to
+	// every other sweep: they drive or heal the step the pointer names, and
+	// this one has no such step to reach.
+	//
+	// Cross-org system read.
+	CheckOrphanedStepsSystem(ctx context.Context) (OrphanedStepCheck, error)
 
 	// CountQueuedSystem returns how many conversations currently match the
 	// needs-driving predicate across the whole deployment — the fleet-wide

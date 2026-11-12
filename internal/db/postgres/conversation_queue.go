@@ -385,11 +385,32 @@ const eligibleForDrivingSQL = needsDrivingSQL
 // second blueprint's step as much as a sibling step of the same one. The
 // task's live conversation is its newest non-ended top-level row, and nothing
 // else on it is drivable.
-var blueprintDrivableSQL = `((r.blueprint_run_id IS NULL
-	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
-	        AND r.blueprint_step_index = br.current_step_index))
+var blueprintDrivableSQL = `(` + blueprintStepDrivableSQL + `
 	   AND (r.task_id IS NULL OR r.id = ` + taskLiveConversationSQL("r.org_id", "r.task_id") + `)
 	   AND (r.task_id IS NULL OR NOT ` + taskMemoryPendingSQL("r.org_id", "r.task_id") + `))`
+
+// blueprintStepDrivableSQL is blueprintDrivableSQL's first clause, the
+// blueprint's: a conversation with no blueprint run, or the current step of a
+// run nobody called off. Its own name because orphanedConversationSQL negates
+// it: what this refuses, it refuses for good, since neither the cancel flag
+// nor the pointer ever moves back.
+const blueprintStepDrivableSQL = `(r.blueprint_run_id IS NULL
+	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
+	        AND r.blueprint_step_index = br.current_step_index))`
+
+// orphanedConversationSQL is conversation r, joined to its run as br, being an
+// orphan (ConversationQueueStore.ParkOrphanedConversationsSystem): mid-flight,
+// on a blueprint run, and refused by blueprintStepDrivableSQL. The COALESCE
+// is for a step that recorded no index: its comparison is NULL, which the gate
+// treats as a refusal and a bare NOT would leave out here. Then the two shapes
+// the settlement owns are left to it, and a conversation a live claim holds is
+// left to its holder.
+var orphanedConversationSQL = `r.status IS NULL
+	  AND r.blueprint_run_id IS NOT NULL
+	  AND NOT COALESCE(` + blueprintStepDrivableSQL + `, false)
+	  AND r.stop_requested_at IS NULL
+	  AND NOT (br.status = 'running' AND br.cancel_requested)
+	  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)`
 
 // taskLiveConversationSQL is the conversation that owns the task's tree: the
 // newest row of liveTopLevelConversationSQL (conversation.go), which is where
@@ -1720,72 +1741,78 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 	return scanOrgQueueShares(rows)
 }
 
-func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedStepCheck, error) {
-	// Boot self-heal — see ConversationQueueStore.ReconcileOrphanedConversations and the
-	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
-	// per-user identity, the same posture as ResetProcessingConversations.
-	//
-	// `open`, not a terminal: nothing about an orphan failed, and nothing
-	// about it concluded either. Read the park as "stopped without
-	// concluding", NOT as "resumable" — its blueprint is terminal, so the
-	// claim gate refuses it and no resume path will wake it. The scope is
-	// status IS NULL alone (mid-flight is exactly what "still looks live"
-	// means); an already-parked orphan is already in the state this writes.
-	// Any active claim on a parked row releases as 'cancelled' in the same
-	// statement — the engagement was ended from outside.
-	var total int
-	var check db.OrphanedStepCheck
+func (s *conversationQueueStore) ParkOrphanedConversationsSystem(ctx context.Context) ([]db.OrphanedConversation, error) {
+	// Admin pool (BYPASSRLS): a cross-org system sweep with no per-user
+	// identity. SKIP LOCKED because a row another transaction holds is being
+	// written by something that knows more about it than this sweep does; if
+	// it is still an orphan afterwards, a later pass takes it. The lock also
+	// re-checks the predicate against the row as that writer left it.
+	var out []db.OrphanedConversation
 	err := inTx(ctx, s.conn, func(q queryer) error {
-		var parked int
-		if err := q.QueryRowContext(ctx, `
-			WITH parked AS (
+		rows, err := q.QueryContext(ctx, `
+			SELECT r.id::text, r.org_id::text, r.blueprint_run_id::text, r.blueprint_step_index,
+			       br.status, br.cancel_requested, br.current_step_index
+			FROM conversations r
+			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			WHERE `+orphanedConversationSQL+`
+			ORDER BY r.id
+			FOR UPDATE OF r SKIP LOCKED
+		`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var o db.OrphanedConversation
+			var step sql.NullInt64
+			if err := rows.Scan(&o.ConversationID, &o.OrgID, &o.BlueprintRunID, &step,
+				&o.RunStatus, &o.RunCancelRequested, &o.RunCurrentStepIndex); err != nil {
+				rows.Close()
+				return err
+			}
+			if step.Valid {
+				v := int(step.Int64)
+				o.StepIndex = &v
+			}
+			out = append(out, o)
+		}
+		err = rows.Err()
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		for _, o := range out {
+			if _, err := q.ExecContext(ctx, `
 				UPDATE conversations
 				SET status = 'open',
 				    parked_at = COALESCE(parked_at, now()),
-				    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
-				    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
-				    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
-				WHERE status IS NULL
-				  AND blueprint_run_id IN (
-				      SELECT id FROM blueprint_runs
-				      WHERE status IN ('completed','aborted','failed','cancelled')
-				  )
-				RETURNING id
-			),
-			rel AS (
-				UPDATE claims SET released_at = now(), outcome = 'cancelled'
-				FROM parked
-				WHERE claims.conversation_id = parked.id AND claims.released_at IS NULL
-				RETURNING claims.id
-			)
-			SELECT count(*) FROM parked
-		`, "Stopped: owning blueprint run reached a terminal state").Scan(&parked); err != nil {
-			return err
+				    park_reason = $2,
+				    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
+				WHERE id = $1
+			`, o.ConversationID, string(o.ParkReason()), o.ParkSummary()); err != nil {
+				return err
+			}
 		}
-
-		// Orphaned-step CHECKER — the shape the park above cannot see, one
-		// level up: a live parent with no child at the step it is pointing
-		// at. It repairs nothing, and its count stays out of the healed
-		// total, because counting is not healing.
-		var err error
-		check, err = countBlueprintRunsMissingCurrentStep(ctx, q)
-		if err != nil {
-			return err
-		}
-		// Claim-desync CHECKER: a terminal conversation still holding an
-		// unreleased claim. Counted, never repaired, for the same reason.
-		desyncs, err := countClaimDesyncs(ctx, q)
-		if err != nil {
-			return err
-		}
-		check.ClaimDesyncs, check.ClaimDesyncSample = desyncs.ClaimDesyncs, desyncs.ClaimDesyncSample
-		total = parked
 		return nil
 	})
 	if err != nil {
-		return 0, db.OrphanedStepCheck{}, err
+		return nil, wrapAdminPoolPermErr(err, "conversation_queue.ParkOrphanedConversationsSystem")
 	}
-	return total, check, nil
+	return out, nil
+}
+
+func (s *conversationQueueStore) CheckOrphanedStepsSystem(ctx context.Context) (db.OrphanedStepCheck, error) {
+	check, err := countBlueprintRunsMissingCurrentStep(ctx, s.conn)
+	if err != nil {
+		return db.OrphanedStepCheck{}, wrapAdminPoolPermErr(err, "conversation_queue.CheckOrphanedStepsSystem")
+	}
+	desyncs, err := countClaimDesyncs(ctx, s.conn)
+	if err != nil {
+		return db.OrphanedStepCheck{}, wrapAdminPoolPermErr(err, "conversation_queue.CheckOrphanedStepsSystem")
+	}
+	check.ClaimDesyncs, check.ClaimDesyncSample = desyncs.ClaimDesyncs, desyncs.ClaimDesyncSample
+	return check, nil
 }
 
 // countClaimDesyncs counts terminal conversations still holding an unreleased
