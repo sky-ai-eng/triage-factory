@@ -8,10 +8,13 @@ import "time"
 // worker claims it under the shared work-item contract (internal/db/workitem)
 // once the task holds no live conversation and no run still marked running,
 // validates it against the world now, and fires it or skips it with a reason.
+// A firing queued while its task's blueprint is running is instead settled
+// with no claim, when the blueprint's next engagement takes its event as a
+// note.
 //
 // The row is the work-item block plus this kind's own columns: the four
 // identity columns are fixed at admission, and exactly one of SkipReason and
-// FiredBlueprintRunID is set on a done row, by the terminal write.
+// FiredBlueprintRunID is set on a done row, by the write that settles it.
 type PendingFiring struct {
 	ID    int64  `json:"id"`
 	OrgID string `json:"org_id"`
@@ -64,16 +67,16 @@ const (
 // PendingFiring skip reasons, set on a done row that did not fire. Each is a
 // definitive answer: retrying could not come out differently, so the row is
 // settled rather than requeued. The worker's validation reaches all of them
-// but PendingFiringSkipInjected, which an engagement's start writes. A failure that
-// could come out differently — a store read, a spawner refusal — is a typed
-// requeue outcome on the block instead, never a skip reason.
+// but PendingFiringSkipInjected, which an engagement's start writes. A
+// failure that could come out differently — a store read, a spawner refusal —
+// is a typed requeue outcome on the block instead, never a skip reason.
 const (
 	// PendingFiringSkipTaskClosed: the task is done, dismissed or snoozed, or
 	// holds a close (TaskCloseDeferral). A task its run's finish closed is
-	// the exception, PendingFiringSkipRerouted. A snooze is on the same axis as a
-	// close — the person said "not now" — and a snooze wake mints a new event
-	// and a new firing if the trigger still matches, so the queued one is the
-	// wrong path to wake it. A held close is a close waiting only for the
+	// the exception, PendingFiringSkipRerouted. A snooze is on the same axis
+	// as a close — the person said "not now" — and a snooze wake mints a new
+	// event and a new firing if the trigger still matches, so the queued one
+	// is the wrong path to wake it. A held close is a close waiting only for the
 	// work already on the task, which a firing would add to.
 	PendingFiringSkipTaskClosed      = "task_closed"
 	PendingFiringSkipTriggerDisabled = "trigger_disabled"
@@ -99,8 +102,8 @@ const (
 	// was handed to that conversation as a note instead of starting a run.
 	PendingFiringSkipInjected = "injected"
 	// PendingFiringSkipRerouted: the task's blueprint finished and its finish
-	// closed the task before anything read the firing's event, so the event
-	// was routed again as if it had just arrived. The task and run it produced
-	// are the router's to name, not this row's.
+	// closed the task before anything read the firing's event, so the task's
+	// newest event was routed again, once for the task. The task and run that
+	// produced are the router's to name, not this row's.
 	PendingFiringSkipRerouted = "rerouted"
 )

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
@@ -39,6 +40,33 @@ func handOffFixture(t *testing.T, convID string) (s *Spawner, database *sql.DB, 
 	return s, database, br, conv, entityID, taskID, triggerID
 }
 
+func readTask(t *testing.T, s *Spawner, taskID string) *domain.Task {
+	t.Helper()
+	task, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("read task: %v", err)
+	}
+	return task
+}
+
+// requireStillQueued asserts the entity's one firing is ready and nothing was
+// staged for the conversation.
+func requireStillQueued(t *testing.T, s *Spawner, entityID, convID string) {
+	t.Helper()
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("firings = %d rows, err=%v, want 1", len(rows), err)
+	}
+	if rows[0].Status != workitem.StatusReady {
+		t.Errorf("firing = %+v, want it still ready", rows[0])
+	}
+	if notes, _ := s.stagedInjections.FlushPendingSystem(ctx, org, convID); len(notes) != 0 {
+		t.Errorf("staged notes = %+v, want none", notes)
+	}
+}
+
 // queueFiring admits a firing for a fresh event on the task, with the
 // timeline row the router records when the event bumps the task.
 func queueFiring(t *testing.T, s *Spawner, database *sql.DB, entityID, taskID, triggerID string) (eventID string) {
@@ -61,9 +89,9 @@ func TestHandOffQueuedFirings_HandsTheEventToTheStartingStep(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	eventID := queueFiring(t, s, database, entityID, taskID, triggerID)
 
-	s.handOffQueuedFirings(ctx, org, br, conv, taskID)
+	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 	// A second engagement finds nothing left to hand over.
-	s.handOffQueuedFirings(ctx, org, br, conv, taskID)
+	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 
 	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
 	if err != nil || len(rows) != 1 {
@@ -104,7 +132,7 @@ func TestHandOffQueuedFirings_NotesAnEventOnce(t *testing.T) {
 		t.Fatalf("enqueue second firing: %v", err)
 	}
 
-	s.handOffQueuedFirings(ctx, org, br, conv, taskID)
+	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 
 	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
 	if err != nil || len(rows) != 2 {
@@ -130,16 +158,54 @@ func TestHandOffQueuedFirings_LeavesFiringsOnceTheBlueprintHasFinished(t *testin
 
 	finished := *br
 	finished.Status = domain.BlueprintRunStatusCompleted
-	s.handOffQueuedFirings(ctx, org, &finished, conv, taskID)
+	s.handOffQueuedFirings(ctx, org, &finished, conv, readTask(t, s, taskID))
 
-	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("firings = %d rows, err=%v, want 1", len(rows), err)
-	}
-	if rows[0].Status != workitem.StatusReady {
-		t.Errorf("firing = %+v, want it still ready", rows[0])
-	}
-	if notes, _ := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID); len(notes) != 0 {
-		t.Errorf("staged notes = %+v, want none", notes)
-	}
+	requireStillQueued(t, s, entityID, conv.ID)
+}
+
+// A firing queued before the run started was waiting for a run of its own
+// when this one was fired ahead of it, and still is.
+func TestHandOffQueuedFirings_LeavesFiringsQueuedBeforeTheRun(t *testing.T) {
+	s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-fifo")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	queueFiring(t, s, database, entityID, taskID, triggerID)
+
+	later := *br
+	later.StartedAt = time.Now().Add(time.Hour)
+	s.handOffQueuedFirings(ctx, org, &later, conv, readTask(t, s, taskID))
+
+	requireStillQueued(t, s, entityID, conv.ID)
+}
+
+// An event queued behind a close answers to that close, which is the firing
+// worker's skip to make: the step is not told to act on it.
+func TestHandOffQueuedFirings_LeavesFiringsOnAClosedOrHeldTask(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+
+	t.Run("closed", func(t *testing.T) {
+		s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-closed")
+		queueFiring(t, s, database, entityID, taskID, triggerID)
+		if _, err := s.tasks.CloseSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
+			t.Fatalf("close task: %v", err)
+		}
+		s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
+		requireStillQueued(t, s, entityID, conv.ID)
+	})
+
+	t.Run("close held", func(t *testing.T) {
+		s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-held")
+		markEngaged(t, database, conv.ID)
+		queueFiring(t, s, database, entityID, taskID, triggerID)
+		passID, err := testSpawnerStores(database).Events.Record(ctx, org, domain.Event{EventType: domain.EventGitHubPRCICheckPassed, EntityID: &entityID, MetadataJSON: `{"check_name":"build"}`})
+		if err != nil {
+			t.Fatalf("record the pass: %v", err)
+		}
+		if out, err := s.tasks.CloseOrHoldSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, passID); err != nil || !out.Held {
+			t.Fatalf("setup: hold = (%+v, %v), want held", out, err)
+		}
+		s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
+		requireStillQueued(t, s, entityID, conv.ID)
+	})
 }

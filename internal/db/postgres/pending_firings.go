@@ -255,16 +255,16 @@ func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID s
 	return err == nil, err
 }
 
-func (s *pendingFiringsStore) EventReroutedForTask(ctx context.Context, orgID, taskID, triggeringEventID string) (bool, error) {
-	if !isValidUUID(taskID) || !isValidUUID(triggeringEventID) {
+func (s *pendingFiringsStore) TaskRerouted(ctx context.Context, orgID, taskID string) (bool, error) {
+	if !isValidUUID(taskID) {
 		return false, nil
 	}
 	var one int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT 1 FROM public.pending_firings
-		WHERE org_id = $1 AND task_id = $2 AND triggering_event_id = $3 AND status = 'done' AND skip_reason = $4
+		WHERE org_id = $1 AND task_id = $2 AND status = 'done' AND skip_reason = $3
 		LIMIT 1
-	`, orgID, taskID, triggeringEventID, domain.PendingFiringSkipRerouted).Scan(&one)
+	`, orgID, taskID, domain.PendingFiringSkipRerouted).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

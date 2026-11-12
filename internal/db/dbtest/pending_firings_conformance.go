@@ -780,31 +780,31 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("EventReroutedForTask_reads_a_rerouted_sibling", func(t *testing.T) {
+	t.Run("TaskRerouted_reads_a_rerouted_firing_on_the_task", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
 		other := seed.Tuple(t)
 		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
 
-		rerouted := func(taskID, eventID string) bool {
+		rerouted := func(taskID string) bool {
 			t.Helper()
-			got, err := s.EventReroutedForTask(ctx, orgID, taskID, eventID)
+			got, err := s.TaskRerouted(ctx, orgID, taskID)
 			if err != nil {
-				t.Fatalf("EventReroutedForTask: %v", err)
+				t.Fatalf("TaskRerouted: %v", err)
 			}
 			return got
 		}
-		if rerouted(tup.TaskID, tup.EventID) {
-			t.Errorf("EventReroutedForTask with the firing still ready = true, want false")
+		if rerouted(tup.TaskID) {
+			t.Errorf("TaskRerouted with the firing still ready = true, want false")
 		}
 		if err := s.MarkSkipped(ctx, claimOne(t, s).Receipt, domain.PendingFiringSkipRerouted); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		if !rerouted(tup.TaskID, tup.EventID) {
-			t.Errorf("EventReroutedForTask after the reroute = false, want true")
+		if !rerouted(tup.TaskID) {
+			t.Errorf("TaskRerouted after the reroute = false, want true")
 		}
-		if rerouted(tup.TaskID, other.EventID) || rerouted(other.TaskID, tup.EventID) {
-			t.Errorf("EventReroutedForTask answered for another event or another task")
+		if rerouted(other.TaskID) {
+			t.Errorf("TaskRerouted answered for another task")
 		}
 
 		// A skip for any other reason is not a reroute.
@@ -812,8 +812,8 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if err := s.MarkSkipped(ctx, claimOne(t, s).Receipt, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		if rerouted(other.TaskID, other.EventID) {
-			t.Errorf("EventReroutedForTask for a task_closed skip = true, want false")
+		if rerouted(other.TaskID) {
+			t.Errorf("TaskRerouted for a task_closed skip = true, want false")
 		}
 	})
 

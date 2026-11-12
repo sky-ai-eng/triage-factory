@@ -71,6 +71,7 @@ func runShared(t *testing.T, mk envFactory) {
 	t.Run("Renewal", func(t *testing.T) { testRenewal(t, mk) })
 	t.Run("HolderObservesCancelAtNextOperation", func(t *testing.T) { testHolderObservesCancel(t, mk) })
 	t.Run("CancelOfDeferredReadyItem", func(t *testing.T) { testCancelDeferred(t, mk) })
+	t.Run("SettleReady", func(t *testing.T) { testSettleReady(t, mk) })
 	t.Run("Uniqueness", func(t *testing.T) { testUniquenessByMode(t, mk) })
 	t.Run("Defer", func(t *testing.T) { testDefer(t, mk) })
 	t.Run("ClaimBatch", func(t *testing.T) { testClaimBatch(t, mk) })

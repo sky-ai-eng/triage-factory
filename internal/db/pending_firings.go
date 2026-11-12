@@ -22,7 +22,9 @@ var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is
 //
 // The lifecycle is the contract's: Enqueue admits a ready row, Claim leases
 // rows and hands back receipts, and RenewLease / MarkFired / MarkSkipped /
-// Requeue / DeferWhileTaskBusy are the holder's fenced writes. The per-task
+// Requeue / DeferWhileTaskBusy are the holder's fenced writes. One write
+// settles a row no one holds: HandOffToConversation, for a ready row behind
+// a running blueprint. The per-task
 // gate lives in the claim query itself, as the kind's claim filter: a firing
 // is claimable only while its task is not busy — no live top-level
 // conversation, and no blueprint run still marked running
@@ -144,11 +146,11 @@ type PendingFiringsStore interface {
 	// acts on handed alone.
 	HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection) (handed bool, err error)
 
-	// EventReroutedForTask reports whether a firing on the task for this
-	// triggering event is already settled domain.PendingFiringSkipRerouted.
-	// One event queues a firing per matched trigger, and routing it again
-	// once decides all of them.
-	EventReroutedForTask(ctx context.Context, orgID, taskID, triggeringEventID string) (bool, error)
+	// TaskRerouted reports whether a firing on the task is already settled
+	// domain.PendingFiringSkipRerouted. A closed task is rerouted once, from
+	// its newest event, and that one routing decides every trigger the
+	// task's firings were queued for.
+	TaskRerouted(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ListForEntity returns every row for an entity, oldest first, in any
 	// status. Kept as the one entity-shaped read the router and delegate

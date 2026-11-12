@@ -28,8 +28,8 @@ import (
 // delegate.ErrAlreadyFired and the row is skipped with that reason; (2) the
 // one-active-run-per-task index refuses a second live run, returning
 // delegate.ErrTaskBusy, which becomes a deferral with the attempt refunded.
-// A firing's only domain write is that insert, one transaction, so a replay
-// either finds it committed or repeats it whole.
+// A unit that fires makes one domain write, that insert, in one transaction,
+// so a replay either finds it committed or repeats it whole.
 //
 // The per-task gate is in the claim query: the kind's claim filter admits a
 // ready row only while its task holds no live top-level conversation and no
@@ -41,9 +41,11 @@ import (
 // ErrTaskBusy and defers at no cost, and FIFO within a task is the claim's
 // own ORDER BY id.
 //
-// A firing whose task its run's finish closed is not fired on that task: its
-// event goes back through the router (reroute, in processFiring), which mints
-// the task and run an event arriving now would get.
+// A firing whose task its run's finish closed is not fired on that task: the
+// task's newest event goes back through the router (reroute, in
+// processFiring), which mints the task and run an event arriving now would
+// get. That unit's domain writes are the router's, behind the router's own
+// fences, not the one fenced insert.
 //
 // Nothing here resets, sweeps or renews on a timer. A row whose holder died
 // is reclaimed by the first claim after its lease expires, and the reclaim
@@ -156,6 +158,32 @@ func closedByRunFinish(task *domain.Task) bool {
 	return task.Status == "done" && task.CloseReason == "run_completed"
 }
 
+// newestEventSince returns the event a reroute of f's task routes: the task's
+// newest event when it is newer than the one f was queued for, else f's own.
+// The comparison is what keeps a task whose timeline is missing f's event
+// from being rerouted with an older one. Nil when f's event row is gone.
+func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (*domain.Event, error) {
+	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
+	if err != nil || ev == nil {
+		return nil, err
+	}
+	latestID, err := r.tasks.LatestEventIDSystem(ctx, f.OrgID, f.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	if latestID == "" || latestID == ev.ID {
+		return ev, nil
+	}
+	latest, err := r.events.GetSystem(ctx, f.OrgID, latestID)
+	if err != nil {
+		return nil, err
+	}
+	if latest != nil && latest.CreatedAt.After(ev.CreatedAt) {
+		return latest, nil
+	}
+	return ev, nil
+}
+
 // processFiring runs one claimed firing as one unit: renew the lease,
 // validate the firing against the world now, fire it, and write its terminal
 // under the receipt's fence. Done means done — the run committed and the row
@@ -249,24 +277,30 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		})
 	}
 
-	// reroute sends the firing's event back through the router as if it had
-	// just arrived, for a task its blueprint's finish closed before anything
-	// read the event: with nothing working on that task the router mints a
-	// new one and decides its triggers afresh. The row stays leased across
-	// the routing, so a failure requeues it and a holder that dies is
-	// replayed; the replay routes the event a second time, which the
-	// router's own fences absorb as they do a replayed queue row. One event
-	// queues a firing per matched trigger, and routing it once decides all
-	// of them, so a firing whose sibling already rerouted settles without
-	// routing again.
+	// reroute sends an event back through the router, for a task its
+	// blueprint's finish closed before anything read the firing's event: with
+	// nothing working on that task the router mints a new one and decides its
+	// triggers afresh. The routing skips what the event's first routing
+	// already did (routeEvent's again).
+	//
+	// The task is rerouted once, from its newest event. A firing is keyed by
+	// (task, trigger), so a later event for the pair collapsed onto this row
+	// and the row names only the first; and one event queues a firing per
+	// matched trigger. Routing the newest event once decides every trigger
+	// for the situation as it last stood, so a firing on a task already
+	// rerouted settles without routing again.
+	//
+	// The row stays leased across the routing, so a failure requeues it and a
+	// holder that dies is replayed. The replay routes the event again, which
+	// bumps the new task and offers the event to the run it started.
 	reroute := func() {
-		rerouted, err := r.firings.EventReroutedForTask(unitCtx, f.OrgID, f.TaskID, f.TriggeringEventID)
+		rerouted, err := r.firings.TaskRerouted(unitCtx, f.OrgID, f.TaskID)
 		if err != nil {
 			requeue(workitem.OutcomeTransient, fmt.Errorf("rerouted sibling lookup: %w", err))
 			return
 		}
 		if !rerouted {
-			ev, err := r.events.GetSystem(unitCtx, f.OrgID, f.TriggeringEventID)
+			ev, err := r.newestEventSince(unitCtx, f)
 			if err != nil {
 				requeue(workitem.OutcomeTransient, fmt.Errorf("load event: %w", err))
 				return
@@ -275,10 +309,10 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 				skip(domain.PendingFiringSkipTaskClosed)
 				return
 			}
-			if err := r.routeEvent(unitCtx, *ev, nil); err != nil {
+			if err := r.routeEvent(unitCtx, *ev, nil, true); err != nil {
 				span.SetStatus(codes.Error, "reroute event")
 				routerLog.WarnContext(unitCtx, "firing-queue: rerouting the event failed, firing not consumed",
-					"firing_id", f.ID, "task_id", f.TaskID, "event_id", f.TriggeringEventID, "attempt", receipt.Attempt, "error", err)
+					"firing_id", f.ID, "task_id", f.TaskID, "event_id", ev.ID, "attempt", receipt.Attempt, "error", err)
 				outcome := workitem.OutcomeTransient
 				if errors.Is(err, context.DeadlineExceeded) {
 					outcome = workitem.OutcomeDeadline

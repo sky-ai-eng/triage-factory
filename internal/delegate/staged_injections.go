@@ -123,21 +123,39 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 // events queued on its task as pending firings, each as the note an event
 // folded into a running conversation is (domain.AdditiveEventInjection), and
 // settles the firings as injected. It applies while the conversation's
-// blueprint is still running: an event that reached the task when no
-// conversation was live to take it (between two steps, or while a crash left
-// the run between them) queued a firing the claim filter holds until the run
-// ends, and the blueprint's events go to the blueprint. Every runtime reads
-// staged notes before its agent's first model call of an engagement, so the
-// step reads them before it does anything.
+// blueprint is still running, to the firings queued since that run started:
+// an event that reached the task when no conversation was live to take it
+// (between two steps, or while a crash left the run between them) queued a
+// firing the claim filter holds until the run ends, and the blueprint's
+// events go to the blueprint. A firing queued before the run started waits
+// for a run of its own, as it did when this run was fired ahead of it. Every
+// runtime reads staged notes before its agent's first model call of an
+// engagement, so the step reads them before it does anything.
+//
+// Nothing is handed over on a task that is closed, snoozed or holding a
+// close: an event queued behind one of those is answered by it, which is the
+// firing worker's skip to make, and the engagement has just been told the
+// task is resolved (tellHeldClose).
 //
 // One event queues a firing per matched trigger; its note is staged once and
-// every firing settles, and the event the run itself fired from is not noted. The note, the settlement and the task's timeline row
-// commit together per firing (HandOffToConversation), so an engagement that
-// dies here leaves each firing either handed over or still queued. Best
-// effort: a firing this pass fails on stays queued, for a later engagement
-// under the run or for the firing worker once the run ends.
-func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *domain.BlueprintRun, conv *domain.Conversation, taskID string) {
-	if s.pendingFirings == nil || s.events == nil || br == nil || br.Status != domain.BlueprintRunStatusRunning {
+// every firing settles, and the event the run itself fired from is not
+// noted. The note, the settlement and the task's timeline row commit together
+// per firing (HandOffToConversation), so an engagement that dies here leaves
+// each firing either handed over or still queued. Best effort: a firing this
+// pass fails on stays queued, for a later engagement under the run or for the
+// firing worker once the run ends.
+func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *domain.BlueprintRun, conv *domain.Conversation, task *domain.Task) {
+	if s.pendingFirings == nil || s.events == nil || s.tasks == nil || br == nil || br.Status != domain.BlueprintRunStatusRunning {
+		return
+	}
+	if task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
+		return
+	}
+	taskID := task.ID
+	if hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID); err != nil {
+		delegateLog.Warn("read the task's held close failed; its queued firings stay queued", "task_id", taskID, "conversation", conv.ID, "error", err)
+		return
+	} else if hold != nil {
 		return
 	}
 	firings, err := s.pendingFirings.ListReadyForTask(ctx, orgID, taskID)
@@ -152,6 +170,9 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 		noted[br.TriggeringEventID] = true
 	}
 	for _, f := range firings {
+		if f.CreatedAt.Before(br.StartedAt) {
+			continue
+		}
 		var note *domain.StagedInjection
 		if !noted[f.TriggeringEventID] {
 			evt, err := s.events.GetSystem(ctx, orgID, f.TriggeringEventID)

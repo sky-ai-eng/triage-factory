@@ -3,7 +3,9 @@ package routing
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
@@ -153,5 +155,129 @@ func TestFiringWorker_EventClosedTask_IsNotRerouted(t *testing.T) {
 	requireSkipped(t, rows[0], domain.PendingFiringSkipTaskClosed)
 	if stub.calls != 1 {
 		t.Errorf("Delegate called %d times, want 1: an event-closed task's firing started a run", stub.calls)
+	}
+}
+
+// dispositionCounter counts the routing dispositions a router publishes.
+type dispositionCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *dispositionCounter) Publish(evt domain.Event) {
+	if evt.EventType != domain.EventSystemRoutingDisposition {
+		return
+	}
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *dispositionCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// A firing names the first event queued for its (task, trigger); a later one
+// collapsed onto the row. The reroute routes the task's newest event, so the
+// new task and its run are about the situation as it last stood.
+func TestFiringWorker_Reroute_RoutesTheTasksNewestEvent(t *testing.T) {
+	database := newTestDB(t)
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	entityID, taskID, queuedEventID := rerouteScenario(t, database, router)
+	st := sqlitestore.New(database)
+	tasks := testTaskStore(database)
+
+	bump := func(eventID string) {
+		t.Helper()
+		if err := tasks.RecordEventSystem(t.Context(), runmode.LocalDefaultOrgID, taskID, eventID, "bumped"); err != nil {
+			t.Fatalf("record bump: %v", err)
+		}
+	}
+	bump(queuedEventID)
+	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", queuedEventID)
+	newer := ciFailedEvent(entityID, "aidan")
+	newer.CreatedAt = time.Now().Add(time.Minute)
+	newestEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, newer)
+	if err != nil {
+		t.Fatalf("record newest event: %v", err)
+	}
+	bump(newestEventID)
+	// The second admission collapses onto the first firing's row.
+	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", newestEventID)
+
+	finishRunClosingTask(t, database, taskID)
+	drainOnce(t, router)
+
+	rows := firingsFor(t, database, entityID)
+	if len(rows) != 1 || rows[0].TriggeringEventID != queuedEventID {
+		t.Fatalf("firings = %+v, want the one row naming the first event", rows)
+	}
+	requireSkipped(t, rows[0], domain.PendingFiringSkipRerouted)
+	active, err := tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 active CI task after the reroute, got %d (err=%v)", len(active), err)
+	}
+	var runEvent string
+	if err := database.QueryRow(`SELECT triggering_event_id FROM blueprint_runs WHERE task_id = ?`, active[0].ID).Scan(&runEvent); err != nil {
+		t.Fatalf("read the new task's run: %v", err)
+	}
+	if runEvent != newestEventID {
+		t.Errorf("the new task's run fired from event %s, want the task's newest event %s", runEvent, newestEventID)
+	}
+}
+
+// The event's first routing published its disposition, which subscribers act
+// on once. Routing it again publishes none.
+func TestFiringWorker_Reroute_PublishesNoSecondDisposition(t *testing.T) {
+	database := newTestDB(t)
+	stub := &stubDelegator{db: database}
+	pub := &dispositionCounter{}
+	deps := firingRouterDeps(database, stub)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
+	entityID, taskID, eventID := rerouteScenario(t, database, router)
+
+	enqueueFiring(t, database, entityID, taskID, "trig-ci-a", eventID)
+	finishRunClosingTask(t, database, taskID)
+
+	published := pub.count()
+	if published == 0 {
+		t.Fatalf("setup: the first routing published no disposition")
+	}
+	drainOnce(t, router)
+
+	requireSkipped(t, firingsFor(t, database, entityID)[0], domain.PendingFiringSkipRerouted)
+	if stub.calls != 2 {
+		t.Fatalf("Delegate called %d times, want 2: the reroute did not start the new task's run", stub.calls)
+	}
+	if got := pub.count(); got != published {
+		t.Errorf("the reroute published %d routing dispositions, want none", got-published)
+	}
+}
+
+// A terminating event closed its entity when it first routed. Routed again it
+// mints nothing, whether the entity is still closed or has reopened.
+func TestRouteEvent_Again_ATerminatingEventRoutesNothing(t *testing.T) {
+	database := newTestDB(t)
+	stub := &stubDelegator{db: database}
+	router := firingRouter(database, stub)
+	entityID, _, _ := rerouteScenario(t, database, router)
+
+	merged := domain.Event{
+		EventType: domain.EventGitHubPRMerged, EntityID: &entityID,
+		MetadataJSON: `{"author":"aidan","repo":"owner/repo"}`, OrgID: runmode.LocalDefaultOrgID,
+	}
+	if err := router.routeEvent(t.Context(), merged, nil, true); err != nil {
+		t.Fatalf("routeEvent again: %v", err)
+	}
+	entity, err := sqlitestore.New(database).Entities.GetSystem(t.Context(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || entity == nil {
+		t.Fatalf("read entity: %v", err)
+	}
+	if entity.State != "active" {
+		t.Errorf("entity state = %q, want it left active: a second routing closed it", entity.State)
 	}
 }

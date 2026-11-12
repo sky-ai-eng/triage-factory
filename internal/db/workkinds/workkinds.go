@@ -108,8 +108,12 @@ const (
 // a firing whose run committed returns delegate.ErrAlreadyFired and the row
 // is skipped with that reason; (2) the one-active-run-per-task index refuses
 // a second live run, returning delegate.ErrTaskBusy, which the worker turns
-// into a deferral. A firing's only domain write is that insert, one
-// transaction, so a replay either finds it committed or repeats it whole.
+// into a deferral. A unit that fires makes one domain write, that insert, in
+// one transaction, so a replay either finds it committed or repeats it whole.
+// A unit that instead routes the task's newest event again, for a task its
+// run's finish closed, makes the router's writes behind the router's own
+// fences (the task dedup index and the two above), and a replay of it bumps
+// the task the first pass minted.
 //
 // UniqueWhileUnsettled keyed on (task, trigger): a parked firing holds its
 // key, so a later event for the same pair collapses onto the parked row
@@ -126,7 +130,8 @@ const (
 // is database writes, and spawner.Delegate is a pure enqueue. Fairness
 // interleaves at batch granularity, which is why the worker claims ten at a
 // time. Frozen is empty: the kind's columns are immutable after admission
-// except skip_reason and fired_run_id, which only the terminal write sets,
+// except skip_reason and fired_run_id, which only a settlement sets (the
+// holder's terminal write, or the hand-off of a ready row to a conversation),
 // so the store reads them by id after Claim returns.
 func PendingFirings(d workitem.Dialect) workitem.Kind {
 	return workitem.Kind{

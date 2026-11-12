@@ -357,6 +357,49 @@ func testCancelDeferred(t *testing.T, mk envFactory) {
 	}
 }
 
+// testSettleReady covers the one settlement with no lease: it lands on a
+// ready row, and refuses a leased row, a row carrying a cancellation request
+// and a row already settled, leaving each as it was.
+func testSettleReady(t *testing.T, mk envFactory) {
+	e := mk(t, workitem.Policy{MaxAttempts: 5, Lease: time.Minute})
+
+	id := e.admit("settle-ready")
+	e.obs.take()
+	if err := workitem.SettleReady(e.ctx, e.conn, e.kind, e.org, id); err != nil {
+		t.Fatalf("SettleReady on a ready row: %v", err)
+	}
+	e.requireStatus(id, workitem.StatusDone)
+	e.requireLeaseCleared(id)
+	e.requireObserved("completed")
+	if err := workitem.SettleReady(e.ctx, e.conn, e.kind, e.org, id); !errors.Is(err, workitem.ErrNotReady) {
+		t.Fatalf("SettleReady on a settled row = %v, want ErrNotReady", err)
+	}
+	// Settling frees the key.
+	if newID, dup := e.admitDup("settle-ready"); dup || newID == id {
+		t.Fatalf("re-admit after the settlement = (%d, deduplicated %v), want a new row", newID, dup)
+	}
+	e.claimOne("worker-a", 1) // the re-admitted row, out of the way
+
+	leased := e.admit("settle-leased")
+	r := e.claimOne("worker-a", 1)
+	if err := workitem.SettleReady(e.ctx, e.conn, e.kind, e.org, leased); !errors.Is(err, workitem.ErrNotReady) {
+		t.Fatalf("SettleReady on a leased row = %v, want ErrNotReady", err)
+	}
+	e.requireStatus(leased, workitem.StatusLeased)
+	if err := e.complete(r); err != nil {
+		t.Fatalf("the holder's completion after the refused settlement: %v", err)
+	}
+
+	cancelled := e.admit("settle-cancel-requested")
+	if err := workitem.RequestCancel(e.ctx, e.conn, e.kind, e.org, cancelled, "operator", "no longer needed"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+	if err := workitem.SettleReady(e.ctx, e.conn, e.kind, e.org, cancelled); !errors.Is(err, workitem.ErrNotReady) {
+		t.Fatalf("SettleReady on a row with a cancellation request = %v, want ErrNotReady", err)
+	}
+	e.requireStatus(cancelled, workitem.StatusReady)
+}
+
 // testUniquenessByMode runs the uniqueness subtest the kind under test
 // declares, so a production table is conformed against its own mode.
 func testUniquenessByMode(t *testing.T, mk envFactory) {
