@@ -71,7 +71,7 @@ func TestTaskClaim_Boundary(t *testing.T) {
 				execSQL(t, s.db, c.setup, append(c.args, taskID)...)
 			}
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{}))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
@@ -112,7 +112,7 @@ func TestTaskDelegate_StampsBeforeStepZeroExists(t *testing.T) {
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", withTaskVersion(t, s, taskID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -156,7 +156,7 @@ func TestConversationRead_CarriesTheBoundary(t *testing.T) {
 		t.Errorf("ended_reason present on an open conversation: %v", before["ended_reason"])
 	}
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, nil)); rec.Code != http.StatusOK {
 		t.Fatalf("requeue = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 

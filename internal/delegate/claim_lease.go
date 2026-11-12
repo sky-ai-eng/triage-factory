@@ -297,8 +297,8 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		// The engagement's activity rides the renewal, so the claim row shows
 		// how long it has been idle, what it is waiting on, and how much of
 		// its workspace a hard kill would lose, without a second write. A
-		// conversation with no tracker reports none, and one that does not
-		// checkpoint reports no checkpoint age.
+		// conversation with no tracker reports none, and one that takes no
+		// boundary checkpoints reports no checkpoint age.
 		var activity db.ClaimActivity
 		activity.Idle, activity.Op = s.activityFor(conv.ID).snapshot()
 		if age, ok := s.checkpointerFor(conv.ID).age(); ok {

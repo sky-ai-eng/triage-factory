@@ -691,7 +691,7 @@ func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) 
 	// bogus id reports ErrNoSuchTask on this path rather than a silent no-op.
 	var t domain.Task
 	return scanTaskBareRow(q.QueryRowContext(ctx, `
-		UPDATE tasks SET team_id = COALESCE(NULLIF($1, '')::uuid, team_id)
+		UPDATE tasks SET `+db.TaskSetSQL(db.TaskAssign{Col: "team_id", Expr: "COALESCE(NULLIF($1, '')::uuid, team_id)"})+`
 		WHERE org_id = $2 AND id = $3
 		RETURNING `+pgTaskBareColumns,
 		teamBind, orgID, taskID), &t)
@@ -898,10 +898,12 @@ func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task
 		), withdrawn AS (`+withdrawProducerNotesForTaskSQL+`
 		       AND EXISTS (SELECT 1 FROM prior WHERE prior.close_deferred_event_id IS NOT NULL))
 		UPDATE tasks
-		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
-		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
-		    close_deferred_event_id = NULL,
-		    close_deferred_at = NULL
+		SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END"},
+		db.TaskAssign{Col: "snooze_until", Expr: "CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END"},
+		db.TaskAssign{Col: "close_deferred_event_id", Expr: "NULL"},
+		db.TaskAssign{Col: "close_deferred_at", Expr: "NULL"},
+	)+`
 		WHERE org_id = $1 AND id = $2
 		RETURNING `+pgTaskBareColumns,
 		orgID, taskID, domain.StagedInjectionSubtypes, domain.StagedInjectionProducerTaskClosing), &t)
@@ -939,8 +941,13 @@ func closeTaskRow(ctx context.Context, q queryer, orgID, taskID, closeReason, cl
 	}
 	var t domain.Task
 	row, err := scanTaskBareRow(q.QueryRowContext(ctx, `
-		UPDATE tasks SET status = 'done', close_reason = $1, close_event_type = $2,
-		                 closed_at = NOW()
+		UPDATE tasks
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "'done'"},
+		db.TaskAssign{Col: "close_reason", Expr: "$1"},
+		db.TaskAssign{Col: "close_event_type", Expr: "$2"},
+		db.TaskAssign{Col: "closed_at", Expr: "NOW()"},
+	)+`
 		WHERE org_id = $3 AND id = $4 AND status NOT IN ('done', 'dismissed')
 		RETURNING `+pgTaskBareColumns,
 		closeReason, cet, orgID, taskID), &t)
@@ -1370,34 +1377,28 @@ func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID,
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	var t domain.Task
 	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
-		UPDATE tasks SET status = $1 WHERE org_id = $2 AND id = $3
+		UPDATE tasks SET `+db.TaskSetSQL(db.TaskAssign{Col: "status", Expr: "$1"})+` WHERE org_id = $2 AND id = $3
 		RETURNING `+pgTaskBareColumns,
 		status, orgID, taskID), &t)
 }
 
-func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error) {
+func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string, version int64) (bool, error) {
 	if newStatus != "in_progress" {
 		return false, nil
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET status = $1
+		   SET `+db.TaskSetSQL(db.TaskAssign{Col: "status", Expr: "$1"})+`
 		 WHERE org_id = $2
 		   AND id = $3
+		   AND version = $5
 		   AND claimed_by_user_id = $4
 		   AND status = 'in_progress'
-	`, newStatus, orgID, taskID, userID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	`, newStatus, orgID, taskID, userID, version)
+	return versionedWriteLanded(ctx, s.q, res, err, orgID, taskID, version)
 }
 
-func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
+func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status string, version int64) (domain.Task, error) {
 	reason, err := db.UserCloseReason(status)
 	if err != nil {
 		return domain.Task{}, err
@@ -1405,77 +1406,78 @@ func (s *taskStore) CloseByUser(ctx context.Context, orgID, taskID, status strin
 	// The status predicate is what makes a second close a no-op rather than
 	// a rewrite — see the SQLite mirror.
 	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+	row, err := scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
-		   SET status = $1,
-		       snooze_until = NULL,
-		       closed_at = NOW(),
-		       close_reason = $2,
-		       close_event_type = NULL
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "$1"},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+		db.TaskAssign{Col: "closed_at", Expr: "NOW()"},
+		db.TaskAssign{Col: "close_reason", Expr: "$2"},
+		db.TaskAssign{Col: "close_event_type", Expr: "NULL"},
+	)+`
 		 WHERE org_id = $3 AND id = $4
+		   AND version = $5
 		   AND status NOT IN ('done', 'dismissed')
 		RETURNING `+pgTaskBareColumns,
-		status, reason, orgID, taskID), &t)
+		status, reason, orgID, taskID, version), &t)
+	if errors.Is(err, db.ErrNoSuchTask) {
+		if verr := taskVersionRefusal(ctx, s.q, orgID, taskID, version); verr != nil {
+			return domain.Task{}, verr
+		}
+	}
+	return row, err
 }
 
-func (s *taskStore) SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time) (bool, error) {
+func (s *taskStore) SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time, version int64) (bool, error) {
 	// The claim guard keeps snooze queue-only, and the status predicate keeps
 	// a task closed under us out of the snoozed lane — see the SQLite mirror.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET status = 'snoozed', snooze_until = $1
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "'snoozed'"},
+		db.TaskAssign{Col: "snooze_until", Expr: "$1"},
+	)+`
 		 WHERE org_id = $2 AND id = $3
+		   AND version = $4
 		   AND claimed_by_agent_id IS NULL
 		   AND claimed_by_user_id  IS NULL
 		   AND status NOT IN ('done', 'dismissed')`,
-		until, orgID, taskID,
+		until, orgID, taskID, version,
 	)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return versionedWriteLanded(ctx, s.q, res, err, orgID, taskID, version)
 }
 
-func (s *taskStore) ClearSnooze(ctx context.Context, orgID, taskID string) (bool, error) {
+func (s *taskStore) ClearSnooze(ctx context.Context, orgID, taskID string, version int64) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET status = 'queued',
-		       snooze_until = NULL
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "'queued'"},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+	)+`
 		 WHERE org_id = $1 AND id = $2
+		   AND version = $3
 		   AND status = 'snoozed'`,
-		orgID, taskID,
+		orgID, taskID, version,
 	)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return versionedWriteLanded(ctx, s.q, res, err, orgID, taskID, version)
 }
 
-func (s *taskStore) RequeueTask(ctx context.Context, orgID, taskID string) (bool, error) {
+func (s *taskStore) RequeueTask(ctx context.Context, orgID, taskID string, version int64) (bool, error) {
 	// Both claim columns clear because the queue is the unclaimed lane, and
 	// the close metadata with them — see the SQLite mirror.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET status = 'queued',
-		       snooze_until = NULL,
-		       claimed_by_agent_id = NULL,
-		       claimed_by_user_id  = NULL,
-		       source_status = NULL,
-		       closed_at = NULL,
-		       close_reason = NULL,
-		       close_deferred_event_id = NULL,
-		       close_deferred_at = NULL
-		 WHERE org_id = $1 AND id = $2`,
-		orgID, taskID,
+		   SET `+db.TaskSetSQL(db.RequeueTaskAssigns...)+`
+		 WHERE org_id = $1 AND id = $2
+		   AND version = $3`,
+		orgID, taskID, version,
 	)
+	return versionedWriteLanded(ctx, s.q, res, err, orgID, taskID, version)
+}
+
+// versionedWriteLanded reports whether a version-guarded write landed, from
+// the Exec that made it — see the SQLite mirror.
+func versionedWriteLanded(ctx context.Context, q queryer, res sql.Result, err error, orgID, taskID string, version int64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
@@ -1483,7 +1485,31 @@ func (s *taskStore) RequeueTask(ctx context.Context, orgID, taskID string) (bool
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n > 0 {
+		return true, nil
+	}
+	return false, taskVersionRefusal(ctx, q, orgID, taskID, version)
+}
+
+// taskVersionRefusal is the follow-up a version-guarded write runs when it
+// matched no row: db.ErrTaskVersion when the task exists at another version
+// than the caller read, and nil when it is gone (or hidden from this pool's
+// view) or still at that version, so one of the write's other guards refused
+// it. It runs on the write's own queryer, so under the app pool it sees what
+// the write could see.
+func taskVersionRefusal(ctx context.Context, q queryer, orgID, taskID string, version int64) error {
+	var stored int64
+	err := q.QueryRowContext(ctx, `SELECT version FROM tasks WHERE org_id = $1 AND id = $2`, orgID, taskID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read task version: %w", err)
+	}
+	if stored != version {
+		return db.ErrTaskVersion
+	}
+	return nil
 }
 
 func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kind string) error {
@@ -1638,10 +1664,12 @@ func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, a
 	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_agent_id = $1,
-		       team_id = COALESCE(NULLIF($4, '')::uuid, team_id),
-		       snooze_until = NULL,
-		       status = `+pgClaimStageExpr+`
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "claimed_by_agent_id", Expr: "$1"},
+		db.TaskAssign{Col: "team_id", Expr: "COALESCE(NULLIF($4, '')::uuid, team_id)"},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+		db.TaskAssign{Col: "status", Expr: pgClaimStageExpr},
+	)+`
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_user_id IS NULL
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != $1)
@@ -1657,7 +1685,7 @@ func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, a
 	return n > 0, nil
 }
 
-func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (db.HandoffResult, domain.Task, error) {
+func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string, version int64) (db.HandoffResult, domain.Task, error) {
 	if agentID == "" {
 		return db.HandoffRefused, domain.Task{}, errors.New("HandoffAgentClaim: empty agentID")
 	}
@@ -1668,18 +1696,21 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	var t domain.Task
 	row, err := scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_agent_id = $1,
-		       claimed_by_user_id  = NULL,
-		       team_id = `+claimTeam+`,
-		       snooze_until = NULL,
-		       status = `+pgClaimStageExpr+`
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "claimed_by_agent_id", Expr: "$1"},
+		db.TaskAssign{Col: "claimed_by_user_id", Expr: "NULL"},
+		db.TaskAssign{Col: "team_id", Expr: claimTeam},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+		db.TaskAssign{Col: "status", Expr: pgClaimStageExpr},
+	)+`
 		 WHERE org_id = $2 AND id = $3
+		   AND version = $5
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = $4)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != $1)
 		   AND status NOT IN ('done', 'dismissed')
 		   AND `+claimTeam+` IS NOT NULL
 		RETURNING `+pgTaskBareColumns,
-		agentID, orgID, taskID, userID), &t)
+		agentID, orgID, taskID, userID, version), &t)
 	if err == nil {
 		return db.HandoffChanged, row, nil
 	}
@@ -1687,11 +1718,12 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		return db.HandoffRefused, domain.Task{}, err
 	}
 	// No row written — re-read to tell the refusals and the no-op apart. A
-	// terminal status takes precedence, so a sticky claim on a closed task
-	// doesn't fall through to HandoffNoOp; a missing team comes next, so a
-	// caller never proceeds to a run on a task it could not have handed off.
-	// The re-read projects the bare columns too, so a no-op answers with the
-	// row it left as it stands.
+	// version the caller did not read comes first, since every other answer
+	// would judge a row the caller never saw. A terminal status comes next,
+	// so a sticky claim on a closed task doesn't fall through to HandoffNoOp;
+	// then a missing team, so a caller never proceeds to a run on a task it
+	// could not have handed off. The re-read projects the bare columns too,
+	// so a no-op answers with the row it left as it stands.
 	var cur domain.Task
 	var st taskScanState
 	var team sql.NullString
@@ -1707,6 +1739,9 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		return db.HandoffRefused, domain.Task{}, err
 	}
 	st.finalize(&cur)
+	if cur.Version != version {
+		return db.HandoffRefused, domain.Task{}, db.ErrTaskVersion
+	}
 	if cur.Status == "done" || cur.Status == "dismissed" {
 		return db.HandoffRefused, domain.Task{}, nil
 	}
@@ -1778,75 +1813,72 @@ func pgClaimTeamExpr(task, user string) string {
 		(SELECT tm.id FROM teams tm WHERE tm.id = tasks.team_id AND tm.deleted_at IS NULL))`
 }
 
-func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {
+func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error) {
 	if userID == "" {
 		return false, errors.New("TakeoverClaimFromAgent: empty userID")
 	}
 	claimTeam := pgClaimTeamExpr("$3", "$1")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_user_id  = $1,
-		       claimed_by_agent_id = NULL,
-		       team_id = `+claimTeam+`,
-		       snooze_until = NULL,
-		       status = `+pgClaimStageExpr+`,
-		       source_status = `+pgSourceStatusExpr+`
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "claimed_by_user_id", Expr: "$1"},
+		db.TaskAssign{Col: "claimed_by_agent_id", Expr: "NULL"},
+		db.TaskAssign{Col: "team_id", Expr: claimTeam},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+		db.TaskAssign{Col: "status", Expr: pgClaimStageExpr},
+		db.TaskAssign{Col: "source_status", Expr: pgSourceStatusExpr},
+	)+`
 		 WHERE org_id = $2 AND id = $3
+		   AND version = $4
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
 		   AND status NOT IN ('done', 'dismissed')
 		   AND `+claimTeam+` IS NOT NULL
-	`, userID, orgID, taskID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if n == 0 {
-		return false, claimTeamRefusal(ctx, s.q, orgID, taskID, userID)
-	}
-	return true, nil
+	`, userID, orgID, taskID, version)
+	return userClaimLanded(ctx, s.q, res, err, orgID, taskID, userID, version)
 }
 
-func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error) {
+// userClaimLanded is versionedWriteLanded for the person-claim writes, whose
+// refusal has one more reason to name: with the version still the caller's,
+// db.ErrNoActiveClaimTeam when the claim has no team to land on.
+func userClaimLanded(ctx context.Context, q queryer, res sql.Result, err error, orgID, taskID, userID string, version int64) (bool, error) {
+	ok, err := versionedWriteLanded(ctx, q, res, err, orgID, taskID, version)
+	if ok || err != nil {
+		return ok, err
+	}
+	return false, claimTeamRefusal(ctx, q, orgID, taskID, userID)
+}
+
+func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error) {
 	if userID == "" {
 		return false, errors.New("ClaimQueuedForUser: empty userID is not a valid claimant")
 	}
 	claimTeam := pgClaimTeamExpr("$3", "$1")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_user_id = $1,
-		       team_id = `+claimTeam+`,
-		       snooze_until = NULL,
-		       status = `+pgClaimStageExpr+`,
-		       source_status = `+pgSourceStatusExpr+`
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "claimed_by_user_id", Expr: "$1"},
+		db.TaskAssign{Col: "team_id", Expr: claimTeam},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+		db.TaskAssign{Col: "status", Expr: pgClaimStageExpr},
+		db.TaskAssign{Col: "source_status", Expr: pgSourceStatusExpr},
+	)+`
 		 WHERE org_id = $2 AND id = $3
+		   AND version = $4
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
 		   AND `+claimTeam+` IS NOT NULL
-	`, userID, orgID, taskID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if n == 0 {
-		return false, claimTeamRefusal(ctx, s.q, orgID, taskID, userID)
-	}
-	return true, nil
+	`, userID, orgID, taskID, version)
+	return userClaimLanded(ctx, s.q, res, err, orgID, taskID, userID, version)
 }
 
-func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
-	return reassignClaimToUser(ctx, s.q, orgID, taskID, fromUserID, toUserID)
+func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error) {
+	return reassignClaimToUser(ctx, s.q, orgID, taskID, fromUserID, toUserID, version)
 }
 
-func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
-	return reassignClaimToUser(ctx, s.admin, orgID, taskID, fromUserID, toUserID)
+func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error) {
+	return reassignClaimToUser(ctx, s.admin, orgID, taskID, fromUserID, toUserID, version)
 }
 
 // reassignClaimToUser is the shared body behind ReassignClaimToUser and its
@@ -1862,7 +1894,7 @@ func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID
 // active team once a task is claimed — there's no "or you're the claimant"
 // escape hatch). The guard passing is also what keeps pgClaimTeamExpr from
 // coming up NULL here, so this write needs no refusal of its own for that.
-func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUserID, toUserID string) (bool, error) {
+func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error) {
 	if fromUserID == "" {
 		return false, errors.New("ReassignClaimToUser: empty fromUserID")
 	}
@@ -1871,10 +1903,13 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_user_id = $1,
-		       team_id = `+pgClaimTeamExpr("$3", "$1")+`,
-		       snooze_until = NULL
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "claimed_by_user_id", Expr: "$1"},
+		db.TaskAssign{Col: "team_id", Expr: pgClaimTeamExpr("$3", "$1")},
+		db.TaskAssign{Col: "snooze_until", Expr: "NULL"},
+	)+`
 		 WHERE org_id = $2 AND id = $3
+		   AND version = $5
 		   AND claimed_by_user_id = $4
 		   AND status NOT IN ('done', 'dismissed')
 		   AND EXISTS (
@@ -1887,15 +1922,8 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 		              OR m2.team_id = (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2)
 		            )
 		       )
-	`, toUserID, orgID, taskID, fromUserID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	`, toUserID, orgID, taskID, fromUserID, version)
+	return versionedWriteLanded(ctx, q, res, err, orgID, taskID, version)
 }
 
 // --- Breaker ---
@@ -2068,7 +2096,7 @@ var pgTaskColumnsWithEntity = `
 	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
 	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
 	t.closed_at, t.created_at,
-	t.claimed_by_agent_id, t.claimed_by_user_id,
+	t.claimed_by_agent_id, t.claimed_by_user_id, t.version,
 	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
 	COALESCE((e.snapshot_json->>'open_subtask_count')::int, 0),
 	-- Slack thread message count: the messages addressed to the bot on this
@@ -2121,7 +2149,7 @@ const pgTaskBareColumns = `
 	priority_reasoning, scoring_status, severity, relevance_reason,
 	source_status, snooze_until, close_reason, close_event_type,
 	closed_at, created_at,
-	claimed_by_agent_id, claimed_by_user_id`
+	claimed_by_agent_id, claimed_by_user_id, version`
 
 type taskScanState struct {
 	teamID                             sql.NullString
@@ -2155,7 +2183,7 @@ func (s *taskScanState) bareTargets(t *domain.Task) []any {
 		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
 		&s.closedAt, &t.CreatedAt,
-		&s.claimedByAgentID, &s.claimedByUserID,
+		&s.claimedByAgentID, &s.claimedByUserID, &t.Version,
 	}
 }
 

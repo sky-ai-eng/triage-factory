@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -591,7 +592,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			`UPDATE tasks SET claimed_by_user_id = $2, status = 'in_progress' WHERE id = $1`, task, userID)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ReassignClaimToUser(ctx, orgID, task, userID, userB)
+			ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ReassignClaimToUser(ctx, orgID, task, userID, userB, dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgID, task))
 			if e != nil {
 				return e
 			}

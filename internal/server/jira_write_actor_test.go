@@ -95,7 +95,7 @@ func TestTaskClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	seedQueuedJiraTask(t, s.db, "e_jira_ok", "SKY-2", "00000000-0000-4000-8000-000000000021")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000021/claim",
-		map[string]any{})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000021", map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -236,7 +236,7 @@ func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000022/claim",
-		map[string]any{})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000022", map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (GitHub claim unaffected by Jira cred); body=%s", rec.Code, rec.Body.String())
 	}

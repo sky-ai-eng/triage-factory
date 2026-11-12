@@ -116,11 +116,12 @@ func (s *Spawner) wakeDispatcher() {
 }
 
 // RunDispatcher is the conversation-queue drain loop — the queue-driven
-// orchestrator's worker. On boot it reconciles conversations/blueprint_runs
-// stranded by a crash, then claims queued steps and drives each through
-// runAgent + the reactor until ctx is cancelled. The recovery pass runs beside
-// it on its own loop (runRecovery), started and stopped with it. A nil
-// ConversationQueueStore makes this a logged no-op.
+// orchestrator's worker. On boot it releases the claims this executor's
+// earlier boot left behind and checks the queue's invariants, then claims
+// queued steps and drives each through runAgent + the reactor until ctx is
+// cancelled. The recovery pass runs beside it on its own loop (runRecovery),
+// started and stopped with it. A nil ConversationQueueStore makes this a
+// logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
 	if s.conversationQueue == nil {
 		dispatchLog.Warn("conversation-queue dispatcher not started: no ConversationQueueStore wired")
@@ -149,7 +150,7 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
 
-	s.drainConversationQueue(ctx, scanInterval) // drain whatever survived the restart / boot reconcile
+	s.drainConversationQueue(ctx, scanInterval) // drain whatever survived the restart
 
 	for {
 		select {
@@ -217,26 +218,16 @@ func (s *Spawner) recoverOnce(ctx context.Context) {
 // reconcileConversationQueue is the boot crash-recovery sweep. Every claim an
 // earlier boot of this executor left unreleased is released (the boot reset),
 // so a mid-flight blueprint resumes by re-running its current step, and the
-// boot checks report the shapes no writer should produce.
+// boot checks report the shapes no writer should produce. Conversations the
+// claim gate will never drive again are not this executor's to settle: the
+// brain parks them (RunOrphanedConversationSweep).
 func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 	s.resetPriorBootClaims(ctx)
 
-	// Mirror sweep for the opposite desync — child conversations left
-	// non-terminal under an already-terminal blueprint_run. The reset above
-	// releases claims and writes no status, so these orphans still read as
-	// mid-flight after it; left alone, an orphan still reading as claimable keeps
-	// the dispatcher on phantom work and pins its feature branch in a worktree, requeuing any
-	// sibling fetch forever. Cancel them so the row stops looking live (the
-	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
-	// conversations). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
-	// rows broken before that landed.
-	c, check, err := s.conversationQueue.ReconcileOrphanedConversations(ctx)
+	check, err := s.conversationQueue.CheckOrphanedStepsSystem(ctx)
 	if err != nil {
-		dispatchLog.Error("boot reconcile: cancel orphaned child conversations failed", "error", err)
+		dispatchLog.Error("boot check: reading the queue's invariants failed", "error", err)
 		return
-	}
-	if c > 0 {
-		dispatchLog.Info("boot reconcile: parked orphaned child conversations", "count", c)
 	}
 	// A terminal conversation still holding a live claim. Every status write
 	// releases its claim in the same transaction and a request path writes no

@@ -91,6 +91,7 @@ const HELD: Task = {
   claimed_by_user_id: 'u1',
   event_type: 'github:pr:opened',
   created_at: '2026-09-01T11:00:00Z',
+  version: 4,
 } as Task
 
 /** The task the board paints into Queued: nobody holds it, because nobody can
@@ -103,6 +104,7 @@ const FREE: Task = {
   status: 'queued',
   event_type: 'github:pr:opened',
   created_at: '2026-09-01T10:00:00Z',
+  version: 2,
 } as Task
 
 /** Its conversation, in whichever state a test puts it. */
@@ -120,6 +122,8 @@ function conversation(status: string): Conversation {
 /** Every list body and every facet body the board sent, in call order. */
 let listBodies: Array<Record<string, unknown>> = []
 let facetBodies: Array<Record<string, unknown>> = []
+/** Every task write the board sent, in call order: its path and its body. */
+let writes: Array<{ path: string; body: Record<string, unknown> }> = []
 let held: Conversation
 /** The can_write every listed task carries; undefined leaves the key off. */
 let taskCanWrite: boolean | undefined
@@ -127,6 +131,7 @@ let taskCanWrite: boolean | undefined
 beforeEach(() => {
   listBodies = []
   facetBodies = []
+  writes = []
   held = conversation('completed')
   taskCanWrite = undefined
   api.apiList.mockReset()
@@ -156,6 +161,13 @@ beforeEach(() => {
     if (path === '/api/agent/conversations/list') {
       return { runs: { [HELD.id]: [held] }, messages: {} }
     }
+    // A task write answers the task with the version it left, one past the
+    // version the board read, whatever the write named.
+    const task = [HELD, FREE].find((t) => path.startsWith(`/api/tasks/${t.id}`))
+    if (task) {
+      writes.push({ path, body: JSON.parse(init?.body ?? '{}') as Record<string, unknown> })
+      return { ...task, version: task.version + 1 }
+    }
     throw new Error('unexpected apiJSON ' + path)
   })
   api.apiFetch.mockResolvedValue(undefined)
@@ -180,9 +192,9 @@ function laterBodies(): Array<Record<string, unknown>> {
   return listBodies.slice(3)
 }
 
-/** Every /api/tasks/… path the board asked for, in call order. */
+/** Every task write's path, in call order. */
 function taskCalls(): string[] {
-  return api.apiFetch.mock.calls.map((c) => String(c[0])).filter((p) => p.startsWith('/api/tasks/'))
+  return writes.map((w) => w.path)
 }
 
 /** Opens one card's assignee picker and returns a scope over it — every card
@@ -301,9 +313,26 @@ describe('starting a queued task', () => {
     fireEvent.click(picker.getByRole('option', { name: ME.display_name }))
 
     await waitFor(() => expect(taskCalls()).toEqual([`/api/tasks/${FREE.id}/claim`]))
+    // It names the version the lane read.
+    expect(writes[0].body).toEqual({ version: FREE.version })
     // The card left Queued, so every lane is stale — the picker refetches all
     // three rather than patching the one it thinks it moved.
     await waitFor(() => expect(laterBodies().length).toBeGreaterThanOrEqual(3))
+  })
+
+  it('names the version its last write returned on the next one', async () => {
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+    // The lanes still list the version the first write moved past; the claim
+    // answered one past it, and that is what the next write sends.
+    const picker = await openPicker('Unassigned')
+    fireEvent.click(picker.getByRole('option', { name: ME.display_name }))
+    await waitFor(() => expect(writes.length).toBe(2))
+    expect(writes.map((w) => w.body.version)).toEqual([FREE.version, FREE.version + 1])
   })
 })
 
@@ -316,15 +345,13 @@ describe('returning a task to the queue', () => {
     expect(
       await screen.findByText('This stops the run. Its work stays with the task.'),
     ).toBeInTheDocument()
-    expect(api.apiFetch).not.toHaveBeenCalledWith(`/api/tasks/${HELD.id}/requeue`, {
-      method: 'POST',
-    })
+    expect(taskCalls()).toEqual([])
 
     fireEvent.click(screen.getByRole('button', { name: 'Return to queue' }))
     await waitFor(() =>
-      expect(api.apiFetch).toHaveBeenCalledWith(`/api/tasks/${HELD.id}/requeue`, {
-        method: 'POST',
-      }),
+      expect(writes).toEqual([
+        { path: `/api/tasks/${HELD.id}/requeue`, body: { version: HELD.version } },
+      ]),
     )
   })
 
@@ -338,9 +365,9 @@ describe('returning a task to the queue', () => {
 
     await unassignHeld()
     await waitFor(() =>
-      expect(api.apiFetch).toHaveBeenCalledWith(`/api/tasks/${HELD.id}/requeue`, {
-        method: 'POST',
-      }),
+      expect(writes).toEqual([
+        { path: `/api/tasks/${HELD.id}/requeue`, body: { version: HELD.version } },
+      ]),
     )
     expect(
       screen.queryByText('This stops the run. Its work stays with the task.'),

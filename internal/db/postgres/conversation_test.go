@@ -409,6 +409,12 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("set blueprint_run status: %v", err)
 			}
 		},
+		SetBlueprintRunCurrentStep: func(t *testing.T, blueprintRunID string, stepIndex int) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE blueprint_runs SET current_step_index = $1 WHERE id = $2`, stepIndex, blueprintRunID); err != nil {
+				t.Fatalf("set blueprint_run current_step_index: %v", err)
+			}
+		},
 		SetConversationMemory: func(t *testing.T, conversationID, content string, source domain.MemorySource) {
 			t.Helper()
 			memID := uuid.New().String()

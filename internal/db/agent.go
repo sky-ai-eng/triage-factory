@@ -519,13 +519,15 @@ type ConversationStore interface {
 	// ListResumableWorktreePathsSystem returns the worktree_path of every
 	// conversation the next claim or message continues — parked in `open`
 	// without a verdict, or left mid-flight by an engagement the process
-	// stopped under — with a
+	// stopped under, on a step the claim gate still drives (the current step
+	// of a blueprint run nobody called off, finished or not) — with a
 	// non-empty worktree_path, via the admin pool in Postgres (the startup
 	// sweep reads it before any JWT-claims context exists). Read at startup so
 	// the worktree-cleanup sweep preserves such a conversation's warm
-	// workspace (worktree dir + session JSONL) as the fast resume path. A
-	// swept entry still resumes via snapshot rehydrate, so this is an
-	// optimization, not a correctness gate.
+	// workspace (worktree dir + session JSONL). A swept entry still resumes via
+	// snapshot rehydrate, but from the last snapshot its task wrote: a local
+	// engagement takes no checkpoints mid-turn, so what a mid-flight turn did
+	// since lives only in the tree this keeps.
 	//
 	// The sweep keys off filepath.Base of each path, which is the run tree's
 	// directory name — the workspace key, i.e. the task id. Returning whole

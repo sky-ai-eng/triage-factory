@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
@@ -88,6 +89,24 @@ type warmEngagement struct {
 	// runs are each turn's Run, in order: what it ran under and what it
 	// returned.
 	runs []warmRun
+	// teamDefault is the team's default model, which every claim on the
+	// conversation after its blueprint finished runs on. It starts as the
+	// engagement's.
+	teamDefault string
+}
+
+// setTeamDefault changes the team's default model, as an admin's settings
+// save does.
+func (f *warmEngagement) setTeamDefault(model string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.teamDefault = model
+}
+
+func (f *warmEngagement) teamModels(context.Context, string, string) (domain.TeamModels, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return domain.NewTeamModels(f.teamDefault, domain.ModelSet{}), nil
 }
 
 type warmRun struct {
@@ -137,7 +156,10 @@ func startWarmEngagement(t *testing.T, o warmOpts) *warmEngagement {
 		t.Fatalf("load task: %v", err)
 	}
 
-	f := &warmEngagement{parkFleet: pf, claim: claim, provider: &warmProvider{turns: o.turns}, done: make(chan engagementDisposition, 1)}
+	f := &warmEngagement{parkFleet: pf, claim: claim, provider: &warmProvider{turns: o.turns}, done: make(chan engagementDisposition, 1), teamDefault: warmModel}
+	for _, s := range []*Spawner{pf.x, pf.control} {
+		s.SetRunCredentialResolvers(nil, nil, f.teamModels)
+	}
 	engCtx, cancel := context.WithCancelCause(context.Background())
 	f.cancel = cancel
 	pf.x.mu.Lock()
@@ -361,6 +383,44 @@ func TestWarmClaim_KeepsTheClaimAfterAPersonsTurn(t *testing.T) {
 	}
 	if released, _, _ := f.claimRelease(t); released {
 		t.Error("the claim was released; it should be kept warm")
+	}
+}
+
+// With TF_SNAPSHOT_INTERVAL_SEC=0 and a blob store, a person's turn still keeps
+// its claim warm: the interval governs only the checkpoints at batch
+// boundaries, and the turn-end capture the window waits on is taken anyway.
+// The blob it stored is that capture, at the turn's newest row, not a park's.
+func TestWarmClaim_ZeroSnapshotIntervalStillKeepsTheClaim(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Minute, turns: []gateTurn{{text: "fixed it"}},
+		beforeStart: func(f *warmEngagement) { f.x.SetSnapshotInterval(0) }})
+	f.awaitWarm(t, 1)
+
+	f.assertConcluded(t, domain.ConversationOutcomeContinue, "fixed it")
+	if released, _, _ := f.claimRelease(t); released {
+		t.Error("the claim was released; it should be kept warm")
+	}
+	if f.jailStopped.Load() {
+		t.Error("the jail was stopped while the claim is warm")
+	}
+
+	rows, err := f.stores.Conversations.ListForAssemblySystem(context.Background(), f.orgID, f.conversationID)
+	if err != nil {
+		t.Fatalf("list transcript: %v", err)
+	}
+	var answer *float64
+	for _, r := range rows {
+		if r.Role == "assistant" && r.Content == "fixed it" {
+			key := assemblyKey(r)
+			answer = &key
+		}
+	}
+	if answer == nil {
+		t.Fatal("the turn's answer is not in the transcript")
+	}
+	man, _ := unpackSnapshotBlob(t, f.blobs, snapshotKey(f.orgID, f.keyID))
+	if man.TranscriptPosition == nil || *man.TranscriptPosition != *answer || man.ConversationID != f.conversationID {
+		t.Errorf("manifest position = (%v, %q), want (%v, %q): the turn-end capture at the turn's answer",
+			man.TranscriptPosition, man.ConversationID, *answer, f.conversationID)
 	}
 }
 
@@ -599,17 +659,11 @@ func TestWarmClaim_EventIsNotFoldedIntoTheConversation(t *testing.T) {
 	}
 }
 
-// A new delegation on the task ends the warm conversation, which no follow-up
-// resumes, and the warm claim lets go of the task's tree for the run that
-// replaces it. Until then the run is not claimed into a tree a jail is still
-// running in.
+// A new run on the task ends the warm conversation. Until the warm claim is
+// released, the run can't be claimed into the tree. Passing the ended rows to
+// RingWarmWaitsForEnded releases it well inside the backstop interval, and the
+// run is then claimable.
 func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
-	// Long enough that the claim below runs before the first tick, and short
-	// enough that the tick is what lets go.
-	saved := warmWaitBackstop
-	warmWaitBackstop = 3 * time.Second
-	t.Cleanup(func() { warmWaitBackstop = saved })
-
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
 	f.awaitWarm(t, 1)
 
@@ -627,23 +681,25 @@ func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
 	}
 	step0 := 0
 	next, nextRun := uuid.New().String(), uuid.New().String()
-	if _, _, _, _, err := f.stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), f.orgID, domain.BlueprintRun{
+	_, _, _, ended, err := f.stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), f.orgID, domain.BlueprintRun{
 		ID: nextRun, BlueprintID: blueprintID, TaskID: f.taskID,
 		TriggerType: domain.BlueprintTriggerManual, WorktreePath: f.wtPath,
 	}, db.AgentClaimStamp{}, "", domain.Conversation{
 		ID: next, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: f.userID, BlueprintRunID: nextRun, BlueprintStepIndex: &step0,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("start another run on the task: %v", err)
 	}
-	if ended := f.read(t); ended.EndedAt == nil {
-		t.Fatal("the new run did not end the warm conversation")
+	if len(ended) != 1 || ended[0].ID != f.conversationID {
+		t.Fatalf("the new run ended %+v, want the warm conversation %s", ended, f.conversationID)
 	}
 	if got := f.parkFleet.claim(t, f.y); got != nil {
 		t.Fatalf("another executor claimed %s while the warm claim held the task's tree", got.ID)
 	}
 
-	if d := f.await(t, 10*time.Second); d.fenced || d.handedBack {
+	f.control.RingWarmWaitsForEnded(context.Background(), f.orgID, ended)
+	if d := f.await(t, 5*time.Second); d.fenced || d.handedBack {
 		t.Fatalf("disposition = %+v, want the ordinary ending", d)
 	}
 	f.assertReleased(t)
@@ -651,6 +707,32 @@ func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
 	got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), id, epoch, f.y.claimPlacement(), db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != next {
 		t.Fatalf("claim once the warm claim let go = (%+v, %v), want conversation %s", got, err, next)
+	}
+}
+
+// A conversation already ended when the wait starts is let go on the wait's
+// first read. The test ends it with SQL, which wakes nothing, while the
+// turn-end snapshot is held.
+func TestWarmClaim_EndingBeforeTheWaitIsNotMissed(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}},
+		beforeStart: func(f *warmEngagement) { f.gate.hold() }})
+
+	select {
+	case <-f.gate.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the turn-end snapshot never uploaded")
+	}
+	pgtest.MustExec(t, f.h.AdminDB, `UPDATE conversations SET ended_at = now(), ended_reason = $1 WHERE id = $2`,
+		string(domain.EndedDelegated), f.conversationID)
+	f.gate.let()
+
+	if d := f.await(t, warmWaitBackstop/3); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the ordinary ending", d)
+	}
+	f.assertConcluded(t, domain.ConversationOutcomeContinue, "fixed it")
+	f.assertReleased(t)
+	if phase := f.claimPhase(t); phase != domain.ClaimPhaseWarm {
+		t.Errorf("released claim's phase = %q, want %q: the turn ended without keeping its claim warm", phase, domain.ClaimPhaseWarm)
 	}
 }
 
@@ -728,5 +810,87 @@ func TestWarmClaim_DurationIsTheTurnsNotTheWait(t *testing.T) {
 	}
 	if got := spanAttr(t, span, "agent.duration_ms").AsInt64(); got != turns {
 		t.Errorf("engagement.complete agent.duration_ms = %d, want the two turns' %d", got, turns)
+	}
+}
+
+// A close held while the claim is warm is told to no conversation, because
+// this one is not working. The person's next message resumes it on the warm
+// claim, and the turn it runs is told the task is resolved, as a cold claim's
+// turn would be.
+func TestWarmClaim_ResumeTellsAHeldClose(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "staged the review"}, {text: "shortened the comments"}}})
+	f.awaitWarm(t, 1)
+	ctx := context.Background()
+
+	// The run staged a review that awaits the person, and then CI passed.
+	task, err := f.stores.Tasks.GetSystem(ctx, f.orgID, f.taskID)
+	if err != nil || task == nil {
+		t.Fatalf("load task: %v", err)
+	}
+	pgtest.MustExec(t, f.h.AdminDB, `
+		INSERT INTO deliverables (conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id, details_json)
+		SELECT id, org_id, team_id, 'github', 'review', 'github.com', 'octo/fleet-test#7', 'pending', 'warm-held-close-' || id::text, $2,
+		       '{"number":7,"review_event":"COMMENT"}'
+		  FROM conversations WHERE id = $1
+	`, f.conversationID, task.EntityID)
+	eventID := uuid.New().String()
+	pgtest.MustExec(t, f.h.AdminDB, `
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, now())
+	`, eventID, f.orgID, task.EntityID, domain.EventGitHubPRCICheckPassed)
+	out, err := f.stores.Tasks.CloseOrHoldSystem(ctx, f.orgID, f.taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID)
+	if err != nil || !out.Held || !out.AwaitingPerson || len(out.WorkingConversationIDs) != 0 {
+		t.Fatalf("close = (%+v, %v), want held for the review with no working conversation to tell", out, err)
+	}
+
+	if err := f.followUp("make the review comments shorter"); err != nil {
+		t.Fatalf("follow-up from the control pod: %v", err)
+	}
+	f.awaitWarm(t, 2)
+
+	evt, err := f.stores.Events.GetSystem(ctx, f.orgID, eventID)
+	if err != nil || evt == nil {
+		t.Fatalf("read the pass: %v", err)
+	}
+	metadataJSON := evt.MetadataJSON
+	if current, err := events.Current(ctx, f.orgID, evt.EventType, metadataJSON); err == nil {
+		metadataJSON = current
+	}
+	sent := f.provider.sent(1)
+	if notice := domain.TaskClosingNotice(evt.EventType, metadataJSON); !strings.Contains(sent, notice) {
+		t.Errorf("the resumed turn was not told of the held close %q:\n%s", notice, sent)
+	}
+	if !strings.Contains(sent, "make the review comments shorter") {
+		t.Errorf("the resumed turn was not sent the person's message:\n%s", sent)
+	}
+	if n := f.claimRows(t); n != 1 {
+		t.Errorf("claim rows = %d, want the one warm claim both turns ran on", n)
+	}
+}
+
+// A warm resume after the team's default model changed lets the claim go
+// instead of running the turn on the model the engagement was built with. The
+// conversation is left queued with no active claim, so a cold claim runs it on
+// the team's model.
+func TestWarmClaim_ResumeAfterTheTeamsModelChangedLetsTheClaimGo(t *testing.T) {
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+	f.awaitWarm(t, 1)
+
+	f.setTeamDefault(domain.ModelOpus)
+	if err := f.followUp("now update the README too"); err != nil {
+		t.Fatalf("follow-up from the control pod: %v", err)
+	}
+	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack || d.launchErr != nil {
+		t.Fatalf("disposition = %+v, want the ordinary ending", d)
+	}
+	f.assertReleased(t)
+	if n := f.provider.calls(); n != 1 {
+		t.Errorf("provider calls = %d, want 1: a turn ran on the engagement's model", n)
+	}
+	if conv := f.read(t); conv.Status != domain.StatusQueued {
+		t.Errorf("conversation status = %q, want %q for a cold claim to drive", conv.Status, domain.StatusQueued)
+	}
+	if n := f.activeClaims(t); n != 0 {
+		t.Errorf("active claims = %d, want none", n)
 	}
 }

@@ -71,7 +71,7 @@ func TestSnooze_PastWakeTimeRejected(t *testing.T) {
 
 	taskID := seedLifecycleTask(t, s.db, "past-wake", lifecycleTaskOpts{})
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"snooze_until": "2020-01-02T03:04:05Z"})
+		withTaskVersion(t, s, taskID, map[string]any{"snooze_until": "2020-01-02T03:04:05Z"}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("a past wake time = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}

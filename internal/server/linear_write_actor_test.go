@@ -378,7 +378,7 @@ func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
 			const taskID = "00000000-0000-4000-8000-000000000300"
 			seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{}))
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -411,7 +411,7 @@ func TestTaskClaim_LinearTask_ResolverBackendError_Returns500(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000301"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{}))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
@@ -433,7 +433,7 @@ func TestTaskClaim_LinearTask_ClearedSnapshotStillFindsTheRule(t *testing.T) {
 		t.Fatalf("clear snapshot: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -453,7 +453,7 @@ func TestTaskClaim_LinearTask_NoRule_NoLinearWrites(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000303"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -614,13 +614,13 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000305"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateBacklogRef)
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", withTaskVersion(t, s, taskID, map[string]any{})); rec.Code != http.StatusOK {
 		t.Fatalf("claim status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	fake.waitForWrites(t, 2)
 	fake.moveIssue("OPS-3")
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", map[string]any{}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, map[string]any{})); rec.Code != http.StatusOK {
 		t.Fatalf("requeue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	want := []linearWrite{
@@ -648,7 +648,7 @@ func TestTaskRequeue_LinearTask_NothingRecorded(t *testing.T) {
 	const taskID = "00000000-0000-4000-8000-000000000306"
 	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", map[string]any{}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, map[string]any{})); rec.Code != http.StatusOK {
 		t.Fatalf("requeue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if userCalls, _, _, _ := res.snapshot(); userCalls != 0 {
@@ -686,7 +686,7 @@ func TestTaskClaim_GitHubTask_SkipsLinearResolver(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000304/claim", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000304/claim", withTaskVersion(t, s, "00000000-0000-4000-8000-000000000304", map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

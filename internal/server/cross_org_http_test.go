@@ -159,7 +159,9 @@ func TestCrossOrgHTTP_TaskClaim(t *testing.T) {
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	taskA := seedTaskInOrg(t, r, orgA, alice, "task-claim")
 
-	body := map[string]any{}
+	// One version for both: a cross-org caller must get the 404 whatever the
+	// body names, so bob's request carries the version of a real read.
+	body := map[string]any{"version": 1}
 	if got := r.postJSONWithSid("POST", "/api/tasks/"+taskA+"/claim", sidA, body).StatusCode; got != http.StatusOK {
 		t.Errorf("alice POST claim on own task = %d, want 200", got)
 	}

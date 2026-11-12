@@ -1534,6 +1534,12 @@ CREATE TABLE public.tasks (
     -- hold's place, cleared with the hold. The close-hold sweep stops the
     -- event-started work still going once a hold is older than its limit.
     close_deferred_at timestamp with time zone,
+    -- The task's optimistic-concurrency token. A write that changes a column a
+    -- person acts on (status, either claim, snooze_until, closed_at,
+    -- close_reason, close_event_type, team_id) raises it in the same UPDATE,
+    -- through db.TaskSetSQL; a write to any other column leaves it. A person's
+    -- write names the version it read and lands only on a task still at it.
+    version bigint DEFAULT 1 NOT NULL,
     CONSTRAINT tasks_claim_xor CHECK (((claimed_by_agent_id IS NULL) OR (claimed_by_user_id IS NULL))),
     CONSTRAINT tasks_close_hold_paired CHECK (((close_deferred_event_id IS NULL) = (close_deferred_at IS NULL))),
     CONSTRAINT tasks_claimed_requires_team CHECK ((((claimed_by_user_id IS NULL) AND (claimed_by_agent_id IS NULL)) OR (team_id IS NOT NULL))),

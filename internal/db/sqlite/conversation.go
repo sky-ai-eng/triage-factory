@@ -2177,13 +2177,8 @@ func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context,
 // ListResumableWorktreePathsSystem returns the worktree dirs the startup sweep
 // must keep warm — conversations parked `open` without a verdict or left
 // mid-flight (a stored status of NULL: an engagement was driving it when the
-// process stopped, and the next claim continues it), whose owning
-// blueprint_run is still 'running'.
-// A conversation under an already-terminal blueprint_run is NOT resumable
-// (every resume path gates on cr.Status == running), so its worktree must NOT
-// be preserved: preserving it would leave a checked-out branch on disk that the
-// boot reconcile then orphans by cancelling the row, reviving the "refusing to
-// fetch into a branch checked out in a worktree" loop.
+// process stopped, and the next claim continues it), on a step the claim gate
+// still drives. The Postgres twin says why that is the line.
 func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -2193,7 +2188,7 @@ func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context
 		 LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 		 WHERE (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL))
 		   AND COALESCE(r.worktree_path, '') != ''
-		   AND (br.id IS NULL OR br.status = 'running')`)
+		   AND `+blueprintStepDrivableSQL)
 	if err != nil {
 		return nil, err
 	}

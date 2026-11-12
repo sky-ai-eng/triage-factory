@@ -900,8 +900,13 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		// Claim is on the responsibility axis, not status. Stamp the user
 		// claim optimistically — if the task pre-existed in some non-queued
 		// state or was already claimed by someone else, surface that as a
-		// failed row rather than stealing.
-		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID)
+		// failed row rather than stealing. The version is the one the find
+		// just read, so a write landing on the task in between refuses the
+		// claim the same way.
+		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID, task.Version)
+		if errors.Is(e, db.ErrTaskVersion) {
+			return nil
+		}
 		return e
 	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
 		return stockFailed(snap.Key, httpx.ReasonTeamArchived,
