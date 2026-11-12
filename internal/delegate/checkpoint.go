@@ -105,9 +105,9 @@ const (
 var checkpointOutcomes = []string{checkpointWritten, checkpointSkippedUnchanged, checkpointSkippedBusy, checkpointFailed}
 
 // ParseSnapshotInterval interprets the TF_SNAPSHOT_INTERVAL_SEC env value.
-// Empty → the default. 0 → checkpoints disabled. Non-numeric or negative → the
-// default plus an error the caller logs; a bad value must not brick boot, the
-// same rule TF_SNAPSHOT_WAIT_SEC follows.
+// Empty → the default. 0 → no checkpoints at batch boundaries. Non-numeric or
+// negative → the default plus an error the caller logs; a bad value must not
+// brick boot, the same rule TF_SNAPSHOT_WAIT_SEC follows.
 func ParseSnapshotInterval(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -123,7 +123,8 @@ func ParseSnapshotInterval(raw string) (time.Duration, error) {
 }
 
 // SetSnapshotInterval sets how often live native engagements checkpoint their
-// workspace. Zero disables checkpoints. Call once at startup (internal/app
+// workspace at batch boundaries. Zero takes none there; the turn-end capture a
+// warm claim needs does not depend on it. Call once at startup (internal/app
 // resolves TF_SNAPSHOT_INTERVAL_SEC); an engagement reads it when it starts.
 func (s *Spawner) SetSnapshotInterval(d time.Duration) {
 	if d < 0 {
@@ -202,7 +203,7 @@ func (c *checkpointer) freezeWith(f treeFreezer) {
 
 // checkpointer is one engagement's checkpoint schedule and its one checkpoint
 // in flight. It lives for the agent loop and no longer. Every method is
-// nil-safe, so an engagement that does not checkpoint wires a nil one.
+// nil-safe, so an engagement with nothing to capture wires a nil one.
 type checkpointer struct {
 	s        *Spawner
 	w        snapshotWrite
@@ -241,12 +242,15 @@ type checkpointer struct {
 }
 
 // startCheckpointer arms checkpoints for one native engagement, or returns nil
-// when it will take none: checkpoints are disabled, no blob store is wired, or
-// the engagement has no claim or tree to snapshot. ctx is the engagement's, so
-// a stop, a fence or a shutdown cancels a checkpoint in flight with it.
+// when there is nothing to capture: no blob store is wired, or the engagement
+// has no claim or tree to snapshot. A zero interval still builds one, because
+// the turn-end capture a warm claim waits on is the checkpointer's; the
+// interval governs only the checkpoints at batch boundaries. ctx is the
+// engagement's, so a stop, a fence or a shutdown cancels a checkpoint in
+// flight with it.
 func (s *Spawner) startCheckpointer(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath string) *checkpointer {
 	interval := s.checkpointInterval()
-	if interval <= 0 || s.Storage() == nil || claimID == "" || keyID == "" || wtPath == "" {
+	if s.Storage() == nil || claimID == "" || keyID == "" || wtPath == "" {
 		return nil
 	}
 	now := time.Now()
@@ -302,10 +306,11 @@ func (c *checkpointer) stop() {
 }
 
 // age is how long the engagement's tree has gone without being covered by a
-// stored blob, for the claim renewal to stamp. False when the engagement does
-// not checkpoint, which the renewal stamps as no reading.
+// stored blob, for the claim renewal to stamp. False when the engagement takes
+// no boundary checkpoints, which the renewal stamps as no reading: nothing
+// covers the tree during a turn, so the age would only climb.
 func (c *checkpointer) age() (time.Duration, bool) {
-	if c == nil {
+	if c == nil || c.interval <= 0 {
 		return 0, false
 	}
 	c.mu.Lock()
@@ -475,11 +480,14 @@ func (c *checkpointer) awaitCapture(ctx context.Context) (deny string) {
 }
 
 // checkpointHooks composes the checkpointer into the engine's hooks around
-// the ones the engagement already has. A nil checkpointer leaves them as they
-// were, so an engagement that does not checkpoint runs exactly the hooks it
-// always did.
+// the ones the engagement already has. A nil checkpointer, or one with a zero
+// interval, leaves them as they were, so an engagement that takes no boundary
+// checkpoints runs exactly the hooks it always did; wired at a zero interval,
+// they would take a checkpoint at every boundary. The turn-end capture needs no
+// barrier, because it runs after the loop has returned, with no tool call
+// beside it.
 func checkpointHooks(c *checkpointer, hooks agentloop.Hooks) agentloop.Hooks {
-	if c == nil {
+	if c == nil || c.interval <= 0 {
 		return hooks
 	}
 	gate, after := hooks.BeforeToolCall, hooks.AfterToolCall

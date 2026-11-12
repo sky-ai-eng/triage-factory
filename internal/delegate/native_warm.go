@@ -161,7 +161,8 @@ func (s *Spawner) warmWindowOpens(ctx context.Context, n nativeTail, result agen
 	}
 	// The turn-end snapshot is taken with the jail still running, so it has to
 	// be a frozen capture, which only a checkpointer takes. With a blob store
-	// and no checkpointer, the turn ends as it always has.
+	// and no checkpointer there is nothing to capture, and the turn ends as it
+	// always has.
 	if n.ckpt == nil && s.Storage() != nil {
 		return false
 	}
