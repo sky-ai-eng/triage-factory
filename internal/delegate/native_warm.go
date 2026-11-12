@@ -50,7 +50,7 @@ type nativeTail struct {
 	mirror         *memoryMirror
 
 	// run drives one turn: engine.Run. params is what the engagement's first
-	// turn runs under.
+	// turn runs under, and its Model is the one every turn runs on.
 	run        func(context.Context, agentloop.Params) agentloop.Result
 	params     agentloop.Params
 	transcript *nativeTranscript
@@ -92,6 +92,10 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 
 		switch s.waitWarm(ctx, n, deadline) {
 		case warmResumed:
+			conv := s.warmResumeModelHolds(context.WithoutCancel(ctx), n)
+			if conv == nil {
+				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+			}
 			resumed, err := s.conversations.ResumeWarmClaimSystem(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.cfg.claimID)
 			if errors.Is(err, db.ErrClaimReleased) {
 				return s.endWarmFenced(n, result)
@@ -104,6 +108,11 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
 			}
 			s.broadcastConversationUpdate(n.orgID, n.conversationID, domain.StatusRunning)
+			// A close held while the claim was warm told only the
+			// conversations that were working, which this one was not. The
+			// loop reads the note at the turn's first model call, with the
+			// person's message.
+			s.tellHeldClose(context.WithoutCancel(ctx), n.orgID, conv, n.task.ID)
 			// The first turn's params say how this engagement started: in a
 			// sandbox launched for it, in a workspace built or restored for
 			// it. Neither is true of a later turn, which runs in the sandbox and
@@ -354,6 +363,42 @@ func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitSta
 		return db.WarmWaitState{}
 	}
 	return st
+}
+
+// warmResumeModelHolds asks the model question a claim asks (modelForClaim)
+// before a warm resume, and returns the conversation it read when the answer
+// is the model the engagement was built with. Otherwise it returns nil and
+// the claim is let go: the resumed conversation is left queued with no claim,
+// and the cold claim that drives it makes the decision as every claim does,
+// switching models or refusing the one the team no longer enables. A failed
+// read answers nil too, so the cold claim decides.
+func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domain.Conversation {
+	conv, err := s.conversations.GetSystem(ctx, n.orgID, n.conversationID)
+	if err != nil || conv == nil {
+		delegateLog.Warn("read the conversation before a warm resume failed; letting the claim go",
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "error", err)
+		return nil
+	}
+	var br *domain.BlueprintRun
+	if n.cfg.blueprintRunID != "" {
+		if br, err = s.blueprints.GetRunSystem(ctx, n.orgID, n.cfg.blueprintRunID); err != nil {
+			delegateLog.Warn("read the blueprint run before a warm resume failed; letting the claim go",
+				"conversation", n.conversationID, "blueprint_run", n.cfg.blueprintRunID, "error", err)
+			return nil
+		}
+	}
+	model, err := s.modelForClaim(ctx, n.orgID, br, *conv)
+	if err != nil {
+		delegateLog.Info("the model check refused a warm resume; letting the claim go for a cold claim to decide",
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "model", n.params.Model, "error", err)
+		return nil
+	}
+	if model != n.params.Model {
+		delegateLog.Info("a claim would now run on another model than the warm engagement's; letting the claim go",
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "model", model)
+		return nil
+	}
+	return conv
 }
 
 // letGoWarm ends an engagement keeping its claim warm: the jail stopped, then
