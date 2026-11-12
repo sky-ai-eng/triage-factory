@@ -582,14 +582,13 @@ func (s *conversationStore) ResumeWarmClaimSystem(ctx context.Context, orgID, co
 	return resumed, err
 }
 
-// ReleaseWarmClaimSystem lets a warm claim go, released completed as its
-// turn's own write would have released it. The conversation is not written:
-// it holds its turn-end state already. The dispatchers are told when the
-// release leaves work to claim: a conversation a follow-up resumed in the
-// moment before the release, left mid-flight with no claim, or an ended one,
-// whose task's next run the claim held out of the tree (warmTreeHeldSQL).
-// released is false when the claim was not this engagement's warm claim any
-// more.
+// ReleaseWarmClaimSystem releases a warm claim as completed, as its turn's own
+// write would have. The conversation is not written; it already holds its
+// turn-end state. The dispatchers are woken when the release leaves work to
+// claim: the conversation was resumed and is now mid-flight with no claim, or
+// it has ended and its task's next run may be waiting on the tree
+// (warmTreeHeldSQL). released is false when the claim is no longer this
+// engagement's warm claim.
 func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error) {
 	err = inTx(ctx, s.admin, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `

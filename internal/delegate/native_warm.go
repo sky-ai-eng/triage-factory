@@ -32,10 +32,8 @@ import (
 // not apply while it runs.
 const warmWaitOp = "warm_wait"
 
-// warmWaitBackstop is how often an engagement keeping its claim warm reads its
-// conversation without having been rung, for a person's message and for the
-// conversation having ended. The doorbell is a NOTIFY, and a dropped one costs
-// at most this long. A var, as thawTimeout is, so a test can shorten it.
+// warmWaitBackstop is how often a warm engagement rereads its conversation
+// without being woken, in case a wake was lost. A var so tests can shorten it.
 var warmWaitBackstop = 15 * time.Second
 
 // nativeTail is a native engagement past agent-live: what its turns run with,
@@ -272,25 +270,20 @@ const (
 	warmFenced
 )
 
-// waitWarm holds the warm claim until deadline, or until something ends the
-// wait first.
-//
-// The entry order is what keeps a message or an ending from being missed. The
-// engagement registers before it looks, so a doorbell rung after it looked
-// reaches it; and it looks once it is registered, so a message or an ending
-// whose doorbell rang before then, or that landed during the turn after its
-// last read, is read anyway.
+// waitWarm holds the warm claim until deadline or until something ends the
+// wait. It registers before its first read, so a wake sent after that read
+// still reaches it, and a message or ending that landed before registration
+// is seen by the read.
 func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time) warmEnd {
 	wait := s.warmWaits.Register(n.conversationID, n.orgID)
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
 
-	// look reads the conversation and reports how the wait ends, with ok
-	// false while it goes on. An ended conversation lets go before a waiting
-	// message is read, since no follow-up resumes one. A message resumes it,
-	// unless the registry let the engagement go while it looked: the let-go
-	// stands, and the message's conversation is queued, so the claim after
-	// this one drives it.
+	// look reads the conversation and returns how the wait ends; ok is false
+	// if it continues. An ended conversation is let go even with a message
+	// waiting, since no message resumes it. A waiting message resumes it,
+	// unless the registry already let this engagement go, in which case the
+	// queued conversation goes to the next claim.
 	look := func() (end warmEnd, ok bool) {
 		st := s.readWarmWait(ctx, n)
 		switch {

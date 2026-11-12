@@ -581,27 +581,21 @@ func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv d
 	}
 }
 
-// RingWarmWaitsForEnded tells the engagements keeping any of ended's claims
-// warm that their conversations ended, so each lets go of its claim and the
-// task's tree at once rather than on its backstop poll. ended are the rows an
-// ending statement returned, rung once the statement has committed; each
-// names the executor of its active claim, if it has one. Every row is rung:
-// one no claim holds rings nothing, and one whose executor has no engagement
-// waiting on it is answered gone.
+// RingWarmWaitsForEnded wakes any engagement keeping a warm claim on one of
+// ended's conversations, so it releases the claim without waiting for its
+// backstop poll. Call it after the ending commits, with the rows the ending
+// returned.
 func (s *Spawner) RingWarmWaitsForEnded(ctx context.Context, orgID string, ended []domain.Conversation) {
 	for i := range ended {
 		s.ringWarmWait(ctx, orgID, &ended[i])
 	}
 }
 
-// ringWarmWait tells the engagement keeping conv's claim warm that the
-// conversation was resumed or ended, without waiting for an answer. One in
-// this process is rung directly; otherwise the claim's executor is sent a
-// steer signal, which its apply loop answers by ringing the engagement there
-// (deliverSignal). conv is the conversation as read while its warm claim was
-// the one it named: before the resume, or as the ending returned it. A ring
-// nothing answers costs nothing: no claim is warm, or the engagement finds
-// the message or the ending on its backstop poll.
+// ringWarmWait wakes the engagement keeping conv's claim warm after conv was
+// resumed or ended. An engagement in this process is woken directly; one on
+// another executor is sent a steer signal (deliverSignal). conv must name the
+// warm claim's executor, so it is read before the resume or taken from the
+// ending's returned rows. A lost wake is covered by the backstop poll.
 func (s *Spawner) ringWarmWait(ctx context.Context, orgID string, conv *domain.Conversation) {
 	if s.warmWaits.Wake(conv.ID) {
 		return
@@ -618,7 +612,7 @@ func (s *Spawner) ringWarmWait(ctx context.Context, orgID string, conv *domain.C
 	}
 	id, err := conversationSignals.Insert(ctx, orgID, conv.ID, domain.ConversationSignalSteer, "", executorID)
 	if err != nil {
-		delegateLog.Warn("insert the doorbell for a warm claim failed; its engagement's backstop poll reads the conversation",
+		delegateLog.Warn("insert the warm claim's steer signal failed; its backstop poll will read the conversation",
 			"conversation", conv.ID, "error", err)
 		return
 	}

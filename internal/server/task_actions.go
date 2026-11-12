@@ -708,8 +708,8 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 	for i := range ended {
 		s.kickMemoryOwed(orgID, ended[i].ID)
 	}
-	// A warm claim on an ended conversation serves nothing, and holds the
-	// task's tree and its executor's slot until it lets go.
+	// A warm claim on an ended conversation still holds the task's tree and
+	// an executor slot. Wake it so it releases them now.
 	if s.spawner != nil {
 		s.spawner.RingWarmWaitsForEnded(ctx, orgID, ended)
 	}

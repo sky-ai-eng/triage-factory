@@ -217,8 +217,8 @@ func (th *Handler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
 			th.memoryOwed(orgID, conv.ID)
 		}
 	}
-	// A warm claim on an ended conversation serves nothing, and holds the
-	// task's tree and its executor's slot until it lets go.
+	// A warm claim on an ended conversation still holds the task's tree and
+	// an executor slot. Wake it so it releases them now.
 	if sp := th.spawnerRuntime(); sp != nil {
 		sp.RingWarmWaitsForEnded(stampCtx, orgID, ended)
 	}

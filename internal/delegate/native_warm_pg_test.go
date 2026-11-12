@@ -599,11 +599,10 @@ func TestWarmClaim_EventIsNotFoldedIntoTheConversation(t *testing.T) {
 	}
 }
 
-// A new delegation on the task ends the warm conversation, which no follow-up
-// resumes, and rings the engagement keeping its claim, which lets go of the
-// task's tree for the run that replaces it well before the backstop poll would
-// have. Until then the run is not claimed into a tree a jail is still running
-// in.
+// A new run on the task ends the warm conversation. Until the warm claim is
+// released, the run can't be claimed into the tree. Passing the ended rows to
+// RingWarmWaitsForEnded releases it well inside the backstop interval, and the
+// run is then claimable.
 func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
 	f.awaitWarm(t, 1)
@@ -651,10 +650,9 @@ func TestWarmClaim_LetsGoWhenANewDelegationEndsTheConversation(t *testing.T) {
 	}
 }
 
-// A conversation that ends before its engagement starts waiting, so the ring
-// for it finds nothing to wake, lets go when the wait starts, well before the
-// backstop poll would read it. It is ended straight on the row here, which
-// rings nothing, while the turn-end snapshot is held.
+// A conversation already ended when the wait starts is let go on the wait's
+// first read. The test ends it with SQL, which wakes nothing, while the
+// turn-end snapshot is held.
 func TestWarmClaim_EndingBeforeTheWaitIsNotMissed(t *testing.T) {
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}},
 		beforeStart: func(f *warmEngagement) { f.gate.hold() }})
