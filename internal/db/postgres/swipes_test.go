@@ -29,10 +29,16 @@ func TestSwipeStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForSwipes(t, h)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		agentID := uuid.New().String()
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO agents (id, org_id, display_name) VALUES ($1, $2, 'Swipe Conformance Bot')`,
+			agentID, orgID)
 
 		return dbtest.SwipeStoreHarness{
-			Store: stores.Swipes,
-			OrgID: orgID,
+			Store:   stores.Swipes,
+			Tasks:   stores.Tasks,
+			AgentID: agentID,
+			OrgID:   orgID,
 			// insertSwipeEvent resolves creator_user_id through
 			// COALESCE(tf.current_user_id(), org owner); on the AdminDB pool
 			// there are no claims, so every row lands on the org owner.

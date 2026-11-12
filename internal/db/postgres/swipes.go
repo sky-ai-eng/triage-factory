@@ -55,10 +55,10 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		// Audit-only path.
 	case "dismiss":
 		newStatus = "dismissed"
-		closeReason = "user_dismissed"
+		closeReason = db.UserDismissedCloseReason
 	case "complete":
 		newStatus = "done"
-		closeReason = "user_completed"
+		closeReason = db.UserCompletedCloseReason
 	case "snooze":
 		// A snoozed row with no wake time is parked forever — the
 		// wake sweep requeues on snooze_until. Refuse rather than
@@ -257,7 +257,10 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 		// its guard. Without it two callers can both pass and both write —
 		// the row lock plus READ COMMITTED's per-statement snapshot means
 		// the second one's guard below sees the first one's committed
-		// 'undo' row and refuses.
+		// 'undo' row and refuses. The same lock orders the guard against
+		// every other write to the row: a close or claim committed before
+		// it is in the UPDATE's snapshot, and one after it waits for this
+		// transaction.
 		if _, err := tx.ExecContext(ctx,
 			`SELECT 1 FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`,
 			orgID, taskID,
@@ -265,9 +268,10 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			return err
 		}
 		// Undo reverses the caller's own last gesture, and only while that
-		// gesture is still the last thing that happened to the task. See the
-		// SQLite mirror for why both halves are load-bearing, why the
-		// predicate rides the UPDATE, and why the audit row goes in after.
+		// gesture is still the last thing that happened to the task: the
+		// newest swipe_events row is the caller's, and the task is still in
+		// the state its action left. See the SQLite mirror for why the
+		// predicate rides the UPDATE and why the audit row goes in after.
 		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
@@ -280,10 +284,12 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        close_deferred_event_id = NULL,
 			        close_deferred_at = NULL
 			  WHERE org_id = $1 AND id = $2
-			    AND (SELECT creator_user_id FROM swipe_events
-			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) = $3
-			    AND (SELECT action FROM swipe_events
-			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) <> 'undo'`,
+			    AND EXISTS (
+			        SELECT 1
+			          FROM (SELECT creator_user_id, action FROM swipe_events
+			                 WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) AS newest
+			         WHERE newest.creator_user_id = $3
+			           AND `+db.UndoableGestureStateSQL("newest.action", "$3")+`)`,
 			orgID, taskID, userID,
 		)
 		if err != nil {
@@ -309,9 +315,10 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 }
 
 // errNothingToUndo signals UndoLastSwipe's guard tripped: the task's newest
-// gesture isn't the caller's, or is itself an undo. Sentinel distinct from
-// real DB errors so UndoLastSwipe can return (false, nil) while triggering
-// the deferred tx rollback.
+// gesture isn't the caller's, isn't one undo reverses, or isn't what the
+// task's state still shows. Sentinel distinct from real DB errors so
+// UndoLastSwipe can return (false, nil) while triggering the deferred tx
+// rollback.
 var errNothingToUndo = errors.New("postgres swipes: the task's newest gesture isn't the caller's to undo")
 
 // runInTx runs fn in a transaction on s.q — the caller's own *sql.Tx when

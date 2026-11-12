@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // SwipeStoreFactory is what a per-backend test file hands to
@@ -59,6 +60,15 @@ type SwipeStoreHarness struct {
 	// error. Every handler holds the store this way, inside its own WithTx,
 	// so whatever the store leaves in that transaction is committed.
 	InCallerTx func(t *testing.T, fn func(db.SwipeStore) error)
+	// Tasks is the task store over the same database. The suite uses it to
+	// stage the claim the claim and delegate routes write before they record
+	// their gesture, to stage the task changes that write no swipe_events row
+	// (closes and automated agent claims), and to read a task's claim and
+	// close.
+	Tasks db.TaskStore
+	// AgentID is an agent row the harness seeded in OrgID, whose claim on a
+	// task SeedTask made lands on a team.
+	AgentID string
 }
 
 // RunSwipeStoreConformance runs the shared assertion suite. The
@@ -76,8 +86,10 @@ type SwipeStoreHarness struct {
 //   - ClearSnooze wakes a snoozed task without an audit row, and
 //     refuses a task that isn't snoozed.
 //   - UndoLastSwipe writes an 'undo' audit row + resets the task to
-//     queued + clears snooze_until, and refuses unless the task's newest
-//     gesture is the caller's own and isn't already an undo.
+//     queued + clears snooze_until, the claim, and the close, and refuses
+//     unless the task's newest gesture is the caller's own, isn't already
+//     an undo, and is still what the task's state shows: a close or an
+//     automated agent claim since refuses it.
 //   - Context cancellation fails fast.
 func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Helper()
@@ -627,6 +639,124 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		}
 	})
 
+	t.Run("UndoLastSwipe_ReversesTheCallersGesture", func(t *testing.T) {
+		// Nothing has happened to the task since the caller's gesture, so the
+		// undo reverses it whichever gesture it was, and leaves the task in
+		// the unclaimed queue with no close.
+		for _, g := range undoableGestures {
+			t.Run(g.action, func(t *testing.T) {
+				h := factory(t)
+				ctx := context.Background()
+				taskID := h.SeedTask(t)
+				g.stage(t, h, taskID)
+
+				ok, err := h.Store.UndoLastSwipe(ctx, h.OrgID, taskID, h.UserID)
+				if err != nil || !ok {
+					t.Fatalf("UndoLastSwipe after the caller's own %s: ok=%v err=%v", g.action, ok, err)
+				}
+				task := readTaskRow(t, h, taskID)
+				if task.Status != "queued" || task.ClaimedByUserID != "" || task.ClaimedByAgentID != "" ||
+					task.CloseReason != "" || task.ClosedAt != nil {
+					t.Fatalf("task after undoing a %s = (status %q, user claim %q, agent claim %q, close_reason %q, closed_at %v); want queued, unclaimed, and open",
+						g.action, task.Status, task.ClaimedByUserID, task.ClaimedByAgentID, task.CloseReason, task.ClosedAt)
+				}
+				if got := h.ReadAudit(t, taskID); !equalActions(got, []string{g.action, "undo"}) {
+					t.Fatalf("swipe_events actions=%v want [%s undo]", got, g.action)
+				}
+			})
+		}
+	})
+
+	t.Run("UndoLastSwipe_RefusesAfterACloseThatIsNotAGesture", func(t *testing.T) {
+		// An event close writes no swipe_events row, so the caller's gesture
+		// is still the task's newest row after one. Only the task's state
+		// shows the close came after it, and an undo that passed here would
+		// reopen a task the event closed and record that as an undo of the
+		// caller's gesture. A gesture that closed the task is first reopened
+		// by a requeue, which writes no row either.
+		for _, g := range undoableGestures {
+			t.Run(g.action, func(t *testing.T) {
+				h := factory(t)
+				ctx := context.Background()
+				taskID := h.SeedTask(t)
+				g.stage(t, h, taskID)
+				if g.closes {
+					if ok, err := h.Store.RequeueTask(ctx, h.OrgID, taskID); err != nil || !ok {
+						t.Fatalf("requeue: ok=%v err=%v", ok, err)
+					}
+				}
+				if _, err := h.Tasks.CloseSystem(ctx, h.OrgID, taskID, "auto_closed_by_event", "github:pr:merged"); err != nil {
+					t.Fatalf("event close: %v", err)
+				}
+
+				ok, err := h.Store.UndoLastSwipe(ctx, h.OrgID, taskID, h.UserID)
+				if err != nil {
+					t.Fatalf("UndoLastSwipe: %v", err)
+				}
+				if ok {
+					t.Fatalf("UndoLastSwipe reversed the caller's %s over an event close that came after it", g.action)
+				}
+				task := readTaskRow(t, h, taskID)
+				if task.Status != "done" || task.CloseReason != "auto_closed_by_event" || task.ClosedAt == nil {
+					t.Fatalf("task = (status %q, close_reason %q, closed_at %v) after a refused undo; want the event's close intact",
+						task.Status, task.CloseReason, task.ClosedAt)
+				}
+				if got := h.ReadAudit(t, taskID); !equalActions(got, []string{g.action}) {
+					t.Fatalf("swipe_events actions=%v want [%s] (a refused undo leaves no trace)", got, g.action)
+				}
+			})
+		}
+	})
+
+	t.Run("UndoLastSwipe_RefusesAfterAnAutomatedAgentClaim", func(t *testing.T) {
+		// The task went back to the queue without a swipe_events row — a wake
+		// for a snooze, a requeue for the rest — and an automated agent claim
+		// took it from there. The caller's gesture is still the newest row,
+		// and an undo that passed would take the task off the agent and stop
+		// its run. A delegate is left out: it leaves the task held by an
+		// agent too, which is the gap UndoableGestureStateSQL documents.
+		for _, g := range undoableGestures {
+			if g.action == "delegate" {
+				// TODO(TFAC-1379): run this case for a delegate once the guard
+				// can tell the delegate's agent claim from an automated one.
+				continue
+			}
+			t.Run(g.action, func(t *testing.T) {
+				h := factory(t)
+				ctx := context.Background()
+				taskID := h.SeedTask(t)
+				g.stage(t, h, taskID)
+				var released bool
+				var err error
+				if g.action == "snooze" {
+					released, err = h.Store.ClearSnooze(ctx, h.OrgID, taskID)
+				} else {
+					released, err = h.Store.RequeueTask(ctx, h.OrgID, taskID)
+				}
+				if err != nil || !released {
+					t.Fatalf("return the task to the queue: ok=%v err=%v", released, err)
+				}
+				if ok, err := h.Tasks.StampAgentClaimIfUnclaimedSystem(ctx, h.OrgID, taskID, h.AgentID, ""); err != nil || !ok {
+					t.Fatalf("automated agent claim: ok=%v err=%v", ok, err)
+				}
+
+				ok, err := h.Store.UndoLastSwipe(ctx, h.OrgID, taskID, h.UserID)
+				if err != nil {
+					t.Fatalf("UndoLastSwipe: %v", err)
+				}
+				if ok {
+					t.Fatalf("UndoLastSwipe reversed the caller's %s over an agent claim that came after it", g.action)
+				}
+				if task := readTaskRow(t, h, taskID); task.ClaimedByAgentID != h.AgentID {
+					t.Fatalf("claimed_by_agent_id=%q after a refused undo; want the agent's claim intact (%q)", task.ClaimedByAgentID, h.AgentID)
+				}
+				if got := h.ReadAudit(t, taskID); !equalActions(got, []string{g.action}) {
+					t.Fatalf("swipe_events actions=%v want [%s] (a refused undo leaves no trace)", got, g.action)
+				}
+			})
+		}
+	})
+
 	t.Run("CtxCancellation_FailsFast", func(t *testing.T) {
 		h := factory(t)
 		store, orgID, seedTask := h.Store, h.OrgID, h.SeedTask
@@ -637,6 +767,65 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 			t.Fatalf("RecordSwipe with cancelled ctx returned nil error")
 		}
 	})
+}
+
+// undoableGestures stages each gesture an undo reverses the way its route
+// leaves the task: the claim and delegate routes stamp the claim and then
+// record the gesture, and the rest are one store call. closes marks the two
+// that close the task.
+var undoableGestures = []struct {
+	action string
+	closes bool
+	stage  func(t *testing.T, h SwipeStoreHarness, taskID string)
+}{
+	{action: "dismiss", closes: true, stage: func(t *testing.T, h SwipeStoreHarness, taskID string) {
+		t.Helper()
+		recordGesture(t, h, taskID, "dismiss")
+	}},
+	{action: "complete", closes: true, stage: func(t *testing.T, h SwipeStoreHarness, taskID string) {
+		t.Helper()
+		recordGesture(t, h, taskID, "complete")
+	}},
+	{action: "snooze", stage: func(t *testing.T, h SwipeStoreHarness, taskID string) {
+		t.Helper()
+		if ok, err := h.Store.SnoozeTask(context.Background(), h.OrgID, taskID, time.Now().Add(time.Hour).UTC(), 0); err != nil || !ok {
+			t.Fatalf("snooze: ok=%v err=%v", ok, err)
+		}
+	}},
+	{action: "claim", stage: func(t *testing.T, h SwipeStoreHarness, taskID string) {
+		t.Helper()
+		if ok, err := h.Tasks.ClaimQueuedForUser(context.Background(), h.OrgID, taskID, h.UserID); err != nil || !ok {
+			t.Fatalf("user claim: ok=%v err=%v", ok, err)
+		}
+		recordGesture(t, h, taskID, "claim")
+	}},
+	{action: "delegate", stage: func(t *testing.T, h SwipeStoreHarness, taskID string) {
+		t.Helper()
+		if res, err := h.Tasks.HandoffAgentClaim(context.Background(), h.OrgID, taskID, h.AgentID, h.UserID); err != nil || res != db.HandoffChanged {
+			t.Fatalf("hand the task to the agent: result=%v err=%v", res, err)
+		}
+		recordGesture(t, h, taskID, "delegate")
+	}},
+}
+
+func recordGesture(t *testing.T, h SwipeStoreHarness, taskID, action string) {
+	t.Helper()
+	if _, ok, err := h.Store.RecordSwipe(context.Background(), h.OrgID, taskID, action, 0, nil); err != nil || !ok {
+		t.Fatalf("record %s: ok=%v err=%v", action, ok, err)
+	}
+}
+
+// readTaskRow reads a task's claim and close, which ReadTask does not report.
+func readTaskRow(t *testing.T, h SwipeStoreHarness, taskID string) *domain.Task {
+	t.Helper()
+	task, err := h.Tasks.GetSystem(context.Background(), h.OrgID, taskID)
+	if err != nil {
+		t.Fatalf("read task %s: %v", taskID, err)
+	}
+	if task == nil {
+		t.Fatalf("task %s not found", taskID)
+	}
+	return task
 }
 
 // equalActions does an order-sensitive comparison of two action
