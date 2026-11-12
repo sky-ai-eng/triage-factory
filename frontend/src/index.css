@@ -87,6 +87,23 @@ samp {
   cursor: pointer;
 }
 
+/* A native select's open list is painted by the browser, not by the page.
+   Chromium fills its rows from the select's computed background, and most of
+   our selects are bg-transparent, so in dark mode the rows fall back to the
+   browser's light default while the options inherit the theme's light ink.
+   Giving the options an explicit ground and ink keeps the list in the theme
+   for every select. Author styles beat the user-agent sheet regardless of
+   specificity, so :where() keeps these at zero for a utility class to win;
+   that is also why the disabled row needs its own colour, since the UA's
+   greyed-out rule would otherwise lose to the one above. */
+:where(select option, select optgroup) {
+  background-color: var(--color-raised);
+  color: var(--color-ink-1);
+}
+:where(select option:disabled) {
+  color: var(--color-ink-4);
+}
+
 :where(button, a, input, select, textarea, [tabindex]):focus-visible {
   outline: 1.5px solid var(--color-focus);
   outline-offset: 3px;

@@ -30,7 +30,13 @@ import path from 'node:path'
 // side because the name is already in scope. The prop should be a structural
 // type the component declares itself.
 
-const UI_DIR = `${path.sep}src${path.sep}ui${path.sep}`
+// Paths are compared in forward-slash form so the rule reads the same on
+// Windows, where ESLint hands it backslashed filenames, as it does elsewhere.
+const UI_DIR = '/src/ui/'
+
+function toSlashes(p) {
+  return p.split(path.sep).join('/')
+}
 
 /** Where the boundary sits for a given file: the .../src/ui prefix it lives under. */
 function uiRootFor(filename) {
@@ -54,19 +60,21 @@ const rule = {
   },
 
   create(context) {
-    const filename = context.filename ?? context.getFilename()
+    const filename = toSlashes(context.filename ?? context.getFilename())
     const uiRoot = uiRootFor(filename)
     // Not a design-system file, so the boundary does not apply.
     if (!uiRoot) return {}
 
-    const dir = path.dirname(filename)
+    const dir = path.posix.dirname(filename)
 
     function check(node, source) {
       // Bare and absolute-URL specifiers are third-party or built-in; only a
       // relative path can walk out of the directory.
       if (!source.startsWith('.')) return
 
-      const resolved = path.resolve(dir, source)
+      // join, not resolve: posix.resolve would treat a drive-letter path as
+      // relative and prefix the working directory. join only normalises.
+      const resolved = path.posix.join(dir, source)
       if (resolved.startsWith(uiRoot)) return
 
       // Name the thing being reached for, so the message says what to do
