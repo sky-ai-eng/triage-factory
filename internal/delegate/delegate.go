@@ -554,6 +554,9 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		// the gap before step 0 can be claimed.
 		s.kickMemoryOwed(orgID, c.ID)
 	}
+	// A warm claim on an ended conversation holds the task's tree, which step
+	// 0 is not claimed into until the claim lets go.
+	s.RingWarmWaitsForEnded(bgCtx, orgID, ended)
 
 	// The blueprint advances entirely through the run queue from here: the
 	// dispatcher claims step 0, builds the shared workspace, runs the agent,

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
 )
 
 // pgConversationQueueExecutorID/pgConversationQueueBootEpoch are the fixed ownership identity
@@ -1197,6 +1200,94 @@ func TestClaimTakeover_Postgres(t *testing.T) {
 func TestWarmClaim_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	dbtest.RunWarmClaimConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
+
+// A warm claim let go on a conversation that has ended tells the dispatchers,
+// so the run the claim held out of the task's tree is claimed at once rather
+// than on the next scan.
+func TestReleaseWarmClaim_Postgres_EndedConversationWakesTheDispatchers(t *testing.T) {
+	h := pgtest.Shared(t)
+	f := pgClaimLeaseFixture(t, h)
+	ctx := context.Background()
+
+	conversationID, _ := f.StageStep(t)
+	claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != conversationID {
+		t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
+	}
+	if _, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, conversationID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), ""); err != nil {
+		t.Fatalf("ConcludeKeepingClaimSystem: %v", err)
+	}
+	if _, err := f.Stores.Conversations.EndConversationSystem(ctx, f.OrgID, conversationID, domain.EndedDelegated); err != nil {
+		t.Fatalf("EndConversationSystem: %v", err)
+	}
+
+	wakes := listenForWakes(t, h)
+	if released, err := f.Stores.Conversations.ReleaseWarmClaimSystem(ctx, f.OrgID, conversationID, claimed.ClaimID); err != nil || !released {
+		t.Fatalf("ReleaseWarmClaimSystem = (%v, %v), want (true, nil)", released, err)
+	}
+	want := wakebus.Message{Kind: wakebus.KindEvent, OrgID: f.OrgID}
+	select {
+	case got := <-wakes:
+		if got != want {
+			t.Errorf("wake = %+v, want %+v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the release published no dispatcher wake")
+	}
+}
+
+// listenForWakes listens on the dispatcher wake channel and returns, once the
+// listener is receiving, the wakes published after it. NOTIFY reaches only a
+// session already listening, so it publishes a probe until one arrives.
+func listenForWakes(t *testing.T, h *pgtest.Harness) <-chan wakebus.Message {
+	t.Helper()
+	dsn, err := h.Container.ConnectionString(context.Background(), "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	const probe = "probe"
+	received := make(chan wakebus.Message, 16)
+	go pgnotify.NewListener(dsn, wakebus.Channel, func(payload string) {
+		var m wakebus.Message
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			t.Errorf("wake payload %q: %v", payload, err)
+			return
+		}
+		received <- m
+	}).Run(ctx)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := wakebus.Publish(context.Background(), h.AdminDB, probe, ""); err != nil {
+			t.Fatalf("publish the probe: %v", err)
+		}
+		select {
+		case <-received:
+			// Probes still in flight are dropped, so the channel carries only
+			// what was published after this returns.
+			wakes := make(chan wakebus.Message, 16)
+			go func() {
+				for {
+					select {
+					case m := <-received:
+						if m.Kind != probe {
+							wakes <- m
+						}
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+			return wakes
+		case <-time.After(200 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("the wake listener never started receiving")
+			}
+		}
+	}
 }
 
 // TestClaimableProbe_Postgres runs the shared claimability-probe conformance

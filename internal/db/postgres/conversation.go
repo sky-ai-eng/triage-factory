@@ -584,10 +584,12 @@ func (s *conversationStore) ResumeWarmClaimSystem(ctx context.Context, orgID, co
 
 // ReleaseWarmClaimSystem lets a warm claim go, released completed as its
 // turn's own write would have released it. The conversation is not written:
-// it holds its turn-end state already. A conversation a follow-up resumed in
-// the moment before the release is left mid-flight with no claim, which is
-// the queue's to claim, so the dispatchers are told. released is false when
-// the claim was not this engagement's warm claim any more.
+// it holds its turn-end state already. The dispatchers are told when the
+// release leaves work to claim: a conversation a follow-up resumed in the
+// moment before the release, left mid-flight with no claim, or an ended one,
+// whose task's next run the claim held out of the tree (warmTreeHeldSQL).
+// released is false when the claim was not this engagement's warm claim any
+// more.
 func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error) {
 	err = inTx(ctx, s.admin, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
@@ -602,13 +604,13 @@ func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, c
 			return err
 		}
 		released = true
-		var resumed bool
+		var wake bool
 		if err := q.QueryRowContext(ctx, `
-			SELECT status IS NULL FROM conversations WHERE org_id = $1 AND id = $2
-		`, orgID, conversationID).Scan(&resumed); err != nil {
+			SELECT status IS NULL OR ended_at IS NOT NULL FROM conversations WHERE org_id = $1 AND id = $2
+		`, orgID, conversationID).Scan(&wake); err != nil {
 			return err
 		}
-		if resumed {
+		if wake {
 			_ = wakebus.Publish(ctx, q, wakebus.KindEvent, orgID)
 		}
 		return nil

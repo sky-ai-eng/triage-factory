@@ -688,11 +688,10 @@ func (s *Spawner) deliverSignal(ctx context.Context, sig domain.ConversationSign
 	case domain.ConversationSignalInterrupt:
 		return ackResultForControlErr(local.Interrupt(ctx, sig.ConversationID))
 	case domain.ConversationSignalSteer:
-		// A doorbell, not a delivery: the person's message is on the
-		// transcript, and the signal tells an engagement keeping the
-		// conversation's claim warm here to resume it (ringWarmWait). Gone,
-		// when none is waiting, costs the sender nothing; it never reads the
-		// answer.
+		// A doorbell, not a delivery: the person's message or the ending is
+		// on the conversation, and the signal tells an engagement keeping its
+		// claim warm here to read it (ringWarmWait). Gone, when none is
+		// waiting, costs the sender nothing; it never reads the answer.
 		if s.warmWaits.Wake(sig.ConversationID) {
 			return domain.ConversationSignalAckOK
 		}

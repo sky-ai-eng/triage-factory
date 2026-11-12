@@ -708,6 +708,11 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 	for i := range ended {
 		s.kickMemoryOwed(orgID, ended[i].ID)
 	}
+	// A warm claim on an ended conversation serves nothing, and holds the
+	// task's tree and its executor's slot until it lets go.
+	if s.spawner != nil {
+		s.spawner.RingWarmWaitsForEnded(ctx, orgID, ended)
+	}
 	// One conversation_update per stamped row. The rows carry no new status —
 	// what changed is whether a follow-up can land — so this is an
 	// invalidation signal: a run station holding one of them refetches and

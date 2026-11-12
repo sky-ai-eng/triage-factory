@@ -32,11 +32,10 @@ import (
 // not apply while it runs.
 const warmWaitOp = "warm_wait"
 
-// warmWaitBackstop is how often an engagement keeping its claim warm looks for
-// a person's message without having been rung, and for its conversation
-// having ended, which nothing rings for. The doorbell is a NOTIFY, and a
-// dropped one costs at most this long. A var, as thawTimeout is, so a test can
-// shorten it.
+// warmWaitBackstop is how often an engagement keeping its claim warm reads its
+// conversation without having been rung, for a person's message and for the
+// conversation having ended. The doorbell is a NOTIFY, and a dropped one costs
+// at most this long. A var, as thawTimeout is, so a test can shorten it.
 var warmWaitBackstop = 15 * time.Second
 
 // nativeTail is a native engagement past agent-live: what its turns run with,
@@ -276,27 +275,37 @@ const (
 // waitWarm holds the warm claim until deadline, or until something ends the
 // wait first.
 //
-// The entry order is what keeps a message from being missed. The engagement
-// registers before it looks, so a doorbell rung for a resume after it looked
-// reaches it; and it looks once it is registered, so a message whose doorbell
-// rang before then, or that arrived during the turn after its last read, is
-// read anyway.
+// The entry order is what keeps a message or an ending from being missed. The
+// engagement registers before it looks, so a doorbell rung after it looked
+// reaches it; and it looks once it is registered, so a message or an ending
+// whose doorbell rang before then, or that landed during the turn after its
+// last read, is read anyway.
 func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time) warmEnd {
 	wait := s.warmWaits.Register(n.conversationID, n.orgID)
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
 
-	// A person's message is waiting. If the registry let the engagement go
-	// while it looked, the let-go stands: the message's conversation is
-	// queued, so the claim after this one drives it.
-	resume := func() warmEnd {
-		if wait.TakeForResume() {
-			return warmResumed
+	// look reads the conversation and reports how the wait ends, with ok
+	// false while it goes on. An ended conversation lets go before a waiting
+	// message is read, since no follow-up resumes one. A message resumes it,
+	// unless the registry let the engagement go while it looked: the let-go
+	// stands, and the message's conversation is queued, so the claim after
+	// this one drives it.
+	look := func() (end warmEnd, ok bool) {
+		st := s.readWarmWait(ctx, n)
+		switch {
+		case st.Ended:
+			return warmLetGo, true
+		case !st.PersonMessageWaiting:
+			return 0, false
+		case wait.TakeForResume():
+			return warmResumed, true
+		default:
+			return warmLetGo, true
 		}
-		return warmLetGo
 	}
-	if s.readWarmWait(ctx, n).PersonMessageWaiting {
-		return resume()
+	if end, ok := look(); ok {
+		return end
 	}
 	window := time.NewTimer(time.Until(deadline))
 	defer window.Stop()
@@ -305,23 +314,19 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	for {
 		select {
 		case <-wait.Wake():
-			if s.readWarmWait(ctx, n).PersonMessageWaiting {
-				return resume()
+			if end, ok := look(); ok {
+				return end
 			}
 		case <-backstop.C:
-			st := s.readWarmWait(ctx, n)
-			if st.Ended {
-				return warmLetGo
-			}
-			if st.PersonMessageWaiting {
-				return resume()
+			if end, ok := look(); ok {
+				return end
 			}
 		case <-window.C:
 			// One last look. A message whose ring is still on its way, or
 			// that landed as the timer fired, is read rather than left to a
 			// cold claim.
-			if s.readWarmWait(ctx, n).PersonMessageWaiting {
-				return resume()
+			if end, ok := look(); ok {
+				return end
 			}
 			return warmLetGo
 		case <-wait.LetGo():
