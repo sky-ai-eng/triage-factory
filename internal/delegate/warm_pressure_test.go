@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,4 +357,80 @@ func waitForProbe(t *testing.T, store *pressureStore) (claims, probes int) {
 		time.Sleep(pressureScan / 2)
 	}
 	return store.counts()
+}
+
+// racingWarmWaitStore answers the warm wait's read with a person's message
+// waiting, and lets the engagement go from the registry while it reads, the
+// way a dispatcher's let-go can land between the doorbell and the resume.
+type racingWarmWaitStore struct {
+	db.ConversationStore
+	s     *Spawner
+	armed atomic.Bool
+}
+
+func (r *racingWarmWaitStore) WarmWaitStateSystem(context.Context, string, string) (db.WarmWaitState, error) {
+	if !r.armed.Load() {
+		return db.WarmWaitState{}, nil
+	}
+	r.s.warmWaits.LetGoOldest()
+	return db.WarmWaitState{PersonMessageWaiting: true}, nil
+}
+
+// A let-go that lands while the wait reads a person's message stands, so the
+// slot the dispatcher let it go for does come back.
+func TestWarmWait_ALetGoDuringTheResumeReadStands(t *testing.T) {
+	store := &racingWarmWaitStore{}
+	stores := testSpawnerStores(nil)
+	stores.Conversations = store
+	s := NewSpawner(nil, stores, nil, nil, "")
+	store.s = s
+
+	ended := make(chan warmEnd, 1)
+	go func() {
+		ended <- s.waitWarm(context.Background(), nativeTail{orgID: "org-a", conversationID: "conv-1"}, time.Now().Add(time.Hour))
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.warmWaits.Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the wait never registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	store.armed.Store(true)
+	s.warmWaits.Wake("conv-1")
+
+	select {
+	case end := <-ended:
+		if end != warmLetGo {
+			t.Errorf("wait ended %v, want warmLetGo: the registry let it go before it resumed", end)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait did not end")
+	}
+}
+
+// A slot that frees during a blocked acquire, after a drain latched, starts
+// no claim: the pass reads the drain again before claiming.
+func TestWarmPressure_ASlotFreedAfterTheDrainLatchedStartsNoClaim(t *testing.T) {
+	store := &pressureStore{}
+	s := newPressureSpawner(t, store, 1)
+	sem := s.semaphore()
+	sem <- struct{}{} // an engagement that is not warm holds the only slot
+
+	// No scan tick fires inside this test, so only the freed slot ends the
+	// wait.
+	done := make(chan bool, 1)
+	go func() { done <- s.drainConversationQueue(context.Background(), time.Hour) }()
+	time.Sleep(pressureSettle) // the drain reaches the blocked acquire
+	s.SetDraining(true)
+	<-sem // the engagement finishes
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain did not return once the slot freed")
+	}
+	if claims, _ := store.counts(); claims != 0 {
+		t.Errorf("claims = %d, want 0: the executor is draining", claims)
+	}
 }

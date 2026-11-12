@@ -1098,8 +1098,9 @@ should be the cheapest self-healing thing available:
   executor lets go of its oldest warm claim, one per scan, when work it
   could claim is queued; work outside its own tier 1 counts only once it
   has been queued for a scan interval, so an executor with a free slot
-  takes it first. An org at its cap lets go of its oldest warm claim on
-  an executor when work waits behind the cap.
+  takes it first. When an org is at its cap with work waiting behind it,
+  each executor holding a warm claim in that org lets go of the org's
+  oldest one there.
 - At N=1 the hash always returns self; tier 1 always hits. No-op.
 
 ### 6.3 Curator homing — removed (TFAC-894)

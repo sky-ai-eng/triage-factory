@@ -499,12 +499,11 @@ type ConversationQueueStore interface {
 	//
 	// One condition is added: a conversation that is not this executor's own
 	// (placement's tier 1, its preferred executor) counts only once it has
-	// been in the queue for minWait. An executor with a free slot is woken
-	// the moment such a conversation is queued, so within that wait it has
-	// had its chance to take it, and an executor holding warm claims gives
-	// one up only for work nobody else is taking. An executor that lets go
-	// of a warm claim on this answer then claims through
-	// ClaimNextConversation, which takes its own tier 1 first.
+	// been in the queue for minWait. The wait is the chance an executor with
+	// a free slot gets to take the work first, so a warm claim is given up
+	// for work that has waited past it. It is measured from queued_at, which
+	// is when a conversation entered the queue, not always when it became
+	// claimable.
 	ClaimableExistsSystem(ctx context.Context, executorID string, placement ClaimPlacement, minWait time.Duration) (bool, error)
 
 	// OrgCapBlockedWorkExistsSystem reports whether orgID is at its

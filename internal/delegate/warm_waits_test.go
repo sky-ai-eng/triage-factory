@@ -113,3 +113,27 @@ func TestWarmWaits_OrgsWaitingNamesEachOrgOnce(t *testing.T) {
 		t.Errorf("OrgsWaiting = %v, want %v", got, want)
 	}
 }
+
+// A let-go and a resume decided at once settle under the registry's lock:
+// whichever comes first stands, and the other finds nothing.
+func TestWarmWaits_TakeForResumeSettlesAgainstALetGo(t *testing.T) {
+	r := NewWarmWaits()
+	letGoFirst := r.Register("conv-1", "org-a")
+	if _, ok := r.LetGoOldest(); !ok {
+		t.Fatal("LetGoOldest found no engagement")
+	}
+	if letGoFirst.TakeForResume() {
+		t.Error("TakeForResume took an engagement the registry had already let go")
+	}
+
+	resumeFirst := r.Register("conv-2", "org-a")
+	if !resumeFirst.TakeForResume() {
+		t.Fatal("TakeForResume refused an engagement nothing had let go")
+	}
+	if _, ok := r.LetGoOldest(); ok {
+		t.Error("LetGoOldest let go of an engagement that had already resumed")
+	}
+	if received(resumeFirst.LetGo()) {
+		t.Error("the resumed engagement was rung to let go")
+	}
+}

@@ -23,6 +23,9 @@ func (s *Spawner) letGoWarmBehindOrgCaps(ctx context.Context) bool {
 	for _, orgID := range s.warmWaits.OrgsWaiting() {
 		blocked, err := s.conversationQueue.OrgCapBlockedWorkExistsSystem(ctx, orgID)
 		if err != nil {
+			if ctx.Err() != nil {
+				return letGo
+			}
 			dispatchLog.Warn("check for work held back by the org cap failed; asking again on the next scan",
 				"org_id", orgID, "error", err)
 			continue
@@ -51,6 +54,9 @@ func (s *Spawner) letGoWarmForClaimableWork(ctx context.Context, minWait time.Du
 	executorID, _ := s.executorIdentity()
 	claimable, err := s.conversationQueue.ClaimableExistsSystem(ctx, executorID, s.claimPlacement(), minWait)
 	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
 		dispatchLog.Warn("check for claimable work failed; asking again on the next scan", "error", err)
 		return false
 	}

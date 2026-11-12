@@ -465,6 +465,12 @@ func (s *Spawner) drainConversationQueue(ctx context.Context, scanInterval time.
 			if !s.awaitSlot(ctx, sem, scanInterval) {
 				return false
 			}
+			// The wait can be long, and the drain, the gates, and the fences
+			// may have changed during it, so the slot goes back and the pass
+			// reads them again before claiming. This loop is the only
+			// acquirer, so the next pass takes the slot at once.
+			<-sem
+			continue
 		}
 		executorID, bootEpoch := s.executorIdentity()
 		// The lease anchor is taken BEFORE the call, not after: the claim's
