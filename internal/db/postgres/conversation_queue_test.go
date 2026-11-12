@@ -262,11 +262,11 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	}
 }
 
-// TestConversationQueueStore_Postgres_ReconcileOrphanedConversations heals the desync where a
-// child conversation is left non-terminal under an already-terminal
-// blueprint_run: the boot sweep cancels it (stamping completed_at) and only it,
-// leaving a child under a still-running parent untouched.
-func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testing.T) {
+// TestConversationQueueStore_Postgres_ParkOrphanedConversations parks the
+// conversations left mid-flight under a cancelled blueprint_run, staged through
+// the store's own fire and advance, and leaves a claimed child under a
+// still-running parent untouched.
+func TestConversationQueueStore_Postgres_ParkOrphanedConversations(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -274,11 +274,10 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
-	// Orphan: terminal (cancelled) parent, child still running. A second
-	// mid-flight orphan under the same parent — the step the blueprint moved
-	// on to — that no claim ever picked up must also be parked: a claimable
-	// step under a non-running parent is never actually claimed, so it would
-	// sit in the queue forever.
+	// Orphan: cancelled parent, child still mid-flight. A second mid-flight
+	// orphan under the same parent — the step the blueprint moved on to — must
+	// also be parked: the claim gate refuses both, so they would sit in the
+	// queue forever.
 	bpA, taskA, promptA := seedPgConversationQueueFixture(t, h, orgID, userID)
 	orphan := firePgStep(t, h, stores, orgID, bpA, taskA, domain.Conversation{
 		PromptID: promptA, CreatorUserID: userID,
@@ -296,9 +295,8 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	healthyID := firePgStep(t, h, stores, orgID, bpB, taskB, domain.Conversation{
 		PromptID: promptB, CreatorUserID: userID,
 	}).ID
-	// A genuinely running child holds an active claim (ClaimNextConversation mints
-	// it); without one, the claim-desync requeue arm would rightly treat the
-	// row as stranded.
+	// A genuinely running child holds an active claim (ClaimNextConversation
+	// mints it).
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
 		VALUES ($1, $2, $3, 'exec-healthy', 1, now() + interval '300 seconds')
@@ -306,9 +304,9 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 		t.Fatalf("seed healthy claim: %v", err)
 	}
 
-	n, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
-	if err != nil || n != 2 {
-		t.Fatalf("ReconcileOrphanedConversations = (%d, %v), want (2, nil)", n, err)
+	parked, err := stores.ConversationQueue.ParkOrphanedConversationsSystem(ctx)
+	if err != nil || len(parked) != 2 {
+		t.Fatalf("ParkOrphanedConversationsSystem = (%d parked, %v), want (2, nil)", len(parked), err)
 	}
 	if st, parked := pgConversationParked(t, h, orphanID); st != "open" || !parked {
 		t.Errorf("orphan = (%q, parked=%v), want (open, true)", st, parked)
@@ -321,16 +319,16 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
-		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
+	if again, err := stores.ConversationQueue.ParkOrphanedConversationsSystem(ctx); err != nil || len(again) != 0 {
+		t.Errorf("second ParkOrphanedConversationsSystem = (%d parked, %v), want (0, nil)", len(again), err)
 	}
 }
 
-// TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs pins the
+// TestConversationQueueStore_Postgres_CheckCountsClaimDesyncs pins the
 // checker: a terminal conversation with a live claim is counted and sampled,
 // and nothing — its claim included — is repaired, because no writer produces
 // the shape. A mid-flight row with no claim is simply claimable and left alone.
-func TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs(t *testing.T) {
+func TestConversationQueueStore_Postgres_CheckCountsClaimDesyncs(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -380,12 +378,9 @@ func TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs(t *testing.
 	healthyClaim := activeClaim(healthyID)
 	queuedID := seedChild("")
 
-	n, check, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
+	check, err := stores.ConversationQueue.CheckOrphanedStepsSystem(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedConversations: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("healed count = %d, want 0 (a desync is counted, never healed)", n)
+		t.Fatalf("CheckOrphanedStepsSystem: %v", err)
 	}
 	if check.ClaimDesyncs != 2 || len(check.ClaimDesyncSample) != 2 {
 		t.Errorf("claim desyncs = (%d, %v), want 2 counted and sampled", check.ClaimDesyncs, check.ClaimDesyncSample)
@@ -426,9 +421,9 @@ func TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs(t *testing.
 		t.Errorf("claimless row status = %q, want none (already claimable, nothing to heal)", st)
 	}
 
-	// Counting is idempotent: a second sweep finds the same two.
-	if n2, check2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 || check2.ClaimDesyncs != 2 {
-		t.Errorf("second sweep = (%d, %d desyncs, %v), want (0, 2, nil)", n2, check2.ClaimDesyncs, err)
+	// Counting is idempotent: a second check finds the same two.
+	if check2, err := stores.ConversationQueue.CheckOrphanedStepsSystem(ctx); err != nil || check2.ClaimDesyncs != 2 {
+		t.Errorf("second check = (%d desyncs, %v), want (2, nil)", check2.ClaimDesyncs, err)
 	}
 }
 
@@ -1025,14 +1020,14 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 	})
 }
 
-// TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConformance runs the shared
-// boot-reconcile conformance against the Postgres impl (admin pool, matching
-// production wiring). Each factory call resets the harness, so the suite's exact
-// healed counts are this subtest's alone.
-func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConformance(t *testing.T) {
+// TestConversationQueueStore_Postgres_OrphanedConversationsConformance runs the
+// shared orphan conformance against the Postgres impl (admin pool, matching
+// production wiring). Each factory call resets the harness, so the suite's
+// exact counts are this subtest's alone.
+func TestConversationQueueStore_Postgres_OrphanedConversationsConformance(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunReconcileOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
+	dbtest.RunOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.OrphanSeeder) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -1050,7 +1045,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 		// several at once.
 		runTask := map[string]string{}
 		nextStep := map[string]int{}
-		seed := dbtest.ReconcileOrphanSeeder{
+		seed := dbtest.OrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
 				taskID := seedPgTask(t, h, orgID, userID)
@@ -1079,6 +1074,31 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 				pgtest.MustExec(t, h.AdminDB,
 					`UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, stepIndex)
 			},
+			RequestCancel: func(t *testing.T, brID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET cancel_requested = true WHERE id = $1`, brID)
+			},
+			HoldClaim: func(t *testing.T, convID string) string {
+				t.Helper()
+				claimID := uuid.New().String()
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+					VALUES ($1, $2, $3, 'exec-orphan', 1, now() + interval '300 seconds')
+				`, claimID, orgID, convID)
+				return claimID
+			},
+			ClaimReleased: func(t *testing.T, claimID string) bool {
+				t.Helper()
+				var released bool
+				if err := h.AdminDB.QueryRow(`SELECT released_at IS NOT NULL FROM claims WHERE id = $1`, claimID).Scan(&released); err != nil {
+					t.Fatalf("read claim %s: %v", claimID, err)
+				}
+				return released
+			},
+			RequestStop: func(t *testing.T, convID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET stop_requested_at = now() WHERE id = $1`, convID)
+			},
 			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {
 				t.Helper()
 				var status string
@@ -1098,6 +1118,16 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 					t.Fatalf("read conversation %s status: %v", convID, err)
 				}
 				return status.String
+			},
+			ConversationPark: func(t *testing.T, convID string) (string, bool) {
+				t.Helper()
+				var reason sql.NullString
+				var parkedAt bool
+				if err := h.AdminDB.QueryRow(`SELECT park_reason, parked_at IS NOT NULL FROM conversations WHERE id = $1`, convID).
+					Scan(&reason, &parkedAt); err != nil {
+					t.Fatalf("read conversation %s park: %v", convID, err)
+				}
+				return reason.String, parkedAt
 			},
 		}
 		return stores.ConversationQueue, seed

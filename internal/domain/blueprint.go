@@ -38,13 +38,14 @@ func ValidBlueprintRunStatus(s string) bool {
 }
 
 // Terminal reports whether the status is an end state (no further steps will
-// run). A terminal blueprint_run must hold zero non-terminal child runs — the
-// invariant the cancellation path and the boot reconcile enforce: a
-// child left 'running' under a cancelled/completed parent strands the
-// dispatcher on phantom work and pins a worktree's branch, requeuing forever.
-// 'aborted' is terminal but message-resumable (ReopenRunForResume flips it back
-// to running); its retained child is parked with the verdict that aborted it,
-// and a parked conversation runs nothing, so the invariant holds.
+// run). A terminal run nobody called off can still hold one child that runs:
+// its current step, when a follow-up re-queues a concluded final step, which
+// the claim gate drives. Any other child left mid-flight under a terminal run
+// — under a run called off, or on a step the run moved past — is one the claim
+// gate refuses for good, so it would read as mid-flight forever. The
+// cancellation path and the orphan park settle those. 'aborted' is terminal
+// but message-resumable (ReopenRunForResume flips it back to running before
+// its step runs again).
 func (s BlueprintRunStatus) Terminal() bool {
 	switch s {
 	case BlueprintRunStatusCompleted, BlueprintRunStatusAborted,

@@ -1312,8 +1312,10 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	// team, so conversations_update admits them — the cancel covers every
 	// child the parent flip's actor owns. The narrow residual is a child the
 	// caller somehow can't see under RLS: it stays non-terminal (not an error
-	// — RLS filters the row, it doesn't fail), and the admin-pool boot
-	// reconcile is the backstop that heals it. Without this whole guard a
+	// — RLS filters the row, it doesn't fail), and once the claim gate
+	// refuses it the brain's orphan park
+	// (ConversationQueueStore.ParkOrphanedConversationsSystem) is the
+	// backstop that settles it. Without this whole guard a
 	// cancel that raced the dispatcher's claim/setup window — or a parked
 	// `open` step the sequence-cancel path skips — would strand a child
 	// 'running', keeping the dispatcher on phantom work and pinning its
@@ -1363,9 +1365,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 // parkOrphanedChildConversationsWithClaims parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims in the
 // same statement — q must hold claims-write privilege. Called by
-// markBlueprintRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedConversations
-// applies the same predicate in its own boot sweep (it can't share this body —
-// different store, different scope).
+// markBlueprintRunStatus's atomic flip.
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without

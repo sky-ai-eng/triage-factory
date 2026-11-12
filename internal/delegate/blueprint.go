@@ -184,7 +184,7 @@ func (s *Spawner) terminateBlueprint(
 	// next delegation rehydrates the tree at the same path — one cold
 	// rehydrate, the cost a resume on another executor already pays. Keeping
 	// the directory instead would mean a checked-out branch on disk belonging
-	// to a blueprint that has stopped, which the boot reconcile then orphans.
+	// to a blueprint that has stopped.
 	if !skipCleanup {
 		s.runBlueprintWorktreeCleanup(orgID, blueprintRunID, workspaceKey(taskID))
 	}
@@ -431,7 +431,7 @@ func (s *Spawner) raiseBlueprintCancel(ctx context.Context, orgID, blueprintRunI
 
 // requestBlueprintCancel raises the signal best-effort, for the callers that
 // finish their teardown either way: a failure leaves the blueprint running
-// with a parked step, which the boot reconcile and the retention sweep both
+// with a parked step, which the orphan park and the retention sweep both
 // tolerate, so it logs rather than failing the caller.
 func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) {
 	if err := s.raiseBlueprintCancel(ctx, orgID, blueprintRunID); err != nil {

@@ -30,14 +30,12 @@ import path from 'node:path'
 // side because the name is already in scope. The prop should be a structural
 // type the component declares itself.
 
-// Paths are compared with forward slashes whatever the platform: ESLint hands a
-// Windows rule backslashes, a specifier is always written with forward slashes,
-// and path.posix.join never consults the process's working directory the way
-// path.posix.resolve does for a path it does not recognize as absolute.
+// Paths are compared in forward-slash form so the rule reads the same on
+// Windows, where ESLint hands it backslashed filenames, as it does elsewhere.
 const UI_DIR = '/src/ui/'
 
-function toPosix(p) {
-  return p.replaceAll('\\', '/')
+function toSlashes(p) {
+  return p.split(path.sep).join('/')
 }
 
 /** Where the boundary sits for a given file: the .../src/ui prefix it lives under. */
@@ -62,7 +60,7 @@ const rule = {
   },
 
   create(context) {
-    const filename = toPosix(context.filename ?? context.getFilename())
+    const filename = toSlashes(context.filename ?? context.getFilename())
     const uiRoot = uiRootFor(filename)
     // Not a design-system file, so the boundary does not apply.
     if (!uiRoot) return {}
@@ -74,6 +72,8 @@ const rule = {
       // relative path can walk out of the directory.
       if (!source.startsWith('.')) return
 
+      // join, not resolve: posix.resolve would treat a drive-letter path as
+      // relative and prefix the working directory. join only normalises.
       const resolved = path.posix.join(dir, source)
       if (resolved.startsWith(uiRoot)) return
 

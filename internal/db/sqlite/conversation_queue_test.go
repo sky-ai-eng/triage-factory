@@ -710,11 +710,11 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 	})
 }
 
-// TestConversationQueueStore_SQLite_ReconcileOrphanedConversations runs the shared boot-reconcile
-// conformance against the SQLite impl. Each factory call opens a fresh
-// in-memory DB, so the suite's exact healed counts are this subtest's alone.
-func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing.T) {
-	dbtest.RunReconcileOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
+// TestConversationQueueStore_SQLite_OrphanedConversations runs the shared
+// orphan conformance against the SQLite impl. Each factory call opens a fresh
+// in-memory DB, so the suite's exact counts are this subtest's alone.
+func TestConversationQueueStore_SQLite_OrphanedConversations(t *testing.T) {
+	dbtest.RunOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.OrphanSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -738,7 +738,7 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 		// several at once.
 		runTask := map[string]string{}
 		nextStep := map[string]int{}
-		seed := dbtest.ReconcileOrphanSeeder{
+		seed := dbtest.OrphanSeeder{
 			BlueprintRun: func(t *testing.T, age time.Duration) string {
 				t.Helper()
 				task := seedEntityEventTask(t, conn, fmt.Sprintf("rq-recon-%d", len(runTask)))
@@ -781,6 +781,37 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 					t.Fatalf("set current_step_index: %v", err)
 				}
 			},
+			RequestCancel: func(t *testing.T, brID string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE blueprint_runs SET cancel_requested = 1 WHERE id = ?`, brID); err != nil {
+					t.Fatalf("request cancel: %v", err)
+				}
+			},
+			HoldClaim: func(t *testing.T, convID string) string {
+				t.Helper()
+				claimID := uuid.New().String()
+				if _, err := conn.Exec(`
+					INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
+					VALUES (?, ?, 'exec-orphan', strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))
+				`, claimID, convID); err != nil {
+					t.Fatalf("seed claim on %s: %v", convID, err)
+				}
+				return claimID
+			},
+			ClaimReleased: func(t *testing.T, claimID string) bool {
+				t.Helper()
+				var released bool
+				if err := conn.QueryRow(`SELECT released_at IS NOT NULL FROM claims WHERE id = ?`, claimID).Scan(&released); err != nil {
+					t.Fatalf("read claim %s: %v", claimID, err)
+				}
+				return released
+			},
+			RequestStop: func(t *testing.T, convID string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE conversations SET stop_requested_at = CURRENT_TIMESTAMP WHERE id = ?`, convID); err != nil {
+					t.Fatalf("request stop on %s: %v", convID, err)
+				}
+			},
 			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {
 				t.Helper()
 				var status string
@@ -799,6 +830,16 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 					t.Fatalf("read conversation %s status: %v", convID, err)
 				}
 				return status.String
+			},
+			ConversationPark: func(t *testing.T, convID string) (string, bool) {
+				t.Helper()
+				var reason sql.NullString
+				var parkedAt bool
+				if err := conn.QueryRow(`SELECT park_reason, parked_at IS NOT NULL FROM conversations WHERE id = ?`, convID).
+					Scan(&reason, &parkedAt); err != nil {
+					t.Fatalf("read conversation %s park: %v", convID, err)
+				}
+				return reason.String, parkedAt
 			},
 		}
 		return stores.ConversationQueue, seed
