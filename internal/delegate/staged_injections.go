@@ -84,20 +84,21 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 	return stored.ID, true
 }
 
-// tellHeldClose tells a conversation an engagement is starting that its
-// task's close is held (TellTaskClosing). Every runtime reads staged notes
-// before its agent's first model call of an engagement, so the agent learns
+// tellHeldClose tells a conversation whose turn is about to start that its
+// task's close is held (TellTaskClosing): at the start of an engagement, and
+// before a turn a warm claim resumes, which no claim precedes. Every runtime
+// reads staged notes before its agent's next model call, so the agent learns
 // the task is resolved before it does anything. The note is a transcript row
 // rather than a line in the conversation's system block, which is fixed for
-// the conversation's life: the hold can be cancelled after this engagement,
-// and a row says what was true when it was sent.
+// the conversation's life: the hold can be cancelled after this turn, and a
+// row says what was true when it was sent.
 //
 // Work a person drives (a conversation a person delegated, or one a person has
 // written to) is told what happened without what to do about it
 // (personStarted). A task held for a person's deliverable is
 // engaged almost only that way, by the person asking for changes before they
-// resolve it. Best effort: a failed read or stage logs, and the engagement
-// runs without the note.
+// resolve it. Best effort: a failed read or stage logs, and the turn runs
+// without the note.
 func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.Conversation, taskID string) {
 	if s.tasks == nil || s.events == nil {
 		return

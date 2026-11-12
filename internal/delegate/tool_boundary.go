@@ -16,9 +16,9 @@ import (
 // delivered at its next tool boundary (stageNoteAtToolBoundary), unless the
 // conversation already has the note for evt. Reports whether the
 // conversation has the note now. The router tells each working conversation
-// through it when a close begins to hold, and the dispatcher tells an
-// engagement that starts while it holds (tellHeldClose), so both send the
-// same note once. A failed read of whether it was told stages the note
+// through it when a close begins to hold, and an engagement starting, or a
+// warm claim resuming, while it holds tells its own conversation
+// (tellHeldClose), so both send the same note once. A failed read of whether it was told stages the note
 // anyway: a second copy of it costs the agent less than none.
 //
 // Work a person started (personStarted) is told what happened without what
