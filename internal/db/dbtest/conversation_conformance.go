@@ -3896,14 +3896,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Kept: what the next claim or message continues, in its tree.
 		stage("open", "open", "/tmp/triagefactory-runs/open", "", 0)
 		stage("mid-flight", "", "/tmp/triagefactory-runs/mid-flight", "", 0)
-		// A follow-up on a finished blueprint's final step, mid-flight or
-		// parked: the claim gate drives the run's current step whatever its
-		// terminal, so the tree it works in is kept like any other.
+		// A follow-up mid-flight on a finished blueprint's final step: the
+		// claim gate drives the run's current step whatever its terminal, so
+		// the tree it works in is kept like any other.
 		stage("followup-completed", "", "/tmp/triagefactory-runs/followup-completed", "completed", 0)
-		stage("followup-aborted", "open", "/tmp/triagefactory-runs/followup-aborted", "aborted", 0)
 
-		// Swept: a verdict leaves nothing to continue.
+		// Swept: a verdict leaves nothing to continue. The same follow-up once
+		// its turn has ended reads as concluded again (the resume and the park
+		// both keep completed_at), and the ending wrote the snapshot its next
+		// follow-up rehydrates from.
 		stage("completed", SeedConcluded, "/tmp/triagefactory-runs/completed", "", 0)
+		stage("followup-ended", SeedConcluded, "/tmp/triagefactory-runs/followup-ended", "completed", 0)
 		stage("running", "running", "/tmp/triagefactory-runs/running", "", 0)
 		// No worktree recorded.
 		stage("no-worktree", "open", "", "", 0)
@@ -3920,18 +3923,18 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		for _, p := range paths {
 			got[p] = true
 		}
-		for _, want := range []string{"open", "mid-flight", "followup-completed", "followup-aborted"} {
+		for _, want := range []string{"open", "mid-flight", "followup-completed"} {
 			if !got["/tmp/triagefactory-runs/"+want] {
 				t.Errorf("%s worktree missing from ListResumableWorktreePathsSystem", want)
 			}
 		}
-		for _, swept := range []string{"completed", "running", "cancelled", "moved-past"} {
+		for _, swept := range []string{"completed", "followup-ended", "running", "cancelled", "moved-past"} {
 			if got["/tmp/triagefactory-runs/"+swept] {
 				t.Errorf("%s worktree leaked into ListResumableWorktreePathsSystem", swept)
 			}
 		}
-		if len(got) != 4 {
-			t.Errorf("got %d resumable paths, want 4 (%v)", len(got), paths)
+		if len(got) != 3 {
+			t.Errorf("got %d resumable paths, want 3 (%v)", len(got), paths)
 		}
 	})
 

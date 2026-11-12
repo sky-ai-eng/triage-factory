@@ -2166,11 +2166,14 @@ func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context,
 // must keep warm — conversations parked `open` or left mid-flight (stored
 // status NULL) on a step the claim gate still drives (blueprintStepDrivableSQL):
 // the current step of a run nobody called off, whatever the run's status, so a
-// follow-up on a finished blueprint's final step keeps its tree. One the gate
-// refuses never runs again, so its worktree must NOT be preserved: preserving
-// it would leave a checked-out branch on disk that nothing will use, reviving
-// the "refusing to fetch into a branch checked out in a worktree" loop. Admin
-// pool — the startup sweep has no JWT-claims context.
+// follow-up mid-flight on a finished blueprint's final step keeps its tree.
+// Once that follow-up's turn ends the row reads as concluded again, and its
+// tree goes like any concluded conversation's: the ending wrote the snapshot
+// the next follow-up rehydrates from. One the gate refuses never runs again,
+// so its worktree must NOT be preserved: preserving it would leave a
+// checked-out branch on disk that nothing will use, reviving the "refusing to
+// fetch into a branch checked out in a worktree" loop. Admin pool — the
+// startup sweep has no JWT-claims context.
 func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.worktree_path FROM conversations r

@@ -917,9 +917,9 @@ type ConversationQueueStore interface {
 	//   - its step is not the run's current step, which only ever moves
 	//     forward, so the run has moved past it.
 	//
-	// The current step of a completed, aborted, or failed run is not an
-	// orphan: a follow-up on a finished blueprint's final step re-queues it,
-	// and the claim gate drives it, whether a claim holds it yet or not.
+	// The current step of a terminal run nobody called off is not an orphan:
+	// the claim gate drives it, which is what lets a follow-up on a finished
+	// blueprint's final step run, whether a claim holds it yet or not.
 	//
 	// Each orphan parks `open`, with parked_at stamped, park_reason
 	// blueprint_cancelled when its run was called off and blueprint_terminal

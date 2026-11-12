@@ -214,12 +214,12 @@ func TestOrphanSweep_ParksOrphanUnderCancelledBlueprint(t *testing.T) {
 	}
 }
 
-// TestReconcileRunQueue_LeavesFollowUpOnFinishedBlueprint: an executor's boot
+// TestReconcileConversationQueue_LeavesFollowUpOnFinishedBlueprint: an executor's boot
 // leaves a follow-up on a finished blueprint's final step alone, both one
 // another executor is running and one waiting for a claim. The claim gate
 // drives that step whatever the run's terminal, so neither is an orphan, and
 // neither is the booting executor's to settle.
-func TestReconcileRunQueue_LeavesFollowUpOnFinishedBlueprint(t *testing.T) {
+func TestReconcileConversationQueue_LeavesFollowUpOnFinishedBlueprint(t *testing.T) {
 	for _, held := range []bool{true, false} {
 		name := "waiting"
 		if held {

@@ -393,7 +393,9 @@ var blueprintDrivableSQL = `(` + blueprintStepDrivableSQL + `
 // blueprint's: a conversation with no blueprint run, or the current step of a
 // run nobody called off. Its own name because orphanedConversationSQL negates
 // it: what this refuses, it refuses for good, since neither the cancel flag
-// nor the pointer ever moves back.
+// nor the pointer ever moves back. A step ahead of the pointer is one no
+// writer produces, and the advance that reaches its index mints a step of its
+// own there rather than driving it.
 const blueprintStepDrivableSQL = `(r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))`
