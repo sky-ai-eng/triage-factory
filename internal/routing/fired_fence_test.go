@@ -40,8 +40,10 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {
 }
 
-func (s *fenceStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
-	return true
+func (s *fenceStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
+}
+
+func (s *fenceStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {

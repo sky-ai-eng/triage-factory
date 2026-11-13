@@ -41,13 +41,13 @@ var StopBlueprint = Tool{
 	Name: StopBlueprintName,
 	Description: "End this run in a way other than simply finishing. You do NOT need this to complete your work normally — " +
 		"for that, reply with a message and no tool calls. Reach for this only to abort, or to end an entire " +
-		"multi-step workflow early.",
+		"multi-step workflow early, as when its task has closed and the work is no longer needed.",
 	Params: obj([]string{"type", "reason", "summary"},
 		Field{Name: "type", Schema: Schema{
 			Type: "string",
 			Enum: []string{stopTypeFinish, stopTypeAbort},
-			Description: `"finish" ends the whole task successfully, skipping any workflow steps after this one. ` +
-				`"abort" stops without completing it and leaves the task open for a human.`,
+			Description: `"finish" ends the workflow successfully, skipping any steps after this one. ` +
+				`"abort" stops without completing the work and leaves the task as it is: an open task stays open for a human.`,
 		}},
 		str("reason", "Why you are stopping here, and what a human needs to know or do next."),
 		str("summary", "The account of the work: what you did, what you found, and what state things are in. "+

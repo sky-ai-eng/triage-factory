@@ -211,17 +211,20 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		if n := seed.CloseAuditCount(t, holding); n != 0 {
 			t.Errorf("held task close audit rows = %d, want 0", n)
 		}
-		if d := held(t, stores.Tasks, orgID, holding); d == nil || *d != (domain.TaskCloseDeferral{OrgID: orgID, TaskID: holding, EventID: first}) {
-			t.Errorf("held close = %+v, want event %s", d, first)
+		began := held(t, stores.Tasks, orgID, holding)
+		if began == nil || began.OrgID != orgID || began.TaskID != holding || began.EventID != first || began.HeldSince.IsZero() {
+			t.Fatalf("held close = %+v, want event %s with the time the hold began", began, first)
 		}
 
-		// A second closing event while the close is held takes its place.
+		// A second closing event while the close is held takes its place,
+		// and the hold is still the one that began with the first: the time
+		// it began is what a note about the hold is keyed on.
 		out = closeOrHold(t, stores.Tasks, orgID, holding, second)
 		if !out.Held || out.NewlyHeld {
 			t.Errorf("second close = %+v, want held, not newly", out)
 		}
-		if d := held(t, stores.Tasks, orgID, holding); d == nil || d.EventID != second {
-			t.Errorf("held close = %+v, want event %s", d, second)
+		if d := held(t, stores.Tasks, orgID, holding); d == nil || d.EventID != second || !d.HeldSince.Equal(began.HeldSince) {
+			t.Errorf("held close = %+v, want event %s held since %v", d, second, began.HeldSince)
 		}
 		// A held close is the system's bookkeeping: it changes nothing a
 		// person acts on, so a person's pending write on the task stays good.

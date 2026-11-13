@@ -655,6 +655,35 @@ func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventI
 	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
 }
 
+func (s *taskStore) WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return workingConversationIDs(ctx, s.q, taskID)
+}
+
+func (s *taskStore) ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	var eventID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		WHERE te.task_id = ?
+		  AND te.kind = 'closed'
+		ORDER BY te.created_at DESC, te.event_id DESC
+		LIMIT 1
+	`, taskID).Scan(&eventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return eventID, nil
+}
+
 func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
@@ -1127,11 +1156,11 @@ func (s *taskStore) closeOnEvent(ctx context.Context, orgID, taskID, closeReason
 
 // sqliteTaskCloseDeferralColumns is the projection of a task's held close,
 // in the order scanTaskCloseDeferral reads it.
-const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id`
+const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id, close_deferred_at`
 
 func scanTaskCloseDeferral(scan func(...any) error) (domain.TaskCloseDeferral, error) {
 	var d domain.TaskCloseDeferral
-	err := scan(&d.OrgID, &d.TaskID, &d.EventID)
+	err := scan(&d.OrgID, &d.TaskID, &d.EventID, &d.HeldSince)
 	return d, err
 }
 

@@ -1045,11 +1045,11 @@ func (s *taskStore) closeOnEvent(ctx context.Context, orgID, taskID, closeReason
 
 // pgTaskCloseDeferralColumns is the projection of a task's held close, in
 // the order scanTaskCloseDeferral reads it.
-const pgTaskCloseDeferralColumns = `org_id::text, id::text, close_deferred_event_id::text`
+const pgTaskCloseDeferralColumns = `org_id::text, id::text, close_deferred_event_id::text, close_deferred_at`
 
 func scanTaskCloseDeferral(scan func(...any) error) (domain.TaskCloseDeferral, error) {
 	var d domain.TaskCloseDeferral
-	err := scan(&d.OrgID, &d.TaskID, &d.EventID)
+	err := scan(&d.OrgID, &d.TaskID, &d.EventID, &d.HeldSince)
 	return d, err
 }
 
@@ -1095,18 +1095,9 @@ func closeTaskOnEvent(ctx context.Context, q queryer, orgID, taskID, closeReason
 	if mode == applyHeldClose && held.String != closingEventID {
 		return db.TaskCloseOutcome{}, nil
 	}
-	rows, err := q.QueryContext(ctx, `
-		SELECT r.id FROM conversations r
-		 WHERE r.org_id = $1 AND r.task_id = $2
-		   AND `+workingConversationSQL+`
-		 ORDER BY r.started_at, r.id
-	`, orgID, taskID)
-	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("list working conversations: %w", err)
-	}
-	// Drained and closed (scanIDs closes) before the writes below: they ride
-	// the one connection this transaction holds.
-	working, err := scanIDs(rows, "conversations.id")
+	// Drained and closed before the writes below: they ride the one
+	// connection this transaction holds.
+	working, err := workingConversationIDs(ctx, q, orgID, taskID)
 	if err != nil {
 		return db.TaskCloseOutcome{}, fmt.Errorf("list working conversations: %w", err)
 	}
@@ -1398,6 +1389,45 @@ func recordTaskEvent(ctx context.Context, q queryer, orgID, taskID, eventID, kin
 		ON CONFLICT DO NOTHING
 	`, orgID, taskID, eventID, kind)
 	return err
+}
+
+// workingConversationIDs drains the task's working conversation ids, oldest
+// first, and closes the cursor before returning.
+func workingConversationIDs(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT r.id FROM conversations r
+		 WHERE r.org_id = $1 AND r.task_id = $2
+		   AND `+workingConversationSQL+`
+		 ORDER BY r.started_at, r.id
+	`, orgID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows, "conversations.id")
+}
+
+func (s *taskStore) WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	return workingConversationIDs(ctx, s.admin, orgID, taskID)
+}
+
+func (s *taskStore) ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	var eventID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		WHERE te.org_id = $1
+		  AND te.task_id = $2
+		  AND te.kind = 'closed'
+		ORDER BY te.created_at DESC, te.event_id DESC
+		LIMIT 1
+	`, orgID, taskID).Scan(&eventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return eventID, nil
 }
 
 func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {

@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // AdditiveEventInjection is the agent-facing copy for an additive event that
 // arrived while the task already had a live conversation: a follow-up on the
@@ -27,44 +30,157 @@ func AdditiveEventInjection(eventType, metadataJSON string) string {
 	)
 }
 
-// taskClosingGuidance is what an agent working on a task should do once an
-// event has resolved the situation the task is about.
-const taskClosingGuidance = "If your own work caused this, finish what you were doing. Otherwise start nothing new on this task and wrap up."
+// TaskCloseKind is how a task closed, as an agent working on it is told.
+type TaskCloseKind int
 
-// TaskClosingInjection is the agent-facing copy telling a conversation on a
-// task that an event resolved the situation the task is about: the
-// conversations working when the event closed the task or its close began
-// to hold, and each one engaged while a close is held. metadataJSON is the
-// closing event's metadata JSON; "" renders a body naming the event type
-// alone. Bare, like AdditiveEventInjection.
-func TaskClosingInjection(eventType, metadataJSON string) string {
-	return taskClosingNote(eventType, metadataJSON, taskClosingGuidance+" ")
+const (
+	// TaskClosedByEvent is an event's close: a sibling event that resolved
+	// the situation, the entity ending, or the poll's reconciled close.
+	TaskClosedByEvent TaskCloseKind = iota
+	// TaskClosedCompleted is a person marking the task complete.
+	TaskClosedCompleted
+	// TaskClosedDismissed is a person dismissing the task.
+	TaskClosedDismissed
+	// TaskClosedDuplicate is the dismissal of a task that duplicated another
+	// once two entity rows turned out to be one object.
+	TaskClosedDuplicate
+	// TaskClosedReassigned is the close of the task an earlier assignment
+	// made, once its issue is assigned again.
+	TaskClosedReassigned
+	// TaskClosedWorkCompleted is the close the work on the task brings: its
+	// blueprint finished, or the last deliverable was resolved. No note
+	// tells it (TaskClosedNote), since the workflow it would end is already
+	// over; a launch on such a task still reads it in <run_context>.
+	TaskClosedWorkCompleted
+)
+
+// TaskClose is one close of a task, with what its note and its
+// <run_context> line name.
+type TaskClose struct {
+	Kind TaskCloseKind
+	// EventID, EventType and MetadataJSON are the closing event's, for an
+	// event's close and a reassignment. All are "" when the close recorded no
+	// event, and MetadataJSON alone when the event carries none. The source
+	// authored MetadataJSON, so the note prints it as the event's metadata
+	// and no sentence of TF's own is built from it: a reassignment's note
+	// names the new assignee there and nowhere else.
+	EventID      string
+	EventType    string
+	MetadataJSON string
+	// DuplicateOf names the task that stays open in a duplicate's place, by
+	// a value TF minted. "" when it could not be read.
+	DuplicateOf string
 }
 
-// TaskClosingNotice is TaskClosingInjection without the line saying what to
-// do about it, for work a person started: what the person asked for is what
-// the agent acts on, and the note only tells it what happened.
-func TaskClosingNotice(eventType, metadataJSON string) string {
-	return taskClosingNote(eventType, metadataJSON, "")
+// TaskCloseKey identifies one close of a task among the closes of that task,
+// by the time the close stamped: a task an event reopens and something closes
+// again has two. A close note carries it (NoteProvenance.TaskClose), which is
+// how a conversation is told of each close once.
+func TaskCloseKey(closedAt time.Time) string {
+	return closedAt.UTC().Format(time.RFC3339Nano)
 }
 
-// taskClosingNote is the close note with guidance, "" or a sentence and its
-// trailing space, ahead of its last line.
-//
-// TODO(TFAC-1392): the last line is true of neither close the note is sent
-// on. A task an event closes at once is closed before the note is read, and a
-// held close applies when a person resolves the deliverable. An agent reading
-// it is told to expect a close that has happened or that its work does not
-// bring.
-func taskClosingNote(eventType, metadataJSON, guidance string) string {
-	if metadataJSON == "" {
-		return fmt.Sprintf(
-			"A %s event resolved the situation this task is about. %sThe task closes once the work on it is finished.",
-			eventType, guidance,
-		)
+// TaskCloseHoldKey identifies one held close of a task
+// (TaskCloseDeferral.HeldSince), as TaskCloseKey identifies a close. The two
+// never collide, so a conversation told a close is held is still told when it
+// applies.
+func TaskCloseHoldKey(heldSince time.Time) string {
+	return "held:" + heldSince.UTC().Format(time.RFC3339Nano)
+}
+
+// taskNotePersonMessage ends every note about a task's close or held close.
+// Each tells the agent to end the workflow unless its instructions need the
+// work to go on, and a person who writes to the conversation once the task
+// is resolved is asking for something in spite of that. The note reaches a
+// parked conversation beside the message that woke it, so without this the
+// agent reads "end the workflow" next to the request. It is scoped to a
+// message arriving with or after the note, so that work a person asked for
+// earlier and then dismissed is not read as still wanted, and to a message a
+// person wrote in the conversation, which text from a source never is.
+const taskNotePersonMessage = " A message a person writes to you in this conversation, arriving with or after this note, " +
+	"still stands whatever this note says about the task: do what it asks."
+
+// taskClosedGuidance is what an agent does about a close of the task it is
+// working on. A close stops no run, so the decision is the agent's, under its
+// own instructions.
+const taskClosedGuidance = "The task is closed now, and this run was not stopped. Re-evaluate what you are doing: " +
+	"if your instructions do not need the work to go on with the task closed, end the workflow with " +
+	"stop_blueprint(type: \"finish\"). If they do, go on." + taskNotePersonMessage
+
+// taskDismissedGuidance is taskClosedGuidance for a dismissal, where a person
+// has said the work is not wanted: stopping is the default, and going on
+// needs an instruction that says so, or a person asking afterwards
+// (taskNotePersonMessage).
+const taskDismissedGuidance = "The task is closed now, and this run was not stopped. Stop the work you are doing on it and start nothing new. " +
+	"Unless your instructions say outright to go on after the task is dismissed, end the workflow now with " +
+	"stop_blueprint(type: \"finish\")." + taskNotePersonMessage
+
+// TaskClosedNote is the agent-facing copy telling a conversation that the
+// task it is on closed, how, and what to do about it: one note per kind of
+// close, the same for every conversation whoever started its work. Bare,
+// like AdditiveEventInjection. "" for a close no note tells
+// (TaskClosedWorkCompleted).
+func TaskClosedNote(c TaskClose) string {
+	guidance := taskClosedGuidance
+	switch c.Kind {
+	case TaskClosedWorkCompleted:
+		return ""
+	case TaskClosedDismissed:
+		guidance = taskDismissedGuidance
 	}
-	return fmt.Sprintf(
-		"A %s event resolved the situation this task is about. Event metadata:\n%s\n%sThe task closes once the work on it is finished.",
-		eventType, metadataJSON, guidance,
-	)
+	if c.MetadataJSON != "" && (c.Kind == TaskClosedByEvent || c.Kind == TaskClosedReassigned) {
+		return fmt.Sprintf("%s Event metadata:\n%s\n%s", taskCloseCause(c), c.MetadataJSON, guidance)
+	}
+	return taskCloseCause(c) + " " + guidance
+}
+
+// TaskCloseHeldNote is the agent-facing copy telling a conversation that an
+// event resolved the situation its task is about while a deliverable on the
+// task awaits a person, so the task stays open (TaskCloseDeferral). It is the
+// one note about a task that has not closed: without it a run on such a task
+// hears nothing of the event until the person acts. metadataJSON is the
+// closing event's metadata; "" renders a body naming the event type alone.
+// Bare, like TaskClosedNote.
+func TaskCloseHeldNote(eventType, metadataJSON string) string {
+	const held = "The task is still open: a draft pull request or a pending review from the work on it is waiting for a person's decision, " +
+		"and the task closes once they have decided. This run was not stopped. Re-evaluate what you are doing: " +
+		"if your instructions do not need the work to go on now that the situation is resolved, end the workflow with " +
+		"stop_blueprint(type: \"finish\"). If they do, go on." + taskNotePersonMessage
+	cause := fmt.Sprintf("A %s event resolved the situation this task is about.", eventType)
+	if metadataJSON == "" {
+		return cause + " " + held
+	}
+	return fmt.Sprintf("%s Event metadata:\n%s\n%s", cause, metadataJSON, held)
+}
+
+// TaskClosedRunContext is the <run_context> line of a run launched on a task
+// that is already closed. It says what was true at the launch, since the
+// block it rides is fixed for the conversation's life and the task can
+// reopen under it, and it names nothing a source authored.
+func TaskClosedRunContext(c TaskClose) string {
+	return "Task state: this task was already closed when this run started. " + taskCloseCause(c)
+}
+
+// taskCloseCause is the sentence saying how the task closed, shared by the
+// note and the <run_context> line so the two describe a close the same way.
+func taskCloseCause(c TaskClose) string {
+	switch c.Kind {
+	case TaskClosedCompleted:
+		return "A person marked this task complete."
+	case TaskClosedDismissed:
+		return "A person dismissed this task."
+	case TaskClosedDuplicate:
+		if c.DuplicateOf == "" {
+			return "This task was closed as a duplicate of another task about the same issue or pull request."
+		}
+		return fmt.Sprintf("This task was closed as a duplicate of %s, which is about the same issue or pull request and stays open.", c.DuplicateOf)
+	case TaskClosedReassigned:
+		return "This task's issue was reassigned, which closed the task."
+	case TaskClosedWorkCompleted:
+		return "The work on this task finished, which closed it."
+	}
+	if c.EventType == "" {
+		return "This task was closed: the situation it is about is over."
+	}
+	return fmt.Sprintf("A %s event closed this task.", c.EventType)
 }

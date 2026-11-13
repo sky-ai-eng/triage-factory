@@ -45,7 +45,7 @@ import (
 // flip and its audit row. It stops no conversation and calls off no
 // blueprint, so the work on a task goes on after the task closes, a
 // blueprint's remaining steps included; the conversations working at the
-// close are told (tellTaskClosing). One thing holds an event's close: a
+// close are told (Delegator.TellTaskClosed). One thing holds an event's close: a
 // deliverable on the task awaiting a person, on a pull request still open
 // (close_deferral.go).
 
@@ -568,7 +568,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	for _, h := range res.HeldTasks {
 		routerLog.InfoContext(ctx, "held task close: a deliverable awaits a person", "task_id", h.TaskID, "on_event", evt.EventType, "newly_held", h.NewlyHeld)
 		if h.NewlyHeld {
-			r.tellTaskClosing(ctx, orgID, evt, h.TaskID, h.WorkingConversationIDs)
+			r.spawner.TellTaskCloseHeld(ctx, orgID, h.TaskID, h.WorkingConversationIDs)
 		}
 	}
 	// The close obligation stands in for a close that was lost, so it is not
@@ -580,7 +580,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	notify.ResolveEvents(ctx, orgID, entityID, closedBy, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
-		r.tellTaskClosing(ctx, orgID, evt, taskID, res.WorkingConversationIDs[taskID])
+		r.spawner.TellTaskClosed(ctx, orgID, taskID, res.WorkingConversationIDs[taskID])
 	}
 	if len(res.DismissedReviews) > 0 {
 		routerLog.InfoContext(ctx, "dismissed pending reviews of the closed pull request",
@@ -852,8 +852,10 @@ func keepReassign(poolType string) func(domain.Event, closeContext, closeTarget)
 // (TaskStore.CloseOnEventSystem), which a reassignment needs.
 //
 // The close stops nothing. The conversations working on the task are told,
-// after the commit: when the task closes, and the first time it holds. A
-// closing event that finds the close already held only takes its place.
+// after the commit: that the task closed, or, the first time the close
+// holds, that the event resolved the situation and the task stays open for
+// a person. A closing event that finds the close already held only takes
+// its place.
 func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string, mayHold bool) (dbpkg.TaskCloseOutcome, error) {
 	closeFn := r.tasks.CloseOnEventSystem
 	if mayHold {
@@ -863,8 +865,11 @@ func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt
 	if err != nil {
 		return dbpkg.TaskCloseOutcome{}, err
 	}
-	if out.Closed || out.NewlyHeld {
-		r.tellTaskClosing(ctx, orgID, evt, taskID, out.WorkingConversationIDs)
+	switch {
+	case out.Closed:
+		r.spawner.TellTaskClosed(ctx, orgID, taskID, out.WorkingConversationIDs)
+	case out.NewlyHeld:
+		r.spawner.TellTaskCloseHeld(ctx, orgID, taskID, out.WorkingConversationIDs)
 	}
 	return out, nil
 }

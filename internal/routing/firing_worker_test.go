@@ -38,9 +38,11 @@ type stubDelegator struct {
 	// dismissed is every review handed to ReviewsDismissedSystem, so a test
 	// can assert a close reached the dismissal's follow-up.
 	dismissed []domain.Deliverable
-	// noted is every conversation id handed to TellTaskClosing, so a
-	// test can tell which conversations a close told.
-	noted []string
+	// noted is every conversation id handed to TellTaskClosed, so a
+	// test can tell which conversations a close told, and heldNoted every
+	// one handed to TellTaskCloseHeld.
+	noted     []string
+	heldNoted []string
 	// beforeRun, when set, runs after the router's checks and before the
 	// firing transaction, which is where a concurrent write such as a team
 	// archive lands between the two.
@@ -155,14 +157,26 @@ func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, 
 	return delegate.InjectNotDelivered
 }
 
-func (s *stubDelegator) TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool {
+func (s *stubDelegator) TellTaskClosed(ctx context.Context, orgID, taskID string, conversationIDs []string) {
 	s.mu.Lock()
-	s.noted = append(s.noted, conversationID)
+	s.noted = append(s.noted, conversationIDs...)
 	s.mu.Unlock()
-	return true
 }
 
-// notedIDs is the conversation ids TellTaskClosing was called with.
+func (s *stubDelegator) TellTaskCloseHeld(ctx context.Context, orgID, taskID string, conversationIDs []string) {
+	s.mu.Lock()
+	s.heldNoted = append(s.heldNoted, conversationIDs...)
+	s.mu.Unlock()
+}
+
+// heldNotedIDs is the conversation ids TellTaskCloseHeld was called with.
+func (s *stubDelegator) heldNotedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.heldNoted)
+}
+
+// notedIDs is the conversation ids TellTaskClosed was called with.
 func (s *stubDelegator) notedIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

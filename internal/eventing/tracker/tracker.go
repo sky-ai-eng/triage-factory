@@ -115,6 +115,34 @@ type Tracker struct {
 	// marks is the org's pending refresh marks the GitHub passes honor
 	// (WithRefreshMarks).
 	marks refreshMarks
+	// taskClosed tells the conversations working on a task that it closed
+	// (WithTaskClosedTeller); nil tells nobody.
+	taskClosed TaskClosedTeller
+}
+
+// TaskClosedTeller tells the conversations working on a task that the task
+// closed, after the close committed. The tracker closes a task in one place,
+// the dismissal of a duplicate when two entity rows turn out to be one
+// object, and a close leaves the work on the task running, so that work is
+// told through this.
+type TaskClosedTeller func(ctx context.Context, orgID, taskID string)
+
+// WithTaskClosedTeller has the tracker tell the conversations working on
+// each task a duplicate merge or a stub fold dismisses.
+func (t *Tracker) WithTaskClosedTeller(tell TaskClosedTeller) *Tracker {
+	t.taskClosed = tell
+	return t
+}
+
+// tellTasksClosed tells the conversations working on each of taskIDs, the
+// tasks a merge or fold just dismissed, that their task closed.
+func (t *Tracker) tellTasksClosed(ctx context.Context, taskIDs []string) {
+	if t.taskClosed == nil {
+		return
+	}
+	for _, id := range taskIDs {
+		t.taskClosed(context.WithoutCancel(ctx), t.orgID, id)
+	}
 }
 
 // WithChangeClock keeps the refresh gate's change window on now: the time a
@@ -1465,7 +1493,7 @@ func (t *Tracker) foldPRStub(ctx context.Context, e domain.Entity, nodeID string
 			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "error", err)
 		return true
 	}
-	err = t.entities.FoldStubEntitySystem(context.Background(), t.orgID, e.ID, holder.ID)
+	dismissed, err := t.entities.FoldStubEntitySystem(context.Background(), t.orgID, e.ID, holder.ID)
 	switch {
 	case errors.Is(err, db.ErrEntityNotStub):
 		trackerLog.WarnContext(ctx, "another entity already carries this pull request's node id; leaving both",
@@ -1476,6 +1504,7 @@ func (t *Tracker) foldPRStub(ctx context.Context, e domain.Entity, nodeID string
 			"source_id", e.SourceID, "node_id", nodeID, "entity_id", e.ID, "other_entity_id", holder.ID, "error", err)
 		return true
 	}
+	t.tellTasksClosed(ctx, dismissed)
 	trackerLog.InfoContext(ctx, "pull request stub was another name of a known pull request; folded into its entity",
 		"stub_source_id", e.SourceID, "source_id", holder.SourceID, "node_id", nodeID, "entity_id", holder.ID)
 	return true
@@ -2663,12 +2692,13 @@ func (t *Tracker) learnJiraIssueID(ctx context.Context, c *jiraCycle, e domain.E
 				"source_id", e.SourceID, "issue_id", issueID, "entity_id", e.ID, "error", herr)
 			return e, false
 		}
-		survivorID, merr := t.entities.MergeDuplicateEntitiesSystem(context.Background(), orgID, e.ID, holder.ID)
+		survivorID, dismissed, merr := t.entities.MergeDuplicateEntitiesSystem(context.Background(), orgID, e.ID, holder.ID)
 		if merr != nil {
 			trackerLog.ErrorContext(ctx, "merging two entities for one jira issue failed; leaving both",
 				"issue_id", issueID, "entity_id", e.ID, "other_entity_id", holder.ID, "error", merr)
 			return e, false
 		}
+		t.tellTasksClosed(ctx, dismissed)
 		for _, id := range []string{e.ID, holder.ID} {
 			if id != survivorID {
 				c.merged[id] = true

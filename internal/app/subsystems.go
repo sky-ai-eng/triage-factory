@@ -609,5 +609,12 @@ func (a *App) newPollerManager() *poller.Manager {
 	// itself. Through the relay wrapper, because a pass in flight when the
 	// lease moves finishes on a pod that no longer holds the brain.
 	m.TriggerScorer = a.triggerScorer
+	// A duplicate merge dismisses a task under the run working on it, and
+	// the run is told, as every close tells it.
+	m.TaskClosed = func(ctx context.Context, orgID, taskID string) {
+		if a.spawner != nil {
+			a.spawner.TellWorkingTaskClosed(ctx, orgID, taskID)
+		}
+	}
 	return m
 }

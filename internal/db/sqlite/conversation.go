@@ -2110,21 +2110,6 @@ func (s *conversationStore) WarmWaitStateSystem(ctx context.Context, orgID, conv
 	return st, err
 }
 
-func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	var wrote bool
-	err := s.q.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM messages m_p
-			WHERE m_p.org_id = ? AND m_p.conversation_id = ?
-			  AND `+personMessageSQL+`
-		)
-	`, orgID, conversationID).Scan(&wrote)
-	return wrote, err
-}
-
 // NewestWorktreePathForTaskSystem is the Postgres twin in the other dialect —
 // the worktree_path of the task's newest top-level conversation that recorded
 // one, "" when none did.

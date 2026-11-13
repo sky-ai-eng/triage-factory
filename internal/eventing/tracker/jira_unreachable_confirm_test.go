@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 )
@@ -225,6 +227,63 @@ func TestRefreshJira_LegacyDuplicatePairMergesIntoTheOlderRow(t *testing.T) {
 	got, err := stores.Entities.GetBySource(ctx, org, "jira", site, "NEW-9")
 	if err != nil || got == nil || got.ID != old.ID || got.ExternalID != "10009" || got.State != "active" {
 		t.Fatalf("NEW-9 = %+v, err=%v; want the older row %s, carrying the id", got, err, old.ID)
+	}
+}
+
+// The merge dismisses the newer row's task where both rows hold one for the
+// same event, and leaves the work on it running. The tracker has the
+// conversations working on that task told, once, and tells nobody about the
+// task that survives.
+func TestRefreshJira_DuplicateMergeTellsTheDismissedTasksRun(t *testing.T) {
+	srv, _ := jiraUnreachableFixture(t, http.StatusOK,
+		`{"id":"10019","key":"NEW-19","fields":{"summary":"Moved","status":{"name":"In Progress"}}}`)
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	const site = "https://jira.example.com"
+	old, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "OLD-19", "10019", dbseed.JiraIssueProject("OLD-19"), "old", "")
+	if err != nil {
+		t.Fatalf("seed old: %v", err)
+	}
+	dbseed.ForgetIssueID(t, database, old.ID)
+	current, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, org, site, "NEW-19", "10019", dbseed.JiraIssueProject("NEW-19"), "current", "")
+	if err != nil {
+		t.Fatalf("seed current: %v", err)
+	}
+	seedTask := func(entityID string) string {
+		t.Helper()
+		eventID, err := stores.Events.Record(ctx, org, domain.Event{EventType: domain.EventJiraIssueAssigned, EntityID: &entityID, MetadataJSON: `{}`})
+		if err != nil {
+			t.Fatalf("record event: %v", err)
+		}
+		task, _, err := stores.Tasks.FindOrCreate(ctx, org, runmode.LocalDefaultTeamID, entityID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
+		if err != nil || task == nil {
+			t.Fatalf("seed task: %v", err)
+		}
+		return task.ID
+	}
+	kept, duplicate := seedTask(old.ID), seedTask(current.ID)
+
+	var told []string
+	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org).
+		WithTaskClosedTeller(func(_ context.Context, orgID, taskID string) {
+			if orgID != org {
+				t.Errorf("told for org %q, want %q", orgID, org)
+			}
+			told = append(told, taskID)
+		})
+	if _, err := tr.RefreshJira(ctx, site, client, site, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
+		t.Fatalf("RefreshJira: %v", err)
+	}
+
+	dismissed, err := stores.Tasks.GetSystem(ctx, org, duplicate)
+	if err != nil || dismissed == nil || dismissed.Status != "dismissed" || dismissed.CloseReason != db.DuplicateEntityMergedCloseReason {
+		t.Fatalf("the newer row's task = %+v (err %v), want dismissed as a duplicate", dismissed, err)
+	}
+	if !slices.Equal(told, []string{duplicate}) {
+		t.Errorf("told = %v, want only the dismissed task %s (the surviving task is %s)", told, duplicate, kept)
 	}
 }
 

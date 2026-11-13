@@ -32,3 +32,31 @@ func TestAdditiveEventInjection_EmptyMetadata_StillNamesType(t *testing.T) {
 		t.Errorf("empty metadata should omit the metadata section: %q", injection)
 	}
 }
+
+// TestTaskNotes_EachSaysAPersonsMessageStillStands: every note about a task's
+// close or held close tells the agent to end the workflow unless its
+// instructions need otherwise, so every one of them ends with the sentence
+// that keeps a person's later message standing. The check is that the notes
+// share it, not what it says.
+func TestTaskNotes_EachSaysAPersonsMessageStillStands(t *testing.T) {
+	notes := map[string]string{
+		"event":             TaskClosedNote(TaskClose{Kind: TaskClosedByEvent, EventType: EventGitHubPRMerged, MetadataJSON: `{"merged_by":"octocat"}`}),
+		"event, no event":   TaskClosedNote(TaskClose{Kind: TaskClosedByEvent}),
+		"completed":         TaskClosedNote(TaskClose{Kind: TaskClosedCompleted}),
+		"dismissed":         TaskClosedNote(TaskClose{Kind: TaskClosedDismissed}),
+		"duplicate":         TaskClosedNote(TaskClose{Kind: TaskClosedDuplicate, DuplicateOf: "task 7"}),
+		"reassigned":        TaskClosedNote(TaskClose{Kind: TaskClosedReassigned, EventType: EventLinearIssueAssigned}),
+		"held":              TaskCloseHeldNote(EventGitHubPRCICheckPassed, `{"check_name":"build"}`),
+		"held, no metadata": TaskCloseHeldNote(EventGitHubPRCICheckPassed, ""),
+	}
+	for name, note := range notes {
+		if !strings.HasSuffix(note, taskNotePersonMessage) {
+			t.Errorf("%s note does not end by keeping a person's message standing:\n%s", name, note)
+		}
+	}
+	// The line a launch reads in <run_context> is a statement of the task's
+	// state and gives no instruction a person's message could conflict with.
+	if line := TaskClosedRunContext(TaskClose{Kind: TaskClosedDismissed}); strings.Contains(line, strings.TrimSpace(taskNotePersonMessage)) {
+		t.Errorf("<run_context> line carries the note's guidance: %q", line)
+	}
+}

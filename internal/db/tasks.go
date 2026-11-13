@@ -49,6 +49,10 @@ const (
 	UserCompletedCloseReason = "user_completed"
 )
 
+// RunCompletedCloseReason is on a task the work on it closed: its blueprint
+// finished, or the last deliverable that work left was resolved.
+const RunCompletedCloseReason = "run_completed"
+
 // The close_reason values an event's typed close stamps, by which of the
 // event's tasks it closed.
 const (
@@ -980,6 +984,26 @@ type TaskStore interface {
 	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
 	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
+
+	// ClosingEventIDSystem returns the id of the event that closed the task:
+	// its newest task_events row of kind 'closed', which an event's close
+	// writes with the close (CloseOnEventSystem). "" when the task has none,
+	// as after a person's close of a task no event ever closed. A task an
+	// event closed, another reopened, and something else then closed still
+	// has the first close's row, so the event is the current close's only
+	// when its type is the one that close stamped (tasks.close_event_type).
+	// Admin pool, org_id bound by argument.
+	ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
+
+	// WorkingConversationIDsSystem returns the conversations working on the
+	// task, oldest first, by the predicate an event's close reads in its own
+	// transaction (TaskCloseOutcome.WorkingConversationIDs). It is for a
+	// close whose door returns no such set, a person's and a duplicate
+	// merge's, read after the close commits: a close writes nothing on a
+	// conversation, so the set is the one the close found unless a
+	// conversation started or stopped working in between. Admin pool, org_id
+	// bound by argument.
+	WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// LatestEventIDSystem returns the id of the newest event that spawned or
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'

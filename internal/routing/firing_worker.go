@@ -159,7 +159,7 @@ func (r *Router) drainFiringQueue(ctx context.Context) error {
 // other close answers the firing: an event resolved the situation, or a
 // person completed or dismissed the task after the event had reached it.
 func closedByRunFinish(task *domain.Task) bool {
-	return task.Status == "done" && task.CloseReason == "run_completed"
+	return task.Status == "done" && task.CloseReason == dbpkg.RunCompletedCloseReason
 }
 
 // newestEventSince returns the event a reroute of f's task routes: the task's

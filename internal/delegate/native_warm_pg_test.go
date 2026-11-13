@@ -813,34 +813,28 @@ func TestWarmClaim_DurationIsTheTurnsNotTheWait(t *testing.T) {
 	}
 }
 
-// A close held while the claim is warm is told to no conversation, because
-// this one is not working. The person's next message resumes it on the warm
-// claim, and the turn it runs is told the task is resolved, as a cold claim's
-// turn would be.
-func TestWarmClaim_ResumeTellsAHeldClose(t *testing.T) {
+// A close while the claim is warm tells no conversation, because this one is
+// not working. The person's next message resumes it on the warm claim, and
+// the turn it runs is told the task closed, as a cold claim's turn would be:
+// the native loop reads the staged note as a user message.
+func TestWarmClaim_ResumeTellsOfACloseWhileWarm(t *testing.T) {
 	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "staged the review"}, {text: "shortened the comments"}}})
 	f.awaitWarm(t, 1)
 	ctx := context.Background()
 
-	// The run staged a review that awaits the person, and then CI passed.
+	// CI passed while the conversation waited on its warm claim.
 	task, err := f.stores.Tasks.GetSystem(ctx, f.orgID, f.taskID)
 	if err != nil || task == nil {
 		t.Fatalf("load task: %v", err)
 	}
-	pgtest.MustExec(t, f.h.AdminDB, `
-		INSERT INTO deliverables (conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id, details_json)
-		SELECT id, org_id, team_id, 'github', 'review', 'github.com', 'octo/fleet-test#7', 'pending', 'warm-held-close-' || id::text, $2,
-		       '{"number":7,"review_event":"COMMENT"}'
-		  FROM conversations WHERE id = $1
-	`, f.conversationID, task.EntityID)
 	eventID := uuid.New().String()
 	pgtest.MustExec(t, f.h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, now())
 	`, eventID, f.orgID, task.EntityID, domain.EventGitHubPRCICheckPassed)
-	out, err := f.stores.Tasks.CloseOrHoldSystem(ctx, f.orgID, f.taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID)
-	if err != nil || !out.Held || len(out.WorkingConversationIDs) != 0 {
-		t.Fatalf("close = (%+v, %v), want held for the review with no working conversation to tell", out, err)
+	out, err := f.stores.Tasks.CloseOnEventSystem(ctx, f.orgID, f.taskID, db.SiblingEventCloseReason, domain.EventGitHubPRCICheckPassed, eventID)
+	if err != nil || !out.Closed || len(out.WorkingConversationIDs) != 0 {
+		t.Fatalf("close = (%+v, %v), want closed with no working conversation to tell", out, err)
 	}
 
 	if err := f.followUp("make the review comments shorter"); err != nil {
@@ -857,8 +851,9 @@ func TestWarmClaim_ResumeTellsAHeldClose(t *testing.T) {
 		metadataJSON = current
 	}
 	sent := f.provider.sent(1)
-	if notice := domain.TaskClosingNotice(evt.EventType, metadataJSON); !strings.Contains(sent, notice) {
-		t.Errorf("the resumed turn was not told of the held close %q:\n%s", notice, sent)
+	note := domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedByEvent, EventType: evt.EventType, MetadataJSON: metadataJSON})
+	if !strings.Contains(sent, note) {
+		t.Errorf("the resumed turn was not told of the close %q:\n%s", note, sent)
 	}
 	if !strings.Contains(sent, "make the review comments shorter") {
 		t.Errorf("the resumed turn was not sent the person's message:\n%s", sent)

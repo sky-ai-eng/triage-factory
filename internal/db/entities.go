@@ -770,7 +770,8 @@ type EntityStore interface {
 	//   - where both rows hold an active task with the same (event_type,
 	//     dedup_key), the newer row's is dismissed with close_reason
 	//     duplicate_entity_merged. Its conversations, and the blueprints
-	//     behind them, are left working;
+	//     behind them, are left working, and dismissedTaskIDs names the
+	//     task for the caller to have them told;
 	//   - the newer row's tasks, events, queue rows, pending firings, memory
 	//     links (at the stronger of the two roles) and entity links move onto
 	//     the survivor;
@@ -795,11 +796,12 @@ type EntityStore interface {
 	// Refused, writing nothing: the two ids are the same, either row is
 	// missing (sql.ErrNoRows), the rows differ in source or scope, or both
 	// carry an external id and the two differ (ErrEntityIdentityAmbiguous —
-	// they are two objects). Returns the survivor's id.
+	// they are two objects). Returns the survivor's id and the tasks the
+	// merge dismissed.
 	//
 	// Exempt from the returned-row rule: a composition across tables, whose
 	// answer is which row survived.
-	MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (survivorID string, err error)
+	MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (survivorID string, dismissedTaskIDs []string, err error)
 
 	// FoldStubEntitySystem folds a stub into the row it turned out to be. Its
 	// one caller is the GitHub tracker: a pull request stub, created from a
@@ -816,7 +818,8 @@ type EntityStore interface {
 	//   - where both rows hold an active task with the same (event_type,
 	//     dedup_key), the stub's is dismissed with close_reason
 	//     duplicate_entity_merged. Its conversations, and the blueprints
-	//     behind them, are left working;
+	//     behind them, are left working, and dismissedTaskIDs names the
+	//     task for the caller to have them told;
 	//   - the stub's tasks, events, queue rows, pending firings, deliverables,
 	//     audit-ledger rows, memory links (at the stronger of the two roles)
 	//     and entity links move onto into, the stub's deliverables take into's
@@ -834,7 +837,7 @@ type EntityStore interface {
 	//
 	// Exempt from the returned-row rule: a composition across tables, and the
 	// row that survives is the one the caller named.
-	FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) error
+	FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) (dismissedTaskIDs []string, err error)
 
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error)
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) (domain.Entity, error)

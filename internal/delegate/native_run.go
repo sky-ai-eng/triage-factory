@@ -502,12 +502,12 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 
 		// The native blocks name the in-jail paths and the `tfac` applet
 		// outright, so the run context carries only what differs per run and
-		// those blocks cannot state for themselves: the PR checkout's path, the
-		// branch convention, the sources this run cannot reach, and this run's
-		// staged knowledge.
+		// those blocks cannot state for themselves: that the task is already
+		// closed, the PR checkout's path, the branch convention, the sources
+		// this run cannot reach, and this run's staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
-			runContext("", "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+			runContext("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID), "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
 			cfg.sources.tools(agentprompt.RuntimeNative),
 			nonTerminal,
 		)
@@ -705,10 +705,11 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // approves it and it is posted.
 //
 // "Expects an artifact" is deliberately narrow — the terminal step of a run
-// against a GitHub, Jira or Linear entity, the shape whose whole point is to
-// leave something behind. A non-terminal step is excluded because a later
-// step owns the blueprint's terminal external action, which is what its
-// addendum tells it. finalStep says which this is.
+// against a GitHub, Jira or Linear entity, on a task whose situation still
+// stands, the shape whose whole point is to leave something behind. A
+// non-terminal step is excluded because a later step owns the blueprint's
+// terminal external action, which is what its addendum tells it. finalStep
+// says which this is.
 //
 // Both runtimes ask it: the native loop as its ShouldStopAfterTurn hook, and
 // the SDK driver through turnEndNudge.
@@ -722,12 +723,34 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // crash's successor.
 func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domain.Task, finalStep bool) func(context.Context, int, string) string {
 	expects := finalStep && (task.EntitySource == "github" || task.EntitySource == "jira" || task.EntitySource == "linear")
-	if !expects || s.artifacts == nil || s.deliverables == nil {
+	if !expects || s.artifacts == nil || s.deliverables == nil || s.tasks == nil {
 		return nil
 	}
 	return func(ctx context.Context, _ int, _ string) string {
 		// Fail quiet on every read: a read failure must not manufacture a
 		// nudge that sends a finished run back to work on a false premise.
+		//
+		// A task that closed, or whose close is held for a person, asks for
+		// nothing more: the run was told the situation resolved and to end
+		// unless its instructions need it to go on, and the nudge would send
+		// it back for an artifact that situation no longer calls for. Read
+		// here, since either can happen at any point in the engagement.
+		current, err := s.tasks.GetSystem(ctx, orgID, task.ID)
+		if err != nil {
+			delegateLog.Warn("read the task for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
+			return ""
+		}
+		if current == nil || current.Status == "done" || current.Status == "dismissed" {
+			return ""
+		}
+		hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, task.ID)
+		if err != nil {
+			delegateLog.Warn("read the task's held close for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
+			return ""
+		}
+		if hold != nil {
+			return ""
+		}
 		changed, err := s.artifacts.ExistsForConversationSystem(ctx, orgID, conversationID)
 		if err != nil {
 			delegateLog.Warn("read artifacts for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)

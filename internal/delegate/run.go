@@ -444,9 +444,17 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// reference and the step addendum — are the harness's system append; the
 	// task context is externally-authored text and stays a transcript row, which
 	// is what the model reads as the conversation's first turn.
+	//
+	// The task-state line is a launch's: a session this claim resumes
+	// mid-flight began before it, so the line would misdate a close that came
+	// since, and the note tells that session of it.
+	taskState := ""
+	if priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID) {
+		taskState = s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID)
+	}
 	systemBlock := composeConversationSystemBlock(
 		mission,
-		runContext(cfg.scope, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
+		runContext(cfg.scope, taskState, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)

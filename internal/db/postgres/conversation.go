@@ -2265,18 +2265,6 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 	return id, nil
 }
 
-func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
-	var wrote bool
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM messages m_p
-			WHERE m_p.org_id = $1 AND m_p.conversation_id = $2
-			  AND `+personMessageSQL+`
-		)
-	`, orgID, conversationID).Scan(&wrote)
-	return wrote, err
-}
-
 func (s *conversationStore) WarmWaitStateSystem(ctx context.Context, orgID, conversationID string) (db.WarmWaitState, error) {
 	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
 		return db.WarmWaitState{}, db.ErrNoSuchConversation

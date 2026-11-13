@@ -73,10 +73,11 @@ func StagedInjectionFromPending(r PendingRow) domain.StagedInjection {
 			Producer  string `json:"producer"`
 			EventID   string `json:"event_id"`
 			EventType string `json:"event_type"`
+			TaskClose string `json:"task_close"`
 		}
 		_ = json.Unmarshal([]byte(r.Metadata), &meta)
 		n.Producer = meta.Producer
-		n.Provenance = domain.NoteProvenance{EventID: meta.EventID, EventType: meta.EventType}
+		n.Provenance = domain.NoteProvenance{EventID: meta.EventID, EventType: meta.EventType, TaskClose: meta.TaskClose}
 	}
 	return n
 }

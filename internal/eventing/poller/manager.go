@@ -136,6 +136,11 @@ type Manager struct {
 	// it (tracker.Tracker.WithChangeClock); nil keeps it on time.Now.
 	ChangeClock func() time.Time
 
+	// TaskClosed, when set, tells the conversations working on a task a
+	// tracker dismissed as a duplicate that it closed
+	// (tracker.Tracker.WithTaskClosedTeller); nil tells nobody.
+	TaskClosed tracker.TaskClosedTeller
+
 	// RefreshMarks is the org's pending GitHub refresh marks, which the
 	// webhook receivers write. The scheduled cycle honors them, and the
 	// narrowed pass (HintGitHub) refreshes what they name between cycles.
@@ -273,7 +278,8 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, m.mergeability, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery).
-		WithChangeClock(m.ChangeClock)
+		WithChangeClock(m.ChangeClock).
+		WithTaskClosedTeller(m.TaskClosed)
 }
 
 // sourceDisabled reports whether this cycle must not run, and the span outcome

@@ -83,44 +83,6 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 	return stored.ID, true
 }
 
-// tellHeldClose tells a conversation whose turn is about to start that its
-// task's close is held (TellTaskClosing): at the start of an engagement, and
-// before a turn a warm claim resumes, which no claim precedes. Every runtime
-// reads staged notes before its agent's next model call, so the agent learns
-// the task is resolved before it does anything. The note is a transcript row
-// rather than a line in the conversation's system block, which is fixed for
-// the conversation's life: the hold can be cancelled after this turn, and a
-// row says what was true when it was sent.
-//
-// Work a person drives (a conversation a person delegated, or one a person has
-// written to) is told what happened without what to do about it
-// (personStarted). A close holds only for a person's deliverable, so a held
-// task is engaged almost only that way, by the person asking for changes
-// before they resolve it. Best effort: a failed read or stage logs, and the
-// turn runs without the note.
-func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.Conversation, taskID string) {
-	if s.tasks == nil || s.events == nil {
-		return
-	}
-	// TODO(TFAC-1392): an engagement that starts on a task already closed is
-	// told nothing here, so a blueprint step minted after the close, and a
-	// conversation resumed after it, run without knowing the task is resolved.
-	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
-	if err != nil {
-		delegateLog.Warn("read the task's held close failed; the engagement starts without the close note", "task_id", taskID, "error", err)
-		return
-	}
-	if hold == nil {
-		return
-	}
-	evt, err := s.events.GetSystem(ctx, orgID, hold.EventID)
-	if err != nil || evt == nil {
-		delegateLog.Warn("read the held close's event failed; the engagement starts without the close note", "task_id", taskID, "event_id", hold.EventID, "error", err)
-		return
-	}
-	s.tellTaskClosing(ctx, orgID, conv.ID, s.personStarted(ctx, orgID, conv), *evt)
-}
-
 // handOffQueuedFirings hands a conversation whose engagement is starting the
 // events queued on its task as pending firings, each as the note an event
 // folded into a running conversation is (domain.AdditiveEventInjection). It
@@ -212,28 +174,6 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 		noteFor[f.TriggeringEventID] = noteID
 		delegateLog.Info("handed a queued firing's event to the starting engagement", "task_id", taskID, "firing_id", f.ID, "event_id", f.TriggeringEventID, "conversation", conv.ID, "blueprint_run", br.ID)
 	}
-}
-
-// personStarted reports whether a person drives the work on conv: they
-// delegated the conversation, which every step of its blueprint inherits, or
-// they have written to it. Only a person's message wakes a conversation that
-// has run (staged notes ride whatever engagement runs next), so once one has
-// written, every engagement after is theirs, and the answer holds before
-// their message is delivered and after. A failed read answers false, and the
-// engagement is told to wrap up.
-func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.Conversation) bool {
-	if conv.CreatorUserID != "" {
-		return true
-	}
-	if s.conversations == nil {
-		return false
-	}
-	wrote, err := s.conversations.HasPersonMessageSystem(ctx, orgID, conv.ID)
-	if err != nil {
-		delegateLog.Warn("read whether a person wrote to the conversation failed; telling it of the held close", "conversation", conv.ID, "error", err)
-		return false
-	}
-	return wrote
 }
 
 // stagedInjectionsForEngagement flushes the conversation's durable
