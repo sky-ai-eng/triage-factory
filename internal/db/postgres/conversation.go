@@ -2073,8 +2073,14 @@ func liveTopLevelConversationSQL(alias string) string {
 // liveConversationForTaskSQL is the router's question over the alias `r`: the
 // base plus the status clause. See liveTopLevelConversationSQL for the three
 // questions and why each carries the clauses it does.
-var liveConversationForTaskSQL = `(` + liveTopLevelConversationSQL("r") + `
-		       AND ` + db.UnsettledConversationSQL("r") + `)`
+var liveConversationForTaskSQL = liveConversationSQL("r")
+
+// liveConversationSQL is liveConversationForTaskSQL's predicate over the
+// alias the caller names, for a statement that asks it of two conversations.
+func liveConversationSQL(alias string) string {
+	return `(` + liveTopLevelConversationSQL(alias) + `
+		       AND ` + db.UnsettledConversationSQL(alias) + `)`
+}
 
 // HasLiveConversationForTask: does the task hold a live conversation, of any
 // trigger type?

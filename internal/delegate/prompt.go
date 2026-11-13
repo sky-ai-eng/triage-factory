@@ -294,6 +294,14 @@ func resolveCLIPath(text, binaryPath string) string {
 // one run. It is not the task context's status, which is the source's own
 // word about its object, inside the region marked untrusted.
 //
+// The overlapping work arrives here for the same reason
+// (domain.SiblingWorkRunContext): which other tasks bear on this run's pull
+// request or issue, who holds each, and whether work is going on it are facts
+// about one launch. The block names tasks by id and entities by key, and no
+// person, so nothing in it is text a source or a person authored. It is read
+// once, at the launch; who takes a task on afterwards reaches the run as a
+// note.
+//
 // The source notes arrive here for the same reason: which sources this run's
 // sandbox holds a credential for, and why each other one is unavailable, is a
 // fact about one engagement (its source manifest), so a line per source that
@@ -307,13 +315,16 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-func runContext(scope, taskState, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
+func runContext(scope, taskState, siblingWork, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
 	}
 	if taskState != "" {
 		lines = append(lines, taskState)
+	}
+	if w := strings.TrimSpace(siblingWork); w != "" {
+		lines = append(lines, w)
 	}
 	if runRoot != "" {
 		lines = append(lines, "Run root: "+runRoot+

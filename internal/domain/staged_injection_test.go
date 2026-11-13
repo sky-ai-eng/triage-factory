@@ -38,3 +38,22 @@ func TestStagedInjectionBlock_EmptyAndBlankBodies(t *testing.T) {
 		t.Errorf("all-blank bodies: want empty, got %q", got)
 	}
 }
+
+// TestStagedInjectionBlock_ABodyOfSeveralLinesIsOneBullet: a body that lists
+// entries on lines of its own stays one bullet, so the block has as many
+// top-level bullets as injections.
+func TestStagedInjectionBlock_ABodyOfSeveralLinesIsOneBullet(t *testing.T) {
+	block := StagedInjectionBlock([]StagedInjection{
+		{Body: "a listing\n- entry one\n- entry two"},
+		{Body: "another update"},
+	})
+	bullets := 0
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			bullets++
+		}
+	}
+	if bullets != 2 {
+		t.Errorf("block has %d top-level bullets, want one per injection (2): %q", bullets, block)
+	}
+}

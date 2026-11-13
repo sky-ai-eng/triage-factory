@@ -448,13 +448,17 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// The task-state line is a launch's: a session this claim resumes
 	// mid-flight began before it, so the line would misdate a close that came
 	// since, and the note tells that session of it.
-	taskState := ""
+	//
+	// The overlapping work is a launch's on the same terms: a resumed session
+	// was told of each assignment since by a note.
+	taskState, siblingWork := "", ""
 	if priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID) {
 		taskState = s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID)
+		siblingWork = s.siblingWorkContext(context.WithoutCancel(ctx), orgID, conversationID)
 	}
 	systemBlock := composeConversationSystemBlock(
 		mission,
-		runContext(cfg.scope, taskState, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
+		runContext(cfg.scope, taskState, siblingWork, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)

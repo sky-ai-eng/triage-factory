@@ -8,10 +8,11 @@ import (
 
 // StagedInjection is one durably-queued agent-facing injection awaiting
 // delivery to a conversation's agent. Every producer of a note (the PR
-// coherence feed, a task's close, a deliverable's resolution) stages it here,
-// and each runtime reads the conversation's pending injections on its own
-// schedule: a native loop before its next model call, a live SDK process at
-// its next tool batch, and an SDK engagement in its first message.
+// coherence feed, a task's close, a task's new assignee, a deliverable's
+// resolution) stages it here, and each runtime reads the conversation's
+// pending injections on its own schedule: a native loop before its next
+// model call, a live SDK process at its next tool batch, and an SDK
+// engagement in its first message.
 //
 // Producer-agnostic by construction: Body is the already-rendered, bare injection
 // line (no <system-note> wrapper — the flush bundles and wraps), and Producer is
@@ -37,7 +38,8 @@ type StagedInjection struct {
 }
 
 // NoteProvenance names what an agent-facing note was composed from: the event
-// behind it, and for a close note the close it tells of. It is
+// behind it, for a close note the close it tells of, and for an assignment
+// note the task and who took it on. It is
 // recorded on the note's message row rather than derived from the body, so a
 // transcript view or an audit can resolve a note back to its cause without
 // re-parsing prose that was written for an agent to read.
@@ -59,11 +61,26 @@ type NoteProvenance struct {
 	// close has no event, so this, not EventID, is what says a conversation
 	// has been told.
 	TaskClose string `json:"task_close,omitempty"`
+	// AssignedTask is the task an assignment note (TaskAssignedNote) tells
+	// of, by id, and Assignee is who the note says holds it (AgentAssignee,
+	// UserAssignee). A note is true while the task is open under that
+	// assignee, which is what retires it once it is not
+	// (StagedInjectionStore.RetireStaleAssignmentNotesSystem).
+	AssignedTask string `json:"assigned_task,omitempty"`
+	Assignee     string `json:"assignee,omitempty"`
 }
+
+// AgentAssignee and UserAssignee spell who holds a task in an assignment
+// note's provenance. Both dialects' retire compares the stored value with the
+// task's claim columns, so the spelling is the stored rows' as well.
+func AgentAssignee(agentID string) string { return "agent:" + agentID }
+
+// UserAssignee is AgentAssignee for a person.
+func UserAssignee(userID string) string { return "user:" + userID }
 
 // Empty reports whether nothing was recorded.
 func (p NoteProvenance) Empty() bool {
-	return p.EventID == "" && p.EventType == "" && p.TaskClose == ""
+	return p.EventID == "" && p.EventType == "" && p.TaskClose == "" && p.AssignedTask == "" && p.Assignee == ""
 }
 
 // NoteMetadata builds the message-row metadata an agent-facing note carries.
@@ -80,6 +97,12 @@ func NoteMetadata(producer string, prov NoteProvenance) map[string]any {
 	}
 	if prov.TaskClose != "" {
 		meta["task_close"] = prov.TaskClose
+	}
+	if prov.AssignedTask != "" {
+		meta["assigned_task"] = prov.AssignedTask
+	}
+	if prov.Assignee != "" {
+		meta["assignee"] = prov.Assignee
 	}
 	return meta
 }
@@ -133,6 +156,19 @@ const (
 	// that a deliverable it produced was resolved (DeliverableResolutionNote).
 	// Stored message rows carry the value, so it keeps its spelling.
 	StagedInjectionProducerDeliverableResolved = "artifact_resolved"
+	// StagedInjectionProducerTaskAssigned is the note telling a conversation
+	// that someone took on another task its work overlaps (TaskAssignedNote).
+	// One is staged per new assignee of the task, and it carries the task and
+	// the assignee in its provenance. A note still waiting when its task
+	// closes, changes hands, or is told of again is retired before a turn
+	// reads it (StagedInjectionStore.RetireStaleAssignmentNotesSystem), which
+	// matches on this tag.
+	StagedInjectionProducerTaskAssigned = "task_assigned"
+	// StagedInjectionProducerSiblingWork is the note listing the work that
+	// overlaps a conversation (SiblingWorkNote), staged when a follow-up
+	// wakes a conversation that had concluded: nothing told it of an
+	// assignment while it sat, and its <run_context> is not rebuilt.
+	StagedInjectionProducerSiblingWork = "sibling_work"
 )
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path
@@ -160,7 +196,10 @@ func stagedInjectionBlock(leadIn string, injections []StagedInjection) string {
 		if injections[i].Body == "" {
 			continue
 		}
-		lines = append(lines, "- "+injections[i].Body)
+		// A body of several lines stays under its own bullet: the lines
+		// after the first are indented, so a listing's entries do not read
+		// as updates of their own.
+		lines = append(lines, "- "+strings.ReplaceAll(injections[i].Body, "\n", "\n  "))
 	}
 	if len(lines) == 0 {
 		return ""

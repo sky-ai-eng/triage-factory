@@ -826,6 +826,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// on the task came before anything that closed it or resolved it, so
 	// the agent reads them in the order they happened.
 	s.handOffQueuedFirings(gateCtx, orgID, br, conv, task)
+	s.retireStaleAssignmentNotes(gateCtx, orgID, conv.ID)
 	s.tellTaskResolved(gateCtx, orgID, conv.ID, task.ID)
 
 	// Resume-by-enqueue: queued input means this claim is NOT a

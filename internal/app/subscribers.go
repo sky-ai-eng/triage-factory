@@ -101,6 +101,20 @@ func (a *App) registerSubscribers() {
 		Filter: []string{domain.EventSystemRoutingDisposition},
 		Handle: a.spawner.HandlePRCoherence,
 	})
+	// Tell the live conversations whose work overlaps a task that someone
+	// took the task on.
+	//
+	// Not brainHolderOnly, like the subscriber above. The bus is in-process:
+	// the agent's stamp is published by the router, which only the brain
+	// runs, and a person's claim by whichever control pod served the request,
+	// so every assignment is published on exactly one pod's bus and the guard
+	// would drop the ones a standby serves. This kicks no brain-owned manager,
+	// and a note reaches its conversation from any pod.
+	a.bus.Subscribe(eventbus.Subscriber{
+		Name:   "task-assigned-notes",
+		Filter: []string{domain.EventSystemTaskAssigned},
+		Handle: a.spawner.HandleTaskAssigned,
+	})
 }
 
 // brainHolderOnly wraps a subscriber handler so it fires only while this

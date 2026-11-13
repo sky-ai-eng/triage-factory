@@ -1035,6 +1035,7 @@ These are internal signals, not shown in the triage UI.
 | **Conversation Status** | `system:conversation:status` | A delegated run's status changed (mirrors the `conversation_update` websocket event) |
 | **Conversation Activity** | `system:conversation:activity` | A delegated run invoked a tool (mirrors the `message` websocket event, `tool_use` messages only) |
 | **Routing Disposition** | `system:routing:disposition` | `Router.HandleEvent` finished handling one event — frozen, source turned off by an org admin, taskless (no handler/owner/unroutable), task created/bumped, or an internal error. Lets an async event source (e.g. Slack) learn synchronously-unavailable routing outcomes |
+| **Task Assigned** | `system:task:assigned` | A task gained a new assignee: the agent's claim stamp landed, or a person claimed it, took it over, reassigned it or delegated it. Published after the write commits. Each live conversation whose work overlaps the task is told by a note |
 
 ## Snapshot fields
 
