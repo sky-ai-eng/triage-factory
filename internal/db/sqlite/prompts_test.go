@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -88,11 +89,25 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 		t.Fatalf("seed task: %v", err)
 	}
 
+	// A followed-up step gets a blueprint run of its own. Each mint settles
+	// the task's run before it as completed, so minting these first and the
+	// shared run last leaves every one of them completed and the shared one
+	// running.
+	followedUpRuns := map[int]string{}
+	for i, status := range statusByOffset {
+		if status == dbtest.SeedFollowedUp {
+			followedUpRuns[i] = seedBlueprintRunForConversation(t, conn, taskID)
+		}
+	}
 	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
 		conversationID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
+		runID := blueprintRunID
+		if id, ok := followedUpRuns[i]; ok {
+			runID, status = id, domain.StatusOpen
+		}
 		resolved, concluded := dbtest.SeedStatus(status)
 		var completedAt any
 		if concluded {
@@ -101,7 +116,7 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 		if _, err := conn.Exec(`
 			INSERT INTO conversations (id, task_id, prompt_id, status, started_at, blueprint_run_id, completed_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, conversationID, taskID, promptID, resolved, startedAt, blueprintRunID, completedAt); err != nil {
+		`, conversationID, taskID, promptID, resolved, startedAt, runID, completedAt); err != nil {
 			t.Fatalf("seed conversation %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped

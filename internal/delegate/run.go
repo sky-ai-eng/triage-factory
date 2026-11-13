@@ -445,9 +445,17 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// reference and the step addendum — are the harness's system append; the
 	// task context is externally-authored text and stays a transcript row, which
 	// is what the model reads as the conversation's first turn.
+	//
+	// The task-state line is a launch's: a session this claim resumes
+	// mid-flight began before it, so the line would misdate a close that came
+	// since, and the note tells that session of it.
+	taskState := ""
+	if priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID) {
+		taskState = s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID)
+	}
 	systemBlock := composeConversationSystemBlock(
 		mission,
-		runContext(cfg.scope, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
+		runContext(cfg.scope, taskState, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)
@@ -807,7 +815,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // Either one carries the notes staged for the conversation, so a launch reads
 // what landed before it as every other engagement does. The continuation note
 // follows them, the way a resume puts them ahead of the person's message
-// (resumeSystemPrepends), since the session already knows the task. The
+// (dispatchResumeClaim), since the session already knows the task. The
 // opening comes first, as a native engagement's does (mintOpeningRows): a
 // model that knows nothing reads what the task is before what happened to
 // it. They are flushed only once the turn's own rows are written, so a
@@ -1253,7 +1261,7 @@ func (s *Spawner) processCompletion(
 	}
 	switch status {
 	case domain.StatusOpen:
-		toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
+		s.toastRunCompleted(orgID, creatorUserID, completedRow)
 	case domain.StatusFailed:
 		if completeErr == nil {
 			s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
@@ -1265,4 +1273,16 @@ func (s *Spawner) processCompletion(
 	// snapshot to drop here. A parked run keeps its snapshot for the eventual
 	// resume.
 	return parked, false
+}
+
+// toastRunCompleted tells the run's creator that it completed. row is what
+// the turn end's write returned, and the toast fires only when that write
+// recorded a verdict: a turn that ended with none, on a blueprint that had
+// already finished or with no blueprint, answered a person's message and
+// completed no run.
+func (s *Spawner) toastRunCompleted(orgID, creatorUserID string, row *domain.Conversation) {
+	if row == nil || !row.Concluded() {
+		return
+	}
+	toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(row.ID)))
 }

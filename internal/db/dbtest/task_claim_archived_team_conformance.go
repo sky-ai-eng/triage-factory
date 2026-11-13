@@ -87,14 +87,14 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		})
 		t.Run("ClaimQueuedForUser", func(t *testing.T) {
 			taskID := seed(t)
-			if ok, err := fx.Store.ClaimQueuedForUser(ctx, fx.OrgID, taskID, fx.UserID); err != nil || !ok {
+			if ok, err := fx.Store.ClaimQueuedForUser(ctx, fx.OrgID, taskID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser = (%v, %v), want (true, nil)", ok, err)
 			}
 			landed(t, taskID)
 		})
 		t.Run("HandoffAgentClaim", func(t *testing.T) {
 			taskID := seed(t)
-			result, _, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID)
+			result, _, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 			if err != nil || result != db.HandoffChanged {
 				t.Fatalf("HandoffAgentClaim = (%v, %v), want (HandoffChanged, nil)", result, err)
 			}
@@ -106,7 +106,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 			if ok, err := fx.Store.StampAgentClaimIfUnclaimed(ctx, fx.OrgID, taskID, fx.AgentID, ""); err != nil || !ok {
 				t.Fatalf("StampAgentClaimIfUnclaimed = (%v, %v)", ok, err)
 			}
-			if ok, err := fx.Store.TakeoverClaimFromAgent(ctx, fx.OrgID, taskID, fx.UserID); err != nil || !ok {
+			if ok, err := fx.Store.TakeoverClaimFromAgent(ctx, fx.OrgID, taskID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID)); err != nil || !ok {
 				t.Fatalf("TakeoverClaimFromAgent = (%v, %v), want (true, nil)", ok, err)
 			}
 			landed(t, taskID)
@@ -114,7 +114,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		t.Run("ReassignClaimToUser", func(t *testing.T) {
 			taskID := seed(t)
 			fx.HoldForUser(t, taskID, fx.HolderID)
-			if ok, err := fx.Store.ReassignClaimToUser(ctx, fx.OrgID, taskID, fx.HolderID, fx.UserID); err != nil || !ok {
+			if ok, err := fx.Store.ReassignClaimToUser(ctx, fx.OrgID, taskID, fx.HolderID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID)); err != nil || !ok {
 				t.Fatalf("ReassignClaimToUser = (%v, %v), want (true, nil)", ok, err)
 			}
 			landed(t, taskID)
@@ -148,7 +148,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		t.Run("ClaimQueuedForUser", func(t *testing.T) {
 			taskID := seed(t)
 			before := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID)
-			ok, err := fx.Store.ClaimQueuedForUser(ctx, fx.OrgID, taskID, fx.UserID)
+			ok, err := fx.Store.ClaimQueuedForUser(ctx, fx.OrgID, taskID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 			if ok || !errors.Is(err, db.ErrNoActiveClaimTeam) {
 				t.Errorf("ClaimQueuedForUser = (%v, %v), want (false, ErrNoActiveClaimTeam)", ok, err)
 			}
@@ -157,7 +157,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		t.Run("HandoffAgentClaim", func(t *testing.T) {
 			taskID := seed(t)
 			before := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID)
-			result, _, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID)
+			result, _, err := fx.Store.HandoffAgentClaim(ctx, fx.OrgID, taskID, fx.AgentID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 			if result != db.HandoffRefused || !errors.Is(err, db.ErrNoActiveClaimTeam) {
 				t.Errorf("HandoffAgentClaim = (%v, %v), want (HandoffRefused, ErrNoActiveClaimTeam)", result, err)
 			}
@@ -169,7 +169,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 				t.Fatalf("StampAgentClaimIfUnclaimed = (%v, %v)", ok, err)
 			}
 			before := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID)
-			ok, err := fx.Store.TakeoverClaimFromAgent(ctx, fx.OrgID, taskID, fx.UserID)
+			ok, err := fx.Store.TakeoverClaimFromAgent(ctx, fx.OrgID, taskID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 			if ok || !errors.Is(err, db.ErrNoActiveClaimTeam) {
 				t.Errorf("TakeoverClaimFromAgent = (%v, %v), want (false, ErrNoActiveClaimTeam)", ok, err)
 			}
@@ -182,7 +182,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 			taskID := seed(t)
 			fx.HoldForUser(t, taskID, fx.HolderID)
 			before := readClaimRow(ctx, t, fx.Store, fx.OrgID, taskID)
-			ok, err := fx.Store.ReassignClaimToUser(ctx, fx.OrgID, taskID, fx.HolderID, fx.UserID)
+			ok, err := fx.Store.ReassignClaimToUser(ctx, fx.OrgID, taskID, fx.HolderID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 			if ok || err != nil {
 				t.Errorf("ReassignClaimToUser = (%v, %v), want (false, nil)", ok, err)
 			}
@@ -196,7 +196,7 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 		fx := factory(t)
 		taskID := fx.SeedTask(t, fx.ActiveTeamID, []string{fx.ActiveTeamID})
 		fx.HoldForUser(t, taskID, fx.HolderID)
-		ok, err := fx.Store.ClaimQueuedForUser(ctx, fx.OrgID, taskID, fx.UserID)
+		ok, err := fx.Store.ClaimQueuedForUser(ctx, fx.OrgID, taskID, fx.UserID, TaskVersion(t, fx.Store, fx.OrgID, taskID))
 		if ok || err != nil {
 			t.Errorf("ClaimQueuedForUser on a held task = (%v, %v), want (false, nil)", ok, err)
 		}

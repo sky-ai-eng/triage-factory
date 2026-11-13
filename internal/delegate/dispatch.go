@@ -821,8 +821,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 
 	// Ahead of the fork between the resume path and the step launch, so the
-	// note reaches the agent whichever one drives it.
-	s.tellHeldClose(gateCtx, orgID, conv, task.ID)
+	// notes reach the agent whichever one drives it. The queued events go
+	// first: staged notes are read oldest first, and an event still queued
+	// on the task came before anything that closed it or resolved it, so
+	// the agent reads them in the order they happened.
+	s.handOffQueuedFirings(gateCtx, orgID, br, conv, task)
+	s.tellTaskResolved(gateCtx, orgID, conv.ID, task.ID)
 
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
@@ -962,9 +966,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// read the step as one the cancel never reached; it leaves the step
 		// alone for db.ReactorGrace after that release, and cancels the run
 		// in this engagement's place only if the reactor has not by then.
-		// The stop recorded no verdict, so the copy carries none: a claim
-		// of a step that had concluded before (a follow-up) still holds the
-		// old stamp in hand, and this engagement is not answering with it.
+		// The stop recorded no verdict, so the copy carries none, whatever
+		// the row this claim read held.
 		parked := *conv
 		parked.Status = domain.StatusOpen
 		parked.CompletedAt = nil
@@ -1233,8 +1236,11 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	stepConversation.Model = conv.Model
 	// Same predicate reactToStepTerminal uses to leave the blueprint running: an
 	// `open` step with no verdict is dormant, not done, so its staged skill
-	// stays for the resume. A concluded one has given its answer.
-	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded()
+	// stays for the resume. A concluded one has given its answer, and so has a
+	// turn that ended on a blueprint that had already finished: it records no
+	// verdict, and the next message brings its own claim, which stages again.
+	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() &&
+		br.Status == domain.BlueprintRunStatusRunning
 	s.reactToStepTerminal(ctx, orgID, br, *stepConversation, cfg, startTime)
 }
 
@@ -1496,8 +1502,11 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// enqueue step, so injections staged AFTER the enqueue are still
 	// picked up (the flush is destructive, so composing it early would
 	// risk losing anything staged in the gap).
-	prepends, prependsUnsent := s.resumeSystemPrepends(stepCtx, orgID, conv)
-	message := prepends + agentMessage
+	prepends, prependsUnsent := s.stagedInjectionsForEngagement(stepCtx, orgID, conv.ID)
+	message := agentMessage
+	if prepends != "" {
+		message = prepends + "\n\n" + agentMessage
+	}
 
 	// The resume path's agent-live. It runs no phase ladder — a resume has no
 	// fetch or clone to report — so this is where its setup ends and its turn

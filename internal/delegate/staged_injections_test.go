@@ -2,15 +2,12 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -101,177 +98,6 @@ func TestStagedInjectionsForEngagement_FlushesAndDrains(t *testing.T) {
 	// Destructive: the flush drained the queue.
 	if again, _ := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume"); again != "" {
 		t.Errorf("second resume should prepend nothing (queue drained), got %q", again)
-	}
-}
-
-// heldCloseFixture is a conversation no person started, on a task whose
-// close a CI pass holds.
-func heldCloseFixture(t *testing.T, convID string) (s *Spawner, database *sql.DB, conv *domain.Conversation, taskID, eventID string) {
-	t.Helper()
-	org := runmode.LocalDefaultOrgID
-	database = newDelegateTestDB(t)
-	seedConversation(t, database, convID, "sess", "/tmp/wt")
-	markEngaged(t, database, convID)
-	if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL WHERE id = ?`, convID); err != nil {
-		t.Fatalf("make the conversation event-triggered: %v", err)
-	}
-	stores := testSpawnerStores(database)
-	s = NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
-	ctx := context.Background()
-
-	var entityID string
-	if err := database.QueryRow(`SELECT t.id, t.entity_id FROM conversations c JOIN tasks t ON t.id = c.task_id WHERE c.id = ?`, convID).Scan(&taskID, &entityID); err != nil {
-		t.Fatalf("read task: %v", err)
-	}
-	eventID, err := stores.Events.Record(ctx, org, domain.Event{EventType: domain.EventGitHubPRCICheckPassed, EntityID: &entityID, MetadataJSON: `{"check_name":"build"}`})
-	if err != nil {
-		t.Fatalf("record the pass: %v", err)
-	}
-	if out, err := stores.Tasks.CloseOrHoldSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil || !out.Held {
-		t.Fatalf("setup: hold = (%+v, %v), want held", out, err)
-	}
-	if conv, err = s.conversations.GetSystem(ctx, org, convID); err != nil || conv == nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	return s, database, conv, taskID, eventID
-}
-
-// TestTellHeldClose_StagesTheCloseNoteOncePerClosingEvent: an engagement on a
-// task whose close is held stages the close note naming the closing event,
-// and the next engagement on the same hold stages nothing more.
-func TestTellHeldClose_StagesTheCloseNoteOncePerClosingEvent(t *testing.T) {
-	s, _, conv, taskID, eventID := heldCloseFixture(t, "run-held")
-	org := runmode.LocalDefaultOrgID
-	ctx := context.Background()
-
-	s.tellHeldClose(ctx, org, conv, taskID)
-	s.tellHeldClose(ctx, org, conv, taskID)
-
-	notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
-	if err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if len(notes) != 1 {
-		t.Fatalf("staged notes = %+v, want one", notes)
-	}
-	if n := notes[0]; n.Producer != domain.StagedInjectionProducerTaskClosing || n.Provenance.EventID != eventID || !strings.Contains(n.Body, "A github:pr:ci_check_passed event resolved") {
-		t.Errorf("note = %+v, want the close note naming the pass", n)
-	}
-}
-
-// TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly: an engagement
-// delivering a person's message, one already under way on a message it
-// delivered, and a conversation a person delegated, get the close notice
-// without the line saying what to do about it. A whole note still waiting from
-// before the person's message is replaced by the notice.
-func TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly(t *testing.T) {
-	org := runmode.LocalDefaultOrgID
-	ctx := context.Background()
-	for _, how := range []string{"waiting_message", "delivered_message", "delegation"} {
-		t.Run(how, func(t *testing.T) {
-			s, database, conv, taskID, eventID := heldCloseFixture(t, "run-held-"+how)
-			evt, err := s.events.GetSystem(ctx, org, eventID)
-			if err != nil || evt == nil {
-				t.Fatalf("read the pass: %v", err)
-			}
-			message := pendingUserInput(conv.ID, runmode.LocalDefaultUserID, "fix the nits before I approve")
-			switch how {
-			case "waiting_message":
-				// Told while no person was asking, then the person writes.
-				s.tellHeldClose(ctx, org, conv, taskID)
-				if _, err := s.conversations.InsertMessage(ctx, org, message); err != nil {
-					t.Fatalf("queue the person's message: %v", err)
-				}
-			case "delivered_message":
-				delivered := true
-				message.Delivered = &delivered
-				if _, err := s.conversations.InsertMessage(ctx, org, message); err != nil {
-					t.Fatalf("record the person's delivered message: %v", err)
-				}
-			default:
-				if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'manual', creator_user_id = ? WHERE id = ?`, runmode.LocalDefaultUserID, conv.ID); err != nil {
-					t.Fatalf("make the conversation a person's: %v", err)
-				}
-				conv.CreatorUserID = runmode.LocalDefaultUserID
-			}
-
-			if how == "delivered_message" {
-				// The close is held while the engagement is under way, and the
-				// router tells it.
-				s.TellTaskClosing(ctx, org, conv.ID, *evt)
-			} else {
-				s.tellHeldClose(ctx, org, conv, taskID)
-			}
-
-			notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
-			if err != nil {
-				t.Fatalf("flush: %v", err)
-			}
-			metadataJSON := evt.MetadataJSON
-			if current, err := events.Current(ctx, org, evt.EventType, metadataJSON); err == nil {
-				metadataJSON = current
-			}
-			if want := domain.TaskClosingNotice(evt.EventType, metadataJSON); len(notes) != 1 || notes[0].Body != want {
-				t.Errorf("staged notes = %+v, want the one notice %q", notes, want)
-			}
-		})
-	}
-}
-
-// TestResumeSystemPrepends_OrdersInjectionsThenLedger: a resumable run with BOTH
-// a staged injection AND a human-resolved deliverable composes both <system-note>
-// blocks ahead of the user's text, staged-injection block first:
-// [staged injections][deliverable ledger]. Guards the composed order against a
-// refactor dropping or reordering a block (the components are tested individually
-// elsewhere; this pins SendMessage's assembly).
-func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-compose", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	ctx := context.Background()
-
-	// Deliverable ledger: a watermark in the past so the resolved PR lands in it.
-	seedMessageAt(t, s, "r-compose", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
-	approvedPR := domain.NewPullRequestDeliverable("o/r", 1, "node1", "h", "main",
-		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → open (approved)
-	seedResolvedDeliverable(t, s, "r-compose", approvedPR)
-
-	// Staged injection on the same run.
-	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
-		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
-
-	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
-	}
-	prefix, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
-
-	inj := strings.Index(prefix, "the staged injection body")
-	ledger := strings.Index(prefix, "o/r#1")
-	if inj < 0 || ledger < 0 {
-		t.Fatalf("a block is missing: injection=%d ledger=%d in %q", inj, ledger, prefix)
-	}
-	if inj > ledger {
-		t.Errorf("staged-injection block must precede the deliverable ledger: %q", prefix)
-	}
-	if strings.Count(prefix, "<system-note>") != 2 {
-		t.Errorf("want two distinct <system-note> blocks, got %d: %q", strings.Count(prefix, "<system-note>"), prefix)
-	}
-}
-
-// TestResumeSystemPrepends_EmptyWhenNothingPending: no staged injection and no
-// resolved deliverable → empty prefix, so a plain resume prepends nothing.
-func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-none", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	ctx := context.Background()
-	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
-	}
-	if got, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
-		t.Errorf("want empty prefix when nothing pending, got %q", got)
 	}
 }
 

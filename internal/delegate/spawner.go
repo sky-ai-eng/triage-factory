@@ -24,7 +24,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -37,6 +36,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -112,10 +112,9 @@ type Spawner struct {
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
 	// deliverables holds the work a conversation prepared for a person. Read
 	// by the blueprint's task-close check (taskHasUnresolvedDeliverables), the
-	// resume note on a deliverable a person resolved, the turn-end nudge, the
-	// task context, and the PR coherence injection's pending-review lookup;
-	// read and written by TeardownTaskDeliverablesSystem, which retires a
-	// closed task's unresolved rows. Admin-pool System methods only.
+	// turn-end nudge, the task context, and the PR coherence injection's
+	// pending-review lookup.
+	// Admin-pool System methods only.
 	deliverables db.DeliverableStore
 	// artifacts reads the objects a conversation changed, from the
 	// ledger: the turn-end nudge and the task context read it. Admin-pool
@@ -379,14 +378,9 @@ type Spawner struct {
 	// setActivityTimings.
 	activityTimingsOverride activityTimings
 
-	dispatchWake chan struct{} // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
-	firingWaker  FiringWaker   // nil-safe; set post-construction via SetFiringWaker
-	// deliverableSettler settles a pending draft pull request before the
-	// system teardown decides whether to close it on GitHub. Nil-safe (an
-	// executor, and tests); set post-construction via SetDeliverableSettler
-	// and read under mu, like firingWaker beside it.
-	deliverableSettler DeliverableSettler
-	eventPublisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
+	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
+	firingWaker    FiringWaker    // nil-safe; set post-construction via SetFiringWaker
+	eventPublisher EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 	// memoryOwed is the doorbell every boundary this spawner stamps rings:
 	// the conversation may have ended without its agent having written its
 	// memory, and the brain is what generates the one it owes. Nil-safe; set
@@ -500,9 +494,9 @@ type Spawner struct {
 	// with a real ladder behind it still runs in milliseconds.
 	snapshotWaitPollInterval time.Duration
 	// snapshotInterval is how often a live native engagement checkpoints its
-	// workspace (checkpoint.go). Zero disables checkpoints. NewSpawner sets
-	// DefaultSnapshotInterval; SetSnapshotInterval (TF_SNAPSHOT_INTERVAL_SEC)
-	// overrides it once at startup.
+	// workspace at batch boundaries (checkpoint.go). Zero takes none there.
+	// NewSpawner sets DefaultSnapshotInterval; SetSnapshotInterval
+	// (TF_SNAPSHOT_INTERVAL_SEC) overrides it once at startup.
 	snapshotInterval time.Duration
 	// claimWarmWindow is how long an engagement waits warm after a person's
 	// turn (warm_window.go). Zero turns warm claims off. NewSpawner sets
@@ -792,31 +786,6 @@ func (s *Spawner) SetFiringWaker(w FiringWaker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.firingWaker = w
-}
-
-// DeliverableSettler settles a pending pull request deliverable from GitHub's
-// answer (reconcile.Reconciler.SettleDeliverable).
-type DeliverableSettler interface {
-	SettleDeliverable(ctx context.Context, orgID string, a domain.Deliverable)
-}
-
-// SetDeliverableSettler wires the reconciler the system teardown settles a
-// pending draft through. Post-construction, same pattern as SetFiringWaker:
-// the reconciler holds a hook into the spawner. Nil leaves a pending draft to
-// be closed TF-side only.
-func (s *Spawner) SetDeliverableSettler(d DeliverableSettler) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.deliverableSettler = d
-}
-
-// HasDeliverableSettler reports whether a settler is wired — the wiring's own
-// check that the system teardown was not left closing every pending draft
-// TF-side only.
-func (s *Spawner) HasDeliverableSettler() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.deliverableSettler != nil
 }
 
 // SetOnMemoryOwed wires the memory doorbell. Post-construction, same pattern
@@ -1794,102 +1763,46 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 	})
 }
 
-// TeardownTaskDeliverablesSystem retires every unresolved deliverable a task's
-// conversations hold, for a close nobody asked for: the event cascade finding
-// the PR merged, the reconciler finding an entity already terminal. The verb is
-// the router's — it stops the task's conversations and then calls this — and it
-// is here rather than on the server because a close driven by an event has no
-// request, no session and no user.
+// ReviewsDismissedSystem is what follows a terminating close that dismissed
+// the closed pull request's pending reviews, once it has committed
+// (db.TerminalCloseResult.DismissedReviews). Each review is announced on the
+// conversation that staged it, beside the resource-wide ping the counters of
+// unresolved work follow, and that conversation is told its review was
+// discarded and why (TellDeliverableResolved). Each such conversation's task
+// is then checked for closing by CloseTaskIfTerminalAndResolved, the rule a
+// person's resolution of a deliverable uses: a task whose run finished and
+// which only that review held open closes now. A review whose conversation
+// was purged belongs to no task and is only counted in the ping.
 //
-// Which is exactly what the System adapter below says: the admin pool answers
-// (a background job holds no JWT claims), and every audit row records
-// actor_user_id NULL, the autonomous-action spelling. A person who closes the
-// same task through the board gets the same teardown with their own name on the
-// rows, through the server's app-pool adapter.
-//
-// Best-effort by contract, like every other half of the close cascade: the task
-// is already terminal by the time this runs, so a failure is logged and the
-// deliverables stay unresolved for the next close to retry rather than unwinding a
-// close that landed.
-func (s *Spawner) TeardownTaskDeliverablesSystem(ctx context.Context, orgID, taskID string) {
-	if s.conversations == nil || s.deliverables == nil || s.externalActions == nil {
-		// The close already happened, and nothing walks back here for it, so
-		// the deliverables this pass would have retired stay open with no record
-		// of why. Say so rather than returning into silence.
-		delegateLog.Warn("deliverable teardown skipped: the spawner holds no store for it; the task's deliverables stay unresolved",
-			"task", taskID, "org", orgID)
+// Best-effort, as the rest of the post-commit cascade is: the dismissal has
+// committed, a dropped frame is repaired by the client's next refetch, a
+// failed stage loses that review's note, and the close check fails closed.
+// Detached from the caller's cancellation: a replayed close finds the entity
+// closed and dismisses nothing, so nothing walks back here for a dismissal
+// that already landed, and each note is staged once.
+func (s *Spawner) ReviewsDismissedSystem(ctx context.Context, orgID string, reviews []domain.Deliverable) {
+	if len(reviews) == 0 {
 		return
 	}
-	// Detached from the caller's cancellation: the task is already closed, and
-	// a drain shutting down mid-pass would leave its deliverables half-retired
-	// with nothing able to reach them again — a replayed close finds no active
-	// task and never walks back here. WithoutCancel keeps the caller's values,
-	// so the writes stay inside the close's trace.
 	ctx = context.WithoutCancel(ctx)
-	if err := deliverableteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, domain.PerformedBySystem, ""); err != nil {
-		delegateLog.Error("system deliverable teardown failed; deliverables left unresolved for retry",
-			"task", taskID, "org", orgID, "error", err)
+	frames := s.frames()
+	var conversations []string
+	seen := map[string]bool{}
+	for _, r := range reviews {
+		if r.ConversationID == "" {
+			continue
+		}
+		frames.DeliverableUpdated(ctx, orgID, r.ConversationID, conversationframe.DeliverableUpdate{
+			DeliverableID: r.ID, State: r.State,
+		})
+		s.TellDeliverableResolved(ctx, orgID, r)
+		if !seen[r.ConversationID] {
+			seen[r.ConversationID] = true
+			conversations = append(conversations, r.ConversationID)
+		}
 	}
-}
-
-// systemTeardown is the deliverable teardown's admin-pool adapter, and its store
-// surface too — the two are one type because the admin pool binds no
-// transaction to distinguish them. The `...System` store methods are per-call
-// with org_id bound by argument rather than by RLS, so a batch applies its
-// writes as they come. The retry that repairs a partial one is the same retry a
-// rolled-back app-pool batch gets: the flips re-target the same predicate set,
-// so running the teardown again is safe.
-type systemTeardown struct{ s *Spawner }
-
-func (d systemTeardown) Batch(_ context.Context, _ string, fn func(deliverableteardown.Stores) error) error {
-	return fn(d)
-}
-
-// GitHub reads the resolver under the spawner's lock, like every other reader:
-// it is wired post-construction by SetRunCredentialResolvers and re-wired on a
-// GitHub config change, so a bare read races that swap.
-func (d systemTeardown) GitHub() ghclient.Resolver {
-	d.s.mu.Lock()
-	defer d.s.mu.Unlock()
-	return d.s.ghResolver
-}
-
-func (d systemTeardown) SettlePullRequest(ctx context.Context, orgID string, a domain.Deliverable) {
-	d.s.mu.Lock()
-	settler := d.s.deliverableSettler
-	d.s.mu.Unlock()
-	if settler != nil {
-		settler.SettleDeliverable(ctx, orgID, a)
+	conversationevent.Publish(s.wsHub, orgID)
+	for _, conversationID := range conversations {
+		s.CloseTaskIfTerminalAndResolved(ctx, orgID, conversationID)
 	}
-}
-
-func (d systemTeardown) ConversationsForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
-	return d.s.conversations.ListForTaskSystem(ctx, orgID, taskID)
-}
-
-func (d systemTeardown) DeliverablesForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Deliverable, error) {
-	return d.s.deliverables.ListByConversationSystem(ctx, orgID, conversationID)
-}
-
-func (d systemTeardown) UpsertDeliverable(ctx context.Context, orgID string, a domain.Deliverable) error {
-	_, err := d.s.deliverables.UpsertSystem(ctx, orgID, a)
-	return err
-}
-
-func (d systemTeardown) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
-	return d.s.externalActions.RecordSystem(ctx, orgID, act)
-}
-
-func (d systemTeardown) Entity(ctx context.Context, orgID, id string) (*domain.Entity, error) {
-	if d.s.entities == nil {
-		return nil, nil
-	}
-	return d.s.entities.GetSystem(ctx, orgID, id)
-}
-
-func (d systemTeardown) Repository(ctx context.Context, orgID, id string) (*domain.Repository, error) {
-	if d.s.repos == nil {
-		return nil, fmt.Errorf("%w: %s (no repository store)", db.ErrNoSuchRepository, id)
-	}
-	return d.s.repos.GetSystem(ctx, orgID, id)
 }

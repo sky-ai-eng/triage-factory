@@ -32,8 +32,8 @@ type Task struct {
 	// task is placed there once, when its delegation is minted; a
 	// user-claimed one is moved there by hand.
 	Status         string     `json:"status"`           // queued | in_progress | done | dismissed | snoozed
-	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (two entity rows turned out to be one Jira issue and were merged — by a migration, or by the tracker when a row learning its issue id found another row already carrying it: this card duplicated one already on the surviving entity)
-	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled, duplicate_entity_merged)
+	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event (another event type resolved the task) | reassigned (the task's own event type retired it: the issue was assigned again) | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (two entity rows turned out to be one Jira issue and were merged — by a migration, or by the tracker when a row learning its issue id found another row already carrying it: this card duplicated one already on the surviving entity)
+	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event, reassigned + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled, duplicate_entity_merged)
 	ClosedAt       *time.Time `json:"closed_at"`
 	SnoozeUntil    *time.Time `json:"snooze_until"`
 
@@ -58,6 +58,13 @@ type Task struct {
 	// + non-empty claim is the audit "who finished this." Empty string = NULL.
 	ClaimedByAgentID string `json:"claimed_by_agent_id,omitempty"`
 	ClaimedByUserID  string `json:"claimed_by_user_id,omitempty"`
+
+	// Version is the task's optimistic-concurrency token: every write that
+	// changes one of db.TaskVersionColumns raises it, and no other write does,
+	// so a scorer pass or a held close never makes a person's pending write
+	// stale. A person's write names the version it read and is refused
+	// (db.ErrTaskVersion) once the task has moved past it.
+	Version int64 `json:"version"`
 
 	CreatedAt time.Time `json:"created_at"`
 

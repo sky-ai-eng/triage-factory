@@ -69,7 +69,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	}
 
 	// conversation_memory: agent finished and wrote its self-report (the
-	// termination upsert). The teardown below must leave it alone.
+	// termination upsert). Every task boundary must leave it alone.
 	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
@@ -102,58 +102,6 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	return "00000000-0000-4000-8000-000000000024", "r_pa", stored.ID
 }
 
-// assertPendingApprovalCleanedUp checks what the task-level teardown owes the
-// fixture: the task at wantTaskStatus, the staged review dismissed, and the
-// conversation's status and the agent's memory untouched.
-func assertPendingApprovalCleanedUp(
-	t *testing.T,
-	database *sql.DB,
-	taskID, conversationID, reviewID string,
-	wantTaskStatus string,
-) {
-	t.Helper()
-
-	var taskStatus string
-	if err := database.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
-		t.Fatalf("scan task: %v", err)
-	}
-	if taskStatus != wantTaskStatus {
-		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
-	}
-
-	// The conversation is untouched by the resolve — it stays concluded. A
-	// resolve must never flip conversations.status.
-	if !storedConcluded(t, database, conversationID) {
-		t.Error("conversation no longer concluded (teardown must not flip conversation lifecycle)")
-	}
-
-	// The review deliverable must be flipped to dismissed (its proposed snapshot is
-	// preserved for the audit ledger — abandonment retires the GitHub review, not
-	// the record). reviewID here is the deliverable id.
-	var artState string
-	if err := database.QueryRow(
-		`SELECT state FROM deliverables WHERE id = ?`, reviewID,
-	).Scan(&artState); err != nil {
-		t.Fatalf("scan review deliverable state: %v", err)
-	}
-	if artState != domain.DeliverableStateReviewDismissed {
-		t.Errorf("review deliverable state = %q, want %q (dismissed on abandon)", artState, domain.DeliverableStateReviewDismissed)
-	}
-
-	// The agent's own memory is the conversation's account of what it tried;
-	// the teardown resolves deliverables and must not touch it.
-	mem, err := sqlitestore.New(database).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
-	if err != nil {
-		t.Fatalf("GetForConversationSystem: %v", err)
-	}
-	if mem == nil {
-		t.Fatalf("no conversation_memory row for conversation %s after cleanup", conversationID)
-	}
-	if mem.Content != "agent self-report" || mem.Source != domain.MemorySourceAgent {
-		t.Errorf("memory = (Source=%q, Content=%q), want the agent's self-report preserved", mem.Source, mem.Content)
-	}
-}
-
 // seedCarriedDraftPR stages a draft pull request on conversationID, the
 // deliverable a next attempt pushes to instead of opening a second PR for the
 // same task. Returns the deliverable id.
@@ -171,10 +119,10 @@ func seedCarriedDraftPR(t *testing.T, database *sql.DB, conversationID string) s
 	return stored.ID
 }
 
-// assertPendingApprovalCarried is assertPendingApprovalCleanedUp's mirror for
-// every boundary short of the task's end: the draft PR and staged review stay as
-// they are for the next claimant, nothing is audited as closed, and the
-// conversation and the agent's memory are untouched.
+// assertPendingApprovalCarried checks what every task boundary, the task's
+// end included, owes the fixture: the task at wantTaskStatus, the draft PR and
+// staged review as they were, nothing audited as closed, and the
+// conversation and the agent's memory untouched.
 func assertPendingApprovalCarried(
 	t *testing.T,
 	database *sql.DB,
@@ -200,7 +148,7 @@ func assertPendingApprovalCarried(
 		t.Fatalf("scan review deliverable state: %v", err)
 	}
 	if reviewState != domain.DeliverableStateReviewPending {
-		t.Errorf("review deliverable state = %q, want %q (a staged review survives every boundary but task end)", reviewState, domain.DeliverableStateReviewPending)
+		t.Errorf("review deliverable state = %q, want %q (no task boundary dismisses a staged review)", reviewState, domain.DeliverableStateReviewPending)
 	}
 
 	var prState string
@@ -208,7 +156,7 @@ func assertPendingApprovalCarried(
 		t.Fatalf("scan draft PR deliverable state: %v", err)
 	}
 	if prState != domain.DeliverableStatePRDraft {
-		t.Errorf("draft PR deliverable state = %q, want %q (the next attempt pushes to this PR)", prState, domain.DeliverableStatePRDraft)
+		t.Errorf("draft PR deliverable state = %q, want %q (no task boundary closes a draft PR)", prState, domain.DeliverableStatePRDraft)
 	}
 
 	// No audit row either: nothing was written to GitHub, so nothing belongs
@@ -244,7 +192,7 @@ func TestRequeue_ConcludedRun(t *testing.T) {
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -284,8 +232,8 @@ func TestRequeue_ConcludedRun(t *testing.T) {
 }
 
 // TestTaskPatch_EndingATask pins done and dismissed on a task whose run left a
-// draft PR and a staged review: the review is dismissed, the PR is closed under
-// the closing user, and the conversation is not stamped, so a follow-up can
+// draft PR and a staged review: both are left as they were, nothing is sent to
+// GitHub or audited, and the conversation is not stamped, so a follow-up can
 // still resume it.
 func TestTaskPatch_EndingATask(t *testing.T) {
 	for _, status := range []string{"done", "dismissed"} {
@@ -295,30 +243,12 @@ func TestTaskPatch_EndingATask(t *testing.T) {
 			prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": status})
+				withTaskVersion(t, s, taskID, map[string]any{"status": status}))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
 			assertUnstamped(t, s.db, conversationID)
-			assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, status)
-
-			var prState string
-			if err := s.db.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, prID).Scan(&prState); err != nil {
-				t.Fatalf("scan draft PR deliverable state: %v", err)
-			}
-			if prState != domain.DeliverableStatePRClosed {
-				t.Errorf("draft PR deliverable state = %q, want %q", prState, domain.DeliverableStatePRClosed)
-			}
-			var actor sql.NullString
-			if err := s.db.QueryRow(
-				`SELECT actor_user_id FROM external_actions WHERE conversation_id = ? AND action = ?`,
-				conversationID, domain.ActionPRClosed,
-			).Scan(&actor); err != nil {
-				t.Fatalf("scan pr_closed audit row: %v", err)
-			}
-			if actor.String != runmode.LocalDefaultUserID {
-				t.Errorf("pr_closed actor_user_id = %q, want the closing user %q", actor.String, runmode.LocalDefaultUserID)
-			}
+			assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, status)
 		})
 	}
 }
@@ -359,7 +289,7 @@ func TestTaskClaim_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/claim",
-		map[string]any{})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000009", map[string]any{}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -417,7 +347,7 @@ func TestTaskDelegate_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/delegate",
-		map[string]any{"blueprint_id": "any"})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000007", map[string]any{"blueprint_id": "any"}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -469,7 +399,7 @@ func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 			}
 
 			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/claim",
-				map[string]any{})
+				withTaskVersion(t, s, "00000000-0000-4000-8000-000000000012", map[string]any{}))
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -527,7 +457,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed terminal task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/delegate",
-			map[string]any{"blueprint_id": "any"})
+			withTaskVersion(t, s, "00000000-0000-4000-8000-000000000011", map[string]any{"blueprint_id": "any"}))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -568,7 +498,7 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/delegate",
-			map[string]any{"blueprint_id": "any"})
+			withTaskVersion(t, s, "00000000-0000-4000-8000-000000000006", map[string]any{"blueprint_id": "any"}))
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -614,7 +544,7 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/delegate",
-		map[string]any{"blueprint_id": "any"})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000005", map[string]any{"blueprint_id": "any"}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}
@@ -663,7 +593,7 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/00000000-0000-4000-8000-000000000010",
-		map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000010", map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
 	}
@@ -722,9 +652,9 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 
 	// A blueprint id that won't resolve: the claim moves before the spawn,
 	// which then fails with a 422.
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", map[string]any{
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", withTaskVersion(t, s, "00000000-0000-4000-8000-000000000004", map[string]any{
 		"blueprint_id": "no-such-prompt",
-	})
+	}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
 	}
@@ -793,7 +723,7 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/claim",
-		map[string]any{})
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000003", map[string]any{}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -827,7 +757,7 @@ func TestHandleRequeue_404OnMissingTask(t *testing.T) {
 func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 	s := newTestServer(t)
 
-	ok, err := s.tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task")
+	ok, err := s.tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task", dbtest.TaskVersion(t, s.tasks, runmode.LocalDefaultOrgID, "no-such-task"))
 	if err != nil {
 		t.Fatalf("RequeueTask: %v", err)
 	}
@@ -865,7 +795,7 @@ func TestHandleRequeue_ClearsClaimColumns(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/requeue", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/requeue", withTaskVersion(t, s, "00000000-0000-4000-8000-000000000013", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -889,42 +819,6 @@ func TestHandleRequeue_ClearsClaimColumns(t *testing.T) {
 	}
 	if snoozeUntil.Valid {
 		t.Errorf("snooze_until = %v; want NULL", snoozeUntil.Time)
-	}
-}
-
-// TestTeardownTaskDeliverables_FailureHoldsDeliverableForRetry: a failure inside
-// the teardown rolls the whole batch back, leaving the review pending for the next
-// call to resolve. Renaming the deliverables table stages the failure.
-func TestTeardownTaskDeliverables_FailureHoldsDeliverableForRetry(t *testing.T) {
-	s := newTestServer(t)
-	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
-
-	// Sabotage: rename the deliverables table so the teardown's ListByConversation fails with
-	// "no such table" and the tx rolls back before any flip.
-	if _, err := s.db.Exec(`ALTER TABLE deliverables RENAME TO deliverables_temp`); err != nil {
-		t.Fatalf("rename deliverables table: %v", err)
-	}
-
-	s.teardownTaskDeliverables(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
-
-	// The conversation is untouched (never flipped — teardown doesn't touch its status).
-	if !storedConcluded(t, s.db, conversationID) {
-		t.Fatal("conversation no longer concluded after failure; want it untouched")
-	}
-
-	// Heal the table; the next call must resolve the still-pending review.
-	if _, err := s.db.Exec(`ALTER TABLE deliverables_temp RENAME TO deliverables`); err != nil {
-		t.Fatalf("restore deliverables table: %v", err)
-	}
-
-	s.teardownTaskDeliverables(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
-
-	var artState string
-	if err := s.db.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, reviewID).Scan(&artState); err != nil {
-		t.Fatalf("scan review deliverable after retry: %v", err)
-	}
-	if artState != domain.DeliverableStateReviewDismissed {
-		t.Errorf("review deliverable state = %q after retry; want %q (review should be dismissed)", artState, domain.DeliverableStateReviewDismissed)
 	}
 }
 
@@ -1033,7 +927,7 @@ func TestRequeue_StopsTheRunWorkingTheTask(t *testing.T) {
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "requeue_live")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", withTaskVersion(t, s, taskID, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

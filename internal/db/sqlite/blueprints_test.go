@@ -458,7 +458,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		taskID, inserted, claimed := fire(t, "claim-race", db.AgentClaimStamp{AgentID: agentID}, func(taskID string) {
 			// The user claims the task in the window before the insert. They
 			// win the claim; the run must still be committed.
-			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil || !ok {
+			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, stores.Tasks, org, taskID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		})
@@ -497,7 +497,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		// The user requeues the task while the run stays live — the documented,
 		// deliberate "unclaimed with a live run" state. A replayed event must
 		// not quietly put the bot's claim back.
-		if ok, err := stores.Tasks.RequeueTask(ctx, org, task.ID); err != nil || !ok {
+		if ok, err := stores.Tasks.RequeueTask(ctx, org, task.ID, dbtest.TaskVersion(t, stores.Tasks, org, task.ID)); err != nil || !ok {
 			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 		}
 		inserted, claimed, conv, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID}, "",
@@ -658,10 +658,10 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_ReopenRunForResume pins the resume re-open CAS: an
-// aborted blueprint_run on an open task flips back to running (clearing its
-// abort metadata) so a follow-up on the step that aborted it can re-finalize; a
-// non-aborted row is a guarded no-op. The task gate and the verdict withdrawal
-// are covered by the shared claim predicate conformance.
+// aborted blueprint_run flips back to running (clearing its abort metadata) so
+// a follow-up on the step that aborted it can re-finalize; a non-aborted row
+// is a guarded no-op. The closed-task case and the verdict withdrawal are
+// covered by the shared claim predicate conformance.
 func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints

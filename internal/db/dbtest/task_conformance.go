@@ -371,7 +371,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, byAgent, agentID, teamID); err != nil || !ok {
 			t.Fatalf("StampAgentClaimIfUnclaimed: ok=%v err=%v", ok, err)
 		}
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID, TaskVersion(t, s, orgID, byUser)); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 
@@ -599,7 +599,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("ClaimQueuedForUser_lands_then_refuses_steal", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "cqfu")
-		ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
+		ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("first claim: %v", err)
 		}
@@ -608,7 +608,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		// Second claim attempt — even by the same user — should now be
 		// refused because the task is no longer unclaimed.
-		ok, err = s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
+		ok, err = s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("second claim: %v", err)
 		}
@@ -637,7 +637,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
-			ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
+			ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("claim on terminal: %v", err)
 			}
@@ -667,9 +667,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// From snoozed, so the landing row exercises both halves of the wake:
 		// the status moves to in_progress rather than back to queued, and the
 		// wake time goes with it.
-		if _, err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
-			t.Fatalf("SetStatus snoozed: %v", err)
-		}
+		snoozeTask(t, s, orgID, taskID)
 		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
 		if err != nil {
 			t.Fatalf("first stamp: %v", err)
@@ -728,7 +726,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		// A user owns the task: the stamp must refuse rather than steal, and
 		// the fold must still be recorded — the injection already happened.
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 		claimed, err := s.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{AgentID: agentID})
@@ -751,7 +749,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "handoff")
 		// Unclaimed → bot: HandoffChanged.
-		result, landed, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
+		result, landed, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID, TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("first handoff: %v", err)
 		}
@@ -768,7 +766,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Errorf("claimed_by_agent_id = %q, want %q", landed.ClaimedByAgentID, agentID)
 		}
 		// Same-agent already-owns → HandoffNoOp, answering with the row as it stands.
-		result, held, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
+		result, held, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID, TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("second handoff: %v", err)
 		}
@@ -783,7 +781,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		result, refused, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
+		result, refused, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID, TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("post-terminal handoff: %v", err)
 		}
@@ -802,7 +800,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
-		ok, err := s.TakeoverClaimFromAgent(ctx, orgID, taskID, userID)
+		ok, err := s.TakeoverClaimFromAgent(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("Takeover: %v", err)
 		}
@@ -826,10 +824,10 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("AdvanceStatusForUser_lands_for_user_claim", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "adv-happy")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
+		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress", TaskVersion(t, s, orgID, taskID))
 		if err != nil {
 			t.Fatalf("AdvanceStatusForUser: %v", err)
 		}
@@ -843,7 +841,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// Idempotent: the guard checks the current status is in the active
 		// set, so a task already in_progress advances again rather than
 		// tripping a "strictly forward" rule it doesn't have.
-		if ok2, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress"); err != nil || !ok2 {
+		if ok2, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress", TaskVersion(t, s, orgID, taskID)); err != nil || !ok2 {
 			t.Fatalf("Advance in_progress → in_progress: ok=%v err=%v", ok2, err)
 		}
 	})
@@ -856,7 +854,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 				t.Fatalf("stamp agent: %v", err)
 			}
-			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
+			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress", TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("AdvanceStatusForUser: %v", err)
 			}
@@ -871,14 +869,14 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 		t.Run("different_user", func(t *testing.T) {
 			_, _, taskID := seed(t, "adv-other")
-			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 				t.Fatalf("claim: ok=%v err=%v", ok, err)
 			}
 			// A different user's id — must not be able to advance someone
 			// else's task. Use a syntactic-only mismatch so the FK-shape
 			// constant the seeder uses for userID still distinguishes.
 			otherUserID := "00000000-0000-0000-0000-0000000000ff"
-			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, otherUserID, "in_progress")
+			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, otherUserID, "in_progress", TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("AdvanceStatusForUser: %v", err)
 			}
@@ -889,13 +887,13 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 		t.Run("terminal_task", func(t *testing.T) {
 			_, _, taskID := seed(t, "adv-term")
-			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 				t.Fatalf("claim: ok=%v err=%v", ok, err)
 			}
 			if _, err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
 				t.Fatalf("close: %v", err)
 			}
-			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
+			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress", TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("AdvanceStatusForUser: %v", err)
 			}
@@ -906,14 +904,14 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 		t.Run("invalid_target", func(t *testing.T) {
 			_, _, taskID := seed(t, "adv-bad")
-			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 				t.Fatalf("claim: ok=%v err=%v", ok, err)
 			}
 			// in_review is in the list because it WAS a target: the value left
 			// the vocabulary, and a store that still accepted it would write a
 			// status the CHECK constraint no longer admits.
 			for _, bad := range []string{"done", "dismissed", "queued", "snoozed", "in_review", "wat"} {
-				ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, bad)
+				ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, bad, TaskVersion(t, s, orgID, taskID))
 				if err != nil {
 					t.Errorf("to=%q: unexpected err: %v", bad, err)
 				}
@@ -932,9 +930,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, liveID := seed(t, "qsnz-live")
 		_, _, snoozedID := seed(t, "qsnz-snoozed")
-		if _, err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
-			t.Fatalf("SetStatus snoozed: %v", err)
-		}
+		snoozeTask(t, s, orgID, snoozedID)
 
 		live, _, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
@@ -980,7 +976,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("List_only_unclaimed_excludes_claimed", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "qsnz-claimed")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
 		out, _, err := s.List(ctx, orgID, queueWithSnoozedFilter(), db.ListOpts{Limit: 50})
@@ -1034,7 +1030,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// A person's claim takes its team from the claimer's active team in
 		// the task's visibility set, else the active owner, and this task has
 		// neither: the door refuses before it writes.
-		ok, err := s.ClaimQueuedForUser(ctx, orgID, task.ID, userID)
+		ok, err := s.ClaimQueuedForUser(ctx, orgID, task.ID, userID, TaskVersion(t, s, orgID, task.ID))
 		if ok || !errors.Is(err, db.ErrNoActiveClaimTeam) {
 			t.Errorf("ClaimQueuedForUser on an unowned task = (%v, %v), want (false, ErrNoActiveClaimTeam)", ok, err)
 		}
@@ -1048,40 +1044,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if !strings.Contains(err.Error(), "tasks_claimed_requires_team") {
 			t.Errorf("stamp on an unowned task failed with %v, want the tasks_claimed_requires_team CHECK", err)
 		}
-	})
-
-	// The queue holds nobody's work, and it is the schema that says so rather
-	// than the six claim doors agreeing to. SetStatus is the unguarded status
-	// primitive — it writes the column with no claim in view — so pushing a
-	// held row back to queued (or to snoozed, the other unclaimed-by-rule
-	// status) is the shortest path to the shape no door may persist.
-	t.Run("QueueUnclaimed_check_rejects_a_held_queued_row", func(t *testing.T) {
-		s, orgID, _, agentID, userID, seed, _ := mk(t)
-		_, _, byUser := seed(t, "queue-held-user")
-		_, _, byAgent := seed(t, "queue-held-agent")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, byUser, userID); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
-		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, byAgent, agentID, ""); err != nil || !ok {
-			t.Fatalf("stamp: ok=%v err=%v", ok, err)
-		}
-		for _, c := range []struct{ taskID, status string }{
-			{byUser, "queued"},
-			{byUser, "snoozed"},
-			{byAgent, "queued"},
-			{byAgent, "snoozed"},
-		} {
-			if _, err := s.SetStatus(ctx, orgID, c.taskID, c.status); err == nil {
-				t.Errorf("SetStatus(%s) on a held task succeeded; tasks_queue_unclaimed must refuse it", c.status)
-			}
-			got, _ := s.Get(ctx, orgID, c.taskID)
-			if got.Status != "in_progress" {
-				t.Errorf("status = %q after a refused write, want in_progress", got.Status)
-			}
-		}
-		// The converse — a row in progress that nobody holds — is not a shape
-		// the schema refuses: only requeue returns a task to the queue, and
-		// it writes the status itself alongside the cleared claim.
 	})
 
 	t.Run("OwnerTeamForLatestTaskInTypes_latest_owned_excludes_null_and_out_of_set", func(t *testing.T) {
@@ -1149,13 +1111,13 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			if _, err := s.Close(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
-			if ok, err := s.RequeueTask(ctx, orgID, taskID); err != nil || !ok {
+			if ok, err := s.RequeueTask(ctx, orgID, taskID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 				t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 			}
-			if ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour)); err != nil || !ok {
+			if ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour), TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 				t.Fatalf("SnoozeTask: ok=%v err=%v", ok, err)
 			}
-			got, err := s.CloseByUser(ctx, orgID, taskID, status)
+			got, err := s.CloseByUser(ctx, orgID, taskID, status, TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("CloseByUser(%s): %v", status, err)
 			}
@@ -1173,7 +1135,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		closers := map[string]func(taskID string) error{
 			"by_a_person": func(taskID string) error {
-				_, err := s.CloseByUser(ctx, orgID, taskID, "dismissed")
+				_, err := s.CloseByUser(ctx, orgID, taskID, "dismissed", TaskVersion(t, s, orgID, taskID))
 				return err
 			},
 			"by_an_event": func(taskID string) error {
@@ -1191,7 +1153,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				if before.ClosedAt == nil {
 					t.Fatalf("close %s left closed_at NULL", name)
 				}
-				if _, err := s.CloseByUser(ctx, orgID, taskID, status); !errors.Is(err, db.ErrNoSuchTask) {
+				if _, err := s.CloseByUser(ctx, orgID, taskID, status, TaskVersion(t, s, orgID, taskID)); !errors.Is(err, db.ErrNoSuchTask) {
 					t.Errorf("CloseByUser(%s) on a task closed %s = %v, want db.ErrNoSuchTask", status, name, err)
 				}
 				after := mustGetTask(t, s, orgID, taskID)
@@ -1208,7 +1170,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "user-close-bad-status")
 		for _, status := range []string{"queued", "in_progress", "snoozed", ""} {
-			if _, err := s.CloseByUser(ctx, orgID, taskID, status); !errors.Is(err, db.ErrInvalidUserCloseStatus) {
+			if _, err := s.CloseByUser(ctx, orgID, taskID, status, TaskVersion(t, s, orgID, taskID)); !errors.Is(err, db.ErrInvalidUserCloseStatus) {
 				t.Errorf("CloseByUser(%q) = %v, want db.ErrInvalidUserCloseStatus", status, err)
 			}
 		}
@@ -1221,7 +1183,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "snooze")
 		until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-		ok, err := s.SnoozeTask(ctx, orgID, taskID, until)
+		ok, err := s.SnoozeTask(ctx, orgID, taskID, until, TaskVersion(t, s, orgID, taskID))
 		if err != nil || !ok {
 			t.Fatalf("SnoozeTask: ok=%v err=%v", ok, err)
 		}
@@ -1242,7 +1204,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		stages := map[string]func(taskID string) error{
 			"claimed_by_a_person": func(taskID string) error {
-				ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
+				ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID))
 				if err == nil && !ok {
 					err = errors.New("claim refused")
 				}
@@ -1256,7 +1218,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				return err
 			},
 			"closed": func(taskID string) error {
-				_, err := s.CloseByUser(ctx, orgID, taskID, "dismissed")
+				_, err := s.CloseByUser(ctx, orgID, taskID, "dismissed", TaskVersion(t, s, orgID, taskID))
 				return err
 			},
 		}
@@ -1267,7 +1229,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 					t.Fatalf("stage %s: %v", name, err)
 				}
 				before, _ := s.Get(ctx, orgID, taskID)
-				ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour))
+				ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour), TaskVersion(t, s, orgID, taskID))
 				if err != nil {
 					t.Fatalf("SnoozeTask: %v", err)
 				}
@@ -1286,10 +1248,10 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("ClearSnooze_wakes_a_snoozed_task", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "wake")
-		if ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour)); err != nil || !ok {
+		if ok, err := s.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour), TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("SnoozeTask: ok=%v err=%v", ok, err)
 		}
-		ok, err := s.ClearSnooze(ctx, orgID, taskID)
+		ok, err := s.ClearSnooze(ctx, orgID, taskID, TaskVersion(t, s, orgID, taskID))
 		if err != nil || !ok {
 			t.Fatalf("ClearSnooze: ok=%v err=%v", ok, err)
 		}
@@ -1305,12 +1267,12 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		stages := map[string]func(taskID string){
 			"queued": func(string) {},
 			"in_progress": func(taskID string) {
-				if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+				if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 					t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 				}
 			},
 			"dismissed": func(taskID string) {
-				if _, err := s.CloseByUser(ctx, orgID, taskID, "dismissed"); err != nil {
+				if _, err := s.CloseByUser(ctx, orgID, taskID, "dismissed", TaskVersion(t, s, orgID, taskID)); err != nil {
 					t.Fatalf("CloseByUser: %v", err)
 				}
 			},
@@ -1318,7 +1280,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		for name, stage := range stages {
 			_, _, taskID := seed(t, "wake-refused-"+name)
 			stage(taskID)
-			ok, err := s.ClearSnooze(ctx, orgID, taskID)
+			ok, err := s.ClearSnooze(ctx, orgID, taskID, TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("ClearSnooze on a %s task: %v", name, err)
 			}
@@ -1337,7 +1299,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		stages := map[string]func(taskID string){
 			"claimed_by_a_person": func(taskID string) {
-				if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+				if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID, TaskVersion(t, s, orgID, taskID)); err != nil || !ok {
 					t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 				}
 			},
@@ -1347,7 +1309,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				}
 			},
 			"closed": func(taskID string) {
-				if _, err := s.CloseByUser(ctx, orgID, taskID, "done"); err != nil {
+				if _, err := s.CloseByUser(ctx, orgID, taskID, "done", TaskVersion(t, s, orgID, taskID)); err != nil {
 					t.Fatalf("CloseByUser: %v", err)
 				}
 			},
@@ -1355,7 +1317,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		for name, stage := range stages {
 			_, _, taskID := seed(t, "requeue-"+name)
 			stage(taskID)
-			ok, err := s.RequeueTask(ctx, orgID, taskID)
+			ok, err := s.RequeueTask(ctx, orgID, taskID, TaskVersion(t, s, orgID, taskID))
 			if err != nil || !ok {
 				t.Fatalf("RequeueTask on a task %s: ok=%v err=%v", name, ok, err)
 			}
@@ -1371,7 +1333,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// A syntactically valid UUID, so Postgres reaches the WHERE clause
 		// rather than refusing the id's type.
 		s, orgID, _, _, _, _, _ := mk(t)
-		ok, err := s.RequeueTask(ctx, orgID, "00000000-0000-0000-0000-000000000000")
+		ok, err := s.RequeueTask(ctx, orgID, "00000000-0000-0000-0000-000000000000", TaskVersion(t, s, orgID, "00000000-0000-0000-0000-000000000000"))
 		if err != nil {
 			t.Fatalf("RequeueTask on a missing id: %v", err)
 		}
@@ -1384,8 +1346,8 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 	t.Run("lifecycle_writes_return_the_stored_row", func(t *testing.T) {
 		// The returned-row standard on TaskStore's converted writes:
-		// Bump[System], Close[System], CloseByUser, HandoffAgentClaim and
-		// SetStatus. Each returns tasks' OWN columns, not the entity join Get
+		// Bump[System], Close[System], CloseByUser and HandoffAgentClaim.
+		// Each returns tasks' OWN columns, not the entity join Get
 		// reads alongside them — see the shape note on db.TaskStore. bareRead
 		// mirrors that: a Get with the join-populated display fields blanked,
 		// the same trick TeamsStore.Role's conformance test uses for a
@@ -1398,9 +1360,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// Bump / BumpSystem: wakes a snoozed task.
 		for _, sys := range []bool{false, true} {
 			_, eventID, taskID := seed(t, fmt.Sprintf("rr-bump-%v", sys))
-			if _, err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
-				t.Fatalf("seed snoozed: %v", err)
-			}
+			snoozeTask(t, s, orgID, taskID)
 			what, got, err := "Tasks.Bump", domain.Task{}, error(nil)
 			if sys {
 				what = "Tasks.BumpSystem"
@@ -1443,12 +1403,12 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// CloseByUser, with the state guard's terminal side as Close's is.
 		for _, status := range []string{"dismissed", "done"} {
 			_, _, taskID := seed(t, "rr-user-close-"+status)
-			got, err := s.CloseByUser(ctx, orgID, taskID, status)
+			got, err := s.CloseByUser(ctx, orgID, taskID, status, TaskVersion(t, s, orgID, taskID))
 			if err != nil {
 				t.Fatalf("Tasks.CloseByUser(%s): %v", status, err)
 			}
 			AssertWriteReturnedStoredRow(t, "Tasks.CloseByUser", got, bareRead(taskID))
-			if _, err := s.CloseByUser(ctx, orgID, taskID, status); !errors.Is(err, db.ErrNoSuchTask) {
+			if _, err := s.CloseByUser(ctx, orgID, taskID, status, TaskVersion(t, s, orgID, taskID)); !errors.Is(err, db.ErrNoSuchTask) {
 				t.Errorf("Tasks.CloseByUser on an already-terminal task = %v, want db.ErrNoSuchTask", err)
 			}
 		}
@@ -1462,24 +1422,11 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				want db.HandoffResult
 			}{{"changed", db.HandoffChanged}, {"no-op", db.HandoffNoOp}} {
 				what := "Tasks.HandoffAgentClaim (" + step.name + ")"
-				result, got, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
+				result, got, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID, TaskVersion(t, s, orgID, taskID))
 				if err != nil || result != step.want {
 					t.Fatalf("%s = (%v, %v), want result %v", what, result, err, step.want)
 				}
 				AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
-			}
-		}
-
-		// SetStatus.
-		{
-			_, _, taskID := seed(t, "rr-status")
-			got, err := s.SetStatus(ctx, orgID, taskID, "in_progress")
-			if err != nil {
-				t.Fatalf("Tasks.SetStatus: %v", err)
-			}
-			AssertWriteReturnedStoredRow(t, "Tasks.SetStatus", got, bareRead(taskID))
-			if got.Status != "in_progress" {
-				t.Errorf("Tasks.SetStatus returned status=%q, want in_progress", got.Status)
 			}
 		}
 
@@ -1492,27 +1439,14 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}{
 			{"Tasks.Bump", func() error { _, e := s.Bump(ctx, orgID, missingID, "x"); return e }},
 			{"Tasks.Close", func() error { _, e := s.Close(ctx, orgID, missingID, "x", ""); return e }},
-			{"Tasks.CloseByUser", func() error { _, e := s.CloseByUser(ctx, orgID, missingID, "dismissed"); return e }},
-			{"Tasks.SetStatus", func() error { _, e := s.SetStatus(ctx, orgID, missingID, "queued"); return e }},
+			{"Tasks.CloseByUser", func() error {
+				_, e := s.CloseByUser(ctx, orgID, missingID, "dismissed", TaskVersion(t, s, orgID, missingID))
+				return e
+			}},
 		}
 		for _, m := range misses {
 			if err := m.call(); !errors.Is(err, db.ErrNoSuchTask) {
 				t.Errorf("%s(missing id) = %v, want db.ErrNoSuchTask", m.name, err)
-			}
-		}
-		// The status CHECK is the backstop behind every guarded helper: a write
-		// path that skipped one — SetStatus is the unguarded one — must not be
-		// able to put a retired value back on the board. in_review left the
-		// vocabulary, so the constraint is what makes that unwritable rather
-		// than merely unwritten.
-		{
-			_, _, taskID := seed(t, "check-in-review")
-			if _, err := s.SetStatus(ctx, orgID, taskID, "in_review"); err == nil {
-				t.Error("SetStatus(in_review) succeeded; the tasks status CHECK must refuse it")
-			}
-			got, _ := s.Get(ctx, orgID, taskID)
-			if got.Status != "queued" {
-				t.Errorf("status=%q, want queued (a refused write must not land)", got.Status)
 			}
 		}
 	})
@@ -1762,13 +1696,11 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 				t.Fatalf("Close: %v", err)
 			}
 		}
-		if _, err := s.SetStatus(ctx, orgID, ids[2], "snoozed"); err != nil {
-			t.Fatalf("SetStatus snoozed: %v", err)
-		}
+		snoozeTask(t, s, orgID, ids[2])
 		if ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, ids[3], agentID, teamID); err != nil || !ok {
 			t.Fatalf("StampAgentClaimIfUnclaimed: ok=%v err=%v", ok, err)
 		}
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, ids[4], userID); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, ids[4], userID, TaskVersion(t, s, orgID, ids[4])); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 		}
 
@@ -1847,9 +1779,7 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		_, _, liveID := seed(t, "tail-live")
 		_, _, snoozedID := seed(t, "tail-snoozed")
 		_, _, doneID := seed(t, "tail-done")
-		if _, err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
-			t.Fatalf("SetStatus snoozed: %v", err)
-		}
+		snoozeTask(t, s, orgID, snoozedID)
 		if _, err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
@@ -1893,11 +1823,45 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		}
 	})
 
+	t.Run("List_ids_narrow_to_the_named_tasks", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		_, _, openID := seed(t, "ids-open")
+		_, _, closedID := seed(t, "ids-closed")
+		seed(t, "ids-unnamed")
+		if _, err := s.Close(ctx, orgID, closedID, "test", ""); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		// The named tasks whatever their lane, in the default order's lane
+		// structure: the open one ahead of the closed one.
+		f := db.TaskListFilter{IDs: []string{closedID, openID}, IncludeSnoozed: true}
+		ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50})
+		if want := []string{openID, closedID}; !slices.Equal(ids, want) || total != 2 {
+			t.Errorf("named tasks = %v (total %d), want %v (total 2)", ids, total, want)
+		}
+
+		// The filter ANDs with a lane like every other.
+		f.Statuses = []string{"done"}
+		if ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{closedID}) || total != 1 {
+			t.Errorf("named tasks in the done lane = %v (total %d), want just the closed one", ids, total)
+		}
+
+		// An id that names no task matches nothing, and so does one the
+		// store cannot read as an id: the HTTP layer refuses a malformed id,
+		// and the store answers an honest empty rather than widening.
+		for _, named := range [][]string{{"00000000-0000-4000-8000-000000000000"}, {"not-a-task-id"}} {
+			f := db.TaskListFilter{IDs: named, IncludeSnoozed: true}
+			if ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50}); len(ids) != 0 || total != 0 {
+				t.Errorf("ids %v returned %v (total %d), want an empty page", named, ids, total)
+			}
+		}
+	})
+
 	t.Run("List_filters_compose", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, freeID := seed(t, "compose-free")
 		_, _, takenID := seed(t, "compose-taken")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, takenID, userID); err != nil || !ok {
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, takenID, userID, TaskVersion(t, s, orgID, takenID)); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
 
@@ -2010,9 +1974,7 @@ func runTaskFacetConformance(ctx context.Context, t *testing.T, mk TaskStoreFact
 		s, orgID, _, _, _, seed, _ := mk(t)
 		seed(t, "facet-live")
 		_, _, snoozedID := seed(t, "facet-snoozed")
-		if _, err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
-			t.Fatalf("SetStatus snoozed: %v", err)
-		}
+		snoozeTask(t, s, orgID, snoozedID)
 		all, _, err := s.List(ctx, orgID, queueWithSnoozedFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("List: %v", err)

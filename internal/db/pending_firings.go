@@ -22,7 +22,8 @@ var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is
 //
 // The lifecycle is the contract's: Enqueue admits a ready row, Claim leases
 // rows and hands back receipts, and RenewLease / MarkFired / MarkSkipped /
-// Requeue / DeferWhileTaskBusy are the holder's fenced writes. The per-task
+// Requeue / DeferWhileTaskBusy are the holder's fenced writes.
+// HandOffToConversation marks a ready row and settles nothing. The per-task
 // gate lives in the claim query itself, as the kind's claim filter: a firing
 // is claimable only while its task is not busy — no live top-level
 // conversation, and no blueprint run still marked running
@@ -52,8 +53,8 @@ var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is
 // returned-row rule: each is fire-and-forget from its caller's side, and the
 // next claim reads the state, not this caller.
 //
-// A store bound to a caller's transaction answers Enqueue,
-// HasUnsettledForTask and ListForEntity on that transaction, and refuses
+// A store bound to a caller's transaction answers Enqueue and the reads on
+// that transaction, and refuses
 // the verbs that open their own with ErrTxBoundStore.
 type PendingFiringsStore interface {
 	// Enqueue admits a ready firing for (task, trigger) under
@@ -119,6 +120,48 @@ type PendingFiringsStore interface {
 	// its key: a later event for the same trigger collapses onto it, and one
 	// for another trigger queues behind it in order.
 	HasUnsettledForTask(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// ListReadyForTask returns the task's ready firings, oldest first: the
+	// ones an engagement starting under the task's running blueprint may
+	// hand over (HandOffToConversation). Leased and parked rows are absent; a
+	// holder or an operator disposes of those.
+	ListReadyForTask(ctx context.Context, orgID, taskID string) ([]domain.PendingFiring, error)
+
+	// HandOffToConversation records that a ready firing's event was handed
+	// to a conversation as a staged note, in one transaction: note is staged
+	// (or, with a nil note, sharedNoteID names the one another firing for
+	// the same event staged in this pass), the row's handed_note_id is set to
+	// it, and the row's unique key is released. noteID is the note the row
+	// now names. handed is false, and nothing is written, when the row is no
+	// longer ready, already names a note, or carries a cancellation request.
+	//
+	// The row is not settled. A staged note is a promise, and the engagement
+	// it was staged for may never run; the row stays the durable record of
+	// the event until its holder settles it. The claim filter holds it while
+	// the blueprint runs, and the firing worker then claims it and settles it
+	// by whether the note was read (WithdrawHandedNote).
+	//
+	// The key is released because the row no longer stands for "the next
+	// event on this (task, trigger) has somewhere to go": a later event for
+	// the pair must admit a row of its own, to be handed to a later
+	// engagement, and would otherwise collapse onto this one.
+	//
+	// Exempt from the returned-row rule, as the holder verbs are.
+	HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection, sharedNoteID string) (noteID string, handed bool, err error)
+
+	// WithdrawHandedNote answers, for the holder of a firing that names a
+	// handed note, whether the note was read, and withdraws it when it was
+	// not (StagedInjectionStore.DeleteSystem): read is true for a note a
+	// conversation consumed, false for one withdrawn now or already gone.
+	// After a false the event has reached no agent and the firing is an
+	// ordinary one again.
+	WithdrawHandedNote(ctx context.Context, orgID, noteID string) (read bool, err error)
+
+	// TaskRerouted reports whether a firing on the task is already settled
+	// domain.PendingFiringSkipRerouted. A closed task is rerouted once, from
+	// its newest event, and that one routing decides every trigger the
+	// task's firings were queued for.
+	TaskRerouted(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ListForEntity returns every row for an entity, oldest first, in any
 	// status. Kept as the one entity-shaped read the router and delegate

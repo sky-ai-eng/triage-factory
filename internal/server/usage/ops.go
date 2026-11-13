@@ -89,7 +89,7 @@ func (h *Handler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
 			durations = append(durations, *t.DurationMS)
 		}
 		switch {
-		case t.Concluded():
+		case t.Completed:
 			resp.RunsCompleted++
 		case t.Status == domain.StatusFailed:
 			// Count every failed run; failure_kind is a classification that is

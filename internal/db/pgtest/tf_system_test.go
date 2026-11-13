@@ -365,6 +365,36 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("warm_claim_turn_end", func(t *testing.T) {
+		// The turn end that keeps its claim, the resume on that claim, and
+		// its release. The first two ask whether the conversation's blueprint
+		// run is running through tf.blueprint_run_is_running, as the cold turn
+		// end above does: a SECURITY DEFINER function the role needs EXECUTE
+		// on, since it is revoked from PUBLIC.
+		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
+		claim, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1)
+		if err != nil || claim == nil {
+			t.Fatalf("Conversations.SetExecutorSystem = (%v, %v)", claim, err)
+		}
+		if _, err := stores.Conversations.ConcludeKeepingClaimSystem(ctx, orgID, conversationID, claim.ID, 1000, 3, "answered", "continue", ""); err != nil {
+			t.Errorf("Conversations.ConcludeKeepingClaimSystem: %v", err)
+		}
+		if _, err := stores.Conversations.WarmWaitStateSystem(ctx, orgID, conversationID); err != nil {
+			t.Errorf("Conversations.WarmWaitStateSystem: %v", err)
+		}
+		// No follow-up flipped the conversation, so this takes the resume
+		// flip itself. Refused or not, the statement ran under tf_system.
+		if _, err := stores.Conversations.ResumeWarmClaimSystem(ctx, orgID, conversationID, claim.ID); err != nil {
+			t.Errorf("Conversations.ResumeWarmClaimSystem: %v", err)
+		}
+		if _, err := stores.Conversations.ReleaseWarmClaimSystem(ctx, orgID, conversationID, claim.ID); err != nil {
+			t.Errorf("Conversations.ReleaseWarmClaimSystem: %v", err)
+		}
+		if _, err := stores.Conversations.HasEngagedClaimForTaskSystem(ctx, orgID, taskID); err != nil {
+			t.Errorf("Conversations.HasEngagedClaimForTaskSystem: %v", err)
+		}
+	})
+
 	t.Run("conversation_worktrees", func(t *testing.T) {
 		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		// The registry row is seeded on the admin pool, not minted by the

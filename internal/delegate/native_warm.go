@@ -16,14 +16,12 @@ package delegate
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // warmWaitOp is the watchdog operation a warm claim's wait is reported under.
@@ -32,11 +30,8 @@ import (
 // not apply while it runs.
 const warmWaitOp = "warm_wait"
 
-// warmWaitBackstop is how often an engagement keeping its claim warm looks for
-// a person's message without having been rung, and for its conversation
-// having ended, which nothing rings for. The doorbell is a NOTIFY, and a
-// dropped one costs at most this long. A var, as thawTimeout is, so a test can
-// shorten it.
+// warmWaitBackstop is how often a warm engagement rereads its conversation
+// without being woken, in case a wake was lost. A var so tests can shorten it.
 var warmWaitBackstop = 15 * time.Second
 
 // nativeTail is a native engagement past agent-live: what its turns run with,
@@ -53,7 +48,7 @@ type nativeTail struct {
 	mirror         *memoryMirror
 
 	// run drives one turn: engine.Run. params is what the engagement's first
-	// turn runs under.
+	// turn runs under, and its Model is the one every turn runs on.
 	run        func(context.Context, agentloop.Params) agentloop.Result
 	params     agentloop.Params
 	transcript *nativeTranscript
@@ -95,6 +90,10 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 
 		switch s.waitWarm(ctx, n, deadline) {
 		case warmResumed:
+			conv := s.warmResumeModelHolds(context.WithoutCancel(ctx), n)
+			if conv == nil {
+				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+			}
 			resumed, err := s.conversations.ResumeWarmClaimSystem(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.cfg.claimID)
 			if errors.Is(err, db.ErrClaimReleased) {
 				return s.endWarmFenced(n, result)
@@ -107,6 +106,11 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
 			}
 			s.broadcastConversationUpdate(n.orgID, n.conversationID, domain.StatusRunning)
+			// A close, or a close beginning to hold, while the claim was warm
+			// told only the conversations that were working, which this one
+			// was not. The loop reads the note at the turn's first model
+			// call, with the person's message.
+			s.tellTaskResolved(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.task.ID)
 			// The first turn's params say how this engagement started: in a
 			// sandbox launched for it, in a workspace built or restored for
 			// it. Neither is true of a later turn, which runs in the sandbox and
@@ -164,7 +168,8 @@ func (s *Spawner) warmWindowOpens(ctx context.Context, n nativeTail, result agen
 	}
 	// The turn-end snapshot is taken with the jail still running, so it has to
 	// be a frozen capture, which only a checkpointer takes. With a blob store
-	// and no checkpointer, the turn ends as it always has.
+	// and no checkpointer there is nothing to capture, and the turn ends as it
+	// always has.
 	if n.ckpt == nil && s.Storage() != nil {
 		return false
 	}
@@ -231,7 +236,7 @@ func (s *Spawner) concludeKeepingClaim(ctx context.Context, n nativeTail, result
 		status = updated.Status
 	}
 	s.broadcastConversationUpdate(n.orgID, n.conversationID, status)
-	toast.FireUser(s.wsHub, n.orgID, n.creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(n.conversationID)))
+	s.toastRunCompleted(n.orgID, n.creatorUserID, updated)
 	return holdKept
 }
 
@@ -273,30 +278,35 @@ const (
 	warmFenced
 )
 
-// waitWarm holds the warm claim until deadline, or until something ends the
-// wait first.
-//
-// The entry order is what keeps a message from being missed. The engagement
-// registers before it looks, so a doorbell rung for a resume after it looked
-// reaches it; and it looks once it is registered, so a message whose doorbell
-// rang before then, or that arrived during the turn after its last read, is
-// read anyway.
+// waitWarm holds the warm claim until deadline or until something ends the
+// wait. It registers before its first read, so a wake sent after that read
+// still reaches it, and a message or ending that landed before registration
+// is seen by the read.
 func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time) warmEnd {
 	wait := s.warmWaits.Register(n.conversationID, n.orgID)
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
 
-	// A person's message is waiting. If the registry let the engagement go
-	// while it looked, the let-go stands: the message's conversation is
-	// queued, so the claim after this one drives it.
-	resume := func() warmEnd {
-		if wait.TakeForResume() {
-			return warmResumed
+	// look reads the conversation and returns how the wait ends; ok is false
+	// if it continues. An ended conversation is let go even with a message
+	// waiting, since no message resumes it. A waiting message resumes it,
+	// unless the registry already let this engagement go, in which case the
+	// queued conversation goes to the next claim.
+	look := func() (end warmEnd, ok bool) {
+		st := s.readWarmWait(ctx, n)
+		switch {
+		case st.Ended:
+			return warmLetGo, true
+		case !st.PersonMessageWaiting:
+			return 0, false
+		case wait.TakeForResume():
+			return warmResumed, true
+		default:
+			return warmLetGo, true
 		}
-		return warmLetGo
 	}
-	if s.readWarmWait(ctx, n).PersonMessageWaiting {
-		return resume()
+	if end, ok := look(); ok {
+		return end
 	}
 	window := time.NewTimer(time.Until(deadline))
 	defer window.Stop()
@@ -305,23 +315,19 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 	for {
 		select {
 		case <-wait.Wake():
-			if s.readWarmWait(ctx, n).PersonMessageWaiting {
-				return resume()
+			if end, ok := look(); ok {
+				return end
 			}
 		case <-backstop.C:
-			st := s.readWarmWait(ctx, n)
-			if st.Ended {
-				return warmLetGo
-			}
-			if st.PersonMessageWaiting {
-				return resume()
+			if end, ok := look(); ok {
+				return end
 			}
 		case <-window.C:
 			// One last look. A message whose ring is still on its way, or
 			// that landed as the timer fired, is read rather than left to a
 			// cold claim.
-			if s.readWarmWait(ctx, n).PersonMessageWaiting {
-				return resume()
+			if end, ok := look(); ok {
+				return end
 			}
 			return warmLetGo
 		case <-wait.LetGo():
@@ -341,9 +347,9 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 
 // readWarmWait reads what the wait acts on: a person's message waiting, and
 // the conversation having ended, which no follow-up resumes, so a warm claim
-// on it serves nothing. A new delegation on the task ends it, and so does the
-// task closing. A conversation that is gone reads as ended. A read that fails
-// answers that neither holds, and the next ring or backstop tick asks again.
+// on it serves nothing. A conversation that is gone reads as ended. A read
+// that fails answers that neither holds, and the next ring or backstop tick
+// asks again.
 func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitState {
 	st, err := s.conversations.WarmWaitStateSystem(ctx, n.orgID, n.conversationID)
 	if errors.Is(err, db.ErrNoSuchConversation) {
@@ -355,6 +361,42 @@ func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitSta
 		return db.WarmWaitState{}
 	}
 	return st
+}
+
+// warmResumeModelHolds asks the model question a claim asks (modelForClaim)
+// before a warm resume, and returns the conversation it read when the answer
+// is the model the engagement was built with. Otherwise it returns nil and
+// the claim is let go: the resumed conversation is left queued with no claim,
+// and the cold claim that drives it makes the decision as every claim does,
+// switching models or refusing the one the team no longer enables. A failed
+// read answers nil too, so the cold claim decides.
+func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domain.Conversation {
+	conv, err := s.conversations.GetSystem(ctx, n.orgID, n.conversationID)
+	if err != nil || conv == nil {
+		delegateLog.Warn("read the conversation before a warm resume failed; letting the claim go",
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "error", err)
+		return nil
+	}
+	var br *domain.BlueprintRun
+	if n.cfg.blueprintRunID != "" {
+		if br, err = s.blueprints.GetRunSystem(ctx, n.orgID, n.cfg.blueprintRunID); err != nil {
+			delegateLog.Warn("read the blueprint run before a warm resume failed; letting the claim go",
+				"conversation", n.conversationID, "blueprint_run", n.cfg.blueprintRunID, "error", err)
+			return nil
+		}
+	}
+	model, err := s.modelForClaim(ctx, n.orgID, br, *conv)
+	if err != nil {
+		delegateLog.Info("the model check refused a warm resume; letting the claim go for a cold claim to decide",
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "error", err)
+		return nil
+	}
+	if model != n.params.Model {
+		delegateLog.Info("a claim would now run on another model than the warm engagement's; letting the claim go",
+			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "model", model)
+		return nil
+	}
+	return conv
 }
 
 // letGoWarm ends an engagement keeping its claim warm: the jail stopped, then

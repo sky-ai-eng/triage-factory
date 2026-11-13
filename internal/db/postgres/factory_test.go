@@ -256,9 +256,13 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 		},
 		FinishConversation: func(t *testing.T, conversationID, status string, completedAt time.Time) {
 			t.Helper()
+			var at any
+			if !completedAt.IsZero() {
+				at = completedAt.UTC()
+			}
 			if _, err := conn.Exec(
 				`UPDATE conversations SET status = $1, completed_at = $2 WHERE id = $3 AND org_id = $4`,
-				status, completedAt.UTC(), conversationID, orgID,
+				status, at, conversationID, orgID,
 			); err != nil {
 				t.Fatalf("finish conversation: %v", err)
 			}

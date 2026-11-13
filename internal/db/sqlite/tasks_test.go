@@ -72,6 +72,90 @@ func TestTaskStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestTaskStatusChecks_SQLite runs the schema-constraint suite behind the
+// task store's guarded status writes against the SQLite schema.
+func TestTaskStatusChecks_SQLite(t *testing.T) {
+	dbtest.RunTaskStatusCheckConformance(t, func(t *testing.T) dbtest.TaskStatusCheckFixture {
+		t.Helper()
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
+		if err != nil {
+			t.Fatalf("open in-memory db: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		conn.SetMaxOpenConns(1)
+		conn.SetMaxIdleConns(1)
+		if err := db.BootstrapSchemaForTest(conn); err != nil {
+			t.Fatalf("bootstrap schema: %v", err)
+		}
+		if _, err := conn.Exec(
+			`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+			runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+		); err != nil {
+			t.Fatalf("seed local agent: %v", err)
+		}
+		return dbtest.TaskStatusCheckFixture{
+			Store:   sqlitestore.New(conn).Tasks,
+			OrgID:   runmode.LocalDefaultOrgID,
+			AgentID: runmode.LocalDefaultAgentID,
+			UserID:  runmode.LocalDefaultUserID,
+			Seed: func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
+				t.Helper()
+				return seedSQLiteTaskChain(t, conn, suffix)
+			},
+			WriteStatus: func(taskID, status string) error {
+				_, err := conn.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
+				return err
+			},
+		}
+	})
+}
+
+// TestTaskVersion_SQLite runs the task-version suite against the SQLite impl,
+// a fresh in-memory DB per subtest.
+func TestTaskVersion_SQLite(t *testing.T) {
+	dbtest.RunTaskVersionConformance(t, func(t *testing.T) dbtest.TaskVersionHarness {
+		t.Helper()
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
+		if err != nil {
+			t.Fatalf("open in-memory db: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		conn.SetMaxOpenConns(1)
+		conn.SetMaxIdleConns(1)
+		if err := db.BootstrapSchemaForTest(conn); err != nil {
+			t.Fatalf("bootstrap schema: %v", err)
+		}
+		exec := func(t *testing.T, query string, args ...any) {
+			t.Helper()
+			if _, err := conn.Exec(query, args...); err != nil {
+				t.Fatalf("exec %q: %v", query, err)
+			}
+		}
+		exec(t, `INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+			runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID)
+		otherTeam := uuid.New().String()
+		exec(t, `INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, 'Other Team')`,
+			otherTeam, runmode.LocalDefaultOrgID, "other-"+otherTeam[:8])
+		stores := sqlitestore.New(conn)
+		return dbtest.TaskVersionHarness{
+			Tasks:       stores.Tasks,
+			Scores:      stores.Scores,
+			OrgID:       runmode.LocalDefaultOrgID,
+			AgentID:     runmode.LocalDefaultAgentID,
+			UserID:      runmode.LocalDefaultUserID,
+			OtherTeamID: otherTeam,
+			Seed: func(t *testing.T, suffix string) (string, string, string) {
+				t.Helper()
+				return seedSQLiteTaskChain(t, conn, suffix)
+			},
+			Exec: func(t *testing.T, query string) {
+				t.Helper()
+				exec(t, query)
+			},
+		}
+	})
+}
+
 // TestTaskClaimArchivedTeam_SQLite runs the archived-team claim suite against
 // the SQLite impl. Local mode never archives its one team, but the claim doors
 // answer the same, so the second team, its archive and the memberships are
@@ -363,10 +447,10 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("lands_then_refuses_stale_expectation", func(t *testing.T) {
 		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-happy")
-		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
+		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign: %v", err)
 		}
@@ -389,7 +473,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 		// The claim already moved to userB — a second reassign expecting
 		// userA as the "from" claimant must now be refused (stale CAS
 		// expectation), and the successful reassign above must survive.
-		ok, err = store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		ok, err = store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("stale reassign: %v", err)
 		}
@@ -404,7 +488,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("refuses_unclaimed_task", func(t *testing.T) {
 		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-unclaimed")
-		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign on unclaimed: %v", err)
 		}
@@ -418,7 +502,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 		if _, err := store.StampAgentClaimIfUnclaimed(ctx, runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID, ""); err != nil {
 			t.Fatalf("stamp bot claim: %v", err)
 		}
-		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign on bot-claimed: %v", err)
 		}
@@ -429,13 +513,13 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("refuses_terminal_task", func(t *testing.T) {
 		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-term")
-		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
+		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
 		if _, err := store.Close(ctx, runmode.LocalDefaultOrgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign on terminal: %v", err)
 		}
@@ -450,10 +534,10 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 	// membership on a claimed task).
 	t.Run("refuses_target_with_no_team_membership", func(t *testing.T) {
 		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-no-team")
-		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
+		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userC)
+		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userC, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign to unrelated target: %v", err)
 		}
@@ -471,10 +555,10 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 	// to ReassignClaimToUser rather than silently diverging.
 	t.Run("system_variant_matches_plain", func(t *testing.T) {
 		_, _, taskID := seedSQLiteTaskChain(t, conn, "reassign-system")
-		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
+		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := store.ReassignClaimToUserSystem(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
+		ok, err := store.ReassignClaimToUserSystem(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB, dbtest.TaskVersion(t, store, runmode.LocalDefaultOrgID, taskID))
 		if err != nil {
 			t.Fatalf("ReassignClaimToUserSystem: %v", err)
 		}

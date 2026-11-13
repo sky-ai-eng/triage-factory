@@ -569,21 +569,20 @@ func (s *Spawner) signalRemoteInject(ctx context.Context, orgID string, conv *do
 }
 
 // StageOrDeliverInformationalEvent stages a note that is information rather
-// than work, such as a PR coherence note, as an injection:system-note row. It
-// never steers a live process and never sends a signal, in either runtime:
+// than work, such as a PR coherence note, as an injection:system-note row
+// delivered at the conversation's next tool boundary
+// (stageNoteAtToolBoundary). It never sends a signal, in either runtime:
 // nothing depends on the agent reading the note, so it does not need the
 // guarantees a new-event injection does. A native loop reads it before its
-// next model call; an SDK conversation reads it on its next resume. A note
-// still pending when a run concludes waits for the next resume.
+// next model call, a live SDK process on this pod at its next tool batch, and
+// any other conversation on its next engagement. A note still pending when a
+// run concludes waits for the next resume.
 //
 // It does not check whether anything will read the row. The caller gates
 // that — see HandlePRCoherence, which stages only for a conversation that is
 // live or that a resume will read.
 func (s *Spawner) StageOrDeliverInformationalEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) {
-	if body == "" {
-		return
-	}
-	s.stageInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, producer, body, prov)
+	s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, producer, body, prov)
 }
 
 // --- Owner-side signal-apply loop ---
@@ -688,11 +687,8 @@ func (s *Spawner) deliverSignal(ctx context.Context, sig domain.ConversationSign
 	case domain.ConversationSignalInterrupt:
 		return ackResultForControlErr(local.Interrupt(ctx, sig.ConversationID))
 	case domain.ConversationSignalSteer:
-		// A doorbell, not a delivery: the person's message is on the
-		// transcript, and the signal tells an engagement keeping the
-		// conversation's claim warm here to resume it (ringWarmWait). Gone,
-		// when none is waiting, costs the sender nothing; it never reads the
-		// answer.
+		// Wakes the engagement keeping this conversation's claim warm, if one
+		// is waiting here (ringWarmWait). The sender never reads the ack.
 		if s.warmWaits.Wake(sig.ConversationID) {
 			return domain.ConversationSignalAckOK
 		}

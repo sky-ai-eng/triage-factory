@@ -608,13 +608,15 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
           <YAxis hide />
           <Tooltip
             contentStyle={{
-              background: 'rgba(255,255,255,0.8)',
-              backdropFilter: 'blur(12px)',
-              border: '1px solid rgba(255,255,255,0.7)',
-              borderRadius: '8px',
-              fontSize: '11px',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+              background: 'var(--color-raised)',
+              border: '1px solid var(--color-line-2)',
+              borderRadius: 'var(--radius-float)',
+              fontSize: 'var(--text-reported)',
+              boxShadow: 'var(--shadow-float)',
             }}
+            labelStyle={{ color: 'var(--color-ink-3)' }}
+            itemStyle={{ color: 'var(--color-ink-1)' }}
+            cursor={{ stroke: 'var(--color-line-2)' }}
             formatter={(value) => {
               const n = typeof value === 'number' ? value : Number(value)
               return [`${n} PR${n !== 1 ? 's' : ''}`, 'Merged']

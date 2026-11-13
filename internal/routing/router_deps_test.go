@@ -100,20 +100,16 @@ func (refusingDelegator) Delegate(domain.Task, delegate.DelegateOpts) (string, e
 	return "", errNoTestDelegator
 }
 
-func (refusingDelegator) StopConversationAndCancelBlueprint(string, string, string, delegate.StopCause) error {
-	return nil
-}
-
-func (refusingDelegator) StopBlueprintRun(string, string, delegate.StopCause) error { return nil }
-
-func (refusingDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
+func (refusingDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {}
 
 func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }
 
-func (refusingDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
-	return false
+func (refusingDelegator) TellTaskClosed(context.Context, string, string, []string) {
+}
+
+func (refusingDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
 // discardPublisher is the Publisher of a test that does not read the

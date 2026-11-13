@@ -1,7 +1,6 @@
-// Generic staged-injection queue, generalized from the deliverable-change
-// feedback. A note is persisted to the durable staged-injection queue
-// (db.StagedInjectionStore, backed by undelivered messages rows) as the bare
-// injection, under the subtype that says what it is for:
+// The staged-injection queue. A note for an agent is persisted to the durable
+// queue (db.StagedInjectionStore, backed by undelivered messages rows) as the
+// bare injection, under the subtype that says what it is for:
 // injection:event for a new-event injection, injection:system-note for every
 // other note. A native loop reads the rows itself before its next model call.
 // An SDK conversation has them flushed — bundled into one <system-note> with
@@ -11,10 +10,9 @@
 // batch (notesAtToolBatch), or as its next turn when one of them is a
 // new-event injection and the turn ends first.
 //
-// Unlike the deliverable-change ledger (which DERIVES its terminal injections from
-// the deliverable rows, so it needs no queue), a producer here has no durable row
-// of its own to re-derive from — the PR coherence feed is such a producer.
-// That's why this half is a real durable queue, not a derivation.
+// The queue is the only place a note waits: no producer keeps a second record
+// to deliver from, so a note whose stage fails is lost, and one staged is
+// delivered once.
 
 package delegate
 
@@ -22,6 +20,7 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // stageOrDeliverInjection routes one agent-facing note for an SDK
@@ -84,60 +83,97 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 	return stored.ID, true
 }
 
-// tellHeldClose tells a conversation an engagement is starting that its
-// task's close is held (TellTaskClosing). Every runtime reads staged notes
-// before its agent's first model call of an engagement, so the agent learns
-// the task is resolved before it does anything. The note is a transcript row
-// rather than a line in the conversation's system block, which is fixed for
-// the conversation's life: the hold can be cancelled after this engagement,
-// and a row says what was true when it was sent.
+// handOffQueuedFirings hands a conversation whose engagement is starting the
+// events queued on its task as pending firings, each as the note an event
+// folded into a running conversation is (domain.AdditiveEventInjection). It
+// applies while the conversation's blueprint is still running, to the firings
+// queued since that run started: an event that reached the task when no
+// conversation was live to take it (between two steps, or while a crash left
+// the run between them) queued a firing the claim filter holds until the run
+// ends, and the blueprint's events go to the blueprint. Every runtime reads
+// staged notes before its agent's first model call of an engagement, so the
+// step reads them before it does anything.
 //
-// Work a person drives (a conversation a person delegated, or one a person has
-// written to) is told what happened without what to do about it
-// (personStarted). A task held for a person's deliverable is
-// engaged almost only that way, by the person asking for changes before they
-// resolve it. Best effort: a failed read or stage logs, and the engagement
-// runs without the note.
-func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.Conversation, taskID string) {
-	if s.tasks == nil || s.events == nil {
+// The firing is marked with the note and stays queued. This engagement may
+// never reach its agent (a bring-up that fails until the claim budget is
+// spent, a stop), and the firing is the event's only durable record until
+// something has read it. The firing worker settles it once the run ends: as
+// injected when the note was read, and otherwise as the ordinary firing it
+// then is again.
+//
+// Three kinds of firing are left as they are. One queued before the run
+// started waits for a run of its own, as it did when this run was fired ahead
+// of it. One for the event the run itself fired from has nothing to tell the
+// run. And nothing is handed over on a task that is closed or snoozed: an
+// event queued behind one of those is answered by it, which is the firing
+// worker's skip to make.
+//
+// One event queues a firing per matched trigger; its note is staged once and
+// every such firing names it. The note and the mark commit together per
+// firing (HandOffToConversation). Best effort: a firing this pass fails on
+// stays unmarked, for a later engagement under the run or for the firing
+// worker once the run ends.
+func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *domain.BlueprintRun, conv *domain.Conversation, task *domain.Task) {
+	if s.pendingFirings == nil || s.events == nil || br == nil || br.Status != domain.BlueprintRunStatusRunning {
 		return
 	}
-	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
+	if task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
+		return
+	}
+	taskID := task.ID
+	firings, err := s.pendingFirings.ListReadyForTask(ctx, orgID, taskID)
 	if err != nil {
-		delegateLog.Warn("read the task's held close failed; the engagement starts without the close note", "task_id", taskID, "error", err)
+		delegateLog.Warn("read the task's queued firings failed; the engagement starts without their events", "task_id", taskID, "conversation", conv.ID, "error", err)
 		return
 	}
-	if hold == nil {
+	if len(firings) == 0 {
 		return
 	}
-	evt, err := s.events.GetSystem(ctx, orgID, hold.EventID)
-	if err != nil || evt == nil {
-		delegateLog.Warn("read the held close's event failed; the engagement starts without the close note", "task_id", taskID, "event_id", hold.EventID, "error", err)
-		return
+	// The note each event is staged as, by event id: the ones this pass
+	// stages, and the ones firings already name. A firing an earlier pass
+	// failed on shares the note that pass staged for its event.
+	noteFor := map[string]string{}
+	for _, f := range firings {
+		if f.HandedNoteID != "" {
+			noteFor[f.TriggeringEventID] = f.HandedNoteID
+		}
 	}
-	s.tellTaskClosing(ctx, orgID, conv.ID, s.personStarted(ctx, orgID, conv), *evt)
-}
-
-// personStarted reports whether a person drives the work on conv: they
-// delegated the conversation, which every step of its blueprint inherits, or
-// they have written to it. Only a person's message wakes a conversation that
-// has run (staged notes ride whatever engagement runs next), so once one has
-// written, every engagement after is theirs, and the answer holds before
-// their message is delivered and after. A failed read answers false, and the
-// engagement is told to wrap up.
-func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.Conversation) bool {
-	if conv.CreatorUserID != "" {
-		return true
+	for _, f := range firings {
+		if f.HandedNoteID != "" || f.CreatedAt.Before(br.StartedAt) || f.TriggeringEventID == br.TriggeringEventID {
+			continue
+		}
+		var note *domain.StagedInjection
+		shared := noteFor[f.TriggeringEventID]
+		if shared == "" {
+			evt, err := s.events.GetSystem(ctx, orgID, f.TriggeringEventID)
+			if err != nil || evt == nil {
+				delegateLog.Warn("read a queued firing's event failed; the firing is not handed over", "task_id", taskID, "firing_id", f.ID, "event_id", f.TriggeringEventID, "error", err)
+				continue
+			}
+			// A failed current view hands the agent the metadata as recorded.
+			metadataJSON := evt.MetadataJSON
+			if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
+				metadataJSON = current
+			}
+			note = &domain.StagedInjection{
+				ConversationID: conv.ID,
+				Subtype:        domain.MessageSubtypeInjectionEvent,
+				Producer:       evt.EventType,
+				Body:           domain.AdditiveEventInjection(evt.EventType, metadataJSON),
+				Provenance:     domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType},
+			}
+		}
+		noteID, handed, err := s.pendingFirings.HandOffToConversation(ctx, orgID, f.ID, note, shared)
+		if err != nil {
+			delegateLog.Warn("hand a queued firing to the starting engagement failed; the firing is not handed over", "task_id", taskID, "firing_id", f.ID, "conversation", conv.ID, "error", err)
+			continue
+		}
+		if !handed {
+			continue
+		}
+		noteFor[f.TriggeringEventID] = noteID
+		delegateLog.Info("handed a queued firing's event to the starting engagement", "task_id", taskID, "firing_id", f.ID, "event_id", f.TriggeringEventID, "conversation", conv.ID, "blueprint_run", br.ID)
 	}
-	if s.conversations == nil {
-		return false
-	}
-	wrote, err := s.conversations.HasPersonMessageSystem(ctx, orgID, conv.ID)
-	if err != nil {
-		delegateLog.Warn("read whether a person wrote to the conversation failed; telling it of the held close", "conversation", conv.ID, "error", err)
-		return false
-	}
-	return wrote
 }
 
 // stagedInjectionsForEngagement flushes the conversation's durable
@@ -150,10 +186,6 @@ func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.
 // (agentproc.RunOptions.OnOpeningUnsent) that returns the flushed injections
 // to the queue if the message never reaches the agent, nil when nothing was
 // flushed.
-//
-// This is the durable sibling of deliverableLedgerForResume — SendMessage
-// prepends both, so a resume that has both a resolved deliverable and a staged
-// injection carries two <system-note> blocks ahead of the user's text.
 func (s *Spawner) stagedInjectionsForEngagement(ctx context.Context, orgID, conversationID string) (string, func()) {
 	injections := s.flushStagedInjections(ctx, orgID, conversationID)
 	if len(injections) == 0 {

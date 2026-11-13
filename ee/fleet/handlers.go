@@ -200,7 +200,7 @@ func summarizeRuns(timings []domain.ConversationTiming, hours int) runsSummary {
 	var durations []int
 	for _, t := range timings {
 		switch {
-		case t.Concluded():
+		case t.Completed:
 			rs.Completed++
 		case t.Status == domain.StatusFailed:
 			// Every failed run counts (failure_kind is a classification that is

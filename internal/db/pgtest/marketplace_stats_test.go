@@ -353,6 +353,51 @@ func TestMarketplaceStats_Idempotent(t *testing.T) {
 	}
 }
 
+// TestMarketplaceStats_FollowedUpRunStillCountsAsCompleted: a run whose
+// blueprint completed and that a person then followed up on holds no verdict
+// any more, since the follow-up's resume cleared it and its turn ends write
+// none. It is still a completed run: it counts toward total_runs and toward
+// the completed share, beside a run nobody replied to.
+func TestMarketplaceStats_FollowedUpRunStillCountsAsCompleted(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, SecretKey)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	teamB := SeedTeam(t, h, orgA, "teamB")
+	bob := SeedUser(t, h, "bob")
+	AddOrgMember(t, h, bob, orgA, teamB, "member", "admin")
+
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Followed-Up Prompt", "")
+	snap := marketplaceSnapshot("Followed-Up Prompt")
+	var rootPromptID string
+	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var e error
+		rootPromptID, _, e = pgstore.NewForTx(tx, SecretKey).Marketplace.MaterializeListing(t.Context(), orgA, teamB, snap, listingID, 1, bob)
+		return e
+	}); err != nil {
+		t.Fatalf("teamB install: %v", err)
+	}
+	taskB := seedMarketplaceStatsTask(t, h, orgA, bob, teamB)
+	now := time.Now().UTC()
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, rootPromptID, dbtest.SeedConcluded, now.Add(-time.Hour))
+	// `open` with no conclusion stamp, under the completed blueprint run the
+	// seeder hangs every conversation off: the followed-up shape.
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, rootPromptID, domain.StatusOpen, now.Add(-30*time.Minute))
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, rootPromptID, domain.StatusFailed, now)
+
+	if err := stores.Marketplace.RecomputeStatsSystem(t.Context(), orgA); err != nil {
+		t.Fatalf("RecomputeStatsSystem: %v", err)
+	}
+	got := readStatsRow(t, h, listingID)
+	if got.totalRuns != 3 {
+		t.Errorf("total_runs = %d, want 3: the followed-up run is a finished run like the other two", got.totalRuns)
+	}
+	if got.successRate < 0.66 || got.successRate > 0.67 {
+		t.Errorf("success_rate = %v, want ~0.6667 (the concluded run and the followed-up one, of three)", got.successRate)
+	}
+}
+
 type statsSnapshot struct {
 	teamsUsing, totalRuns int
 	successRate           float64

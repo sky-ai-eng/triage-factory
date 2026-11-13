@@ -31,19 +31,18 @@ type stubDelegator struct {
 	// mu guards the things concurrent units write: lastRunTeamID, the team
 	// the most recent Delegate call resolved for its run (tests assert a
 	// firing runs as the acting team, not the task's creation-time owner),
-	// the teardown ids below, and failFor.
+	// the calls recorded below, and failFor.
 	mu            sync.Mutex
 	lastRunTeamID string
 	failFor       map[string]bool
-	// stopped is every blueprint-run id handed to StopBlueprintRun, so a test
-	// can assert nothing tore a run down.
-	stopped []string
-	// tornDown is every task id handed to TeardownTaskDeliverablesSystem, so a
-	// test can assert a close reached the deliverable pass.
-	tornDown []string
-	// noted is every conversation id handed to TellTaskClosing, so a
-	// test can tell a close that held and told its conversations.
-	noted []string
+	// dismissed is every review handed to ReviewsDismissedSystem, so a test
+	// can assert a close reached the dismissal's follow-up.
+	dismissed []domain.Deliverable
+	// noted is every conversation id handed to TellTaskClosed, so a
+	// test can tell which conversations a close told, and heldNoted every
+	// one handed to TellTaskCloseHeld.
+	noted     []string
+	heldNoted []string
 	// beforeRun, when set, runs after the router's checks and before the
 	// firing transaction, which is where a concurrent write such as a team
 	// archive lands between the two.
@@ -137,58 +136,47 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	return brID, nil
 }
 
-func (s *stubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
-	return nil
-}
-
-// StopBlueprintRun records the id the caller asked to tear down.
-func (s *stubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
+// ReviewsDismissedSystem records the reviews a terminating close dismissed.
+// Recording only: what the real follow-up sends and closes is the spawner's to
+// prove, and what a router test can prove is that the close handed it the
+// reviews its transaction dismissed.
+func (s *stubDelegator) ReviewsDismissedSystem(_ context.Context, orgID string, reviews []domain.Deliverable) {
 	s.mu.Lock()
-	s.stopped = append(s.stopped, blueprintRunID)
-	s.mu.Unlock()
-	return nil
-}
-
-// TeardownTaskDeliverablesSystem records the task whose deliverables the close asked
-// to retire. Recording only: what the real teardown writes is
-// deliverableteardown's to prove, and what a router test can prove is that the
-// close cascade reached it with the task it closed.
-func (s *stubDelegator) TeardownTaskDeliverablesSystem(_ context.Context, orgID, taskID string) {
-	s.mu.Lock()
-	s.tornDown = append(s.tornDown, taskID)
+	s.dismissed = append(s.dismissed, reviews...)
 	s.mu.Unlock()
 }
 
-// tornDownCopy is the task ids TeardownTaskDeliverablesSystem was called with.
-func (s *stubDelegator) tornDownCopy() []string {
+// dismissedCopy is the reviews ReviewsDismissedSystem was called with.
+func (s *stubDelegator) dismissedCopy() []domain.Deliverable {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]string, len(s.tornDown))
-	copy(out, s.tornDown)
-	return out
-}
-
-// stoppedCopy is the blueprint-run ids StopBlueprintRun was called with.
-func (s *stubDelegator) stoppedCopy() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, len(s.stopped))
-	copy(out, s.stopped)
-	return out
+	return append([]domain.Deliverable(nil), s.dismissed...)
 }
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }
 
-func (s *stubDelegator) TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool {
+func (s *stubDelegator) TellTaskClosed(ctx context.Context, orgID, taskID string, conversationIDs []string) {
 	s.mu.Lock()
-	s.noted = append(s.noted, conversationID)
+	s.noted = append(s.noted, conversationIDs...)
 	s.mu.Unlock()
-	return true
 }
 
-// notedIDs is the conversation ids TellTaskClosing was called with.
+func (s *stubDelegator) TellTaskCloseHeld(ctx context.Context, orgID, taskID string, conversationIDs []string) {
+	s.mu.Lock()
+	s.heldNoted = append(s.heldNoted, conversationIDs...)
+	s.mu.Unlock()
+}
+
+// heldNotedIDs is the conversation ids TellTaskCloseHeld was called with.
+func (s *stubDelegator) heldNotedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.heldNoted)
+}
+
+// notedIDs is the conversation ids TellTaskClosed was called with.
 func (s *stubDelegator) notedIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -780,8 +768,8 @@ func TestFiringWorker_MarkFiredLosesLease_RunStandsAndReplaySkips(t *testing.T) 
 	if f.Status != workitem.StatusLeased || f.FiredBlueprintRunID != nil {
 		t.Fatalf("firing after the lost terminal = %+v, want still leased with no run recorded", f)
 	}
-	if runs() != 1 || len(stub.stoppedCopy()) != 0 {
-		t.Fatalf("runs = %d, torn down = %v; the committed run must stand", runs(), stub.stoppedCopy())
+	if runs() != 1 {
+		t.Fatalf("runs = %d; the committed run must stand", runs())
 	}
 
 	// The replay: the reclaim takes the row whatever the live conversation
@@ -796,8 +784,8 @@ func TestFiringWorker_MarkFiredLosesLease_RunStandsAndReplaySkips(t *testing.T) 
 		drainOnce(t, router)
 	}
 	requireSkipped(t, firingsFor(t, database, entityID)[0], domain.PendingFiringSkipAlreadyFired)
-	if runs() != 1 || len(stub.stoppedCopy()) != 0 {
-		t.Errorf("runs = %d, torn down = %v after the replay; the fence must not duplicate or undo the run", runs(), stub.stoppedCopy())
+	if runs() != 1 {
+		t.Errorf("runs = %d after the replay; the fence must not duplicate the run", runs())
 	}
 }
 

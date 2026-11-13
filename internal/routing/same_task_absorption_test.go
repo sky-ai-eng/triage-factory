@@ -94,18 +94,13 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 	return "run-" + task.ID, nil
 }
 
-func (s *injectingStubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
-	return nil
+func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {
 }
 
-func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
-	return nil
+func (s *injectingStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
-func (s *injectingStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
-
-func (s *injectingStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
-	return true
+func (s *injectingStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
@@ -210,12 +205,12 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 		teamTriggers: map[string][]domain.EventHandler{runmode.LocalDefaultTeamID: {trigger}},
 		taskPriority: 0.5,
 	}
-	bumped, created, err := router.upsertTaskForEvent(context.Background(), runmode.LocalDefaultOrgID, domain.Event{EventType: absorbTestEventType, ID: eventID}, entityID, routing)
+	bumped, mint, err := router.upsertTaskForEvent(context.Background(), runmode.LocalDefaultOrgID, domain.Event{EventType: absorbTestEventType, ID: eventID}, entityID, routing)
 	if err != nil {
 		t.Fatalf("upsertTaskForEvent (bump): %v", err)
 	}
-	if created || bumped == nil || bumped.ID != task.ID {
-		t.Fatalf("expected the second event to bump the existing task %q, got created=%v task=%+v", task.ID, created, bumped)
+	if mint != db.TaskFound || bumped == nil || bumped.ID != task.ID {
+		t.Fatalf("expected the second event to bump the existing task %q, got mint=%v task=%+v", task.ID, mint, bumped)
 	}
 }
 

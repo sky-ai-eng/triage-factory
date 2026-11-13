@@ -149,13 +149,21 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	if conv.BlueprintStepIndex != nil {
 		stepIdx = *conv.BlueprintStepIndex
 	}
+	// A seed with no blueprint run is a conversation outside any blueprint,
+	// which the origin CHECK admits only under an origin other than the
+	// column's default.
+	origin := "blueprint"
+	var blueprintRunID any = conv.BlueprintRunID
+	if conv.BlueprintRunID == "" {
+		origin, blueprintRunID = "interactive", nil
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
-		                           creator_user_id, blueprint_run_id, blueprint_step_index, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
+		                           creator_user_id, blueprint_run_id, blueprint_step_index, completed_at, origin)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, ?)
 	`, id, conv.TaskID, conv.PromptID, status, conv.Model,
-		trigger, triggerID, teamID, creator, conv.BlueprintRunID, stepIdx, completedAt); err != nil {
+		trigger, triggerID, teamID, creator, blueprintRunID, stepIdx, completedAt, origin); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
@@ -276,6 +284,14 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				fmt.Sprintf("-%d seconds", int64(age.Seconds())), conversationID); err != nil {
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
+		},
+		ParkedAtSet: func(t *testing.T, conversationID string) bool {
+			t.Helper()
+			var set bool
+			if err := conn.QueryRow(`SELECT parked_at IS NOT NULL FROM conversations WHERE id = ?`, conversationID).Scan(&set); err != nil {
+				t.Fatalf("read parked_at of %s: %v", conversationID, err)
+			}
+			return set
 		},
 		LiveClaimsWithoutLease: func(t *testing.T) int {
 			t.Helper()

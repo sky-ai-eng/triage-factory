@@ -6,7 +6,9 @@
 // intermediate blueprint step, a final step, the only step, or a conversation
 // with no blueprint at all. The agent stops, the conversation parks `open`,
 // and everything outside the conversation freezes. Nothing continues until
-// someone resumes it or, for task-driven work, dispositions the task.
+// someone resumes it or, for task-driven work, moves the task off it: a
+// requeue, a new delegation, or a person's claim. Closing the task is not one
+// of those; a close leaves the conversation and its blueprint as they are.
 //
 // Cancellation is a real concept, but it belongs to the layers that own a
 // lifecycle: the blueprint has cancel_requested / BlueprintRunStatusCancelled
@@ -36,8 +38,9 @@
 //
 // A frozen blueprint is the deliberate cost of that. A stopped step leaves its
 // blueprint 'running' with no queued step and no live claim, holding its
-// worktree, until the conversation is resumed or the task is dispositioned —
-// so every surface that counts live blueprints counts it.
+// worktree, until the conversation is resumed or something ends the run (its
+// cancel, a requeue, a new delegation, a person claiming the task, the team's
+// archive) — so every surface that counts live blueprints counts it.
 //
 // That cost is bounded to the stopped conversation's own task, and it has to
 // stay that way. Auto-delegation gates on the task, so a frozen blueprint
@@ -102,10 +105,10 @@ var (
 // the task, else ErrTaskHeld or ErrTaskStopping. An engaged claim is any
 // unreleased one but an idle warm claim (HasEngagedClaimForTaskSystem).
 //
-// An idle warm claim does not hold the task. Its conversation has its
-// turn-end verdict, so there is nothing to stop or settle, and the new run
-// ends that conversation, which lets the claim go. A warm claim whose
-// conversation a follow-up has resumed holds the task like any claim.
+// An idle warm claim does not hold the task. Its conversation's turn has
+// ended, so no agent is running under it, and the caller's boundary ends that
+// conversation, which lets the claim go. A warm claim whose conversation a
+// follow-up has resumed holds the task like any claim.
 func (s *Spawner) CheckTaskUnheld(ctx context.Context, orgID, taskID string) error {
 	if s.conversations == nil {
 		return nil
@@ -150,15 +153,8 @@ func (s *Spawner) SettleTaskStops(ctx context.Context, orgID, taskID string) err
 type StopCause string
 
 const (
-	// StopCauseTaskClosed — the system decided the task is resolved (its
-	// entity merged, closed, or otherwise stopped needing attention).
-	StopCauseTaskClosed StopCause = "task_closed"
-	// StopCauseCloseHoldExpired — an event resolved the task while the
-	// conversation was working, and it was still working when the close-hold
-	// limit ran out. Its own cause rather than a close because the task can
-	// stay open after it, held by a person's work or deliverable.
-	StopCauseCloseHoldExpired StopCause = "close_hold_expired"
-	// StopCauseTaskDispositioned — a user swiped the task away.
+	// StopCauseTaskDispositioned — a person claimed a task the agent did not
+	// hold. Closing a task is not a cause: no close stops a conversation.
 	StopCauseTaskDispositioned StopCause = "task_dispositioned"
 	// StopCauseTaskRequeued — a user returned the task to the queue. Its own
 	// cause rather than a disposition because the task is still open: what
@@ -180,10 +176,6 @@ const (
 // knows from the row's presence.
 func (c StopCause) note() string {
 	switch c {
-	case StopCauseTaskClosed:
-		return "Run stopped: the task it was working on was closed."
-	case StopCauseCloseHoldExpired:
-		return "Run stopped: the task it was working on was resolved, and the run had not finished in the time allowed after that."
 	case StopCauseTaskDispositioned:
 		return "Run stopped: the task it was working on was dispositioned."
 	case StopCauseTaskRequeued:
@@ -231,8 +223,8 @@ func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 // name spells both halves because only the first is addressed: the id is a
 // conversation's, and the blueprint_run reached through it is a consequence.
 // That second half belongs to callers that own a lifecycle one layer up and
-// have already decided it is over — a task closed by the router, a task
-// swiped by a user, a team archived. Nothing will resume those conversations,
+// have already decided it is over — a task requeued, handed to a new
+// delegation or claimed by a person, a team archived. Nothing will resume those conversations,
 // so freezing their blueprints 'running' would hold a worktree and inflate
 // every live-blueprint count for work that is finished.
 //
@@ -389,8 +381,9 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// conversations routinely, because every caller enumerates non-terminal
 	// runs and `open` is non-terminal — and for those it is the first and
 	// last thing the transcript will ever say about why the work ended. Skip
-	// it there and a swiped or closed task silently ends a conversation with
-	// no explanation at all, which is the case this note exists for.
+	// it there and a requeued task or an archived team silently ends a
+	// conversation with no explanation at all, which is the case this note
+	// exists for.
 	if cancelBlueprint || conv.Status != domain.StatusOpen {
 		s.insertStopNote(orgID, conversationID, userID, note)
 	}
@@ -485,8 +478,8 @@ func (s *Spawner) insertStopNote(orgID, conversationID, userID, content string) 
 	}
 	ctx := context.Background()
 	// Never say the same thing twice in a row. Two teardowns can reach one
-	// conversation — a task closed by the router and then swiped, an archived
-	// team over a task that already closed — and each enumerates every
+	// conversation — a task requeued and then delegated again, an archived
+	// team over a task a person already claimed — and each enumerates every
 	// non-terminal run, so the second arrives at a row the first already
 	// explained. The engine's guard is reused rather than reimplemented: it
 	// walks back only to the last human input, so a stop after a resume is a

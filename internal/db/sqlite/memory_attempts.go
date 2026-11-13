@@ -113,8 +113,10 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM tasks t
-		WHERE t.org_id = ? AND t.status NOT IN ('done', 'dismissed')
+		WHERE t.org_id = ?
 		  AND `+taskMemoryPendingSQL("t.org_id", "t.id")+`
+		  AND (t.status NOT IN ('done', 'dismissed')
+		       OR `+taskWorkingSQL("t.id")+`)
 	`, orgID).Scan(&out.TasksWaiting); err != nil {
 		return domain.MemoryFailing{}, err
 	}

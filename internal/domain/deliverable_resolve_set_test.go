@@ -54,23 +54,6 @@ func TestAllReadyReviews(t *testing.T) {
 	}
 }
 
-func TestAllPendingReviewDeliverables(t *testing.T) {
-	finalized := readyReview(1, "run_1")
-	unfinalized := NewReviewDeliverable("o/r", 2, "PR_kwDOnode", "headsha", "run_2")
-	submitted := readyReview(3, "run_3")
-	submitted.State = DeliverableStateReviewSubmitted // resolved
-
-	// All pending reviews count regardless of the ready sentinel (teardown
-	// abandons even started-but-unfinalized reviews); submitted/dismissed don't.
-	got := AllPendingReviewDeliverables([]Deliverable{finalized, unfinalized, submitted})
-	if len(got) != 2 {
-		t.Fatalf("AllPendingReviewDeliverables len = %d, want 2 (both pending, finalized or not)", len(got))
-	}
-	if got[0].Target != "o/r#1" || got[1].Target != "o/r#2" {
-		t.Errorf("AllPendingReviewDeliverables = %q,%q, want o/r#1,o/r#2", got[0].Target, got[1].Target)
-	}
-}
-
 func TestUnresolvedDeliverableIDs(t *testing.T) {
 	d := draftPR(1, "pr1")
 	openPR := draftPR(2, "pr2")

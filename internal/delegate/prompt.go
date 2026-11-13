@@ -288,6 +288,12 @@ func resolveCLIPath(text, binaryPath string) string {
 // An absent fact renders no line: a deployment with no public URL says nothing
 // about a URL rather than offering a blank one.
 //
+// The task's state arrives here only when the task is already closed at the
+// launch (domain.TaskClosedRunContext): the completion blocks tell a run what
+// a closed task means for it, and whether this one is closed is a fact about
+// one run. It is not the task context's status, which is the source's own
+// word about its object, inside the region marked untrusted.
+//
 // The source notes arrive here for the same reason: which sources this run's
 // sandbox holds a credential for, and why each other one is unavailable, is a
 // fact about one engagement (its source manifest), so a line per source that
@@ -301,10 +307,13 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
+func runContext(scope, taskState, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
+	}
+	if taskState != "" {
+		lines = append(lines, taskState)
 	}
 	if runRoot != "" {
 		lines = append(lines, "Run root: "+runRoot+

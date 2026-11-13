@@ -37,18 +37,13 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 	return stubDelegateRun(s.db, task, opts)
 }
 
-func (s *fenceStubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
-	return nil
+func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {
 }
 
-func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
-	return nil
+func (s *fenceStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
-func (s *fenceStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
-
-func (s *fenceStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
-	return true
+func (s *fenceStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {

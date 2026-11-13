@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,9 +14,14 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // TestTaskPatchStage_RejectsUnclaimedTask: a stage is the claimant's own
@@ -26,7 +32,7 @@ func TestTaskPatchStage_RejectsUnclaimedTask(t *testing.T) {
 	taskID := seedLifecycleTask(t, s.db, "unclaimed", lifecycleTaskOpts{})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_progress"})
+		withTaskVersion(t, s, taskID, map[string]any{"status": "in_progress"}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (unclaimed task); body=%s",
 			rec.Code, rec.Body.String())
@@ -55,7 +61,7 @@ func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 					claimedByUserID: runmode.LocalDefaultUserID,
 					status:          seeded,
 				})
-				rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, body)
+				rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, body))
 				if rec.Code != http.StatusConflict {
 					t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 				}
@@ -78,7 +84,7 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 	taskID := seedLifecycleTask(t, s.db, "double-close", lifecycleTaskOpts{})
 
 	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "dismissed"}); rec.Code != http.StatusOK {
+		withTaskVersion(t, s, taskID, map[string]any{"status": "dismissed"})); rec.Code != http.StatusOK {
 		t.Fatalf("first close = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	closedAt, closeReason := readTaskClose(t, s.db, taskID)
@@ -87,7 +93,7 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 	}
 
 	for _, status := range []string{"done", "dismissed"} {
-		if _, err := s.tasks.CloseByUser(t.Context(), runmode.LocalDefaultOrgID, taskID, status); !errors.Is(err, db.ErrNoSuchTask) {
+		if _, err := s.tasks.CloseByUser(t.Context(), runmode.LocalDefaultOrgID, taskID, status, dbtest.TaskVersion(t, s.tasks, runmode.LocalDefaultOrgID, taskID)); !errors.Is(err, db.ErrNoSuchTask) {
 			t.Fatalf("CloseByUser(%s) on a closed task = %v, want db.ErrNoSuchTask", status, err)
 		}
 		gotAt, gotReason := readTaskClose(t, s.db, taskID)
@@ -98,6 +104,83 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 		if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
 			t.Fatalf("status = %q after a refused close as %s, want the original dismissed", got, status)
 		}
+	}
+}
+
+// TestTaskPatchClose_LeavesTheRunWorkingTheTask: a person's dismiss or
+// complete closes the task and stops nothing on the run working it. The
+// conversation is not asked to stop, gets no stop note, and its blueprint is
+// not called off. It is told the task closed, by one note.
+func TestTaskPatchClose_LeavesTheRunWorkingTheTask(t *testing.T) {
+	for _, status := range []string{"dismissed", "done"} {
+		t.Run(status, func(t *testing.T) {
+			s := newTestServer(t)
+			// A real spawner: a stop, had the close asked for one, would
+			// land on the rows read below.
+			s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+			taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "close_live_"+status)
+			// An engagement holds the conversation, so it is working on the
+			// task when the person closes it.
+			execSQL(t, s.db, `UPDATE conversations SET status = NULL WHERE id = ?`, conversationID)
+			execSQL(t, s.db, `
+				INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+				VALUES (?, ?, ?, 'test-engagement', 1, CURRENT_TIMESTAMP, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))`,
+				fixtureUUID("cl_close_live_"+status), runmode.LocalDefaultOrgID, conversationID)
+			closeNotes := func() int {
+				t.Helper()
+				var n int
+				if err := s.db.QueryRow(`
+					SELECT COUNT(*) FROM messages
+					 WHERE conversation_id = ? AND json_extract(metadata, '$.producer') = ?`,
+					conversationID, domain.StagedInjectionProducerTaskClosing).Scan(&n); err != nil {
+					t.Fatalf("count close notes: %v", err)
+				}
+				return n
+			}
+			readRun := func() string {
+				t.Helper()
+				var convStatus, runStatus string
+				var stopRequested, ended, cancelRequested bool
+				var notes int
+				if err := s.db.QueryRow(`
+					SELECT COALESCE(status, ''), stop_requested_at IS NOT NULL, ended_at IS NOT NULL
+					  FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus, &stopRequested, &ended); err != nil {
+					t.Fatalf("read conversation: %v", err)
+				}
+				if err := s.db.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = ?`,
+					blueprintRunID).Scan(&runStatus, &cancelRequested); err != nil {
+					t.Fatalf("read blueprint run: %v", err)
+				}
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&notes); err != nil {
+					t.Fatalf("count transcript rows: %v", err)
+				}
+				notes -= closeNotes()
+				return fmt.Sprintf("conversation (%s, stop requested %v, ended %v), run (%s, cancel requested %v), %d transcript rows",
+					convStatus, stopRequested, ended, runStatus, cancelRequested, notes)
+			}
+			before := readRun()
+
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+				withTaskVersion(t, s, taskID, map[string]any{"status": status}))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("close as %s = %d, want 200; body=%s", status, rec.Code, rec.Body.String())
+			}
+			// A stop the close had requested would be settled here.
+			if _, err := sqlitestore.New(s.db).ConversationQueue.SettleUnclaimedStopsSystem(context.Background()); err != nil {
+				t.Fatalf("settle: %v", err)
+			}
+
+			if got := readTaskStatus(t, s.db, taskID); got != status {
+				t.Errorf("task status = %q, want %s", got, status)
+			}
+			if after := readRun(); after != before {
+				t.Errorf("the close changed the run working the task:\n before %s\n after  %s", before, after)
+			}
+			// The run is told, once, and nothing else is written on it.
+			if n := closeNotes(); n != 1 {
+				t.Errorf("close notes staged on the working conversation = %d, want 1", n)
+			}
+		})
 	}
 }
 
@@ -126,7 +209,7 @@ func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	for _, badStatus := range []any{"queued", "snoozed", "claimed", "in_review", "wat", "", 7, nil} {
 		t.Run(statusName(badStatus), func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": badStatus})
+				withTaskVersion(t, s, taskID, map[string]any{"status": badStatus}))
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status=%v: got %d, want 400; body=%s",
 					badStatus, rec.Code, rec.Body.String())
@@ -154,7 +237,7 @@ func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			taskID := seedLifecycleTask(t, s.db, "order-"+name, lifecycleTaskOpts{status: "dismissed"})
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, tc.body)
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, withTaskVersion(t, s, taskID, tc.body))
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d (the body's own fault, not the task's state); body=%s",
 					rec.Code, tc.want, rec.Body.String())
@@ -175,7 +258,7 @@ func TestTaskPatchStage_HappyPath_ReassertsInProgress(t *testing.T) {
 	})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_progress"})
+		withTaskVersion(t, s, taskID, map[string]any{"status": "in_progress"}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -205,7 +288,7 @@ func TestTaskPatchStage_RefusesInReview(t *testing.T) {
 	})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_review"})
+		withTaskVersion(t, s, taskID, map[string]any{"status": "in_review"}))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -221,7 +304,7 @@ func TestTaskPatch_404OnUnknownTask(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPatch,
 		"/api/tasks/00000000-0000-0000-0000-000000000bad",
-		map[string]any{"status": "in_progress"})
+		withTaskVersion(t, s, "00000000-0000-0000-0000-000000000bad", map[string]any{"status": "in_progress"}))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (task not found); body=%s",
 			rec.Code, rec.Body.String())

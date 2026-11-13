@@ -83,6 +83,10 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 	}
 }
 
+// errRunAlreadyTerminal rolls back terminateBlueprint's transaction when the
+// run it would end was already ended by another writer.
+var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
+
 // terminateBlueprint finalizes the blueprint run row and runs the shared
 // worktree cleanup that runAgent's per-step defers skipped. status
 // distinguishes "all steps green, mark task done like a single run
@@ -113,66 +117,86 @@ func (s *Spawner) terminateBlueprint(
 	skipCleanup bool,
 ) {
 	bgCtx := context.Background()
-	var (
-		changed bool
-		markErr error
-	)
+
+	// Completion and task-closure are independent. A clean finalization
+	// closes the task ONLY when no deliverable remains unresolved; a blueprint
+	// that completed with an open draft PR / ready review leaves the task
+	// exactly as it is — bot-claimed and in_progress — until the last
+	// deliverable is resolved (the last resolution closes it). The signal that
+	// a human is owed something rides the card frame and the attention
+	// order, not the lane the card sits in, so there is no column to move
+	// it to and nothing to write here. Unresolved is asked of the TASK, not
+	// of this blueprint: a draft PR carried in from an earlier engagement is
+	// unresolved work whichever run just finished.
+	closeTask := status == domain.BlueprintRunStatusCompleted && !s.taskHasUnresolvedDeliverables(bgCtx, orgID, taskID)
+
+	// The run's terminal status and the close of its task are one
+	// transaction. Between them the task would be open with no run on it, and
+	// an event arriving then, or a queued firing, starts a run on a task that
+	// is about to close; committed together, such an event meets either a
+	// running run (and queues) or a closed task (and mints a new one).
+	//
+	// The task is written first, the order every transaction that writes both
+	// keeps: a firing locks its task before it inserts its run. Whether this
+	// write is the one that ended the run is only known from the mark, so a
+	// run another writer already ended rolls the close back with it
+	// (errRunAlreadyTerminal): that writer decided what happens to the task.
+	//
+	// A task already closed (ErrNoSuchTask: the close's WHERE is
+	// state-guarded) is not a failure. Any other close error fails the whole
+	// write and leaves the run running, for the stranded-run replay to end.
+	finish := func(closeFn func() error, mark func() (bool, error)) error {
+		if closeTask {
+			if err := closeFn(); err != nil && !errors.Is(err, db.ErrNoSuchTask) {
+				return fmt.Errorf("close task: %w", err)
+			}
+		}
+		changed, err := mark()
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return errRunAlreadyTerminal
+		}
+		return nil
+	}
+	var markErr error
 	if triggerType == "manual" {
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			c, mErr := ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-			changed = c
-			return mErr
+			return finish(
+				func() error {
+					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
+					return err
+				},
+				func() (bool, error) {
+					return ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
+				})
 		})
 	} else {
-		changed, markErr = s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-	}
-	if markErr != nil {
-		blueprintLog.Error("mark blueprint_run status failed; skipping cleanup to keep blueprint row consistent", "blueprint_run", blueprintRunID, "status", status, "error", markErr)
-		return
+		markErr = s.tx.SystemWithTx(bgCtx, orgID, func(ts db.SystemTxStores) error {
+			return finish(
+				func() error {
+					_, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
+					return err
+				},
+				func() (bool, error) {
+					return ts.Blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
+				})
+		})
 	}
 	// Everything below belongs to the write that ended the run. A run already
 	// terminal was ended by another writer — a replay of a stranded run racing
 	// its late reactor, two executors replaying one run, a cancel that landed
-	// first — and that writer ran them. Running them twice would close a task
-	// the other terminal decided to leave open, or remove a worktree a
-	// follow-up has since been given.
-	if !changed {
+	// first — and that writer ran them. Running them twice would remove a
+	// worktree a follow-up has since been given.
+	if errors.Is(markErr, errRunAlreadyTerminal) {
 		blueprintLog.Info("blueprint_run already terminal; its terminal side effects belong to the write that ended it",
 			"blueprint_run", blueprintRunID, "status", status)
 		return
 	}
-
-	if status == domain.BlueprintRunStatusCompleted {
-		// Completion and task-closure are independent. A clean finalization
-		// closes the task ONLY when no deliverable remains unresolved; a blueprint
-		// that completed with an open draft PR / ready review leaves the task
-		// exactly as it is — bot-claimed and in_progress — until the last
-		// deliverable is resolved (the last resolution closes it). The signal that
-		// a human is owed something rides the card frame and the attention
-		// order, not the lane the card sits in, so there is no column to move
-		// it to and nothing to write here. Unresolved is asked of the TASK, not
-		// of this blueprint: a draft PR carried in from an earlier engagement is
-		// unresolved work whichever run just finished.
-		if !s.taskHasUnresolvedDeliverables(bgCtx, orgID, taskID) {
-			// Mirror single-run behavior: a clean blueprint finalization with no
-			// unresolved deliverable closes the task.
-			var closeErr error
-			if triggerType == "manual" {
-				closeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, "run_completed", "")
-					return err
-				})
-			} else {
-				_, closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
-			}
-			// ErrNoSuchTask here means a concurrent close already landed —
-			// harmless (Close's WHERE clause is state-guarded, so this branch
-			// only reaches a task that's still non-terminal or missing); any
-			// other error is worth a warning.
-			if closeErr != nil && !errors.Is(closeErr, db.ErrNoSuchTask) {
-				blueprintLog.Warn("close task failed", "task", taskID, "error", closeErr)
-			}
-		}
+	if markErr != nil {
+		blueprintLog.Error("mark blueprint_run status failed; skipping cleanup to keep blueprint row consistent", "blueprint_run", blueprintRunID, "status", status, "error", markErr)
+		return
 	}
 	// Aborted / failed / cancelled blueprints intentionally do NOT mark
 	// the task done — leave it in the queue so a human can inspect the
@@ -418,7 +442,8 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 // best-effort spelling for the callers that don't.
 //
 // Only the blueprint's own cancel verbs and the lifecycle teardown one layer up
-// (a closed or swiped task, an archived team) reach this. Stopping a
+// (a task requeued, delegated again or claimed by a person, an archived team)
+// reach this. Stopping a
 // conversation must not: the signal is what turns a parked step into a
 // permanently unresumable one.
 func (s *Spawner) raiseBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) error {
@@ -678,7 +703,7 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	}
 	// CloseSystem's WHERE is state-guarded, so a task the approval click (or a
 	// concurrent cycle) already closed answers ErrNoSuchTask — not a failure.
-	if _, err := s.tasks.CloseSystem(ctx, orgID, br.TaskID, "run_completed", ""); err != nil {
+	if _, err := s.tasks.CloseSystem(ctx, orgID, br.TaskID, db.RunCompletedCloseReason, ""); err != nil {
 		if !errors.Is(err, db.ErrNoSuchTask) {
 			blueprintLog.Warn("terminal-on-last close: close task failed", "task", br.TaskID, "conversation", conversationID, "error", err)
 		}

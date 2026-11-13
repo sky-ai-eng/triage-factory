@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
 )
 
 // pgConversationQueueExecutorID/pgConversationQueueBootEpoch are the fixed ownership identity
@@ -1197,6 +1200,123 @@ func TestClaimTakeover_Postgres(t *testing.T) {
 func TestWarmClaim_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	dbtest.RunWarmClaimConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
+
+// Releasing a warm claim wakes the dispatchers when its conversation has
+// ended, and not when the conversation is concluded and still live.
+func TestReleaseWarmClaim_Postgres_EndedConversationWakesTheDispatchers(t *testing.T) {
+	h := pgtest.Shared(t)
+	f := pgClaimLeaseFixture(t, h)
+	ctx := context.Background()
+
+	warmClaim := func(t *testing.T) *domain.Conversation {
+		t.Helper()
+		conversationID, _ := f.StageStep(t)
+		claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
+		if err != nil || claimed == nil || claimed.ID != conversationID {
+			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
+		}
+		if _, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, conversationID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), ""); err != nil {
+			t.Fatalf("ConcludeKeepingClaimSystem: %v", err)
+		}
+		return claimed
+	}
+	release := func(t *testing.T, c *domain.Conversation) {
+		t.Helper()
+		if released, err := f.Stores.Conversations.ReleaseWarmClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID); err != nil || !released {
+			t.Fatalf("ReleaseWarmClaimSystem = (%v, %v), want (true, nil)", released, err)
+		}
+	}
+	live, ended := warmClaim(t), warmClaim(t)
+	if _, err := f.Stores.Conversations.EndConversationSystem(ctx, f.OrgID, ended.ID, domain.EndedDelegated); err != nil {
+		t.Fatalf("EndConversationSystem: %v", err)
+	}
+
+	payloads := listenForWakes(t, h)
+	release(t, live)
+	if got := wakesBeforeMarker(t, h, payloads); len(got) != 0 {
+		t.Errorf("releasing a warm claim on a live conversation woke %+v, want nothing", got)
+	}
+	release(t, ended)
+	want := wakebus.Message{Kind: wakebus.KindEvent, OrgID: f.OrgID}
+	if got := wakesBeforeMarker(t, h, payloads); len(got) != 1 || got[0] != want {
+		t.Errorf("releasing a warm claim on an ended conversation woke %+v, want [%+v]", got, want)
+	}
+}
+
+// wakeMarker is the wake kind the tests below publish as markers.
+const wakeMarker = "test-marker"
+
+// listenForWakes listens on the dispatcher wake channel and returns its
+// payloads once the listener is receiving. NOTIFY reaches only sessions
+// already listening, so it publishes markers until one arrives.
+func listenForWakes(t *testing.T, h *pgtest.Harness) <-chan string {
+	t.Helper()
+	dsn, err := h.Container.ConnectionString(context.Background(), "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	payloads := make(chan string, 64)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pgnotify.NewListener(dsn, wakebus.Channel, func(p string) {
+			// Non-blocking, so Run can return when the test cancels it.
+			select {
+			case payloads <- p:
+			default:
+			}
+		}).Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := wakebus.Publish(context.Background(), h.AdminDB, wakeMarker, uuid.New().String()); err != nil {
+			t.Fatalf("publish a marker: %v", err)
+		}
+		select {
+		case <-payloads:
+			return payloads
+		case <-time.After(200 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("the wake listener never started receiving")
+			}
+		}
+	}
+}
+
+// wakesBeforeMarker publishes a marker and returns the wakes received before
+// it. Postgres delivers notifications in commit order, so those are the wakes
+// committed before the marker. Earlier markers are skipped.
+func wakesBeforeMarker(t *testing.T, h *pgtest.Harness, payloads <-chan string) []wakebus.Message {
+	t.Helper()
+	marker := uuid.New().String()
+	if err := wakebus.Publish(context.Background(), h.AdminDB, wakeMarker, marker); err != nil {
+		t.Fatalf("publish a marker: %v", err)
+	}
+	var got []wakebus.Message
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case p := <-payloads:
+			var m wakebus.Message
+			if err := json.Unmarshal([]byte(p), &m); err != nil {
+				t.Fatalf("wake payload %q: %v", p, err)
+			}
+			if m.Kind != wakeMarker {
+				got = append(got, m)
+			} else if m.OrgID == marker {
+				return got
+			}
+		case <-timeout:
+			t.Fatal("the marker never arrived")
+		}
+	}
 }
 
 // TestClaimableProbe_Postgres runs the shared claimability-probe conformance

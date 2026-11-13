@@ -69,7 +69,17 @@ type Reconciler struct {
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
+	// transitioned runs after each transition this reconciler applied to a
+	// conversation's deliverable commits. nil skips it, as for prResolved.
+	transitioned DeliverableTransitionedHook
 }
+
+// DeliverableTransitionedHook is what the reconciler calls for each
+// transition it applied to a deliverable a conversation produced, with the
+// row as it stored it. A transition found here happened on GitHub, where no
+// handler of ours saw it, so this is how the agent that produced the
+// deliverable is told of one that resolved it.
+type DeliverableTransitionedHook func(ctx context.Context, orgID string, d domain.Deliverable)
 
 // PullRequestResolvedHook is what the reconciler calls when a draft pull
 // request became ready somewhere other than the approval click — a human on
@@ -133,6 +143,18 @@ func (rc *Reconciler) SetPullRequestResolvedHook(h PullRequestResolvedHook) {
 // own check that a brain's reconciler was not left without one.
 func (rc *Reconciler) HasPullRequestResolvedHook() bool {
 	return rc.prResolved != nil
+}
+
+// SetDeliverableTransitionedHook installs what each applied transition runs.
+// Set once at wiring, before any cycle runs.
+func (rc *Reconciler) SetDeliverableTransitionedHook(h DeliverableTransitionedHook) {
+	rc.transitioned = h
+}
+
+// HasDeliverableTransitionedHook reports whether that hook is installed, for
+// the wiring's check.
+func (rc *Reconciler) HasDeliverableTransitionedHook() bool {
+	return rc.transitioned != nil
 }
 
 // ReconcileOrg runs the PR-deliverable backstop, then lists the org's
@@ -455,13 +477,21 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		if !ok || newState == a.State {
 			continue
 		}
-		updated, err := rc.applyTransition(writeCtx, orgID, a, newState)
+		updated, moved, err := rc.applyTransition(writeCtx, orgID, a, newState)
 		if err != nil {
 			reconcileLog.WarnContext(ctx, "apply deliverable transition failed",
 				"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState, "error", err)
 			continue
 		}
+		if !moved {
+			// The row left the state this pass read before the write, so
+			// this pass made no transition and has none to announce.
+			continue
+		}
 		transitioned = append(transitioned, updated)
+		if rc.transitioned != nil && updated.ConversationID != "" {
+			rc.transitioned(writeCtx, orgID, updated)
+		}
 		if a.ConversationID != "" && isDraftResolved(a, newState) {
 			resolvedConversations[a.ConversationID] = true
 		}
@@ -488,25 +518,27 @@ func isDraftResolved(a domain.Deliverable, newState string) bool {
 		newState != domain.DeliverableStatePRDraft
 }
 
-// applyTransition writes the new state (admin pool) and broadcasts the change.
+// applyTransition moves a from the state this pass read to newState (admin
+// pool) and broadcasts the change. The write is guarded on the state read, so
+// of two passes that read the same state one moves the row; moved is false
+// for the other, which wrote nothing and has nothing to announce.
 // Best-effort WS: a dropped broadcast must not undo the transition.
-func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Deliverable, newState string) (domain.Deliverable, error) {
-	next := a
-	next.State = newState
+func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Deliverable, newState string) (updated domain.Deliverable, moved bool, err error) {
+	details := ""
 	if a.Kind == domain.DeliverableKindPullRequest {
-		// Nobody resolved this through TF — the row records that so the
-		// agent-facing note reads "on GitHub" rather than crediting a human
-		// approval or dismissal that never happened.
-		next.DetailsJSON = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
+		// No person resolved this through TF's deliverable verbs — the row
+		// records that so the agent-facing note reads "on GitHub" rather than
+		// crediting a human approval or dismissal that never happened.
+		details = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
 	}
-	updated, err := rc.deliverables.UpsertSystem(ctx, orgID, next)
-	if err != nil {
-		return domain.Deliverable{}, err
+	stored, err := rc.deliverables.TransitionStateSystem(ctx, orgID, a.ID, a.State, newState, details)
+	if err != nil || stored == nil {
+		return domain.Deliverable{}, false, err
 	}
-	rc.broadcast(ctx, orgID, updated)
+	rc.broadcast(ctx, orgID, *stored)
 	reconcileLog.InfoContext(ctx, "deliverable reconciled",
 		"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
-	return updated, nil
+	return *stored, true, nil
 }
 
 // broadcast pushes the transition to the frontend as a dedicated deliverable_updated

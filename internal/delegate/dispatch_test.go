@@ -290,6 +290,64 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 	}
 }
 
+// TestReactor_AdvanceEnqueuesNextStepOnAClosedTask: a close writes the task
+// and nothing on its runs, so a step that finishes after its task closed
+// advances its blueprint exactly as it would on an open task, whichever way
+// the task closed.
+func TestReactor_AdvanceEnqueuesNextStepOnAClosedTask(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	closes := map[string]func(t *testing.T, s *Spawner, taskID string){
+		"event": func(t *testing.T, s *Spawner, taskID string) {
+			task, err := s.tasks.GetSystem(ctx, org, taskID)
+			if err != nil || task == nil {
+				t.Fatalf("read task: %v", err)
+			}
+			eventID, err := s.events.Record(ctx, org, domain.Event{
+				EventType: domain.EventGitHubPRCICheckPassed, EntityID: &task.EntityID, MetadataJSON: `{}`,
+			})
+			if err != nil {
+				t.Fatalf("record the closing event: %v", err)
+			}
+			if out, err := s.tasks.CloseOrHoldSystem(ctx, org, taskID, db.SiblingEventCloseReason, domain.EventGitHubPRCICheckPassed, eventID); err != nil || !out.Closed {
+				t.Fatalf("CloseOrHoldSystem = %+v (err %v), want closed", out, err)
+			}
+		},
+		"dismissed": func(t *testing.T, s *Spawner, taskID string) {
+			if _, err := s.tasks.CloseByUser(ctx, org, taskID, "dismissed", dbtest.TaskVersion(t, s.tasks, org, taskID)); err != nil {
+				t.Fatalf("CloseByUser: %v", err)
+			}
+		},
+		"completed": func(t *testing.T, s *Spawner, taskID string) {
+			if _, err := s.tasks.CloseByUser(ctx, org, taskID, "done", dbtest.TaskVersion(t, s.tasks, org, taskID)); err != nil {
+				t.Fatalf("CloseByUser: %v", err)
+			}
+		},
+	}
+	for name, closeTask := range closes {
+		t.Run(name, func(t *testing.T) {
+			s, database, brID, taskID, step0ConversationID := reactorFixture(t, "adv-closed-"+name, 2, dbtest.SeedConcluded, "continue")
+			closeTask(t, s, taskID)
+
+			stepConversation, _ := s.conversations.GetSystem(ctx, org, step0ConversationID)
+			stepConversation.TriggerType = "manual"
+			stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+			s.reactToStepTerminal(ctx, org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
+
+			if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
+				t.Fatalf("queued step runs = %v, want [1]", q)
+			}
+			br := mustGetRun(t, s, org, brID)
+			if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
+				t.Errorf("blueprint = (status %q, cancel requested %v), want running and not called off", br.Status, br.CancelRequested)
+			}
+			if br.CurrentStepIndex != 1 {
+				t.Errorf("current_step_index = %d, want 1", br.CurrentStepIndex)
+			}
+		})
+	}
+}
+
 // TestReactor_AdvanceInheritsActorAgent pins the freeze-and-inherit design: the
 // next step the reactor enqueues carries the blueprint_run's frozen
 // actor_agent_id, NOT a value re-derived from the task claim. The task is left

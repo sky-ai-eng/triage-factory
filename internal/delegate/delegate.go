@@ -171,10 +171,10 @@ var ErrTaskBusy = errors.New("delegate: another run is active on this task")
 var ErrAlreadyFired = errors.New("delegate: run already fired for this (event, trigger)")
 
 // ErrTaskClosed is returned by Delegate on the event path when the task had
-// closed, or an event held its close, by the time the firing locked it — a
+// closed by the time the firing locked it — a
 // close that landed after the router's own check. No run starts, and the
 // router skips the firing as it skips one on a closed task.
-var ErrTaskClosed = errors.New("delegate: the task closed, or its close is held")
+var ErrTaskClosed = errors.New("delegate: the task closed")
 
 // ErrTeamArchived is returned by Delegate, on either path, when the team the
 // run would belong to was archived by the time the firing read it under the
@@ -554,6 +554,9 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		// the gap before step 0 can be claimed.
 		s.kickMemoryOwed(orgID, c.ID)
 	}
+	// Step 0 can't be claimed while a warm claim on an ended conversation
+	// holds the task's tree.
+	s.RingWarmWaitsForEnded(bgCtx, orgID, ended)
 
 	// The blueprint advances entirely through the run queue from here: the
 	// dispatcher claims step 0, builds the shared workspace, runs the agent,

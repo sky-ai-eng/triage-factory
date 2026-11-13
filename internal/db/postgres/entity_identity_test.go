@@ -77,6 +77,12 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 				}
 				return taskID
 			},
+			WorkingRun: func(t *testing.T, taskID string) func(t *testing.T) dbtest.TaskCloseWorkState {
+				t.Helper()
+				work, _ := newPgCloseSeeder(h.AdminDB, orgID, userID)
+				runID, convID := work.BlueprintAndConversation(t, taskID, "running", "")
+				return func(t *testing.T) dbtest.TaskCloseWorkState { return work.WorkState(t, runID, convID) }
+			},
 			RawActionURL: func(t *testing.T, dedupKey string) (string, string) {
 				t.Helper()
 				var u, cur string

@@ -66,9 +66,9 @@ type outageTaskStore struct {
 	o *outage
 }
 
-func (s outageTaskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+func (s outageTaskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, dbpkg.TaskMint, error) {
 	if s.o.down() {
-		return nil, false, errOutage
+		return nil, dbpkg.TaskFound, errOutage
 	}
 	return s.TaskStore.FindOrCreateAtSystem(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
 }

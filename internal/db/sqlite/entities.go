@@ -824,14 +824,15 @@ func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) er
 // MergeDuplicateEntitiesSystem — see the interface doc. SQLite's single writer
 // is the lock: nothing interleaves between the reads that decide the survivor
 // and the writes that fold the other row into it.
-func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (string, error) {
+func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (string, []string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if entityID == otherID {
-		return "", fmt.Errorf("merge entities: %s with itself", entityID)
+		return "", nil, fmt.Errorf("merge entities: %s with itself", entityID)
 	}
 	var survivorID string
+	var dismissed []string
 	err := inTx(ctx, s.q, func(q queryer) error {
 		a, err := scanEntityRow(q.QueryRowContext(ctx, `SELECT `+entitySelectCols+` FROM entities WHERE id = ?`, entityID))
 		if err != nil {
@@ -849,7 +850,7 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 			return err
 		}
 		survivorID = survivor.ID
-		if err := moveEntityReferences(ctx, q, loser.ID, survivor.ID); err != nil {
+		if dismissed, err = moveEntityReferences(ctx, q, loser.ID, survivor.ID); err != nil {
 			return err
 		}
 
@@ -903,21 +904,22 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 		return rewriteEntityActionURLs(ctx, q, survivor.ID, dropped.URL, kept.URL)
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return survivorID, nil
+	return survivorID, dismissed, nil
 }
 
 // FoldStubEntitySystem — see the interface doc. SQLite's single writer is the
 // lock, as in the merge: the stub is judged and folded with nothing between.
-func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) error {
+func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
 	if stubID == intoID {
-		return fmt.Errorf("fold entity: %s into itself", stubID)
+		return nil, fmt.Errorf("fold entity: %s into itself", stubID)
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var dismissed []string
+	err := inTx(ctx, s.q, func(q queryer) error {
 		stub, err := scanEntityRow(q.QueryRowContext(ctx, `SELECT `+entitySelectCols+` FROM entities WHERE id = ?`, stubID))
 		if err != nil {
 			return err
@@ -932,7 +934,7 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if err := db.ValidateStubFold(*stub, *into); err != nil {
 			return err
 		}
-		if err := moveEntityReferences(ctx, q, stub.ID, into.ID); err != nil {
+		if dismissed, err = moveEntityReferences(ctx, q, stub.ID, into.ID); err != nil {
 			return err
 		}
 		if _, err := q.ExecContext(ctx, `
@@ -950,34 +952,52 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		}
 		return rewriteEntityActionURLs(ctx, q, into.ID, stub.URL, into.URL)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return dismissed, nil
 }
 
 // moveEntityReferences re-points every row that names loser by id onto
 // survivor, the step a duplicate merge and a stub fold share. The loser's
 // active tasks whose slot the survivor already holds are dismissed in place
 // first, which takes them out of the partial unique index the repoint would
-// otherwise trip.
-func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID string) error {
-	if _, err := q.ExecContext(ctx, `
-		UPDATE tasks SET status = 'dismissed', closed_at = ?, close_reason = ?
-		WHERE entity_id = ? AND status NOT IN ('done','dismissed')
-		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id = ? AND s.event_type = tasks.event_type
-		              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`,
-		time.Now().UTC(), db.DuplicateEntityMergedCloseReason, loserID, survivorID); err != nil {
-		return fmt.Errorf("dismiss duplicate tasks: %w", err)
+// otherwise trip. The dismissal writes the tasks alone, and dismissed is
+// those tasks' ids, as on Postgres.
+func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID string) (dismissed []string, err error) {
+	rows, err := q.QueryContext(ctx, `
+		UPDATE tasks
+		   SET `+db.TaskSetSQL(
+		db.TaskAssign{Col: "status", Expr: "'dismissed'"},
+		db.TaskAssign{Col: "closed_at", Expr: "?1"},
+		db.TaskAssign{Col: "close_reason", Expr: "?2"},
+	)+`
+		WHERE entity_id = ?3 AND status NOT IN ('done','dismissed')
+		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id = ?4 AND s.event_type = tasks.event_type
+		              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))
+		RETURNING id`,
+		time.Now().UTC(), db.DuplicateEntityMergedCloseReason, loserID, survivorID)
+	if err != nil {
+		return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
 	}
-	if _, err := q.ExecContext(ctx, `
-		UPDATE blueprint_runs SET cancel_requested = 1
-		WHERE status = 'running' AND cancel_requested = 0 AND id IN (
-			SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id = c.task_id
-			WHERE t.entity_id = ? AND t.close_reason = ? AND c.blueprint_run_id IS NOT NULL
-			  AND `+db.UnsettledConversationSQL("c")+`)`,
-		loserID, db.DuplicateEntityMergedCloseReason); err != nil {
-		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
+	// Drained and closed before the writes below, as on Postgres.
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
+		}
+		dismissed = append(dismissed, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
 	}
 	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "deliverables", "external_actions"} {
 		if _, err := q.ExecContext(ctx, `UPDATE `+table+` SET entity_id = ? WHERE entity_id = ?`, survivorID, loserID); err != nil {
-			return fmt.Errorf("move %s: %w", table, err)
+			return nil, fmt.Errorf("move %s: %w", table, err)
 		}
 	}
 	if _, err := q.ExecContext(ctx, `
@@ -986,17 +1006,17 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		ON CONFLICT(conversation_id, entity_id) DO UPDATE SET role = excluded.role
 		WHERE `+fmt.Sprintf(memoryRoleRankCASE, "excluded.role")+` > `+fmt.Sprintf(memoryRoleRankCASE, "conversation_memory_entities.role"),
 		survivorID, loserID); err != nil {
-		return fmt.Errorf("move memory links: %w", err)
+		return nil, fmt.Errorf("move memory links: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id = ?`, loserID); err != nil {
-		return err
+		return nil, err
 	}
 	// A link between the two rows would become a self-link; it is dropped.
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM entity_links
 		WHERE (from_entity_id = ? AND to_entity_id = ?) OR (from_entity_id = ? AND to_entity_id = ?)`,
 		loserID, survivorID, survivorID, loserID); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := q.ExecContext(ctx, `
 		INSERT OR IGNORE INTO entity_links (from_entity_id, to_entity_id, kind, origin, created_at, org_id)
@@ -1005,12 +1025,12 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		       kind, origin, created_at, org_id
 		FROM entity_links WHERE from_entity_id = ? OR to_entity_id = ?`,
 		loserID, survivorID, loserID, survivorID, loserID, loserID); err != nil {
-		return fmt.Errorf("move entity links: %w", err)
+		return nil, fmt.Errorf("move entity links: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id = ? OR to_entity_id = ?`, loserID, loserID); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return dismissed, nil
 }
 
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
@@ -1096,7 +1116,7 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.TerminalCloseResult{}, err
 	}
-	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
+	res := db.TerminalCloseResult{WorkingConversationIDs: map[string][]string{}}
 	err := inTx(ctx, s.q, func(q queryer) error {
 		var state string
 		var pollSeq int64
@@ -1123,13 +1143,16 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return errors.New("close entity: row changed under the transaction")
 		}
 		res.Closed = true
+		if res.DismissedReviews, err = dismissPendingReviewsOf(ctx, q, entityID, domain.ReviewResolutionForClose(closeEventType)); err != nil {
+			return fmt.Errorf("dismiss pending reviews: %w", err)
+		}
 
 		taskIDs, err := openTaskIDsByEntityAndTypes(ctx, q, entityID, closeTypes)
 		if err != nil {
 			return fmt.Errorf("list open tasks: %w", err)
 		}
 		for _, taskID := range taskIDs {
-			out, err := closeOrHoldTask(ctx, q, taskID, closeReason, closeEventType, closingEventID, false)
+			out, err := closeTaskOnEvent(ctx, q, taskID, closeReason, closeEventType, closingEventID, closeOrHold)
 			if err != nil {
 				return fmt.Errorf("task %s: %w", taskID, err)
 			}
@@ -1137,11 +1160,10 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			case out.Held:
 				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{
 					TaskID: taskID, NewlyHeld: out.NewlyHeld, WorkingConversationIDs: out.WorkingConversationIDs,
-					AwaitingPerson: out.AwaitingPerson,
 				})
 			case out.Closed:
 				res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
-				res.ActiveConversationIDs[taskID] = out.ActiveConversationIDs
+				res.WorkingConversationIDs[taskID] = out.WorkingConversationIDs
 			}
 		}
 		return nil
@@ -1153,6 +1175,59 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 		return db.TerminalCloseResult{}, nil
 	}
 	return res, nil
+}
+
+// dismissPendingReviewsOf dismisses every pending review deliverable about
+// entity entityID, recording resolution on each (domain.StampReviewResolution),
+// and returns the rows it stored, ordered by id. A review's entity is the pull
+// request it reviews. The close's transaction is the single writer, so nothing
+// moves a review between the read and its write. No audit row: a review is
+// staged TF-side, so the dismissal writes nothing on GitHub.
+func dismissPendingReviewsOf(ctx context.Context, q queryer, entityID, resolution string) ([]domain.Deliverable, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, COALESCE(details_json, '') FROM deliverables
+		 WHERE entity_id = ? AND kind = ? AND state = ?
+		 ORDER BY id
+	`, entityID, domain.DeliverableKindReview, domain.DeliverableStateReviewPending)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := scanPendingReviews(rows)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Deliverable, 0, len(pending))
+	for _, p := range pending {
+		var d domain.Deliverable
+		if err := scanDeliverable(q.QueryRowContext(ctx, `
+			UPDATE deliverables
+			   SET state = ?, details_json = COALESCE(NULLIF(?, ''), details_json), updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ?
+			RETURNING `+deliverableColumns,
+			domain.DeliverableStateReviewDismissed, domain.StampReviewResolution(p.details, resolution), p.id,
+		), &d); err != nil {
+			return nil, fmt.Errorf("dismiss review %s: %w", p.id, err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// pendingReview is one review dismissPendingReviewsOf read: its id and the
+// details it stamps.
+type pendingReview struct{ id, details string }
+
+func scanPendingReviews(rows *sql.Rows) ([]pendingReview, error) {
+	defer rows.Close()
+	var out []pendingReview
+	for rows.Next() {
+		var p pendingReview
+		if err := rows.Scan(&p.id, &p.details); err != nil {
+			return nil, fmt.Errorf("scan pending review: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // openTaskIDsByEntityAndTypes lists the entity's non-terminal tasks of the

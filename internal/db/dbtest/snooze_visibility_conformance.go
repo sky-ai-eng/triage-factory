@@ -88,7 +88,7 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 			// An hour out — the shortest preset the UI offers, and the one a
 			// user notices immediately when it does nothing.
 			until := time.Now().Add(time.Hour).In(z.loc)
-			ok, err := tasks.SnoozeTask(ctx, orgID, taskID, until)
+			ok, err := tasks.SnoozeTask(ctx, orgID, taskID, until, TaskVersion(t, tasks, orgID, taskID))
 			if err != nil {
 				t.Fatalf("SnoozeTask: %v", err)
 			}
@@ -115,7 +115,7 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 			// This is the half a broken comparison passes by accident when the
 			// offset happens to push every value into the past.
 			until := time.Now().Add(-time.Hour).In(z.loc)
-			if _, err := tasks.SnoozeTask(ctx, orgID, taskID, until); err != nil {
+			if _, err := tasks.SnoozeTask(ctx, orgID, taskID, until, TaskVersion(t, tasks, orgID, taskID)); err != nil {
 				t.Fatalf("SnoozeTask: %v", err)
 			}
 
@@ -132,7 +132,7 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 		base := time.Now().Add(90 * time.Minute)
 		for _, z := range zones {
 			taskID := seedTask(t)
-			if _, err := tasks.SnoozeTask(ctx, orgID, taskID, base.In(z.loc)); err != nil {
+			if _, err := tasks.SnoozeTask(ctx, orgID, taskID, base.In(z.loc), TaskVersion(t, tasks, orgID, taskID)); err != nil {
 				t.Fatalf("SnoozeTask (%s): %v", z.name, err)
 			}
 		}
@@ -153,7 +153,7 @@ func RunSnoozeVisibilityConformance(t *testing.T, mk SnoozeVisibilityFactory) {
 		tasks, orgID, seedTask := mk(t)
 		taskID := seedTask(t)
 		until := time.Now().Add(3 * time.Hour).In(time.FixedZone("TEST-0400", -4*60*60))
-		if _, err := tasks.SnoozeTask(ctx, orgID, taskID, until); err != nil {
+		if _, err := tasks.SnoozeTask(ctx, orgID, taskID, until, TaskVersion(t, tasks, orgID, taskID)); err != nil {
 			t.Fatalf("SnoozeTask: %v", err)
 		}
 		task, err := tasks.Get(ctx, orgID, taskID)

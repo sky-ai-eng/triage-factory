@@ -82,11 +82,10 @@ var (
 	ErrTaskBusyActiveRun = errors.New("db: another run is active on this task (one-active-per-task index)")
 	// ErrTaskClosedForEventRun is returned by CreateRunWithFirstStepSystem,
 	// in both dialects, when an event-triggered firing names a task that has
-	// closed, or whose close an event holds, by the time the firing takes the
-	// task's lock. The router's reads before the firing are a fast path; this
+	// closed by the time the firing takes the task's lock. The router's reads before the firing are a fast path; this
 	// is the check no close can land between. A manual delegation is a
 	// person's decision and is never refused for it.
-	ErrTaskClosedForEventRun = errors.New("db: an event-triggered run names a closed task, or one whose close is held")
+	ErrTaskClosedForEventRun = errors.New("db: an event-triggered run names a closed task")
 	// ErrTeamArchived is returned by CreateRunWithFirstStepSystem, in both
 	// dialects and on both arms, when the team the run's conversation would
 	// belong to — the owner the firing consolidates to, or the task's own
@@ -583,7 +582,7 @@ type BlueprintStore interface {
 	//     step 2, so without a fixed order two firings racing on one task can
 	//     take tasks and blueprint_runs in opposite orders and deadlock. No
 	//     such task aborts the firing here, before anything is written. An
-	//     event-triggered firing on a task that is closed or holds a close,
+	//     event-triggered firing on a task that is closed,
 	//     read under that lock, aborts as ErrTaskClosedForEventRun once the
 	//     fence below has passed it, so a replay still reads as one. Then the
 	//     run's team — ownerTeamID when non-empty, otherwise the task's team —
@@ -738,13 +737,13 @@ type BlueprintStore interface {
 	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 
 	// ReopenRunForResume flips an `aborted` blueprint_run back to `running` (a
-	// compare-and-swap guarded on status='aborted' and on its task still being
-	// open), clearing its abort metadata, so a resume of the run's aborting step
-	// can re-run and re-finalize through the normal post-resume disposition.
-	// The blueprint terminated when the step aborted, so without this the
-	// resumed step's new verdict would find a terminal blueprint and never
-	// advance/close it. A follow-up can change the blueprint only while its
-	// task is open, so a task a person has since closed leaves the run aborted.
+	// compare-and-swap guarded on status='aborted'), clearing its abort
+	// metadata, so a resume of the run's aborting step can re-run and
+	// re-finalize through the normal post-resume disposition. The blueprint
+	// terminated when the step aborted, so without this the resumed step's new
+	// verdict would find a terminal blueprint and never advance/close it. The
+	// task's status is not read: a follow-up continues an aborted blueprint on
+	// a closed task as it does on an open one.
 	//
 	// The re-open also withdraws the verdict stepConversationID recorded
 	// (outcome, outcome_reason and the conclusion stamp): a running blueprint
@@ -755,10 +754,9 @@ type BlueprintStore interface {
 	// and no other conversation's verdict is touched.
 	// Returns (true, nil) when it re-opened the row, (false, nil) when the
 	// blueprint was not aborted (already running for an `open` resume,
-	// finished, or finalized by a racing path), its task is closed, or the
-	// conversation is not its current step. Runs inside the same tx as
-	// ConversationStore.MarkQueuedForResume so the run flip and the blueprint
-	// re-open commit atomically.
+	// finished, or finalized by a racing path), or the conversation is not its
+	// current step. Runs inside the same tx as ConversationStore.MarkQueuedForResume
+	// so the run flip and the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID, id, stepConversationID string) (reopened bool, err error)
 
 	// RequestRunCancelSystem raises the DB sequence-cancel signal

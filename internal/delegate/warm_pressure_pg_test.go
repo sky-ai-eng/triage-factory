@@ -76,7 +76,7 @@ func TestWarmPressure_ClaimableWorkLetsARealWarmClaimGo(t *testing.T) {
 		t.Fatalf("disposition = %+v, want the ordinary ending", d)
 	}
 	f.assertReleased(t)
-	f.assertConcluded(t, domain.ConversationOutcomeContinue, "fixed it")
+	f.assertTurnEnded(t, "fixed it")
 	id, epoch := f.x.executorIdentity()
 	got, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, id, epoch, f.x.claimPlacement(), db.DefaultClaimLease)
 	if err != nil || got == nil || got.ID != other {

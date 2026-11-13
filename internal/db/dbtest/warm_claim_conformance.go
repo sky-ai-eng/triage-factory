@@ -12,30 +12,50 @@ import (
 
 // RunWarmClaimConformance is the shared assertion suite for warm claims
 // (domain.ClaimPhaseWarm): a claim kept after its engagement's turn ended and
-// wrote its verdict. A warm claim is a claim fact only. The conversation reads
-// as the turn left it, and the claim holds the conversation and the task's
-// tree until it is resumed or let go.
+// wrote its turn-end state. A warm claim is a claim fact only. The
+// conversation reads as the turn left it, and the claim holds the conversation
+// and the task's tree until it is resumed or let go.
 func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	// warmStep stages and claims one step, finishes its blueprint run, and
-	// concludes its turn keeping the claim warm, as an engagement whose turn
-	// opened a window does.
-	warmStep := func(t *testing.T, f ClaimLeaseFixture) (conv *domain.Conversation, taskID string) {
+	// followUpClaim stages a step, runs it to its verdict, finishes its
+	// blueprint run, and claims the follow-up a person then sends: the
+	// engagement whose turn end can keep its claim warm, since no running
+	// blueprint waits on it.
+	followUpClaimAs := func(t *testing.T, f ClaimLeaseFixture, executor string, epoch int64) (conv *domain.Conversation, taskID string) {
 		t.Helper()
 		conversationID, taskID := f.StageStep(t)
-		claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
-		if err != nil || claimed == nil || claimed.ID != conversationID {
-			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
+		first, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, executor, epoch, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || first == nil || first.ID != conversationID {
+			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", first, err, conversationID)
 		}
-		if _, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, conversationID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), ""); err != nil {
-			t.Fatalf("ConcludeKeepingClaimSystem: %v", err)
+		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, conversationID, first.ClaimID, domain.StatusOpen, 0, 900, 2, "shipped it", string(domain.ConversationOutcomeFinish), "", ""); err != nil {
+			t.Fatalf("CompleteForClaimSystem: %v", err)
 		}
-		// A warm claim's blueprint run is not running. Finished after the
-		// verdict, because finishing a run parks a step still mid-flight.
-		if _, err := f.Stores.Blueprints.MarkRunStatusSystem(ctx, f.OrgID, claimed.BlueprintRunID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+		if _, err := f.Stores.Blueprints.MarkRunStatusSystem(ctx, f.OrgID, first.BlueprintRunID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
 			t.Fatalf("MarkRunStatusSystem(completed): %v", err)
+		}
+		if flipped, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, conversationID); err != nil || !flipped {
+			t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", flipped, err)
+		}
+		claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, executor, epoch, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || claimed == nil || claimed.ID != conversationID {
+			t.Fatalf("ClaimNextConversation for the follow-up = (%+v, %v), want conversation %s", claimed, err, conversationID)
+		}
+		return claimed, taskID
+	}
+	followUpClaim := func(t *testing.T, f ClaimLeaseFixture) (conv *domain.Conversation, taskID string) {
+		t.Helper()
+		return followUpClaimAs(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+	}
+	// warmStep is followUpClaim with the follow-up's turn ended and its claim
+	// kept warm, as an engagement whose turn opened a window leaves it.
+	warmStep := func(t *testing.T, f ClaimLeaseFixture) (conv *domain.Conversation, taskID string) {
+		t.Helper()
+		claimed, taskID := followUpClaim(t, f)
+		if _, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, claimed.ID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), ""); err != nil {
+			t.Fatalf("ConcludeKeepingClaimSystem: %v", err)
 		}
 		return claimed, taskID
 	}
@@ -80,31 +100,32 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 		return active && !engaged
 	}
 
-	t.Run("ConcludeKeepingClaim_WritesTheVerdictAndKeepsTheClaim", func(t *testing.T) {
+	// The turn that ends under a warm claim is a follow-up's, on a blueprint
+	// that has finished, so its write records no verdict: the conversation is
+	// parked `open` and live, and the claim that holds it is idle.
+	t.Run("ConcludeKeepingClaim_WritesTheTurnEndAndKeepsTheClaim", func(t *testing.T) {
 		f := mk(t)
-		conversationID, taskID := f.StageStep(t)
-		claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
-		if err != nil || claimed == nil {
-			t.Fatalf("ClaimNextConversation = (%+v, %v)", claimed, err)
-		}
-		got, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, conversationID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), "")
+		claimed, taskID := followUpClaim(t, f)
+		got, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, claimed.ID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), "")
 		if err != nil {
 			t.Fatalf("ConcludeKeepingClaimSystem: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "ConcludeKeepingClaimSystem", *got, func() (*domain.Conversation, error) {
-			return f.Stores.Conversations.GetSystem(ctx, f.OrgID, conversationID)
+			return f.Stores.Conversations.GetSystem(ctx, f.OrgID, claimed.ID)
 		})
-		// The conversation reads exactly as a turn-end verdict leaves it.
-		if got.Status != domain.StatusOpen || !got.Concluded() || got.Outcome != string(domain.ConversationOutcomeContinue) ||
-			got.ResultSummary != "fixed it" || intOr0(got.DurationMs) != 1200 || intOr0(got.NumTurns) != 3 {
-			t.Errorf("conversation = {status %q, concluded %v, outcome %q, summary %q, duration %d, turns %d}, want {open, true, continue, fixed it, 1200, 3}",
-				got.Status, got.Concluded(), got.Outcome, got.ResultSummary, intOr0(got.DurationMs), intOr0(got.NumTurns))
+		if got.Status != domain.StatusOpen || got.Concluded() || got.Outcome != "" || got.ResultSummary != "fixed it" {
+			t.Errorf("conversation = {status %q, concluded %v, outcome %q, summary %q}, want {open, false, none, fixed it}",
+				got.Status, got.Concluded(), got.Outcome, got.ResultSummary)
+		}
+		// The first engagement's telemetry and the warm one's so far.
+		if intOr0(got.DurationMs) != 900+1200 || intOr0(got.NumTurns) != 2+3 {
+			t.Errorf("telemetry = {duration %d, turns %d}, want {2100, 5}", intOr0(got.DurationMs), intOr0(got.NumTurns))
 		}
 		if released, _ := claimState(t, f, claimed.ClaimID); released {
 			t.Error("the claim was released; it should be kept warm")
 		}
 		if !warm(t, f, taskID) {
-			t.Error("the claim is not warm")
+			t.Error("the claim is not idle: a warm claim on a parked conversation is one no agent works under")
 		}
 		noSecondClaim(t, f)
 	})
@@ -255,10 +276,10 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		after := get(t, f, c.ID)
 		if after.Status != before.Status || after.Outcome != before.Outcome || after.ResultSummary != before.ResultSummary ||
-			!after.CompletedAt.Equal(*before.CompletedAt) || intOr0(after.DurationMs) != intOr0(before.DurationMs) || intOr0(after.NumTurns) != intOr0(before.NumTurns) {
+			after.Concluded() != before.Concluded() || intOr0(after.DurationMs) != intOr0(before.DurationMs) || intOr0(after.NumTurns) != intOr0(before.NumTurns) {
 			t.Errorf("conversation moved on the release: before {%q %q %q %v %d %d}, after {%q %q %q %v %d %d}",
-				before.Status, before.Outcome, before.ResultSummary, before.CompletedAt, intOr0(before.DurationMs), intOr0(before.NumTurns),
-				after.Status, after.Outcome, after.ResultSummary, after.CompletedAt, intOr0(after.DurationMs), intOr0(after.NumTurns))
+				before.Status, before.Outcome, before.ResultSummary, before.Concluded(), intOr0(before.DurationMs), intOr0(before.NumTurns),
+				after.Status, after.Outcome, after.ResultSummary, after.Concluded(), intOr0(after.DurationMs), intOr0(after.NumTurns))
 		}
 		if active, err := f.Stores.Conversations.HasActiveClaimForTaskSystem(ctx, f.OrgID, taskID); err != nil || active {
 			t.Errorf("HasActiveClaimForTaskSystem after the release = (%v, %v), want (false, nil)", active, err)
@@ -308,16 +329,10 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 	} {
 		t.Run(path.name+"_ReleasesALapsedWarmClaimCompleted", func(t *testing.T) {
 			f := mk(t)
-			conversationID, _ := f.StageStep(t)
-			claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, path.executor, path.epoch, db.ClaimPlacement{}, testClaimLease)
-			if err != nil || claimed == nil || claimed.ID != conversationID {
-				t.Fatalf("ClaimNextConversation = (%+v, %v)", claimed, err)
-			}
+			claimed, _ := followUpClaimAs(t, f, path.executor, path.epoch)
+			conversationID := claimed.ID
 			if _, err := f.Stores.Conversations.ConcludeKeepingClaimSystem(ctx, f.OrgID, conversationID, claimed.ClaimID, 1200, 3, "fixed it", string(domain.ConversationOutcomeContinue), ""); err != nil {
 				t.Fatalf("ConcludeKeepingClaimSystem: %v", err)
-			}
-			if _, err := f.Stores.Blueprints.MarkRunStatusSystem(ctx, f.OrgID, claimed.BlueprintRunID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
-				t.Fatalf("MarkRunStatusSystem: %v", err)
 			}
 			before := get(t, f, conversationID)
 			path.release(t, f, claimed)
@@ -325,12 +340,12 @@ func RunWarmClaimConformance(t *testing.T, mk ClaimLeaseFactory) {
 				t.Errorf("lapsed warm claim = (released %v, %q), want (true, completed): its turn had ended, so nothing was lost", released, outcome)
 			}
 			after := get(t, f, conversationID)
-			if after.Status != before.Status || after.Outcome != before.Outcome || !after.CompletedAt.Equal(*before.CompletedAt) {
+			if after.Status != before.Status || after.Outcome != before.Outcome || after.Concluded() != before.Concluded() {
 				t.Errorf("conversation after the release = {%q %q %v}, want it as the turn left it {%q %q %v}",
-					after.Status, after.Outcome, after.CompletedAt, before.Status, before.Outcome, before.CompletedAt)
+					after.Status, after.Outcome, after.Concluded(), before.Status, before.Outcome, before.Concluded())
 			}
 			if next, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, takeoverOtherExecutor, 1, db.ClaimPlacement{}, testClaimLease); err != nil || next != nil {
-				t.Errorf("ClaimNextConversation after the release = (%+v, %v), want none: a concluded turn is not re-driven", next, err)
+				t.Errorf("ClaimNextConversation after the release = (%+v, %v), want none: a turn that ended is not re-driven", next, err)
 			}
 		})
 	}

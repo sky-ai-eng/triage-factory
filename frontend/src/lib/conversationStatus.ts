@@ -130,9 +130,8 @@ export function chainPosition(conversation: Conversation): ChainPosition | null 
 //
 //   - 'handoff' — a step of a chain that isn't the last one, whose part is done.
 //     Another step picks the work up; the task is NOT over.
-//   - 'stopped' — the work stopped without finishing and the task stays open for
-//     a human: the agent aborted, or a non-final step ended with no usable
-//     hand-off.
+//   - 'stopped' — the work stopped without finishing: the agent aborted, or a
+//     non-final step ended with no usable hand-off.
 //   - 'done'    — the work is over. The chain's final step, a single-prompt
 //     conversation,
 //     or a step that deliberately ended the whole workflow early ('finish').
@@ -215,14 +214,13 @@ export function completionGloss(conversation: Conversation): string {
     // nothing the workflow could act on (no outcome recorded, or one this
     // build doesn't know). The rail prints the raw token beside this, so the
     // last line doesn't repeat it.
-    if (conversation.blueprint_run_status === 'cancelled') {
-      return 'workflow cancelled — the task stays open for a human'
-    }
-    if (conversation.blueprint_run_status === 'failed') {
-      return 'the workflow failed — the task stays open for a human'
-    }
+    //
+    // None of them says what state the task is in: a task closes when its
+    // situation resolves, whatever its run did.
+    if (conversation.blueprint_run_status === 'cancelled') return 'workflow cancelled'
+    if (conversation.blueprint_run_status === 'failed') return 'the workflow failed'
     return conversation.Outcome === 'abort'
-      ? 'stopped without finishing — the task stays open for a human'
+      ? 'stopped without finishing'
       : 'ended without a usable outcome — the workflow stopped here for a human'
   }
   if (kind === 'handoff') {

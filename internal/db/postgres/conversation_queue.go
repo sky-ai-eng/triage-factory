@@ -226,15 +226,17 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
 
 // idleWarmClaimSQL is claim alias cl being a warm claim (domain.ClaimPhaseWarm)
-// whose conversation r still holds the verdict its turn wrote. Its turn has
-// ended and nothing has resumed it, so no agent works under it. A follow-up
+// whose conversation r is still parked where its turn left it. Its turn has
+// ended and nothing has resumed it, so no agent works under it. The test is
+// the park and not a verdict, because a turn that ends under a warm claim is
+// one whose blueprint is not running, and it writes no verdict. A follow-up
 // that resumes the conversation leaves the claim warm until its engagement
 // takes it back up, and from the resume on the claim is the one about to
-// drive the conversation, so it is not idle. A resumed conversation keeps its
-// completed_at, and its NULL status would make the bare test NULL, so the
-// result is coalesced and negates cleanly.
+// drive the conversation, so it is not idle. A resumed conversation's status
+// is NULL, which would make the bare test NULL, so the result is coalesced
+// and negates cleanly.
 func idleWarmClaimSQL(cl string) string {
-	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, false)`
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND r.status = 'open', false)`
 }
 
 // workingClaimExistsSQL is activeClaimExistsSQL without an idle warm claim
@@ -268,12 +270,11 @@ const warmTreeHeldSQL = `EXISTS (
 // the current step of a running blueprint nobody called off that has given it
 // an answer (settled) the blueprint has not acted on yet. That last arm is a
 // blueprint between two steps: its next step has no conversation yet, and the
-// work on the task is not over until the blueprint has advanced or ended. A conversation parked on a person, and a
-// concluded or failed one its blueprint has moved past, are not working. An
-// event close holds while one of the task's conversations is
-// (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
-// none is (TaskStore.ListActiveCloseDeferralsSystem), so the two read this
-// one predicate.
+// work on the task is not over until the blueprint has advanced or ended. A
+// conversation parked on a person, and a concluded or failed one its blueprint
+// has moved past, are not working. The task's status is no part of it: a
+// conversation on a closed task is working on the same terms as one on an open
+// task.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
 	  AND (` + workingClaimExistsSQL + `
@@ -289,6 +290,30 @@ var workingConversationSQL = `r.parent_conversation_id IS NULL
 	                 AND br_s.status = 'running' AND NOT br_s.cancel_requested
 	                 AND br_s.current_step_index = r.blueprint_step_index)))`
 
+// taskWorkingSQL is the task (orgExpr, taskExpr) holding a conversation that
+// is working (workingConversationSQL).
+func taskWorkingSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM conversations r
+		WHERE r.org_id = ` + orgExpr + ` AND r.task_id = ` + taskExpr + `
+		  AND ` + workingConversationSQL + `)`
+}
+
+// taskWorkingUnderRunningBlueprintSQL is the task (orgExpr, taskExpr) holding
+// a conversation that is working (workingConversationSQL) under a blueprint
+// run that is running and that nobody has called off. A person's follow-up on
+// a finished blueprint is working from the moment it is queued until its turn
+// ends, with no run finish ahead of it, and taskWorkingSQL counts it. The join
+// is an inner one, so a conversation with no blueprint run never qualifies.
+func taskWorkingUnderRunningBlueprintSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM conversations r
+		JOIN blueprint_runs br_r ON br_r.org_id = r.org_id AND br_r.id = r.blueprint_run_id
+		WHERE r.org_id = ` + orgExpr + ` AND r.task_id = ` + taskExpr + `
+		  AND br_r.status = 'running' AND NOT br_r.cancel_requested
+		  AND ` + workingConversationSQL + `)`
+}
+
 // personMessageSQL is a message row m_p that a person wrote: a plain or
 // steered user message with an author, delivered or still waiting, and not
 // withdrawn. Every row TF writes itself carries a subtype of its own, so these
@@ -297,23 +322,6 @@ const personMessageSQL = `m_p.role = 'user'
 	  AND m_p.subtype IN ('', '` + domain.MessageSubtypeInjectionSteer + `')
 	  AND m_p.user_id IS NOT NULL
 	  AND NOT (m_p.delivered = false AND m_p.window_state = 'inactive')`
-
-// personDrivenConversationSQL is conversation r's work being a person's: they
-// delegated it, which every step of its blueprint inherits, or they have
-// written to it (personMessageSQL). The close note tells such work what
-// happened without telling it to stop.
-const personDrivenConversationSQL = `(r.creator_user_id IS NOT NULL OR EXISTS (
-		SELECT 1 FROM messages m_p
-		WHERE m_p.org_id = r.org_id AND m_p.conversation_id = r.id
-		  AND ` + personMessageSQL + `))`
-
-// expiringConversationSQL is conversation r still working on a task whose
-// close holds, on work an event started that nobody has asked to stop: the
-// work the close note told to wrap up, which the close-hold sweep stops once
-// the hold is older than its limit.
-var expiringConversationSQL = workingConversationSQL + `
-	  AND NOT ` + personDrivenConversationSQL + `
-	  AND r.stop_requested_at IS NULL`
 
 // nextAttemptDueSQL is the time gate: no hand-back is holding the row back, or
 // the wait it set is over. statement_timestamp(), the clock the claim leases
@@ -1946,13 +1954,18 @@ const conversationTimingClaimLateral = `
 // for the same reason the display ladder says so (liveClaimExistsSQL).
 const conversationTimingStatusSQL = `COALESCE(r.status, CASE WHEN cl.has_active THEN 'running' ELSE 'queued' END)`
 
+// conversationTimingCompletedSQL is the timing projection's Completed: the row
+// is a completed run (db.PostgresCompletedRunSQL). Coalesced because a
+// mid-flight row's NULL status makes the bare test NULL.
+var conversationTimingCompletedSQL = `COALESCE(` + db.PostgresCompletedRunSQL("r") + `, false)`
+
 func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT r.org_id::text, COALESCE(cl.executor_id, ''), `+conversationTimingStatusSQL+`, COALESCE(r.failure_kind, ''),
-		       r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
+		       r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms, `+conversationTimingCompletedSQL+`
 		FROM conversations r
 		`+conversationTimingClaimLateral+`
 		WHERE r.type = 'delegation' AND r.started_at >= $1
@@ -2005,7 +2018,7 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 		limit = 5000
 	}
 	q := `SELECT r.org_id::text, COALESCE(cl.executor_id, ''), ` + conversationTimingStatusSQL + `, COALESCE(r.failure_kind, ''),
-	             r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
+	             r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms, ` + conversationTimingCompletedSQL + `
 	      FROM conversations r
 	      ` + conversationTimingClaimLateral + `
 	      WHERE r.type = 'delegation' AND r.org_id = $1 AND r.started_at >= $2`
@@ -2196,7 +2209,7 @@ func scanConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming, error
 		var durationMS sql.NullInt64
 		if err := rows.Scan(
 			&t.OrgID, &t.ExecutorID, &t.Status, &t.FailureKind,
-			&t.StartedAt, &claimedAt, &completedAt, &durationMS,
+			&t.StartedAt, &claimedAt, &completedAt, &durationMS, &t.Completed,
 		); err != nil {
 			return nil, err
 		}

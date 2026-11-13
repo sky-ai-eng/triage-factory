@@ -65,6 +65,63 @@ func TestTaskStore_Postgres(t *testing.T) {
 	})
 }
 
+// TestTaskStatusChecks_Postgres runs the schema-constraint suite behind the
+// task store's guarded status writes against the Postgres schema, both pools
+// on AdminDB like the suite above.
+func TestTaskStatusChecks_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunTaskStatusCheckConformance(t, func(t *testing.T) dbtest.TaskStatusCheckFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		return dbtest.TaskStatusCheckFixture{
+			Store:   stores.Tasks,
+			OrgID:   orgID,
+			AgentID: agentID,
+			UserID:  userID,
+			Seed: func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
+				t.Helper()
+				return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
+			},
+			WriteStatus: func(taskID, status string) error {
+				_, err := h.AdminDB.Exec(`UPDATE tasks SET status = $1 WHERE org_id = $2 AND id = $3`, status, orgID, taskID)
+				return err
+			},
+		}
+	})
+}
+
+// TestTaskVersion_Postgres runs the task-version suite against the Postgres
+// impl, both pools on AdminDB like the suite above.
+func TestTaskVersion_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunTaskVersionConformance(t, func(t *testing.T) dbtest.TaskVersionHarness {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		return dbtest.TaskVersionHarness{
+			Tasks:       stores.Tasks,
+			Scores:      stores.Scores,
+			OrgID:       orgID,
+			AgentID:     agentID,
+			UserID:      userID,
+			OtherTeamID: seedPgDefaultTeam(t, h, orgID, userID),
+			Seed: func(t *testing.T, suffix string) (string, string, string) {
+				t.Helper()
+				return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
+			},
+			Exec: func(t *testing.T, query string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, query)
+			},
+		}
+	})
+}
+
 // TestTaskClaimArchivedTeam_Postgres runs the archived-team claim suite
 // against the Postgres impl, both pools on AdminDB like the suite above. The
 // claimant is admin of the org's default team and a member of a second team
@@ -256,13 +313,13 @@ func TestTaskStore_Postgres_ReturnedRowUnderRLS(t *testing.T) {
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		tasks := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 		for _, want := range []db.HandoffResult{db.HandoffChanged, db.HandoffNoOp} {
-			result, got, err := tasks.HandoffAgentClaim(ctx, orgID, handedID, agentID, userID)
+			result, got, err := tasks.HandoffAgentClaim(ctx, orgID, handedID, agentID, userID, dbtest.TaskVersion(t, tasks, orgID, handedID))
 			if err != nil || result != want {
 				t.Fatalf("HandoffAgentClaim = (%v, %v), want result %v", result, err, want)
 			}
 			dbtest.AssertWriteReturnedStoredRow(t, "Tasks.HandoffAgentClaim under RLS", got, dbtest.BareTaskRead(tasks, orgID, handedID))
 		}
-		got, err := tasks.CloseByUser(ctx, orgID, closedID, "dismissed")
+		got, err := tasks.CloseByUser(ctx, orgID, closedID, "dismissed", dbtest.TaskVersion(t, tasks, orgID, closedID))
 		if err != nil {
 			t.Fatalf("CloseByUser under RLS: %v", err)
 		}
@@ -477,10 +534,10 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("lands_then_refuses_stale_expectation", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-happy")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign: %v", err)
 		}
@@ -506,7 +563,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 		// The claim already moved to userB — a second reassign expecting
 		// userA as the "from" claimant must now be refused (stale CAS
 		// expectation), and the successful reassign above must survive.
-		ok, err = stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		ok, err = stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("stale reassign: %v", err)
 		}
@@ -524,7 +581,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("refuses_unclaimed_task", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-unclaimed")
-		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign on unclaimed: %v", err)
 		}
@@ -538,7 +595,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 		if _, err := stores.Tasks.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 			t.Fatalf("stamp bot claim: %v", err)
 		}
-		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign on bot-claimed: %v", err)
 		}
@@ -549,13 +606,13 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 
 	t.Run("refuses_terminal_task", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-term")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
 		if _, err := stores.Tasks.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign on terminal: %v", err)
 		}
@@ -570,10 +627,10 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 	// membership on a claimed task).
 	t.Run("refuses_target_with_no_team_membership", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-no-team")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userC)
+		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userC, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("reassign to unrelated target: %v", err)
 		}
@@ -595,10 +652,10 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 	// silently diverging.
 	t.Run("system_variant_matches_plain", func(t *testing.T) {
 		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "reassign-system")
-		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
+		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		ok, err := stores.Tasks.ReassignClaimToUserSystem(ctx, orgID, taskID, userA, userB)
+		ok, err := stores.Tasks.ReassignClaimToUserSystem(ctx, orgID, taskID, userA, userB, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID))
 		if err != nil {
 			t.Fatalf("ReassignClaimToUserSystem: %v", err)
 		}
@@ -737,7 +794,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 	}
 	bumpID := seed("ap-bump")
 	closeID := seed("ap-close")
-	statusID := seed("ap-status")
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
@@ -756,8 +812,8 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 			}
 		}
 
-		if _, err := store.SetStatus(ctx, orgID, bumpID, "snoozed"); err != nil {
-			return fmt.Errorf("seed snoozed: %w", err)
+		if ok, err := store.SnoozeTask(ctx, orgID, bumpID, time.Now().Add(time.Hour), dbtest.TaskVersion(t, store, orgID, bumpID)); err != nil || !ok {
+			return fmt.Errorf("seed snoozed: ok=%v err=%w", ok, err)
 		}
 		bumped, err := store.Bump(ctx, orgID, bumpID, "")
 		if err != nil {
@@ -770,12 +826,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 			return fmt.Errorf("Close: %w", err)
 		}
 		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.Close", closed, bareRead(closeID))
-
-		status, err := store.SetStatus(ctx, orgID, statusID, "in_progress")
-		if err != nil {
-			return fmt.Errorf("SetStatus: %w", err)
-		}
-		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetStatus", status, bareRead(statusID))
 		return nil
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)

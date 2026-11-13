@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -29,7 +30,7 @@ func TestTaskStore_Postgres_FindOrCreateAtUnlessEntityActiveSystem(t *testing.T)
 
 	t.Run("clean_entity_proceeds", func(t *testing.T) {
 		entityID, eventID := seedPgEntityEvent(t, h.AdminDB, orgID, "clean")
-		task, created, suppressed, err := stores.Tasks.FindOrCreateAtUnlessEntityActiveSystem(
+		task, mint, suppressed, err := stores.Tasks.FindOrCreateAtUnlessEntityActiveSystem(
 			ctx, orgID, teamID, entityID, domain.EventJiraIssueBecameAtomic, "", eventID, 0.5, time.Now())
 		if err != nil {
 			t.Fatalf("FindOrCreateAtUnlessEntityActiveSystem: %v", err)
@@ -37,8 +38,8 @@ func TestTaskStore_Postgres_FindOrCreateAtUnlessEntityActiveSystem(t *testing.T)
 		if suppressed {
 			t.Fatal("clean entity should not suppress")
 		}
-		if !created || task == nil {
-			t.Fatalf("expected a new task, created=%v task=%v", created, task)
+		if mint != db.TaskCreated || task == nil {
+			t.Fatalf("expected a new task, mint=%v task=%v", mint, task)
 		}
 	})
 
@@ -60,7 +61,7 @@ func TestTaskStore_Postgres_FindOrCreateAtUnlessEntityActiveSystem(t *testing.T)
 			t.Fatalf("seed became_atomic event: %v", err)
 		}
 
-		task, created, suppressed, err := stores.Tasks.FindOrCreateAtUnlessEntityActiveSystem(
+		task, mint, suppressed, err := stores.Tasks.FindOrCreateAtUnlessEntityActiveSystem(
 			ctx, orgID, teamID, entityID, domain.EventJiraIssueBecameAtomic, "", atomicEventID, 0.5, time.Now())
 		if err != nil {
 			t.Fatalf("FindOrCreateAtUnlessEntityActiveSystem: %v", err)
@@ -68,8 +69,8 @@ func TestTaskStore_Postgres_FindOrCreateAtUnlessEntityActiveSystem(t *testing.T)
 		if !suppressed {
 			t.Fatal("entity with an active (different-type) task should suppress became_atomic")
 		}
-		if created || task != nil {
-			t.Errorf("suppressed call should return created=false, task=nil; got created=%v task=%v", created, task)
+		if mint != db.TaskFound || task != nil {
+			t.Errorf("suppressed call should return no mint and task=nil; got mint=%v task=%v", mint, task)
 		}
 
 		var count int
@@ -136,9 +137,9 @@ func TestTaskStore_Postgres_BecameAtomic_ConcurrentIdenticalEventsCollapse(t *te
 			defer wg.Done()
 			ready.Done()
 			<-start
-			task, created, suppressed, err := stores.Tasks.FindOrCreateAtUnlessEntityActiveSystem(
+			task, mint, suppressed, err := stores.Tasks.FindOrCreateAtUnlessEntityActiveSystem(
 				ctx, orgID, teamID, entityID, domain.EventJiraIssueBecameAtomic, "", eventIDs[i], 0.5, time.Now())
-			errs[i], createdFlags[i], suppressedFlags[i] = err, created, suppressed
+			errs[i], createdFlags[i], suppressedFlags[i] = err, mint == db.TaskCreated, suppressed
 			if task != nil {
 				taskIDs[i] = task.ID
 			}

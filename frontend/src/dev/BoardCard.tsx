@@ -232,6 +232,20 @@ export function BoardCard() {
                 true,
               )}
             />
+            <TaskCard
+              title="Rename the retry knob"
+              entity="acme/api#688"
+              entityHref="https://github.com/acme/api/pull/688"
+              lifecycle="done"
+              dismissed
+              summary="The retry setting is named for its old default; a reviewer asked for a clearer name."
+              event={EV.changes}
+              age="3d ago"
+              assigneeSlot={picker(
+                task('t7', 'Rename the retry knob', { status: 'dismissed' }),
+                true,
+              )}
+            />
           </div>
         </div>
       </div>

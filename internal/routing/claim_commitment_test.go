@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -143,7 +144,7 @@ func TestFire_UserClaimMidFireWinsAndTheRunStillLands(t *testing.T) {
 	// A human takes the task over before the fire commits. tryAutoDelegate's
 	// cross-team guard only reads the BOT claim, so the trigger proceeds and
 	// the stamp is what has to refuse.
-	if ok, err := testTaskStore(s.db).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID); err != nil || !ok {
+	if ok, err := testTaskStore(s.db).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, testTaskStore(s.db), runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 	}
 
@@ -176,7 +177,7 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	// Clear the claim the fire wrote so the deferral's own stamp is what the
 	// assertion sees — this is the "user requeued while the run stayed live"
 	// state, which a NEW event legitimately re-commits.
-	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, dbtest.TaskVersion(t, sqlitestore.New(s.db).Tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
 	s.task.ClaimedByAgentID = ""
@@ -213,43 +214,41 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	if agent, _ := s.claim(t); agent != runmode.LocalDefaultAgentID {
 		t.Errorf("claim = %q, want the bot's claim written with the queued firing", agent)
 	}
+	if s.task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("in-memory task claim = %q, want %q — the cross-team guard reads this on the next matched trigger",
+			s.task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
 }
 
-// TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory pins the in-memory
-// half of the same commitment. The store's guard only lets a stamp land when
+// TestFold_CommittedClaimClearsTheStaleUserClaimInMemory pins the in-memory
+// half of a landed stamp. The store's guard only lets a stamp land when
 // claimed_by_user_id IS NULL, so a landed stamp is proof the router's copy of
 // that field — read before the commit — is stale. Carrying it forward would
 // leave one task struct holding both claims at once, which the DB's XOR makes
 // unrepresentable and which evaluateReDerive's "already claimed" guard
 // would read as a user's ownership.
-func TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
-	s := setupClaimScenario(t, "defer-stale-user")
+//
+// The fold is the commitment that reaches this: it runs before the router
+// reads the person's claim, so its stamp is the one that can land on a task
+// whose in-memory copy still carries one.
+func TestFold_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
+	s := setupClaimScenario(t, "fold-stale-user")
 
-	// First fire takes the task's one auto-run slot, so the next trigger hits
-	// the busy gate and defers.
+	// First fire leaves a conversation live on the task, so the next event
+	// folds into it.
 	if fired := mustAutoDelegate(t, s.router, s.task, s.trigger, s.entity, s.event, runmode.LocalDefaultTeamID); !fired {
 		t.Fatal("expected the first trigger to fire")
 	}
-	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, dbtest.TaskVersion(t, sqlitestore.New(s.db).Tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
 	s.task.ClaimedByAgentID = ""
 	// The stale read: a user claim the router loaded before the requeue that
-	// cleared it. The DB row has no user claim, so the deferral's stamp lands.
+	// cleared it. The DB row has no user claim, so the fold's stamp lands.
 	s.task.ClaimedByUserID = runmode.LocalDefaultUserID
 
-	createTestPrompt(t, s.db, domain.Prompt{ID: "p-stale-2", Name: "P2", Body: "x", Source: "user"})
-	second := domain.EventHandler{
-		ID:                     "trig-stale-2",
-		Kind:                   domain.EventHandlerKindTrigger,
-		BlueprintID:            "p-stale-2",
-		TriggerType:            domain.TriggerTypeEvent,
-		EventType:              domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold:       intPtr(4),
-		MinAutonomySuitability: floatPtr(0),
-		Enabled:                true,
-	}
-	createTriggerForTestRouting(t, s.db, second)
+	fold := &foldingDelegator{stubDelegator: s.stub}
+	s.router.spawner = fold
 	secondEvent, err := sqlitestore.New(s.db).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &s.entity, DedupKey: "build",
 	})
@@ -257,11 +256,14 @@ func TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
 		t.Fatalf("record second event: %v", err)
 	}
 
-	if fired := mustAutoDelegate(t, s.router, s.task, second, s.entity, secondEvent, runmode.LocalDefaultTeamID); !fired {
-		t.Fatal("expected the busy-gate deferral to report a committed firing")
+	if fired := mustAutoDelegate(t, s.router, s.task, s.trigger, s.entity, secondEvent, runmode.LocalDefaultTeamID); fired {
+		t.Fatal("expected the event to fold into the live conversation, not start or queue a run")
+	}
+	if len(fold.folded) != 1 {
+		t.Fatalf("folded into = %v, want the task's live conversation", fold.folded)
 	}
 	if agent, user := s.claim(t); agent != runmode.LocalDefaultAgentID || user != "" {
-		t.Fatalf("row claim = (agent=%q, user=%q), want the bot's claim written with the queued firing", agent, user)
+		t.Fatalf("row claim = (agent=%q, user=%q), want the bot's claim written with the fold", agent, user)
 	}
 	if s.task.ClaimedByAgentID != runmode.LocalDefaultAgentID || s.task.ClaimedByUserID != "" {
 		t.Errorf("in-memory claim = (agent=%q, user=%q), want the committed bot claim with the stale user claim dropped",
@@ -290,7 +292,7 @@ func TestFiringWorker_DoesNotReStampAClearedClaim(t *testing.T) {
 		t.Fatalf("record queued event: %v", err)
 	}
 	enqueueFiring(t, s.db, s.entity, s.task.ID, s.trigger.ID, queuedEvent)
-	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+	if ok, err := sqlitestore.New(s.db).Tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID, dbtest.TaskVersion(t, sqlitestore.New(s.db).Tasks, runmode.LocalDefaultOrgID, s.task.ID)); err != nil || !ok {
 		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 	}
 	// End the run so the task's gate opens and the firing is claimable.

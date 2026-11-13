@@ -7,12 +7,11 @@ import (
 )
 
 // StagedInjection is one durably-queued agent-facing injection awaiting
-// delivery on a conversation's next resume/steer. It is the "terminal ledger"
-// half of the deliverable-sidecar feedback design (TFAC-493) made generic
-// (TFAC-501): a producer that has no durable row to re-derive its injection
-// from (the PR coherence feed is such a producer) stages the
-// injection here, and the spawner flushes the conversation's pending injections
-// ahead of the user's text on the next ResumeWithMessage.
+// delivery to a conversation's agent. Every producer of a note (the PR
+// coherence feed, a task's close, a deliverable's resolution) stages it here,
+// and each runtime reads the conversation's pending injections on its own
+// schedule: a native loop before its next model call, a live SDK process at
+// its next tool batch, and an SDK engagement in its first message.
 //
 // Producer-agnostic by construction: Body is the already-rendered, bare injection
 // line (no <system-note> wrapper — the flush bundles and wraps), and Producer is
@@ -37,7 +36,8 @@ type StagedInjection struct {
 	Provenance NoteProvenance `json:"provenance,omitzero"`
 }
 
-// NoteProvenance names the event an agent-facing note was composed from. It is
+// NoteProvenance names what an agent-facing note was composed from: the event
+// behind it, and for a close note the close it tells of. It is
 // recorded on the note's message row rather than derived from the body, so a
 // transcript view or an audit can resolve a note back to its cause without
 // re-parsing prose that was written for an agent to read.
@@ -54,10 +54,17 @@ type StagedInjection struct {
 type NoteProvenance struct {
 	EventID   string `json:"event_id,omitempty"`
 	EventType string `json:"event_type,omitempty"`
+	// TaskClose is the close of the conversation's task a close note tells
+	// of (TaskCloseKey), or the held close (TaskCloseHoldKey). A person's
+	// close has no event, so this, not EventID, is what says a conversation
+	// has been told.
+	TaskClose string `json:"task_close,omitempty"`
 }
 
-// Empty reports whether no originating event was recorded.
-func (p NoteProvenance) Empty() bool { return p.EventID == "" && p.EventType == "" }
+// Empty reports whether nothing was recorded.
+func (p NoteProvenance) Empty() bool {
+	return p.EventID == "" && p.EventType == "" && p.TaskClose == ""
+}
 
 // NoteMetadata builds the message-row metadata an agent-facing note carries.
 // Both delivery paths compose it here — the live steer writes it straight onto
@@ -70,6 +77,9 @@ func NoteMetadata(producer string, prov NoteProvenance) map[string]any {
 	}
 	if prov.EventType != "" {
 		meta["event_type"] = prov.EventType
+	}
+	if prov.TaskClose != "" {
+		meta["task_close"] = prov.TaskClose
 	}
 	return meta
 }
@@ -100,7 +110,7 @@ func IsStagedInjectionSubtype(subtype string) bool {
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a
 // new producer adds a const without a migration; used for audit/debugging, and
-// the close note's tag is what its dedup and withdrawal match, so renaming one
+// the close notes' tag is what their withdrawal matches, so renaming one
 // strands the rows already staged under the old value.
 const (
 	// StagedInjectionProducerPRNewCommits tags a head-SHA-change note. Nothing
@@ -113,22 +123,17 @@ const (
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
-	// still working on a task that an event resolved it, and that the task
-	// closes once the work on it is finished, in either version
-	// (TaskClosingInjection, or TaskClosingNotice for work a person started).
-	// A conversation is told once per closing event
-	// (StagedInjectionStore.HasNoteForEventSystem), and a hold cleared
-	// without its close withdraws the notes still waiting (TaskStore.Bump).
+	// that its task closed (TaskClosedNote), or that its close is held for a
+	// person (TaskCloseHeldNote). A conversation is told once per close and
+	// once per hold (StagedInjectionStore.HasNoteForTaskCloseSystem). A
+	// reopen of the task, and a hold cleared without its close, withdraw the
+	// notes still waiting (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
+	// StagedInjectionProducerDeliverableResolved is the note telling an agent
+	// that a deliverable it produced was resolved (DeliverableResolutionNote).
+	// Stored message rows carry the value, so it keeps its spelling.
+	StagedInjectionProducerDeliverableResolved = "artifact_resolved"
 )
-
-// NoteProducerDeliverableResolved tags the note telling an agent that a human
-// resolved a deliverable it produced. It shares the producer vocabulary above
-// but never reaches the staged queue — the resume path re-derives that note
-// from deliverable state instead (deliverableLedgerForResume) — so it appears only
-// on a live-delivered note's message row. Stored message rows carry the value,
-// so it keeps its spelling.
-const NoteProducerDeliverableResolved = "artifact_resolved"
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path
 // prepends ahead of a parked conversation's user message: every staged
@@ -137,9 +142,7 @@ const NoteProducerDeliverableResolved = "artifact_resolved"
 // the slice is empty, so a resume with nothing staged prepends nothing.
 //
 // The lead-in frames these as out-of-band updates that landed while the agent was
-// not running — the same shape DeliverableLedgerBlock uses for the deliverable-change
-// ledger, so the two prepended blocks read consistently when a resume carries
-// both.
+// not running.
 func StagedInjectionBlock(injections []StagedInjection) string {
 	return stagedInjectionBlock("While you were not running, these updates landed on work you have open:", injections)
 }
@@ -164,6 +167,6 @@ func stagedInjectionBlock(leadIn string, injections []StagedInjection) string {
 	}
 	body := leadIn + "\n\n" +
 		strings.Join(lines, "\n") +
-		"\n\nThese are informational — act only if they affect your work."
+		"\n\nEach update says what happened. Where one also says what to do about it, follow that; otherwise act on it only if it affects your work."
 	return WrapSystemNote(body)
 }

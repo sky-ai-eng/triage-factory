@@ -833,8 +833,8 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 			return nil
 		}
 
-		// An event-triggered firing on a task that closed, or whose close an
-		// event holds, since the router's reads. After the fence, so a replay
+		// An event-triggered firing on a task that closed since the router's
+		// reads. After the fence, so a replay
 		// of a firing that did commit still answers inserted=false; the
 		// error rolls back the run step 2 wrote.
 		if event && !open {
@@ -958,9 +958,8 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, fro
 // lockFiringTask takes the row lock on a firing's task, and reports
 // db.ErrNoSuchTask when there is no such row — the firing's first statement,
 // so a task that does not exist is refused before anything is written. open
-// reports a task neither closed nor holding a close, read under the lock,
-// which is what orders the firing against a close: the close writes this row
-// too.
+// reports a task that is not closed, read under the lock, which is what
+// orders the firing against a close: the close writes this row too.
 //
 // SELECT … FOR UPDATE rather than a write: this is about lock ORDER (see the
 // call site), and a firing whose fence catches a replay has to leave the task
@@ -972,7 +971,7 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, fro
 func lockFiringTask(ctx context.Context, q queryer, orgID, taskID string) (open bool, teamID string, err error) {
 	var team sql.NullString
 	err = q.QueryRowContext(ctx, `
-		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL, team_id::text
+		SELECT status NOT IN ('done', 'dismissed'), team_id::text
 		  FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, taskID).Scan(&open, &team)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, "", db.ErrNoSuchTask
@@ -1433,11 +1432,13 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, step
 	if !isValidUUID(id) || !isValidUUID(stepConversationID) {
 		return false, nil
 	}
-	// CAS aborted → running while the task is still open and the conversation
-	// is the run's current step, clearing the stale abort metadata, and
-	// withdraw that conversation's verdict in the same statement. The resumed step re-finalizes the blueprint through the
-	// normal post-resume disposition, and a verdict left behind would read as
-	// one it had already given.
+	// CAS aborted → running while the conversation is the run's current step,
+	// clearing the stale abort metadata, and withdraw that conversation's
+	// verdict in the same statement. The resumed step re-finalizes the
+	// blueprint through the normal post-resume disposition, and a verdict left
+	// behind would read as one it had already given. The task's status is not
+	// part of the guard: a blueprint advances by its own state, whether its
+	// task is open or closed.
 	// App pool — runs inside the resume's synthetic-claims tx alongside the run
 	// flip, so the two commit atomically. The withdrawal writes the same
 	// conversation row the flip just wrote, under the same policy.
@@ -1447,9 +1448,6 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, step
 			UPDATE blueprint_runs br
 			SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
 			WHERE br.org_id = $1 AND br.id = $2 AND br.status = 'aborted'
-			  AND EXISTS (SELECT 1 FROM tasks t
-			              WHERE t.org_id = br.org_id AND t.id = br.task_id
-			                AND t.status NOT IN ('done', 'dismissed'))
 			  AND EXISTS (SELECT 1 FROM conversations c
 			              WHERE c.org_id = br.org_id AND c.id = $3
 			                AND c.blueprint_run_id = br.id

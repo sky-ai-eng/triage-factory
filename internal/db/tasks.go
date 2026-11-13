@@ -49,6 +49,40 @@ const (
 	UserCompletedCloseReason = "user_completed"
 )
 
+// RunCompletedCloseReason is on a task the work on it closed: its blueprint
+// finished, or the last deliverable that work left was resolved.
+const RunCompletedCloseReason = "run_completed"
+
+// The close_reason values an event's typed close stamps, by which of the
+// event's tasks it closed.
+const (
+	// SiblingEventCloseReason is on a task another event type resolved: CI
+	// passing closes the CI-failure task. It is the one close a recurrence
+	// of the task's own event reopens (TaskReopened).
+	SiblingEventCloseReason = "auto_closed_by_event"
+	// ReassignedCloseReason is on a task its own event type retired: an
+	// issue assigned again closes the task the previous assignment made,
+	// and the same event then creates the new assignee's.
+	ReassignedCloseReason = "reassigned"
+)
+
+// TaskMint is what a System mint door did with an event's task key
+// (entity, event type, dedup key).
+type TaskMint int
+
+const (
+	// TaskFound: an active task already held the key, and is returned as it
+	// stood.
+	TaskFound TaskMint = iota
+	// TaskCreated: no task held the key, and a new queued task was inserted.
+	TaskCreated
+	// TaskReopened: no active task held the key, and the newest closed task
+	// with it was returned to work in place of a new one, because a blueprint
+	// is still running on it: a second task would start a second agent on the
+	// situation the first is already handling.
+	TaskReopened
+)
+
 // UserCloseReason is the close reason CloseByUser stamps for status, one
 // rule for both dialects: dismissed and done each have their own, and any
 // other status is ErrInvalidUserCloseStatus.
@@ -62,27 +96,22 @@ func UserCloseReason(status string) (string, error) {
 	return "", ErrInvalidUserCloseStatus
 }
 
-// TaskCloseOutcome is what TaskStore.CloseOrHoldSystem or
-// ApplyHeldCloseSystem did to one task: closed it, held its close, or
-// neither.
+// TaskCloseOutcome is what an event's close did to one task
+// (TaskStore.CloseOnEventSystem, CloseOrHoldSystem, ApplyHeldCloseSystem):
+// closed it, held its close, or neither.
 type TaskCloseOutcome struct {
-	// Closed reports that this call closed the task, and
-	// ActiveConversationIDs are the conversations then active on it, whose
-	// cancel intent the close stamped: the set the caller stops.
-	Closed                bool
-	ActiveConversationIDs []string
-	// Held reports that the close is held on the task, NewlyHeld that the
-	// task held no close before this call, and WorkingConversationIDs are
-	// the working conversations that made it hold: the set the caller tells,
-	// empty when AwaitingPerson is what made it hold.
-	Held                   bool
-	NewlyHeld              bool
+	// Closed reports that this call closed the task.
+	Closed bool
+	// Held reports that the close is held on the task: one of its
+	// deliverables (domain.HasUnresolvedDeliverables) awaits a person's
+	// verdict on a pull request still open. NewlyHeld reports that the task
+	// held no close before this call.
+	Held      bool
+	NewlyHeld bool
+	// WorkingConversationIDs are the conversations working on the task when
+	// it closed or held, oldest first, read in the transaction that decided
+	// it: the set the caller tells. The close writes nothing on them.
 	WorkingConversationIDs []string
-	// AwaitingPerson reports that nothing is working on the task and one of
-	// its deliverables (domain.HasUnresolvedDeliverables) awaits a person's
-	// verdict on a pull request still open, which holds the close until the
-	// person resolves it.
-	AwaitingPerson bool
 }
 
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
@@ -140,6 +169,9 @@ var TaskListStatuses = []string{
 // which lane, the rest narrow within it:
 //
 //   - Statuses: match any of these (see TaskListStatuses). Empty = all.
+//   - IDs: when non-empty, only the tasks with these ids, for a surface that
+//     already holds the ids of the tasks it shows. Empty = every id. An id
+//     that names no visible task matches nothing; it never widens the set.
 //   - TeamIDs: the per-page *multi-team* view scope. Empty = the union of the
 //     viewer's teams (the RLS-scoped default). Non-empty narrows to tasks any
 //     of those teams owns (team_id) or can see (a task_teams visibility row) —
@@ -193,6 +225,7 @@ var TaskListStatuses = []string{
 //     refuses that combination rather than silently ignoring it.
 type TaskListFilter struct {
 	Statuses       []string
+	IDs            []string
 	TeamIDs        []string
 	OnlyUnclaimed  bool
 	IncludeSnoozed bool
@@ -379,6 +412,18 @@ func taskKeyTime(t *time.Time) string {
 //     state hole — the row can change in between — so these predicates are
 //     the enforcement; a handler's pre-read only buys the common case a more
 //     specific answer.
+//   - The writes a person makes take the task version the person read
+//     (domain.Task.Version) as their last argument: CloseByUser, SnoozeTask,
+//     ClearSnooze, AdvanceStatusForUser, RequeueTask, and the claim
+//     mutations a person drives (TakeoverClaimFromAgent, ClaimQueuedForUser,
+//     ReassignClaimToUser, HandoffAgentClaim). The comparison is one more
+//     predicate on the write's own UPDATE, and a task at another version
+//     answers ErrTaskVersion with nothing written, ahead of every other
+//     refusal, since those would judge a row the caller never saw. Every
+//     other writer is the system's and takes none.
+//   - Every task writer renders its SET list through TaskSetSQL, so a write
+//     that changes one of TaskVersionColumns raises the version, and one
+//     that doesn't leaves it, in every writer of both dialects.
 //
 // Returned-row shape: Get's point read projects a task joined to
 // its entity (title, url, source fields, the open-subtask and Slack-message
@@ -489,7 +534,7 @@ type TaskStore interface {
 	// mints on the entity it closed (domain.TaskMayRideClosedEntity) is
 	// excluded: it is on a closed entity by design, and so is a task holding
 	// a close (domain.TaskCloseDeferral), which stays open on the closed
-	// entity until none of its conversations is working. Ordered by created_at
+	// entity until the person its deliverable awaits resolves it. Ordered by created_at
 	// then id so the oldest violation is reported first. Read-only, org-bound
 	// by argument on the admin pool: the checker is a background job with no
 	// JWT claims.
@@ -571,26 +616,21 @@ type TaskStore interface {
 	// them apart re-reads.
 	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
-	// SetStatus updates the lifecycle status only — claim cols are
-	// unaffected. No production path calls it: every lifecycle write
-	// routes through a guarded helper, and a status the claim columns
-	// contradict is what tasks_queue_unclaimed refuses. It survives as the
-	// primitive fixtures and conformance tests reach for when they need to
-	// write a status with nothing else in view.
-	SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
-
 	// AdvanceStatusForUser re-asserts a user-claimed task's stage. Guards:
+	//   - task must be at version
 	//   - task must be claimed by userID
 	//   - current status must be in_progress
 	//   - newStatus must be in_progress
 	// The claim itself is what lands a task in progress, so this is the
 	// idempotent arm of that transition rather than the transition: a task
-	// whose claim the caller holds is already there. Refuses all other
+	// whose claim the caller holds is already there, and the write changes
+	// nothing, so the version stays where it is. Refuses all other
 	// shapes — terminal transitions (done / dismissed) go through Close +
 	// handleTaskPatch, and requeue clears the claim entirely. Returns
 	// ok=true when the update actually matched a row; false means a guard
-	// tripped (caller surfaces 409).
-	AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error)
+	// tripped (caller surfaces 409), and ErrTaskVersion a task at another
+	// version.
+	AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string, version int64) (bool, error)
 
 	// CloseByUser closes a task on a person's word: status is "dismissed"
 	// (walked away) or "done" (resolved), and the close reason is
@@ -601,36 +641,35 @@ type TaskStore interface {
 	// ErrInvalidUserCloseStatus and writes nothing.
 	//
 	// A closed task takes no second close: the UPDATE carries the status
-	// predicate, so a row that went done/dismissed since the caller read it
-	// answers ErrNoSuchTask, as a missing id does, with nothing written. That
-	// predicate is the only thing standing between two concurrent closes and
-	// a rewritten closed_at / close_reason. A caller that read the task
-	// before writing maps ErrNoSuchTask to "already closed".
-	CloseByUser(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
+	// predicate, so a row that went done/dismissed at the version the caller
+	// read answers ErrNoSuchTask, as a missing id does, with nothing written.
+	// A task at another version answers ErrTaskVersion. A caller that read
+	// the task before writing maps ErrNoSuchTask to "already closed".
+	CloseByUser(ctx context.Context, orgID, taskID, status string, version int64) (domain.Task, error)
 
 	// SnoozeTask parks a task until the given wake time: status 'snoozed'
 	// with snooze_until set. Snooze is queue-only ("snoozed ↔ both claim
 	// cols NULL"), and a closed task is never parked, so the UPDATE carries
 	// both predicates and returns ok=false when either refuses — a claimed
-	// task, or one that went done/dismissed since the caller read it — with
-	// nothing written. Handlers map ok=false to 409.
-	SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time) (ok bool, err error)
+	// task, or a closed one — with nothing written. Handlers map ok=false to
+	// 409. A task at another version answers ErrTaskVersion.
+	SnoozeTask(ctx context.Context, orgID, taskID string, until time.Time, version int64) (ok bool, err error)
 
 	// ClearSnooze wakes a snoozed task early: status 'snoozed' → 'queued'
 	// with snooze_until cleared. Guarded on the current status: a clear
 	// against a task that isn't snoozed returns ok=false rather than
 	// dragging an in_progress or closed row back into the queue. Handlers
-	// map ok=false to 409.
-	ClearSnooze(ctx context.Context, orgID, taskID string) (ok bool, err error)
+	// map ok=false to 409. A task at another version answers ErrTaskVersion.
+	ClearSnooze(ctx context.Context, orgID, taskID string, version int64) (ok bool, err error)
 
 	// RequeueTask sends a task back to the queue, whatever its status. It
 	// clears the claim and the source_status the claim recorded with it, the
 	// close, and any held close: putting the task back in the queue overrides
-	// the event that resolved it, as reopening a closed task does, and the
-	// requeue's handler ends the conversations the close waited on. Returning
-	// it to the queue is the whole job, so there is nothing to refuse:
-	// ok=false means only that no such row exists.
-	RequeueTask(ctx context.Context, orgID, taskID string) (ok bool, err error)
+	// the event that resolved it, as reopening a closed task does. Returning
+	// it to the queue is the whole job, so the only state it refuses is a
+	// version the caller did not read (ErrTaskVersion): ok=false means only
+	// that no such row exists.
+	RequeueTask(ctx context.Context, orgID, taskID string, version int64) (ok bool, err error)
 
 	// RecordEvent inserts into the task_events junction (task_id,
 	// event_id, kind). Idempotent on (task_id, event_id).
@@ -671,7 +710,12 @@ type TaskStore interface {
 	// wrote on HandoffChanged, and the row as it stands on HandoffNoOp,
 	// both in the bare projection every TaskStore write returns. It is the
 	// zero value on HandoffRefused.
-	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (HandoffResult, domain.Task, error)
+	//
+	// A task at another version than the caller read is refused with
+	// ErrTaskVersion, the no-op included: a re-delegation stops and replaces
+	// the task's runs, which a caller that has not seen the task's latest
+	// state must not do.
+	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string, version int64) (HandoffResult, domain.Task, error)
 
 	// ResolveClaimTeam returns the team a user→bot handoff WOULD
 	// consolidate the task onto, without mutating anything — the same
@@ -689,21 +733,23 @@ type TaskStore interface {
 
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
 	// to a user claim, landing the row in_progress. Race-safe: guards on
-	// the bot still holding the claim AND no other user owning it. Returns
-	// ok=true on success; false means the race was lost (caller surfaces
-	// 409).
+	// the version the caller read, the bot still holding the claim AND no
+	// other user owning it. Returns ok=true on success; false means the race
+	// was lost (caller surfaces 409), and ErrTaskVersion a task at another
+	// version.
 	// On success the owning team_id consolidates to the acting team
 	// derived from userID (see ClaimQueuedForUser), and source_status
 	// records the entity snapshot's state the same way. With no acting
 	// team it refuses with ErrNoActiveClaimTeam, as ClaimQueuedForUser
 	// does.
-	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error)
+	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error)
 
 	// ClaimQueuedForUser is the user-claim handler's atomic "take
 	// this task off the queue" — succeeds only on (queued|snoozed)
-	// + both claim cols NULL, and lands the row in_progress, which is
-	// what taking it off the queue means. Returns ok=true when the claim
-	// landed; false means another claimant won or the task is closed.
+	// + both claim cols NULL, at the version the caller read, and lands the
+	// row in_progress, which is what taking it off the queue means. Returns
+	// ok=true when the claim landed; false means another claimant won or the
+	// task is closed, and ErrTaskVersion a task at another version.
 	//
 	// On success the owning team_id consolidates to the acting team:
 	// the claimer's active team in the task's visibility set
@@ -719,7 +765,7 @@ type TaskStore interface {
 	// status and assignee the task's Jira or Linear entity snapshot holds,
 	// which a requeue reads to put the issue back. NULL for any
 	// other source.
-	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
+	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error)
 
 	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the
 	// other claim mutations don't cover: an atomic CAS that requires the
@@ -731,7 +777,8 @@ type TaskStore interface {
 	// the claim moved; false means either guard tripped — a genuine race
 	// (someone else changed the claim/status between the caller's read and
 	// this call) or toUserID sharing no team with the task — and the
-	// caller re-reads to tell the two apart before surfacing 409. It does
+	// caller re-reads to tell the two apart before surfacing 409. A task at
+	// another version than the caller read answers ErrTaskVersion. It does
 	// NOT accept an unclaimed or bot-claimed task as a valid "from" state —
 	// those go through ClaimQueuedForUser / TakeoverClaimFromAgent
 	// instead, so the caller pre-checks task.ClaimedByUserID != "" before
@@ -759,7 +806,7 @@ type TaskStore interface {
 	// cross-team handoff/override even though both guards above already
 	// authorized it in Go. This method stays on the interface for
 	// conformance testing and same-team callers where RLS naturally holds.
-	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
+	ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -786,7 +833,42 @@ type TaskStore interface {
 	// router mints the terminating transition's own lifecycle task through
 	// this door immediately after closing the entity in the transaction
 	// before it. FindOrCreate / FindOrCreateAt never admit it.
-	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+	//
+	// They also carry the reopen, which is the router's alone: a task a
+	// person creates through FindOrCreate is always new. With no active task
+	// on the key, the newest closed task with it (by closed_at) is reopened
+	// instead of a new one inserted, when all of these hold:
+	//   - it is done with SiblingEventCloseReason. No other close is ever
+	//     reopened: not one that terminated the entity or reconciled it, a
+	//     reassignment, a person's, run_completed, or a duplicate merge. An
+	//     older closed task behind one of those stays closed too;
+	//   - one of its conversations is working, by the predicate that picks
+	//     the conversations a close tells, under a blueprint run that is
+	//     running and that nobody has called off. A person's follow-up on a
+	//     finished blueprint is working and reopens nothing: no run finish is
+	//     ahead of it to close the task again, so the event is a new
+	//     situation and gets a new task. A follow-up that returned an aborted
+	//     blueprint to running (BlueprintStore.ReopenRunForResume) is under a
+	//     running blueprint, and reopens;
+	//   - the entity is active. A rider minted on a closed entity is new.
+	// The reopen is one guarded UPDATE in the mint's transaction, under the
+	// same locks. It keeps the claim and sets the status from it (in_progress
+	// when claimed, queued when not, which is what tasks_queue_unclaimed
+	// admits), clears closed_at, close_reason, close_event_type and any held
+	// close, and withdraws the close notes still waiting on the task's
+	// conversations, as Bump does for a hold it clears. The task comes back
+	// in the shape a found one does, with TaskReopened.
+	//
+	// These doors are outside the returned-row rule: they return the task
+	// joined to its entity, which the router reads and no RETURNING can
+	// project, so a created or reopened row is read back inside the mint's
+	// own transaction, under the locks that wrote it.
+	//
+	// A reopen and another writer that makes a task active on the same key
+	// (a requeue of a closed task, another mint) are decided by the dedup
+	// index: the later one finds the active row, or is refused by the index
+	// with nothing written.
+	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, TaskMint, error)
 
 	// FindOrCreateAtUnlessEntityActiveSystem is FindOrCreateAtSystem's
 	// twin for the became_atomic belated-discovery path (TFAC-579):
@@ -808,7 +890,7 @@ type TaskStore interface {
 	// active-check and its own insert. suppressed=true means the check
 	// found an active task and no row was created or returned (task is
 	// nil); suppressed=false behaves exactly like FindOrCreateAtSystem.
-	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error)
+	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, mint TaskMint, suppressed bool, err error)
 	//
 	// Exempt from the returned-row rule: it reconciles a set, same as
 	// SetVisibilityTeams.
@@ -816,76 +898,51 @@ type TaskStore interface {
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
-	// CloseWithConversationCancelIntentSystem is the close the router performs: the
-	// task's terminal flip, its task_events audit row, and the durable STOP
-	// INTENT for the conversations the close ends — one transaction, three
-	// tables.
+	// CloseOnEventSystem is an event's close of a task: the task's terminal
+	// flip and its task_events audit row, in one transaction, and nothing
+	// else. No conversation on the task is stopped and no blueprint behind
+	// one is called off: a close records that the situation resolved, and
+	// the work on the task has a lifecycle of its own.
 	//
-	// The intent is `cancel_requested` on the blueprint runs behind the task's
-	// then-active conversations, and it is transactional because the kill that
-	// follows the commit is not reachable twice. A close whose cascade failed
-	// afterwards leaves no active task for a replay to find, so nothing walks
-	// back to the runs; stamping here means the system cannot forget it meant
-	// to stop them. From the flag alone the rest finishes on its own — the
-	// claim gate refuses to drive a cancel-requested step, and the
-	// dispatcher's settlement parks it and cancels its run once no claim
-	// holds it, whether or not a stop intent ever reached it.
+	// It never holds, so the router uses it where a hold would be wrong: a
+	// reassignment's close of the task the previous assignment made. Every
+	// other event close goes through CloseOrHoldSystem, which writes the same
+	// rows when it closes.
 	//
-	// The returned conversation ids are that same then-active set, read
-	// inside the tx: every non-terminal conversation on the task,
-	// blueprint-parented or not, which is the selection the caller's post-
-	// commit stop cascade targets. Conversations with no blueprint parent
-	// are returned (they still get stopped) but stamp nothing — there is no
-	// blueprint to call off.
-	//
-	// closed reports whether THIS call performed the transition. False means
-	// the task was already terminal, and then nothing is stamped and no ids
-	// are returned: a task that closed earlier may since have had a
-	// conversation legitimately resumed under it (a finished blueprint's final step, which
-	// the resume ladder allows), and a replayed close must not reach back and
-	// kill work a user started after the fact. The audit row is written either
-	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
+	// Closed reports whether THIS call performed the transition. A task that
+	// is already terminal, or missing, is left as it is: no audit row, and a
+	// zero outcome. WorkingConversationIDs are the conversations working on
+	// the task when it closed.
 	//
 	// closeEventType and closingEventID travel as a pair: an event-driven
-	// close passes both, a non-event close passes neither, and an empty
-	// closingEventID writes no audit row. Passing one without the other
-	// stamps a close_event_type no task_events row accounts for — not
-	// rejected here, but no caller does it.
+	// close passes both, and an empty closingEventID writes no audit row.
+	// Passing one without the other stamps a close_event_type no task_events
+	// row accounts for; nothing rejects it, and no caller does it.
 	//
-	// EntityStore.CloseTerminalSystem runs this same body per task inside its
-	// own transaction, so a task closed by a terminating event and one closed
-	// by a typed sibling close produce identical rows.
-	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
+	// Admin pool. Exempt from the returned-row rule: the caller acts on
+	// whether the close landed and on the conversations to tell, not on the
+	// task row.
+	CloseOnEventSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (TaskCloseOutcome, error)
 
 	// CloseOrHoldSystem is the close an event owes a task, held while one of
-	// the task's conversations is working or one of its deliverables awaits
-	// a person (domain.TaskCloseDeferral). In one transaction, the task's row
-	// locked first:
+	// the task's deliverables awaits a person (domain.TaskCloseDeferral). In
+	// one transaction, the task's row locked first:
 	//
-	//   - an active task with a working conversation (a top-level, unended
-	//     conversation holding an active claim, one that will be driven
-	//     without a person under a blueprint nobody called off, or the
-	//     current step of a running blueprint that has not yet acted on the
-	//     step's answer), or with none and an unresolved deliverable whose
-	//     pull request is still open, holds the close:
-	//     close_deferred_event_id is set to closingEventID, over any close it
-	//     already held, and close_deferred_at to the database's now when it
-	//     held none (a later closing event keeps the time the hold began), and
-	//     nothing else is written — no close, no audit row, no cancel intent.
-	//     Held is true, NewlyHeld says whether the task
-	//     held no close before this write, WorkingConversationIDs are the
-	//     working conversations, and AwaitingPerson says a deliverable made
-	//     it hold.
-	//   - otherwise it is CloseWithConversationCancelIntentSystem, rows and
-	//     outcome alike: Closed and ActiveConversationIDs are its closed and
-	//     activeConversationIDs. A task already terminal is neither.
+	//   - an active task with an unresolved deliverable whose pull request
+	//     is still open holds the close: close_deferred_event_id is set to
+	//     closingEventID, over any close it already held, and
+	//     close_deferred_at to the database's now when it held none (a later
+	//     closing event keeps the time the hold began), and nothing else is
+	//     written: no close and no audit row. Held is true, and NewlyHeld
+	//     says whether the task held no close before this write.
+	//   - otherwise it is CloseOnEventSystem, rows and outcome alike. A task
+	//     already terminal is neither.
 	//
-	// A hold names its closing event, so with closingEventID empty nothing
-	// is held. Admin pool.
-	//
-	// Exempt from the returned-row rule: the caller acts on which of the
-	// three things happened and on the conversations behind it, not on the
-	// task row.
+	// Whether a conversation is working on the task decides nothing here: a
+	// working conversation never holds a close, and never keeps a held one
+	// from applying. A hold names its closing event, so with closingEventID
+	// empty nothing is held. Admin pool. Exempt from the returned-row rule
+	// as CloseOnEventSystem is.
 	CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (TaskCloseOutcome, error)
 
 	// ApplyHeldCloseSystem applies the close the task holds on heldEventID,
@@ -897,66 +954,30 @@ type TaskStore interface {
 	//     replaced it, since the sweep read it), is left as it is, and the
 	//     outcome is zero.
 	//   - a task CloseOrHoldSystem would hold keeps its hold unwritten: Held
-	//     is true, NewlyHeld false, and WorkingConversationIDs and
-	//     AwaitingPerson say why.
-	//   - otherwise it is CloseWithConversationCancelIntentSystem with
-	//     heldEventID as the closing event, and the hold is cleared with it.
+	//     is true and NewlyHeld false.
+	//   - otherwise it is CloseOnEventSystem with heldEventID as the closing
+	//     event, and the hold is cleared with it.
 	//
-	// Admin pool. Exempt from the returned-row rule as CloseOrHoldSystem is.
+	// Admin pool. Exempt from the returned-row rule as CloseOnEventSystem is.
 	ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (TaskCloseOutcome, error)
 
 	// CloseDeferralForTaskSystem returns the close the task holds, or nil
-	// when it holds none or is no longer active. Admin pool: its readers
-	// (a run's launch, the auto-delegation gates) carry no claims.
+	// when it holds none or is no longer active. Admin pool: its reader, a
+	// run's launch, carries no claims.
 	CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error)
 
 	// ListActiveCloseDeferralsSystem returns every deferral held by an active
 	// task in every org that is not deleted and that nothing holds any more,
-	// ordered by org then task id, for the router's deferral sweep: no
-	// conversation on the task is working and none of its deliverables
-	// awaits a person, by the predicates CloseOrHoldSystem holds on. A
-	// deferral left on a task that closed by another path is never returned,
-	// and neither is one in a deleted org, whose tasks no close should reach
-	// any more. A task can start working again after this read, so
-	// ApplyHeldCloseSystem decides again under the task's lock. Admin pool,
-	// org-wide by design: the sweep is one brain loop over all orgs, and the
-	// partial index on the deferral column keeps it to the rows that hold one.
+	// ordered by org then task id, for the router's deferral sweep: none of
+	// the task's deliverables awaits a person, by the predicate
+	// CloseOrHoldSystem holds on. A deferral left on a task that closed by
+	// another path is never returned, and neither is one in a deleted org,
+	// whose tasks no close should reach any more. A deliverable can be
+	// recorded after this read, so ApplyHeldCloseSystem decides again under
+	// the task's lock. Admin pool, org-wide by design: the sweep is one brain
+	// loop over all orgs, and the partial index on the deferral column keeps
+	// it to the rows that hold one.
 	ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error)
-
-	// ListExpiredCloseDeferralsSystem returns every deferral an active task
-	// in a live org has held for heldFor or longer, by the database's clock,
-	// while one of its conversations is still working that no person started
-	// or wrote to and nobody has asked to stop: work an event started, which
-	// the close note told to wrap up. Ordered by org then task id, for the
-	// close-hold sweep, which expires each through ExpireHeldCloseSystem. A
-	// person's work is told what happened without being told to stop, so its
-	// conversations never expire. Admin pool, org-wide by design, as
-	// ListActiveCloseDeferralsSystem is.
-	ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor time.Duration) ([]domain.TaskCloseDeferral, error)
-
-	// ExpireHeldCloseSystem expires the work an event started under the
-	// close the task has held on heldEventID for heldFor or longer, for the
-	// close-hold sweep, which read that hold earlier. In one transaction, the
-	// task's row locked first: a task no longer active, whose hold no longer
-	// names heldEventID, or that has held it for less than heldFor, is left
-	// as it is and expired is empty. Otherwise expired are the conversations
-	// ListExpiredCloseDeferralsSystem would expire, and cancel intent is
-	// stamped on their running blueprint runs.
-	//
-	// The close stays held either way. The caller stops the expired
-	// conversations, and the sweep applies the close through
-	// ApplyHeldCloseSystem once nothing on the task is working, reading the
-	// deliverables they left only then; until then a stop that never landed
-	// is retried, since the conversation still works and nobody has asked it
-	// to stop.
-	//
-	// Whether a person drives a conversation is read in this transaction,
-	// which takes no lock a person's message waits on, as the close note's
-	// wording is chosen without one: a message that lands while the expiry
-	// runs does not keep its conversation from expiring. Admin pool. Exempt
-	// from the returned-row rule: it writes no task row, and the caller acts
-	// on the conversations.
-	ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) (expired []string, err error)
 
 	// ClearCloseDeferralSystem clears the task's deferral when it still names
 	// eventID — a compare-and-clear on the event the sweep read, so a
@@ -973,6 +994,26 @@ type TaskStore interface {
 	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
 	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
+
+	// ClosingEventIDSystem returns the id of the event that closed the task:
+	// its newest task_events row of kind 'closed', which an event's close
+	// writes with the close (CloseOnEventSystem). "" when the task has none,
+	// as after a person's close of a task no event ever closed. A task an
+	// event closed, another reopened, and something else then closed still
+	// has the first close's row, so the event is the current close's only
+	// when its type is the one that close stamped (tasks.close_event_type).
+	// Admin pool, org_id bound by argument.
+	ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
+
+	// WorkingConversationIDsSystem returns the conversations working on the
+	// task, oldest first, by the predicate an event's close reads in its own
+	// transaction (TaskCloseOutcome.WorkingConversationIDs). It is for a
+	// close whose door returns no such set, a person's and a duplicate
+	// merge's, read after the close commits: a close writes nothing on a
+	// conversation, so the set is the one the close found unless a
+	// conversation started or stopped working in between. Admin pool, org_id
+	// bound by argument.
+	WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// LatestEventIDSystem returns the id of the newest event that spawned or
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'
@@ -1020,7 +1061,7 @@ type TaskStore interface {
 	// admin pool (BYPASSRLS) in Postgres — see the doc comment on
 	// ReassignClaimToUser for why the reassign handler needs this instead
 	// of the app-pool variant every other request-path caller uses.
-	ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error)
+	ReassignClaimToUserSystem(ctx context.Context, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error)
 
 	// OwnerTeamForLatestTaskInTypesSystem returns the team_id of the most
 	// recent task on the entity whose event_type is in eventTypes AND whose

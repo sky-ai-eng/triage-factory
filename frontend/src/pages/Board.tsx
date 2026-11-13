@@ -3,13 +3,11 @@ import type { Task, Conversation, WSEvent, TeamMember, TeamBot } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
-  isActiveConversation,
   isActiveStatus,
   isLiveRun,
   isPermissionTerminalStatus,
   isTerminalStatus,
 } from '../lib/conversationStatus'
-import { approvalCounts, hasUnresolvedDeliverables } from '../lib/approval'
 import {
   summarizePermissionInput,
   type PendingPermission,
@@ -37,13 +35,21 @@ import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
 import PromptPicker from '../components/PromptPicker'
-import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import RequeueConfirm from '../components/board/RequeueConfirm'
 import { TaskCard } from '../components/board/TaskCard'
 import { deriveCard } from '../components/board/cardModel'
 import { toast } from '../components/Toast/toastStore'
-import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import {
+  claimTask,
+  delegateTask,
+  isVersionConflict,
+  patchTaskStatus,
+  reassignTask,
+  requeueTask,
+  type TaskRef,
+} from '../lib/taskWrites'
 import BoardColumn, { CollapsedColumn, type LanePaging } from '../components/board/BoardColumn'
 import {
   emptyLaneFilter,
@@ -189,9 +195,8 @@ function loadCollapsed(userID: string): CollapseMap {
   }
 }
 
-// The two gestures that end a task, each gated behind the resolve-all
-// confirmation when the task still carries unresolved deliverables: ending a
-// task is what tears them down.
+// The two gestures that end a task. Neither touches the task's deliverables:
+// a draft PR stays open and a staged review stays pending for a person.
 type EndAction = 'complete' | 'dismiss'
 
 export default function Board() {
@@ -374,20 +379,6 @@ export default function Board() {
   // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
-  // Resolve-all confirmation: the two gestures that END a task —
-  // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
-  // force-resolve every unresolved deliverable and cancel a live conversation.
-  // When the target task has unresolved deliverables we stash the intended
-  // action here and gate the request behind the confirmation modal.
-  const [confirmResolve, setConfirmResolve] = useState<{
-    taskId: string
-    action: EndAction
-    prCount: number
-    reviewCount: number
-    isLive: boolean
-  } | null>(null)
-  const [confirmBusy, setConfirmBusy] = useState(false)
-
   // The task awaiting the return-to-queue confirmation, when its run is in
   // flight. Null the rest of the time: a requeue with nothing running fires
   // without asking.
@@ -541,7 +532,7 @@ export default function Board() {
       case 'queued':
         return queueListBody(tf, showSnoozedRef.current, fields)
       case 'in_progress':
-        return statusListBody('in_progress', tf, fields)
+        return statusListBody(['in_progress'], tf, fields)
       case 'done':
         return doneListBody(tf, fields)
     }
@@ -951,6 +942,25 @@ export default function Board() {
     return map
   }, [queued, inProgress, done])
 
+  // The version each of this board's task writes left, by task id. A write
+  // names the newest of it, the lane's copy, and the copy the gesture was
+  // handed (a picker's task, which a refetch can drop from the lanes while it
+  // is open), so a gesture made before the refetch after the last write lands
+  // sends the version that write returned rather than the read it already
+  // moved past. Versions only rise, so the largest is the current one.
+  const writtenVersions = useRef(new Map<string, number>())
+  const noteWritten = useCallback((task: TaskRef) => {
+    writtenVersions.current.set(task.id, task.version)
+  }, [])
+  const taskRefFor = useCallback(
+    (taskId: string, handed = 0): TaskRef => {
+      const listed = allTasks.get(taskId)?.version ?? 0
+      const written = writtenVersions.current.get(taskId) ?? 0
+      return { id: taskId, version: Math.max(listed, written, handed) }
+    },
+    [allTasks],
+  )
+
   // taskId → column lookup, built once per board state. getColumn is called
   // per dnd onDragOver event (which fires rapidly while dragging), so an O(1)
   // map beats re-scanning all three lists on every move.
@@ -967,27 +977,23 @@ export default function Board() {
     [columnByTask],
   )
 
-  // A status write on the task. Complete (drag-to-Done from In Progress)
-  // keeps the card in Done; dismiss (drag-to-Done from Queued) closes it
-  // unworked; in_progress is how a card comes back out of Done. Ending the
-  // task force-resolves every unresolved deliverable server-side and cancels a
-  // live conversation; we only confirm first.
+  // A status write on the task. Complete (drag-to-Done from In Progress) and
+  // dismiss (drag-to-Done from Queued, closing it unworked) both land the
+  // card in Done; in_progress is how a card comes back out of Done. Ending
+  // the task leaves its deliverables and its runs as they are.
   const patchStatus = useCallback(
     async (taskId: string, status: 'done' | 'dismissed' | 'in_progress', failure: string) => {
       try {
-        // A failure (e.g. a teardown that partially failed) must surface — a
-        // silent fetchTasks would repaint as if the move succeeded.
-        await apiFetch(`/api/tasks/${taskId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        })
+        // A failure must surface — a silent fetchTasks would repaint as if the
+        // move succeeded.
+        noteWritten(await patchTaskStatus(taskRefFor(taskId), status))
         fetchTasks()
       } catch (err) {
         toast.failed(err, failure)
+        if (isVersionConflict(err)) fetchTasks()
       }
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const fireEnd = useCallback(
@@ -1001,13 +1007,14 @@ export default function Board() {
   const fireRequeue = useCallback(
     async (taskId: string) => {
       try {
-        await apiFetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
+        noteWritten(await requeueTask(taskRefFor(taskId)))
         fetchTasks()
       } catch (err) {
         toast.failed(err, 'Could not return the task to the queue.')
+        if (isVersionConflict(err)) fetchTasks()
       }
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   // requestRequeue is the one door every return-to-queue gesture takes — the
@@ -1026,32 +1033,6 @@ export default function Board() {
       void fireRequeue(taskId)
     },
     [conversations, fireRequeue],
-  )
-
-  // requestResolveAll gates a task-ending gesture behind the confirmation
-  // modal when the task's conversation still has unresolved deliverables.
-  // Returns true when it deferred to the modal (the caller must NOT fire its
-  // own request); false when there's nothing to resolve and the caller should
-  // proceed directly.
-  //
-  // Only the gestures that END a task reach it — ending a task is what
-  // resolves what it holds. A queued task can be carrying a draft PR back in
-  // the queue, so dismissing it is gated the same as completing.
-  const requestResolveAll = useCallback(
-    (taskId: string, action: EndAction): boolean => {
-      const conversation = conversations[taskId]
-      if (!conversation || !hasUnresolvedDeliverables(conversation)) return false
-      const c = approvalCounts(conversation)
-      setConfirmResolve({
-        taskId,
-        action,
-        prCount: c.pr,
-        reviewCount: c.review,
-        isLive: isActiveConversation(conversation),
-      })
-      return true
-    },
-    [conversations],
   )
 
   // The lane viewport (the scroller) and the strip inside it, which is
@@ -1218,22 +1199,15 @@ export default function Board() {
       if (sourceCol === targetCol) return
 
       if (sourceCol === 'queued') {
-        // Queued → Done: dismiss. Ending the task is what tears its
-        // deliverables down, and a task can be carrying a draft PR back in the
-        // queue, so the gate that guards completing guards this too.
+        // Queued → Done: dismiss.
         if (targetCol === 'done') {
-          if (requestResolveAll(taskId, 'dismiss')) return
           await fireEnd(taskId, 'dismiss')
           return
         }
         // Queued → In Progress: the drag is a claim, and the claim is what
         // moves the card — the server lands the row in progress in the same
         // write. Idempotent when the caller already holds it.
-        await apiFetch(`/api/tasks/${taskId}/claim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        })
+        noteWritten(await claimTask(taskRefFor(taskId)))
         return
       }
 
@@ -1244,11 +1218,8 @@ export default function Board() {
         return
       }
 
-      // Any → Done: complete (preserves the card in Done; distinct from queued →
-      // done which dismisses). Ending the task IS what resolves its deliverables,
-      // so this gesture keeps the confirmation.
+      // Any → Done: complete (distinct from queued → done, which dismisses).
       if (targetCol === 'done') {
-        if (requestResolveAll(taskId, 'complete')) return
         await fireEnd(taskId, 'complete')
         return
       }
@@ -1259,8 +1230,11 @@ export default function Board() {
     } catch (err) {
       // A failed status/claim/requeue mutation would otherwise leave the board
       // silently in the wrong state; surface it and let the next fetchTasks
-      // reconcile.
+      // reconcile. A refusal over the version means this board's copy is the
+      // stale one, so that fetch is now: a retry from the same copy is refused
+      // the same way.
       toast.failed(err, 'Could not move the task — please try again.')
+      if (isVersionConflict(err)) fetchTasks()
     }
   }
 
@@ -1269,17 +1243,13 @@ export default function Board() {
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/claim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        })
+        noteWritten(await claimTask(taskRefFor(task.id, task.version)))
       } catch (err) {
         toast.failed(err, 'Could not claim the task.')
       }
       fetchTasks()
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const handlePickerUnclaim = useCallback(
@@ -1300,17 +1270,13 @@ export default function Board() {
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/claim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target_user_id: targetUserID }),
-        })
+        noteWritten(await reassignTask(taskRefFor(task.id, task.version), targetUserID))
       } catch (err) {
         toast.failed(err, 'Could not reassign the task.')
       }
       fetchTasks()
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const handlePromptSelected = useCallback(
@@ -1320,11 +1286,8 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/delegate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blueprint_id: promptId }),
-        })
+        const body = await delegateTask(taskRefFor(task.id, task.version), promptId)
+        noteWritten({ id: task.id, version: body.version })
         const conversationID = body.conversation_id
         if (conversationID) {
           setConversations((prev) => ({
@@ -1368,7 +1331,7 @@ export default function Board() {
       }
       fetchTasks()
     },
-    [fetchTasks],
+    [fetchTasks, noteWritten, taskRefFor],
   )
 
   const activeTask = activeId ? allTasks.get(activeId) : null
@@ -1544,26 +1507,6 @@ export default function Board() {
           pendingDelegateTask.current = null
           window.location.href = '/prompts'
         }}
-      />
-
-      <ResolveAllConfirm
-        open={confirmResolve !== null}
-        prCount={confirmResolve?.prCount ?? 0}
-        reviewCount={confirmResolve?.reviewCount ?? 0}
-        isLive={confirmResolve?.isLive ?? false}
-        actionLabel={confirmResolve?.action === 'dismiss' ? 'Dismiss' : 'Mark done'}
-        busy={confirmBusy}
-        onConfirm={async () => {
-          if (!confirmResolve) return
-          setConfirmBusy(true)
-          try {
-            await fireEnd(confirmResolve.taskId, confirmResolve.action)
-            setConfirmResolve(null)
-          } finally {
-            setConfirmBusy(false)
-          }
-        }}
-        onCancel={() => setConfirmResolve(null)}
       />
 
       <RequeueConfirm
@@ -1801,7 +1744,9 @@ const SortableCard = memo(function SortableCard({
         }
         // Allow and Deny are for a reader the permission route accepts; a
         // team viewer sees the ask and the link to the run, not the verbs.
-        interactive={!picker.pickerReadOnly && conversation?.can_write !== false}
+        // That holds in every lane: a close ends no run, so a Done card's
+        // run can be waiting on an answer like any other.
+        interactive={conversation?.can_write !== false}
         assigneeSlot={
           <AssigneePicker
             task={task}

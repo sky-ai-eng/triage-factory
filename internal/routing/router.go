@@ -23,32 +23,18 @@ type Scorer interface {
 }
 
 // Delegator is the minimal interface the router needs from the delegate
-// spawner — kicking off a run, tearing one down, and injecting into a live
-// one. Narrowed from *delegate.Spawner so tests can stub the spawn surface
+// spawner — kicking off a run and injecting into a live one. Narrowed from *delegate.Spawner so tests can stub the spawn surface
 // without bringing up a worktree, the agent subprocess, etc. Production
 // wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
-	// StopConversationAndCancelBlueprint is the teardown half: the router only
-	// stops a conversation when the layer above it has already ended — a task
-	// closed, a firing rolled back — so the owning blueprint dies with it
-	// rather than freezing 'running' over work nothing will resume. The cause
-	// names which of those it was, and reaches the stopped conversation's
-	// transcript.
-	StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error
-	// StopBlueprintRun is the same teardown addressed from the other end, for
-	// the caller that holds the id Delegate returned and has no conversation
-	// in hand: it stops whatever steps the run has and cancels the run itself.
-	// Which verb a caller wants follows from which id it is holding — neither
-	// id resolves against the other's table.
-	StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error
-	// TeardownTaskDeliverablesSystem retires the unresolved deliverables a closed
-	// task's conversations hold — the draft PRs closed, the staged reviews
-	// dismissed. It rides only the close, because a task's deliverables survive
-	// every other boundary: a firing rolled back or a conversation stopped
-	// leaves them for whatever picks the task up next. Nobody authorized an
-	// event-driven close, so the audit rows it writes name no actor.
-	TeardownTaskDeliverablesSystem(ctx context.Context, orgID, taskID string)
+	// ReviewsDismissedSystem follows a terminating close that dismissed the
+	// closed pull request's pending reviews (TerminalCloseResult.DismissedReviews),
+	// once it has committed: each review is announced on the conversation that
+	// staged it, that conversation is told its review was discarded, and its
+	// task is checked for closing by the rule a person's resolution of a
+	// deliverable uses.
+	ReviewsDismissedSystem(ctx context.Context, orgID string, reviews []domain.Deliverable)
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a conversation — a local SDK process, a staged row a
 	// native loop reads, a live remote executor (the `inject`
@@ -64,12 +50,19 @@ type Delegator interface {
 	// outcomes are delivered or staged where something will read them, and
 	// the caller records task_events 'injected'.
 	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
-	// TellTaskClosing stages the note that evt resolved the conversation's
-	// task, delivered at its next tool boundary and never as a turn of its
-	// own, unless the conversation already has it. The held close tells each
-	// working conversation through it. Reports whether the conversation has
-	// the note. Signature matches *delegate.Spawner's method exactly.
-	TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool
+	// TellTaskClosed tells each of conversationIDs, the conversations
+	// working on the task when an event closed it, that the task closed
+	// and how. The note is composed from the task's stored close, reaches
+	// each conversation at its next tool boundary and never as a turn of
+	// its own, and is sent once per close. Signature matches
+	// *delegate.Spawner's method exactly.
+	TellTaskClosed(ctx context.Context, orgID, taskID string, conversationIDs []string)
+	// TellTaskCloseHeld tells each of conversationIDs, the conversations
+	// working on the task when an event's close of it began to hold, that
+	// the event resolved the task's situation and the task stays open for
+	// a person. Delivered as TellTaskClosed's note is, once per hold.
+	// Signature matches *delegate.Spawner's method exactly.
+	TellTaskCloseHeld(ctx context.Context, orgID, taskID string, conversationIDs []string)
 }
 
 // EventPublisher is the bus-publish seam the router uses to mirror the

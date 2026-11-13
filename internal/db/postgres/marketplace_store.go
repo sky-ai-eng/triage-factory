@@ -704,11 +704,11 @@ var recomputePromptListingStatsPG = `
 	LEFT JOIN (
 		SELECT mi.listing_id,
 			COUNT(r.id) AS total_runs,
-			SUM(CASE WHEN ` + db.ConcludedConversationSQL("r") + ` THEN 1 ELSE 0 END) AS completed_runs,
+			SUM(CASE WHEN ` + db.PostgresCompletedRunSQL("r") + ` THEN 1 ELSE 0 END) AS completed_runs,
 			MAX(r.started_at) AS last_run_at
 		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
 		JOIN conversations r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
-		WHERE ` + db.SettledConversationSQL("r") + `
+		WHERE (` + db.SettledConversationSQL("r") + ` OR ` + db.PostgresCompletedRunSQL("r") + `)
 		GROUP BY mi.listing_id
 	) runs_agg ON runs_agg.listing_id = l.id
 	WHERE l.org_id = $1 AND l.kind = 'prompt'

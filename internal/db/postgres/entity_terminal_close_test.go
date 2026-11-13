@@ -29,16 +29,20 @@ func TestEntityStore_CloseTerminal_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
-		return stores.Entities, stores.Tasks, orgID, newPgTerminalCloseSeeder(h.AdminDB, orgID, userID)
+		seeder := newPgTerminalCloseSeeder(h.AdminDB, orgID, userID)
+		seeder.Deliverable = func(id string) (*domain.Deliverable, error) {
+			return stores.Deliverables.Get(context.Background(), orgID, id)
+		}
+		return stores.Entities, stores.Tasks, orgID, seeder
 	})
 }
 
-// newPgTerminalCloseSeeder extends the cancel-intent seeder with the entity
+// newPgTerminalCloseSeeder extends the close seeder with the entity
 // side the terminating-close suite reads and moves.
 func newPgTerminalCloseSeeder(conn *sql.DB, orgID, userID string) dbtest.EntityTerminalCloseSeeder {
-	base, entityForTask := newPgCloseIntentSeeder(conn, orgID, userID)
+	base, entityForTask := newPgCloseSeeder(conn, orgID, userID)
 	return dbtest.EntityTerminalCloseSeeder{
-		TaskCloseCancelIntentSeeder: base,
+		TaskCloseSeeder: base,
 		EntityForTask: func(t *testing.T, taskID string) string {
 			t.Helper()
 			id, ok := entityForTask[taskID]
@@ -90,6 +94,35 @@ func newPgTerminalCloseSeeder(conn *sql.DB, orgID, userID string) dbtest.EntityT
 			if _, err := conn.Exec(`UPDATE entities SET state = 'closed', closed_at = now() WHERE id = $1 AND org_id = $2`, entityID, orgID); err != nil {
 				t.Fatalf("close entity %s around the guard: %v", entityID, err)
 			}
+		},
+		Review: func(t *testing.T, conversationID, entityID, state string) string {
+			t.Helper()
+			var id string
+			if err := conn.QueryRow(`
+				INSERT INTO deliverables (conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id, details_json)
+				SELECT id, org_id, team_id, 'github', 'review', 'github.com', 'acme/widget#7', $3, 'review-' || gen_random_uuid()::text, $4, '{"review_event":"COMMENT"}'
+				  FROM conversations WHERE org_id = $1 AND id = $2
+				RETURNING id::text
+			`, orgID, conversationID, state, entityID).Scan(&id); err != nil {
+				t.Fatalf("seed review: %v", err)
+			}
+			return id
+		},
+		DeliverableState: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var state string
+			if err := conn.QueryRow(`SELECT state FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, deliverableID).Scan(&state); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return state
+		},
+		DeliverableDetails: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var details sql.NullString
+			if err := conn.QueryRow(`SELECT details_json FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, deliverableID).Scan(&details); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return details.String
 		},
 	}
 }

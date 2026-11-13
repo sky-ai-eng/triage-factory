@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -220,6 +221,73 @@ func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	}
 	if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "running" {
 		t.Errorf("blueprint status = %q, want running — an abort resumes its sequence", gotStatus)
+	}
+}
+
+// TestFollowUpOnAnAbortedStep_ContinuesTheBlueprintToItsNextStep drives the
+// whole path a follow-up on an aborted step takes: the wake re-opens the
+// blueprint and withdraws the abort, the claim gate hands the step out, and
+// its `continue` then advances the blueprint to its next step. A closed task
+// takes it exactly as an open one does, and the follow-up leaves the task's
+// status as it found it.
+func TestFollowUpOnAnAbortedStep_ContinuesTheBlueprintToItsNextStep(t *testing.T) {
+	for _, tc := range []struct{ name, closeAs string }{
+		{"task-open", ""},
+		{"task-done", "done"},
+		{"task-dismissed", "dismissed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			s, database, brID, taskID, stepConversationID := reactorFixture(t, "abort-continue-"+tc.name, 2, dbtest.SeedConcluded, "abort")
+			org := runmode.LocalDefaultOrgID
+			if _, err := database.Exec(
+				`UPDATE conversations SET sdk_session_id = 'sess-abort-continue', worktree_path = ? WHERE id = ?`,
+				t.TempDir(), stepConversationID,
+			); err != nil {
+				t.Fatalf("give the step a session and a worktree: %v", err)
+			}
+			finishBlueprint(t, database, brID, "aborted", 0)
+			if tc.closeAs != "" {
+				if _, err := database.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, tc.closeAs, taskID); err != nil {
+					t.Fatalf("close task: %v", err)
+				}
+			}
+			wantTaskStatus := taskStatus(t, database, taskID)
+
+			if err := s.SendMessage(context.Background(), org, stepConversationID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+				t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
+			}
+			if gotStatus, gotStep := blueprintState(t, database, brID); gotStatus != "running" || gotStep != 0 {
+				t.Fatalf("after the follow-up, blueprint = (%q, %d), want (running, 0)", gotStatus, gotStep)
+			}
+
+			// The claim gate hands the resumed step out, its engagement reads
+			// the follow-up and gives the step's new verdict, and the reactor
+			// acts on it.
+			conv, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+			if err != nil || conv == nil || conv.ID != stepConversationID {
+				t.Fatalf("ClaimNextConversation = (%v, %v), want the resumed step %s", conv, err, stepConversationID)
+			}
+			if _, _, ok, err := s.pendingInput.Consume(context.Background(), org, stepConversationID); err != nil || !ok {
+				t.Fatalf("consume the follow-up: ok=%v err=%v", ok, err)
+			}
+			if _, err := dbtest.HolderComplete(s.conversations, context.Background(), org, stepConversationID,
+				domain.StatusOpen, 0, 0, 0, "", string(domain.ConversationOutcomeContinue), "", ""); err != nil {
+				t.Fatalf("conclude the resumed step: %v", err)
+			}
+			conv.OrgID = org
+			s.reactToResumedStep(context.Background(), org, conv)
+
+			if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
+				t.Errorf("queued step conversations = %v, want [1] — the blueprint's next step", q)
+			}
+			if gotStatus, gotStep := blueprintState(t, database, brID); gotStatus != "running" || gotStep != 1 {
+				t.Errorf("after the resumed step continued, blueprint = (%q, %d), want (running, 1)", gotStatus, gotStep)
+			}
+			if got := taskStatus(t, database, taskID); got != wantTaskStatus {
+				t.Errorf("task status = %q, want %q — a follow-up does not move the task", got, wantTaskStatus)
+			}
+		})
 	}
 }
 

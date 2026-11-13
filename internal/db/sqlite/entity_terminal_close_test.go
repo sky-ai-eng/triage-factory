@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -32,16 +34,19 @@ func TestEntityStore_CloseTerminal_SQLite(t *testing.T) {
 		}
 		seeder := newSQLiteTerminalCloseSeeder(conn)
 		stores := sqlitestore.New(conn)
+		seeder.Deliverable = func(id string) (*domain.Deliverable, error) {
+			return stores.Deliverables.Get(context.Background(), runmode.LocalDefaultOrgID, id)
+		}
 		return stores.Entities, stores.Tasks, runmode.LocalDefaultOrgID, seeder
 	})
 }
 
-// newSQLiteTerminalCloseSeeder extends the cancel-intent seeder with the
+// newSQLiteTerminalCloseSeeder extends the close seeder with the
 // entity side the terminating-close suite reads and moves.
 func newSQLiteTerminalCloseSeeder(conn *sql.DB) dbtest.EntityTerminalCloseSeeder {
-	base, entityForTask := newSQLiteCloseIntentSeeder(conn)
+	base, entityForTask := newSQLiteCloseSeeder(conn)
 	return dbtest.EntityTerminalCloseSeeder{
-		TaskCloseCancelIntentSeeder: base,
+		TaskCloseSeeder: base,
 		EntityForTask: func(t *testing.T, taskID string) string {
 			t.Helper()
 			id, ok := entityForTask[taskID]
@@ -92,6 +97,34 @@ func newSQLiteTerminalCloseSeeder(conn *sql.DB) dbtest.EntityTerminalCloseSeeder
 			if _, err := conn.Exec(`UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?`, time.Now().UTC(), entityID); err != nil {
 				t.Fatalf("close entity %s around the guard: %v", entityID, err)
 			}
+		},
+		Review: func(t *testing.T, conversationID, entityID, state string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id, details_json)
+				SELECT ?, id, org_id, team_id, 'github', 'review', 'github.com', 'acme/widget#7', ?, 'review-' || ?, ?, '{"review_event":"COMMENT"}'
+				  FROM conversations WHERE id = ?
+			`, id, state, id, entityID, conversationID); err != nil {
+				t.Fatalf("seed review: %v", err)
+			}
+			return id
+		},
+		DeliverableState: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var state string
+			if err := conn.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, deliverableID).Scan(&state); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return state
+		},
+		DeliverableDetails: func(t *testing.T, deliverableID string) string {
+			t.Helper()
+			var details sql.NullString
+			if err := conn.QueryRow(`SELECT details_json FROM deliverables WHERE id = ?`, deliverableID).Scan(&details); err != nil {
+				t.Fatalf("read deliverable %s: %v", deliverableID, err)
+			}
+			return details.String
 		},
 	}
 }

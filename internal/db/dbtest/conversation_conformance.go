@@ -100,15 +100,19 @@ type ConversationSeeder struct {
 	BackdateQueuedAt func(t *testing.T, conversationID string, age time.Duration)
 
 	// BackdateCompletedAt is BackdateStartedAt for the terminal stamp. No
-	// store method rewrites completed_at after the terminal — and notably the
-	// resume flips do not CLEAR it — so staging "concluded long ago, and
-	// something else happened since" needs its own door. The workspace sweeps
+	// store method moves completed_at to a time of the caller's choosing, so
+	// staging "concluded long ago" needs its own door. The workspace sweeps
 	// read the newest stamp a row carries, which is what that shape is for.
 	BackdateCompletedAt func(t *testing.T, conversationID string, age time.Duration)
 
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
+
+	// ParkedAtSet reads whether the conversation's parked_at is stamped. No
+	// store read projects the column — the idle sweeps read it in-SQL — so the
+	// suite reads it directly to assert what a turn end writes.
+	ParkedAtSet func(t *testing.T, conversationID string) bool
 
 	// LiveClaimsWithoutLease counts rows breaking the live-claim invariant:
 	// unreleased, and carrying no lease. Every subtest's fixture is swept
@@ -964,6 +968,86 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// A verdict is a blueprint step's answer, so the turn-end write records
+	// one only while the conversation's blueprint run is running. Anywhere
+	// else the same call leaves the row `open` with no verdict, stamped
+	// parked_at, and so live for the next message. The write decides on the
+	// row; the caller passes the same arguments every time.
+	t.Run("Complete_OpenRecordsAVerdictOnlyUnderARunningBlueprint", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			// blueprint is the run's status at the write; "" stages a
+			// conversation with no blueprint run at all.
+			blueprint   string
+			wantVerdict bool
+		}{
+			{"running blueprint", "running", true},
+			{"finished blueprint", "completed", false},
+			{"aborted blueprint", "aborted", false},
+			{"no blueprint run", "", false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				store, orgID, _, seed := mk(t)
+				ctx := context.Background()
+				var conversationID string
+				if tc.blueprint == "" {
+					ent := seed.Entity(t, "verdict-rule-none")
+					taskID := seed.Task(t, ent, domain.EventGitHubPROpened, seed.Event(t, ent, domain.EventGitHubPROpened))
+					conversationID = seed.Conversation(t, concludedSeed(domain.Conversation{
+						TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running", Model: "m",
+					}))
+				} else {
+					var brID string
+					conversationID, brID, _ = seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+					if tc.blueprint != "running" {
+						seed.SetBlueprintRunStatus(t, brID, tc.blueprint)
+					}
+				}
+
+				returned, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 1200, 3, "looked into it", "finish", "all shipped", "")
+				if err != nil || returned == nil {
+					t.Fatalf("Complete: row=%v err=%v", returned, err)
+				}
+				AssertWriteReturnedStoredRow(t, "CompleteForClaimSystem", *returned, func() (*domain.Conversation, error) {
+					return store.Get(ctx, orgID, conversationID)
+				})
+
+				if returned.Status != domain.StatusOpen || returned.ParkReason != "" {
+					t.Errorf("row = (status %q, park_reason %q), want (open, none)", returned.Status, returned.ParkReason)
+				}
+				if returned.ResultSummary != "looked into it" {
+					t.Errorf("result summary = %q, want it written whatever the blueprint", returned.ResultSummary)
+				}
+				parked := seed.ParkedAtSet(t, conversationID)
+				if tc.wantVerdict {
+					if !returned.Concluded() || returned.Outcome != "finish" || returned.OutcomeReason != "all shipped" {
+						t.Errorf("verdict = (concluded %v, outcome %q, reason %q), want the finish recorded for the reactor",
+							returned.Concluded(), returned.Outcome, returned.OutcomeReason)
+					}
+					if parked {
+						t.Errorf("parked_at is stamped on a verdict; completed_at is a verdict's stamp")
+					}
+				} else {
+					if returned.Concluded() || returned.CompletedAt != nil || returned.Outcome != "" || returned.OutcomeReason != "" {
+						t.Errorf("verdict = (completed_at %v, outcome %q, reason %q), want none: no running blueprint reads one",
+							returned.CompletedAt, returned.Outcome, returned.OutcomeReason)
+					}
+					if !parked {
+						t.Errorf("parked_at is not stamped; a turn end with no verdict ages from it")
+					}
+				}
+
+				claims := seed.ClaimRows(t, conversationID)
+				if len(claims) == 0 {
+					t.Fatalf("the conversation has no claim rows")
+				}
+				if last := claims[len(claims)-1]; !last.Released || last.Outcome != "completed" {
+					t.Errorf("claim = (released %v, outcome %q), want released as completed either way", last.Released, last.Outcome)
+				}
+			})
+		}
+	})
+
 	t.Run("Complete_PersistsFailureKind", func(t *testing.T) {
 		// processCompletion writes failed-status kinds (agent_error,
 		// no_result) via Complete rather than MarkFailedIfActive — this
@@ -1565,11 +1649,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	//     preferred queued_at would age it from before it ran.
 	//  2. Aged wholesale, it is reapable — the precondition for the third.
 	//  3. Resumed from `completed` — the follow-up on a finished run —
-	//     MarkQueuedForResume clears parked_at but never completed_at, so the
-	//     row now carries a stale completion beside a just-written queued_at.
-	//     An order that preferred completed_at would drop the blob that
-	//     follow-up is about to rehydrate from, in the window before an
-	//     executor claims it and the claim guard takes over.
+	//     MarkQueuedForResume clears parked_at and completed_at, so the
+	//     just-written queued_at is the newest stamp the row carries. An
+	//     order that left queued_at out would age the row from its mint and
+	//     drop the blob that follow-up is about to rehydrate from, in the
+	//     window before an executor claims it and the claim guard takes over.
 	t.Run("ListReapableSnapshotKeys_AgeIsTheNewestStampNotARanking", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -1601,8 +1685,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("two-day-old completed task %s is not reapable; the fixture has not staged the precondition", taskID)
 		}
 
-		// A follow-up resumes it. Nothing clears the old completed_at, and no
-		// executor has claimed it yet, so the stamp is all that withholds it.
+		// A follow-up resumes it. No executor has claimed it yet, so the fresh
+		// queued_at is all that withholds it.
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
 			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
 		}
@@ -1611,7 +1695,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("ListReapableSnapshotKeysSystem(resumed): %v", err)
 		}
 		if reapKeysContain(resumed, taskID) {
-			t.Errorf("task %s stayed reapable after a follow-up resumed its completed conversation; the stale completed_at outranked the fresh queued_at, and the blob would go before the dispatcher claims it", taskID)
+			t.Errorf("task %s stayed reapable after a follow-up resumed its completed conversation; the fresh queued_at did not count, and the blob would go before the dispatcher claims it", taskID)
 		}
 	})
 
@@ -3818,13 +3902,23 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("resumed conversation, sibling task on the same entity: id=%q err=%v, want empty", id, err)
 		}
 
-		// Terminate it — terminal, plus the already-ended manual conversation,
-		// resolves back to "".
+		// The follow-up's turn ends on the finished blueprint, so it records
+		// no verdict and the conversation is still the task's live one: an
+		// event arriving between a person's messages folds into it.
 		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
+		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
+			t.Errorf("follow-up between turns: id=%q err=%v, want %q", id, err, eventConversationID)
+		}
+
+		// The boundary is what takes it out: with it ended beside the manual
+		// conversation, the task resolves back to "".
+		if _, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedDelegated); err != nil {
+			t.Fatalf("EndConversationsForTask: %v", err)
+		}
 		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
-			t.Errorf("terminal event conversation + ended manual: id=%q err=%v, want empty", id, err)
+			t.Errorf("ended event conversation + ended manual: id=%q err=%v, want empty", id, err)
 		}
 	})
 
@@ -3896,17 +3990,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Kept: what the next claim or message continues, in its tree.
 		stage("open", "open", "/tmp/triagefactory-runs/open", "", 0)
 		stage("mid-flight", "", "/tmp/triagefactory-runs/mid-flight", "", 0)
-		// A follow-up mid-flight on a finished blueprint's final step: the
-		// claim gate drives the run's current step whatever its terminal, so
-		// the tree it works in is kept like any other.
+		// A follow-up on a finished blueprint's final step, mid-flight and
+		// between turns: the claim gate drives the run's current step whatever
+		// its terminal, and a turn that ends there records no verdict, so the
+		// tree is kept like any other.
 		stage("followup-completed", "", "/tmp/triagefactory-runs/followup-completed", "completed", 0)
+		stage("followup-between-turns", "open", "/tmp/triagefactory-runs/followup-between-turns", "completed", 0)
 
-		// Swept: a verdict leaves nothing to continue. The same follow-up once
-		// its turn has ended reads as concluded again (the resume and the park
-		// both keep completed_at), and the ending wrote the snapshot its next
-		// follow-up rehydrates from.
+		// Swept: a verdict leaves nothing to continue, and a finished
+		// blueprint's step nobody has followed up on still holds its verdict.
 		stage("completed", SeedConcluded, "/tmp/triagefactory-runs/completed", "", 0)
-		stage("followup-ended", SeedConcluded, "/tmp/triagefactory-runs/followup-ended", "completed", 0)
+		stage("finished-not-followed-up", SeedConcluded, "/tmp/triagefactory-runs/finished-not-followed-up", "completed", 0)
 		stage("running", "running", "/tmp/triagefactory-runs/running", "", 0)
 		// No worktree recorded.
 		stage("no-worktree", "open", "", "", 0)
@@ -3923,18 +4017,18 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		for _, p := range paths {
 			got[p] = true
 		}
-		for _, want := range []string{"open", "mid-flight", "followup-completed"} {
+		for _, want := range []string{"open", "mid-flight", "followup-completed", "followup-between-turns"} {
 			if !got["/tmp/triagefactory-runs/"+want] {
 				t.Errorf("%s worktree missing from ListResumableWorktreePathsSystem", want)
 			}
 		}
-		for _, swept := range []string{"completed", "followup-ended", "running", "cancelled", "moved-past"} {
+		for _, swept := range []string{"completed", "finished-not-followed-up", "running", "cancelled", "moved-past"} {
 			if got["/tmp/triagefactory-runs/"+swept] {
 				t.Errorf("%s worktree leaked into ListResumableWorktreePathsSystem", swept)
 			}
 		}
-		if len(got) != 3 {
-			t.Errorf("got %d resumable paths, want 3 (%v)", len(got), paths)
+		if len(got) != 4 {
+			t.Errorf("got %d resumable paths, want 4 (%v)", len(got), paths)
 		}
 	})
 
@@ -5093,95 +5187,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("LastAgentActivityAtSystem_NewestNonUserMessage", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "open")
-
-		// No agent message yet → ok=false, the caller falls back to the
-		// conversation's start.
-		if _, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, conversationID); err != nil || ok {
-			t.Fatalf("empty conversation: got ok=%v err=%v, want ok=false err=nil", ok, err)
-		}
-
-		// Insert in id order: an assistant turn, then a LATER user follow-up. The
-		// watermark must be the assistant row, NOT the user message — a resume's
-		// just-recorded user message must not poison the "agent last ran" mark.
-		// Explicit timestamps make the assertion exact; ordering is by id, so the
-		// user row (inserted last, newest id) would win a naive ORDER BY id query.
-		agentAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-		for _, m := range []*domain.Message{
-			{ConversationID: conversationID, Role: "assistant", Content: "agent turn", CreatedAt: agentAt},
-			{ConversationID: conversationID, Role: "user", Content: "resume message", CreatedAt: agentAt.Add(time.Hour)},
-		} {
-			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
-				t.Fatalf("InsertMessage(%s): %v", m.Role, err)
-			}
-		}
-		at, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, conversationID)
-		if err != nil || !ok {
-			t.Fatalf("after messages: got ok=%v err=%v, want ok=true err=nil", ok, err)
-		}
-		if !at.Equal(agentAt) {
-			t.Errorf("watermark = %v, want the assistant row %v (user message must be excluded)", at, agentAt)
-		}
-
-		// A newer agent (tool) message advances the watermark.
-		toolAt := agentAt.Add(2 * time.Hour)
-		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: conversationID, Role: "tool", Content: "tool result", CreatedAt: toolAt,
-		}); err != nil {
-			t.Fatalf("InsertMessage(tool): %v", err)
-		}
-		at2, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, conversationID)
-		if err != nil || !ok {
-			t.Fatalf("after tool message: got ok=%v err=%v", ok, err)
-		}
-		if !at2.Equal(toolAt) {
-			t.Errorf("watermark = %v, want the newer tool row %v", at2, toolAt)
-		}
-	})
-
-	t.Run("HasPersonMessageSystem_SeesOnlyWhatAPersonWrote", func(t *testing.T) {
-		store, orgID, userID, seed := mk(t)
-		ctx := context.Background()
-		wrote := func(conversationID string) bool {
-			t.Helper()
-			ok, err := store.HasPersonMessageSystem(ctx, orgID, conversationID)
-			if err != nil {
-				t.Fatalf("HasPersonMessageSystem: %v", err)
-			}
-			return ok
-		}
-		insert := func(m domain.Message) {
-			t.Helper()
-			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
-				t.Fatalf("InsertMessage %q: %v", m.Content, err)
-			}
-		}
-		undelivered, delivered := false, true
-
-		waiting := seedConversationForTest(t, orgID, seed, "open")
-		// Rows TF writes carry the engagement's user too, and a withdrawn
-		// message never happened.
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "the task", Delivered: &delivered})
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "parked"})
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Content: "withdrawn", Delivered: &undelivered, WindowState: domain.MessageWindowInactive})
-		if wrote(waiting) {
-			t.Fatalf("HasPersonMessageSystem = true with only TF's rows and a withdrawn message")
-		}
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Content: "one more thing", Delivered: &undelivered})
-		if !wrote(waiting) {
-			t.Errorf("HasPersonMessageSystem = false with a person's message waiting")
-		}
-
-		steered := seedConversationForTest(t, orgID, seed, "running")
-		insert(domain.Message{ConversationID: steered, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "mid-turn", Delivered: &delivered, WindowState: domain.MessageWindowInactive})
-		if !wrote(steered) {
-			t.Errorf("HasPersonMessageSystem = false with a person's steer delivered and compacted away")
-		}
-	})
-
 	t.Run("MemoryMissing_IsFalseOnlyForAnAgentWrittenRow", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -5254,8 +5259,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("owed = %v, want exactly [%s] — %s filed its memory and %s never ended",
 				ids, owing, settled, live)
 		}
-		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskOpen {
-			t.Errorf("owed row = %+v, want org %s task %s open", owed[0], orgID, taskID)
+		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskWorking {
+			t.Errorf("owed row = %+v, want org %s task %s with %s working on it", owed[0], orgID, taskID, live)
 		}
 	})
 
@@ -5442,50 +5447,51 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("ListMemoryOwed_OrdersOpenTasksFirstThenOldestBoundary", func(t *testing.T) {
+	t.Run("ListMemoryOwed_OrdersTasksWithWorkFirstThenOldestBoundary", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		if seed.BackdateEndedAt == nil || seed.SetTaskStatus == nil {
 			t.Skip("harness cannot stage boundary ages or task statuses")
 		}
 
-		// Three owing conversations: two on open tasks, one on a task nobody
-		// is waiting on. The closed one ended longest ago, so ordering by age
-		// alone would put it first — which is exactly the answer the open-task
-		// term exists to prevent.
-		newOpen := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		oldOpen := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		closedTaskConv := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		ages := map[string]time.Duration{
-			newOpen:        1 * time.Hour,
-			oldOpen:        6 * time.Hour,
-			closedTaskConv: 24 * time.Hour,
-		}
-		for id, age := range ages {
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+		// Four owing conversations. Two are on tasks with a conversation
+		// waiting to be driven, which the claim gate holds back until the
+		// memory exists; one of those tasks is closed. Two are on tasks with
+		// nothing working; one of those is closed. The idle ones ended longest
+		// ago, so ordering by age alone would put them first, and ordering by
+		// task status would split each pair.
+		owing := func(working bool, closeAs string, age time.Duration) string {
+			t.Helper()
+			ent := seed.Entity(t, "owed-order-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+			id := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
+			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedStepAdvanced); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 			seed.BackdateEndedAt(t, id, age)
-		}
-		closedTask := ""
-		for _, o := range mustListMemoryOwed(t, store, ctx) {
-			if o.ConversationID == closedTaskConv {
-				closedTask = o.TaskID
+			if working {
+				seedConversationForTaskTest(t, orgID, taskID, "", seed)
 			}
+			if closeAs != "" {
+				seed.SetTaskStatus(t, taskID, closeAs)
+			}
+			return id
 		}
-		if closedTask == "" {
-			t.Fatal("precondition: the closed-task fixture is not owed")
-		}
-		seed.SetTaskStatus(t, closedTask, "done")
+		workingClosed := owing(true, "done", 1*time.Hour)
+		workingOpen := owing(true, "", 6*time.Hour)
+		idleOpen := owing(false, "", 24*time.Hour)
+		idleClosed := owing(false, "dismissed", 48*time.Hour)
 
-		got := memoryOwedIDs(mustListMemoryOwed(t, store, ctx))
-		want := []string{oldOpen, newOpen, closedTaskConv}
+		owed := mustListMemoryOwed(t, store, ctx)
+		got := memoryOwedIDs(owed)
+		want := []string{workingOpen, workingClosed, idleClosed, idleOpen}
 		if !slices.Equal(got, want) {
-			t.Errorf("owed order = %v, want %v — open tasks first (they are blocking somebody), then oldest boundary", got, want)
+			t.Errorf("owed order = %v, want %v — tasks with a working conversation first, closed or open, then oldest boundary", got, want)
 		}
-		for _, o := range mustListMemoryOwed(t, store, ctx) {
-			if (o.ConversationID == closedTaskConv) == o.TaskOpen {
-				t.Errorf("row %+v: task_open disagrees with the task's status", o)
+		for _, o := range owed {
+			if wantWorking := o.ConversationID == workingOpen || o.ConversationID == workingClosed; o.TaskWorking != wantWorking {
+				t.Errorf("row %+v: task_working = %v, want %v", o, o.TaskWorking, wantWorking)
 			}
 		}
 	})

@@ -156,14 +156,16 @@ func (r *taskGateRig) detailCanWrite(t *testing.T, caller, id string) any {
 	return body["can_write"]
 }
 
+// The bodies carry a well-formed version, a new task's first, so a refusal
+// below is the gate's and not the body's.
 var taskGateRoutes = []struct {
 	name, method, suffix string
 	body                 any
 }{
-	{"patch", http.MethodPatch, "", map[string]any{"status": "dismissed"}},
-	{"claim", http.MethodPost, "/claim", map[string]any{}},
-	{"delegate", http.MethodPost, "/delegate", map[string]any{}},
-	{"requeue", http.MethodPost, "/requeue", nil},
+	{"patch", http.MethodPatch, "", map[string]any{"status": "dismissed", "version": 1}},
+	{"claim", http.MethodPost, "/claim", map[string]any{"version": 1}},
+	{"delegate", http.MethodPost, "/delegate", map[string]any{"version": 1}},
+	{"requeue", http.MethodPost, "/requeue", map[string]any{"version": 1}},
 }
 
 // TestTaskWriteGate_Postgres: the four task write routes answer a task the
@@ -243,7 +245,8 @@ func TestTaskWriteGate_Postgres(t *testing.T) {
 	if got := r.detailCanWrite(t, r.split, unclaimedShared); got != true {
 		t.Errorf("split caller GET unclaimed task: can_write = %v, want true", got)
 	}
-	rec := r.do(t, r.split, http.MethodPatch, "/api/tasks/"+unclaimedShared, map[string]any{"status": "dismissed"})
+	rec := r.do(t, r.split, http.MethodPatch, "/api/tasks/"+unclaimedShared,
+		withTaskVersionIn(t, r.s, r.orgID, unclaimedShared, map[string]any{"status": "dismissed"}))
 	if rec.Code != http.StatusOK {
 		t.Errorf("split caller dismiss of the unclaimed task = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

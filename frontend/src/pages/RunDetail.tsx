@@ -14,6 +14,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import { GlassBackdrop } from './setup/glass'
 import { toast } from '../components/Toast/toastStore'
 import { apiFetch, apiJSON } from '../lib/apiClient'
+import { isVersionConflict, requeueTask } from '../lib/taskWrites'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
 // task + messages (live over websocket via useConversationDetail), wires the real
@@ -33,6 +34,7 @@ export default function RunDetail() {
     pendingPermissions,
     resolvePermission,
     softRefresh,
+    refetch,
     hasOlderMessages,
     loadingOlderMessages,
     loadOlderMessages,
@@ -157,15 +159,21 @@ export default function RunDetail() {
   // to the pool with the task, for whoever picks it up next to finish or
   // dismiss. So it fires straight from the button — there is nothing
   // destructive to confirm.
+  //
+  // It names the version of the task this page read, so a task that changed
+  // since (closed, claimed, requeued by someone else) is refused rather than
+  // pulled back to the queue over the change. The page reads its task once, so
+  // a refusal reloads it: the next press decides against the task as it is.
   const handleRequeue = useCallback(async () => {
-    if (!conversation?.TaskID) return
+    if (!task) return
     try {
-      await apiFetch(`/api/tasks/${conversation.TaskID}/requeue`, { method: 'POST' })
+      await requeueTask(task)
       navigate(orgHref('/board'))
     } catch (err) {
       toast.failed(err, 'Could not return the task to the queue.')
+      if (isVersionConflict(err)) refetch()
     }
-  }, [navigate, orgHref, conversation?.TaskID])
+  }, [navigate, orgHref, task, refetch])
 
   // Open one deliverable's editor overlay by id — from the dock's approval
   // popover, or from the rail's Deliverables list. The per-item editors
@@ -212,8 +220,9 @@ export default function RunDetail() {
     onBack: () => navigate(orgHref('/board')),
     onCancel: handleStop,
     // A caller who may not write the task (a team viewer) is not offered the
-    // requeue. Absent is unknown, and offers it.
-    onRequeue: task?.can_write === false ? undefined : handleRequeue,
+    // requeue. Absent is unknown, and offers it. A page whose task did not load
+    // has no version to name, so it offers no requeue either.
+    onRequeue: !task || task.can_write === false ? undefined : handleRequeue,
     onOpenDeliverable: handleOpenDeliverable,
     onDeliverableResolved: softRefresh,
     onMessage: handleMessage,

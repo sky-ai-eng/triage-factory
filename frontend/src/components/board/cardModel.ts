@@ -45,6 +45,11 @@ export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'can
 
 export interface CardModel {
   lifecycle: Lifecycle
+  /** The task was dismissed: closed without its work being done, by a person
+   *  or as a duplicate of another task. A fact about the task, beside the
+   *  run's lifecycle rather than a value of it: a close ends no run, so a
+   *  dismissed task's run can be in any state. */
+  dismissed: boolean
   /** What the work is, as the scorer summarized it: the task's summary, in
    *  every state. */
   summary?: string
@@ -141,6 +146,7 @@ export function deriveCard(
 
   return {
     lifecycle,
+    dismissed: task.status === 'dismissed',
     summary,
     // A closed task is never scored, so it waits on no summary.
     summaryPending: !summary && task.scoring_status !== 'scored' && isOpenTask(task),
@@ -180,9 +186,9 @@ function isOpenTask(task: Task): boolean {
 }
 
 function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
-  // No run: a task, waiting — or, for a task ended by hand with nothing ever
-  // run on it, simply done.
-  if (!run) return task.status === 'done' ? 'done' : 'queued'
+  // No run: a task, waiting — or, for a task closed with nothing ever run on
+  // it, simply done.
+  if (!run) return isOpenTask(task) ? 'queued' : 'done'
   const s = run.Status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'

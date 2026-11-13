@@ -68,7 +68,8 @@ type FactorySeeder struct {
 	// FinishConversation stamps a terminal status and completed_at on an
 	// already-seeded conversation — the shape the team activity node's
 	// failed cut reads, which windows on when a run ended rather than on
-	// when it started.
+	// when it started. A zero completedAt writes the status with no stamp:
+	// with `open`, a turn that ended with no verdict.
 	FinishConversation func(t *testing.T, conversationID, status string, completedAt time.Time)
 
 	// WarmClaim puts the conversation's active claim in phase
@@ -263,10 +264,11 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		conversationGenerated := seed.Conversation(t, taskID, "running")
 		conversationPopulated := seed.Conversation(t, taskID, "running")
 		conversationTerminal := seed.Conversation(t, taskID, SeedConcluded) // must NOT appear
-		// A turn that concluded with its engagement keeping the claim warm:
-		// the claim is unreleased, but nothing is in flight. Must NOT appear.
+		// A turn that ended with its engagement keeping the claim warm: parked
+		// with no verdict, as a follow-up's turn on a finished blueprint is.
+		// The claim is unreleased, but nothing is in flight. Must NOT appear.
 		conversationWarm := seed.Conversation(t, taskID, "running")
-		seed.FinishConversation(t, conversationWarm, domain.StatusOpen, now)
+		seed.FinishConversation(t, conversationWarm, domain.StatusOpen, time.Time{})
 		seed.WarmClaim(t, conversationWarm)
 
 		seed.SetConversationMemory(t, conversationNone, nullSentinel, domain.MemorySourceNone)
@@ -289,7 +291,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 			t.Errorf("terminal conversation %s leaked into ActiveConversations — status filter failed", conversationTerminal)
 		}
 		if gotIDs[conversationWarm] {
-			t.Errorf("concluded conversation %s on a warm claim listed as in flight", conversationWarm)
+			t.Errorf("parked conversation %s on a warm claim listed as in flight", conversationWarm)
 		}
 		for _, id := range []string{conversationNoRow, conversationNone, conversationGenerated, conversationPopulated} {
 			if !gotIDs[id] {

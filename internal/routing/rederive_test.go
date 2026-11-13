@@ -312,7 +312,7 @@ func TestReDeriveWorker_UserClaimed_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 	scoreTask(t, database, taskID, 0.9)
-	if ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID); err != nil || !ok {
+	if ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, testTaskStore(database), runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 		t.Fatalf("stamp user claim: ok=%v err=%v", ok, err)
 	}
 

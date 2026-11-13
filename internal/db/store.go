@@ -423,9 +423,8 @@ type Stores struct {
 	// TFAC-76.
 	AuthEvents AuthEventStore
 
-	// StagedInjections is the durable, producer-agnostic "stage for next
-	// resume" agent-injection queue (TFAC-501, the generic terminal half of
-	// TFAC-493's feedback seam), stored as undelivered messages rows.
+	// StagedInjections is the durable, producer-agnostic agent-injection
+	// queue, stored as undelivered messages rows.
 	// Admin-pool-only in Postgres: both the producer (an eventbus
 	// subscriber) and the consumer (a detached resume goroutine) run
 	// without JWT claims. SQLite is N=1. Written/read by the delegate
@@ -674,6 +673,12 @@ type SystemTxStores struct {
 	// marks it stands for.
 	GitHubDeliveries   GitHubDeliveryStore
 	GitHubRefreshMarks GitHubRefreshMarkStore
+
+	// Blueprints and Tasks join the transaction, so a blueprint run's finish
+	// and the close of its task commit together: a task is never left open
+	// with its run no longer running and nothing yet closing it.
+	Blueprints BlueprintStore
+	Tasks      TaskStore
 
 	// Ext carries the opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go) from the app pool and the

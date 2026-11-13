@@ -3,6 +3,8 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -18,16 +20,16 @@ import (
 // Its own factory rather than a ride on EntityStoreFactory because the
 // method under test writes across entities, tasks, task_events and
 // blueprint_runs, and reads conversations: the fixtures are the ones
-// TaskCloseCancelIntentSeeder already knows how to stage, plus the entity
+// TaskCloseSeeder already knows how to stage, plus the entity
 // each task hangs off.
 type EntityTerminalCloseFactory func(t *testing.T) (entities db.EntityStore, tasks db.TaskStore, orgID string, seed EntityTerminalCloseSeeder)
 
 // EntityTerminalCloseSeeder stages what the terminating close spans and
-// reads back what it wrote. The embedded cancel-intent seeder stages tasks
+// reads back what it wrote. The embedded close seeder stages tasks
 // (each on a fresh entity), events, blueprints and conversations; the extra
 // callbacks reach the entity side.
 type EntityTerminalCloseSeeder struct {
-	TaskCloseCancelIntentSeeder
+	TaskCloseSeeder
 
 	// EntityForTask returns the entity a seeded task hangs off.
 	EntityForTask func(t *testing.T, taskID string) (entityID string)
@@ -49,6 +51,19 @@ type EntityTerminalCloseSeeder struct {
 	// its tasks alone — the state no store write produces and the checker's
 	// Count B exists to find.
 	CloseEntityRaw func(t *testing.T, entityID string)
+
+	// Review gives the conversation a review deliverable in state about the
+	// pull request entityID names, and returns its id.
+	Review func(t *testing.T, conversationID, entityID, state string) (deliverableID string)
+
+	// DeliverableState reads a deliverable's state.
+	DeliverableState func(t *testing.T, deliverableID string) string
+
+	// DeliverableDetails reads a deliverable's details_json.
+	DeliverableDetails func(t *testing.T, deliverableID string) string
+
+	// Deliverable is the deliverable store's point read of one row.
+	Deliverable func(deliverableID string) (*domain.Deliverable, error)
 }
 
 // RunEntityTerminalCloseConformance is the shared suite for
@@ -58,7 +73,7 @@ type EntityTerminalCloseSeeder struct {
 // serialization, TaskStore's refusal to mint on a closed entity.
 //
 // The declined cases carry the weight. A close that lands against the wrong
-// version cancels work on a pull request someone just reopened, and a close
+// version closes the tasks of a pull request someone just reopened, and a close
 // that lands half — tasks flipped, entity not, or the reverse — is exactly
 // the state the invariant forbids. So every guard miss is asserted as "nothing
 // at all was written", against every table the transaction touches.
@@ -74,9 +89,12 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		entityID := seed.EntityForTask(t, taskA)
 		taskB := seed.TaskOnEntity(t, entityID, review)
 		eventID := seed.Event(t, taskA)
-		// Parked on a person: still active, so the close stops it, and not
-		// working, so the close is not held.
-		brID, convID := seed.BlueprintAndConversation(t, taskA, "running", domain.StatusOpen)
+		// One task's conversation is working and the other's is parked on a
+		// person. The close leaves both, and the blueprints behind them, as
+		// they were, and reports the working one for the caller to tell.
+		brID, convID := seed.BlueprintAndConversation(t, taskA, "running", "")
+		parkedRun, parkedConv := seed.BlueprintAndConversation(t, taskB, "running", domain.StatusOpen)
+		working, parked := seed.WorkState(t, brID, convID), seed.WorkState(t, parkedRun, parkedConv)
 		_, seq := seed.EntityRow(t, entityID)
 
 		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review}, "entity_closed", domain.EventGitHubPRMerged, eventID)
@@ -89,8 +107,11 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		if len(res.ClosedTaskIDs) != 2 {
 			t.Errorf("ClosedTaskIDs = %v, want both tasks", res.ClosedTaskIDs)
 		}
-		if got := res.ActiveConversationIDs[taskA]; len(got) != 1 || got[0] != convID {
-			t.Errorf("active conversations for %s = %v, want exactly [%s]", taskA, got, convID)
+		if got := res.WorkingConversationIDs[taskA]; len(got) != 1 || got[0] != convID {
+			t.Errorf("working conversations for %s = %v, want exactly [%s]", taskA, got, convID)
+		}
+		if got := res.WorkingConversationIDs[taskB]; len(got) != 0 {
+			t.Errorf("working conversations for %s = %v, want none: its conversation is parked", taskB, got)
 		}
 		if state, _ := seed.EntityRow(t, entityID); state != "closed" {
 			t.Errorf("entity state = %q, want closed", state)
@@ -100,8 +121,11 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 				t.Errorf("task %s status = %q, want done", id, got)
 			}
 		}
-		if !seed.CancelRequested(t, brID) {
-			t.Error("cancel_requested = false; the terminating close must carry the stop intent exactly as a typed close does")
+		if got := seed.WorkState(t, brID, convID); got != working {
+			t.Errorf("the close changed the working conversation or its blueprint:\n before %+v\n after  %+v", working, got)
+		}
+		if got := seed.WorkState(t, parkedRun, parkedConv); got != parked {
+			t.Errorf("the close changed the parked conversation or its blueprint:\n before %+v\n after  %+v", parked, got)
 		}
 		if n := seed.CloseAuditCount(t, taskA); n != 1 {
 			t.Errorf("close-audit rows on %s = %d, want 1", taskA, n)
@@ -121,15 +145,84 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		}
 	})
 
+	t.Run("Dismisses_the_pending_reviews_of_the_closed_pull_request", func(t *testing.T) {
+		// A review of a merged pull request can no longer be posted, so the
+		// close dismisses it whichever task's conversation staged it. A review
+		// of another pull request, and one already submitted, are left alone.
+		entities, _, orgID, seed := mk(t)
+		taskA := seed.Task(t)
+		entityID := seed.EntityForTask(t, taskA)
+		taskB := seed.Task(t)
+		otherEntityID := seed.EntityForTask(t, taskB)
+		_, convA := seed.BlueprintAndConversation(t, taskA, "running", domain.StatusOpen)
+		_, convB := seed.BlueprintAndConversation(t, taskB, "running", domain.StatusOpen)
+		pendingA := seed.Review(t, convA, entityID, domain.DeliverableStateReviewPending)
+		pendingB := seed.Review(t, convB, entityID, domain.DeliverableStateReviewPending)
+		submitted := seed.Review(t, convA, entityID, domain.DeliverableStateReviewSubmitted)
+		elsewhere := seed.Review(t, convB, otherEntityID, domain.DeliverableStateReviewPending)
+		_, seq := seed.EntityRow(t, entityID)
+
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "")
+		if err != nil {
+			t.Fatalf("CloseTerminalSystem: %v", err)
+		}
+		// The dismissed reviews come back ordered by id, each as the row the
+		// dismissal stored and under the conversation that staged it.
+		stagedBy := map[string]string{pendingA: convA, pendingB: convB}
+		want := []string{pendingA, pendingB}
+		sort.Strings(want)
+		var got []string
+		for _, d := range res.DismissedReviews {
+			got = append(got, d.ID)
+			if d.ConversationID != stagedBy[d.ID] {
+				t.Errorf("dismissed review %s names conversation %q, want %q", d.ID, d.ConversationID, stagedBy[d.ID])
+			}
+			AssertWriteReturnedStoredRow(t, "CloseTerminalSystem's dismissal of "+d.ID, d, func() (*domain.Deliverable, error) {
+				return seed.Deliverable(d.ID)
+			})
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("DismissedReviews = %v, want %v", got, want)
+		}
+		for id, wantState := range map[string]string{
+			pendingA:  domain.DeliverableStateReviewDismissed,
+			pendingB:  domain.DeliverableStateReviewDismissed,
+			submitted: domain.DeliverableStateReviewSubmitted,
+			elsewhere: domain.DeliverableStateReviewPending,
+		} {
+			if got := seed.DeliverableState(t, id); got != wantState {
+				t.Errorf("deliverable %s state = %q, want %q", id, got, wantState)
+			}
+		}
+		// Each dismissal records how the pull request ended, so the agent that
+		// staged it is not told a person dismissed it, and keeps the draft.
+		for _, id := range []string{pendingA, pendingB} {
+			d, err := domain.ParseReviewDeliverableDetails(seed.DeliverableDetails(t, id))
+			if err != nil {
+				t.Fatalf("parse details of %s: %v", id, err)
+			}
+			if d.Resolution != domain.ReviewResolutionPullRequestMerged || d.ReviewEvent != "COMMENT" {
+				t.Errorf("review %s details = %+v, want resolution %q with the draft kept", id, d, domain.ReviewResolutionPullRequestMerged)
+			}
+		}
+		if d, _ := domain.ParseReviewDeliverableDetails(seed.DeliverableDetails(t, submitted)); d.Resolution != "" {
+			t.Errorf("submitted review resolution = %q, want none — the close did not write it", d.Resolution)
+		}
+		if got := seed.TaskStatus(t, taskB); got != "queued" {
+			t.Errorf("task %s status = %q, want queued — dismissing its review is not a close of it", taskB, got)
+		}
+	})
+
 	t.Run("Version_guard_miss_writes_nothing", func(t *testing.T) {
 		// The reopen race: the event was judged at version N, and a poll
 		// has since re-judged the entity. Nothing may land — not the task,
-		// not its audit row, not the cancel intent, not the entity.
+		// not its audit row, not the entity.
 		entities, _, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		entityID := seed.EntityForTask(t, taskID)
 		eventID := seed.Event(t, taskID)
-		brID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
+		_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+		reviewID := seed.Review(t, convID, entityID, domain.DeliverableStateReviewPending)
 		_, judgedAt := seed.EntityRow(t, entityID)
 		seed.BumpPollSeq(t, entityID)
 
@@ -146,11 +239,11 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		if got := seed.TaskStatus(t, taskID); got != "queued" {
 			t.Errorf("task status = %q, want queued", got)
 		}
-		if seed.CancelRequested(t, brID) {
-			t.Error("cancel_requested = true after a declined close; a reopened pull request's run was cancelled")
-		}
 		if n := seed.CloseAuditCount(t, taskID); n != 0 {
 			t.Errorf("close-audit rows = %d, want 0", n)
+		}
+		if got := seed.DeliverableState(t, reviewID); got != domain.DeliverableStateReviewPending {
+			t.Errorf("review state = %q, want pending — the pull request it reviews was reopened", got)
 		}
 	})
 
@@ -277,9 +370,9 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		// The one exemption: the lifecycle task the terminating transition
 		// mints on the entity it just closed. It is minted, it is the only
 		// open task on the entity, and the checker's read does not count it.
-		riding, created, err := tasks.FindOrCreateAtSystem(ctx, orgID, "", entityID, domain.EventGitHubPRMerged, "", eventID, 0.5, time.Now().UTC())
-		if err != nil || !created || riding == nil {
-			t.Fatalf("mint the riding task on the closed entity: task=%v created=%v err=%v", riding, created, err)
+		riding, mint, err := tasks.FindOrCreateAtSystem(ctx, orgID, "", entityID, domain.EventGitHubPRMerged, "", eventID, 0.5, time.Now().UTC())
+		if err != nil || mint != db.TaskCreated || riding == nil {
+			t.Fatalf("mint the riding task on the closed entity: task=%v mint=%v err=%v", riding, mint, err)
 		}
 		if open, err := tasks.ListOpenOnClosedEntitiesSystem(ctx, orgID); err != nil || len(open) != 0 {
 			t.Errorf("open-on-closed = %v (err %v), want none — the riding task lives on a closed entity by design", open, err)

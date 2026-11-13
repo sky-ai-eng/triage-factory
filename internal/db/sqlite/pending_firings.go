@@ -78,7 +78,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, entityID, task
 const sqlitePendingFiringSelect = `
 	SELECT id, org_id,
 	       entity_id, task_id, trigger_id, triggering_event_id,
-	       COALESCE(skip_reason, ''), fired_run_id,
+	       COALESCE(skip_reason, ''), fired_run_id, COALESCE(handed_note_id, ''),
 	       status, attempt, max_attempts, next_attempt_at,
 	       lease_generation, COALESCE(lease_owner, ''), lease_epoch, leased_at, lease_expires_at,
 	       cancel_requested_at, COALESCE(cancel_requested_by, ''), COALESCE(cancel_reason, ''),
@@ -215,6 +215,95 @@ func (s *pendingFiringsStore) HasUnsettledForTask(ctx context.Context, orgID, ta
 	return err == nil, err
 }
 
+func (s *pendingFiringsStore) ListReadyForTask(ctx context.Context, orgID, taskID string) ([]domain.PendingFiring, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, sqlitePendingFiringSelect+`
+		WHERE task_id = ? AND status = 'ready'
+		ORDER BY id
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.PendingFiring{}
+	for rows.Next() {
+		f, err := scanSqlitePendingFiring(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// errFiringNotHandable rolls a hand-off back when its row cannot take one,
+// so a note staged in the same transaction does not outlive the refusal.
+var errFiringNotHandable = errors.New("firing is not ready for a hand-off")
+
+func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection, sharedNoteID string) (string, bool, error) {
+	if s.conn == nil {
+		return "", false, db.ErrTxBoundStore
+	}
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	noteID := sharedNoteID
+	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		if note != nil {
+			stored, err := newStagedInjectionStore(tx).AppendSystem(ctx, orgID, *note)
+			if err != nil {
+				return err
+			}
+			noteID = stored.ID
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE pending_firings SET handed_note_id = ?, unique_key = NULL
+			WHERE id = ? AND org_id = ? AND status = 'ready'
+			  AND handed_note_id IS NULL AND cancel_requested_at IS NULL
+		`, noteID, firingID, orgID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errFiringNotHandable
+		}
+		return nil
+	})
+	if errors.Is(err, errFiringNotHandable) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return noteID, true, nil
+}
+
+func (s *pendingFiringsStore) WithdrawHandedNote(ctx context.Context, orgID, noteID string) (bool, error) {
+	return newStagedInjectionStore(s.q).DeleteSystem(ctx, orgID, noteID)
+}
+
+func (s *pendingFiringsStore) TaskRerouted(ctx context.Context, orgID, taskID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var one int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT 1 FROM pending_firings
+		WHERE task_id = ? AND status = 'done' AND skip_reason = ?
+		LIMIT 1
+	`, taskID, domain.PendingFiringSkipRerouted).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *pendingFiringsStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -330,7 +419,7 @@ func scanSqlitePendingFiring(row interface{ Scan(...any) error }) (domain.Pendin
 	err := row.Scan(
 		&f.ID, &f.OrgID,
 		&f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
-		&f.SkipReason, &firedRunID,
+		&f.SkipReason, &firedRunID, &f.HandedNoteID,
 		&f.Status, &f.Attempt, &f.MaxAttempts, &nextAt,
 		&f.LeaseGeneration, &f.LeaseOwner, &leaseEpoch, &leasedAt, &expiresAt,
 		&cancelAt, &f.CancelRequestedBy, &f.CancelReason,

@@ -268,6 +268,29 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 			t.Helper()
 			execOne(t, conn, "ripen", `UPDATE pending_firings SET next_attempt_at = NULL WHERE id = ? AND status = 'ready'`, firingID)
 		},
+		StagedNotes: func(t *testing.T, conversationID string) []string {
+			t.Helper()
+			rows, err := conn.Query(`SELECT content FROM messages WHERE conversation_id = ? AND delivered = 0 AND COALESCE(window_state, '') <> 'inactive' ORDER BY id`, conversationID)
+			if err != nil {
+				t.Fatalf("read staged notes: %v", err)
+			}
+			defer rows.Close()
+			var out []string
+			for rows.Next() {
+				var body string
+				if err := rows.Scan(&body); err != nil {
+					t.Fatalf("scan staged note: %v", err)
+				}
+				out = append(out, body)
+			}
+			return out
+		},
+		DeliverNotes: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE messages SET delivered = 1 WHERE conversation_id = ? AND delivered = 0`, conversationID); err != nil {
+				t.Fatalf("deliver notes: %v", err)
+			}
+		},
 		InTx: func(t *testing.T, fn func(s db.PendingFiringsStore) error) error {
 			t.Helper()
 			return stores.Tx.WithTx(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {

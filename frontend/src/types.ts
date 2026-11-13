@@ -52,6 +52,11 @@ export interface Task {
   // when the viewer belongs to ≥2 teams.
   // TODO: board row color-coding consumes this.
   team_id?: string
+  // The task's version. Every task write sends the one its caller read
+  // (lib/taskWrites), and the server refuses a write whose task has changed
+  // since with 409 VERSION_CONFLICT. Every write answers the new one, which is
+  // what the caller's next write on the task sends.
+  version: number
   // memory_pending says a conversation on this task ended without leaving the
   // memory its successor is owed, and the dispatcher will not claim the task's
   // next delegation until one exists. Never absent: false is a real answer
@@ -68,7 +73,7 @@ export interface Task {
     started_at: string
   }
   // can_write is whether the caller may write the task: claim, delegate,
-  // requeue, undo, or PATCH it. The server derives it from the rule those
+  // requeue, or PATCH it. The server derives it from the rule those
   // routes enforce, so a team viewer reads false. On the detail read
   // (GET /api/tasks/{id}) and each row of POST /api/tasks/list; ABSENT means
   // the server did not answer, and consumers offer the control, whose route
@@ -321,8 +326,8 @@ export interface Conversation {
   // set was read; undefined under the transient-failure guard.
   pending_deliverable_ids?: string[]
   // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
-  // "Review N items →") and the resolve-all confirmation copy. unresolved_pr_count
-  // draft PRs + unresolved_review_count ready reviews === pending_deliverable_ids.length.
+  // "Review N items →"). unresolved_pr_count draft PRs + unresolved_review_count
+  // ready reviews === pending_deliverable_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
   // artifact_count is the number of objects this conversation changed,

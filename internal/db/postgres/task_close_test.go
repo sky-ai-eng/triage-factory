@@ -14,39 +14,39 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestTaskStore_CloseWithConversationCancelIntent_Postgres runs the shared close-
-// carries-stop-intent suite against the Postgres impl. Fixtures are seeded
-// through the harness's admin connection (BYPASSRLS) and the store is wired
-// on the same pool — the method is admin-pool only, so that is the pool it
-// runs on in production too. Skips cleanly when Docker isn't available.
-func TestTaskStore_CloseWithConversationCancelIntent_Postgres(t *testing.T) {
+// TestTaskStore_Close_Postgres runs the shared plain-close suite against the
+// Postgres impl. Fixtures are seeded through the harness's admin connection
+// (BYPASSRLS) and the store is wired on the same pool for both of its
+// handles, so a person's close runs with no claims to scope it. Skips
+// cleanly when Docker isn't available.
+func TestTaskStore_Close_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	dbtest.RunTaskCloseCancelIntentConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskCloseCancelIntentSeeder) {
+	dbtest.RunTaskCloseConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskCloseSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
-		seeder, _ := newPgCloseIntentSeeder(h.AdminDB, orgID, userID)
+		seeder, _ := newPgCloseSeeder(h.AdminDB, orgID, userID)
 		return stores.Tasks, orgID, seeder
 	})
 }
 
-// newPgCloseIntentSeeder builds the (task, event, blueprint, conversation)
+// newPgCloseSeeder builds the (task, event, blueprint, conversation)
 // seeder against the harness's admin connection for one org, and returns the
 // task→entity map it keeps so a suite that also needs the entity side can
 // read it. Shared with the terminating-close suite, which stages the same
 // graph.
-func newPgCloseIntentSeeder(conn *sql.DB, orgID, userID string) (dbtest.TaskCloseCancelIntentSeeder, map[string]string) {
+func newPgCloseSeeder(conn *sql.DB, orgID, userID string) (dbtest.TaskCloseSeeder, map[string]string) {
 	// entityForTask lets Event() find the entity a seeded task hangs off,
 	// so the closing event lands on the same entity production would put
 	// it on. Keyed per factory call, which is per subtest.
 	entityForTask := map[string]string{}
 
-	seeder := dbtest.TaskCloseCancelIntentSeeder{
+	seeder := dbtest.TaskCloseSeeder{
 		Task: func(t *testing.T) string {
 			t.Helper()
-			entityID, _, taskID := seedPgTaskChain(t, conn, orgID, userID, "close-intent-"+uuid.New().String()[:8])
+			entityID, _, taskID := seedPgTaskChain(t, conn, orgID, userID, "close-"+uuid.New().String()[:8])
 			entityForTask[taskID] = entityID
 			return taskID
 		},
@@ -97,13 +97,22 @@ func newPgCloseIntentSeeder(conn *sql.DB, orgID, userID string) (dbtest.TaskClos
 			}
 			return convID
 		},
-		CancelRequested: func(t *testing.T, blueprintRunID string) bool {
+		WorkState: func(t *testing.T, blueprintRunID, conversationID string) dbtest.TaskCloseWorkState {
 			t.Helper()
-			var flag bool
-			if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&flag); err != nil {
-				t.Fatalf("read cancel_requested: %v", err)
+			var st dbtest.TaskCloseWorkState
+			if blueprintRunID != "" {
+				if err := conn.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = $1`,
+					blueprintRunID).Scan(&st.RunStatus, &st.CancelRequested); err != nil {
+					t.Fatalf("read blueprint run: %v", err)
+				}
 			}
-			return flag
+			if err := conn.QueryRow(`
+					SELECT COALESCE(status, ''), stop_requested_at IS NOT NULL, ended_at IS NOT NULL
+					  FROM conversations WHERE id = $1`,
+				conversationID).Scan(&st.ConversationStatus, &st.StopRequested, &st.Ended); err != nil {
+				t.Fatalf("read conversation: %v", err)
+			}
+			return st
 		},
 		TaskStatus: func(t *testing.T, taskID string) string {
 			t.Helper()
@@ -136,7 +145,7 @@ func seedPgBlueprintRunForClose(t *testing.T, conn *sql.DB, orgID, userID, taskI
 		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'Close Intent BP', 'user')
+		        'Close BP', 'user')
 	`, bpID, orgID, userID); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
 	}
@@ -160,7 +169,7 @@ func seedPgStepPromptForClose(t *testing.T, conn *sql.DB, orgID, userID string) 
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'Close Intent', 'body', 'user', '', now(), now())
+		        'Close', 'body', 'user', '', now(), now())
 	`, promptID, orgID, userID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

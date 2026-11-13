@@ -90,7 +90,6 @@ export default function Overview() {
   const midnight = useMemo(() => utcMidnightISO(), [])
 
   const { needs, running } = useConversationSets(teamId, tick, transcriptTick)
-  const tasks = useTasksIndex(teamId, tick)
   const sinceMidnight = useActivityWindow(teamId, midnight, tick)
   const usage = useSpendToday(teamId, tick)
   const openPRs = useOpenPRCount(teamId, tick)
@@ -121,18 +120,14 @@ export default function Overview() {
 
   const needsTotal = needs?.total ?? null
   const quiet = !offline && needsTotal === 0
-  const needsItems = useMemo<RunRowItem[]>(() => {
+  const needsShown = useMemo<Conversation[]>(() => {
     const rows = [...(needs?.rows ?? [])]
     rows.sort(
       (a, b) => Date.parse(b.CompletedAt ?? b.StartedAt) - Date.parse(a.CompletedAt ?? a.StartedAt),
     )
-    return rows
-      .slice(0, NEEDS_SHOWN)
-      .map((c) => needsRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge))
-  }, [needs, tasks, runHref, renderAge])
-
-  const retryNow = useRetryClock(running?.rows)
-  const runningItems = useMemo<RunRowItem[]>(() => {
+    return rows.slice(0, NEEDS_SHOWN)
+  }, [needs])
+  const runningShown = useMemo<Conversation[]>(() => {
     const rows = running?.rows ?? []
     const live = rows
       .filter((c) => (ACTIVE_STATUSES as readonly string[]).includes(c.Status))
@@ -140,10 +135,29 @@ export default function Overview() {
     const queued = rows
       .filter((c: Conversation) => c.Status === 'queued')
       .sort((a, b) => (a.queue_position ?? 1e9) - (b.queue_position ?? 1e9))
-    return [...live, ...queued]
-      .slice(0, RUNNING_SHOWN)
-      .map((c) => runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge, retryNow))
-  }, [running, tasks, runHref, renderAge, retryNow])
+    return [...live, ...queued].slice(0, RUNNING_SHOWN)
+  }, [running])
+
+  // The tasks the shown rows name, and no others: a conversation past a
+  // section's cut is the Board's, so its task is not read here.
+  const tasks = useTasksIndex(
+    teamId,
+    [...needsShown, ...runningShown].map((c) => c.TaskID),
+    tick,
+  )
+  const needsItems = useMemo<RunRowItem[]>(
+    () => needsShown.map((c) => needsRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge)),
+    [needsShown, tasks, runHref, renderAge],
+  )
+
+  const retryNow = useRetryClock(running?.rows)
+  const runningItems = useMemo<RunRowItem[]>(
+    () =>
+      runningShown.map((c) =>
+        runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge, retryNow),
+      ),
+    [runningShown, tasks, runHref, renderAge, retryNow],
+  )
 
   const needsHidden = needsTotal != null ? Math.max(0, needsTotal - needsItems.length) : 0
   const runningHidden = running != null ? Math.max(0, running.total - runningItems.length) : 0

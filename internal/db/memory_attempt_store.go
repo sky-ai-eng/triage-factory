@@ -76,8 +76,9 @@ type MemoryAttemptStore interface {
 	// newest of those started at least `span` apart, the answer's Kinds are
 	// the error kinds among the ones that started within `window` before the
 	// newest, newest first, each with its newest attempt's message; before
-	// that, Kinds is empty. TasksWaiting counts the org's open tasks owing a
-	// memory either way.
+	// that, Kinds is empty. TasksWaiting counts the org's tasks owing a memory
+	// either way: the open ones, and the closed ones with a conversation still
+	// working.
 	//
 	// Attempts still running, or abandoned by a brain that stopped, are
 	// neither failures nor successes, so they move nothing.
