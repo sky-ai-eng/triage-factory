@@ -295,7 +295,8 @@ describe('the lane read runs on the server', () => {
 
   it('sends a picked sort as sort_key and sort_dir', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    // The filter panels render with the lanes, once every lane has answered.
+    await screen.findByText(FREE.title)
     // The panels sit in lane order, so the second Newest pill is In Progress's.
     const [, inProgressFilter] = screen.getAllByRole('button', { name: 'Sort & filter' })
     fireEvent.click(inProgressFilter)
