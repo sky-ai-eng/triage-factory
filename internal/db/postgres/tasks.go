@@ -953,17 +953,9 @@ func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID strin
 	return bumpTask(ctx, s.admin, orgID, taskID)
 }
 
-// bumpTask is one statement on either pool, so the close notes a cleared
-// hold withdraws go in a data-modifying CTE beside the task's UPDATE. Every
-// part of the statement reads the snapshot from before it, so prior is the
-// hold the bump clears, and a bump of a task holding none withdraws nothing.
 func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task, error) {
 	var t domain.Task
 	return scanTaskBareRow(q.QueryRowContext(ctx, `
-		WITH prior AS (
-		    SELECT close_deferred_event_id FROM tasks WHERE org_id = $1 AND id = $2
-		), withdrawn AS (`+withdrawProducerNotesForTaskSQL+`
-		       AND EXISTS (SELECT 1 FROM prior WHERE prior.close_deferred_event_id IS NOT NULL))
 		UPDATE tasks
 		SET `+db.TaskSetSQL(
 		db.TaskAssign{Col: "status", Expr: "CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END"},
@@ -973,7 +965,7 @@ func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task
 	)+`
 		WHERE org_id = $1 AND id = $2
 		RETURNING `+pgTaskBareColumns,
-		orgID, taskID, domain.StagedInjectionSubtypes, domain.StagedInjectionProducerTaskClosing), &t)
+		orgID, taskID), &t)
 }
 
 func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
@@ -1095,18 +1087,9 @@ func closeTaskOnEvent(ctx context.Context, q queryer, orgID, taskID, closeReason
 	if mode == applyHeldClose && held.String != closingEventID {
 		return db.TaskCloseOutcome{}, nil
 	}
-	rows, err := q.QueryContext(ctx, `
-		SELECT r.id FROM conversations r
-		 WHERE r.org_id = $1 AND r.task_id = $2
-		   AND `+workingConversationSQL+`
-		 ORDER BY r.started_at, r.id
-	`, orgID, taskID)
-	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("list working conversations: %w", err)
-	}
-	// Drained and closed (scanIDs closes) before the writes below: they ride
-	// the one connection this transaction holds.
-	working, err := scanIDs(rows, "conversations.id")
+	// Drained and closed before the writes below: they ride the one
+	// connection this transaction holds.
+	working, err := workingConversationIDs(ctx, q, orgID, taskID)
 	if err != nil {
 		return db.TaskCloseOutcome{}, fmt.Errorf("list working conversations: %w", err)
 	}
@@ -1224,31 +1207,16 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 }
 
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {
-	var cleared bool
-	err := inTx(ctx, s.admin, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE tasks
-			   SET close_deferred_event_id = NULL, close_deferred_at = NULL
-			 WHERE org_id = $1 AND id = $2 AND close_deferred_event_id = $3
-		`, orgID, taskID, eventID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil || n == 0 {
-			return err
-		}
-		cleared = true
-		if _, err := q.ExecContext(ctx, withdrawProducerNotesForTaskSQL, orgID, taskID,
-			domain.StagedInjectionSubtypes, domain.StagedInjectionProducerTaskClosing); err != nil {
-			return fmt.Errorf("withdraw close notes: %w", err)
-		}
-		return nil
-	})
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE tasks
+		   SET close_deferred_event_id = NULL, close_deferred_at = NULL
+		 WHERE org_id = $1 AND id = $2 AND close_deferred_event_id = $3
+	`, orgID, taskID, eventID)
 	if err != nil {
 		return false, err
 	}
-	return cleared, nil
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string, version int64) (bool, error) {
@@ -1398,6 +1366,45 @@ func recordTaskEvent(ctx context.Context, q queryer, orgID, taskID, eventID, kin
 		ON CONFLICT DO NOTHING
 	`, orgID, taskID, eventID, kind)
 	return err
+}
+
+// workingConversationIDs drains the task's working conversation ids, oldest
+// first, and closes the cursor before returning.
+func workingConversationIDs(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT r.id FROM conversations r
+		 WHERE r.org_id = $1 AND r.task_id = $2
+		   AND `+workingConversationSQL+`
+		 ORDER BY r.started_at, r.id
+	`, orgID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows, "conversations.id")
+}
+
+func (s *taskStore) WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	return workingConversationIDs(ctx, s.admin, orgID, taskID)
+}
+
+func (s *taskStore) ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	var eventID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		WHERE te.org_id = $1
+		  AND te.task_id = $2
+		  AND te.kind = 'closed'
+		ORDER BY te.created_at DESC, te.event_id DESC
+		LIMIT 1
+	`, orgID, taskID).Scan(&eventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return eventID, nil
 }
 
 func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {

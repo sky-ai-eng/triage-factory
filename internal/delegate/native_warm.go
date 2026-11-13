@@ -108,11 +108,10 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
 			}
 			s.broadcastConversationUpdate(n.orgID, n.conversationID, domain.StatusRunning)
-			// A close held while the claim was warm told only the
-			// conversations that were working, which this one was not. The
-			// loop reads the note at the turn's first model call, with the
-			// person's message.
-			s.tellHeldClose(context.WithoutCancel(ctx), n.orgID, conv, n.task.ID)
+			// A close while the claim was warm told only the conversations
+			// that were working, which this one was not. The loop reads the
+			// note at the turn's first model call, with the person's message.
+			s.tellClosedTask(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.task.ID)
 			// The first turn's params say how this engagement started: in a
 			// sandbox launched for it, in a workspace built or restored for
 			// it. Neither is true of a later turn, which runs in the sandbox and

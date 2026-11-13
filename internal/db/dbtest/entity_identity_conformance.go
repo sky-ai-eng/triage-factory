@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -470,9 +471,16 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ProviderJira, jiraScope, older.ID, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ProviderJira, jiraScope, newer.ID, "NEW-1", jiraScope+"/browse/NEW-1", "merge-repointed")
 
-		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, newer.ID, older.ID)
+		survivor, dismissed, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, newer.ID, older.ID)
 		if err != nil || survivor != older.ID {
 			t.Fatalf("merge = (%s, %v), want the older row %s to survive", survivor, err, older.ID)
+		}
+		// The dismissed task is what the caller tells the run working on it.
+		if !slices.Equal(dismissed, []string{dupTask}) {
+			t.Errorf("dismissed tasks = %v, want only the duplicate %s", dismissed, dupTask)
+		}
+		if working, err := s.Tasks.WorkingConversationIDsSystem(ctx, orgID, dupTask); err != nil || len(working) != 1 {
+			t.Errorf("working conversations of the dismissed task = %v (err %v), want the one run", working, err)
 		}
 		if after := dupWork(t); after != dupWorkBefore {
 			t.Errorf("the merge changed the run on the task it dismissed:\n before %+v\n after  %+v", dupWorkBefore, after)
@@ -553,7 +561,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		// NEW-2, moves onto it.
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ProviderJira, jiraScope, newer.ID, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
 
-		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, older.ID, newer.ID)
+		survivor, _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, older.ID, newer.ID)
 		if err != nil || survivor != older.ID {
 			t.Fatalf("merge = (%s, %v), want %s", survivor, err, older.ID)
 		}
@@ -589,16 +597,16 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if err != nil {
 			t.Fatalf("create elsewhere: %v", err)
 		}
-		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, b.ID); !errors.Is(err, db.ErrEntityIdentityAmbiguous) {
+		if _, _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, b.ID); !errors.Is(err, db.ErrEntityIdentityAmbiguous) {
 			t.Errorf("merge of two ids: err=%v, want ErrEntityIdentityAmbiguous", err)
 		}
-		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, elsewhere.ID); err == nil {
+		if _, _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, elsewhere.ID); err == nil {
 			t.Errorf("merge across scopes succeeded")
 		}
-		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, a.ID); err == nil {
+		if _, _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, a.ID); err == nil {
 			t.Errorf("merge of a row with itself succeeded")
 		}
-		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, "00000000-0000-0000-0000-00000000dead"); !errors.Is(err, sql.ErrNoRows) {
+		if _, _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, "00000000-0000-0000-0000-00000000dead"); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("merge with a missing row: err=%v, want sql.ErrNoRows", err)
 		}
 		for _, e := range []*domain.Entity{a, b, elsewhere} {
@@ -668,8 +676,12 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			"https://github.com/acme/old/pull/5#issuecomment-9005", "fold-comment")
 		before, _ := s.Entities.GetSystem(ctx, orgID, into.ID)
 
-		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, stub.ID, into.ID); err != nil {
+		dismissed, err := s.Entities.FoldStubEntitySystem(ctx, orgID, stub.ID, into.ID)
+		if err != nil {
 			t.Fatalf("FoldStubEntitySystem: %v", err)
+		}
+		if !slices.Equal(dismissed, []string{dupTask}) {
+			t.Errorf("dismissed tasks = %v, want only the duplicate %s", dismissed, dupTask)
 		}
 		if after := dupWork(t); after != dupWorkBefore {
 			t.Errorf("the fold changed the run on the task it dismissed:\n before %+v\n after  %+v", dupWorkBefore, after)
@@ -758,17 +770,17 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Fatalf("create elsewhere: %v", err)
 		}
 		for name, id := range map[string]string{"a row with a snapshot": seeded.ID, "a row with a provider id": identified.ID} {
-			if err := s.Entities.FoldStubEntitySystem(ctx, orgID, id, into.ID); !errors.Is(err, db.ErrEntityNotStub) {
+			if _, err := s.Entities.FoldStubEntitySystem(ctx, orgID, id, into.ID); !errors.Is(err, db.ErrEntityNotStub) {
 				t.Errorf("fold of %s: err=%v, want ErrEntityNotStub", name, err)
 			}
 		}
-		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, elsewhere.ID, into.ID); err == nil {
+		if _, err := s.Entities.FoldStubEntitySystem(ctx, orgID, elsewhere.ID, into.ID); err == nil {
 			t.Errorf("fold across scopes succeeded")
 		}
-		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, into.ID, into.ID); err == nil {
+		if _, err := s.Entities.FoldStubEntitySystem(ctx, orgID, into.ID, into.ID); err == nil {
 			t.Errorf("fold of a row into itself succeeded")
 		}
-		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", into.ID); !errors.Is(err, sql.ErrNoRows) {
+		if _, err := s.Entities.FoldStubEntitySystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", into.ID); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("fold of a missing row: err=%v, want sql.ErrNoRows", err)
 		}
 		for _, e := range []*domain.Entity{into, seeded, identified, elsewhere} {

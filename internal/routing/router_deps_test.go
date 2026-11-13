@@ -106,8 +106,7 @@ func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, st
 	return delegate.InjectNotDelivered
 }
 
-func (refusingDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
-	return false
+func (refusingDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
 // discardPublisher is the Publisher of a test that does not read the

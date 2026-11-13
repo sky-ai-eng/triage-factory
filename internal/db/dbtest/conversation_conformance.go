@@ -5093,46 +5093,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("HasPersonMessageSystem_SeesOnlyWhatAPersonWrote", func(t *testing.T) {
-		store, orgID, userID, seed := mk(t)
-		ctx := context.Background()
-		wrote := func(conversationID string) bool {
-			t.Helper()
-			ok, err := store.HasPersonMessageSystem(ctx, orgID, conversationID)
-			if err != nil {
-				t.Fatalf("HasPersonMessageSystem: %v", err)
-			}
-			return ok
-		}
-		insert := func(m domain.Message) {
-			t.Helper()
-			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
-				t.Fatalf("InsertMessage %q: %v", m.Content, err)
-			}
-		}
-		undelivered, delivered := false, true
-
-		waiting := seedConversationForTest(t, orgID, seed, "open")
-		// Rows TF writes carry the engagement's user too, and a withdrawn
-		// message never happened.
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "the task", Delivered: &delivered})
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "parked"})
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Content: "withdrawn", Delivered: &undelivered, WindowState: domain.MessageWindowInactive})
-		if wrote(waiting) {
-			t.Fatalf("HasPersonMessageSystem = true with only TF's rows and a withdrawn message")
-		}
-		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Content: "one more thing", Delivered: &undelivered})
-		if !wrote(waiting) {
-			t.Errorf("HasPersonMessageSystem = false with a person's message waiting")
-		}
-
-		steered := seedConversationForTest(t, orgID, seed, "running")
-		insert(domain.Message{ConversationID: steered, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "mid-turn", Delivered: &delivered, WindowState: domain.MessageWindowInactive})
-		if !wrote(steered) {
-			t.Errorf("HasPersonMessageSystem = false with a person's steer delivered and compacted away")
-		}
-	})
-
 	t.Run("MemoryMissing_IsFalseOnlyForAnAgentWrittenRow", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

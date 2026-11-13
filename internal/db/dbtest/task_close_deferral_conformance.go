@@ -559,51 +559,6 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			t.Errorf("close = (%q, %q), want (%s, %s)", got.CloseReason, got.CloseEventType, db.SiblingEventCloseReason, passed)
 		}
 	})
-
-	t.Run("Clearing_a_hold_withdraws_its_close_notes", func(t *testing.T) {
-		stores, orgID, seed := mk(t)
-		// "unheld" is a bump of a task that holds no close: it clears
-		// nothing, so it withdraws nothing.
-		for _, how := range []string{"bump", "clear", "unheld"} {
-			taskID := seed.Task(t)
-			eventID := seed.Event(t, taskID)
-			_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
-			if how != "unheld" {
-				seed.DraftPullRequest(t, convID, seed.EntityForTask(t, seed.Task(t)))
-				if out := closeOrHold(t, stores.Tasks, orgID, taskID, eventID); !out.Held {
-					t.Fatalf("%s: CloseOrHoldSystem = %+v, want held", how, out)
-				}
-			}
-			for _, producer := range []string{domain.StagedInjectionProducerTaskClosing, domain.StagedInjectionProducerPRCoherence} {
-				if _, err := stores.StagedInjections.AppendSystem(ctx, orgID, domain.StagedInjection{
-					ConversationID: convID, Subtype: domain.MessageSubtypeInjectionSystemNote,
-					Producer: producer, Body: producer, Provenance: domain.NoteProvenance{EventID: eventID},
-				}); err != nil {
-					t.Fatalf("AppendSystem(%s): %v", producer, err)
-				}
-			}
-			if how == "clear" {
-				if cleared, err := stores.Tasks.ClearCloseDeferralSystem(ctx, orgID, taskID, eventID); err != nil || !cleared {
-					t.Fatalf("ClearCloseDeferralSystem = %v (err %v), want cleared", cleared, err)
-				}
-			} else if _, err := stores.Tasks.BumpSystem(ctx, orgID, taskID, seed.Event(t, taskID)); err != nil {
-				t.Fatalf("BumpSystem: %v", err)
-			}
-			left, err := stores.StagedInjections.FlushPendingSystem(ctx, orgID, convID)
-			if err != nil {
-				t.Fatalf("FlushPendingSystem: %v", err)
-			}
-			want := 1
-			if how == "unheld" {
-				want = 2
-			}
-			if len(left) != want {
-				t.Errorf("%s: still staged = %+v, want %d", how, left, want)
-			} else if want == 1 && left[0].Producer != domain.StagedInjectionProducerPRCoherence {
-				t.Errorf("%s: still staged = %+v, want only the pull request note", how, left)
-			}
-		}
-	})
 }
 
 func outcomeEqual(a, b db.TaskCloseOutcome) bool {

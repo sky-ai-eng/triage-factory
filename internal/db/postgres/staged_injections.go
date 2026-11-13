@@ -65,16 +65,15 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 // withdrawProducerNotesSQL withdraws the notes producer $4 staged in org $1
 // that are still waiting, under any of the staged subtypes ($3), as
 // DeleteSystem withdraws one: delivered stays false and the row leaves the
-// window. Each scope below adds which conversations, named by $2.
+// window. The scope below adds which conversations, named by $2.
 const withdrawProducerNotesSQL = `
 	UPDATE messages SET window_state = 'inactive'
 	 WHERE org_id = $1 AND NOT delivered AND role = 'user'
 	   AND subtype = ANY($3::text[]) AND metadata->>'producer' = $4`
 
 // withdrawProducerNotesForTaskSQL scopes withdrawProducerNotesSQL to task
-// $2's conversations. The task store's clears of a held close run it in
-// their own statements, since a hold cleared without its close makes its
-// notes false.
+// $2's conversations. The task store's reopen runs it for the close notes,
+// which a reopen makes false.
 const withdrawProducerNotesForTaskSQL = withdrawProducerNotesSQL + `
 	   AND conversation_id IN (SELECT c.id FROM conversations c WHERE c.org_id = $1 AND c.task_id = $2)`
 
@@ -95,14 +94,6 @@ func (s *stagedInjectionStore) RestorePendingSystem(ctx context.Context, orgID, 
 		  AND role = 'user' AND subtype = ANY($4::text[])
 	`, orgID, conversationID, rowIDs, domain.StagedInjectionSubtypes); err != nil {
 		return fmt.Errorf("restore staged injections: %w", err)
-	}
-	return nil
-}
-
-func (s *stagedInjectionStore) WithdrawPendingSystem(ctx context.Context, orgID, conversationID, producer string) error {
-	if _, err := s.admin.ExecContext(ctx, withdrawProducerNotesSQL+`
-	   AND conversation_id = $2`, orgID, conversationID, domain.StagedInjectionSubtypes, producer); err != nil {
-		return fmt.Errorf("withdraw %s notes: %w", producer, err)
 	}
 	return nil
 }
@@ -142,16 +133,16 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	return consumed, err
 }
 
-func (s *stagedInjectionStore) HasNoteForEventSystem(ctx context.Context, orgID, conversationID, producer, eventID string) (bool, error) {
+func (s *stagedInjectionStore) HasNoteForTaskCloseSystem(ctx context.Context, orgID, conversationID, taskClose string) (bool, error) {
 	var told bool
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM messages
 			WHERE org_id = $1::uuid AND conversation_id = $2::uuid
 			  AND role = 'user' AND subtype = ANY($3::text[])
-			  AND metadata->>'producer' = $4 AND metadata->>'event_id' = $5
+			  AND metadata->>'task_close' = $4
 			  AND (delivered OR window_state = 'active')
 		)
-	`, orgID, conversationID, domain.StagedInjectionSubtypes, producer, eventID).Scan(&told)
+	`, orgID, conversationID, domain.StagedInjectionSubtypes, taskClose).Scan(&told)
 	return told, err
 }

@@ -50,12 +50,13 @@ type Delegator interface {
 	// outcomes are delivered or staged where something will read them, and
 	// the caller records task_events 'injected'.
 	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
-	// TellTaskClosing stages the note that evt resolved the conversation's
-	// task, delivered at its next tool boundary and never as a turn of its
-	// own, unless the conversation already has it. An event's close tells
-	// each conversation working on the task through it. Reports whether the conversation has
-	// the note. Signature matches *delegate.Spawner's method exactly.
-	TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool
+	// TellTaskClosed tells each of conversationIDs, the conversations
+	// working on the task when an event closed it, that the task closed
+	// and how. The note is composed from the task's stored close, reaches
+	// each conversation at its next tool boundary and never as a turn of
+	// its own, and is sent once per close. Signature matches
+	// *delegate.Spawner's method exactly.
+	TellTaskClosed(ctx context.Context, orgID, taskID string, conversationIDs []string)
 }
 
 // EventPublisher is the bus-publish seam the router uses to mirror the

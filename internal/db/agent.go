@@ -1333,15 +1333,6 @@ type ConversationStore interface {
 	// runtime into a conversation somebody else now owns.
 	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error)
 
-	// HasPersonMessageSystem reports whether a person has written to the
-	// conversation: a plain or steered user message with an author, delivered
-	// or still waiting, and not withdrawn. Every row TF writes itself carries
-	// a subtype of its own, so these rows are the people's alone; the
-	// held-close note reads it to tell work a person drives from work an
-	// event started, during the engagement as much as before it. Admin pool,
-	// for the router and the dispatcher's claim path.
-	HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error)
-
 	// ListReapableSnapshotKeysSystem returns the (org, task_id) of every task
 	// all of whose top-level conversations last went idle before cutoff and
 	// none of whose conversations is claimed. These are the workspace snapshot

@@ -106,7 +106,8 @@ type TaskCloseOutcome struct {
 	NewlyHeld bool
 	// WorkingConversationIDs are the conversations working on the task when
 	// it closed or held, oldest first, read in the transaction that decided
-	// it: the set the caller tells. The close writes nothing on them.
+	// it: the set the caller tells of a close. The close writes nothing on
+	// them.
 	WorkingConversationIDs []string
 }
 
@@ -595,8 +596,7 @@ type TaskStore interface {
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
 	// update primary_event_id; subsequent events are tracked via
 	// the task_events junction (see RecordEvent). It also clears a close
-	// the task holds (domain.TaskCloseDeferral), and withdraws the close
-	// notes still waiting on its conversations: the task's own event
+	// the task holds (domain.TaskCloseDeferral): the task's own event
 	// arriving again says the situation is live again.
 	Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 
@@ -842,8 +842,9 @@ type TaskStore interface {
 	// when claimed, queued when not, which is what tasks_queue_unclaimed
 	// admits), clears closed_at, close_reason, close_event_type and any held
 	// close, and withdraws the close notes still waiting on the task's
-	// conversations, as Bump does for a hold it clears. The task comes back
-	// in the shape a found one does, with TaskReopened.
+	// conversations, which would tell them of a close that no longer
+	// stands. The task comes back in the shape a found one does, with
+	// TaskReopened.
 	//
 	// These doors are outside the returned-row rule: they return the task
 	// joined to its entity, which the router reads and no RETURNING can
@@ -948,8 +949,7 @@ type TaskStore interface {
 	ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (TaskCloseOutcome, error)
 
 	// CloseDeferralForTaskSystem returns the close the task holds, or nil
-	// when it holds none or is no longer active. Admin pool: its reader, a
-	// run's launch, carries no claims.
+	// when it holds none or is no longer active. Admin pool.
 	CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error)
 
 	// ListActiveCloseDeferralsSystem returns every deferral held by an active
@@ -969,8 +969,7 @@ type TaskStore interface {
 	// eventID — a compare-and-clear on the event the sweep read, so a
 	// deferral a later closing event overwrote in between survives for the
 	// next pass. It does not look at the task's status. cleared reports whether
-	// the compare matched, and a clear withdraws the close notes still
-	// waiting on the task's conversations, as Bump does.
+	// the compare matched.
 	//
 	// Exempt from the returned-row rule: what it leaves is a row with no
 	// deferral, and the one fact the caller acts on is whether the compare
@@ -980,6 +979,26 @@ type TaskStore interface {
 	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
 	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
+
+	// ClosingEventIDSystem returns the id of the event that closed the task:
+	// its newest task_events row of kind 'closed', which an event's close
+	// writes with the close (CloseOnEventSystem). "" when the task has none,
+	// as after a person's close of a task no event ever closed. A task an
+	// event closed, another reopened, and a person then closed still has the
+	// first close's row, so a caller reads this only for a task whose
+	// close_reason says an event closed it. Admin pool, org_id bound by
+	// argument.
+	ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
+
+	// WorkingConversationIDsSystem returns the conversations working on the
+	// task, oldest first, by the predicate an event's close reads in its own
+	// transaction (TaskCloseOutcome.WorkingConversationIDs). It is for a
+	// close whose door returns no such set, a person's and a duplicate
+	// merge's, read after the close commits: a close writes nothing on a
+	// conversation, so the set is the one the close found unless a
+	// conversation started or stopped working in between. Admin pool, org_id
+	// bound by argument.
+	WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// LatestEventIDSystem returns the id of the newest event that spawned or
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'

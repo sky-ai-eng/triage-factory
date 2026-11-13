@@ -199,7 +199,8 @@ func RunTaskCloseConformance(t *testing.T, mk TaskCloseFactory) {
 			taskID := seed.Task(t)
 			_, convID := seed.BlueprintAndConversation(t, taskID, "running", shape.convStatus)
 
-			out, err := s.CloseOnEventSystem(ctx, orgID, taskID, db.SiblingEventCloseReason, domain.EventGitHubPRCICheckPassed, seed.Event(t, taskID))
+			eventID := seed.Event(t, taskID)
+			out, err := s.CloseOnEventSystem(ctx, orgID, taskID, db.SiblingEventCloseReason, domain.EventGitHubPRCICheckPassed, eventID)
 			if err != nil {
 				t.Fatalf("%s: CloseOnEventSystem: %v", shape.name, err)
 			}
@@ -209,6 +210,36 @@ func RunTaskCloseConformance(t *testing.T, mk TaskCloseFactory) {
 			}
 			if !out.Closed || out.Held || !slices.Equal(out.WorkingConversationIDs, want) {
 				t.Errorf("%s: outcome = %+v, want closed, telling %v", shape.name, out, want)
+			}
+			// The close note is composed from the stored close, so the
+			// closing event has to be readable back from it.
+			if got, err := s.ClosingEventIDSystem(ctx, orgID, taskID); err != nil || got != eventID {
+				t.Errorf("%s: ClosingEventIDSystem = (%q, %v), want the closing event %s", shape.name, got, err, eventID)
+			}
+		}
+	})
+
+	// A person's close and a duplicate merge get no working set from their
+	// door, and read it after the close: the same conversations an event's
+	// close reports, since a close writes nothing on them.
+	t.Run("The_working_conversations_read_after_a_close_are_the_ones_it_found", func(t *testing.T) {
+		for _, shape := range shapes {
+			s, orgID, seed := mk(t)
+			taskID := seed.Task(t)
+			_, convID := seed.BlueprintAndConversation(t, taskID, "running", shape.convStatus)
+			if _, err := s.CloseByUser(ctx, orgID, taskID, "dismissed", TaskVersion(t, s, orgID, taskID)); err != nil {
+				t.Fatalf("%s: CloseByUser: %v", shape.name, err)
+			}
+			var want []string
+			if shape.working {
+				want = []string{convID}
+			}
+			got, err := s.WorkingConversationIDsSystem(ctx, orgID, taskID)
+			if err != nil || !slices.Equal(got, want) {
+				t.Errorf("%s: WorkingConversationIDsSystem = (%v, %v), want %v", shape.name, got, err, want)
+			}
+			if got, err := s.ClosingEventIDSystem(ctx, orgID, taskID); err != nil || got != "" {
+				t.Errorf("%s: ClosingEventIDSystem = (%q, %v), want none for a person's close", shape.name, got, err)
 			}
 		}
 	})

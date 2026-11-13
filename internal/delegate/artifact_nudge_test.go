@@ -49,6 +49,7 @@ func newTwoConversationTask(t *testing.T) twoConversationTask {
 			conversations: stores.Conversations,
 			artifacts:     stores.Artifacts,
 			deliverables:  stores.Deliverables,
+			tasks:         stores.Tasks,
 		},
 		taskID: taskID,
 	}
@@ -86,7 +87,7 @@ func (f twoConversationTask) stageReview(t *testing.T, conversationID string) {
 // terminal step.
 func (f twoConversationTask) nudge(t *testing.T) string {
 	t.Helper()
-	check := f.spawner.artifactContractNudge(runmode.LocalDefaultOrgID, "run-2", domain.Task{EntitySource: "github"}, true)
+	check := f.spawner.artifactContractNudge(runmode.LocalDefaultOrgID, "run-2", domain.Task{ID: f.taskID, EntitySource: "github"}, true)
 	if check == nil {
 		t.Fatal("a GitHub task's terminal step expects an artifact, so the check must be armed")
 	}
@@ -154,5 +155,32 @@ func TestArtifactContractNudge_NoOutputIsNudgedOnce(t *testing.T) {
 	insert("assistant", "", "there was genuinely nothing to publish")
 	if got := f.nudge(t); got != "" {
 		t.Errorf("the nudge was put twice about the same silence:\n%s", got)
+	}
+}
+
+// TestArtifactContractNudge_AClosedTaskIsNotNudged: a run that produced
+// nothing is asked about it on an open task, and not once the task has
+// closed under it, however it closed. The check reads the task at the turn's
+// end, so a close during the engagement counts.
+func TestArtifactContractNudge_AClosedTaskIsNotNudged(t *testing.T) {
+	for _, status := range []string{"done", "dismissed"} {
+		t.Run(status, func(t *testing.T) {
+			f := newTwoConversationTask(t)
+			ctx := context.Background()
+			msg := &domain.Message{ConversationID: "run-2", Role: "user", Content: "fix the build"}
+			if _, err := f.stores.Conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID, msg); err != nil {
+				t.Fatalf("insert the opening message: %v", err)
+			}
+			if got := f.nudge(t); got != artifactNudgeNote {
+				t.Fatalf("setup: the open task's run was not nudged; got %q", got)
+			}
+			version := dbtest.TaskVersion(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID)
+			if _, err := f.stores.Tasks.CloseByUser(ctx, runmode.LocalDefaultOrgID, f.taskID, status, version); err != nil {
+				t.Fatalf("close the task: %v", err)
+			}
+			if got := f.nudge(t); got != "" {
+				t.Errorf("the run on a closed task was nudged:\n%s", got)
+			}
+		})
 	}
 }

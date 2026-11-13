@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
@@ -107,9 +108,9 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 }
 
 // TestTaskPatchClose_LeavesTheRunWorkingTheTask: a person's dismiss or
-// complete closes the task and writes nothing on the run working it. The
+// complete closes the task and stops nothing on the run working it. The
 // conversation is not asked to stop, gets no stop note, and its blueprint is
-// not called off.
+// not called off. It is told the task closed, by one note.
 func TestTaskPatchClose_LeavesTheRunWorkingTheTask(t *testing.T) {
 	for _, status := range []string{"dismissed", "done"} {
 		t.Run(status, func(t *testing.T) {
@@ -118,6 +119,24 @@ func TestTaskPatchClose_LeavesTheRunWorkingTheTask(t *testing.T) {
 			// land on the rows read below.
 			s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 			taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "close_live_"+status)
+			// An engagement holds the conversation, so it is working on the
+			// task when the person closes it.
+			execSQL(t, s.db, `UPDATE conversations SET status = NULL WHERE id = ?`, conversationID)
+			execSQL(t, s.db, `
+				INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, lease_expires_at)
+				VALUES (?, ?, ?, 'test-engagement', 1, CURRENT_TIMESTAMP, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))`,
+				fixtureUUID("cl_close_live_"+status), runmode.LocalDefaultOrgID, conversationID)
+			closeNotes := func() int {
+				t.Helper()
+				var n int
+				if err := s.db.QueryRow(`
+					SELECT COUNT(*) FROM messages
+					 WHERE conversation_id = ? AND json_extract(metadata, '$.producer') = ?`,
+					conversationID, domain.StagedInjectionProducerTaskClosing).Scan(&n); err != nil {
+					t.Fatalf("count close notes: %v", err)
+				}
+				return n
+			}
 			readRun := func() string {
 				t.Helper()
 				var convStatus, runStatus string
@@ -135,6 +154,7 @@ func TestTaskPatchClose_LeavesTheRunWorkingTheTask(t *testing.T) {
 				if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&notes); err != nil {
 					t.Fatalf("count transcript rows: %v", err)
 				}
+				notes -= closeNotes()
 				return fmt.Sprintf("conversation (%s, stop requested %v, ended %v), run (%s, cancel requested %v), %d transcript rows",
 					convStatus, stopRequested, ended, runStatus, cancelRequested, notes)
 			}
@@ -155,6 +175,10 @@ func TestTaskPatchClose_LeavesTheRunWorkingTheTask(t *testing.T) {
 			}
 			if after := readRun(); after != before {
 				t.Errorf("the close changed the run working the task:\n before %s\n after  %s", before, after)
+			}
+			// The run is told, once, and nothing else is written on it.
+			if n := closeNotes(); n != 1 {
+				t.Errorf("close notes staged on the working conversation = %d, want 1", n)
 			}
 		})
 	}

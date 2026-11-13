@@ -97,8 +97,7 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {
 }
 
-func (s *injectingStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
-	return true
+func (s *injectingStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {

@@ -1382,6 +1382,13 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	// blueprint with it, and the task's deliverables are left as they are: a
 	// draft PR stays on GitHub for the person to decide, and a staged review
 	// is dismissed only when the pull request it reviews merges or closes.
+	//
+	// The run is told, and decides under its own instructions whether to go
+	// on. Detached from the request: the close committed, and the note is
+	// owed whether or not the caller is still connected.
+	if s.spawner != nil {
+		s.spawner.TellWorkingTaskClosed(context.WithoutCancel(r.Context()), orgID, id)
+	}
 	s.broadcastTaskStatus(orgID)
 	return closed.Version, true
 }

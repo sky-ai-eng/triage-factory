@@ -36,7 +36,8 @@ type StagedInjection struct {
 	Provenance NoteProvenance `json:"provenance,omitzero"`
 }
 
-// NoteProvenance names the event an agent-facing note was composed from. It is
+// NoteProvenance names what an agent-facing note was composed from: the event
+// behind it, and for a close note the close it tells of. It is
 // recorded on the note's message row rather than derived from the body, so a
 // transcript view or an audit can resolve a note back to its cause without
 // re-parsing prose that was written for an agent to read.
@@ -53,10 +54,16 @@ type StagedInjection struct {
 type NoteProvenance struct {
 	EventID   string `json:"event_id,omitempty"`
 	EventType string `json:"event_type,omitempty"`
+	// TaskClose is the close of the conversation's task a close note tells of
+	// (TaskCloseKey). A person's close has no event, so this, not EventID, is
+	// what says a conversation has been told of a close.
+	TaskClose string `json:"task_close,omitempty"`
 }
 
-// Empty reports whether no originating event was recorded.
-func (p NoteProvenance) Empty() bool { return p.EventID == "" && p.EventType == "" }
+// Empty reports whether nothing was recorded.
+func (p NoteProvenance) Empty() bool {
+	return p.EventID == "" && p.EventType == "" && p.TaskClose == ""
+}
 
 // NoteMetadata builds the message-row metadata an agent-facing note carries.
 // Both delivery paths compose it here — the live steer writes it straight onto
@@ -69,6 +76,9 @@ func NoteMetadata(producer string, prov NoteProvenance) map[string]any {
 	}
 	if prov.EventType != "" {
 		meta["event_type"] = prov.EventType
+	}
+	if prov.TaskClose != "" {
+		meta["task_close"] = prov.TaskClose
 	}
 	return meta
 }
@@ -99,7 +109,7 @@ func IsStagedInjectionSubtype(subtype string) bool {
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a
 // new producer adds a const without a migration; used for audit/debugging, and
-// the close note's tag is what its dedup and withdrawal match, so renaming one
+// the close note's tag is what its withdrawal matches, so renaming one
 // strands the rows already staged under the old value.
 const (
 	// StagedInjectionProducerPRNewCommits tags a head-SHA-change note. Nothing
@@ -112,12 +122,9 @@ const (
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
-	// still working on a task that an event resolved it, in either version
-	// (TaskClosingInjection, or TaskClosingNotice for work a person started).
-	// A conversation is told once per closing event
-	// (StagedInjectionStore.HasNoteForEventSystem), and a hold cleared
-	// without its close, or a reopen of the task, withdraws the notes still
-	// waiting (TaskStore.Bump).
+	// that its task closed (TaskClosedNote). A conversation is told once per
+	// close (StagedInjectionStore.HasNoteForTaskCloseSystem), and a reopen of
+	// the task withdraws the notes still waiting.
 	StagedInjectionProducerTaskClosing = "task_closing"
 	// StagedInjectionProducerDeliverableResolved is the note telling an agent
 	// that a deliverable it produced was resolved (DeliverableResolutionNote).
@@ -157,6 +164,6 @@ func stagedInjectionBlock(leadIn string, injections []StagedInjection) string {
 	}
 	body := leadIn + "\n\n" +
 		strings.Join(lines, "\n") +
-		"\n\nThese are informational — act only if they affect your work."
+		"\n\nEach update says what happened. Where one also says what to do about it, follow that; otherwise act on it only if it affects your work."
 	return WrapSystemNote(body)
 }

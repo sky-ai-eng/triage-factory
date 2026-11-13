@@ -21,22 +21,14 @@ import (
 // conversation, which goes on, and so does its blueprint. A reassignment
 // never holds either (closeRelation.reassigns), and neither does a person's
 // own close.
+//
+// A held close tells the task's conversations nothing: the task is still
+// open, and the note they get says it is closed. They are told when the hold
+// applies, as any close tells them.
 
 // DefaultCloseDeferralSweepInterval is how often the brain looks at the held
 // closes of tasks nothing holds any more.
 const DefaultCloseDeferralSweepInterval = 30 * time.Second
-
-// tellTaskClosing tells each conversation working on a task that evt
-// resolved it, delivered where the conversation's runtime reads it without
-// starting a turn. Best effort, after the close or the hold committed: a lost
-// note costs the conversation the news, never the close.
-func (r *Router) tellTaskClosing(ctx context.Context, orgID string, evt domain.Event, taskID string, conversationIDs []string) {
-	for _, id := range conversationIDs {
-		if !r.spawner.TellTaskClosing(ctx, orgID, id, evt) {
-			routerLog.WarnContext(ctx, "the closing note was not staged", "task_id", taskID, "conversation", id, "on_event", evt.EventType)
-		}
-	}
-}
 
 // --- the sweep --------------------------------------------------------------
 
@@ -116,7 +108,7 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 	if !out.Closed {
 		return false, nil
 	}
-	r.tellTaskClosing(ctx, d.OrgID, *evt, d.TaskID, out.WorkingConversationIDs)
+	r.spawner.TellTaskClosed(ctx, d.OrgID, d.TaskID, out.WorkingConversationIDs)
 	routerLog.InfoContext(ctx, "closed task on its held close", "task_id", d.TaskID, "on_event", evt.EventType, "reason", reason)
 	return true, nil
 }

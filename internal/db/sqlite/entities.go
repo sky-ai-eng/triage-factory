@@ -824,14 +824,15 @@ func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) er
 // MergeDuplicateEntitiesSystem — see the interface doc. SQLite's single writer
 // is the lock: nothing interleaves between the reads that decide the survivor
 // and the writes that fold the other row into it.
-func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (string, error) {
+func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (string, []string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if entityID == otherID {
-		return "", fmt.Errorf("merge entities: %s with itself", entityID)
+		return "", nil, fmt.Errorf("merge entities: %s with itself", entityID)
 	}
 	var survivorID string
+	var dismissed []string
 	err := inTx(ctx, s.q, func(q queryer) error {
 		a, err := scanEntityRow(q.QueryRowContext(ctx, `SELECT `+entitySelectCols+` FROM entities WHERE id = ?`, entityID))
 		if err != nil {
@@ -849,7 +850,7 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 			return err
 		}
 		survivorID = survivor.ID
-		if err := moveEntityReferences(ctx, q, loser.ID, survivor.ID); err != nil {
+		if dismissed, err = moveEntityReferences(ctx, q, loser.ID, survivor.ID); err != nil {
 			return err
 		}
 
@@ -903,21 +904,22 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 		return rewriteEntityActionURLs(ctx, q, survivor.ID, dropped.URL, kept.URL)
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return survivorID, nil
+	return survivorID, dismissed, nil
 }
 
 // FoldStubEntitySystem — see the interface doc. SQLite's single writer is the
 // lock, as in the merge: the stub is judged and folded with nothing between.
-func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) error {
+func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, intoID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
 	if stubID == intoID {
-		return fmt.Errorf("fold entity: %s into itself", stubID)
+		return nil, fmt.Errorf("fold entity: %s into itself", stubID)
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var dismissed []string
+	err := inTx(ctx, s.q, func(q queryer) error {
 		stub, err := scanEntityRow(q.QueryRowContext(ctx, `SELECT `+entitySelectCols+` FROM entities WHERE id = ?`, stubID))
 		if err != nil {
 			return err
@@ -932,7 +934,7 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if err := db.ValidateStubFold(*stub, *into); err != nil {
 			return err
 		}
-		if err := moveEntityReferences(ctx, q, stub.ID, into.ID); err != nil {
+		if dismissed, err = moveEntityReferences(ctx, q, stub.ID, into.ID); err != nil {
 			return err
 		}
 		if _, err := q.ExecContext(ctx, `
@@ -950,15 +952,20 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		}
 		return rewriteEntityActionURLs(ctx, q, into.ID, stub.URL, into.URL)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return dismissed, nil
 }
 
 // moveEntityReferences re-points every row that names loser by id onto
 // survivor, the step a duplicate merge and a stub fold share. The loser's
 // active tasks whose slot the survivor already holds are dismissed in place
 // first, which takes them out of the partial unique index the repoint would
-// otherwise trip. The dismissal writes the tasks alone, as on Postgres.
-func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID string) error {
-	if _, err := q.ExecContext(ctx, `
+// otherwise trip. The dismissal writes the tasks alone, and dismissed is
+// those tasks' ids, as on Postgres.
+func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID string) (dismissed []string, err error) {
+	rows, err := q.QueryContext(ctx, `
 		UPDATE tasks
 		   SET `+db.TaskSetSQL(
 		db.TaskAssign{Col: "status", Expr: "'dismissed'"},
@@ -967,13 +974,30 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 	)+`
 		WHERE entity_id = ?3 AND status NOT IN ('done','dismissed')
 		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id = ?4 AND s.event_type = tasks.event_type
-		              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`,
-		time.Now().UTC(), db.DuplicateEntityMergedCloseReason, loserID, survivorID); err != nil {
-		return fmt.Errorf("dismiss duplicate tasks: %w", err)
+		              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))
+		RETURNING id`,
+		time.Now().UTC(), db.DuplicateEntityMergedCloseReason, loserID, survivorID)
+	if err != nil {
+		return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
+	}
+	// Drained and closed before the writes below, as on Postgres.
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
+		}
+		dismissed = append(dismissed, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dismiss duplicate tasks: %w", err)
 	}
 	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "deliverables", "external_actions"} {
 		if _, err := q.ExecContext(ctx, `UPDATE `+table+` SET entity_id = ? WHERE entity_id = ?`, survivorID, loserID); err != nil {
-			return fmt.Errorf("move %s: %w", table, err)
+			return nil, fmt.Errorf("move %s: %w", table, err)
 		}
 	}
 	if _, err := q.ExecContext(ctx, `
@@ -982,17 +1006,17 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		ON CONFLICT(conversation_id, entity_id) DO UPDATE SET role = excluded.role
 		WHERE `+fmt.Sprintf(memoryRoleRankCASE, "excluded.role")+` > `+fmt.Sprintf(memoryRoleRankCASE, "conversation_memory_entities.role"),
 		survivorID, loserID); err != nil {
-		return fmt.Errorf("move memory links: %w", err)
+		return nil, fmt.Errorf("move memory links: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id = ?`, loserID); err != nil {
-		return err
+		return nil, err
 	}
 	// A link between the two rows would become a self-link; it is dropped.
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM entity_links
 		WHERE (from_entity_id = ? AND to_entity_id = ?) OR (from_entity_id = ? AND to_entity_id = ?)`,
 		loserID, survivorID, survivorID, loserID); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := q.ExecContext(ctx, `
 		INSERT OR IGNORE INTO entity_links (from_entity_id, to_entity_id, kind, origin, created_at, org_id)
@@ -1001,12 +1025,12 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		       kind, origin, created_at, org_id
 		FROM entity_links WHERE from_entity_id = ? OR to_entity_id = ?`,
 		loserID, survivorID, loserID, survivorID, loserID, loserID); err != nil {
-		return fmt.Errorf("move entity links: %w", err)
+		return nil, fmt.Errorf("move entity links: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id = ? OR to_entity_id = ?`, loserID, loserID); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return dismissed, nil
 }
 
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
