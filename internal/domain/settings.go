@@ -629,6 +629,15 @@ type TeamSettings struct {
 	// account. The native runtime has no such connectors and ignores it.
 	ClaudeAIConnectorsEnabled bool
 
+	// LocalPlugins are the Claude Code plugin directories loaded into every
+	// local-mode SDK delegated run of this team, and every resume of one.
+	// Empty by default, and empty leaves a spawn byte-identical to a team that
+	// never set it. Multi mode refuses a non-empty list at the settings write:
+	// its delegations run on the native loop, which has no Claude Code to load
+	// a plugin into. Paths and env values are operator detail, so the settings
+	// GET hands the list only to team admins.
+	LocalPlugins []LocalPlugin
+
 	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
 	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
 	// When the toggle is on and a delegated conversation raises an
@@ -716,6 +725,7 @@ type TeamSettings struct {
 // want review-before-run.
 func DefaultTeamSettingsFor(multiMode bool) TeamSettings {
 	return TeamSettings{
+		LocalPlugins:                    []LocalPlugin{},
 		AIReprioritizeThreshold:         5,
 		AIPreferenceUpdateInterval:      20,
 		DefaultModel:                    DefaultModelFor(multiMode),

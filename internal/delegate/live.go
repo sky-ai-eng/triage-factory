@@ -212,6 +212,10 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	s.stampExecutor(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 
 	out := s.driveLiveConversation(ctx, spec.park, lr, results, spec.nudge)
+	// Every exit of the driver has closed the process, so its terminal error is
+	// final here. A required plugin's failure overrides a result the process
+	// produced before it.
+	failPluginNotLoaded(&out, lr.Err())
 	// Capture the final session id / stderr off the (now-closed) process for
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()

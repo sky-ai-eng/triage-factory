@@ -478,7 +478,25 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	defer func() { _ = localSbx.Close() }()
 
-	teamOpts := s.resolveSDKTeamOptions(ctx, opts.TeamID)
+	teamOpts, err := s.resolveSDKTeamOptions(ctx, opts.TeamID)
+	if err != nil {
+		return &ResumeOutcome{}, err
+	}
+	// The resume reads the team's plugin list as it is now, not as the run's
+	// first spawn did, and records its own report. The cwd is the run root, so
+	// the state directories land where the first spawn's did.
+	plugins, err := s.preparePluginsForSpawn(ctx, pluginSpawn{
+		orgID:          orgID,
+		teamID:         opts.TeamID,
+		conversationID: conversationID,
+		claimID:        opts.claimID,
+		runRoot:        cwd,
+		addDirs:        specAddDirs(localSbx.runSpec()),
+		resuming:       true,
+	}, teamOpts.localPlugins)
+	if err != nil {
+		return &ResumeOutcome{}, err
+	}
 	baseOpts := agentproc.RunOptions{
 		Cwd:                cwd,
 		Model:              model,
@@ -498,7 +516,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
 			SelfBin: selfBin,
-			Extras:  opts.ExtraAllowedTools,
+			Extras:  plugins.extraAllowedTools(opts.ExtraAllowedTools),
 			GH:      ghChannel != nil,
 		}),
 		ExtraEnv:       extraEnv,
@@ -523,6 +541,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		MemorySourcePath: stagedEntityMemorySource(conversationID),
 	}
 	stampCommitIdentity(&baseOpts, commitIdentity)
+	plugins.apply(&baseOpts)
 	sink := newConversationSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does: a
@@ -570,12 +589,17 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	outcome.StderrText = out.stderr
 	outcome.CostUSD = out.costUSD
 
+	// A required plugin that did not load fails the resume whether or not the
+	// turn produced a result first (runLiveAndDrive clears the result).
 	if out.err != nil && out.result == nil {
 		// The driver returns ctx.Err() directly when ctx triggered the kill
 		// before any completion was captured; preserve that shape so the
 		// resume goroutine's ctx.Err() check still routes through the cancel park.
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
+		}
+		if isSpawnRefusal(out.err) {
+			return outcome, out.err
 		}
 		return outcome, fmt.Errorf("agent runtime resume failed: %w (stderr: %s)", out.err, outcome.StderrText)
 	}

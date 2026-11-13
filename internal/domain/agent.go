@@ -982,9 +982,13 @@ type Claim struct {
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
 	// derivable from messages.
-	DurationMs *int      `json:"duration_ms,omitempty"`
-	NumTurns   *int      `json:"num_turns,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	DurationMs *int `json:"duration_ms,omitempty"`
+	NumTurns   *int `json:"num_turns,omitempty"`
+	// PluginsLoaded is what this engagement's wrapper reported about the
+	// team's local plugins. nil when the engagement was given none, or never
+	// reached Claude Code's init.
+	PluginsLoaded *PluginsLoaded `json:"plugins_loaded,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 // ExecutorClaim is one engagement projected for the operator fleet console's

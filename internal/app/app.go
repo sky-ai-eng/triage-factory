@@ -431,6 +431,10 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 			return nil, err
 		}
 
+		// Local plugins are a local-mode feature, and the operator's allowed env
+		// prefixes are checked against the SDK installed on this host.
+		a.checkPluginEnvAllowPrefixes()
+
 		// Resolve (and, for the no-keychain encrypted-file backend, construct +
 		// validate) the local secret backend up front, so a missing
 		// TF_SECRET_ENCRYPTION_KEY or an undecryptable secrets file fails the

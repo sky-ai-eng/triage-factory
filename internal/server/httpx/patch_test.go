@@ -39,3 +39,61 @@ func TestPatchValue_TypeFaultMessages(t *testing.T) {
 		})
 	}
 }
+
+type patchJSONEntry struct {
+	Name  string            `json:"name"`
+	Count int               `json:"count"`
+	Tags  map[string]string `json:"tags"`
+}
+
+// TestPatchJSON: absent keeps, null clears, a list is the whole value (an
+// empty one included), and a bad body is a fault naming the field and the
+// entry key, never a partial read.
+func TestPatchJSON(t *testing.T) {
+	t.Run("absent, null and values", func(t *testing.T) {
+		var v Validation
+		if _, st := PatchJSON[patchJSONEntry](&v, nil, "f"); st != PatchAbsent {
+			t.Errorf("absent = %v, want PatchAbsent", st)
+		}
+		if got, st := PatchJSON[patchJSONEntry](&v, json.RawMessage(`null`), "f"); st != PatchClear || got != nil {
+			t.Errorf("null = (%v, %v), want (nil, PatchClear)", got, st)
+		}
+		got, st := PatchJSON[patchJSONEntry](&v, json.RawMessage(`[]`), "f")
+		if st != PatchSet || got == nil || len(got) != 0 {
+			t.Errorf("[] = (%#v, %v), want an empty non-nil list and PatchSet", got, st)
+		}
+		got, st = PatchJSON[patchJSONEntry](&v, json.RawMessage(`[{"name":"a","count":2,"tags":{"k":"v"}},{"name":"b"}]`), "f")
+		if st != PatchSet || len(got) != 2 || got[0].Name != "a" || got[0].Count != 2 || got[0].Tags["k"] != "v" || got[1].Name != "b" {
+			t.Errorf("list = (%+v, %v)", got, st)
+		}
+		if items := v.Items(); len(items) != 0 {
+			t.Errorf("faults on valid input: %+v", items)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want ErrorItem
+	}{
+		{"unknown entry key", `[{"name":"a","label":"b"}]`,
+			ErrorItem{Reason: ReasonUnknownField, Message: `f entries have no field "label"`, Field: "f[].label"}},
+		{"wrong type inside an entry", `[{"name":"a","count":"x"}]`,
+			ErrorItem{Reason: ReasonInvalidField, Message: "f[].count must be a whole number", Field: "f[].count"}},
+		{"an object, not a list", `{"name":"a"}`,
+			ErrorItem{Reason: ReasonInvalidField, Message: "f must be an array of objects, or null", Field: "f"}},
+		{"a list of strings", `["a"]`,
+			ErrorItem{Reason: ReasonInvalidField, Message: "f must be an array of objects, or null", Field: "f"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var v Validation
+			got, st := PatchJSON[patchJSONEntry](&v, json.RawMessage(tc.raw), "f")
+			if st == PatchSet || got != nil {
+				t.Errorf("a bad body read as (%+v, %v)", got, st)
+			}
+			if items := v.Items(); !slices.Equal(items, []ErrorItem{tc.want}) {
+				t.Errorf("faults = %+v, want %+v", items, tc.want)
+			}
+		})
+	}
+}

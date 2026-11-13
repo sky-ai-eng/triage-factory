@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1195,5 +1198,264 @@ func TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly(t *testing.T)
 	}
 	if pollReady(t, s, "github") || pollReady(t, s, "jira") {
 		t.Error("a combined GitHub and Jira change must clear both readiness rows")
+	}
+}
+
+// --- local plugins ----------------------------------------------------------
+
+// pluginDir makes a directory that passes the plugin check: it holds
+// .claude-plugin/plugin.json.
+func pluginDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), []byte(`{"name":"fixture"}`), 0o644); err != nil {
+		t.Fatalf("write plugin.json: %v", err)
+	}
+	return dir
+}
+
+// pluginEntry is one local_plugins entry as a PATCH body carries it.
+func pluginEntry(path string, mutate ...func(map[string]any)) map[string]any {
+	e := map[string]any{"path": path, "required": false, "env": map[string]string{}, "grant_tools": []string{}}
+	for _, m := range mutate {
+		m(e)
+	}
+	return e
+}
+
+func withEnv(env map[string]string) func(map[string]any) {
+	return func(e map[string]any) { e["env"] = env }
+}
+
+func withGrants(tools ...string) func(map[string]any) {
+	return func(e map[string]any) { e["grant_tools"] = tools }
+}
+
+// storedLocalPlugins reads the team's plugin list and count back off its GET.
+func storedLocalPlugins(t *testing.T, s *Server) ([]domain.LocalPlugin, int) {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, teamSettingsPath("default"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s: %d: %s", teamSettingsPath("default"), rec.Code, rec.Body.String())
+	}
+	var out struct {
+		TeamSettings struct {
+			LocalPlugins []domain.LocalPlugin `json:"LocalPlugins"`
+		} `json:"team_settings"`
+		LocalPluginCount int `json:"local_plugin_count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode team settings: %v", err)
+	}
+	return out.TeamSettings.LocalPlugins, out.LocalPluginCount
+}
+
+// TestTeamSettingsPatch_LocalPlugins_RoundTrip: a valid list is stored whole,
+// answered by the PATCH exactly as a follow-up GET returns it, kept by an
+// unrelated save, replaced wholesale by the next list, and reset by null or by
+// an empty list.
+func TestTeamSettingsPatch_LocalPlugins_RoundTrip(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if got, n := storedLocalPlugins(t, s); got == nil || len(got) != 0 || n != 0 {
+		t.Fatalf("a fresh team has local_plugins = %#v, count %d; want [] and 0", got, n)
+	}
+
+	a, b := pluginDir(t), pluginDir(t)
+	want := []domain.LocalPlugin{
+		{Path: a, Required: true, Env: map[string]string{"GUARD_STATE": "{run_state_dir}state", "GUARD_MODE": "strict"}, GrantTools: []string{"Agent", "Skill"}},
+		{Path: b, Env: map[string]string{}, GrantTools: []string{}},
+	}
+	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"local_plugins": []map[string]any{
+		pluginEntry(a, withEnv(want[0].Env), withGrants("Agent", "Skill"), func(e map[string]any) { e["required"] = true }),
+		pluginEntry(b),
+	}})
+	// The read-back goes to the admin who saved, unredacted.
+	patched, _ := json.Marshal(resp["team_settings"].(map[string]any)["LocalPlugins"])
+	var fromPatch []domain.LocalPlugin
+	if err := json.Unmarshal(patched, &fromPatch); err != nil {
+		t.Fatalf("decode the PATCH's LocalPlugins: %v", err)
+	}
+	if !reflect.DeepEqual(fromPatch, want) {
+		t.Errorf("PATCH answered %+v, want %+v", fromPatch, want)
+	}
+	if got, n := storedLocalPlugins(t, s); !reflect.DeepEqual(got, want) || n != 2 {
+		t.Errorf("GET after PATCH = %+v, count %d; want %+v and 2", got, n, want)
+	}
+
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelAliasHaiku})
+	if got, _ := storedLocalPlugins(t, s); !reflect.DeepEqual(got, want) {
+		t.Errorf("an unrelated save changed local_plugins to %+v", got)
+	}
+
+	// A list replaces the whole list; it does not merge.
+	patchTeamSettingsOK(t, s, "default", map[string]any{"local_plugins": []map[string]any{pluginEntry(b)}})
+	if got, n := storedLocalPlugins(t, s); len(got) != 1 || got[0].Path != b || n != 1 {
+		t.Errorf("after replacing with one entry: %+v, count %d", got, n)
+	}
+
+	patchTeamSettingsOK(t, s, "default", map[string]any{"local_plugins": nil})
+	if got, n := storedLocalPlugins(t, s); got == nil || len(got) != 0 || n != 0 {
+		t.Errorf("null left local_plugins = %#v, count %d; want [] and 0", got, n)
+	}
+
+	patchTeamSettingsOK(t, s, "default", map[string]any{"local_plugins": []map[string]any{pluginEntry(a)}})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"local_plugins": []map[string]any{}})
+	if got, _ := storedLocalPlugins(t, s); got == nil || len(got) != 0 {
+		t.Errorf("an empty list left local_plugins = %#v; want []", got)
+	}
+}
+
+// localPluginRefusal is one plugin list the settings write refuses, the field
+// the refusal names, and a phrase its message carries.
+type localPluginRefusal struct {
+	name      string
+	list      any
+	field     string
+	wantInMsg string
+}
+
+// TestTeamSettingsPatch_LocalPlugins_Refusals: each rule of the plugin list is
+// a 400 naming the field it broke, and a refused save stores nothing.
+func TestTeamSettingsPatch_LocalPlugins_Refusals(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	valid := pluginDir(t)
+	noManifest := t.TempDir()
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, nil, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	envOn := func(key, value string) []map[string]any {
+		return []map[string]any{pluginEntry(valid, withEnv(map[string]string{key: value}))}
+	}
+	one := func(e map[string]any) []map[string]any { return []map[string]any{e} }
+
+	cases := []localPluginRefusal{
+		{"relative path", one(pluginEntry("relative/dir")), "local_plugins[0].path", "absolute"},
+		{"blank path", one(pluginEntry("")), "local_plugins[0].path", "required"},
+		{"missing directory", one(pluginEntry(filepath.Join(t.TempDir(), "gone"))), "local_plugins[0].path", "cannot be read"},
+		{"a file, not a directory", one(pluginEntry(notADir)), "local_plugins[0].path", "not a directory"},
+		{"no plugin manifest", one(pluginEntry(noManifest)), "local_plugins[0].path", "plugin.json"},
+		{"the same directory twice", []map[string]any{pluginEntry(valid), pluginEntry(valid)}, "local_plugins[1].path", "same directory"},
+		{"the same directory spelled differently", []map[string]any{pluginEntry(valid), pluginEntry(valid + "/.")}, "local_plugins[1].path", "same directory"},
+		{"a per-skill grant", one(pluginEntry(valid, withGrants("Skill(commit)"))), "local_plugins[0].grant_tools[0]", "per-skill grants are not supported"},
+		{"an unknown grant", one(pluginEntry(valid, withGrants("Bash"))), "local_plugins[0].grant_tools[0]", "Agent"},
+		{"a grant listed twice", one(pluginEntry(valid, withGrants("Agent", "Agent"))), "local_plugins[0].grant_tools[1]", "twice"},
+		{"a lowercase env key", envOn("guard_state", "x"), "local_plugins[0].env.guard_state", ""},
+		{"an env key starting with a digit", envOn("1GUARD", "x"), "local_plugins[0].env.1GUARD", ""},
+		{"an env key over 64 characters", envOn("K"+strings.Repeat("A", 64), "x"), "local_plugins[0].env.K" + strings.Repeat("A", 64), ""},
+		{"an env value over 1024 bytes", envOn("GUARD_NOTE", strings.Repeat("a", 1025)), "local_plugins[0].env.GUARD_NOTE", "1024"},
+		{"a NUL in an env value", envOn("GUARD_NOTE", "a\x00b"), "local_plugins[0].env.GUARD_NOTE", "NUL"},
+		{"a placeholder other than run_state_dir", envOn("GUARD_NOTE", "{home}/x"), "local_plugins[0].env.GUARD_NOTE", "{run_state_dir}"},
+	}
+	// One key from each family of the env denylist, and the substring rule.
+	for _, key := range []string{
+		"TF_X", "TRIAGE_FACTORY_X", "ANTHROPIC_X", "CLAUDE_X", "GH_X", "GITHUB_X", "GIT_X", "SSH_X",
+		"NODE_OPTIONS", "LD_PRELOAD", "PYTHONPATH", "BASH_ENV",
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "CURL_CA_BUNDLE",
+		"HOME", "PATH", "TMPDIR", "XDG_CONFIG_HOME", "AWS_X", "AZURE_X", "GOOGLE_X",
+		"MY_TOKEN", "MY_SECRET", "DB_PASSWORD", "MY_CREDENTIAL", "STRIPE_KEY", "OAUTH_X",
+	} {
+		cases = append(cases, localPluginRefusal{"denylisted env key " + key, envOn(key, "x"), "local_plugins[0].env." + key, ""})
+	}
+	// More than 8 entries, each a distinct valid directory.
+	var nine []map[string]any
+	for range 9 {
+		nine = append(nine, pluginEntry(pluginDir(t)))
+	}
+	cases = append(cases, localPluginRefusal{"more than 8 entries", nine, "local_plugins", "at most 8"})
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := patchTeamSettings(t, s, "default", map[string]any{"local_plugins": tc.list})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+			var found bool
+			for _, item := range decodeErrorItems(t, rec) {
+				if item.Field == tc.field {
+					found = true
+					if tc.wantInMsg != "" && !strings.Contains(item.Message, tc.wantInMsg) {
+						t.Errorf("message %q does not mention %q", item.Message, tc.wantInMsg)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("no error names %q: %s", tc.field, rec.Body.String())
+			}
+			if got, _ := storedLocalPlugins(t, s); len(got) != 0 {
+				t.Errorf("a refused save stored %+v", got)
+			}
+		})
+	}
+}
+
+// A list with several bad entries reports every fault, not the first, and a
+// bad plugin list does not hide a bad field beside it.
+func TestTeamSettingsPatch_LocalPlugins_ReportsEveryFault(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	valid := pluginDir(t)
+
+	rec := patchTeamSettings(t, s, "default", map[string]any{
+		"local_plugins": []map[string]any{
+			pluginEntry("relative"),
+			pluginEntry(valid, withGrants("Skill(x)"), withEnv(map[string]string{"HOME": "x", "MY_TOKEN": "y"})),
+		},
+		"branch_template": " ",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	got := map[string]bool{}
+	for _, item := range decodeErrorItems(t, rec) {
+		got[item.Field] = true
+	}
+	for _, want := range []string{
+		"local_plugins[0].path", "local_plugins[1].grant_tools[0]",
+		"local_plugins[1].env.HOME", "local_plugins[1].env.MY_TOKEN", "branch_template",
+	} {
+		if !got[want] {
+			t.Errorf("no error names %q: %s", want, rec.Body.String())
+		}
+	}
+}
+
+// The body is held to its shape: an entry key the schema does not have, and a
+// value of the wrong JSON type, are refused rather than dropped.
+func TestTeamSettingsPatch_LocalPlugins_StrictShape(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	valid := pluginDir(t)
+
+	for name, tc := range map[string]struct {
+		list   any
+		reason string
+	}{
+		"an unknown entry key":    {[]map[string]any{{"path": valid, "reqired": true}}, httpx.ReasonUnknownField},
+		"an object, not a list":   {map[string]any{"path": valid}, httpx.ReasonInvalidField},
+		"a string list":           {[]string{valid}, httpx.ReasonInvalidField},
+		"a path that is a number": {[]map[string]any{{"path": 5}}, httpx.ReasonInvalidField},
+		"required as a string":    {[]map[string]any{{"path": valid, "required": "yes"}}, httpx.ReasonInvalidField},
+		"env as a list":           {[]map[string]any{{"path": valid, "env": []string{"A=b"}}}, httpx.ReasonInvalidField},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := patchTeamSettings(t, s, "default", map[string]any{"local_plugins": tc.list})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if got := decodeErrorItems(t, rec)[0].Reason; got != tc.reason {
+				t.Errorf("reason = %s, want %s (body: %s)", got, tc.reason, rec.Body.String())
+			}
+			if got, _ := storedLocalPlugins(t, s); len(got) != 0 {
+				t.Errorf("a refused save stored %+v", got)
+			}
+		})
 	}
 }

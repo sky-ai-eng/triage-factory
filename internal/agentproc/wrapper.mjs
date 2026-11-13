@@ -35,8 +35,8 @@ import { query } from "@anthropic-ai/claude-agent-sdk"
 import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
 import { createRequire } from "node:module"
-import { existsSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { existsSync, realpathSync, statSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
 
 function resolveClaudeBinary() {
   if (process.platform !== "linux") return null
@@ -67,6 +67,9 @@ function parseArgs(argv) {
   let tfTools = null
   const opts = {}
   const addDirs = []
+  const pluginDirs = []
+  const pluginRequired = []
+  let pluginInitTimeoutMs = 0
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
@@ -111,6 +114,20 @@ function parseArgs(argv) {
         break
       case "--add-dir":
         addDirs.push(next())
+        break
+      case "--plugin-dir":
+        // One of the team's local plugins, as the resolved directory Go
+        // checked. Repeats, in the team's order; the order is what the
+        // positional inline[N] tag on a load error counts.
+        pluginDirs.push(next())
+        break
+      case "--plugin-required":
+        // A --plugin-dir value, repeated, that must load before any tool
+        // call is allowed (the plugin gate in runStreamingInput).
+        pluginRequired.push(next())
+        break
+      case "--plugin-init-timeout-ms":
+        pluginInitTimeoutMs = parseInt(next(), 10)
         break
       case "--append-system-prompt":
         // Preserve Claude Code's default system prompt and append the
@@ -176,6 +193,12 @@ function parseArgs(argv) {
   }
 
   if (addDirs.length > 0) opts.additionalDirectories = addDirs
+  // skipMcpDiscovery on every entry: TF launches no MCP server a plugin
+  // declares. It does not stop a plugin's hook code from opening connections.
+  if (pluginDirs.length > 0) {
+    opts.plugins = pluginDirs.map((path) => ({ type: "local", path, skipMcpDiscovery: true }))
+  }
+  const plugins = { dirs: pluginDirs, required: pluginRequired, initTimeoutMs: pluginInitTimeoutMs }
   // Set here rather than on the Go side so it covers every spawn the same way,
   // a run with a stored key included, whose argv carries no --settings at all.
   // Merged over --settings, which holds the operator's auth helpers. Left unset
@@ -184,11 +207,189 @@ function parseArgs(argv) {
   if (!claudeAiConnectors) {
     opts.settings = { ...opts.settings, disableClaudeAiConnectors: true }
   }
-  return { prompt, options: opts, streamInput, permissionPrompts, toolBatchNotes, tfTools }
+  return { prompt, options: opts, streamInput, permissionPrompts, toolBatchNotes, tfTools, plugins }
 }
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n")
+}
+
+// emitThen writes one line and calls cb once the line has been handed to the
+// OS. The process exits in cb on the plugin failure path, and an exit before
+// the write lands would lose the one line that says why the run failed.
+function emitThen(obj, cb) {
+  let called = false
+  const once = () => {
+    if (called) return
+    called = true
+    cb()
+  }
+  process.stdout.write(JSON.stringify(obj) + "\n", once)
+  return once
+}
+
+// pluginExitCode is the wrapper's exit status when a required plugin did not
+// load. 1 is a query error and 2 a missing prompt.
+const pluginExitCode = 3
+
+// pluginExitFallbackMs bounds the wait for the failure line's write callback,
+// which a stuck stdout would never call.
+const pluginExitFallbackMs = 2000
+
+// fileIdentity names the file at p by device and inode, read as bigints
+// because an NTFS file id exceeds 2^53. null when p cannot be stat'ed, which
+// matches nothing. Paths are never compared as strings: Claude Code reports a
+// normalised form of the path it was given (case, separators, 8.3 names,
+// /var against /private/var).
+function fileIdentity(p) {
+  if (typeof p !== "string" || p === "") return null
+  try {
+    const s = statSync(p, { bigint: true })
+    return `${s.dev}:${s.ino}`
+  } catch {
+    return null
+  }
+}
+
+function displayPath(p) {
+  try {
+    return realpathSync.native(p)
+  } catch {
+    return p
+  }
+}
+
+// createPluginGate holds the plugin latch. With any required plugin it starts
+// closed, and while closed every tool call is denied, main thread and
+// subagent alike. Each system/init is evaluated: a required plugin passes
+// only when it matched a loaded row by file identity and no load error is
+// tied to it, and a failure on any evaluation closes the latch for good and
+// ends the process. With no required plugin it is open from the start and
+// only reports.
+//
+// The deadline starts at the first user message, because in streaming-input
+// mode Claude Code emits init only after its first input arrives.
+function createPluginGate({ dirs, required, initTimeoutMs }) {
+  const requiredSet = new Set(required)
+  const entries = dirs.map((path, index) => ({
+    path,
+    index,
+    required: requiredSet.has(path),
+    id: fileIdentity(path),
+    dirNames: new Set([basename(path), basename(displayPath(path))].filter(Boolean)),
+  }))
+  const anyRequired = entries.some((e) => e.required)
+  // "open" | "pending" | "failed"
+  let state = anyRequired ? "pending" : "open"
+  let sawInit = false
+  let timer = null
+
+  const fail = (failed) => {
+    if (state === "failed") return
+    state = "failed"
+    if (timer) clearTimeout(timer)
+    const exit = () => process.exit(pluginExitCode)
+    emitThen({ type: "control", subtype: "plugins_loaded", ok: false, failed }, exit)
+    setTimeout(exit, pluginExitFallbackMs)
+  }
+
+  return {
+    active: entries.length > 0,
+
+    // denial is the reason to deny a tool call, or null to let the call go
+    // on to the rest of the checks.
+    denial() {
+      if (state === "pending") return "required plugin check pending"
+      if (state === "failed") return "required plugin check failed"
+      return null
+    },
+
+    armDeadline() {
+      if (!anyRequired || timer || sawInit || state !== "pending") return
+      const ms = initTimeoutMs > 0 ? initTimeoutMs : 60000
+      timer = setTimeout(() => {
+        if (sawInit) return
+        fail(
+          entries
+            .filter((e) => e.required)
+            .map((e) => ({
+              path: displayPath(e.path),
+              reason: `Claude Code did not report its loaded plugins within ${Math.round(ms / 1000)}s`,
+              required: true,
+            })),
+        )
+      }, ms)
+    },
+
+    onInit(init) {
+      if (entries.length === 0 || state === "failed") return
+      sawInit = true
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      const loaded = (Array.isArray(init?.plugins) ? init.plugins : []).map((row) => ({ row, id: fileIdentity(row?.path) }))
+      const errors = (Array.isArray(init?.plugin_errors) ? init.plugin_errors : []).map((err) => ({
+        err,
+        id: fileIdentity(err?.path),
+      }))
+      const ok = []
+      const failed = []
+      // An error is tied to an entry when its tag names the plugin, by the
+      // manifest name of the row it matched or by the entry's directory name
+      // (Claude Code tags a component that failed to load, such as hooks.json,
+      // with the directory's name: "<dir>@inline"), when its path is the
+      // entry's file, or when it carries the entry's positional inline[N] tag.
+      const tagNames = (tag) => {
+        const at = tag.lastIndexOf("@")
+        return at > 0 ? tag.slice(0, at) : tag
+      }
+      const isTiedTo = (entry, name, { err, id }) => {
+        const tag = typeof err?.plugin === "string" ? err.plugin : ""
+        const tagName = tagNames(tag)
+        if (name !== "" && tagName === name) return true
+        if (tagName !== "" && entry.dirNames.has(tagName)) return true
+        if (entry.id && id === entry.id) return true
+        return tag === `inline[${entry.index}]`
+      }
+      const matches = entries.map((entry) => {
+        const match = entry.id ? loaded.find((l) => l.id === entry.id) : undefined
+        const name = typeof match?.row?.name === "string" ? match.row.name : ""
+        return { entry, match, name, tied: errors.filter((e) => isTiedTo(entry, name, e)) }
+      })
+      // Every directory this wrapper passes is an inline entry, so an inline
+      // error that ties to none of them still belongs to one. It is tied to
+      // every required entry rather than read as belonging to nobody.
+      const unattributed = errors.filter(({ err }) => {
+        const tag = typeof err?.plugin === "string" ? err.plugin : ""
+        const inline = tag.endsWith("@inline") || tag.startsWith("inline[")
+        return inline && !matches.some((m) => m.tied.some((t) => t.err === err))
+      })
+      for (const { entry, match, name, tied: own } of matches) {
+        const tied = entry.required ? [...own, ...unattributed] : own
+        const shown = displayPath(entry.path)
+        if (match && tied.length === 0) {
+          ok.push({ name, version: match.row.version, path: shown, required: entry.required })
+          continue
+        }
+        let reason
+        if (tied.length > 0) {
+          reason = tied.map(({ err }) => `${err?.type ?? "error"}: ${err?.message ?? ""}`.trim()).join("; ")
+        } else {
+          reason = "Claude Code did not report it loaded"
+        }
+        failed.push({ path: shown, reason, required: entry.required })
+      }
+      if (failed.some((f) => f.required)) {
+        fail(failed)
+        return
+      }
+      if (state === "pending") state = "open"
+      const report = { type: "control", subtype: "plugins_loaded", ok: true, plugins: ok }
+      if (failed.length > 0) report.failed = failed
+      emit(report)
+    },
+  }
 }
 
 // createInputStream returns an AsyncIterable the SDK consumes as the
@@ -259,8 +460,9 @@ function userMessage(text, blocks) {
 // off-allowlist tool auto-denies with no prompt (the autonomous-run path).
 // toolBatchNotes gates the PostToolBatch hook the same way, and tfTools, when
 // present, the in-process MCP server that serves TF's tools.
-async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfTools) {
+async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfTools, plugins) {
   const input = createInputStream()
+  const pluginGate = createPluginGate(plugins)
   const pendingPerms = new Map()
   const pendingBatches = new Map()
   const pendingToolCalls = new Map()
@@ -292,6 +494,9 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   // headless one-shot path.
   if (permissionPrompts) {
     options.canUseTool = async (toolName, toolInput, opts = {}) => {
+      // The plugin latch first, as in onToolStarted.
+      const latched = pluginGate.denial()
+      if (latched) return { behavior: "deny", message: latched }
       if (closing) return { behavior: "deny", message: "run ending" }
       // toolUseID identifies the tool_use block being gated — the same id
       // that lands in the assistant message's tool_calls[] and on the tool
@@ -459,7 +664,22 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   // but a TF tool acts for the run itself: its handler is handed the
   // conversation's identity, and stop_blueprint ends the run only from a batch
   // of the main thread's.
+  //
+  // It is also the plugin latch's gate, because it is the one hook that sees
+  // every call: canUseTool is wired only with --permission-prompts, and an
+  // allowlisted call never reaches it. The latch test is the first statement,
+  // ahead of the closing short-circuit, so ending the input cannot open it.
   const onToolStarted = async (input, toolUseID) => {
+    const latched = pluginGate.denial()
+    if (latched) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: latched,
+        },
+      }
+    }
     if (closing) return {}
     if (input?.agent_id) {
       if (typeof input.tool_name !== "string" || !input.tool_name.startsWith("mcp__tf__")) return {}
@@ -507,6 +727,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
 
     switch (ctl.kind) {
       case "user_message":
+        pluginGate.armDeadline()
         input.push(userMessage(ctl.text, ctl.blocks))
         break
 
@@ -599,6 +820,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   try {
     for await (const msg of q) {
       process.stdout.write(JSON.stringify(msg) + "\n")
+      if (pluginGate.active && msg?.type === "system" && msg?.subtype === "init") pluginGate.onInit(msg)
     }
   } catch (err) {
     process.stderr.write(`wrapper error: ${err?.stack ?? err}\n`)
@@ -610,7 +832,7 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   process.exit(0)
 }
 
-const { prompt, options, streamInput, permissionPrompts, toolBatchNotes, tfTools } = parseArgs(process.argv.slice(2))
+const { prompt, options, streamInput, permissionPrompts, toolBatchNotes, tfTools, plugins } = parseArgs(process.argv.slice(2))
 
 // Forward the spawned Claude Code subprocess's stderr through our own.
 // Without this, the SDK swallows the child's stderr ("ignore" in its
@@ -626,10 +848,17 @@ if (!options.pathToClaudeCodeExecutable) {
 }
 
 if (streamInput) {
-  await runStreamingInput(options, permissionPrompts, toolBatchNotes, tfTools)
+  await runStreamingInput(options, permissionPrompts, toolBatchNotes, tfTools, plugins)
 } else {
   if (!prompt) {
     process.stderr.write("wrapper: missing -p <message>\n")
+    process.exit(2)
+  }
+  // The plugin check lives in streaming-input mode. Go never sends plugins on
+  // the one-shot path; refusing here keeps a required plugin from loading
+  // unchecked if it ever did.
+  if (plugins.dirs.length > 0) {
+    process.stderr.write("wrapper: --plugin-dir needs --input-format stream-json\n")
     process.exit(2)
   }
 

@@ -1621,6 +1621,10 @@ CREATE TABLE public.team_settings (
     -- connectors. Only local mode runs the SDK, so multi stores it and nothing
     -- reads it.
     claude_ai_connectors_enabled boolean DEFAULT false NOT NULL,
+    -- The Claude Code plugin directories loaded into a team's local-mode SDK runs,
+    -- as [{path, required, env, grant_tools}]. Only local mode runs the SDK, so
+    -- multi refuses a non-empty list at the settings write and nothing reads it.
+    local_plugins jsonb DEFAULT '[]'::jsonb NOT NULL,
     -- Grace window (ms) an unattended permission prompt waits before denying with
     -- "no operator available"; the boolean off waits out the full timeout instead.
     permission_absent_grace_ms integer DEFAULT 15000 NOT NULL,
@@ -6713,6 +6717,10 @@ CREATE TABLE public.claims (
     -- writes claim_credentials, and kept after teardown deletes that row, so
     -- it describes the engagement after it ends. NULL = never sealed.
     source_manifest jsonb,
+    -- What the engagement's wrapper reported about the team's local plugins
+    -- ({ok, plugins, failed}). NULL = the engagement was given none, or never
+    -- reached Claude Code's init. A resume is its own claim, so one per segment.
+    plugins_loaded jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
