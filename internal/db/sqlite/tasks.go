@@ -446,6 +446,13 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 			args = append(args, s)
 		}
 	}
+	if len(f.IDs) > 0 {
+		ph := strings.TrimRight(strings.Repeat("?, ", len(f.IDs)), ", ")
+		clauses = append(clauses, fmt.Sprintf("t.id IN (%s)", ph))
+		for _, id := range f.IDs {
+			args = append(args, id)
+		}
+	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
 	}

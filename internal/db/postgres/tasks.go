@@ -369,6 +369,17 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 		args = append(args, f.Statuses)
 		clauses = append(clauses, fmt.Sprintf("t.status = ANY($%d)", len(args)))
 	}
+	if len(f.IDs) > 0 {
+		// tasks.id is a uuid column, so an id that does not parse is dropped
+		// before the bind rather than failing it with 22P02. A set that named
+		// only such ids asked for no task, which must not widen to every one.
+		if ids := filterValidUUIDs(f.IDs); len(ids) > 0 {
+			args = append(args, pgUUIDArray(ids))
+			clauses = append(clauses, fmt.Sprintf("t.id = ANY($%d::uuid[])", len(args)))
+		} else {
+			clauses = append(clauses, "FALSE")
+		}
+	}
 	if f.OnlyUnclaimed {
 		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
 	}

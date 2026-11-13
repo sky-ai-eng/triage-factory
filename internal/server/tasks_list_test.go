@@ -431,6 +431,32 @@ func TestTaskList_StrictBody(t *testing.T) {
 			wantField:  "team_ids",
 		},
 		{
+			name:       "malformed task id",
+			body:       map[string]any{"ids": []string{uuid.NewString(), "junk"}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "ids[1]",
+		},
+		{
+			// uuid.Parse accepts it, but SQLite compares the text, so it
+			// would name no row there and answer an empty page.
+			name:       "task id not in canonical form",
+			body:       map[string]any{"ids": []string{strings.ToUpper(uuid.NewString())}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "ids[0]",
+		},
+		{
+			name:       "empty task id",
+			body:       map[string]any{"ids": []string{""}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "ids[0]",
+		},
+		{
+			name:       "ids past the cap",
+			body:       map[string]any{"ids": distinctTaskIDs(maxTaskListIDs + 1)},
+			wantReason: "OUT_OF_RANGE",
+			wantField:  "ids",
+		},
+		{
 			name:       "malformed closed_since",
 			body:       map[string]any{"closed_since": "last tuesday"},
 			wantReason: "INVALID_FIELD",
@@ -579,6 +605,68 @@ func TestTaskList_StrictBody(t *testing.T) {
 			t.Errorf("reported fields = %v, want %v", fields, want)
 		}
 	})
+}
+
+// distinctTaskIDs returns n well-formed task ids that name no task.
+func distinctTaskIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	return ids
+}
+
+// TestTaskList_IDsNarrowToTheNamedTasks: ids answers the named tasks whatever
+// their lane or close time, counts under the narrowing, and never widens: an
+// id that names no task matches nothing.
+func TestTaskList_IDsNarrowToTheNamedTasks(t *testing.T) {
+	s := newTestServer(t)
+	monthAgo := time.Now().UTC().AddDate(0, 0, -30)
+	open := seedTaskFixture(t, s.db, taskFixture{name: "ids-open", status: "queued"})
+	closed := seedTaskFixture(t, s.db, taskFixture{name: "ids-closed", status: "dismissed", closedAt: &monthAgo})
+	seedTaskFixture(t, s.db, taskFixture{name: "ids-unnamed", status: "queued"})
+
+	page := postTaskList(t, s, map[string]any{"ids": []string{closed, open}})
+	if want := []string{open, closed}; !slices.Equal(listedIDs(page), want) || page.TotalCount != 2 {
+		t.Errorf("named tasks = %v (total %d), want %v (total 2)", listedIDs(page), page.TotalCount, want)
+	}
+
+	// A repeated id is the same filter, and an id that names no task adds
+	// nothing.
+	page = postTaskList(t, s, map[string]any{"ids": []string{open, open, uuid.NewString()}})
+	if want := []string{open}; !slices.Equal(listedIDs(page), want) || page.TotalCount != 1 {
+		t.Errorf("repeated and unknown ids = %v (total %d), want %v (total 1)", listedIDs(page), page.TotalCount, want)
+	}
+	page = postTaskList(t, s, map[string]any{"ids": distinctTaskIDs(3)})
+	if len(page.Items) != 0 || page.TotalCount != 0 {
+		t.Errorf("ids naming no task = %+v, want an empty page", page)
+	}
+
+	// The cap is one full page, so a read naming that many tasks is accepted.
+	full := append(distinctTaskIDs(maxTaskListIDs-1), open)
+	page = postTaskList(t, s, map[string]any{"ids": full, "page_size": maxTaskListIDs})
+	if want := []string{open}; !slices.Equal(listedIDs(page), want) {
+		t.Errorf("a full cap of ids = %v, want %v", listedIDs(page), want)
+	}
+
+	// The token is bound to the ids it was minted under.
+	first := postTaskList(t, s, map[string]any{"ids": []string{open, closed}, "page_size": 1})
+	if first.NextPageToken == "" {
+		t.Fatal("no token minted for a partial page")
+	}
+	second := postTaskList(t, s, map[string]any{
+		"ids": []string{closed, open}, "page_size": 1, "page_token": first.NextPageToken,
+	})
+	if want := []string{closed}; !slices.Equal(listedIDs(second), want) {
+		t.Errorf("second page under the same ids reordered = %v, want %v", listedIDs(second), want)
+	}
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", map[string]any{
+		"ids": []string{open}, "page_size": 1, "page_token": first.NextPageToken,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("token under other ids: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	httpxtest.AssertFirstError(t, rec, "INVALID_PARAM", "page_token")
 }
 
 // TestTaskList_CreatedSinceAndSources: sources and created_since narrow the

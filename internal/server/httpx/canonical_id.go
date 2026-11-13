@@ -21,7 +21,14 @@ func CanonicalIDFilterField(v *Validation, field, value, noun string) {
 	if value == "" {
 		return
 	}
-	if parsed, err := uuid.Parse(value); err != nil || parsed.String() != value {
+	if !IsCanonicalID(value) {
 		v.Invalid(field, fmt.Sprintf("must be a %s id in canonical form", noun))
 	}
+}
+
+// IsCanonicalID reports whether s is a uuid in the canonical form
+// CanonicalIDFilterField requires, for a filter that holds a list of ids.
+func IsCanonicalID(s string) bool {
+	parsed, err := uuid.Parse(s)
+	return err == nil && parsed.String() == s
 }

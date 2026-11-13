@@ -167,12 +167,19 @@ describe('NEEDS YOU', () => {
     mount()
     await waitFor(() => expect(screen.getByText('Killed at the memory limit')).toBeInTheDocument())
     expect(screen.getByText('Approve the draft pull request')).toBeInTheDocument()
+    // The references come from the rows' tasks, read by the ids the rows name
+    // once the rows are known.
+    expect(await screen.findByText('SKY-412')).toBeInTheDocument()
+    expect(api.apiList).toHaveBeenCalledWith('/api/tasks/list', {
+      ids: ['t-a', 't-b'],
+      include_snoozed: true,
+      page_size: 2,
+    })
     // The reference is the source's own spelling — GitHub without the owner.
     // The reference leads the row in its own column, number split for pinning.
     expect(document.querySelector('.rr-lead-ref')).not.toBeNull()
     const refs = [...document.querySelectorAll('.rr-row > .rr-ref')].map((el) => el.textContent)
     expect(refs).toContain('factory-api#761')
-    expect(screen.getByText('SKY-412')).toBeInTheDocument()
     // Every row's one target is its run.
     const row = screen.getByText('Approve the draft pull request').closest('a')
     expect(row).toHaveAttribute('href', '/runs/c-pr')
@@ -182,6 +189,26 @@ describe('NEEDS YOU', () => {
     expect(more.closest('.rr-more')).not.toBeNull()
   })
 
+  it('reads only the tasks of the rows it shows', async () => {
+    const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600_000).toISOString()
+    // Four runs ask, three rows show: the oldest is past the cut, and so is
+    // its task.
+    answers.needs = {
+      runs: {
+        't-a': [conv({ ID: 'c-1', Status: 'failed', CompletedAt: at(1) })],
+        't-b': [conv({ ID: 'c-2', TaskID: 't-b', Status: 'failed', CompletedAt: at(2) })],
+        't-c': [conv({ ID: 'c-3', TaskID: 't-c', Status: 'failed', CompletedAt: at(3) })],
+        't-d': [conv({ ID: 'c-4', TaskID: 't-d', Status: 'failed', CompletedAt: at(4) })],
+      },
+      total_count: 4,
+    }
+    mount()
+    await waitFor(() => expect(api.apiList).toHaveBeenCalled())
+    expect(api.apiList.mock.calls).toEqual([
+      ['/api/tasks/list', { ids: ['t-a', 't-b', 't-c'], include_snoozed: true, page_size: 3 }],
+    ])
+  })
+
   it('states the quiet answer in words when nothing needs you', async () => {
     answers.needs = { runs: {}, total_count: 0 }
     mount()
@@ -189,6 +216,8 @@ describe('NEEDS YOU', () => {
     // The answer is a sentence — no figure strip, and no errand to the board
     // with no reason attached.
     expect(screen.queryByText('open the board')).not.toBeInTheDocument()
+    // No row names a task, so no task is read.
+    expect(api.apiList).not.toHaveBeenCalled()
   })
 })
 
@@ -232,7 +261,7 @@ describe('RUNNING', () => {
     expect(act).toHaveAttribute('data-tone')
     // The queued run's prose names the work; the wait is the mark, speaking
     // places-ahead (position 3 in line = 2 ahead).
-    const queued = screen.getByText('Triage the flaking rebalance test')
+    const queued = await screen.findByText('Triage the flaking rebalance test')
     expect(queued).not.toHaveAttribute('data-tone')
     expect(screen.getByRole('img', { name: '2 runs ahead of this one' })).toBeInTheDocument()
     // Two rendered of four: the tail defers to the Board.
