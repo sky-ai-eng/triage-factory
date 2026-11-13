@@ -929,7 +929,7 @@ func reopenClosedTask(ctx context.Context, q queryer, orgID, entityID, eventType
 		   AND EXISTS (
 		       SELECT 1 FROM entities e
 		        WHERE e.org_id = tasks.org_id AND e.id = tasks.entity_id AND e.state = 'active')
-		   AND `+taskWorkingSQL("tasks.org_id", "tasks.id")+`
+		   AND `+taskWorkingUnderRunningBlueprintSQL("tasks.org_id", "tasks.id")+`
 		RETURNING id
 	`, orgID, entityID, eventType, dedupKey).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {

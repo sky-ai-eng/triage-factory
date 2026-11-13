@@ -167,6 +167,18 @@ func taskWorkingSQL(taskExpr string) string {
 		  AND ` + workingConversationSQL + `)`
 }
 
+// taskWorkingUnderRunningBlueprintSQL is the Postgres twin's predicate in this
+// dialect: the task taskExpr holding a conversation that is working under a
+// blueprint run that is running and that nobody has called off.
+func taskWorkingUnderRunningBlueprintSQL(taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM conversations r
+		JOIN blueprint_runs br_r ON br_r.id = r.blueprint_run_id
+		WHERE r.task_id = ` + taskExpr + `
+		  AND br_r.status = 'running' AND br_r.cancel_requested = 0
+		  AND ` + workingConversationSQL + `)`
+}
+
 // personMessageSQL is the Postgres twin's predicate in this dialect.
 const personMessageSQL = `m_p.role = 'user'
 	  AND m_p.subtype IN ('', '` + domain.MessageSubtypeInjectionSteer + `')

@@ -18,9 +18,10 @@ import (
 )
 
 // A task a sibling event closed reopens when its own event recurs while one
-// of its conversations is still working, and the event is folded into that
-// conversation. With nothing working, or after any other close, the event
-// gets a new task.
+// of its conversations is still working under a running blueprint, and the
+// event is folded into that conversation. With nothing working, with a
+// person's follow-up working on a finished blueprint, or after any other
+// close, the event gets a new task.
 
 // foldingDelegator is stubDelegator with a fold that lands: the event a busy
 // task gate hands its live conversation is delivered, and the conversation
@@ -236,6 +237,35 @@ func TestReopen_NothingWorkingCreatesANewTask(t *testing.T) {
 	}
 	if n := atomic.LoadInt64(&f.fold.calls); n != 2 {
 		t.Errorf("delegations = %d, want the new task's run beside the first", n)
+	}
+}
+
+// TestReopen_FollowUpOnAFinishedBlueprintCreatesANewTask: the recurrence lands
+// while a person's follow-up on the task's finished blueprint is queued. The
+// conversation is working, but no run finish is ahead of it to close a
+// reopened task again, so the closed task stays closed, the event is not
+// folded into the person's thread, and a new task takes it.
+func TestReopen_FollowUpOnAFinishedBlueprintCreatesANewTask(t *testing.T) {
+	f := newReopenFixture(t, "owner/repo#follow-up-not-reopened")
+	if _, err := f.database.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, domain.BlueprintRunStatusCompleted, f.runID); err != nil {
+		t.Fatalf("finish the blueprint: %v", err)
+	}
+	f.closeBySibling(t)
+
+	emitCI(t, f.router, f.entityID, "aidan")
+
+	disp := f.lastDisposition(t)
+	if disp.Disposition != events.DispositionTaskCreated || disp.TaskID == f.taskID {
+		t.Errorf("disposition = %q on task %q, want a new task created", disp.Disposition, disp.TaskID)
+	}
+	if got := f.ciTaskIDs(t); len(got) != 2 {
+		t.Errorf("ci tasks on the entity = %v, want the closed one and a new one", got)
+	}
+	if status, reason, _ := taskRow(t, f.database, f.taskID); status != "done" || reason != dbpkg.SiblingEventCloseReason {
+		t.Errorf("the closed task = (%q, %q), want it left closed by the pass", status, reason)
+	}
+	if len(f.fold.folded) != 0 {
+		t.Errorf("folded into = %v, want nothing: the follow-up is the person's thread", f.fold.folded)
 	}
 }
 
