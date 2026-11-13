@@ -7,17 +7,27 @@
 // repository's alerts to every member of a team that tracks it, which can be
 // more people than GitHub shows them to.
 //
+// The fix it names depends on who can make it: an org's own App and a token
+// are the org admin's to change, the deployment's App is the operator's.
+//
 // Renders nothing until at least one tracked repository has been checked, and
 // nothing when the counts can't be read: an absent answer is "not known".
 import { useEffect, useState } from 'react'
 import { AlertTriangle, Info } from 'lucide-react'
 import { getDependabotAccess, type DependabotAccess } from '../../lib/githubApp'
 
+const RECHECK =
+  'Triage Factory checks each repository once a day, so a change on GitHub can take up to a day to show here.'
+
 const AUDIENCE =
   'Every member of a team that tracks a repository sees its Dependabot alerts in Triage Factory, which can include people GitHub doesn’t show them to.'
 
-const FIX = {
+type Credential = 'app' | 'managed' | 'token'
+
+const FIX: Record<Credential, string> = {
   app: 'The GitHub App needs read access to Dependabot alerts, and each installation has to accept the new permission on GitHub.',
+  managed:
+    'The deployment’s GitHub App needs read access to Dependabot alerts. Whoever runs this Triage Factory deployment adds the permission to the App, and each installation then has to accept it on GitHub.',
   token:
     'A classic token needs the security_events scope, which repo includes; a fine-grained token needs read access to Dependabot alerts. GitHub also shows a repository’s alerts only to some accounts, and the token’s account has to be one of them.',
 }
@@ -28,7 +38,7 @@ function repositories(n: number): string {
 
 function dependabotNotice(
   a: DependabotAccess,
-  credential: 'app' | 'token',
+  credential: Credential,
 ): { warn: boolean; headline: string; detail: string[] } | null {
   if (a.readable + a.no_permission + a.disabled === 0) return null
   const off =
@@ -39,7 +49,7 @@ function dependabotNotice(
     return {
       warn: true,
       headline: `Triage Factory can’t read Dependabot alerts on ${repositories(a.no_permission)}.`,
-      detail: [FIX[credential], 'Everything else on GitHub works as before.', ...off],
+      detail: [FIX[credential], 'Everything else on GitHub works as before.', RECHECK, ...off],
     }
   }
   return {
@@ -57,7 +67,7 @@ export default function GitHubDependabotNotice({
   credential,
 }: {
   orgId: string
-  credential: 'app' | 'token'
+  credential: Credential
 }) {
   const [access, setAccess] = useState<DependabotAccess | null>(null)
 

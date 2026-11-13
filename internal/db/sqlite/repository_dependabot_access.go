@@ -80,13 +80,13 @@ func (s *repositoryDependabotAccessStore) ListSystem(ctx context.Context, orgID,
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT a.repository_id, a.org_id, a.access, a.checked_at
-		FROM repository_dependabot_access a
-		JOIN repositories ON repositories.id = a.repository_id
-		WHERE a.org_id = ?
-		  AND repositories.host = ?
-		  AND repositories.retired_at IS NULL
-		ORDER BY a.repository_id
+		SELECT `+sqliteDependabotAccessColumns+`
+		FROM repository_dependabot_access
+		WHERE org_id = ?
+		  AND repository_id IN (
+		    SELECT id FROM repositories WHERE host = ? AND retired_at IS NULL
+		  )
+		ORDER BY repository_id
 	`, orgID, host)
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func (s *repositoryDependabotAccessStore) ListSystem(ctx context.Context, orgID,
 	return out, rows.Err()
 }
 
-func (s *repositoryDependabotAccessStore) CountTrackedSystem(ctx context.Context, orgID, host string) (domain.DependabotAccessCounts, error) {
+func (s *repositoryDependabotAccessStore) CountTrackedSystem(ctx context.Context, orgID, host string, checkedSince time.Time) (domain.DependabotAccessCounts, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.DependabotAccessCounts{}, err
 	}
@@ -118,11 +118,12 @@ func (s *repositoryDependabotAccessStore) CountTrackedSystem(ctx context.Context
 			COALESCE(SUM(CASE WHEN a.access = 'disabled' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN a.access IS NULL THEN 1 ELSE 0 END), 0)
 		FROM repositories
-		LEFT JOIN repository_dependabot_access a ON a.repository_id = repositories.id
+		LEFT JOIN repository_dependabot_access a
+		  ON a.repository_id = repositories.id AND a.checked_at >= ?
 		WHERE repositories.host = ?
 		  AND repositories.retired_at IS NULL
 		  AND `+repoTrackedByATeam,
-		host).Scan(&c.Readable, &c.NoPermission, &c.Disabled, &c.Unchecked)
+		checkedSince.UTC(), host).Scan(&c.Readable, &c.NoPermission, &c.Disabled, &c.Unchecked)
 	if err != nil {
 		return domain.DependabotAccessCounts{}, err
 	}

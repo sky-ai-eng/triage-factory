@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -73,13 +74,14 @@ func (s *repositoryDependabotAccessStore) ListSystem(ctx context.Context, orgID,
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT a.repository_id::text, a.org_id::text, a.access, a.checked_at
-		FROM repository_dependabot_access a
-		JOIN repositories rp ON rp.id = a.repository_id AND rp.org_id = a.org_id
-		WHERE a.org_id = $1
-		  AND rp.host = $2
-		  AND rp.retired_at IS NULL
-		ORDER BY a.repository_id
+		SELECT `+pgDependabotAccessColumns+`
+		FROM repository_dependabot_access
+		WHERE org_id = $1
+		  AND repository_id IN (
+		    SELECT id FROM repositories
+		    WHERE org_id = $1 AND host = $2 AND retired_at IS NULL
+		  )
+		ORDER BY repository_id
 	`, orgID, host)
 	if err != nil {
 		return nil, err
@@ -96,7 +98,7 @@ func (s *repositoryDependabotAccessStore) ListSystem(ctx context.Context, orgID,
 	return out, rows.Err()
 }
 
-func (s *repositoryDependabotAccessStore) CountTrackedSystem(ctx context.Context, orgID, host string) (domain.DependabotAccessCounts, error) {
+func (s *repositoryDependabotAccessStore) CountTrackedSystem(ctx context.Context, orgID, host string, checkedSince time.Time) (domain.DependabotAccessCounts, error) {
 	if err := db.RequireRepoHost(host); err != nil {
 		return domain.DependabotAccessCounts{}, err
 	}
@@ -108,12 +110,13 @@ func (s *repositoryDependabotAccessStore) CountTrackedSystem(ctx context.Context
 			count(*) FILTER (WHERE a.access = 'disabled'),
 			count(*) FILTER (WHERE a.access IS NULL)
 		FROM repositories rp
-		LEFT JOIN repository_dependabot_access a ON a.repository_id = rp.id AND a.org_id = rp.org_id
+		LEFT JOIN repository_dependabot_access a
+		  ON a.repository_id = rp.id AND a.org_id = rp.org_id AND a.checked_at >= $3
 		WHERE rp.org_id = $1
 		  AND rp.host = $2
 		  AND rp.retired_at IS NULL
 		  AND `+repoTrackedByATeam,
-		orgID, host).Scan(&c.Readable, &c.NoPermission, &c.Disabled, &c.Unchecked)
+		orgID, host, checkedSince).Scan(&c.Readable, &c.NoPermission, &c.Disabled, &c.Unchecked)
 	if err != nil {
 		return domain.DependabotAccessCounts{}, err
 	}

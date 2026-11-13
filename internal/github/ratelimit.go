@@ -432,6 +432,9 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 		if resp.StatusCode == http.StatusForbidden && (hasRetryAfter || primaryExhausted || isSecondaryRateLimitBody(data)) {
 			class = upstream.RateLimited
 		}
+		if class == upstream.Auth && resp.StatusCode == http.StatusForbidden && forbiddenIsAnswer(ctx) {
+			class = upstream.Rejected
+		}
 		upstream.Record(ctx, upstream.GitHub, c.orgID, class)
 
 		switch class {

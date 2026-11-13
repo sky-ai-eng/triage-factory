@@ -905,7 +905,9 @@ export default function GitHubAccessControl({
             onDisconnect={(inst) => void disconnectManaged(inst)}
           />
           {installCount > 0 && <GitHubGrantFindings findings={findings} />}
-          {orgId && installCount > 0 && <GitHubDependabotNotice orgId={orgId} credential="app" />}
+          {orgId && installCount > 0 && (
+            <GitHubDependabotNotice orgId={orgId} credential="managed" />
+          )}
           {error && <p className="text-ui text-alarm">{error}</p>}
           {orgId && (
             <div className="flex flex-wrap items-center gap-2">

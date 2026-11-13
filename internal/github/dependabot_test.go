@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // TestClient_DependabotAlertsAccess covers each answer the list request can
@@ -36,7 +37,6 @@ func TestClient_DependabotAlertsAccess(t *testing.T) {
 		{"fine-grained token without the permission", http.StatusForbidden,
 			`{"message":"Resource not accessible by personal access token","status":"403"}`,
 			domain.DependabotAlertsNoPermission},
-		{"403 with no JSON body", http.StatusForbidden, `forbidden`, domain.DependabotAlertsNoPermission},
 		{"not found", http.StatusNotFound, `{"message":"Not Found","status":"404"}`, domain.DependabotAlertsNoPermission},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,6 +60,18 @@ func TestClient_DependabotAlertsAccess(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a 403 that is not GitHub's is no answer", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<html>Access denied</html>`))
+		}))
+		t.Cleanup(srv.Close)
+		got, err := NewClient(srv.URL, "tok").DependabotAlertsAccess(context.Background(), "octo", "api")
+		if err == nil || got != "" {
+			t.Errorf("access = %q, err = %v; want no answer and an error", got, err)
+		}
+	})
 
 	t.Run("a server error is no answer", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -86,4 +98,31 @@ func TestClient_DependabotAlertsAccess(t *testing.T) {
 			t.Errorf("access = %q, err = %v; want no answer and *ErrRateLimited", got, err)
 		}
 	})
+}
+
+// TestClient_DependabotAlertsAccess_CountsARefusalAsAnswered: GitHub's 403 to
+// the probe is counted as an answered request, not a refused credential, and
+// the same 403 to any other request still is one.
+func TestClient_DependabotAlertsAccess_CountsARefusalAsAnswered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration","status":"403"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "tok")
+	ctx, tally := upstream.WithTally(context.Background())
+
+	if _, err := c.DependabotAlertsAccess(ctx, "octo", "api"); err != nil {
+		t.Fatalf("DependabotAlertsAccess: %v", err)
+	}
+	if auth, rejected := tally.Count(upstream.Auth), tally.Count(upstream.Rejected); auth != 0 || rejected != 1 {
+		t.Errorf("probe counted auth=%d rejected=%d, want auth=0 rejected=1", auth, rejected)
+	}
+
+	if _, err := c.Get(ctx, "/repos/octo/api"); err == nil {
+		t.Fatal("Get: want the 403 as an error")
+	}
+	if auth := tally.Count(upstream.Auth); auth != 1 {
+		t.Errorf("another request's 403 counted auth=%d, want 1", auth)
+	}
 }

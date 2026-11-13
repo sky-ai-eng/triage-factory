@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -15,31 +14,112 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
-// dependabotAccessRecheck is how long a recorded answer stands before the poll
-// asks GitHub again. It is how TF notices a credential gaining or losing the
-// permission, or alerts being turned on or off on a repository, at a cost of
-// one request per tracked repository per interval.
-const dependabotAccessRecheck = 24 * time.Hour
-
-// dependabotProbesPerPass caps the probes one credential's pass makes, so a
-// large tracked set is probed over several cycles rather than with a request
-// for every repository at once. The repositories never probed go first, then
-// the longest-standing answers.
-const dependabotProbesPerPass = 25
+// dependabotProbesPerCycle caps the probes one org's cycle makes across all
+// of its credential passes, so a large tracked set is probed over several
+// cycles rather than with a request for every repository at once. The
+// repositories never probed go first, then the longest-standing answers.
+const dependabotProbesPerCycle = 25
 
 // dependabotProbe records, per tracked repository, whether the org's GitHub
-// credential can read its Dependabot alerts. One is made per org cycle, and
-// each credential pass hands it the tracked repositories that credential
-// reads. It reads the tracked set and the recorded answers once, on its first
-// pass.
+// credential can read its Dependabot alerts. One is made per org cycle. Each
+// credential pass adds the repositories it reads, and the probes run once,
+// after every pass has refreshed, so they never delay a refresh.
 type dependabotProbe struct {
-	m     *Manager
-	orgID string
-	host  string
-	load  func() (map[string]dependabotTarget, error)
-	// rateLimited ends the cycle's probes, as a rate limit ends the cycle's
-	// refreshes: the next cycle takes up the repositories this one left.
-	rateLimited bool
+	m      *Manager
+	orgID  string
+	host   string
+	passes []dependabotPass
+}
+
+// dependabotPass is one credential and the repositories it reads.
+type dependabotPass struct {
+	client *ghclient.Client
+	repos  []string
+}
+
+// newDependabotProbe returns the cycle's probe, or nil when the Manager holds
+// no store to record answers in (tests and embedders that haven't wired it).
+func (m *Manager) newDependabotProbe(orgID, host string) *dependabotProbe {
+	if m.DependabotAccess == nil {
+		return nil
+	}
+	return &dependabotProbe{m: m, orgID: orgID, host: host}
+}
+
+// add queues repos for probing under client. nil-safe.
+func (p *dependabotProbe) add(client *ghclient.Client, repos []string) {
+	if p == nil || len(repos) == 0 {
+		return
+	}
+	p.passes = append(p.passes, dependabotPass{client: client, repos: repos})
+}
+
+// run probes the tracked repositories the passes added whose answer is
+// missing or older than domain.DependabotAccessRecheck, and records each
+// answer GitHub gives. The first request that gets no answer ends the cycle's
+// probes: a rate limit, a refused or revoked credential, or GitHub failing
+// would meet every remaining request too, so the next cycle tries again.
+// nil-safe.
+func (p *dependabotProbe) run(ctx context.Context) {
+	if p == nil || len(p.passes) == 0 {
+		return
+	}
+	targets, err := p.load(ctx)
+	if err != nil {
+		githubLog.WarnContext(ctx, "read dependabot access answers failed; none probed this cycle", "org", p.orgID, "error", err)
+		return
+	}
+
+	now := time.Now()
+	type due struct {
+		name   string
+		client *ghclient.Client
+		target dependabotTarget
+	}
+	var dueRepos []due
+	seen := map[string]bool{}
+	for _, pass := range p.passes {
+		for _, name := range pass.repos {
+			t, ok := targets[name]
+			if !ok || seen[name] {
+				continue
+			}
+			seen[name] = true
+			if t.answer != nil && now.Sub(t.answer.CheckedAt) < domain.DependabotAccessRecheck {
+				continue
+			}
+			dueRepos = append(dueRepos, due{name: name, client: pass.client, target: t})
+		}
+	}
+	slices.SortStableFunc(dueRepos, func(a, b due) int {
+		return checkedAt(a.target).Compare(checkedAt(b.target))
+	})
+	if len(dueRepos) > dependabotProbesPerCycle {
+		dueRepos = dueRepos[:dependabotProbesPerCycle]
+	}
+
+	for _, d := range dueRepos {
+		if ctx.Err() != nil {
+			return
+		}
+		owner, repo, _ := strings.Cut(d.name, "/")
+		access, err := d.client.DependabotAlertsAccess(ctx, owner, repo)
+		if err != nil {
+			var rl *ghclient.ErrRateLimited
+			if !errors.As(err, &rl) {
+				githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "dependabot alerts access probe failed; the rest wait for the next cycle", "org", p.orgID, "repo", d.name, "error", err)
+			}
+			return
+		}
+		stored, err := p.m.DependabotAccess.RecordSystem(ctx, p.orgID, d.target.repositoryID, access)
+		if err != nil {
+			githubLog.ErrorContext(ctx, "record dependabot alerts access failed", "org", p.orgID, "repo", d.name, "error", err)
+			continue
+		}
+		if d.target.answer == nil || d.target.answer.Access != stored.Access {
+			githubLog.InfoContext(ctx, "dependabot alerts access", "org", p.orgID, "repo", d.name, "access", stored.Access)
+		}
+	}
 }
 
 // dependabotTarget is a tracked repository and the answer recorded for it,
@@ -49,100 +129,26 @@ type dependabotTarget struct {
 	answer       *domain.RepositoryDependabotAccess
 }
 
-// newDependabotProbe returns the cycle's probe, or nil when the Manager holds
-// no store to record answers in (tests and embedders that haven't wired it).
-func (m *Manager) newDependabotProbe(ctx context.Context, orgID, host string) *dependabotProbe {
-	if m.DependabotAccess == nil {
-		return nil
-	}
-	return &dependabotProbe{
-		m:     m,
-		orgID: orgID,
-		host:  host,
-		load: sync.OnceValues(func() (map[string]dependabotTarget, error) {
-			tracked, _, err := m.repos.ListTrackedSystem(ctx, orgID, host, db.Unwindowed)
-			if err != nil {
-				return nil, err
-			}
-			answers, err := m.DependabotAccess.ListSystem(ctx, orgID, host)
-			if err != nil {
-				return nil, err
-			}
-			byRepo := make(map[string]*domain.RepositoryDependabotAccess, len(answers))
-			for i := range answers {
-				byRepo[answers[i].RepositoryID] = &answers[i]
-			}
-			out := make(map[string]dependabotTarget, len(tracked))
-			for _, r := range tracked {
-				out[r.Slug()] = dependabotTarget{repositoryID: r.ID, answer: byRepo[r.ID]}
-			}
-			return out, nil
-		}),
-	}
-}
-
-// run probes the repositories of repos whose answer is missing or older than
-// dependabotAccessRecheck, under client, and records each answer GitHub
-// gives. A failed probe or write records nothing for that repository, and the
-// next cycle tries it again. nil-safe.
-func (p *dependabotProbe) run(ctx context.Context, client *ghclient.Client, repos []string) {
-	if p == nil || p.rateLimited {
-		return
-	}
-	targets, err := p.load()
+// load reads the org's tracked repositories on the host and the answers
+// recorded for them, keyed by owner/repo.
+func (p *dependabotProbe) load(ctx context.Context) (map[string]dependabotTarget, error) {
+	tracked, _, err := p.m.repos.ListTrackedSystem(ctx, p.orgID, p.host, db.Unwindowed)
 	if err != nil {
-		githubLog.WarnContext(ctx, "read dependabot access answers failed; none probed this cycle", "org", p.orgID, "error", err)
-		return
+		return nil, err
 	}
-
-	now := time.Now()
-	type due struct {
-		name   string
-		target dependabotTarget
+	answers, err := p.m.DependabotAccess.ListSystem(ctx, p.orgID, p.host)
+	if err != nil {
+		return nil, err
 	}
-	var dueRepos []due
-	for _, name := range repos {
-		t, ok := targets[name]
-		if !ok {
-			continue
-		}
-		if t.answer != nil && now.Sub(t.answer.CheckedAt) < dependabotAccessRecheck {
-			continue
-		}
-		dueRepos = append(dueRepos, due{name: name, target: t})
+	byRepo := make(map[string]*domain.RepositoryDependabotAccess, len(answers))
+	for i := range answers {
+		byRepo[answers[i].RepositoryID] = &answers[i]
 	}
-	slices.SortStableFunc(dueRepos, func(a, b due) int {
-		return checkedAt(a.target).Compare(checkedAt(b.target))
-	})
-	if len(dueRepos) > dependabotProbesPerPass {
-		dueRepos = dueRepos[:dependabotProbesPerPass]
+	out := make(map[string]dependabotTarget, len(tracked))
+	for _, r := range tracked {
+		out[r.Slug()] = dependabotTarget{repositoryID: r.ID, answer: byRepo[r.ID]}
 	}
-
-	for _, d := range dueRepos {
-		if ctx.Err() != nil {
-			return
-		}
-		owner, repo, _ := strings.Cut(d.name, "/")
-		access, err := client.DependabotAlertsAccess(ctx, owner, repo)
-		var rl *ghclient.ErrRateLimited
-		if errors.As(err, &rl) {
-			p.rateLimited = true
-			return
-		}
-		if err != nil {
-			githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "dependabot alerts access probe failed", "org", p.orgID, "repo", d.name, "error", err)
-			continue
-		}
-		stored, err := p.m.DependabotAccess.RecordSystem(ctx, p.orgID, d.target.repositoryID, access)
-		if err != nil {
-			githubLog.ErrorContext(ctx, "record dependabot alerts access failed", "org", p.orgID, "repo", d.name, "error", err)
-			continue
-		}
-		targets[d.name] = dependabotTarget{repositoryID: d.target.repositoryID, answer: &stored}
-		if d.target.answer == nil || d.target.answer.Access != access {
-			githubLog.InfoContext(ctx, "dependabot alerts access", "org", p.orgID, "repo", d.name, "access", access)
-		}
-	}
+	return out, nil
 }
 
 // checkedAt is when the target's answer was recorded, zero when it has none,

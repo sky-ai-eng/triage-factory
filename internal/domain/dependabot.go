@@ -7,7 +7,6 @@ import (
 
 // DependabotAlertsAccess is whether the org's GitHub credential can read a
 // repository's Dependabot alerts, as GitHub last answered the list request.
-// Only a readable repository's alerts are polled.
 type DependabotAlertsAccess string
 
 const (
@@ -32,8 +31,19 @@ func (a DependabotAlertsAccess) Validate() error {
 	return fmt.Errorf("dependabot alerts access %q is not one of readable, no_permission, disabled", string(a))
 }
 
-// Polled reports whether the poll lists the repository's alerts.
-func (a DependabotAlertsAccess) Polled() bool { return a == DependabotAlertsReadable }
+// DependabotAccessRecheck is how long a recorded answer stands before the
+// poll asks GitHub again. It is how TF notices a credential gaining or losing
+// the permission, or alerts being turned on or off on a repository, at a cost
+// of one request per tracked repository per interval.
+const DependabotAccessRecheck = 24 * time.Hour
+
+// DependabotAccessStaleAfter is the age past which a recorded answer no longer
+// counts. It is twice the recheck interval, so an answer the poll is due to
+// replace still counts until it does. An older answer is for a repository the
+// poll no longer reaches: it left every grant the org's credential reads, or
+// the poll has failed for that long. Such an answer describes a credential
+// the org may no longer hold.
+const DependabotAccessStaleAfter = 2 * DependabotAccessRecheck
 
 // RepositoryDependabotAccess is the stored answer for one repository: its
 // registry row, the answer, and when GitHub gave it.
@@ -46,8 +56,8 @@ type RepositoryDependabotAccess struct {
 
 // DependabotAccessCounts counts an org's tracked repositories on one GitHub
 // host by their stored answer. Unchecked is the tracked repositories with no
-// answer yet: the poll has not reached them, or no credential of the org
-// reads them.
+// current answer: the poll has not reached them yet, or their answer is older
+// than DependabotAccessStaleAfter.
 type DependabotAccessCounts struct {
 	Readable     int
 	NoPermission int

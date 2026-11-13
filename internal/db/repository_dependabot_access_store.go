@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -32,8 +33,8 @@ type RepositoryDependabotAccessStore interface {
 	ListSystem(ctx context.Context, orgID, host string) ([]domain.RepositoryDependabotAccess, error)
 
 	// CountTrackedSystem counts the repositories on host that a team of the
-	// org tracks, by their answer; a tracked repository with no answer counts
-	// as unchecked. Retired rows and archived teams are left out, as in
-	// RepositoryStore.ListTrackedSystem.
-	CountTrackedSystem(ctx context.Context, orgID, host string) (domain.DependabotAccessCounts, error)
+	// org tracks, by their answer. A tracked repository with no answer, or
+	// with one checked before checkedSince, counts as unchecked. Retired rows
+	// and archived teams are left out, as in RepositoryStore.ListTrackedSystem.
+	CountTrackedSystem(ctx context.Context, orgID, host string, checkedSince time.Time) (domain.DependabotAccessCounts, error)
 }

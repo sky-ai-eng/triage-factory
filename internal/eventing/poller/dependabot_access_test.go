@@ -111,7 +111,7 @@ func TestDependabotProbe_RecordsEachAnswer(t *testing.T) {
 	m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
 	names := []string{"octo/readable", "octo/disabled", "octo/refused", "octo/untracked"}
 
-	m.newDependabotProbe(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost).run(ctx, client, names)
+	probeCycle(ctx, m, dependabotPass{client, names})
 
 	want := map[string]domain.DependabotAlertsAccess{
 		"readable": domain.DependabotAlertsReadable,
@@ -132,17 +132,17 @@ func TestDependabotProbe_RecordsEachAnswer(t *testing.T) {
 	}
 
 	// The next cycle finds every answer fresh.
-	m.newDependabotProbe(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost).run(ctx, client, names)
+	probeCycle(ctx, m, dependabotPass{client, names})
 	if n := gh.total(); n != 3 {
 		t.Errorf("requests after a second cycle = %d, want the first cycle's 3", n)
 	}
 
 	// An answer older than the recheck interval is asked for again.
-	stale := time.Now().Add(-dependabotAccessRecheck - time.Minute).UTC()
+	stale := time.Now().Add(-domain.DependabotAccessRecheck - time.Minute).UTC()
 	if _, err := database.Exec(`UPDATE repository_dependabot_access SET checked_at = ?`, stale); err != nil {
 		t.Fatalf("age answers: %v", err)
 	}
-	m.newDependabotProbe(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost).run(ctx, client, names)
+	probeCycle(ctx, m, dependabotPass{client, names})
 	for repo := range want {
 		if n := gh.count(repo); n != 2 {
 			t.Errorf("%s asked %d times, want 2 once its answer aged out", repo, n)
@@ -150,50 +150,61 @@ func TestDependabotProbe_RecordsEachAnswer(t *testing.T) {
 	}
 }
 
-// TestDependabotProbe_RateLimitStopsTheCycle: a rate-limited probe records
-// nothing and ends the cycle's probes, for this credential and the next.
-func TestDependabotProbe_RateLimitStopsTheCycle(t *testing.T) {
-	ctx := context.Background()
-	gh, client := newAlertsServer(t, func(string) (int, string) {
-		return http.StatusTooManyRequests, `{"message":"API rate limit exceeded"}`
-	})
-	stores := sqlitestore.New(newMigratedSQLiteForPoller(t))
-	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a", "octo/b"})
-	m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
+// TestDependabotProbe_NoAnswerEndsTheCycle: a request that gets no answer (a
+// rate limit, a revoked token) records nothing and ends the cycle's probes,
+// across every credential pass.
+func TestDependabotProbe_NoAnswerEndsTheCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"rate limited", http.StatusTooManyRequests, `{"message":"API rate limit exceeded"}`},
+		{"revoked token", http.StatusUnauthorized, `{"message":"Bad credentials"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			gh, client := newAlertsServer(t, func(string) (int, string) { return tc.status, tc.body })
+			stores := sqlitestore.New(newMigratedSQLiteForPoller(t))
+			trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a", "octo/b", "octo/c"})
+			m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
 
-	probe := m.newDependabotProbe(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
-	probe.run(ctx, client, []string{"octo/a", "octo/b"})
-	probe.run(ctx, client, []string{"octo/a", "octo/b"})
+			probeCycle(ctx, m, dependabotPass{client, []string{"octo/a", "octo/b"}}, dependabotPass{client, []string{"octo/c"}})
 
-	if n := gh.total(); n != 1 {
-		t.Errorf("requests = %d, want the one that was rate-limited", n)
-	}
-	if got := recordedAccess(t, stores); len(got) != 0 {
-		t.Errorf("answers = %v, want none", got)
+			if n := gh.total(); n != 1 {
+				t.Errorf("requests = %d, want the one that got no answer", n)
+			}
+			if got := recordedAccess(t, stores); len(got) != 0 {
+				t.Errorf("answers = %v, want none", got)
+			}
+		})
 	}
 }
 
-// TestDependabotProbe_CapsEachPass: a pass probes at most
-// dependabotProbesPerPass repositories, and the next cycle takes the ones
-// never probed before any it has an answer for.
-func TestDependabotProbe_CapsEachPass(t *testing.T) {
+// TestDependabotProbe_CapsEachCycle: a cycle probes at most
+// dependabotProbesPerCycle repositories across all of its credential passes,
+// and the next cycle takes the ones never probed before any it has an answer
+// for.
+func TestDependabotProbe_CapsEachCycle(t *testing.T) {
 	ctx := context.Background()
 	gh, client := newAlertsServer(t, func(string) (int, string) { return http.StatusOK, `[]` })
 	stores := sqlitestore.New(newMigratedSQLiteForPoller(t))
 	var names []string
-	for i := range dependabotProbesPerPass + 5 {
+	for i := range dependabotProbesPerCycle + 5 {
 		names = append(names, fmt.Sprintf("octo/r%02d", i))
 	}
 	trackRepos(t, stores, runmode.LocalDefaultOrgID, names)
 	m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
+	half := len(names) / 2
+	passes := []dependabotPass{{client, names[:half]}, {client, names[half:]}}
 
-	m.newDependabotProbe(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost).run(ctx, client, names)
-	if n := gh.total(); n != dependabotProbesPerPass {
-		t.Fatalf("first pass made %d requests, want %d", n, dependabotProbesPerPass)
+	probeCycle(ctx, m, passes...)
+	if n := gh.total(); n != dependabotProbesPerCycle {
+		t.Fatalf("first cycle made %d requests, want %d", n, dependabotProbesPerCycle)
 	}
-	m.newDependabotProbe(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost).run(ctx, client, names)
+	probeCycle(ctx, m, passes...)
 	if n := gh.total(); n != len(names) {
-		t.Errorf("after two passes %d requests, want one per repository (%d)", n, len(names))
+		t.Errorf("after two cycles %d requests, want one per repository (%d)", n, len(names))
 	}
 	if got := recordedAccess(t, stores); len(got) != len(names) {
 		t.Errorf("%d answers, want %d", len(got), len(names))
@@ -204,9 +215,17 @@ func TestDependabotProbe_CapsEachPass(t *testing.T) {
 // makes no request.
 func TestDependabotProbe_NoStoreProbesNothing(t *testing.T) {
 	gh, client := newAlertsServer(t, func(string) (int, string) { return http.StatusOK, `[]` })
-	m := &Manager{}
-	m.newDependabotProbe(context.Background(), runmode.LocalDefaultOrgID, dbtest.TestGitHubHost).run(context.Background(), client, []string{"octo/a"})
+	probeCycle(context.Background(), &Manager{}, dependabotPass{client, []string{"octo/a"}})
 	if n := gh.total(); n != 0 {
 		t.Errorf("requests = %d, want none", n)
 	}
+}
+
+// probeCycle runs one org cycle's probe over passes.
+func probeCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
+	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
+	for _, pass := range passes {
+		p.add(pass.client, pass.repos)
+	}
+	p.run(ctx)
 }

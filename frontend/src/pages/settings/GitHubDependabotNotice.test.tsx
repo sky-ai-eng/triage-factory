@@ -7,7 +7,7 @@ import { jsonBody } from '../../test/apiResponse'
 
 type Counts = Record<'readable' | 'no_permission' | 'disabled' | 'unchecked', number>
 
-function renderWith(c: Partial<Counts>, credential: 'app' | 'token') {
+function renderWith(c: Partial<Counts>, credential: 'app' | 'managed' | 'token') {
   const fetchMock = vi.fn().mockResolvedValue({
     ok: true,
     ...jsonBody({ readable: 0, no_permission: 0, disabled: 0, unchecked: 0, ...c }),
@@ -46,6 +46,13 @@ describe('GitHubDependabotNotice', () => {
     renderWith({ no_permission: 1 }, 'app')
     await screen.findByText('Triage Factory can’t read Dependabot alerts on 1 tracked repository.')
     expect(screen.getByText(/each installation has to accept/)).toBeInTheDocument()
+  })
+
+  it('sends a deployment-App org to the operator', async () => {
+    renderWith({ no_permission: 1 }, 'managed')
+    await screen.findByText('Triage Factory can’t read Dependabot alerts on 1 tracked repository.')
+    expect(screen.getByText(/Whoever runs this Triage Factory deployment/)).toBeInTheDocument()
+    expect(screen.getByText(/once a day/)).toBeInTheDocument()
   })
 
   it('names who sees alerts once they are readable', async () => {

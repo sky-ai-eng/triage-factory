@@ -1044,7 +1044,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle.
 	grants := make(map[string]tracker.GitHubReach, len(installs))
 	defer func() { m.rememberGrants(orgID, installs, grants) }()
-	probe := m.newDependabotProbe(ctx, orgID, scope)
+	probe := m.newDependabotProbe(orgID, scope)
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
@@ -1124,7 +1124,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			rateLimitResumeFrom, rateLimitErr = resumeFrom, rl
 			break
 		}
-		probe.run(ctx, client, scoped)
+		probe.add(client, scoped)
+	}
+	if rateLimitErr == nil {
+		probe.run(ctx)
 	}
 
 	// Decide the cycle's actual resume point once, after every installation
@@ -1292,7 +1295,9 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	}
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(rerr, &rl) {
-		m.newDependabotProbe(ctx, orgID, scope).run(ctx, client, repos)
+		probe := m.newDependabotProbe(orgID, scope)
+		probe.add(client, repos)
+		probe.run(ctx)
 	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
 	return rerr == nil

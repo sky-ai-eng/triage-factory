@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -129,7 +130,8 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		// An answer for a repository no team tracks is not counted.
 		record(t, f, untracked, domain.DependabotAlertsNoPermission)
 
-		got, err := f.Stores.DependabotAccess.CountTrackedSystem(ctx, f.OrgID, TestGitHubHost)
+		current := time.Now().Add(-domain.DependabotAccessStaleAfter)
+		got, err := f.Stores.DependabotAccess.CountTrackedSystem(ctx, f.OrgID, TestGitHubHost, current)
 		if err != nil {
 			t.Fatalf("CountTrackedSystem: %v", err)
 		}
@@ -138,12 +140,36 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 			t.Errorf("counts = %+v, want %+v", got, want)
 		}
 
-		other, err := f.Stores.DependabotAccess.CountTrackedSystem(ctx, f.OrgID, TestOtherGitHubHost)
+		other, err := f.Stores.DependabotAccess.CountTrackedSystem(ctx, f.OrgID, TestOtherGitHubHost, current)
 		if err != nil {
 			t.Fatalf("CountTrackedSystem (other host): %v", err)
 		}
 		if other != (domain.DependabotAccessCounts{}) {
 			t.Errorf("counts on %s = %+v, want none", TestOtherGitHubHost, other)
+		}
+	})
+
+	t.Run("Count_takes_an_answer_checked_before_the_cutoff_as_unchecked", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestGitHubHost, []string{repoID}); err != nil {
+			t.Fatalf("track: %v", err)
+		}
+		stored := record(t, f, repoID, domain.DependabotAlertsNoPermission)
+
+		at, err := f.Stores.DependabotAccess.CountTrackedSystem(ctx, f.OrgID, TestGitHubHost, stored.CheckedAt)
+		if err != nil {
+			t.Fatalf("CountTrackedSystem: %v", err)
+		}
+		if want := (domain.DependabotAccessCounts{NoPermission: 1}); at != want {
+			t.Errorf("counts with the cutoff at the answer = %+v, want %+v", at, want)
+		}
+		after, err := f.Stores.DependabotAccess.CountTrackedSystem(ctx, f.OrgID, TestGitHubHost, stored.CheckedAt.Add(time.Microsecond))
+		if err != nil {
+			t.Fatalf("CountTrackedSystem: %v", err)
+		}
+		if want := (domain.DependabotAccessCounts{Unchecked: 1}); after != want {
+			t.Errorf("counts with the cutoff after the answer = %+v, want %+v", after, want)
 		}
 	})
 
