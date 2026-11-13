@@ -3,10 +3,10 @@ package routing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 
@@ -14,6 +14,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -146,6 +147,41 @@ func deliverableState(t *testing.T, database *sql.DB, deliverableID string) stri
 	return state
 }
 
+// stagedSystemNotes is the contents of the conversation's undelivered system
+// notes: what its agent reads next, whichever runtime drives it.
+func stagedSystemNotes(t *testing.T, database *sql.DB, conversationID string) []string {
+	t.Helper()
+	rows, err := database.Query(`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ? AND delivered = 0 ORDER BY id`,
+		conversationID, domain.MessageSubtypeInjectionSystemNote)
+	if err != nil {
+		t.Fatalf("read staged notes: %v", err)
+	}
+	defer rows.Close()
+	var notes []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatalf("scan staged note: %v", err)
+		}
+		notes = append(notes, c)
+	}
+	return notes
+}
+
+// enqueueClosed queues the event of the pull request closing without a merge.
+func enqueueClosed(t *testing.T, database *sql.DB, entityID string) {
+	t.Helper()
+	meta, _ := json.Marshal(events.GitHubPRClosedMetadata{Author: "octocat", Repo: "owner/repo", PRNumber: 1, ClosedBy: "octocat"})
+	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		OrgID:        runmode.LocalDefaultOrgID,
+		EntityID:     &entityID,
+		EventType:    domain.EventGitHubPRClosed,
+		MetadataJSON: string(meta),
+	}, ""); err != nil {
+		t.Fatalf("enqueue pr:closed: %v", err)
+	}
+}
+
 func externalActionCount(t *testing.T, database *sql.DB, conversationID string) int {
 	t.Helper()
 	var n int
@@ -183,15 +219,17 @@ func TestCloseCascade_LeavesTheDraftAndDismissesTheMergedPullRequestsReview(t *t
 	if got := deliverableState(t, database, reviewID); got != domain.DeliverableStateReviewDismissed {
 		t.Errorf("review deliverable state = %q, want %q", got, domain.DeliverableStateReviewDismissed)
 	}
-	// What the agent that staged the review is told on its next resume, read
-	// from the row as the ledger reads it: the merge, and no person.
+	// The agent that staged the review is told once, with the note the stored
+	// row renders: the merge, and no person.
 	review, err := sqlitestore.New(database).Deliverables.Get(t.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil || review == nil {
 		t.Fatalf("read review deliverable: %v", err)
 	}
-	note := domain.DeliverableResolutionNote(*review)
-	if !strings.Contains(note, "the pull request was merged") || strings.Contains(note, "human") {
-		t.Errorf("resolution note = %q, want it to say the pull request was merged and credit no person", note)
+	if d, _ := domain.ParseReviewDeliverableDetails(review.DetailsJSON); d.Resolution != domain.ReviewResolutionPullRequestMerged {
+		t.Errorf("review resolution = %q, want %q", d.Resolution, domain.ReviewResolutionPullRequestMerged)
+	}
+	if notes := stagedSystemNotes(t, database, convID); len(notes) != 1 || notes[0] != domain.DeliverableResolutionNote(*review) {
+		t.Errorf("staged notes = %q, want exactly the review's resolution note", notes)
 	}
 	if n := externalActionCount(t, database, convID); n != 0 {
 		t.Errorf("audit rows = %d, want 0 — the close wrote nothing on GitHub", n)
@@ -257,7 +295,7 @@ func TestCloseCascade_ReplayedCloseDismissesNothing(t *testing.T) {
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("first drain: %v", err)
 	}
-	if got := sp.dismissedCopy(); len(got) != 1 || got[0].DeliverableID != reviewID || got[0].ConversationID != convID {
+	if got := sp.dismissedCopy(); len(got) != 1 || got[0].ID != reviewID || got[0].ConversationID != convID {
 		t.Fatalf("dismissed reviews after the close = %+v, want exactly %s on %s", got, reviewID, convID)
 	}
 
@@ -269,5 +307,65 @@ func TestCloseCascade_ReplayedCloseDismissesNothing(t *testing.T) {
 	}
 	if got := sp.dismissedCopy(); len(got) != 1 {
 		t.Errorf("dismissed reviews after the replay = %+v, want the first one only", got)
+	}
+}
+
+// TestCloseCascade_TellsTheConversationItsReviewWasDismissedOnce: a merge and
+// a close each dismiss the staged review of the pull request, and the
+// conversation that staged it, which belongs to another task and is still
+// working, has exactly one note staged for it in either runtime. The note is
+// the one the stored row renders, so it carries how the pull request ended.
+// The same event again finds the entity closed and stages no second note.
+func TestCloseCascade_TellsTheConversationItsReviewWasDismissedOnce(t *testing.T) {
+	ends := []struct {
+		name       string
+		enqueue    func(*testing.T, *sql.DB, string)
+		resolution string
+	}{
+		{"merge", enqueueMerged, domain.ReviewResolutionPullRequestMerged},
+		{"close", enqueueClosed, domain.ReviewResolutionPullRequestClosed},
+	}
+	for _, end := range ends {
+		for _, runtime := range []string{domain.ConversationRuntimeSDK, domain.ConversationRuntimeNative} {
+			t.Run(end.name+" tells a working "+runtime+" conversation", func(t *testing.T) {
+				database := newTestDB(t)
+				r := newQueueWorkerRouter(t, database)
+				sp, _ := realSpawner(t, database)
+				r.spawner = sp
+
+				reviewedID, _ := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#31")
+				_, workingTaskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#32")
+				_, convID := seedRunOnTask(t, database, workingTaskID, "running", domain.StatusRunning)
+				if _, err := database.Exec(`UPDATE conversations SET runtime = ? WHERE id = ?`, runtime, convID); err != nil {
+					t.Fatalf("set runtime: %v", err)
+				}
+				reviewID := seedPendingReview(t, database, convID, reviewedID, "owner/repo", 31)
+
+				end.enqueue(t, database, reviewedID)
+				if err := r.drainEventQueue(context.Background()); err != nil {
+					t.Fatalf("drainEventQueue: %v", err)
+				}
+
+				review, err := sqlitestore.New(database).Deliverables.Get(t.Context(), runmode.LocalDefaultOrgID, reviewID)
+				if err != nil || review == nil {
+					t.Fatalf("read review deliverable: %v", err)
+				}
+				if d, _ := domain.ParseReviewDeliverableDetails(review.DetailsJSON); review.State != domain.DeliverableStateReviewDismissed || d.Resolution != end.resolution {
+					t.Fatalf("review = (%q, resolution %q), want it dismissed with resolution %q", review.State, d.Resolution, end.resolution)
+				}
+				want := domain.DeliverableResolutionNote(*review)
+				if notes := stagedSystemNotes(t, database, convID); len(notes) != 1 || notes[0] != want {
+					t.Fatalf("staged notes = %q, want exactly the review's resolution note %q", notes, want)
+				}
+
+				end.enqueue(t, database, reviewedID)
+				if err := r.drainEventQueue(context.Background()); err != nil {
+					t.Fatalf("replay drain: %v", err)
+				}
+				if notes := stagedSystemNotes(t, database, convID); len(notes) != 1 {
+					t.Errorf("staged notes after the replay = %q, want the first one only", notes)
+				}
+			})
+		}
 	}
 }

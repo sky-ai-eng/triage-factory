@@ -1003,12 +1003,12 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		}
 	})
 
-	// The reopen rule: a follow-up can change the blueprint only while its
-	// task is still open. An aborted blueprint reopens, and the step's abort
-	// verdict is withdrawn with it so the reactor reads the follow-up's own
-	// verdict, not the one that aborted the run. A closed task, or a blueprint
-	// that finished, reopens nothing and keeps the verdict as it was.
-	t.Run("AFollowUpReopensAnAbortedBlueprintOnlyWhileItsTaskIsOpen", func(t *testing.T) {
+	// The reopen rule: a follow-up reopens an aborted blueprint whether its
+	// task is open or closed, and the step's abort verdict is withdrawn with it
+	// so the reactor reads the follow-up's own verdict, not the one that
+	// aborted the run. A blueprint that finished reopens nothing and keeps the
+	// verdict as it was.
+	t.Run("AFollowUpReopensAnAbortedBlueprintWhateverItsTaskStatus", func(t *testing.T) {
 		for _, tc := range []struct {
 			name       string
 			blueprint  string
@@ -1016,7 +1016,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			wantReopen bool
 		}{
 			{"aborted, task open", "aborted", false, true},
-			{"aborted, task closed", "aborted", true, false},
+			{"aborted, task closed", "aborted", true, true},
 			{"finished", "completed", false, false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {

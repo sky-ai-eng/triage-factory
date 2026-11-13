@@ -1616,22 +1616,23 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	// The Postgres twin carries the reasoning: the owing condition is the
 	// shared taskMemoryOwedRowSQL correlated against the tasks row (which is
 	// what makes the comma-join a join), the backoff arm is spelled against
-	// started_at so an attempt nobody closed out ages out on its own, and the
-	// org arm sits inside the predicate so a one-org scan's LIMIT counts that
-	// org's rows. Local mode is N=1, so both the cross-tenant caveat and the
-	// org scope are moot here — but the row still carries its org and the
-	// predicate is still spelled, because the provisioner is the same code in
-	// both modes.
+	// started_at so an attempt nobody closed out ages out on its own, the
+	// ordering key is the task holding a working conversation rather than its
+	// status, and the org arm sits inside the predicate so a one-org scan's
+	// LIMIT counts that org's rows. Local mode is N=1, so both the
+	// cross-tenant caveat and the org scope are moot here — but the row still
+	// carries its org and the predicate is still spelled, because the
+	// provisioner is the same code in both modes.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT owed.org_id, owed.id, owed.task_id,
-		       (t.status NOT IN ('done', 'dismissed')) AS task_open
+		       `+taskWorkingSQL("t.id")+` AS task_working
 		FROM conversations owed, tasks t
 		WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
 		  AND (? IS NULL OR owed.org_id = ?)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM conversation_memory_attempts att
 		      WHERE att.conversation_id = owed.id AND att.started_at > ?)
-		ORDER BY task_open DESC, owed.ended_at ASC, owed.id ASC
+		ORDER BY task_working DESC, owed.ended_at ASC, owed.id ASC
 		LIMIT ?
 	`, nullIfEmpty(orgID), nullIfEmpty(orgID), time.Now().UTC().Add(-backoff), limit)
 	if err != nil {
@@ -1641,7 +1642,7 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	var out []domain.MemoryOwed
 	for rows.Next() {
 		var o domain.MemoryOwed
-		if err := rows.Scan(&o.OrgID, &o.ConversationID, &o.TaskID, &o.TaskOpen); err != nil {
+		if err := rows.Scan(&o.OrgID, &o.ConversationID, &o.TaskID, &o.TaskWorking); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -2087,34 +2088,6 @@ func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conv
 		return nil, err
 	}
 	return result, nil
-}
-
-// LastAgentActivityAtSystem returns the created_at of the run's newest non-user
-// message (the deliverable-change ledger watermark). Ordered by id DESC —
-// the monotonic insertion order — rather than MAX(created_at), so the watermark
-// is the genuinely last-inserted agent row and never trips over mixed timestamp
-// text formats in a lexical MAX. ok=false when the run has no agent message yet.
-//
-// assertLocalOrg above is SQLite's hard single-tenant gate; org_id is also kept
-// in the WHERE to mirror the Postgres twin (defense-in-depth, and resilience if a
-// multi-org SQLite path ever lands).
-func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (time.Time, bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return time.Time{}, false, err
-	}
-	var at time.Time
-	err := s.q.QueryRowContext(ctx, `
-		SELECT created_at FROM messages
-		WHERE org_id = ? AND conversation_id = ? AND role <> 'user'
-		ORDER BY id DESC LIMIT 1
-	`, orgID, conversationID).Scan(&at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	return at, true, nil
 }
 
 func (s *conversationStore) WarmWaitStateSystem(ctx context.Context, orgID, conversationID string) (db.WarmWaitState, error) {

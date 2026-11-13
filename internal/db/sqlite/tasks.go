@@ -1011,10 +1011,7 @@ func reopenClosedTask(ctx context.Context, q queryer, entityID, eventType, dedup
 		   AND EXISTS (
 		       SELECT 1 FROM entities e
 		        WHERE e.id = tasks.entity_id AND e.state = 'active')
-		   AND EXISTS (
-		       SELECT 1 FROM conversations r
-		        WHERE r.task_id = tasks.id
-		          AND `+workingConversationSQL+`)
+		   AND `+taskWorkingSQL("tasks.id")+`
 		RETURNING id
 	`, entityID, eventType, dedupKey).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {

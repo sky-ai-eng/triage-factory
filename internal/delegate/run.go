@@ -799,7 +799,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // Either one carries the notes staged for the conversation, so a launch reads
 // what landed before it as every other engagement does. The continuation note
 // follows them, the way a resume puts them ahead of the person's message
-// (resumeSystemPrepends), since the session already knows the task. The
+// (dispatchResumeClaim), since the session already knows the task. The
 // opening comes first, as a native engagement's does (mintOpeningRows): a
 // model that knows nothing reads what the task is before what happened to
 // it. They are flushed only once the turn's own rows are written, so a

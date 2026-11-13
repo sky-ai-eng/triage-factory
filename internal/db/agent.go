@@ -1333,17 +1333,6 @@ type ConversationStore interface {
 	// runtime into a conversation somebody else now owns.
 	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error)
 
-	// LastAgentActivityAtSystem returns the created_at of the conversation's most
-	// recent non-user messages row (role <> 'user') — the "agent last
-	// ran" watermark the deliverable-change feedback ledger derives
-	// against. ok=false (zero time) when the conversation has no agent messages
-	// yet, so the caller falls back to the conversation's start. User messages
-	// are excluded so a just-recorded resume message can't poison the
-	// watermark, and the agent's own messages advance it past anything injected
-	// live. Admin pool: the resume path runs on a detached goroutine with no
-	// JWT claims.
-	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
-
 	// HasPersonMessageSystem reports whether a person has written to the
 	// conversation: a plain or steered user message with an author, delivered
 	// or still waiting, and not withdrawn. Every row TF writes itself carries
@@ -1424,12 +1413,14 @@ type ConversationStore interface {
 	// and an attempt whose brain died mid-generation ages out on its own,
 	// since nothing will ever stamp its completed_at.
 	//
-	// Ordering is what a person waiting would choose: open tasks (status NOT
-	// IN done/dismissed) before closed ones, because an owed memory on an open
-	// task is blocking that task's next delegation while one on a finished
-	// task is only completing the record; then oldest boundary first, so the
-	// longest wait is served first. limit caps the page; a sweep takes the
-	// next page on its next tick rather than draining the world in one pass.
+	// Ordering is what a person waiting would choose: tasks holding a working
+	// conversation before the rest, because the claim gate holds that
+	// conversation back until the memory exists while an owed memory on a
+	// task with nothing working holds nothing back yet; then oldest boundary
+	// first, so the longest wait is served first. The task's status is not
+	// read: a closed task's memory is swept on the same terms as an open
+	// task's. limit caps the page; a sweep takes the next page on its next
+	// tick rather than draining the world in one pass.
 	//
 	// orgID narrows the scan to one tenant; empty reads across tenants, like
 	// the retention sweeps it sits beside. Both callers are the brain's

@@ -100,7 +100,7 @@ func (refusingDelegator) Delegate(domain.Task, delegate.DelegateOpts) (string, e
 	return "", errNoTestDelegator
 }
 
-func (refusingDelegator) ReviewsDismissedSystem(context.Context, string, []dbpkg.DismissedReview) {}
+func (refusingDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {}
 
 func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered

@@ -37,7 +37,7 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 	return stubDelegateRun(s.db, task, opts)
 }
 
-func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []dbpkg.DismissedReview) {
+func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {
 }
 
 func (s *fenceStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {

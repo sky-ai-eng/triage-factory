@@ -61,6 +61,9 @@ type EntityTerminalCloseSeeder struct {
 
 	// DeliverableDetails reads a deliverable's details_json.
 	DeliverableDetails func(t *testing.T, deliverableID string) string
+
+	// Deliverable is the deliverable store's point read of one row.
+	Deliverable func(deliverableID string) (*domain.Deliverable, error)
 }
 
 // RunEntityTerminalCloseConformance is the shared suite for
@@ -163,13 +166,23 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
-		want := []db.DismissedReview{
-			{DeliverableID: pendingA, ConversationID: convA},
-			{DeliverableID: pendingB, ConversationID: convB},
+		// The dismissed reviews come back ordered by id, each as the row the
+		// dismissal stored and under the conversation that staged it.
+		stagedBy := map[string]string{pendingA: convA, pendingB: convB}
+		want := []string{pendingA, pendingB}
+		sort.Strings(want)
+		var got []string
+		for _, d := range res.DismissedReviews {
+			got = append(got, d.ID)
+			if d.ConversationID != stagedBy[d.ID] {
+				t.Errorf("dismissed review %s names conversation %q, want %q", d.ID, d.ConversationID, stagedBy[d.ID])
+			}
+			AssertWriteReturnedStoredRow(t, "CloseTerminalSystem's dismissal of "+d.ID, d, func() (*domain.Deliverable, error) {
+				return seed.Deliverable(d.ID)
+			})
 		}
-		sort.Slice(want, func(i, j int) bool { return want[i].DeliverableID < want[j].DeliverableID })
-		if !reflect.DeepEqual(res.DismissedReviews, want) {
-			t.Errorf("DismissedReviews = %+v, want %+v", res.DismissedReviews, want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("DismissedReviews = %v, want %v", got, want)
 		}
 		for id, wantState := range map[string]string{
 			pendingA:  domain.DeliverableStateReviewDismissed,

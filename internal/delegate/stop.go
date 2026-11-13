@@ -38,9 +38,9 @@
 //
 // A frozen blueprint is the deliberate cost of that. A stopped step leaves its
 // blueprint 'running' with no queued step and no live claim, holding its
-// worktree, until the conversation is resumed, the run is cancelled, or the
-// task is moved off it —
-// so every surface that counts live blueprints counts it.
+// worktree, until the conversation is resumed or something ends the run (its
+// cancel, a requeue, a new delegation, a person claiming the task, the team's
+// archive) — so every surface that counts live blueprints counts it.
 //
 // That cost is bounded to the stopped conversation's own task, and it has to
 // stay that way. Auto-delegation gates on the task, so a frozen blueprint

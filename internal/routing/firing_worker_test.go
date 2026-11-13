@@ -37,7 +37,7 @@ type stubDelegator struct {
 	failFor       map[string]bool
 	// dismissed is every review handed to ReviewsDismissedSystem, so a test
 	// can assert a close reached the dismissal's follow-up.
-	dismissed []dbpkg.DismissedReview
+	dismissed []domain.Deliverable
 	// noted is every conversation id handed to TellTaskClosing, so a
 	// test can tell which conversations a close told.
 	noted []string
@@ -138,17 +138,17 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 // Recording only: what the real follow-up sends and closes is the spawner's to
 // prove, and what a router test can prove is that the close handed it the
 // reviews its transaction dismissed.
-func (s *stubDelegator) ReviewsDismissedSystem(_ context.Context, orgID string, reviews []dbpkg.DismissedReview) {
+func (s *stubDelegator) ReviewsDismissedSystem(_ context.Context, orgID string, reviews []domain.Deliverable) {
 	s.mu.Lock()
 	s.dismissed = append(s.dismissed, reviews...)
 	s.mu.Unlock()
 }
 
 // dismissedCopy is the reviews ReviewsDismissedSystem was called with.
-func (s *stubDelegator) dismissedCopy() []dbpkg.DismissedReview {
+func (s *stubDelegator) dismissedCopy() []domain.Deliverable {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]dbpkg.DismissedReview(nil), s.dismissed...)
+	return append([]domain.Deliverable(nil), s.dismissed...)
 }
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {

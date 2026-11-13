@@ -44,6 +44,12 @@ type MemoryAttemptSeeder struct {
 	// otherwise.
 	OwingConversation func(t *testing.T, suffix string, taskOpen bool) (conversationID string)
 
+	// QueueNextConversation adds, on afterConversationID's task and blueprint
+	// run, a conversation at the next step index that nothing has claimed, and
+	// moves the run's pointer to it: what a blueprint's advance leaves waiting
+	// to be driven.
+	QueueNextConversation func(t *testing.T, afterConversationID string)
+
 	// AgeAttempt rewrites an attempt's started_at, and its completed_at when
 	// it has one, to `age` ago, so attempts made back to back have an order
 	// that cannot tie.
@@ -426,8 +432,8 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrProviderError, "the model call failed", 4*time.Minute)
 		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrProviderBackoff, "in backoff", 3*time.Minute)
 		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrProviderError, "no memory text", time.Minute)
-		// A done task's conversation still owes its memory and still fails;
-		// it is not a task waiting.
+		// A done task's conversation still owes its memory and still fails.
+		// Nothing is working on the task, so it is not a task waiting.
 		closed := seed.OwingConversation(t, "closed", false)
 		fail(t, store, orgID, seed, closed, domain.MemoryAttemptErrTimeout, "exceeded", 2*time.Minute)
 
@@ -440,6 +446,27 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrTimeout, ErrorMessage: "exceeded"},
 			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrProviderBackoff, ErrorMessage: "in backoff"},
 		)
+	})
+
+	t.Run("a_closed_task_with_a_conversation_waiting_counts_as_waiting", func(t *testing.T) {
+		// The claim gate holds a task's next conversation back until the
+		// memory its last one owes exists, whatever the task's status. So a
+		// closed task counts once something is waiting on it, and an open
+		// task with something waiting still counts once.
+		store, orgID, seed := mk(t)
+		closed := seed.OwingConversation(t, "closed-waiting", false)
+		if got := failing(t, store, orgID); got.TasksWaiting != 0 {
+			t.Fatalf("TasksWaiting = %d, want 0: nothing waits on the closed task yet", got.TasksWaiting)
+		}
+		seed.QueueNextConversation(t, closed)
+		if got := failing(t, store, orgID); got.TasksWaiting != 1 {
+			t.Errorf("TasksWaiting = %d, want the closed task whose next step is waiting", got.TasksWaiting)
+		}
+		open := seed.OwingConversation(t, "open-waiting", true)
+		seed.QueueNextConversation(t, open)
+		if got := failing(t, store, orgID); got.TasksWaiting != 2 {
+			t.Errorf("TasksWaiting = %d, want 2: the closed task and the open one, each once", got.TasksWaiting)
+		}
 	})
 
 	t.Run("a_memory_generated_anywhere_since_resets_the_debounce", func(t *testing.T) {

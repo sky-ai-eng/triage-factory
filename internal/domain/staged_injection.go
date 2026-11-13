@@ -7,12 +7,11 @@ import (
 )
 
 // StagedInjection is one durably-queued agent-facing injection awaiting
-// delivery on a conversation's next resume/steer. It is the "terminal ledger"
-// half of the deliverable-sidecar feedback design (TFAC-493) made generic
-// (TFAC-501): a producer that has no durable row to re-derive its injection
-// from (the PR coherence feed is such a producer) stages the
-// injection here, and the spawner flushes the conversation's pending injections
-// ahead of the user's text on the next ResumeWithMessage.
+// delivery to a conversation's agent. Every producer of a note (the PR
+// coherence feed, a task's close, a deliverable's resolution) stages it here,
+// and each runtime reads the conversation's pending injections on its own
+// schedule: a native loop before its next model call, a live SDK process at
+// its next tool batch, and an SDK engagement in its first message.
 //
 // Producer-agnostic by construction: Body is the already-rendered, bare injection
 // line (no <system-note> wrapper — the flush bundles and wraps), and Producer is
@@ -120,15 +119,11 @@ const (
 	// without its close, or a reopen of the task, withdraws the notes still
 	// waiting (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
+	// StagedInjectionProducerDeliverableResolved is the note telling an agent
+	// that a deliverable it produced was resolved (DeliverableResolutionNote).
+	// Stored message rows carry the value, so it keeps its spelling.
+	StagedInjectionProducerDeliverableResolved = "artifact_resolved"
 )
-
-// NoteProducerDeliverableResolved tags the note telling an agent that a human
-// resolved a deliverable it produced. It shares the producer vocabulary above
-// but never reaches the staged queue — the resume path re-derives that note
-// from deliverable state instead (deliverableLedgerForResume) — so it appears only
-// on a live-delivered note's message row. Stored message rows carry the value,
-// so it keeps its spelling.
-const NoteProducerDeliverableResolved = "artifact_resolved"
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path
 // prepends ahead of a parked conversation's user message: every staged
@@ -137,9 +132,7 @@ const NoteProducerDeliverableResolved = "artifact_resolved"
 // the slice is empty, so a resume with nothing staged prepends nothing.
 //
 // The lead-in frames these as out-of-band updates that landed while the agent was
-// not running — the same shape DeliverableLedgerBlock uses for the deliverable-change
-// ledger, so the two prepended blocks read consistently when a resume carries
-// both.
+// not running.
 func StagedInjectionBlock(injections []StagedInjection) string {
 	return stagedInjectionBlock("While you were not running, these updates landed on work you have open:", injections)
 }

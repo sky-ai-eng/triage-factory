@@ -86,12 +86,12 @@ const (
 	// or it came to rest on one).
 	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
 	// ResumeBlockedBlueprintCancelled — the workspace survives but the
-	// blueprint was called off at its own layer (its task closed or swiped, its
-	// team archived, the run cancelled outright), so nothing under it runs
-	// again. As permanent as the rung above, and split from it because the two
-	// put different sentences in front of a person: nothing here moved past
-	// anything — the work itself was ended, and the stop note on the transcript
-	// names the lifecycle event that ended it.
+	// blueprint was called off at its own layer (the run cancelled outright,
+	// its team archived), so nothing under it runs again. As permanent as the
+	// rung above, and split from it because the two put different sentences in
+	// front of a person: nothing here moved past anything — the work itself
+	// was ended, and the stop note on the transcript names the lifecycle event
+	// that ended it.
 	ResumeBlockedBlueprintCancelled = "blueprint_cancelled"
 	// ResumeBlockedModelNotEnabled — the model a resume would run on is one the
 	// team's enable-set no longer includes: its default, or the model the step
@@ -151,8 +151,9 @@ func endedBlock(reason domain.EndedReason) string {
 // no coherent workspace to rehydrate. It is also an ended conversation, which
 // the rung above this one refuses first and for a reason a person can read.
 // Runs never park for approval; a concluded run that left an unresolved
-// deliverable (draft PR / ready review) resumes through this same path plus the
-// feedback ledger, not through a parked status.
+// deliverable (draft PR / ready review) resumes through this same path, and
+// reads how the deliverable was resolved from its staged notes, not through
+// a parked status.
 func resumableState(status string) bool {
 	return status == domain.StatusOpen
 }
@@ -473,8 +474,8 @@ func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, org
 // its own message is there: an undelivered row reads a parked conversation as
 // queued.
 //
-// The out-of-band <system-note> prepends (staged injections + the deliverable
-// ledger) are deliberately NOT composed here. Delivery belongs to whichever
+// The out-of-band <system-note> prepend (the staged injections) is
+// deliberately NOT composed here. Delivery belongs to whichever
 // executor claims the row, and composing the prepend now would destructively
 // flush the staged-injection queue at enqueue time, losing anything staged in
 // the gap before the claim; Spawner.dispatchResumeClaim composes it immediately
@@ -998,7 +999,6 @@ var errWakeRefused = errors.New("wake refused")
 // since it cannot show delivery is coming and a false success is worse than a
 // conflict the client resolves by refreshing.
 func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, conv domain.Conversation) (flipped bool, err error) {
-	// A follow-up can change the blueprint only while its task is still open.
 	// An aborted blueprint terminated when its step stopped, and the step it
 	// stopped on is this conversation, on its abort verdict. Re-open it to
 	// running in the same tx as the flip, withdrawing the verdict that aborted
@@ -1009,9 +1009,10 @@ func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, 
 	// it either way — but for disposition: an abort is work that paused
 	// mid-plan. A blueprint that FINISHED is the opposite case and stays
 	// finished; finished machinery never restarts and the follow-up rides it
-	// as-is. ReopenRunForResume's CAS is what decides: status 'aborted' and a
-	// task still open, so it is a no-op on a finished or still-running
-	// blueprint and on a task a person has since closed.
+	// as-is. ReopenRunForResume's CAS is what decides: status 'aborted', so it
+	// is a no-op on a finished or still-running blueprint. The task's status
+	// decides nothing here: the follow-up continues the blueprint on a closed
+	// task exactly as on an open one.
 	reopenAbortedBlueprint := conv.Concluded()
 
 	f, err := ts.Conversations.MarkQueuedForResume(ctx, orgID, conv.ID)
@@ -1073,34 +1074,4 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 		return false, err
 	}
 	return blueprintCalledOff(br), nil
-}
-
-// resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
-// ahead of a resuming run's user message, in their final read order
-// [staged injections][deliverable ledger]:
-//
-//   - the durable staged-injection queue flush (TFAC-501) — every producer-
-//     agnostic injection staged while the run wasn't running (e.g. the new-commits
-//     freshness injection), destructively flushed (delivered exactly once); and
-//   - the deliverable-change ledger (TFAC-493) — every deliverable this run produced
-//     that was resolved while it wasn't running, derived from the deliverable rows
-//     (no ledger table).
-//
-// The deliverable ledger is composed first and the staged-injection flush second, so
-// the injection block lands FIRST in the returned prefix (each step writes to the
-// front). Both are out-of-band <system-note> blocks, so their order relative to
-// each other is cosmetic. Returns "" (prepend nothing) when neither has anything
-// pending; a read failure in either source degrades to no block for that source,
-// never blocking the resume. The callback is the staged injections' opening-unsent
-// return (stagedInjectionsForEngagement), nil when none were flushed.
-func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, conv *domain.Conversation) (string, func()) {
-	var prefix string
-	if block := s.deliverableLedgerForResume(ctx, orgID, conv); block != "" {
-		prefix = block + "\n\n"
-	}
-	block, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conv.ID)
-	if block != "" {
-		prefix = block + "\n\n" + prefix
-	}
-	return prefix, unsent
 }

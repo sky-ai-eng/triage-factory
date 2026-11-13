@@ -94,7 +94,7 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 	return "run-" + task.ID, nil
 }
 
-func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string, []db.DismissedReview) {
+func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {
 }
 
 func (s *injectingStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {

@@ -335,4 +335,14 @@ type DeliverableStore interface {
 	// returned-row rule as a compare-and-swap, like TransitionReviewState. Any
 	// other verdict is refused with ErrDeliverableVerification.
 	SettleVerificationSystem(ctx context.Context, orgID, id, verdict, detailsJSON string) (bool, error)
+
+	// TransitionStateSystem moves deliverable id from state from to state to,
+	// in one write guarded on from, and returns the row it stored. It returns
+	// nil when the row is not in from, or is not there: of two writers that
+	// read the same state exactly one gets a row back, so exactly one acts on
+	// the transition. detailsJSON, when non-empty, replaces the row's details;
+	// empty keeps them. Its writer is the deliverable reconciler, whose passes
+	// can overlap. Admin pool — it has no JWT-claims context; org_id stays
+	// bound as defense in depth.
+	TransitionStateSystem(ctx context.Context, orgID, id, from, to, detailsJSON string) (*domain.Deliverable, error)
 }

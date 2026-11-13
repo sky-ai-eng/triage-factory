@@ -1155,11 +1155,11 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 
 // dismissPendingReviewsOf dismisses every pending review deliverable about
 // entity entityID, recording resolution on each (domain.StampReviewResolution),
-// and returns them, ordered by id. A review's entity is the pull request it
-// reviews. The close's transaction is the single writer, so nothing moves a
-// review between the read and its write. No audit row: a review is staged
-// TF-side, so the dismissal writes nothing on GitHub.
-func dismissPendingReviewsOf(ctx context.Context, q queryer, entityID, resolution string) ([]db.DismissedReview, error) {
+// and returns the rows it stored, ordered by id. A review's entity is the pull
+// request it reviews. The close's transaction is the single writer, so nothing
+// moves a review between the read and its write. No audit row: a review is
+// staged TF-side, so the dismissal writes nothing on GitHub.
+func dismissPendingReviewsOf(ctx context.Context, q queryer, entityID, resolution string) ([]domain.Deliverable, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(details_json, '') FROM deliverables
 		 WHERE entity_id = ? AND kind = ? AND state = ?
@@ -1172,16 +1172,16 @@ func dismissPendingReviewsOf(ctx context.Context, q queryer, entityID, resolutio
 	if err != nil {
 		return nil, err
 	}
-	out := make([]db.DismissedReview, 0, len(pending))
+	out := make([]domain.Deliverable, 0, len(pending))
 	for _, p := range pending {
-		var d db.DismissedReview
-		if err := q.QueryRowContext(ctx, `
+		var d domain.Deliverable
+		if err := scanDeliverable(q.QueryRowContext(ctx, `
 			UPDATE deliverables
 			   SET state = ?, details_json = COALESCE(NULLIF(?, ''), details_json), updated_at = CURRENT_TIMESTAMP
 			 WHERE id = ?
-			RETURNING id, COALESCE(conversation_id, '')
-		`, domain.DeliverableStateReviewDismissed, domain.StampReviewResolution(p.details, resolution), p.id,
-		).Scan(&d.DeliverableID, &d.ConversationID); err != nil {
+			RETURNING `+deliverableColumns,
+			domain.DeliverableStateReviewDismissed, domain.StampReviewResolution(p.details, resolution), p.id,
+		), &d); err != nil {
 			return nil, fmt.Errorf("dismiss review %s: %w", p.id, err)
 		}
 		out = append(out, d)

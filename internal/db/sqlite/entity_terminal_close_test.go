@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -32,6 +34,9 @@ func TestEntityStore_CloseTerminal_SQLite(t *testing.T) {
 		}
 		seeder := newSQLiteTerminalCloseSeeder(conn)
 		stores := sqlitestore.New(conn)
+		seeder.Deliverable = func(id string) (*domain.Deliverable, error) {
+			return stores.Deliverables.Get(context.Background(), runmode.LocalDefaultOrgID, id)
+		}
 		return stores.Entities, stores.Tasks, runmode.LocalDefaultOrgID, seeder
 	})
 }

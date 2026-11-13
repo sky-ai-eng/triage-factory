@@ -31,9 +31,10 @@ type Delegator interface {
 	// ReviewsDismissedSystem follows a terminating close that dismissed the
 	// closed pull request's pending reviews (TerminalCloseResult.DismissedReviews),
 	// once it has committed: each review is announced on the conversation that
-	// staged it, and that conversation's task is checked for closing by the
-	// rule a person's resolution of a deliverable uses.
-	ReviewsDismissedSystem(ctx context.Context, orgID string, reviews []dbpkg.DismissedReview)
+	// staged it, that conversation is told its review was discarded, and its
+	// task is checked for closing by the rule a person's resolution of a
+	// deliverable uses.
+	ReviewsDismissedSystem(ctx context.Context, orgID string, reviews []domain.Deliverable)
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a conversation — a local SDK process, a staged row a
 	// native loop reads, a live remote executor (the `inject`

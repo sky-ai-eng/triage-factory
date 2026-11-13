@@ -158,6 +158,15 @@ var workingConversationSQL = `r.parent_conversation_id IS NULL
 	                 AND br_s.status = 'running' AND br_s.cancel_requested = 0
 	                 AND br_s.current_step_index = r.blueprint_step_index)))`
 
+// taskWorkingSQL is the task taskExpr holding a conversation that is working
+// (workingConversationSQL).
+func taskWorkingSQL(taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM conversations r
+		WHERE r.task_id = ` + taskExpr + `
+		  AND ` + workingConversationSQL + `)`
+}
+
 // personMessageSQL is the Postgres twin's predicate in this dialect.
 const personMessageSQL = `m_p.role = 'user'
 	  AND m_p.subtype IN ('', '` + domain.MessageSubtypeInjectionSteer + `')
