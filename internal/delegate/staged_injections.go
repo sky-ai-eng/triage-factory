@@ -108,18 +108,22 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 // reading it (an event folded into that step, or handed to it here). The note
 // is withdrawn and the firing handed to this step like any other
 // (ReleaseHandOff), so the event reaches the blueprint's next step rather than
-// waiting for the whole run to end. Under a running blueprint only the
+// waiting for the whole run to end. That holds whenever the firing was
+// queued, since an earlier run's unread event is one that run was told about
+// and never acted on: had it arrived after that run's step concluded, it
+// would have folded into this run, rather than each such event starting a
+// run of its own once this one ends. Under a running blueprint only the
 // current step's conversation is live, and a person's message to an earlier
 // step is forwarded to the current one, so no reader races the withdrawal.
 //
 // Four kinds of firing are left as they are. One queued before the run
-// started waits for a run of its own, as it did when this run was fired ahead
-// of it. One for the event the run itself fired from has nothing to tell the
-// run. One whose note was read, or waits on this conversation (a resume of
-// the same step, which reads it), is the firing worker's to settle. And
-// nothing is handed over on a task that is closed or snoozed: an event queued
-// behind one of those is answered by it, which is the firing worker's skip to
-// make.
+// started and naming no note waits for a run of its own, as it did when this
+// run was fired ahead of it. One for the event the run itself fired from has
+// nothing to tell the run. One whose note was read, or waits on this
+// conversation (a resume of the same step, which reads it), is the firing
+// worker's to settle. And nothing is handed over on a task that is closed or
+// snoozed: an event queued behind one of those is answered by it, which is
+// the firing worker's skip to make.
 //
 // One event queues a firing per matched trigger; its note is staged once and
 // every such firing names it. The note and the mark commit together per
@@ -142,36 +146,39 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 	if len(firings) == 0 {
 		return
 	}
-	// forThisRun: queued since the run started, for an event other than the
-	// one the run fired from.
-	forThisRun := func(f domain.PendingFiring) bool {
-		return !f.CreatedAt.Before(br.StartedAt) && f.TriggeringEventID != br.TriggeringEventID
-	}
+	released := map[int64]bool{}
+	withdrawn := map[string]bool{}
 	for i := range firings {
 		f := &firings[i]
-		if f.HandedNoteID == "" || !forThisRun(*f) {
+		if f.HandedNoteID == "" || f.TriggeringEventID == br.TriggeringEventID {
 			continue
 		}
-		released, err := s.pendingFirings.ReleaseHandOff(ctx, orgID, f.ID, f.HandedNoteID, conv.ID)
+		ok, err := s.pendingFirings.ReleaseHandOff(ctx, orgID, f.ID, f.HandedNoteID, conv.ID)
 		if err != nil {
 			delegateLog.Warn("take a queued firing's unread note over from an earlier step failed; the firing stays handed to it", "task_id", taskID, "firing_id", f.ID, "note_id", f.HandedNoteID, "conversation", conv.ID, "error", err)
 			continue
 		}
-		if released {
+		if ok {
+			released[f.ID] = true
+			withdrawn[f.HandedNoteID] = true
 			f.HandedNoteID = ""
 		}
 	}
 	// The note each event is staged as, by event id: the ones this pass
 	// stages, and the ones firings still name. A firing an earlier pass
-	// failed on shares the note that pass staged for its event.
+	// failed on shares the note that pass staged for its event. A note this
+	// pass withdrew is not shared, though a sibling whose release was refused
+	// or failed still names it: a firing handed it would name a note nothing
+	// reads.
 	noteFor := map[string]string{}
 	for _, f := range firings {
-		if f.HandedNoteID != "" {
+		if f.HandedNoteID != "" && !withdrawn[f.HandedNoteID] {
 			noteFor[f.TriggeringEventID] = f.HandedNoteID
 		}
 	}
 	for _, f := range firings {
-		if f.HandedNoteID != "" || !forThisRun(f) {
+		if f.HandedNoteID != "" || f.TriggeringEventID == br.TriggeringEventID ||
+			(f.CreatedAt.Before(br.StartedAt) && !released[f.ID]) {
 			continue
 		}
 		var note *domain.StagedInjection

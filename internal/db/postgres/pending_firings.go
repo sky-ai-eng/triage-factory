@@ -49,27 +49,8 @@ const unsettledFiringStatuses = "'ready','leased','parked'"
 // are inseparable. A stamp refusal is not an error and leaves the firing
 // committed.
 func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID string, claim db.AgentClaimStamp) (bool, bool, error) {
-	inserted, claimed := false, false
-	err := inTx(ctx, s.q, func(q queryer) error {
-		_, deduplicated, err := workitem.Admit(ctx, q, s.kind, orgID, workkinds.PendingFiringKey(taskID, triggerID),
-			db.PendingFiringRowCols(entityID, taskID, triggerID, triggeringEventID))
-		if err != nil {
-			return err
-		}
-		inserted = !deduplicated
-		// Nothing was committed on the collapse path — the unsettled row
-		// already carries the commitment, and its own admission stamped the
-		// claim.
-		if !inserted || claim.AgentID == "" {
-			return nil
-		}
-		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, taskID, claim.AgentID, claim.ActingTeamID)
-		return err
-	})
-	if err != nil {
-		return false, false, err
-	}
-	return inserted, claimed, nil
+	return s.admitAndStamp(ctx, orgID, workkinds.PendingFiringKey(taskID, triggerID),
+		db.PendingFiringRowCols(entityID, taskID, triggerID, triggeringEventID), taskID, claim)
 }
 
 // EnqueueHanded admits the held firing with no unique key, so the package
@@ -81,22 +62,32 @@ func (s *pendingFiringsStore) EnqueueHanded(ctx context.Context, orgID, entityID
 	}
 	cols := db.PendingFiringRowCols(entityID, taskID, triggerID, triggeringEventID)
 	cols["handed_note_id"] = noteID
-	claimed := false
-	err := inTx(ctx, s.q, func(q queryer) error {
-		if _, _, err := workitem.Admit(ctx, q, s.kind, orgID, "", cols); err != nil {
+	_, claimed, err := s.admitAndStamp(ctx, orgID, "", cols, taskID, claim)
+	return claimed, err
+}
+
+// admitAndStamp admits one firing under uniqueKey ("" for none) and stamps
+// the task's agent claim in the same transaction, pending_firings before
+// tasks. The stamp is skipped when the admission collapsed onto an unsettled
+// row: that row already carries the commitment, and its own admission
+// stamped the claim.
+func (s *pendingFiringsStore) admitAndStamp(ctx context.Context, orgID, uniqueKey string, cols map[string]any, taskID string, claim db.AgentClaimStamp) (inserted, claimed bool, err error) {
+	err = inTx(ctx, s.q, func(q queryer) error {
+		_, deduplicated, err := workitem.Admit(ctx, q, s.kind, orgID, uniqueKey, cols)
+		if err != nil {
 			return err
 		}
-		if claim.AgentID == "" {
+		inserted = !deduplicated
+		if !inserted || claim.AgentID == "" {
 			return nil
 		}
-		var err error
 		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, taskID, claim.AgentID, claim.ActingTeamID)
 		return err
 	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return claimed, nil
+	return inserted, claimed, nil
 }
 
 // errHandedFiringNeedsNote refuses a held firing that names no note.

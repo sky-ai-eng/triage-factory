@@ -39,10 +39,15 @@ import (
 // conversation or enqueues onto pending_firings instead of being dropped
 // silently.
 //
-// Returns fired=true iff this call actually committed the bot to the task —
-// an immediate fireDelegate success, or a new row landed in pending_firings
-// (queued because the task was busy; the commitment is real even though
-// the conversation hasn't started yet). Every other exit — already claimed by
+// Returns fired=true iff this call committed the bot to a run of its own on
+// the task — an immediate fireDelegate success, or a new row landed in
+// pending_firings because the task was busy with no conversation live to fold
+// into (the commitment is real even though the conversation hasn't started
+// yet). A fold into the task's live conversation returns (false, nil), even
+// one that holds its firing behind the note it staged: the event went to a
+// conversation already working the task, which
+// tryAutoDelegateTrackingInjection reports, and the held firing starts a run
+// only if that note goes unread. Every other exit — already claimed by
 // another team or by a person, the bot disabled for the team, no agent
 // bootstrapped, the breaker tripped, a duplicate already queued, a replay
 // hitting ErrAlreadyFired, or a task that closed under the fire — returns
