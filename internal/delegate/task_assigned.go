@@ -13,6 +13,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
@@ -29,17 +31,29 @@ func (s *Spawner) HandleTaskAssigned(evt domain.Event) {
 		delegateLog.Warn("task assignment event has no usable metadata; nobody is told", "error", err)
 		return
 	}
-	assignee := domain.UserAssignee(meta.UserID)
+	assignee := domain.UserAssignee(storedID(meta.UserID))
 	switch {
 	case meta.AgentID != "" && meta.UserID == "":
-		assignee = domain.AgentAssignee(meta.AgentID)
+		assignee = domain.AgentAssignee(storedID(meta.AgentID))
 	case meta.AgentID != "" || meta.UserID == "":
 		delegateLog.Warn("task assignment event names no single assignee; nobody is told", "task_id", meta.TaskID)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
 	defer cancel()
-	s.TellTaskAssigned(ctx, evt.OrgID, meta.TaskID, assignee)
+	s.TellTaskAssigned(ctx, evt.OrgID, storedID(meta.TaskID), assignee)
+}
+
+// storedID spells an id an event carries the way the store returns it. A
+// publisher names the task and the assignee as its caller spelled them, and
+// a UUID has several spellings Postgres takes for one row, while the teller
+// compares the id with a stored one and the retire compares the provenance
+// it records.
+func storedID(id string) string {
+	if parsed, err := uuid.Parse(id); err == nil {
+		return parsed.String()
+	}
+	return id
 }
 
 // TellTaskAssigned tells each live conversation whose work overlaps the task
@@ -66,12 +80,12 @@ func (s *Spawner) TellTaskAssigned(ctx context.Context, orgID, taskID, assignee 
 	if assignment == nil || assignment.Assignee() != assignee {
 		return
 	}
-	recipients, err := s.tasks.SiblingWorkRecipientsSystem(ctx, orgID, taskID)
+	recipients, err := s.tasks.SiblingWorkRecipientsSystem(ctx, orgID, assignment.TaskID)
 	if err != nil {
 		delegateLog.Warn("read the conversations the assigned task's work overlaps failed; they are not told", "task_id", taskID, "error", err)
 		return
 	}
-	prov := domain.NoteProvenance{AssignedTask: taskID, Assignee: assignee}
+	prov := domain.NoteProvenance{AssignedTask: assignment.TaskID, Assignee: assignment.Assignee()}
 	for _, r := range recipients {
 		told := *assignment
 		told.Recurrence = r.EntityID == told.EntityID && r.EventType == told.EventType && r.DedupKey == told.DedupKey

@@ -196,7 +196,10 @@ func stagedInjectionBlock(leadIn string, injections []StagedInjection) string {
 		if injections[i].Body == "" {
 			continue
 		}
-		lines = append(lines, "- "+injections[i].Body)
+		// A body of several lines stays under its own bullet: the lines
+		// after the first are indented, so a listing's entries do not read
+		// as updates of their own.
+		lines = append(lines, "- "+strings.ReplaceAll(injections[i].Body, "\n", "\n  "))
 	}
 	if len(lines) == 0 {
 		return ""

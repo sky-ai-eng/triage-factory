@@ -59,12 +59,14 @@ func TestTaskReopen_Postgres(t *testing.T) {
 }
 
 // TestSiblingWork_Postgres runs the shared overlapping-work suite against the
-// Postgres impl, on the held-close suite's stores and seeder. Every read and
-// the retire are admin-pool only, so the stores run on the admin connection,
-// as in production. Skips cleanly when Docker isn't available.
+// Postgres impl, on the held-close suite's seeder. An executor runs the
+// listing and the retire, and its admin pool is tf_system, so the stores'
+// admin half is that role's connection and its grants are part of what the
+// suite proves. Seeding and a person's claim stay on the superuser
+// connection. Skips cleanly when Docker isn't available.
 func TestSiblingWork_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	stores := pgstore.New(h.SystemDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunSiblingWorkConformance(t, func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.SiblingWorkSeeder) {
 		t.Helper()
@@ -93,6 +95,9 @@ func TestSiblingWork_Postgres(t *testing.T) {
 					if _, err := h.AdminDB.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
 						teamID, orgID, "other-"+teamID[:8], "Other"); err != nil {
 						t.Fatalf("seed team: %v", err)
+					}
+					if _, err := h.AdminDB.Exec(`INSERT INTO task_teams (task_id, team_id) SELECT id, team_id FROM tasks WHERE org_id = $1 AND id = $2`, orgID, taskID); err != nil {
+						t.Fatalf("seed the visibility row the move leaves behind: %v", err)
 					}
 					if _, err := h.AdminDB.Exec(`UPDATE tasks SET team_id = $3 WHERE org_id = $1 AND id = $2`, orgID, taskID, teamID); err != nil {
 						t.Fatalf("move task: %v", err)

@@ -21,7 +21,8 @@ type SiblingWorkSeeder struct {
 	// conversation_memory_entities row.
 	Touch func(t *testing.T, conversationID, entityID string)
 	// MoveToOtherTeam moves the task to a team other than the one every
-	// seeded conversation is on, and leaves its visibility set empty.
+	// seeded conversation is on, and leaves the team it had in its
+	// visibility set, as a claim that moves a task between teams does.
 	MoveToOtherTeam func(t *testing.T, taskID string)
 }
 
@@ -105,7 +106,7 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 					_, convID := seed.BlueprintAndConversation(t, taskID, "completed", SeedConcluded)
 					return convID, taskID
 				}},
-			{name: "on a team that cannot see the task",
+			{name: "on a team the task's claim moved it away from",
 				stage: func(t *testing.T, seed SiblingWorkSeeder, assigned string) (string, string) {
 					taskID := seed.TaskOnEntity(t, seed.EntityForTask(t, assigned), review)
 					_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
@@ -122,7 +123,11 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				stores, orgID, seed := mk(t)
+				// The task has an assignee before anything is staged, so
+				// nothing but the relation can leave it out of a listing,
+				// and a move to another team is a held task's.
 				assigned := seed.Task(t)
+				claim(t, stores, orgID, assigned)
 				convID, taskID := tc.stage(t, seed, assigned)
 
 				got, err := stores.Tasks.SiblingWorkRecipientsSystem(ctx, orgID, assigned)
@@ -134,11 +139,8 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 					t.Fatalf("conversation told = %v, want %v (recipients %+v)", told, tc.told, got)
 				}
 				// The listing reads the relation from the conversation's
-				// side. The task has an assignee here, so nothing but the
-				// relation can leave it out. A settled conversation is no
-				// recipient and its listing still names the task, which is
-				// what a wake reads.
-				claim(t, stores, orgID, assigned)
+				// side. A settled conversation is no recipient and its
+				// listing still names the task, which is what a wake reads.
 				listed, err := stores.Tasks.SiblingWorkSystem(ctx, orgID, convID)
 				if err != nil {
 					t.Fatalf("SiblingWorkSystem: %v", err)

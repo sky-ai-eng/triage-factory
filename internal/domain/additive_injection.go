@@ -226,8 +226,11 @@ func (a TaskAssignment) Assignee() string {
 // taskOverlapGuidance is what an agent does about work on another task that
 // overlaps its own. Nothing is stopped or handed over: the two go on side by
 // side, so the agent is told what it will meet.
-const taskOverlapGuidance = "Work on that task may touch the same branch or issue as yours: " +
-	"fetch before you push, and expect commits you did not make."
+const taskOverlapGuidance = "Work on that task may touch the same branch or issue as yours: " + fetchFirstGuidance
+
+// fetchFirstGuidance is the instruction every note and listing about
+// overlapping work ends on.
+const fetchFirstGuidance = "fetch before you push, and expect commits you did not make."
 
 // TaskAssignedNote is the agent-facing copy telling a conversation that
 // someone took on another task its work overlaps: which task, on what, and
@@ -330,7 +333,7 @@ func siblingWorkBlock(leadIn string, tasks []SiblingTask) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(leadIn + " Their work may touch the same branch or issue as yours: fetch before you push, and expect commits you did not make.")
+	b.WriteString(leadIn + " Their work may touch the same branch or issue as yours: " + fetchFirstGuidance)
 	for _, t := range tasks {
 		state := "open"
 		if t.Closed {

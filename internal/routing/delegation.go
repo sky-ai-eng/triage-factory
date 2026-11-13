@@ -2,10 +2,8 @@ package routing
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -508,17 +506,12 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 // stamps nothing, so neither is a new assignee. Best effort: the claim
 // stands whatever becomes of the event.
 func (r *Router) publishTaskAssigned(orgID, taskID, agentID string) {
-	raw, err := json.Marshal(events.SystemTaskAssignedMetadata{TaskID: taskID, AgentID: agentID})
+	evt, err := events.TaskAssigned(orgID, taskID, agentID, "")
 	if err != nil {
-		routerLog.Warn("marshal task assignment metadata failed", "task_id", taskID, "error", err)
+		routerLog.Warn("build the task assignment event failed", "task_id", taskID, "error", err)
 		return
 	}
-	r.publisher.Publish(domain.Event{
-		OrgID:        orgID,
-		EventType:    domain.EventSystemTaskAssigned,
-		MetadataJSON: string(raw),
-		OccurredAt:   time.Now().UTC(),
-	})
+	r.publisher.Publish(evt)
 }
 
 // syncClaimAfterCommit reads back the claim and the owner that rode the

@@ -121,7 +121,9 @@ func TestTellTaskAssigned_TellsTheOverlappingConversationOfTheAssignment(t *test
 		t.Fatalf("an event naming an assignee the task no longer has staged %d notes, want none", len(got))
 	}
 
-	f.s.HandleTaskAssigned(assignedEvent(t, events.SystemTaskAssignedMetadata{TaskID: assigned, UserID: runmode.LocalDefaultUserID}))
+	// A publisher names the ids as its caller spelled them. The note is
+	// staged all the same, and records them as the store spells them.
+	f.s.HandleTaskAssigned(assignedEvent(t, events.SystemTaskAssignedMetadata{TaskID: "{" + assigned + "}", UserID: "{" + runmode.LocalDefaultUserID + "}"}))
 	got := f.notes(t, domain.StagedInjectionProducerTaskAssigned)
 	if len(got) != 1 {
 		t.Fatalf("staged %d assignment notes, want one: %+v", len(got), got)

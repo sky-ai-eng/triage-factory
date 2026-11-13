@@ -13,8 +13,7 @@ import (
 // over the same three aliases: x is the task, c the conversation, and t the
 // conversation's own task.
 var siblingWorkRelationSQL = `(x.id <> t.id
-	   AND (x.team_id = c.team_id
-	        OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = x.id AND tt.team_id = c.team_id))
+	   AND x.team_id = c.team_id
 	   AND (x.entity_id = t.entity_id
 	        OR EXISTS (
 	            SELECT 1 FROM conversation_memory_entities cme

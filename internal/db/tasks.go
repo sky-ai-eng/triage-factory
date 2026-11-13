@@ -1029,8 +1029,8 @@ type TaskStore interface {
 	// overlaps the task: the conversations that read new input on their own
 	// (the predicate LiveConversationIDForTaskSystem reads by) and that the
 	// task relates to. A task X relates to a conversation C on task T when X
-	// is not T, C's team can see X (it owns X or is in X's visibility set),
-	// and one of these holds: X and T are on one entity; C touched X's
+	// is not T, C's team owns X (the one team a held task is visible to,
+	// whatever its visibility set still names), and one of these holds: X and T are on one entity; C touched X's
 	// entity (a conversation_memory_entities row, under any role); or a live
 	// conversation on X touched T's entity. Each result carries the
 	// conversation's own task's identity. Ordered by the conversation's

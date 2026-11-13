@@ -15,11 +15,15 @@ import (
 // conversation's own task. Both reads of the relation interpolate it, so a
 // conversation is told of a task exactly when the task is in its listing.
 //
-// A team sees a task it owns or one whose visibility set names it. A task's
-// own team is not always in that set, so both are asked.
+// The conversation's team sees the task when it owns it. A task someone holds
+// is visible to its owning team alone, as the tasks_select policy has it: a
+// claim consolidates the task to that team, and the rows its visibility set
+// held before the claim stay behind. The set widens an unclaimed task alone,
+// and the relation leaves that one to its owning team too: an unclaimed task
+// a conversation is working is listed for that team only. Nothing here reads
+// the set, so the role an executor runs the listing as needs no grant on it.
 var siblingWorkRelationSQL = `(x.id <> t.id
-	   AND (x.team_id = c.team_id
-	        OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = x.id AND tt.team_id = c.team_id))
+	   AND x.team_id = c.team_id
 	   AND (x.entity_id = t.entity_id
 	        OR EXISTS (
 	            SELECT 1 FROM conversation_memory_entities cme

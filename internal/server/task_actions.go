@@ -2,12 +2,10 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -325,17 +323,12 @@ func (s *Server) publishTaskAssigned(orgID, taskID, agentID, userID string) {
 	if s.bus == nil {
 		return
 	}
-	raw, err := json.Marshal(events.SystemTaskAssignedMetadata{TaskID: taskID, AgentID: agentID, UserID: userID})
+	evt, err := events.TaskAssigned(orgID, taskID, agentID, userID)
 	if err != nil {
-		taskActionLog.Warn("marshal task assignment metadata failed", "task", taskID, "error", err)
+		taskActionLog.Warn("build the task assignment event failed", "task", taskID, "error", err)
 		return
 	}
-	s.bus.Publish(domain.Event{
-		OrgID:        orgID,
-		EventType:    domain.EventSystemTaskAssigned,
-		MetadataJSON: string(raw),
-		OccurredAt:   time.Now().UTC(),
-	})
+	s.bus.Publish(evt)
 }
 
 // linearUserCredentialMissingMessage is the claim's refusal for an

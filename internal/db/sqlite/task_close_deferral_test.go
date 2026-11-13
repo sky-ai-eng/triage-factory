@@ -50,6 +50,9 @@ func TestSiblingWork_SQLite(t *testing.T) {
 					teamID, orgID, "other-"+teamID[:8], "Other"); err != nil {
 					t.Fatalf("seed team: %v", err)
 				}
+				if _, err := conn.Exec(`INSERT INTO task_teams (task_id, team_id) SELECT id, team_id FROM tasks WHERE id = ?`, taskID); err != nil {
+					t.Fatalf("seed the visibility row the move leaves behind: %v", err)
+				}
 				if _, err := conn.Exec(`UPDATE tasks SET team_id = ? WHERE id = ?`, teamID, taskID); err != nil {
 					t.Fatalf("move task: %v", err)
 				}

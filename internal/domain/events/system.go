@@ -1,6 +1,11 @@
 package events
 
-import "github.com/sky-ai-eng/triage-factory/internal/domain"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
 
 // System events — internal sentinels (poll-completed, scoring-completed,
 // breaker trips). They're never user-addressable, but we still register
@@ -261,6 +266,24 @@ type SystemTaskAssignedMetadata struct {
 	TaskID  string `json:"task_id"`
 	AgentID string `json:"agent_id,omitempty"`
 	UserID  string `json:"user_id,omitempty"`
+}
+
+// TaskAssigned builds the system:task:assigned event for a task in orgID
+// whose new assignee is the agent or the user, exactly one of which is named.
+// The router and the server each publish on a bus of their own and build the
+// event here, so it has one shape. The ids are recorded as given; the
+// subscriber compares them with the task as stored.
+func TaskAssigned(orgID, taskID, agentID, userID string) (domain.Event, error) {
+	raw, err := json.Marshal(SystemTaskAssignedMetadata{TaskID: taskID, AgentID: agentID, UserID: userID})
+	if err != nil {
+		return domain.Event{}, err
+	}
+	return domain.Event{
+		OrgID:        orgID,
+		EventType:    domain.EventSystemTaskAssigned,
+		MetadataJSON: string(raw),
+		OccurredAt:   time.Now().UTC(),
+	}, nil
 }
 
 // No predicate fields — never user-addressable; the schema exists so the
