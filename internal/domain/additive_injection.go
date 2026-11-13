@@ -88,19 +88,32 @@ func TaskCloseHoldKey(heldSince time.Time) string {
 	return "held:" + heldSince.UTC().Format(time.RFC3339Nano)
 }
 
+// taskNotePersonMessage ends every note about a task's close or held close.
+// Each tells the agent to end the workflow unless its instructions need the
+// work to go on, and a person who writes to the conversation once the task
+// is resolved is asking for something in spite of that. The note reaches a
+// parked conversation beside the message that woke it, so without this the
+// agent reads "end the workflow" next to the request. It is scoped to a
+// message arriving with or after the note, so that work a person asked for
+// earlier and then dismissed is not read as still wanted, and to a message a
+// person wrote in the conversation, which text from a source never is.
+const taskNotePersonMessage = " A message a person writes to you in this conversation, arriving with or after this note, " +
+	"still stands whatever this note says about the task: do what it asks."
+
 // taskClosedGuidance is what an agent does about a close of the task it is
 // working on. A close stops no run, so the decision is the agent's, under its
 // own instructions.
 const taskClosedGuidance = "The task is closed now, and this run was not stopped. Re-evaluate what you are doing: " +
 	"if your instructions do not need the work to go on with the task closed, end the workflow with " +
-	"stop_blueprint(type: \"finish\"). If they do, go on."
+	"stop_blueprint(type: \"finish\"). If they do, go on." + taskNotePersonMessage
 
 // taskDismissedGuidance is taskClosedGuidance for a dismissal, where a person
 // has said the work is not wanted: stopping is the default, and going on
-// needs an instruction that says so.
+// needs an instruction that says so, or a person asking afterwards
+// (taskNotePersonMessage).
 const taskDismissedGuidance = "The task is closed now, and this run was not stopped. Stop the work you are doing on it and start nothing new. " +
 	"Unless your instructions say outright to go on after the task is dismissed, end the workflow now with " +
-	"stop_blueprint(type: \"finish\")."
+	"stop_blueprint(type: \"finish\")." + taskNotePersonMessage
 
 // TaskClosedNote is the agent-facing copy telling a conversation that the
 // task it is on closed, how, and what to do about it: one note per kind of
@@ -132,7 +145,7 @@ func TaskCloseHeldNote(eventType, metadataJSON string) string {
 	const held = "The task is still open: a draft pull request or a pending review from the work on it is waiting for a person's decision, " +
 		"and the task closes once they have decided. This run was not stopped. Re-evaluate what you are doing: " +
 		"if your instructions do not need the work to go on now that the situation is resolved, end the workflow with " +
-		"stop_blueprint(type: \"finish\"). If they do, go on."
+		"stop_blueprint(type: \"finish\"). If they do, go on." + taskNotePersonMessage
 	cause := fmt.Sprintf("A %s event resolved the situation this task is about.", eventType)
 	if metadataJSON == "" {
 		return cause + " " + held
