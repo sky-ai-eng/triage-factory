@@ -970,8 +970,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 	// A verdict parks the conversation and leaves it the task's to resume. A
 	// follow-up on it is live work again: the router folds an arriving event
-	// into it and the claim gate drives it, exactly as for any woken row. The
-	// verdict stays on the row until a new one replaces it.
+	// into it and the claim gate drives it, exactly as for any woken row.
 	t.Run("AFollowUpOnAConcludedConversationIsLiveAgain", func(t *testing.T) {
 		h := mk(t)
 		convID := h.StageDelegation(t, "sdk")
@@ -994,20 +993,47 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Errorf("the router's read = %q err=%v, want the resumed %q", id, err, convID)
 		}
 		mustClaim(t, h, convID)
+	})
+
+	// The resume clears the verdict it admits. The blueprint finished, so
+	// nothing reads that verdict again, and left in place its stamp would make
+	// the follow-up's turn end, which writes none, read as concluded.
+	t.Run("AResumeClearsAFinishedBlueprintsVerdict", func(t *testing.T) {
+		h := mk(t)
+		convID := h.StageDelegation(t, "sdk")
+		mustClaim(t, h, convID)
+		if _, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "done", "finish", "all shipped", ""); err != nil {
+			t.Fatalf("record verdict: %v", err)
+		}
+		h.SetBlueprintState(t, "completed", 0)
+		before, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+		if err != nil || before == nil {
+			t.Fatalf("Get: err=%v got=%v", err, before)
+		}
+		if !before.Concluded() || before.Outcome != string(domain.ConversationOutcomeFinish) {
+			t.Fatalf("before the resume = (concluded %v, outcome %q), want the recorded finish; the fixture has not staged the precondition", before.Concluded(), before.Outcome)
+		}
+
+		if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
+		}
 		got, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
-		if got.Outcome != string(domain.ConversationOutcomeFinish) || got.CompletedAt == nil {
-			t.Errorf("verdict after the follow-up's claim = (outcome %q, completed_at %v), want the recorded finish kept", got.Outcome, got.CompletedAt)
+		if got.CompletedAt != nil || got.Outcome != "" || got.OutcomeReason != "" {
+			t.Errorf("verdict after the resume = (completed_at %v, outcome %q, reason %q), want all cleared", got.CompletedAt, got.Outcome, got.OutcomeReason)
+		}
+		if got.ResultSummary != "done" {
+			t.Errorf("result summary after the resume = %q, want it kept", got.ResultSummary)
 		}
 	})
 
 	// The reopen rule: a follow-up reopens an aborted blueprint whether its
 	// task is open or closed, and the step's abort verdict is withdrawn with it
 	// so the reactor reads the follow-up's own verdict, not the one that
-	// aborted the run. A blueprint that finished reopens nothing and keeps the
-	// verdict as it was.
+	// aborted the run. A blueprint that finished reopens nothing, and the
+	// resume has cleared its step's verdict all the same.
 	t.Run("AFollowUpReopensAnAbortedBlueprintWhateverItsTaskStatus", func(t *testing.T) {
 		for _, tc := range []struct {
 			name       string
@@ -1061,13 +1087,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				if err != nil || after == nil {
 					t.Fatalf("Get after: err=%v conv=%v", err, after)
 				}
-				if tc.wantReopen {
-					if after.Outcome != "" || after.OutcomeReason != "" || after.CompletedAt != nil {
-						t.Errorf("verdict after the reopen = (outcome %q, reason %q, completed_at %v), want withdrawn",
-							after.Outcome, after.OutcomeReason, after.CompletedAt)
-					}
-				} else if after.Outcome != "abort" || after.OutcomeReason != "needs a human" || after.CompletedAt == nil {
-					t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want the abort kept — nothing reopened",
+				if after.Outcome != "" || after.OutcomeReason != "" || after.CompletedAt != nil {
+					t.Errorf("verdict after the follow-up's wake = (outcome %q, reason %q, completed_at %v), want withdrawn",
 						after.Outcome, after.OutcomeReason, after.CompletedAt)
 				}
 			})
@@ -1075,9 +1096,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	})
 
 	// A follow-up on a step whose blueprint does not re-open wakes with the
-	// earlier engagement's verdict still on the row, and a park at the end of
-	// that follow-up leaves it standing: the row parks concluded again.
-	t.Run("AFollowUpsParkLeavesTheEarlierVerdictStanding", func(t *testing.T) {
+	// earlier engagement's verdict cleared, so a park at the end of that
+	// follow-up is a park with no verdict: the row is not concluded.
+	t.Run("AFollowUpsParkIsNotConcluded", func(t *testing.T) {
 		h := mk(t)
 		convID := h.StageDelegation(t, "sdk")
 		mustClaim(t, h, convID)
@@ -1100,8 +1121,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
 			t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, domain.ParkReasonIdle)
 		}
-		if got.Outcome != "abort" || got.OutcomeReason != "needs a human" || got.CompletedAt == nil {
-			t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want the earlier abort standing", got.Outcome, got.OutcomeReason, got.CompletedAt)
+		if got.Concluded() || got.Outcome != "" || got.OutcomeReason != "" {
+			t.Errorf("verdict = (concluded %v, outcome %q, reason %q), want none: the wake cleared the earlier one", got.Concluded(), got.Outcome, got.OutcomeReason)
 		}
 	})
 }

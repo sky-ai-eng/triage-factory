@@ -19,13 +19,12 @@ type ConversationTiming struct {
 	ClaimedAt   *time.Time
 	CompletedAt *time.Time
 	DurationMS  *int
-}
-
-// Concluded reports whether the timed conversation is parked with its step's
-// verdict — Conversation.Concluded over the same two columns. It is what a
-// "runs completed" count reads.
-func (t ConversationTiming) Concluded() bool {
-	return t.Status == StatusOpen && t.CompletedAt != nil
+	// Completed is whether the row is a completed run: parked with its step's
+	// verdict, or parked with none under a blueprint run that completed, which
+	// is a step a person followed up on. The store computes it, since the
+	// second half is the blueprint run's status. It is what a "runs completed"
+	// count reads.
+	Completed bool
 }
 
 // QueuedConversation is one currently-queued conversation's org + enqueue time, for the fleet

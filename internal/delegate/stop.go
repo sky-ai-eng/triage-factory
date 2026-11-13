@@ -105,10 +105,10 @@ var (
 // the task, else ErrTaskHeld or ErrTaskStopping. An engaged claim is any
 // unreleased one but an idle warm claim (HasEngagedClaimForTaskSystem).
 //
-// An idle warm claim does not hold the task. Its conversation has its
-// turn-end verdict, so there is nothing to stop or settle, and the new run
-// ends that conversation, which lets the claim go. A warm claim whose
-// conversation a follow-up has resumed holds the task like any claim.
+// An idle warm claim does not hold the task. Its conversation's turn has
+// ended, so no agent is running under it, and the caller's boundary ends that
+// conversation, which lets the claim go. A warm claim whose conversation a
+// follow-up has resumed holds the task like any claim.
 func (s *Spawner) CheckTaskUnheld(ctx context.Context, orgID, taskID string) error {
 	if s.conversations == nil {
 		return nil

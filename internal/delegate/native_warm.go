@@ -16,14 +16,12 @@ package delegate
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // warmWaitOp is the watchdog operation a warm claim's wait is reported under.
@@ -238,7 +236,7 @@ func (s *Spawner) concludeKeepingClaim(ctx context.Context, n nativeTail, result
 		status = updated.Status
 	}
 	s.broadcastConversationUpdate(n.orgID, n.conversationID, status)
-	toast.FireUser(s.wsHub, n.orgID, n.creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(n.conversationID)))
+	s.toastRunCompleted(n.orgID, n.creatorUserID, updated)
 	return holdKept
 }
 

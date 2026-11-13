@@ -26,7 +26,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
-	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -1088,12 +1087,14 @@ func (s *Spawner) recordNativeResult(
 	outcomeReason := result.OutcomeReason
 	terminal = "concluded_" + outcome
 
-	// The verdict parks the conversation `open` with the conclusion stamped:
-	// the step is concluded, the conversation is not, and the blueprint run
-	// the reactor advances or closes off this verdict holds whether the work
-	// is done. One fenced write for both trigger types — the fence's ownership
-	// check stands in for the RLS pass the former synthetic-claims route
-	// provided, the same trade the SDK completion path makes.
+	// The turn end parks the conversation `open`. Under a running blueprint
+	// the write stamps the step's verdict, which the reactor advances or
+	// closes the run off; on a finished blueprint, or with none, the store
+	// records no verdict and the conversation stays live for the next message
+	// (ConversationStore.CompleteForClaimSystem). One fenced write for both
+	// trigger types — the fence's ownership check stands in for the RLS pass
+	// the former synthetic-claims route provided, the same trade the SDK
+	// completion path makes.
 	//
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is
@@ -1116,6 +1117,6 @@ func (s *Spawner) recordNativeResult(
 		broadcastStatus = updated.Status
 	}
 	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
-	toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
+	s.toastRunCompleted(orgID, creatorUserID, updated)
 	return engagementDisposition{}
 }

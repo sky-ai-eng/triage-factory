@@ -1253,7 +1253,7 @@ func (s *Spawner) processCompletion(
 	}
 	switch status {
 	case domain.StatusOpen:
-		toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
+		s.toastRunCompleted(orgID, creatorUserID, completedRow)
 	case domain.StatusFailed:
 		if completeErr == nil {
 			s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
@@ -1265,4 +1265,16 @@ func (s *Spawner) processCompletion(
 	// snapshot to drop here. A parked run keeps its snapshot for the eventual
 	// resume.
 	return parked, false
+}
+
+// toastRunCompleted tells the run's creator that it completed. row is what
+// the turn end's write returned, and the toast fires only when that write
+// recorded a verdict: a turn that ended with none, on a blueprint that had
+// already finished or with no blueprint, answered a person's message and
+// completed no run.
+func (s *Spawner) toastRunCompleted(orgID, creatorUserID string, row *domain.Conversation) {
+	if row == nil || !row.Concluded() {
+		return
+	}
+	toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelSuccess, "", fmt.Sprintf("Run %s completed", shortConversationID(row.ID)))
 }

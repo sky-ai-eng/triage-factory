@@ -174,9 +174,13 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 		},
 		FinishConversation: func(t *testing.T, conversationID, status string, completedAt time.Time) {
 			t.Helper()
+			var at any
+			if !completedAt.IsZero() {
+				at = completedAt.UTC()
+			}
 			if _, err := conn.Exec(
 				`UPDATE conversations SET status = ?, completed_at = ? WHERE id = ?`,
-				status, completedAt.UTC(), conversationID,
+				status, at, conversationID,
 			); err != nil {
 				t.Fatalf("finish conversation %s: %v", conversationID, err)
 			}

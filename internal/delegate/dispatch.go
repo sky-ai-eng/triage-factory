@@ -966,9 +966,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// read the step as one the cancel never reached; it leaves the step
 		// alone for db.ReactorGrace after that release, and cancels the run
 		// in this engagement's place only if the reactor has not by then.
-		// The stop recorded no verdict, so the copy carries none: a claim
-		// of a step that had concluded before (a follow-up) still holds the
-		// old stamp in hand, and this engagement is not answering with it.
+		// The stop recorded no verdict, so the copy carries none, whatever
+		// the row this claim read held.
 		parked := *conv
 		parked.Status = domain.StatusOpen
 		parked.CompletedAt = nil
@@ -1237,8 +1236,11 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	stepConversation.Model = conv.Model
 	// Same predicate reactToStepTerminal uses to leave the blueprint running: an
 	// `open` step with no verdict is dormant, not done, so its staged skill
-	// stays for the resume. A concluded one has given its answer.
-	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded()
+	// stays for the resume. A concluded one has given its answer, and so has a
+	// turn that ended on a blueprint that had already finished: it records no
+	// verdict, and the next message brings its own claim, which stages again.
+	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() &&
+		br.Status == domain.BlueprintRunStatusRunning
 	s.reactToStepTerminal(ctx, orgID, br, *stepConversation, cfg, startTime)
 }
 

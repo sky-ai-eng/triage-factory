@@ -73,7 +73,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	}
 	var completed *domain.ConversationTiming
 	for i := range timings {
-		if timings[i].Concluded() {
+		if timings[i].Completed {
 			completed = &timings[i]
 		}
 	}

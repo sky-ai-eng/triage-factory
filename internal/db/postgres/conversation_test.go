@@ -238,6 +238,14 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
 		},
+		ParkedAtSet: func(t *testing.T, conversationID string) bool {
+			t.Helper()
+			var set bool
+			if err := conn.QueryRow(`SELECT parked_at IS NOT NULL FROM conversations WHERE id = $1`, conversationID).Scan(&set); err != nil {
+				t.Fatalf("read parked_at of %s: %v", conversationID, err)
+			}
+			return set
+		},
 		LiveClaimsWithoutLease: func(t *testing.T) int {
 			t.Helper()
 			var n int
@@ -973,16 +981,23 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 	if conv.CompletedAt != nil {
 		completedAt = conv.CompletedAt.UTC()
 	}
+	// A seed with no blueprint run is a conversation outside any blueprint,
+	// which the origin CHECK admits only under an origin other than the
+	// column's default.
+	origin := "blueprint"
+	if conv.BlueprintRunID == "" {
+		origin = "interactive"
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, visibility, creator_user_id,
-		                           blueprint_run_id, blueprint_step_index, completed_at)
+		                           blueprint_run_id, blueprint_step_index, completed_at, origin)
 		VALUES ($1, $2, $3,
 		        COALESCE(NULLIF($12, '')::uuid,
 		                 (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)),
-		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11, $13)
+		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, NULLIF($10, '')::uuid, $11, $13, $14)
 	`, id, orgID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
-		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID, completedAt); err != nil {
+		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID, completedAt, origin); err != nil {
 		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id

@@ -309,12 +309,15 @@ type ConversationStore interface {
 	// unconditionally — a stopped mid-blueprint step is a paused step
 	// continuing, and its verdict SHOULD advance the sequence.
 	//
-	// The wake leaves the conclusion stamp where it is: a follow-up on a
-	// finished blueprint that parks again is concluded again. Only the
-	// re-open of an aborted blueprint (BlueprintStore.ReopenRunForResume,
-	// in the same transaction) withdraws it. The check reads the run past blueprint_runs
-	// RLS, so a teammate who cannot see another user's manual run gets the
-	// creator's answer.
+	// The wake clears the verdict of the row it admits (completed_at,
+	// outcome, outcome_reason). That row's blueprint is not running, so
+	// nothing reads the verdict again, and the turn the wake starts ends with
+	// none (CompleteForClaimSystem); a stamp left in place would make that
+	// turn end read as concluded. The re-open of an aborted blueprint
+	// (BlueprintStore.ReopenRunForResume, in the same transaction) withdraws
+	// the same columns. The check reads the run past blueprint_runs RLS, so a
+	// teammate who cannot see another user's manual run gets the creator's
+	// answer.
 	//
 	// WHICH step of a finished blueprint may be woken is still not checked
 	// here — only the last one may, and that gate needs an admin-pool read
@@ -1183,12 +1186,22 @@ type ConversationStore interface {
 	// telemetry onto the released claim.
 	//
 	// status is one of two endings, and anything else is refused with
-	// ErrInvalidConversationEnding. `open` is the step's verdict: a
-	// conversation never concludes, so the verdict parks it like any other
-	// turn end, with no park reason (nothing stopped it), and completed_at is
-	// the conclusion stamp that makes it concluded
-	// (domain.Conversation.Concluded) and that the idle sweeps age it from.
-	// `failed` is the runtime under the agent dying.
+	// ErrInvalidConversationEnding. `open` is a turn the model ended on its
+	// own: a conversation never concludes, so the turn end parks it like any
+	// other, with no park reason (nothing stopped it). `failed` is the
+	// runtime under the agent dying.
+	//
+	// An `open` ending records a verdict only when a running blueprint will
+	// read it. The write decides, on the row: while the conversation's
+	// blueprint run is running, completed_at, outcome and outcome_reason are
+	// written, and completed_at is the conclusion stamp that makes the row
+	// concluded (domain.Conversation.Concluded) and that the idle sweeps age
+	// it from. On a blueprint that has finished, or a conversation with no
+	// blueprint run, all three are written NULL whatever the caller passed,
+	// parked_at is stamped if it is not already, and the row is left live for
+	// the next message. result_summary is written either way. A caller reads
+	// which it was off the returned row's Concluded. A `failed` ending writes
+	// its columns whatever the blueprint.
 	//
 	// costUSD is the invocation's reported total, settled as ONE lump on
 	// the engagement's own newest message row — the newest row attributed
@@ -1203,9 +1216,10 @@ type ConversationStore interface {
 	// stored. No proration across rows — proration without a pricing table
 	// is confidently wrong.
 	//
-	// outcome / outcomeReason persist the step's verdict and the reason a
-	// stop_blueprint call gave; pass "" for both on conversations that have no
-	// agent outcome (cancellation, infra failure).
+	// outcome / outcomeReason are the step's verdict and the reason a
+	// stop_blueprint call gave, persisted under the rule above; pass "" for
+	// both on conversations that have no agent outcome (cancellation, infra
+	// failure).
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary) — non-empty only when status
@@ -1242,14 +1256,20 @@ type ConversationStore interface {
 	// An `open` row without a verdict is intentionally NOT in the protected set, and it is safe
 	// because of who can reach an `open` row with this write. A parked
 	// conversation is only ever driven again by a wake that flips it to
-	// `running` before any engagement could fail it, and the engagement
-	// that parked it released its claim in that same park — so its own late
-	// failure meets the claim fence (the ForClaimSystem twin refuses it),
-	// never this predicate. What is left is a claimless writer failing a
-	// conversation it still holds, and there a park that never took a
-	// durable snapshot is not a conversation that can be left resumably open,
-	// so failing it is correct — and the cleanup then tears the worktree
-	// down.
+	// `running` before any engagement could fail it, and an engagement
+	// that parked it and released its claim in that same park meets the
+	// claim fence with its own late failure (the ForClaimSystem twin refuses
+	// it), never this predicate. Two writers are left. One is a claimless
+	// writer failing a conversation it still holds, and there a park that
+	// never took a durable snapshot is not a conversation that can be left
+	// resumably open, so failing it is correct — and the cleanup then tears
+	// the worktree down. The other is an engagement keeping its claim warm
+	// (ConcludeKeepingClaimSystem): its turn end left the row `open` with no
+	// verdict and it still holds a live claim, so neither the fence nor this
+	// predicate refuses it. What keeps the row safe there is the engagement
+	// itself, which fails nothing while it waits: it resumes the
+	// conversation, which takes the row out of `open` first, or releases the
+	// claim.
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
@@ -1349,12 +1369,12 @@ type ConversationStore interface {
 	// A row's stamp is the NEWEST of parked_at, completed_at, ended_at,
 	// queued_at and started_at — the largest, not the first of a ranking.
 	// Each of those columns records that something happened at a time, so the
-	// largest is when the row last did anything; and the columns are not
-	// cleared in step, so any ranking is wrong for some row. A resume clears
-	// parked_at but leaves completed_at, so a conversation resumed from
-	// `completed` carries a stale completion beside a fresh queued_at, while a
-	// completed conversation that was never resumed carries a queued_at older
-	// than its completion. The maximum is right for both; no order is.
+	// largest is when the row last did anything; and no one column is the
+	// newest on every row, so any ranking is wrong for some row. A concluded
+	// conversation that was never resumed carries a queued_at older than its
+	// completion, while one a follow-up resumed carries only its fresh
+	// queued_at, the resume having cleared parked_at and completed_at. The
+	// maximum is right for both; no order is.
 	//
 	// The claim guard is the same one the eviction enumeration applies, and it
 	// is not redundant with the age rule: an engagement holds the blob open as
@@ -1453,19 +1473,23 @@ type ConversationStore interface {
 	// HasEngagedClaimForTaskSystem is HasActiveClaimForTaskSystem without idle
 	// warm claims: whether an engagement on taskID has a turn in progress or
 	// about to start. A warm claim (domain.ClaimPhaseWarm) whose conversation
-	// still holds its turn's verdict is idle, and a new run on the task ends
-	// that conversation, which lets the claim go, so it does not stand in the
-	// way of one. Once a follow-up resumes the conversation, the claim's
-	// engagement is about to drive it, and the claim counts.
+	// is still parked where its turn left it is idle, and a person's new
+	// delegation on the task ends that conversation, which lets the claim go,
+	// so it does not stand in the way of one. Once a follow-up resumes the
+	// conversation, the claim's engagement is about to drive it, and the claim
+	// counts.
 	HasEngagedClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
-	// ConcludeKeepingClaimSystem is CompleteForClaimSystem's `open` verdict for
+	// ConcludeKeepingClaimSystem is CompleteForClaimSystem's `open` ending for
 	// a turn whose engagement stays warm: the same fence, the same conversation
 	// write and the same returned row, with the claim kept in phase
-	// domain.ClaimPhaseWarm instead of released. The claim records the
-	// engagement's turn time and turns so far. No cost lump is taken: the
-	// native runtime, the only one that keeps a claim warm, settles spend per
-	// assistant row.
+	// domain.ClaimPhaseWarm instead of released. The write records a verdict
+	// under the same rule, and an engagement keeps its claim warm only when no
+	// running blueprint waits on the turn, so the row it returns holds none:
+	// `open`, parked_at stamped, and live for the message the claim is kept
+	// for. The claim records the engagement's turn time and turns so far. No
+	// cost lump is taken: the native runtime, the only one that keeps a claim
+	// warm, settles spend per assistant row.
 	ConcludeKeepingClaimSystem(ctx context.Context, orgID, conversationID, claimID string, durationMs, numTurns int, resultSummary, outcome, outcomeReason string) (*domain.Conversation, error)
 
 	// ResumeWarmClaimSystem takes a warm claim's conversation back for its next
