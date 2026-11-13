@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -17,9 +18,10 @@ import (
 // run-2, over the real stores, and a spawner holding the reads the turn-end
 // nudge and the task context make.
 type twoConversationTask struct {
-	stores  db.Stores
-	spawner *Spawner
-	taskID  string
+	database *sql.DB
+	stores   db.Stores
+	spawner  *Spawner
+	taskID   string
 }
 
 func newTwoConversationTask(t *testing.T) twoConversationTask {
@@ -44,7 +46,8 @@ func newTwoConversationTask(t *testing.T) twoConversationTask {
 	stores := sqlitestore.New(database)
 	registerOctoRepo(t, stores)
 	return twoConversationTask{
-		stores: stores,
+		database: database,
+		stores:   stores,
 		spawner: &Spawner{
 			conversations: stores.Conversations,
 			artifacts:     stores.Artifacts,
@@ -182,5 +185,32 @@ func TestArtifactContractNudge_AClosedTaskIsNotNudged(t *testing.T) {
 				t.Errorf("the run on a closed task was nudged:\n%s", got)
 			}
 		})
+	}
+}
+
+// TestArtifactContractNudge_ATaskWhoseCloseIsHeldIsNotNudged: a close held
+// for a person leaves the task open with its situation resolved, and the run
+// was told so. A run that then stops without an artifact is not asked for
+// one.
+func TestArtifactContractNudge_ATaskWhoseCloseIsHeldIsNotNudged(t *testing.T) {
+	f := newTwoConversationTask(t)
+	ctx := context.Background()
+	msg := &domain.Message{ConversationID: "run-2", Role: "user", Content: "fix the build"}
+	if _, err := f.stores.Conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID, msg); err != nil {
+		t.Fatalf("insert the opening message: %v", err)
+	}
+	if got := f.nudge(t); got != artifactNudgeNote {
+		t.Fatalf("setup: the open task's run was not nudged; got %q", got)
+	}
+	if _, err := f.database.Exec(`
+		UPDATE tasks SET close_deferred_event_id = primary_event_id, close_deferred_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, f.taskID); err != nil {
+		t.Fatalf("hold the task's close: %v", err)
+	}
+	if hold, err := f.stores.Tasks.CloseDeferralForTaskSystem(ctx, runmode.LocalDefaultOrgID, f.taskID); err != nil || hold == nil {
+		t.Fatalf("setup: the task holds no close: (%+v, %v)", hold, err)
+	}
+	if got := f.nudge(t); got != "" {
+		t.Errorf("the run on a task whose close is held was nudged:\n%s", got)
 	}
 }

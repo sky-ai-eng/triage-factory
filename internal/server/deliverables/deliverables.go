@@ -1444,7 +1444,7 @@ func (ah *Handler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, us
 	// db.ErrNoSuchTask, which this treats as "already closed by the other
 	// racer" rather than a real failure.
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		_, err := tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
+		_, err := tx.Tasks.Close(ctx, orgID, taskID, db.RunCompletedCloseReason, "")
 		return err
 	}); err != nil {
 		if !errors.Is(err, db.ErrNoSuchTask) {

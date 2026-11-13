@@ -165,7 +165,7 @@ func (s *Spawner) terminateBlueprint(
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			return finish(
 				func() error {
-					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, "run_completed", "")
+					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
 					return err
 				},
 				func() (bool, error) {
@@ -176,7 +176,7 @@ func (s *Spawner) terminateBlueprint(
 		markErr = s.tx.SystemWithTx(bgCtx, orgID, func(ts db.SystemTxStores) error {
 			return finish(
 				func() error {
-					_, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
+					_, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
 					return err
 				},
 				func() (bool, error) {
@@ -703,7 +703,7 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	}
 	// CloseSystem's WHERE is state-guarded, so a task the approval click (or a
 	// concurrent cycle) already closed answers ErrNoSuchTask — not a failure.
-	if _, err := s.tasks.CloseSystem(ctx, orgID, br.TaskID, "run_completed", ""); err != nil {
+	if _, err := s.tasks.CloseSystem(ctx, orgID, br.TaskID, db.RunCompletedCloseReason, ""); err != nil {
 		if !errors.Is(err, db.ErrNoSuchTask) {
 			blueprintLog.Warn("terminal-on-last close: close task failed", "task", br.TaskID, "conversation", conversationID, "error", err)
 		}

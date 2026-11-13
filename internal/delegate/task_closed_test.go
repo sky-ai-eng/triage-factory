@@ -18,8 +18,7 @@ import (
 )
 
 // closedTaskFixture is a conversation an event started, working on its task
-// under an active claim, and minted well before anything the test closes the
-// task with.
+// under an active claim.
 type closedTaskFixture struct {
 	s        *Spawner
 	database *sql.DB
@@ -35,7 +34,7 @@ func newClosedTaskFixture(t *testing.T, convID string) closedTaskFixture {
 	seedConversation(t, database, convID, "sess", "/tmp/wt")
 	markEngaged(t, database, convID)
 	if _, err := database.Exec(`
-		UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL, started_at = datetime('now', '-1 hour')
+		UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL
 		 WHERE id = ?`, convID); err != nil {
 		t.Fatalf("make the conversation event-triggered: %v", err)
 	}
@@ -139,8 +138,7 @@ func TestTellTaskClosed_EachClosePathSendsOneNoteOfItsKind(t *testing.T) {
 		{name: "reassigned", close: func(t *testing.T, f closedTaskFixture) domain.TaskClose {
 			evt := f.event(t, domain.EventLinearIssueAssigned, `{"issue_identifier":"ENG-7","assignee":"Bob Rivera","assignee_user_id":"lu-bob"}`)
 			f.s.TellTaskClosed(ctx, org, f.taskID, f.closeOnEvent(t, db.ReassignedCloseReason, evt))
-			return domain.TaskClose{Kind: domain.TaskClosedReassigned, EventID: evt.ID, EventType: evt.EventType,
-				MetadataJSON: currentMetadata(evt), Assignee: "Bob Rivera"}
+			return domain.TaskClose{Kind: domain.TaskClosedReassigned, EventID: evt.ID, EventType: evt.EventType, MetadataJSON: currentMetadata(evt)}
 		}},
 		{name: "person_completed", close: func(t *testing.T, f closedTaskFixture) domain.TaskClose {
 			f.closeByPerson(t, "done")
@@ -231,7 +229,7 @@ func TestTellTaskClosed_TheWorksOwnCloseTellsNothing(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	f := newClosedTaskFixture(t, "run-closed-by-its-work")
-	if _, err := f.stores.Tasks.CloseSystem(ctx, org, f.taskID, runCompletedCloseReason, ""); err != nil {
+	if _, err := f.stores.Tasks.CloseSystem(ctx, org, f.taskID, db.RunCompletedCloseReason, ""); err != nil {
 		t.Fatalf("CloseSystem: %v", err)
 	}
 
@@ -306,26 +304,24 @@ func TestTellTaskResolved_AResumeAfterTheCloseTellsOnce(t *testing.T) {
 	}
 }
 
-// TestTellTaskResolved_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote: a
-// conversation minted after its task closed is told by its launch's
-// <run_context>, which names how the task closed, and never by a note. An
-// open task's launch says nothing about the task's state.
-func TestTellTaskResolved_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote(t *testing.T) {
+// TestTellTaskResolved_ALaunchOnAClosedTaskReadsRunContextAndTheNote: a
+// conversation launched once its task is closed reads the close in its
+// <run_context>, which names how the task closed, and gets the close's note
+// as any conversation not yet told does. An open task's launch says nothing
+// about the task's state.
+func TestTellTaskResolved_ALaunchOnAClosedTaskReadsRunContextAndTheNote(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
-	f := newClosedTaskFixture(t, "run-minted-after-close")
+	f := newClosedTaskFixture(t, "run-launched-after-close")
 	if line := f.s.closedTaskContext(ctx, org, f.taskID); line != "" {
 		t.Fatalf("an open task's <run_context> line = %q, want none", line)
 	}
 	f.closeByPerson(t, "dismissed")
-	// The step's conversation is minted once the task is already closed.
-	if _, err := f.database.Exec(`UPDATE conversations SET started_at = datetime('now', '+1 hour') WHERE id = ?`, f.convID); err != nil {
-		t.Fatalf("mint the conversation after the close: %v", err)
-	}
 
 	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
-	if notes := f.notes(t); len(notes) != 0 {
-		t.Errorf("notes for a launch after the close = %+v, want none", notes)
+	notes := f.notes(t)
+	if len(notes) != 1 || notes[0].Body != domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedDismissed}) {
+		t.Errorf("notes for a launch on the closed task = %+v, want the dismissal's note", notes)
 	}
 
 	line := f.s.closedTaskContext(ctx, org, f.taskID)
@@ -341,16 +337,48 @@ func TestTellTaskResolved_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote(t *te
 	}
 }
 
-// TestTaskClosedRunContext_NamesNothingASourceAuthored: <run_context> is TF's
-// own words, so the line for a reassignment leaves out the assignee's display
-// name, which the source wrote, and the event's metadata.
-func TestTaskClosedRunContext_NamesNothingASourceAuthored(t *testing.T) {
+// TestTaskClosed_OnlyTheEventMetadataCarriesWhatASourceAuthored: a
+// reassignment's event names the new assignee by a display name the source
+// wrote. The note prints it as the event's metadata and nowhere else, and
+// <run_context>, which is TF's own words, leaves the metadata out.
+func TestTaskClosed_OnlyTheEventMetadataCarriesWhatASourceAuthored(t *testing.T) {
 	const assignee, metadata = "Bob Rivera", `{"assignee":"Bob Rivera"}`
-	line := domain.TaskClosedRunContext(domain.TaskClose{
-		Kind: domain.TaskClosedReassigned, EventType: domain.EventLinearIssueAssigned, MetadataJSON: metadata, Assignee: assignee,
-	})
-	if strings.Contains(line, assignee) || strings.Contains(line, metadata) {
+	c := domain.TaskClose{Kind: domain.TaskClosedReassigned, EventType: domain.EventLinearIssueAssigned, MetadataJSON: metadata}
+	if line := domain.TaskClosedRunContext(c); strings.Contains(line, assignee) {
 		t.Errorf("<run_context> line carries text the source authored: %q", line)
+	}
+	note := domain.TaskClosedNote(c)
+	if strings.Count(note, assignee) != 1 || !strings.Contains(note, metadata) {
+		t.Errorf("the note names the assignee outside the event's metadata, or not at all: %q", note)
+	}
+}
+
+// TestTellTaskClosed_AnEarlierClosesEventIsNotThisCloses: the task's newest
+// audit row of an event's close belongs to this close only when it is of the
+// type this close stamped. A task an event closed, that reopened, and that
+// closed again with no audit row of its own is told of the second close
+// without the first one's event.
+func TestTellTaskClosed_AnEarlierClosesEventIsNotThisCloses(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	f := newClosedTaskFixture(t, "run-closed-by-two-events")
+	first := f.event(t, domain.EventGitHubPRCICheckPassed, `{"check_name":"build"}`)
+	f.closeOnEvent(t, db.SiblingEventCloseReason, first)
+	if _, err := f.database.Exec(`
+		UPDATE tasks SET status = 'in_progress', close_reason = NULL, close_event_type = NULL, closed_at = NULL, version = version + 1
+		 WHERE id = ?`, f.taskID); err != nil {
+		t.Fatalf("reopen the task: %v", err)
+	}
+	out, err := f.stores.Tasks.CloseOnEventSystem(ctx, org, f.taskID, "entity_closed", domain.EventGitHubPRMerged, "")
+	if err != nil || !out.Closed {
+		t.Fatalf("CloseOnEventSystem = (%+v, %v), want closed", out, err)
+	}
+
+	f.s.TellTaskClosed(ctx, org, f.taskID, out.WorkingConversationIDs)
+	notes := f.notes(t)
+	want := domain.TaskClose{Kind: domain.TaskClosedByEvent, EventType: domain.EventGitHubPRMerged}
+	if len(notes) != 1 || notes[0].Body != domain.TaskClosedNote(want) || notes[0].Provenance.EventID != "" {
+		t.Errorf("notes = %+v, want one naming the second close's event type and no event", notes)
 	}
 }
 
@@ -494,15 +522,12 @@ func TestTellTaskCloseHeld_TellsOncePerHold(t *testing.T) {
 
 // TestTellTaskCloseHeld_ALaunchUnderTheHoldIsToldByANote: a hold can be
 // cancelled, so it never goes in a launch's <run_context>. A conversation
-// minted after the hold began is told by a note, as a resumed one is.
+// launched under the hold is told by a note alone, as a resumed one is.
 func TestTellTaskCloseHeld_ALaunchUnderTheHoldIsToldByANote(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	f := newClosedTaskFixture(t, "run-launched-under-hold")
 	evt, _ := f.holdClose(t)
-	if _, err := f.database.Exec(`UPDATE conversations SET started_at = datetime('now', '+1 hour') WHERE id = ?`, f.convID); err != nil {
-		t.Fatalf("mint the conversation after the hold: %v", err)
-	}
 
 	if line := f.s.closedTaskContext(ctx, org, f.taskID); line != "" {
 		t.Errorf("<run_context> line for a task still open = %q, want none", line)

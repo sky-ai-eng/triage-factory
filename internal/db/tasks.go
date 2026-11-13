@@ -49,6 +49,10 @@ const (
 	UserCompletedCloseReason = "user_completed"
 )
 
+// RunCompletedCloseReason is on a task the work on it closed: its blueprint
+// finished, or the last deliverable that work left was resolved.
+const RunCompletedCloseReason = "run_completed"
+
 // The close_reason values an event's typed close stamps, by which of the
 // event's tasks it closed.
 const (
@@ -985,10 +989,10 @@ type TaskStore interface {
 	// its newest task_events row of kind 'closed', which an event's close
 	// writes with the close (CloseOnEventSystem). "" when the task has none,
 	// as after a person's close of a task no event ever closed. A task an
-	// event closed, another reopened, and a person then closed still has the
-	// first close's row, so a caller reads this only for a task whose
-	// close_reason says an event closed it. Admin pool, org_id bound by
-	// argument.
+	// event closed, another reopened, and something else then closed still
+	// has the first close's row, so the event is the current close's only
+	// when its type is the one that close stamped (tasks.close_event_type).
+	// Admin pool, org_id bound by argument.
 	ClosingEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
 
 	// WorkingConversationIDsSystem returns the conversations working on the

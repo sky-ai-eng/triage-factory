@@ -60,15 +60,13 @@ type TaskClose struct {
 	Kind TaskCloseKind
 	// EventID, EventType and MetadataJSON are the closing event's, for an
 	// event's close and a reassignment. All are "" when the close recorded no
-	// event, and MetadataJSON alone when the event carries none.
+	// event, and MetadataJSON alone when the event carries none. The source
+	// authored MetadataJSON, so the note prints it as the event's metadata
+	// and no sentence of TF's own is built from it: a reassignment's note
+	// names the new assignee there and nowhere else.
 	EventID      string
 	EventType    string
 	MetadataJSON string
-	// Assignee is who a reassignment assigned the issue to, by display name.
-	// "" when the event names nobody. The source authored it, as it did
-	// MetadataJSON, so only the note carries either: <run_context> is TF's
-	// own words.
-	Assignee string
 	// DuplicateOf names the task that stays open in a duplicate's place, by
 	// a value TF minted. "" when it could not be read.
 	DuplicateOf string
@@ -147,7 +145,6 @@ func TaskCloseHeldNote(eventType, metadataJSON string) string {
 // block it rides is fixed for the conversation's life and the task can
 // reopen under it, and it names nothing a source authored.
 func TaskClosedRunContext(c TaskClose) string {
-	c.Assignee = ""
 	return "Task state: this task was already closed when this run started. " + taskCloseCause(c)
 }
 
@@ -165,10 +162,7 @@ func taskCloseCause(c TaskClose) string {
 		}
 		return fmt.Sprintf("This task was closed as a duplicate of %s, which is about the same issue or pull request and stays open.", c.DuplicateOf)
 	case TaskClosedReassigned:
-		if c.Assignee == "" {
-			return "This task's issue was reassigned, which closed the task."
-		}
-		return fmt.Sprintf("This task's issue was reassigned to %s, which closed the task.", c.Assignee)
+		return "This task's issue was reassigned, which closed the task."
 	case TaskClosedWorkCompleted:
 		return "The work on this task finished, which closed it."
 	}
