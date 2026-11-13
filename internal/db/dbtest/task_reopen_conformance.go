@@ -15,8 +15,8 @@ import (
 // FindOrCreateAtUnlessEntityActiveSystem): which closed task an event's
 // recurrence returns to work, what the reopen writes, and every case where
 // the mint creates a task instead. It runs on the held-close suite's stores
-// and seeder, since a reopen and a held close are decided by the same working
-// conversation.
+// and seeder: a reopen is decided by the working conversations a close
+// reports, and it clears a hold left on the closed row.
 //
 // Most of the cases assert that the mint creates a task. A reopen that
 // reaches a task it should have left closed puts a card back on the board
@@ -75,8 +75,9 @@ func RunTaskReopenConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 				}
 			}
 			_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
-			// An earlier event held its close, and the close that landed
-			// left the hold on the row.
+			// An earlier event's close was held for a draft awaiting a
+			// person, and the close that landed left the hold on the row.
+			seed.DraftPullRequest(t, convID, seed.EntityForTask(t, seed.Task(t)))
 			heldEvent := seed.Event(t, taskID)
 			if out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, db.SiblingEventCloseReason, passed, heldEvent); err != nil || !out.Held {
 				t.Fatalf("CloseOrHoldSystem = %+v (err %v), want held", out, err)

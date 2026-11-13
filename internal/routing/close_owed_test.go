@@ -122,16 +122,15 @@ func prSnapshotJSON(t *testing.T, state string) string {
 
 // seedStrandedPR is the divergence the obligation repairs: the fake's pull
 // request as an ACTIVE entity whose stored snapshot already says merged, with
-// a live CI task on it and a running blueprint behind that task. Returns the
-// entity, the task and the blueprint run.
-func seedStrandedPR(t *testing.T, r *Router, database *sql.DB) (entityID, taskID, blueprintRunID string) {
+// a live CI task on it and a running blueprint behind that task, its
+// conversation working. Returns the entity, the task, the blueprint run and
+// the conversation.
+func seedStrandedPR(t *testing.T, r *Router, database *sql.DB) (entityID, taskID, blueprintRunID, convID string) {
 	t.Helper()
 	entityID, taskID = seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
 	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "MERGED"))
-	// Parked on a person: still active, so the close stops it, and not
-	// working, so the close is not held.
-	blueprintRunID, _ = seedRunOnTask(t, database, taskID, "running", domain.StatusOpen)
-	return entityID, taskID, blueprintRunID
+	blueprintRunID, convID = seedRunOnTask(t, database, taskID, "running", "")
+	return entityID, taskID, blueprintRunID, convID
 }
 
 // queueRowsOfType lists the entity's queue rows of one event type.
@@ -173,16 +172,17 @@ func entityPollSeq(t *testing.T, database *sql.DB, entityID string) int64 {
 // headline: an entity active with a terminal snapshot at test start. One poll
 // cycle enqueues exactly one obligation, judged at the version the cycle
 // advanced to; routing it closes the tasks — audit reason reconciled, audit
-// row naming the obligation, cancel intent stamped, stop reached — and the
-// entity; a second cycle enqueues nothing, because the entity is closed and
+// row naming the obligation, the working conversation told and left working —
+// and the entity; a second cycle enqueues nothing, because the entity is closed and
 // out of the refresh set.
 func TestCloseOwed_PreExistingInconsistency_RepairedWithinOneCycle(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{stubDelegator: stubDelegator{db: database}}
+	sp := &stubDelegator{db: database}
 	r.spawner = sp
 	gh := newFakeGitHub(t, "MERGED")
-	entityID, taskID, brID := seedStrandedPR(t, r, database)
+	entityID, taskID, brID, convID := seedStrandedPR(t, r, database)
+	work := readWorkState(t, database, brID, convID)
 	seqBefore := entityPollSeq(t, database, entityID)
 
 	pollGitHub(t, database, gh)
@@ -211,11 +211,11 @@ func TestCloseOwed_PreExistingInconsistency_RepairedWithinOneCycle(t *testing.T)
 	if n := closeAuditCount(t, database, taskID); n != 1 {
 		t.Errorf("close-audit rows = %d, want 1 — the obligation is the closing event", n)
 	}
-	if !cancelRequested(t, database, brID) {
-		t.Error("cancel_requested = false; the reconciled close must carry the same stop intent as an event-driven one")
+	if after := readWorkState(t, database, brID, convID); after != work {
+		t.Errorf("the reconciled close changed the work on the task:\n before %+v\n after  %+v", work, after)
 	}
-	if got := sp.stoppedIDs(); len(got) != 1 {
-		t.Errorf("conversations stopped = %v, want the one running on the task", got)
+	if got := sp.notedIDs(); !slices.Equal(got, []string{convID}) {
+		t.Errorf("told = %v, want [%s], the conversation working on the task", got, convID)
 	}
 	if rows := queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed); rows[0].Status != domain.QueuedEventStatusDone {
 		t.Errorf("obligation row status = %q, want done", rows[0].Status)
@@ -237,7 +237,7 @@ func TestCloseOwed_UnchangedSnapshot_StillOwed(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	gh := newFakeGitHub(t, "MERGED")
-	entityID, _, _ := seedStrandedPR(t, r, database)
+	entityID, _, _, _ := seedStrandedPR(t, r, database)
 
 	// First cycle: whatever the refresh normalises the snapshot to is now
 	// stored, and the obligation lands. Route it away and reopen the
@@ -315,13 +315,12 @@ func TestCloseOwed_InFlightTransition_EmitsOnlyTheTransition(t *testing.T) {
 // exists for. The obligation is enqueued at version N+1; before it routes,
 // the pull request reopens and the next cycle writes the open snapshot
 // (version N+2). Routing the obligation must decline: the entity stays
-// active, the task stays open, no cancel intent is written, and the row is
-// consumed rather than replayed.
+// active, the task stays open, and the row is consumed rather than replayed.
 func TestCloseOwed_ReopenRace_ObligationIsStale(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	gh := newFakeGitHub(t, "MERGED")
-	entityID, taskID, brID := seedStrandedPR(t, r, database)
+	entityID, taskID, _, _ := seedStrandedPR(t, r, database)
 
 	pollGitHub(t, database, gh)
 	owed := queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed)
@@ -344,9 +343,6 @@ func TestCloseOwed_ReopenRace_ObligationIsStale(t *testing.T) {
 	if status, _ := taskCloseReason(t, database, taskID); status != "queued" {
 		t.Errorf("task status = %q, want queued — the stale obligation must touch nothing", status)
 	}
-	if cancelRequested(t, database, brID) {
-		t.Error("cancel_requested = true; a stale close cancelled a run on a reopened pull request")
-	}
 	if rows := queueRowsOfType(t, database, entityID, domain.EventSystemEntityCloseOwed); rows[0].Status != domain.QueuedEventStatusDone {
 		t.Errorf("obligation row status = %q, want done — a stale terminal is consumed, not replayed", rows[0].Status)
 	}
@@ -364,7 +360,7 @@ func TestCloseOwed_ReopenRace_RealTransitionIsStale(t *testing.T) {
 	gh := newFakeGitHub(t, "OPEN")
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
 	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "OPEN"))
-	brID, _ := seedRunOnTask(t, database, taskID, "running", "")
+	seedRunOnTask(t, database, taskID, "running", "")
 
 	pollGitHub(t, database, gh)
 	gh.set("MERGED")
@@ -384,9 +380,6 @@ func TestCloseOwed_ReopenRace_RealTransitionIsStale(t *testing.T) {
 	}
 	if status, _ := taskCloseReason(t, database, taskID); status != "queued" {
 		t.Errorf("task status = %q, want queued", status)
-	}
-	if cancelRequested(t, database, brID) {
-		t.Error("cancel_requested = true; the stale merge cancelled a run on a reopened pull request")
 	}
 	var disp string
 	for _, evt := range pub.eventsCopy() {
@@ -416,7 +409,7 @@ func (s closeTerminalOutageStore) CloseTerminalSystem(ctx context.Context, orgID
 
 // TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey pins the
 // failure posture. A close that fails leaves nothing half-done — both tasks
-// open, the entity active, no cancel intent — and the row replays; a row
+// open, the entity active — and the row replays; a row
 // that parks after its budget holds the entity's key, so the next cycle owes
 // nothing while it sits on the parked panel, and an operator's redrive is
 // what closes the entity.
@@ -424,7 +417,7 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	gh := newFakeGitHub(t, "MERGED")
-	entityID, taskID, brID := seedStrandedPR(t, r, database)
+	entityID, taskID, _, _ := seedStrandedPR(t, r, database)
 	second, _, err := testTaskStore(database).FindOrCreateAtSystem(context.Background(), runmode.LocalDefaultOrgID,
 		runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRReviewChangesRequested, "", queueRowsOfType(t, database, entityID, domain.EventGitHubPRCICheckFailed)[0].EventID, 0.5, time.Now())
 	if err != nil {
@@ -449,9 +442,6 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey(t *testing.T) {
 		if status, _ := taskCloseReason(t, database, id); status != "queued" {
 			t.Errorf("task %s status = %q, want queued — a failed close leaves nothing half-closed", id, status)
 		}
-	}
-	if cancelRequested(t, database, brID) {
-		t.Error("cancel_requested = true after a failed close; the intent must roll back with it")
 	}
 
 	// The replay finishes the whole job.
@@ -527,7 +517,7 @@ func TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey(t *testing.T) {
 func TestCloseOwed_SourcePause_ClearedSnapshotIsNotTerminal(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	entityID, _, _ := seedStrandedPR(t, r, database)
+	entityID, _, _, _ := seedStrandedPR(t, r, database)
 	if _, err := sqlitestore.New(database).Entities.ClearSnapshotsForSourceSystem(context.Background(), runmode.LocalDefaultOrgID, "github"); err != nil {
 		t.Fatalf("clear snapshots: %v", err)
 	}

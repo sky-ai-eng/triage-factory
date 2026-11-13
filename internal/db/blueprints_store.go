@@ -82,11 +82,10 @@ var (
 	ErrTaskBusyActiveRun = errors.New("db: another run is active on this task (one-active-per-task index)")
 	// ErrTaskClosedForEventRun is returned by CreateRunWithFirstStepSystem,
 	// in both dialects, when an event-triggered firing names a task that has
-	// closed, or whose close an event holds, by the time the firing takes the
-	// task's lock. The router's reads before the firing are a fast path; this
+	// closed by the time the firing takes the task's lock. The router's reads before the firing are a fast path; this
 	// is the check no close can land between. A manual delegation is a
 	// person's decision and is never refused for it.
-	ErrTaskClosedForEventRun = errors.New("db: an event-triggered run names a closed task, or one whose close is held")
+	ErrTaskClosedForEventRun = errors.New("db: an event-triggered run names a closed task")
 	// ErrTeamArchived is returned by CreateRunWithFirstStepSystem, in both
 	// dialects and on both arms, when the team the run's conversation would
 	// belong to — the owner the firing consolidates to, or the task's own
@@ -583,7 +582,7 @@ type BlueprintStore interface {
 	//     step 2, so without a fixed order two firings racing on one task can
 	//     take tasks and blueprint_runs in opposite orders and deadlock. No
 	//     such task aborts the firing here, before anything is written. An
-	//     event-triggered firing on a task that is closed or holds a close,
+	//     event-triggered firing on a task that is closed,
 	//     read under that lock, aborts as ErrTaskClosedForEventRun once the
 	//     fence below has passed it, so a replay still reads as one. Then the
 	//     run's team — ownerTeamID when non-empty, otherwise the task's team —

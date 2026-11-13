@@ -45,7 +45,7 @@ import (
 // the conversation hasn't started yet). Every other exit — already claimed by
 // another team, the bot disabled for the team, no agent bootstrapped, the
 // breaker tripped, a duplicate already queued, a replay hitting
-// ErrAlreadyFired, or a task whose close is held or that closed under the fire
+// ErrAlreadyFired, or a task that closed under the fire
 // — returns (false, nil): nothing new happened on this call, and nothing
 // should.
 //
@@ -172,11 +172,10 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return false, nil
 		}
-		// The preflight read no held close, but the task closed or an event
-		// held its close before the insert locked it. Nothing new starts on
-		// a task an event resolved.
+		// The task closed before the insert locked it. No event starts a
+		// new run on a closed task.
 		if errors.Is(err, delegate.ErrTaskClosed) {
-			routerLog.Info("auto-delegate skipped: the task closed or its close is held under the fire",
+			routerLog.Info("auto-delegate skipped: the task closed under the fire",
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return false, nil
 		}
@@ -210,7 +209,7 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 
 // autoDelegatePreflight runs the checks every auto-fired trigger passes
 // before its firing is decided, at event time and at the post-scoring
-// re-evaluation alike: the held-close skip, the cross-team exclusive-claim
+// re-evaluation alike: the cross-team exclusive-claim
 // skip, the org agent resolution, and the per-team team_agents.enabled gate.
 // It returns the agent the firing runs as and claims for; proceed=false is a
 // decided skip, logged where each check finds it, and a non-nil error is a
@@ -219,14 +218,6 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 // event folded into a live one, so each caller applies breakerGate where it
 // would start or queue a run.
 func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, actingTeamID string) (agentID string, proceed bool, err error) {
-	// An event has resolved the task and its close waits only for the work
-	// already on it, so nothing starts more.
-	if hold, err := r.tasks.CloseDeferralForTaskSystem(ctx, orgID, task.ID); err != nil {
-		return "", false, fmt.Errorf("read held close: %w", err)
-	} else if hold != nil {
-		routerLog.Info("auto-trigger skipped: the task's close is held", "task_id", task.ID, "closing_event", hold.EventID)
-		return "", false, nil
-	}
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a

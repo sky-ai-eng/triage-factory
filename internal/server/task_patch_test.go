@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,9 +15,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // TestTaskPatchStage_RejectsUnclaimedTask: a stage is the claimant's own
@@ -99,6 +103,60 @@ func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 		if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
 			t.Fatalf("status = %q after a refused close as %s, want the original dismissed", got, status)
 		}
+	}
+}
+
+// TestTaskPatchClose_LeavesTheRunWorkingTheTask: a person's dismiss or
+// complete closes the task and writes nothing on the run working it. The
+// conversation is not asked to stop, gets no stop note, and its blueprint is
+// not called off.
+func TestTaskPatchClose_LeavesTheRunWorkingTheTask(t *testing.T) {
+	for _, status := range []string{"dismissed", "done"} {
+		t.Run(status, func(t *testing.T) {
+			s := newTestServer(t)
+			// A real spawner: a stop, had the close asked for one, would
+			// land on the rows read below.
+			s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+			taskID, conversationID, blueprintRunID := runningRunFixture(t, s.db, "close_live_"+status)
+			readRun := func() string {
+				t.Helper()
+				var convStatus, runStatus string
+				var stopRequested, ended, cancelRequested bool
+				var notes int
+				if err := s.db.QueryRow(`
+					SELECT COALESCE(status, ''), stop_requested_at IS NOT NULL, ended_at IS NOT NULL
+					  FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus, &stopRequested, &ended); err != nil {
+					t.Fatalf("read conversation: %v", err)
+				}
+				if err := s.db.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = ?`,
+					blueprintRunID).Scan(&runStatus, &cancelRequested); err != nil {
+					t.Fatalf("read blueprint run: %v", err)
+				}
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&notes); err != nil {
+					t.Fatalf("count transcript rows: %v", err)
+				}
+				return fmt.Sprintf("conversation (%s, stop requested %v, ended %v), run (%s, cancel requested %v), %d transcript rows",
+					convStatus, stopRequested, ended, runStatus, cancelRequested, notes)
+			}
+			before := readRun()
+
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+				withTaskVersion(t, s, taskID, map[string]any{"status": status}))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("close as %s = %d, want 200; body=%s", status, rec.Code, rec.Body.String())
+			}
+			// A stop the close had requested would be settled here.
+			if _, err := sqlitestore.New(s.db).ConversationQueue.SettleUnclaimedStopsSystem(context.Background()); err != nil {
+				t.Fatalf("settle: %v", err)
+			}
+
+			if got := readTaskStatus(t, s.db, taskID); got != status {
+				t.Errorf("task status = %q, want %s", got, status)
+			}
+			if after := readRun(); after != before {
+				t.Errorf("the close changed the run working the task:\n before %s\n after  %s", before, after)
+			}
+		})
 	}
 }
 

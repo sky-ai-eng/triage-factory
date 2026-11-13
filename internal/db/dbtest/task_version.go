@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
@@ -23,4 +24,14 @@ func TaskVersion(t testing.TB, s db.TaskStore, orgID, taskID string) int64 {
 		return 0
 	}
 	return task.Version
+}
+
+// snoozeTask snoozes an open, unclaimed task for an hour through the store's
+// own door, for a test that needs a snoozed row and is not about the snooze.
+func snoozeTask(t testing.TB, s db.TaskStore, orgID, taskID string) {
+	t.Helper()
+	ok, err := s.SnoozeTask(context.Background(), orgID, taskID, time.Now().Add(time.Hour), TaskVersion(t, s, orgID, taskID))
+	if err != nil || !ok {
+		t.Fatalf("snooze task %s: ok=%v err=%v", taskID, ok, err)
+	}
 }

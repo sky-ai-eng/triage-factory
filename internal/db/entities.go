@@ -221,10 +221,10 @@ type TerminalCloseResult struct {
 	// ClosedTaskIDs are the tasks this call closed, in the order they were
 	// closed. Empty with Closed=true is normal.
 	ClosedTaskIDs []string
-	// ActiveConversationIDs maps each closed task to the conversations that
-	// were active on it when the transaction stamped their cancel intent —
-	// the set the caller's post-commit stop acts on.
-	ActiveConversationIDs map[string][]string
+	// WorkingConversationIDs maps each closed task to the conversations
+	// working on it when it closed, read in the transaction: the set the
+	// caller tells. The close writes nothing on them.
+	WorkingConversationIDs map[string][]string
 	// HeldTasks are the tasks this call left open with the close held
 	// (domain.TaskCloseDeferral), in the order they were held.
 	HeldTasks []HeldTaskClose
@@ -243,10 +243,8 @@ type HeldTaskClose struct {
 	// NewlyHeld reports that the task held no close before this call.
 	NewlyHeld bool
 	// WorkingConversationIDs are the task's working conversations: the set
-	// the caller tells. AwaitingPerson reports that a deliverable awaiting a
-	// person made it hold instead (TaskCloseOutcome.AwaitingPerson).
+	// the caller tells.
 	WorkingConversationIDs []string
-	AwaitingPerson         bool
 }
 
 type EntityStore interface {
@@ -650,9 +648,9 @@ type EntityStore interface {
 	// CloseTerminalSystem is the terminating close: the one transaction in
 	// which an entity flips to closed and every open task the terminating
 	// event resolves closes with it, each task closed with exactly the rows
-	// TaskStore.CloseWithConversationCancelIntentSystem writes (the terminal
-	// flip, the task_events audit row when closingEventID is set, and the
-	// cancel intent on the blueprints behind its then-active conversations).
+	// TaskStore.CloseOnEventSystem writes (the terminal flip, and the
+	// task_events audit row when closingEventID is set). No conversation is
+	// stopped and no blueprint called off.
 	// The router runs it for every event in domain.EntityCloseSettlingEventTypes.
 	//
 	// The transaction locks the entity row first (SELECT … FOR UPDATE on
@@ -667,26 +665,27 @@ type EntityStore interface {
 	//
 	// Closed=false means the guard missed — the entity is not active, or the
 	// snapshot has moved on since the event was judged (a reopen) — and
-	// NOTHING was written: no task flipped, no audit row, no cancel intent.
+	// NOTHING was written: no task flipped and no audit row.
 	// The caller consumes the event; the newer snapshot's own cycle owns the
 	// entity's fate. Any failure inside rolls the whole close back, so a
 	// replay finds every task still open and the entity still active: there
 	// is no half-closed state for a retry to be blind to.
 	//
 	// ClosedTaskIDs may be empty with Closed=true — a merged pull request
-	// with no live tasks still closes its entity. ActiveConversationIDs is
-	// keyed per closed task and is the set the transaction stamped, so the
-	// post-commit stop acts on exactly what closed rather than on a later
-	// read. closeTypes narrows which task types close: the terminating
+	// with no live tasks still closes its entity. WorkingConversationIDs is
+	// keyed per closed task and is the set the transaction read, so the
+	// caller tells exactly the conversations working when the task closed.
+	// closeTypes narrows which task types close: the terminating
 	// event's own type is excluded by its relation so the lifecycle task it
 	// mints afterwards survives; a type with no open task is a no-op.
 	//
-	// A task with a working conversation is not closed: it holds the close
-	// exactly as TaskStore.CloseOrHoldSystem holds one, in the same
-	// transaction that closes the others, and is reported in HeldTasks. The
-	// entity closes whether or not any task held, and closes before the
-	// tasks are decided, so a deliverable on this entity reads as one
-	// nobody can act on any more. When the guard misses,
+	// A task with a deliverable awaiting a person, on a pull request still
+	// open, is not closed: it holds the close exactly as
+	// TaskStore.CloseOrHoldSystem holds one, in the same transaction that
+	// closes the others, and is reported in HeldTasks. The entity closes
+	// whether or not any task held, and closes before the tasks are decided,
+	// so a deliverable on this entity reads as one nobody can act on any
+	// more and holds nothing. When the guard misses,
 	// nothing is held either. A hold names its closing event, so with
 	// closingEventID empty every task closes.
 	//
@@ -770,8 +769,8 @@ type EntityStore interface {
 	//
 	//   - where both rows hold an active task with the same (event_type,
 	//     dedup_key), the newer row's is dismissed with close_reason
-	//     duplicate_entity_merged, and a blueprint still running under one of
-	//     its unsettled conversations is marked cancel_requested;
+	//     duplicate_entity_merged. Its conversations, and the blueprints
+	//     behind them, are left working;
 	//   - the newer row's tasks, events, queue rows, pending firings, memory
 	//     links (at the stronger of the two roles) and entity links move onto
 	//     the survivor;
@@ -816,8 +815,8 @@ type EntityStore interface {
 	//
 	//   - where both rows hold an active task with the same (event_type,
 	//     dedup_key), the stub's is dismissed with close_reason
-	//     duplicate_entity_merged, and a blueprint still running under one of
-	//     its unsettled conversations is marked cancel_requested;
+	//     duplicate_entity_merged. Its conversations, and the blueprints
+	//     behind them, are left working;
 	//   - the stub's tasks, events, queue rows, pending firings, deliverables,
 	//     audit-ledger rows, memory links (at the stronger of the two roles)
 	//     and entity links move onto into, the stub's deliverables take into's
@@ -917,8 +916,7 @@ type EntityStore interface {
 }
 
 // DuplicateEntityMergedCloseReason is the close_reason MergeDuplicateEntitiesSystem
-// stamps on the newer row's tasks it dismisses. It names exactly those tasks,
-// which is what the merge's cancel of their running blueprints selects on.
+// stamps on the newer row's tasks it dismisses.
 const DuplicateEntityMergedCloseReason = "duplicate_entity_merged"
 
 // ValidateJiraEntityCreate is FindOrCreateJiraSystem's argument check, shared

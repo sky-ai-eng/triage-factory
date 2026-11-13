@@ -2,9 +2,7 @@ package sqlite_test
 
 import (
 	"database/sql"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -78,11 +76,6 @@ func newSQLiteCloseDeferralFactory() dbtest.TaskCloseDeferralFactory {
 			},
 			ResolveDeliverables: func(t *testing.T, conversationID string) {
 				exec(t, "resolve drafts", `UPDATE deliverables SET state = 'open' WHERE conversation_id = ? AND state = 'draft'`, conversationID)
-			},
-			AgeHold: func(t *testing.T, taskID string, d time.Duration) {
-				exec(t, "age hold", `
-					UPDATE tasks SET close_deferred_at = strftime('%Y-%m-%d %H:%M:%f', close_deferred_at, ?) WHERE id = ?
-				`, fmt.Sprintf("%+.3f seconds", -d.Seconds()), taskID)
 			},
 		}
 		return dbtest.TaskCloseDeferralStores{

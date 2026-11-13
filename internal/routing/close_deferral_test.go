@@ -7,14 +7,17 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// An event close that finds a working conversation on its task holds the
-// close and tells the conversation instead of stopping it; the sweep applies
-// the close once nothing on the task is working, if it still holds then.
+// One thing holds an event's close: a deliverable on the task awaiting a
+// person, on a pull request still open. The sweep applies the close once the
+// person resolves it, if it still holds then. A conversation working on the
+// task holds nothing.
 
 // heldClose reads a task's held close event, "" for none.
 func heldClose(t *testing.T, database *sql.DB, taskID string) string {
@@ -52,18 +55,6 @@ func secondCIFailedTask(t *testing.T, r *Router, database *sql.DB, entityID, fir
 	return ""
 }
 
-// failRun leaves the run as a step that failed leaves it once its blueprint
-// has acted on the failure: the conversation and the run both failed.
-func failRun(t *testing.T, database *sql.DB, runID, convID string) {
-	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, domain.StatusFailed, convID); err != nil {
-		t.Fatalf("fail conversation %s: %v", convID, err)
-	}
-	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
-		t.Fatalf("fail blueprint run %s: %v", runID, err)
-	}
-}
-
 // seedDraftPullRequest gives the conversation a draft pull request
 // deliverable about the pull request entityID names, one that awaits a
 // person's verdict while that entity is open.
@@ -78,27 +69,42 @@ func seedDraftPullRequest(t *testing.T, database *sql.DB, convID, entityID strin
 	}
 }
 
-// heldCIFixture is a ci_check_failed task with a working conversation whose
-// close a CI pass has held, and a sibling ci_check_failed task with nothing
-// on it that the same pass closed.
+// resolveDrafts marks the conversation's draft pull requests open, as a
+// person marking one ready does.
+func resolveDrafts(t *testing.T, database *sql.DB, convID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE deliverables SET state = 'open' WHERE conversation_id = ? AND state = 'draft'`, convID); err != nil {
+		t.Fatalf("resolve the drafts on %s: %v", convID, err)
+	}
+}
+
+// heldCIFixture is a ci_check_failed task whose finished run left a draft
+// pull request for a person, with a second run working on it, whose close a
+// CI pass has held; and a sibling ci_check_failed task with nothing on it
+// that the same pass closed.
 type heldCIFixture struct {
 	r                *Router
 	database         *sql.DB
-	sp               *stoppingSpawner
+	sp               *stubDelegator
 	entityID, taskID string
 	otherID          string
-	runID, convID    string
-	eventID          string
+	// draftConvID is the finished run's conversation, which holds the draft.
+	draftConvID string
+	// runID and convID are the run still working on the task.
+	runID, convID string
+	eventID       string
 }
 
 func newHeldCIFixture(t *testing.T, sourceID string) heldCIFixture {
 	t.Helper()
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{}
+	sp := &stubDelegator{}
 	r.spawner = sp
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, sourceID)
 	otherID := secondCIFailedTask(t, r, database, entityID, taskID)
+	_, draftConvID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
+	seedDraftPullRequest(t, database, draftConvID, entityID)
 	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
 	seedPRCheckRuns(t, database, entityID,
 		domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
@@ -112,24 +118,22 @@ func newHeldCIFixture(t *testing.T, sourceID string) heldCIFixture {
 	if eventID == "" {
 		t.Fatal("setup: the pass held no close")
 	}
-	return heldCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, otherID: otherID, runID: runID, convID: convID, eventID: eventID}
+	return heldCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, otherID: otherID,
+		draftConvID: draftConvID, runID: runID, convID: convID, eventID: eventID}
 }
 
-// TestCloseHold_WorkingConversationHoldsTheClose is the headline: the pass
-// holds the close of the task a conversation is working on, stops nothing,
-// tears nothing down, and tells the conversation once. The sibling task
-// nothing is working on closes now.
-func TestCloseHold_WorkingConversationHoldsTheClose(t *testing.T) {
+// TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose is the headline: the
+// pass holds the close of the task whose draft awaits a person, writes
+// nothing on the work under it, and tells the working conversation once. The
+// sibling task with no deliverable closes now.
+func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#held")
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Fatal("the worked-on task closed under its conversation")
+		t.Fatal("the task closed while its draft awaits a person")
 	}
-	if got := f.sp.stoppedIDs(); len(got) != 0 {
-		t.Errorf("stopped = %v, want nothing", got)
-	}
-	if cancelRequested(t, f.database, f.runID) {
-		t.Error("the run was called off")
+	if got := readWorkState(t, f.database, f.runID, f.convID); got.cancelRequested || got.stopRequested || got.runStatus != "running" {
+		t.Errorf("the hold changed the work on the task: %+v", got)
 	}
 	if n := closeAuditCount(t, f.database, f.taskID); n != 0 {
 		t.Errorf("close audit rows on the held task = %d, want 0", n)
@@ -161,17 +165,26 @@ func TestCloseHold_SecondClosingEventSendsNoSecondNote(t *testing.T) {
 	}
 }
 
-// TestCloseHold_TerminatingCloseHoldsAndTells: a merge closes the entity and
-// its idle task, and holds the worked-on task's close and tells its
-// conversation, in the same pass.
-func TestCloseHold_TerminatingCloseHoldsAndTells(t *testing.T) {
+// TestCloseHold_TerminatingCloseHoldsForADraftOnAnotherPullRequest: a merge
+// closes the entity and the task with nothing awaiting a person, and holds
+// the close of the task whose draft is on another pull request, still open.
+// A draft on the merged pull request itself holds nothing.
+func TestCloseHold_TerminatingCloseHoldsForADraftOnAnotherPullRequest(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{}
+	sp := &stubDelegator{}
 	r.spawner = sp
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#merged-held")
 	otherID := secondCIFailedTask(t, r, database, entityID, taskID)
-	_, convID := seedRunOnTask(t, database, taskID, "running", "")
+	elsewhere, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
+		"github", "https://github.com", "owner/repo#still-open", "", "pr", "PR", "https://example.com/2")
+	if err != nil {
+		t.Fatalf("create the other pull request: %v", err)
+	}
+	_, convID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
+	seedDraftPullRequest(t, database, convID, elsewhere.ID)
+	_, otherConv := seedRunOnTask(t, database, otherID, "completed", dbtest.SeedConcluded)
+	seedDraftPullRequest(t, database, otherConv, entityID)
 
 	enqueueMerged(t, database, entityID)
 	if err := r.drainEventQueue(context.Background()); err != nil {
@@ -186,38 +199,48 @@ func TestCloseHold_TerminatingCloseHoldsAndTells(t *testing.T) {
 		t.Errorf("entity state = %q, want closed", state)
 	}
 	if heldClose(t, database, taskID) == "" {
-		t.Error("the worked-on task's close was not held")
+		t.Error("the close of the task whose draft is on an open pull request was not held")
 	}
-	if got := sp.notedIDs(); !slices.Equal(got, []string{convID}) {
-		t.Errorf("noted = %v, want [%s]", got, convID)
+	if status, _, _ := taskRow(t, database, taskID); status == "done" {
+		t.Error("the task closed while its draft awaits a person")
 	}
 	if status, reason, _ := taskRow(t, database, otherID); status != "done" || reason != "entity_closed" {
 		t.Errorf("other task = (%q, %q), want closed with entity_closed", status, reason)
 	}
 }
 
-// TestCloseHold_ReassignmentClosesAtOnce pins the exception: a task of the
-// closing event's own type closes under a working conversation, which is
-// stopped, so the new assignment mints the new assignee's team a task of its
+// TestCloseHold_ReassignmentClosesAtOnce pins the relation's setting: the
+// task the previous assignment made closes at once as reassigned, under a
+// working conversation it leaves working and a draft that would hold any
+// other close, so the same event mints the new assignee's team a task of its
 // own instead of bumping the old one.
 func TestCloseHold_ReassignmentClosesAtOnce(t *testing.T) {
 	database, router, _, teamB, entityID := reassignFixture(t)
-	sp := &stoppingSpawner{}
+	sp := &stubDelegator{}
 	router.spawner = sp
 	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
 	first := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
 	if len(first) != 1 {
 		t.Fatalf("after the first assignment: %d tasks, want 1", len(first))
 	}
-	_, convID := seedRunOnTask(t, database, first[0].ID, "running", "")
+	runID, convID := seedRunOnTask(t, database, first[0].ID, "running", "")
+	seedDraftPullRequest(t, database, convID, entityID)
+	before := readWorkState(t, database, runID, convID)
 
 	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-bob"))
 
-	if status, _, _ := taskRow(t, database, first[0].ID); status != "done" {
-		t.Errorf("the old assignment's task = %q, want done", status)
+	status, reason, eventType := taskRow(t, database, first[0].ID)
+	if status != "done" || reason != dbpkg.ReassignedCloseReason || eventType != domain.EventLinearIssueAssigned {
+		t.Errorf("the old assignment's task = (%q, %q, %q), want done as reassigned by the assignment", status, reason, eventType)
 	}
-	if got := sp.stoppedIDs(); !slices.Equal(got, []string{convID}) {
-		t.Errorf("stopped = %v, want [%s]", got, convID)
+	if ev := heldClose(t, database, first[0].ID); ev != "" {
+		t.Errorf("held close = %q, want none: a reassignment never holds", ev)
+	}
+	if after := readWorkState(t, database, runID, convID); after != before {
+		t.Errorf("the reassignment changed the work on the old task:\n before %+v\n after  %+v", before, after)
+	}
+	if got := sp.notedIDs(); !slices.Equal(got, []string{convID}) {
+		t.Errorf("noted = %v, want [%s]", got, convID)
 	}
 	active := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
 	if len(active) != 1 || active[0].ID == first[0].ID || teamIDValue(&active[0]) != teamB {
@@ -226,8 +249,8 @@ func TestCloseHold_ReassignmentClosesAtOnce(t *testing.T) {
 }
 
 // TestCloseHold_OwnEventArrivingAgainCancelsTheHold: the task's own event
-// arriving again says the situation is live again, so once nothing is
-// working the sweep leaves the task open.
+// arriving again says the situation is live again, so once the person has
+// resolved the draft the sweep leaves the task open.
 func TestCloseHold_OwnEventArrivingAgainCancelsTheHold(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#held-then-failed")
 
@@ -235,8 +258,8 @@ func TestCloseHold_OwnEventArrivingAgainCancelsTheHold(t *testing.T) {
 	if err := f.r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the second failure: %v", err)
 	}
-	failRun(t, f.database, f.runID, f.convID)
-	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+	resolveDrafts(t, f.database, f.draftConvID)
+	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
 		t.Error("the sweep closed a task its own event reopened")
@@ -258,7 +281,7 @@ func TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone(t *testing.T) {
 	if err := f.r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the second failure: %v", err)
 	}
-	failRun(t, f.database, f.runID, f.convID)
+	resolveDrafts(t, f.database, f.draftConvID)
 	closed, err := f.r.settleCloseDeferral(t.Context(), read)
 	if err != nil {
 		t.Fatalf("settle: %v", err)
@@ -272,32 +295,31 @@ func TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone(t *testing.T) {
 	}
 }
 
-// TestCloseHoldSweep_LeavesAWorkingTaskHeld: while the conversation works,
-// the sweep closes nothing and stops nothing.
-func TestCloseHoldSweep_LeavesAWorkingTaskHeld(t *testing.T) {
-	f := newHeldCIFixture(t, "owner/repo#sweep-working")
+// TestCloseHoldSweep_LeavesATaskHeldWhileItsDraftAwaitsAPerson: until the
+// person resolves the draft, the sweep closes nothing and keeps the hold.
+func TestCloseHoldSweep_LeavesATaskHeldWhileItsDraftAwaitsAPerson(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-awaiting")
 
-	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the sweep closed a task a conversation is working on")
+		t.Error("the sweep closed a task whose draft awaits a person")
 	}
 	if ev := heldClose(t, f.database, f.taskID); ev != f.eventID {
 		t.Errorf("held close = %q, want %s", ev, f.eventID)
 	}
-	if got := f.sp.stoppedIDs(); len(got) != 0 {
-		t.Errorf("stopped = %v, want nothing", got)
-	}
 }
 
-// TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks: the close applies
-// through the ordinary path once the conversation stops working: the event's
-// reason and type, and its audit row.
-func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
+// TestCloseHoldSweep_AppliesTheCloseOnceThePersonResolvesTheDraft: the close
+// applies through the plain close once nothing awaits a person: the event's
+// reason and type, and its audit row. The conversation still working on the
+// task is left working.
+func TestCloseHoldSweep_AppliesTheCloseOnceThePersonResolvesTheDraft(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-applies")
-	failRun(t, f.database, f.runID, f.convID)
+	before := readWorkState(t, f.database, f.runID, f.convID)
+	resolveDrafts(t, f.database, f.draftConvID)
 
-	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+	f.r.sweepCloseDeferrals(t.Context())
 
 	status, reason, eventType := taskRow(t, f.database, f.taskID)
 	if status != "done" || reason != "auto_closed_by_event" || eventType != domain.EventGitHubPRCICheckPassed {
@@ -310,46 +332,22 @@ func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	if audit != 1 {
 		t.Errorf("close audit rows naming the pass = %d, want 1", audit)
 	}
-}
-
-// TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson: once nothing works,
-// a draft pull request the run left for a person keeps the close held until
-// the person resolves it; the next pass then closes the task.
-func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
-	f := newHeldCIFixture(t, "owner/repo#sweep-awaiting")
-	failRun(t, f.database, f.runID, f.convID)
-	seedDraftPullRequest(t, f.database, f.convID, f.entityID)
-
-	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
-
-	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the sweep closed a task whose draft awaits a person")
-	}
-	if heldClose(t, f.database, f.taskID) != f.eventID {
-		t.Error("the sweep dropped the close a draft awaiting a person holds")
-	}
-
-	if _, err := f.database.Exec(`UPDATE deliverables SET state = 'open' WHERE conversation_id = ?`, f.convID); err != nil {
-		t.Fatalf("resolve the draft: %v", err)
-	}
-	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
-
-	if status, reason, _ := taskRow(t, f.database, f.taskID); status != "done" || reason != "auto_closed_by_event" {
-		t.Errorf("task = (%q, %q), want closed by the pass once the draft is resolved", status, reason)
+	if after := readWorkState(t, f.database, f.runID, f.convID); after != before {
+		t.Errorf("the applied close changed the work on the task:\n before %+v\n after  %+v", before, after)
 	}
 }
 
 // TestCloseHoldSweep_DropsAHoldThatNoLongerHolds: CI failing again by the
-// time nothing works means the pass no longer resolves the task, so the hold
-// is cleared and nothing closes.
+// time the person resolves the draft means the pass no longer resolves the
+// task, so the hold is cleared and nothing closes.
 func TestCloseHoldSweep_DropsAHoldThatNoLongerHolds(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-dropped")
 	seedPRCheckRuns(t, f.database, f.entityID,
 		domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
 	)
-	failRun(t, f.database, f.runID, f.convID)
+	resolveDrafts(t, f.database, f.draftConvID)
 
-	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
 		t.Error("the sweep closed a task whose close no longer holds")
@@ -359,11 +357,11 @@ func TestCloseHoldSweep_DropsAHoldThatNoLongerHolds(t *testing.T) {
 	}
 }
 
-// TestCloseHold_FiringsSkipAHeldTask: no automatic firing starts new work on
-// a task whose close is held. The preflight every auto-fire runs proceeds on
-// the task until its close is held and declines it after, and the firing
-// worker skips its queued firing as task_closed.
-func TestCloseHold_FiringsSkipAHeldTask(t *testing.T) {
+// TestCloseHold_FiringsStartOnAHeldTask: a task whose close is held is an
+// open task, and an automatic firing starts new work on it as on any other.
+// The preflight every auto-fire runs proceeds, and the firing worker fires
+// the task's queued firing.
+func TestCloseHold_FiringsStartOnAHeldTask(t *testing.T) {
 	database := newTestDB(t)
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
@@ -383,27 +381,16 @@ func TestCloseHold_FiringsSkipAHeldTask(t *testing.T) {
 	if err != nil || trigger == nil {
 		t.Fatalf("read trigger: trigger=%v err=%v", trigger, err)
 	}
-	preflight := func() bool {
-		t.Helper()
-		task, err := testTaskStore(database).GetSystem(ctx, org, taskID)
-		if err != nil || task == nil {
-			t.Fatalf("read task: task=%v err=%v", task, err)
-		}
-		_, proceed, err := r.autoDelegatePreflight(ctx, org, task, *trigger, entityID, "")
-		if err != nil {
-			t.Fatalf("preflight: %v", err)
-		}
-		return proceed
-	}
-	if !preflight() {
-		t.Fatal("setup: the preflight declines the task before its close is held")
-	}
-
 	if _, err := database.Exec(`UPDATE tasks SET close_deferred_event_id = ?, close_deferred_at = CURRENT_TIMESTAMP WHERE id = ?`, eventID, taskID); err != nil {
 		t.Fatalf("hold the task's close: %v", err)
 	}
-	if preflight() {
-		t.Error("the preflight proceeds on a held task")
+
+	task, err := testTaskStore(database).GetSystem(ctx, org, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("read task: task=%v err=%v", task, err)
+	}
+	if _, proceed, err := r.autoDelegatePreflight(ctx, org, task, *trigger, entityID, ""); err != nil || !proceed {
+		t.Errorf("preflight on a held task = (proceed %v, err %v), want it to proceed", proceed, err)
 	}
 	drainOnce(t, r)
 
@@ -411,8 +398,10 @@ func TestCloseHold_FiringsSkipAHeldTask(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 firing row, got %d", len(rows))
 	}
-	requireSkipped(t, rows[0], domain.PendingFiringSkipTaskClosed)
-	if stub.calls != 0 {
-		t.Errorf("Delegate called %d times on a held task", stub.calls)
+	if rows[0].SkipReason != "" {
+		t.Errorf("the held task's firing was skipped as %q, want it fired", rows[0].SkipReason)
+	}
+	if stub.calls != 1 {
+		t.Errorf("Delegate called %d times on a held task, want 1", stub.calls)
 	}
 }

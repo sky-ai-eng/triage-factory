@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -104,7 +105,8 @@ func TestStagedInjectionsForEngagement_FlushesAndDrains(t *testing.T) {
 }
 
 // heldCloseFixture is a conversation no person started, on a task whose
-// close a CI pass holds.
+// close a CI pass holds for the draft pull request the conversation left for
+// a person.
 func heldCloseFixture(t *testing.T, convID string) (s *Spawner, database *sql.DB, conv *domain.Conversation, taskID, eventID string) {
 	t.Helper()
 	org := runmode.LocalDefaultOrgID
@@ -125,6 +127,13 @@ func heldCloseFixture(t *testing.T, convID string) (s *Spawner, database *sql.DB
 	eventID, err := stores.Events.Record(ctx, org, domain.Event{EventType: domain.EventGitHubPRCICheckPassed, EntityID: &entityID, MetadataJSON: `{"check_name":"build"}`})
 	if err != nil {
 		t.Fatalf("record the pass: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id)
+		SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id, ?
+		  FROM conversations WHERE id = ?
+	`, uuid.New().String(), entityID, convID); err != nil {
+		t.Fatalf("seed the draft pull request: %v", err)
 	}
 	if out, err := stores.Tasks.CloseOrHoldSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil || !out.Held {
 		t.Fatalf("setup: hold = (%+v, %v), want held", out, err)

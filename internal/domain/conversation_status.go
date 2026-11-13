@@ -196,8 +196,8 @@ const (
 	ParkReasonIdle ParkReason = "idle"
 	// ParkReasonUserCancelled — a person stopped this conversation.
 	ParkReasonUserCancelled ParkReason = "user_cancelled"
-	// ParkReasonSystemCancelled — TF stopped it with no user asking: a task
-	// closing its conversations, a team archive's force-stop cascade.
+	// ParkReasonSystemCancelled — TF stopped it with no user asking: a team
+	// archive's force-stop cascade. A task's close stops nothing.
 	ParkReasonSystemCancelled ParkReason = "system_cancelled"
 	// ParkReasonBlueprintCancelled — the blueprint behind the step was
 	// cancelled, so the step it would have run is moot.

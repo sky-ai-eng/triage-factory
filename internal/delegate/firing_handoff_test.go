@@ -218,7 +218,7 @@ func TestHandOffQueuedFirings_LeavesFiringsQueuedBeforeTheRun(t *testing.T) {
 
 // An event queued behind a close answers to that close, which is the firing
 // worker's skip to make: the step is not told to act on it.
-func TestHandOffQueuedFirings_LeavesFiringsOnAClosedOrHeldTask(t *testing.T) {
+func TestHandOffQueuedFirings_LeavesFiringsOnAClosedTask(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 
@@ -227,21 +227,6 @@ func TestHandOffQueuedFirings_LeavesFiringsOnAClosedOrHeldTask(t *testing.T) {
 		queueFiring(t, s, database, entityID, taskID, triggerID)
 		if _, err := s.tasks.CloseSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
 			t.Fatalf("close task: %v", err)
-		}
-		s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
-		requireStillQueued(t, s, entityID, conv.ID)
-	})
-
-	t.Run("close held", func(t *testing.T) {
-		s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-held")
-		markEngaged(t, database, conv.ID)
-		queueFiring(t, s, database, entityID, taskID, triggerID)
-		passID, err := testSpawnerStores(database).Events.Record(ctx, org, domain.Event{EventType: domain.EventGitHubPRCICheckPassed, EntityID: &entityID, MetadataJSON: `{"check_name":"build"}`})
-		if err != nil {
-			t.Fatalf("record the pass: %v", err)
-		}
-		if out, err := s.tasks.CloseOrHoldSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, passID); err != nil || !out.Held {
-			t.Fatalf("setup: hold = (%+v, %v), want held", out, err)
 		}
 		s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 		requireStillQueued(t, s, entityID, conv.ID)

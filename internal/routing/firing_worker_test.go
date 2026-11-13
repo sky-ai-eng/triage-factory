@@ -35,14 +35,11 @@ type stubDelegator struct {
 	mu            sync.Mutex
 	lastRunTeamID string
 	failFor       map[string]bool
-	// stopped is every blueprint-run id handed to StopBlueprintRun, so a test
-	// can assert nothing tore a run down.
-	stopped []string
 	// dismissed is every review handed to ReviewsDismissedSystem, so a test
 	// can assert a close reached the dismissal's follow-up.
 	dismissed []domain.Deliverable
 	// noted is every conversation id handed to TellTaskClosing, so a
-	// test can tell a close that held and told its conversations.
+	// test can tell which conversations a close told.
 	noted []string
 	// beforeRun, when set, runs after the router's checks and before the
 	// firing transaction, which is where a concurrent write such as a team
@@ -137,18 +134,6 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	return brID, nil
 }
 
-func (s *stubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
-	return nil
-}
-
-// StopBlueprintRun records the id the caller asked to tear down.
-func (s *stubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
-	s.mu.Lock()
-	s.stopped = append(s.stopped, blueprintRunID)
-	s.mu.Unlock()
-	return nil
-}
-
 // ReviewsDismissedSystem records the reviews a terminating close dismissed.
 // Recording only: what the real follow-up sends and closes is the spawner's to
 // prove, and what a router test can prove is that the close handed it the
@@ -164,15 +149,6 @@ func (s *stubDelegator) dismissedCopy() []domain.Deliverable {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]domain.Deliverable(nil), s.dismissed...)
-}
-
-// stoppedCopy is the blueprint-run ids StopBlueprintRun was called with.
-func (s *stubDelegator) stoppedCopy() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, len(s.stopped))
-	copy(out, s.stopped)
-	return out
 }
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
@@ -778,8 +754,8 @@ func TestFiringWorker_MarkFiredLosesLease_RunStandsAndReplaySkips(t *testing.T) 
 	if f.Status != workitem.StatusLeased || f.FiredBlueprintRunID != nil {
 		t.Fatalf("firing after the lost terminal = %+v, want still leased with no run recorded", f)
 	}
-	if runs() != 1 || len(stub.stoppedCopy()) != 0 {
-		t.Fatalf("runs = %d, torn down = %v; the committed run must stand", runs(), stub.stoppedCopy())
+	if runs() != 1 {
+		t.Fatalf("runs = %d; the committed run must stand", runs())
 	}
 
 	// The replay: the reclaim takes the row whatever the live conversation
@@ -794,8 +770,8 @@ func TestFiringWorker_MarkFiredLosesLease_RunStandsAndReplaySkips(t *testing.T) 
 		drainOnce(t, router)
 	}
 	requireSkipped(t, firingsFor(t, database, entityID)[0], domain.PendingFiringSkipAlreadyFired)
-	if runs() != 1 || len(stub.stoppedCopy()) != 0 {
-		t.Errorf("runs = %d, torn down = %v after the replay; the fence must not duplicate or undo the run", runs(), stub.stoppedCopy())
+	if runs() != 1 {
+		t.Errorf("runs = %d after the replay; the fence must not duplicate the run", runs())
 	}
 }
 

@@ -578,12 +578,8 @@ type ConversationStore interface {
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
 	// the admin pool in Postgres, for a claims-less background caller.
 	//
-	// No production caller today: the router's task-close cascade takes the
-	// same set from the close transaction itself
-	// (TaskStore.CloseWithConversationCancelIntentSystem) so the conversations
-	// it stops are the conversations it stamped. Kept as the admin-pool arm of
-	// a pair whose app-pool half is live, and covered by the store
-	// conformance.
+	// Its reader is the spawner's check of whether a new run could replace
+	// the task's current one (CheckTaskUnheld).
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ActiveIDsForTeamSystem returns the IDs of every active conversation owned by the
