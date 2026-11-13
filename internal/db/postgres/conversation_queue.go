@@ -299,10 +299,10 @@ func taskWorkingSQL(orgExpr, taskExpr string) string {
 
 // taskWorkingUnderRunningBlueprintSQL is the task (orgExpr, taskExpr) holding
 // a conversation that is working (workingConversationSQL) under a blueprint
-// run that is running and that nobody has called off. It is narrower than
-// taskWorkingSQL by the conversations whose blueprint has finished: a person's
-// follow-up on a finished blueprint is working from the moment it is queued
-// until its turn ends, with no run finish ahead of it.
+// run that is running and that nobody has called off. A person's follow-up on
+// a finished blueprint is working from the moment it is queued until its turn
+// ends, with no run finish ahead of it, and taskWorkingSQL counts it. The join
+// is an inner one, so a conversation with no blueprint run never qualifies.
 func taskWorkingUnderRunningBlueprintSQL(orgExpr, taskExpr string) string {
 	return `EXISTS (
 		SELECT 1 FROM conversations r

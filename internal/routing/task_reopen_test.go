@@ -267,6 +267,9 @@ func TestReopen_FollowUpOnAFinishedBlueprintCreatesANewTask(t *testing.T) {
 	if len(f.fold.folded) != 0 {
 		t.Errorf("folded into = %v, want nothing: the follow-up is the person's thread", f.fold.folded)
 	}
+	if n := atomic.LoadInt64(&f.fold.calls); n != 2 {
+		t.Errorf("delegations = %d, want the new task's run beside the first", n)
+	}
 }
 
 // TestReopen_ReassignmentLeavesTheOldTaskClosed: a reassignment closes the

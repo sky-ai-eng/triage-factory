@@ -149,10 +149,21 @@ func RunTaskReopenConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 				runID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
 				seed.CallOff(t, runID)
 			}},
+			// A claim keeps the conversation working through the cancel, so
+			// only the blueprint's own state refuses this one.
+			{name: "blueprint called off mid-turn", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
+				runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+				seed.Claim(t, convID)
+				seed.CallOff(t, runID)
+			}},
 			// The conversation is working, and its blueprint is not running:
 			// nothing ahead of it would close a reopened task again.
 			{name: "follow-up on a finished blueprint", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
 				seed.BlueprintAndConversation(t, taskID, string(domain.BlueprintRunStatusCompleted), "")
+			}},
+			{name: "follow-up mid-turn on a finished blueprint", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
+				_, convID := seed.BlueprintAndConversation(t, taskID, string(domain.BlueprintRunStatusCompleted), "")
+				seed.Claim(t, convID)
 			}},
 		}
 		for _, tc := range cases {
