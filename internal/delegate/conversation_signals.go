@@ -398,7 +398,8 @@ const (
 	InjectNotDelivered InjectOutcome = iota
 	// InjectDeliveredLocal means the event was staged for the run's live
 	// process on this pod (stageNoteAtToolBoundary says when the process
-	// reads it) — the caller should record the task_event 'injected' itself.
+	// reads it). The caller records the task_event 'injected' itself, or
+	// holds a firing behind the note (AdditiveDelivery.HandedNoteID).
 	InjectDeliveredLocal
 	// InjectDeliveredRemote means a conversation_signals row was handed to a live
 	// remote executor — the OWNER records 'injected' (or compensates with
@@ -408,9 +409,24 @@ const (
 	// InjectStagedResumable means the event was durably staged AND
 	// something will read the row: the conversation's own loop (a native
 	// conversation that is queued, running, or in a claim phase) or its next
-	// resume. The caller records the task_event 'injected' itself.
+	// resume. The caller records the task_event 'injected' itself, or holds
+	// a firing behind the note (AdditiveDelivery.HandedNoteID).
 	InjectStagedResumable
 )
+
+// AdditiveDelivery is how StageOrDeliverAdditiveEvent handled an additive
+// event. HandedNoteID is the staged note's id when the caller should hold
+// the firing the fold replaced behind it rather than mark the event
+// injected: the outcome is InjectDeliveredLocal or InjectStagedResumable,
+// and the conversation is a step of a blueprint run that was running just
+// before the note was staged. A step can conclude without reading a note (a
+// stop_blueprint call, an error, a process exit), and nothing wakes a
+// concluded conversation for an event alone, so the held firing is what
+// runs the event if the note goes unread. Empty for every other delivery.
+type AdditiveDelivery struct {
+	Outcome      InjectOutcome
+	HandedNoteID string
+}
 
 // AdditiveFiringRef carries the (entity, task, trigger, triggering event)
 // identity an inject signal's payload needs so the OWNER can compensate
@@ -432,7 +448,16 @@ type AdditiveFiringRef struct {
 
 // StageOrDeliverAdditiveEvent is the cross-pod-aware entry point for the
 // routed additive-injection gate: a new-event injection, which the router
-// folds into this conversation in place of a run and then marks injected.
+// folds into this conversation in place of a run, and then either marks
+// injected or keeps the firing behind the note (AdditiveDelivery).
+//
+// The conversation's blueprint run is read before anything is staged. A run
+// read as running makes a staged note one the caller can hold a firing
+// behind: a run that ends between that read and the stage still gets the
+// held firing, which the firing worker then settles by whether the note was
+// read, while a read after the stage would miss a step concluding in exactly
+// that window. A failed read leaves the delivery unholdable, so the fold
+// marks the event injected.
 //
 // Decision order:
 //
@@ -440,10 +465,9 @@ type AdditiveFiringRef struct {
 //     next tool boundary (stageNoteAtToolBoundary). The process reads it with
 //     the results of its next tool batch, or as its next turn when the model
 //     ends the turn first. A turn that ends any other way, a stop_blueprint
-//     call included, leaves it staged for the conversation's next engagement.
-//     TODO(TFAC-1347): nothing starts that engagement for an event alone, so
-//     a conversation that concludes first never reads it, and the firing it
-//     replaced is gone; the conversation should be woken to read it.
+//     call included, leaves it unread, and on a running blueprint the firing
+//     held behind it runs the event once the run ends: as what would have
+//     happened had the event arrived just after the step concluded.
 //  2. A native conversation: staged as an injection:event row, never sent as
 //     a signal. The loop reads its pending rows before every model call, and
 //     its would-stop recheck continues for this subtype, so a running loop
@@ -455,40 +479,64 @@ type AdditiveFiringRef struct {
 //
 // A staged row nothing will read is withdrawn and reported InjectNotDelivered,
 // so the caller defers the firing instead.
-func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) InjectOutcome {
+func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) AdditiveDelivery {
 	if body == "" {
-		return InjectNotDelivered
+		return AdditiveDelivery{Outcome: InjectNotDelivered}
+	}
+	holdable := s.blueprintRunRunning(ctx, orgID, conversationID)
+	deliver := func(outcome InjectOutcome, stagedID string) AdditiveDelivery {
+		d := AdditiveDelivery{Outcome: outcome}
+		if holdable && (outcome == InjectDeliveredLocal || outcome == InjectStagedResumable) {
+			d.HandedNoteID = stagedID
+		}
+		return d
 	}
 	if s.getProc(conversationID) != nil {
-		if !s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov) {
-			return InjectNotDelivered
+		stagedID, ok := s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
+		if !ok {
+			return deliver(InjectNotDelivered, "")
 		}
-		return InjectDeliveredLocal
+		return deliver(InjectDeliveredLocal, stagedID)
 	}
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil || conv == nil {
-		return InjectNotDelivered
+		return deliver(InjectNotDelivered, "")
 	}
 	if undeliveredRowsFor(conv.Runtime) == inputRoleLiveQueue {
 		stagedID, ok := s.stageInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
 		if !ok {
-			return InjectNotDelivered
+			return deliver(InjectNotDelivered, "")
 		}
-		return s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, nativeLoopWillRead)
+		return deliver(s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, nativeLoopWillRead), stagedID)
 	}
 	if s.signalRemoteInject(ctx, orgID, conv, producer, body, prov, firing) {
-		return InjectDeliveredRemote
+		return deliver(InjectDeliveredRemote, "")
 	}
 	delivered, staged, stagedID := s.stageOrDeliverInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
 	if delivered {
-		return InjectDeliveredLocal // race: getProc missed above, live by the time stageOrDeliverInjection ran
+		return deliver(InjectDeliveredLocal, stagedID) // race: getProc missed above, live by the time stageOrDeliverInjection ran
 	}
 	if !staged {
-		return InjectNotDelivered
+		return deliver(InjectNotDelivered, "")
 	}
-	return s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, func(conv *domain.Conversation) bool {
+	return deliver(s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, func(conv *domain.Conversation) bool {
 		return injectionWillFlush(conv.Status, conv.Concluded(), conv.Outcome)
-	})
+	}), stagedID)
+}
+
+// blueprintRunRunning reports whether the conversation is a step of a
+// blueprint run whose status is running. A failed read answers false.
+func (s *Spawner) blueprintRunRunning(ctx context.Context, orgID, conversationID string) bool {
+	if s.blueprints == nil {
+		return false
+	}
+	br, _, err := s.blueprints.GetRunForConversationSystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read the conversation's blueprint run failed; no firing is held behind the note this fold stages",
+			"conversation", conversationID, "error", err)
+		return false
+	}
+	return br != nil && br.Status == domain.BlueprintRunStatusRunning
 }
 
 // nativeLoopWillRead reports whether a row staged on a native conversation
@@ -764,7 +812,11 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 	// durable write this pod makes — see db.AgentClaimStamp.
 	claim := db.AgentClaimStamp{AgentID: p.ClaimAgentID, ActingTeamID: p.ClaimActingTeamID}
 	prov := domain.NoteProvenance{EventID: p.EventID, EventType: p.EventType}
-	if s.getProc(sig.ConversationID) == nil || !s.stageNoteAtToolBoundary(ctx, sig.OrgID, sig.ConversationID, domain.MessageSubtypeInjectionEvent, p.Producer, p.Body, prov) {
+	staged := false
+	if s.getProc(sig.ConversationID) != nil {
+		_, staged = s.stageNoteAtToolBoundary(ctx, sig.OrgID, sig.ConversationID, domain.MessageSubtypeInjectionEvent, p.Producer, p.Body, prov)
+	}
+	if !staged {
 		if s.pendingFirings != nil && p.EntityID != "" && p.TaskID != "" && p.TriggerID != "" && p.TriggeringEventID != "" {
 			if _, _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID, claim); err != nil {
 				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "conversation", sig.ConversationID, "task_id", p.TaskID, "error", err)

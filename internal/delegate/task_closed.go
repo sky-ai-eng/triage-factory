@@ -306,8 +306,8 @@ func (s *Spawner) stageTaskNote(ctx context.Context, orgID, conversationID, key 
 		return
 	}
 	n.prov.TaskClose = key
-	if !s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote,
-		domain.StagedInjectionProducerTaskClosing, n.body, n.prov) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote,
+		domain.StagedInjectionProducerTaskClosing, n.body, n.prov); !ok {
 		delegateLog.Warn("the note about the conversation's task was not staged; it is told when its next engagement starts", "conversation", conversationID)
 	}
 }

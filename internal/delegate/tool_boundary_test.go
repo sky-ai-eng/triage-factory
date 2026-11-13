@@ -22,7 +22,7 @@ func TestToolBoundary_StagedNotesRideTheNextArmedToolBatchOnce(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	if !s.stageNoteAtToolBoundary(ctx, org, convID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing, "staged while starting", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, org, convID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing, "staged while starting", domain.NoteProvenance{}); !ok {
 		t.Fatal("the note staged before the process registered was not staged")
 	}
 	s.registerProc(org, convID, nil)
@@ -36,7 +36,7 @@ func TestToolBoundary_StagedNotesRideTheNextArmedToolBatchOnce(t *testing.T) {
 	if got := s.notesAtToolBatch(org, convID, "").Text; got != "" {
 		t.Fatalf("an unarmed batch handed over %q", got)
 	}
-	if !s.stageNoteAtToolBoundary(ctx, org, convID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing, "the task is resolved", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, org, convID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing, "the task is resolved", domain.NoteProvenance{}); !ok {
 		t.Fatal("the note was not staged")
 	}
 
@@ -67,7 +67,7 @@ func TestToolBoundary_NotesTheModelNeverReadRideTheNextBatch(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	s.registerProc(org, convID, nil)
 
-	if !s.stageNoteAtToolBoundary(ctx, org, convID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing, "the task is resolved", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, org, convID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing, "the task is resolved", domain.NoteProvenance{}); !ok {
 		t.Fatal("the note was not staged")
 	}
 	first := s.notesAtToolBatch(org, convID, "")

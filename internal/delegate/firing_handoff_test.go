@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -231,4 +232,84 @@ func TestHandOffQueuedFirings_LeavesFiringsOnAClosedTask(t *testing.T) {
 		s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 		requireStillQueued(t, s, entityID, conv.ID)
 	})
+}
+
+// An event folded into an earlier step that concluded without reading it
+// reaches the step starting now: the earlier step's note is withdrawn and the
+// firing names the note staged for this one. A firing whose note was read is
+// left for the firing worker to settle as injected.
+func TestHandOffQueuedFirings_TakesOverAnEarlierStepsUnreadNote(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read bool
+	}{
+		{name: "unread"},
+		{name: "read", read: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-next")
+			ctx := context.Background()
+			org := runmode.LocalDefaultOrgID
+			stepIdx := 0
+			dbtest.SeedConversation(t, database, domain.Conversation{
+				ID:                 "step-earlier",
+				TaskID:             taskID,
+				PromptID:           "test-prompt",
+				Status:             "completed",
+				Model:              "claude-sonnet-4-6",
+				BlueprintRunID:     br.ID,
+				BlueprintStepIndex: &stepIdx,
+			})
+
+			// The router's fold into the earlier step: the event staged as
+			// its note, and the firing it replaced held behind the note.
+			eventID := seedFakeEvent(t, database)
+			if _, err := database.Exec(`INSERT INTO task_events (task_id, event_id, kind) VALUES (?, ?, 'bumped')`, taskID, eventID); err != nil {
+				t.Fatalf("seed task event: %v", err)
+			}
+			earlierNote, ok := s.stageInjection(ctx, org, "step-earlier", domain.MessageSubtypeInjectionEvent, domain.EventGitHubPRCICheckFailed,
+				"the earlier step's note", domain.NoteProvenance{EventID: eventID, EventType: domain.EventGitHubPRCICheckFailed})
+			if !ok {
+				t.Fatal("stage the earlier step's note failed")
+			}
+			if _, err := s.pendingFirings.EnqueueHanded(ctx, org, entityID, taskID, triggerID, eventID, earlierNote, db.AgentClaimStamp{}); err != nil {
+				t.Fatalf("hold the firing behind the note: %v", err)
+			}
+			if tc.read {
+				if notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, "step-earlier"); err != nil || len(notes) != 1 {
+					t.Fatalf("read the earlier step's note: %+v, err=%v", notes, err)
+				}
+			}
+
+			s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
+
+			rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("firings = %d rows, err=%v, want 1", len(rows), err)
+			}
+			f := rows[0]
+			notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
+			if err != nil {
+				t.Fatalf("flush the starting step: %v", err)
+			}
+			if tc.read {
+				if f.Status != workitem.StatusReady || f.HandedNoteID != earlierNote {
+					t.Errorf("firing = %+v, want it still naming the read note %q", f, earlierNote)
+				}
+				if len(notes) != 0 {
+					t.Errorf("starting step's notes = %+v, want none for an event already read", notes)
+				}
+				return
+			}
+			if f.Status != workitem.StatusReady || f.HandedNoteID == "" || f.HandedNoteID == earlierNote {
+				t.Errorf("firing = %+v, want it ready and naming a note other than the earlier step's %q", f, earlierNote)
+			}
+			if len(notes) != 1 || notes[0].ID != f.HandedNoteID || notes[0].Provenance.EventID != eventID {
+				t.Errorf("starting step's notes = %+v, want the one the firing names, for event %s", notes, eventID)
+			}
+			if left, err := s.stagedInjections.FlushPendingSystem(ctx, org, "step-earlier"); err != nil || len(left) != 0 {
+				t.Errorf("earlier step's notes = %+v (err=%v), want its note withdrawn", left, err)
+			}
+		})
+	}
 }

@@ -375,6 +375,18 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 // silently lose it). Neither case has a durable row to fall back on, so the
 // caller decides the firing.
 //
+// A fold into a step of a running blueprint, on a task no person has
+// claimed, keeps the firing it replaced instead of marking the event
+// injected: the spawner names the staged note (HandedNoteID), and the firing
+// is admitted naming it (EnqueueHanded). A step can conclude without reading
+// the note, and nothing wakes a concluded conversation for an event alone, so
+// the held firing is the event's durable record until the firing worker
+// settles it once the run ends: as injected if the note was read, and
+// otherwise as the firing it is, fired on an open task or rerouted from one
+// the run's finish closed. A person's claim keeps the mark instead: the
+// worker would skip the firing as claim_changed, and the claim filter would
+// hold it behind a person's thread for as long as the thread stays open.
+//
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a
 // live remote executor now owns recording task_events 'injected' (or
 // compensating with a pending_firing enqueue if the conversation turns out
@@ -399,7 +411,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body,
+	delivery := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body,
 		domain.NoteProvenance{EventID: triggeringEventID, EventType: trigger.EventType},
 		delegate.AdditiveFiringRef{
 			EntityID:          entityID,
@@ -408,7 +420,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 			TriggeringEventID: triggeringEventID,
 			TaskClaim:         claim,
 		})
-	switch outcome {
+	switch delivery.Outcome {
 	case delegate.InjectNotDelivered:
 		return false
 	case delegate.InjectDeliveredRemote:
@@ -417,6 +429,21 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 		r.stampAgentClaim(ctx, orgID, task, claim)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
+		// The held firing and the claim are one durable step. The task event
+		// stays unmarked: the firing worker marks it injected once it finds
+		// the note read.
+		if delivery.HandedNoteID != "" && task.ClaimedByUserID == "" {
+			claimed, err := r.firings.EnqueueHanded(ctx, orgID, entityID, task.ID, trigger.ID, triggeringEventID, delivery.HandedNoteID, claim)
+			if err == nil {
+				r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, claimed)
+				routerLog.Info("injected additive event into a running blueprint step, its firing held behind the note",
+					"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID,
+					"event_type", trigger.EventType, "note_id", delivery.HandedNoteID)
+				return true
+			}
+			routerLog.Error("hold a firing behind the folded note failed; marking the event injected instead",
+				"task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID, "error", err)
+		}
 		// The mark and the claim are one durable step, so a failure loses both
 		// together rather than committing the fold against a task the board
 		// still shows as free. The injection itself is already delivered

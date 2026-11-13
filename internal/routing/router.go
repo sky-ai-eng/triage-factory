@@ -39,7 +39,8 @@ type Delegator interface {
 	// injection for a conversation — a local SDK process, a staged row a
 	// native loop reads, a live remote executor (the `inject`
 	// conversation_signals kind, for an SDK conversation), or the durable
-	// staged queue an SDK resume reads — returning a 4-way outcome.
+	// staged queue an SDK resume reads — returning a 4-way outcome and, for
+	// a step of a running blueprint, the note a firing can be held behind.
 	// Signature matches *delegate.Spawner's method exactly. Used by
 	// tryAutoDelegate's additive-event branch to fold a follow-up event into
 	// the task's live conversation instead of deferring a second one:
@@ -48,8 +49,9 @@ type Delegator interface {
 	// means a live remote executor now owns recording the outcome (the
 	// caller must NOT record task_events 'injected' itself); the other two
 	// outcomes are delivered or staged where something will read them, and
-	// the caller records task_events 'injected'.
-	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
+	// the caller records task_events 'injected' or holds a firing behind
+	// the note (AdditiveDelivery.HandedNoteID).
+	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.AdditiveDelivery
 	// TellTaskClosed tells each of conversationIDs, the conversations
 	// working on the task when an event closed it, that the task closed
 	// and how. The note is composed from the task's stored close, reaches

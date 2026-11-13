@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -73,7 +74,10 @@ func seedAbsorbEventCatalog(t *testing.T, database *sql.DB, eventType string) {
 // (local/remote/staged/resumable) is covered directly in internal/delegate.
 type injectingStubDelegator struct {
 	outcome delegate.InjectOutcome
-	calls   []injectCall
+	// handedNoteID is the note the delivery reports a firing can be held
+	// behind (delegate.AdditiveDelivery.HandedNoteID).
+	handedNoteID string
+	calls        []injectCall
 	// allowFire lets a test exercise the OPEN-gate branch: a firing on a
 	// task with no live run of its own fires normally, even while a sibling
 	// task on the same entity is busy.
@@ -103,9 +107,9 @@ func (s *injectingStubDelegator) TellTaskClosed(context.Context, string, string,
 func (s *injectingStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
-func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.AdditiveDelivery {
 	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
-	return s.outcome
+	return delegate.AdditiveDelivery{Outcome: s.outcome, HandedNoteID: s.handedNoteID}
 }
 
 // setupAbsorbScenario seeds entity + prompt + a trigger on
@@ -345,6 +349,86 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 	}
 	if kind != "injected" {
 		t.Errorf("task_events.kind = %q, want %q", kind, "injected")
+	}
+}
+
+// TestTryAutoDelegate_SameTask_HoldsTheFiringBehindAHandedNote: a fold the
+// spawner reports a note for keeps the firing it replaced, naming the note,
+// and leaves the task event for the firing worker to mark once it finds the
+// note read. A fold with no note, or on a task a person holds, marks the
+// event injected and queues nothing.
+func TestTryAutoDelegate_SameTask_HoldsTheFiringBehindAHandedNote(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		handedNoteID string
+		personsClaim bool
+		wantHeld     bool
+	}{
+		{name: "a handed note on an unclaimed task", handedNoteID: "4242", wantHeld: true},
+		{name: "no handed note", handedNoteID: ""},
+		{name: "a handed note on a task a person holds", handedNoteID: "4242", personsClaim: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			entityID, task, trigger, _ := setupAbsorbScenario(t, database)
+			secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+				EventType:    absorbTestEventType,
+				EntityID:     &entityID,
+				MetadataJSON: `{"mention":"second"}`,
+				CreatedAt:    time.Now(),
+				OrgID:        runmode.LocalDefaultOrgID,
+			})
+			if err != nil {
+				t.Fatalf("record second event: %v", err)
+			}
+
+			stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal, handedNoteID: tc.handedNoteID}
+			router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
+			bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
+			if tc.personsClaim {
+				tasks := testTaskStore(database)
+				if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, task.ID)); err != nil || !ok {
+					t.Fatalf("claim the task for a person: ok=%v err=%v", ok, err)
+				}
+				if task, err = tasks.Get(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || task == nil || task.ClaimedByUserID == "" {
+					t.Fatalf("re-read the person's task: %+v, err=%v", task, err)
+				}
+			}
+
+			mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
+
+			if len(stub.calls) != 1 {
+				t.Fatalf("StageOrDeliverAdditiveEvent calls = %d, want 1", len(stub.calls))
+			}
+			rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+			if err != nil {
+				t.Fatalf("list pending firings: %v", err)
+			}
+			var kind string
+			if err := database.QueryRow(`SELECT kind FROM task_events WHERE task_id = ? AND event_id = ?`, task.ID, secondEventID).Scan(&kind); err != nil {
+				t.Fatalf("read the event's task_event: %v", err)
+			}
+			if !tc.wantHeld {
+				if len(rows) != 0 {
+					t.Errorf("pending firings = %+v, want none", rows)
+				}
+				if kind != "injected" {
+					t.Errorf("task_events.kind = %q, want injected", kind)
+				}
+				return
+			}
+			if len(rows) != 1 {
+				t.Fatalf("pending firings = %+v, want the one held firing", rows)
+			}
+			f := rows[0]
+			if f.Status != domain.PendingFiringStatusReady || f.HandedNoteID != tc.handedNoteID || f.UniqueKey != "" ||
+				f.TaskID != task.ID || f.TriggerID != trigger.ID || f.TriggeringEventID != secondEventID {
+				t.Errorf("held firing = %+v, want ready, naming note %q, with no key", f, tc.handedNoteID)
+			}
+			if kind == "injected" {
+				t.Errorf("task_events.kind = injected, want the event left for the firing worker to mark")
+			}
+		})
 	}
 }
 

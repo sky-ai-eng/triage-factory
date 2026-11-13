@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -70,6 +71,36 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, entityID, task
 	}
 	return inserted, claimed, nil
 }
+
+// EnqueueHanded admits the held firing with no unique key, so the package
+// inserts it outright, and stamps the claim in the same transaction as
+// Enqueue does.
+func (s *pendingFiringsStore) EnqueueHanded(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID, noteID string, claim db.AgentClaimStamp) (bool, error) {
+	if noteID == "" {
+		return false, errHandedFiringNeedsNote
+	}
+	cols := db.PendingFiringRowCols(entityID, taskID, triggerID, triggeringEventID)
+	cols["handed_note_id"] = noteID
+	claimed := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if _, _, err := workitem.Admit(ctx, q, s.kind, orgID, "", cols); err != nil {
+			return err
+		}
+		if claim.AgentID == "" {
+			return nil
+		}
+		var err error
+		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, taskID, claim.AgentID, claim.ActingTeamID)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return claimed, nil
+}
+
+// errHandedFiringNeedsNote refuses a held firing that names no note.
+var errHandedFiringNeedsNote = errors.New("a held firing must name the note it is held behind")
 
 // pgPendingFiringSelect is the projection every PendingFiring read answers
 // with: the shared block and the kind's own columns.
@@ -263,6 +294,63 @@ func (s *pendingFiringsStore) HandOffToConversation(ctx context.Context, orgID s
 		return "", false, err
 	}
 	return noteID, true, nil
+}
+
+// errHandOffNotReleasable rolls a release back when either of its writes
+// matches no row, so a withdrawn note never outlives a firing that still
+// names it.
+var errHandOffNotReleasable = errors.New("hand-off cannot be released")
+
+func (s *pendingFiringsStore) ReleaseHandOff(ctx context.Context, orgID string, firingID int64, noteID, conversationID string) (bool, error) {
+	if s.conn == nil {
+		return false, db.ErrTxBoundStore
+	}
+	noteRowID, err := strconv.ParseInt(noteID, 10, 64)
+	if err != nil {
+		// A note id that is not a messages row id names no note to withdraw.
+		return false, nil
+	}
+	// matched answers errHandOffNotReleasable for a write that matched no
+	// row, which rolls the release back.
+	matched := func(res sql.Result, err error) error {
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errHandOffNotReleasable
+		}
+		return nil
+	}
+	err = db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		// Withdrawn as DeleteSystem withdraws: retired in place, delivered
+		// left false. A row already retired still matches, which is what
+		// releases every firing sharing the note.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE messages SET window_state = 'inactive'
+			WHERE org_id = $1::uuid AND id = $2 AND delivered = false
+			  AND conversation_id <> $3::uuid AND subtype = ANY($4::text[])
+		`, orgID, noteRowID, conversationID, domain.StagedInjectionSubtypes)
+		if err := matched(res, err); err != nil {
+			return err
+		}
+		res, err = tx.ExecContext(ctx, `
+			UPDATE public.pending_firings SET handed_note_id = NULL
+			WHERE id = $1 AND org_id = $2 AND status = 'ready'
+			  AND handed_note_id = $3 AND cancel_requested_at IS NULL
+		`, firingID, orgID, noteID)
+		return matched(res, err)
+	})
+	if errors.Is(err, errHandOffNotReleasable) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *pendingFiringsStore) WithdrawHandedNote(ctx context.Context, orgID, noteID string) (bool, error) {

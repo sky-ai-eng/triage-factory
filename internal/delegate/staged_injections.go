@@ -42,9 +42,10 @@ import (
 // next follow-up, and one for a conversation that can never resume simply
 // never reaches the agent. The caller gates that.
 //
-// stagedID is the durable row's id when staged=true (empty otherwise), which
-// the additive gate needs in order to delete the row when its post-stage
-// recheck decides against delivery.
+// stagedID is the durable row's id on either arm (empty when nothing was
+// staged): the additive gate deletes the row by it when its post-stage
+// recheck decides against delivery, and names it as the note a firing is
+// held behind.
 //
 // delivered=false with staged=false is a drop: the durable append failed (see
 // stageInjection).
@@ -53,7 +54,8 @@ func (s *Spawner) stageOrDeliverInjection(ctx context.Context, orgID, conversati
 		return false, false, ""
 	}
 	if s.getProc(conversationID) != nil {
-		return s.stageNoteAtToolBoundary(ctx, orgID, conversationID, subtype, producer, body, prov), false, ""
+		stagedID, delivered = s.stageNoteAtToolBoundary(ctx, orgID, conversationID, subtype, producer, body, prov)
+		return delivered, false, stagedID
 	}
 	stagedID, staged = s.stageInjection(ctx, orgID, conversationID, subtype, producer, body, prov)
 	return false, staged, stagedID
@@ -101,12 +103,23 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 // injected when the note was read, and otherwise as the ordinary firing it
 // then is again.
 //
-// Three kinds of firing are left as they are. One queued before the run
+// A firing that already names a note is taken over when the note is still
+// unread on another conversation: an earlier step's, which concluded without
+// reading it (an event folded into that step, or handed to it here). The note
+// is withdrawn and the firing handed to this step like any other
+// (ReleaseHandOff), so the event reaches the blueprint's next step rather than
+// waiting for the whole run to end. Under a running blueprint only the
+// current step's conversation is live, and a person's message to an earlier
+// step is forwarded to the current one, so no reader races the withdrawal.
+//
+// Four kinds of firing are left as they are. One queued before the run
 // started waits for a run of its own, as it did when this run was fired ahead
 // of it. One for the event the run itself fired from has nothing to tell the
-// run. And nothing is handed over on a task that is closed or snoozed: an
-// event queued behind one of those is answered by it, which is the firing
-// worker's skip to make.
+// run. One whose note was read, or waits on this conversation (a resume of
+// the same step, which reads it), is the firing worker's to settle. And
+// nothing is handed over on a task that is closed or snoozed: an event queued
+// behind one of those is answered by it, which is the firing worker's skip to
+// make.
 //
 // One event queues a firing per matched trigger; its note is staged once and
 // every such firing names it. The note and the mark commit together per
@@ -129,8 +142,27 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 	if len(firings) == 0 {
 		return
 	}
+	// forThisRun: queued since the run started, for an event other than the
+	// one the run fired from.
+	forThisRun := func(f domain.PendingFiring) bool {
+		return !f.CreatedAt.Before(br.StartedAt) && f.TriggeringEventID != br.TriggeringEventID
+	}
+	for i := range firings {
+		f := &firings[i]
+		if f.HandedNoteID == "" || !forThisRun(*f) {
+			continue
+		}
+		released, err := s.pendingFirings.ReleaseHandOff(ctx, orgID, f.ID, f.HandedNoteID, conv.ID)
+		if err != nil {
+			delegateLog.Warn("take a queued firing's unread note over from an earlier step failed; the firing stays handed to it", "task_id", taskID, "firing_id", f.ID, "note_id", f.HandedNoteID, "conversation", conv.ID, "error", err)
+			continue
+		}
+		if released {
+			f.HandedNoteID = ""
+		}
+	}
 	// The note each event is staged as, by event id: the ones this pass
-	// stages, and the ones firings already name. A firing an earlier pass
+	// stages, and the ones firings still name. A firing an earlier pass
 	// failed on shares the note that pass staged for its event.
 	noteFor := map[string]string{}
 	for _, f := range firings {
@@ -139,7 +171,7 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 		}
 	}
 	for _, f := range firings {
-		if f.HandedNoteID != "" || f.CreatedAt.Before(br.StartedAt) || f.TriggeringEventID == br.TriggeringEventID {
+		if f.HandedNoteID != "" || !forThisRun(f) {
 			continue
 		}
 		var note *domain.StagedInjection
