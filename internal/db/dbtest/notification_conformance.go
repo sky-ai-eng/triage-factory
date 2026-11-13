@@ -55,6 +55,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		if o.Title == "" {
 			o.Title = "title"
 		}
+		awaitClockTick()
 		u, err := f.Stores.Notifications.UpsertOpenSystem(ctx, o)
 		if err != nil {
 			t.Fatalf("UpsertOpenSystem: %v", err)
@@ -112,6 +113,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		t.Helper()
 		var m domain.NotificationMarks
 		var err error
+		awaitClockTick()
 		f.As(t, f.Viewer, func(s db.NotificationStore) { m, err = s.SetMarks(ctx, f.OrgID, f.Viewer, id, p) })
 		return m, err
 	}
@@ -526,6 +528,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		urgent := raise(t, f, db.NotificationOccurrence{Key: "u", Priority: domain.NotificationUrgent}).Notification
 		low := raise(t, f, db.NotificationOccurrence{Key: "l", Priority: domain.NotificationLow}).Notification
 		for _, key := range []string{"h", "u", "l"} {
+			awaitClockTick()
 			if _, err := s.ResolveSystem(ctx, f.OrgID, domain.NotificationOriginSystem, "test.kind", key); err != nil {
 				t.Fatalf("ResolveSystem(%s): %v", key, err)
 			}
@@ -687,6 +690,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		check(t, "last_seen_at, no dir", db.NotificationSortLastSeenAt, "", []string{b, e, d, c, a})
 
 		for _, key := range []string{"c", "a"} {
+			awaitClockTick()
 			if _, err := f.Stores.Notifications.ResolveSystem(ctx, f.OrgID, domain.NotificationOriginSystem, "test.kind", key); err != nil {
 				t.Fatalf("ResolveSystem %s: %v", key, err)
 			}
@@ -928,6 +932,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 			if _, err := tx.Notifications.UpsertOpenSystem(ctx, o); err != nil {
 				return err
 			}
+			awaitClockTick()
 			u, err := tx.Notifications.UpsertOpenSystem(ctx, o)
 			if err != nil {
 				return err

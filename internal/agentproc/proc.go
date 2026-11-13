@@ -40,6 +40,7 @@ type runProc interface {
 // there is no jail whose consumption could be attributed to the run).
 type execProc struct {
 	cmd    *exec.Cmd
+	tree   *procTree
 	stdin  io.WriteCloser
 	stdout io.Reader
 	stderr *syncBuffer
@@ -50,26 +51,59 @@ type execProc struct {
 // pipe is created for both the interactive and one-shot paths — the
 // wrapper only reads stdin in streaming mode, so an unused pipe on the
 // one-shot path is inert.
-func newExecProc(cmd *exec.Cmd) (*execProc, error) {
+//
+// tree is the handle configureProcessTree returned for cmd, or nil for a
+// command that needs no process-tree teardown. Start attaches the started
+// process to it and Wait (or a failed Start) releases it.
+func newExecProc(cmd *exec.Cmd, tree *procTree) (*execProc, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		removeArgsFile(cmd)
+		tree.close()
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		removeArgsFile(cmd)
+		tree.close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderr := newSyncBuffer()
 	cmd.Stderr = stderr
-	return &execProc{cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}, nil
+	return &execProc{cmd: cmd, tree: tree, stdin: stdin, stdout: stdout, stderr: stderr}, nil
 }
 
-func (p *execProc) Start() error          { return p.cmd.Start() }
+// Start launches the process and attaches it to its process tree. An attach
+// failure is logged and not returned: the run is still correct, and cancel
+// falls back to killing the direct child.
+func (p *execProc) Start() error {
+	if err := p.cmd.Start(); err != nil {
+		removeArgsFile(p.cmd)
+		p.tree.close()
+		return err
+	}
+	if p.tree != nil {
+		if err := p.tree.attach(p.cmd.Process); err != nil {
+			agentprocLog.Warn("attach agent process to process tree failed", "pid", p.cmd.Process.Pid, "error", err)
+		}
+	}
+	return nil
+}
+
+// Wait reaps the process, removes its args file if the wrapper never did, then
+// releases the process tree. Releasing it ends any descendant the agent left
+// running.
+func (p *execProc) Wait() error {
+	err := waitOutcome(p.cmd, p.cmd.Wait())
+	removeArgsFile(p.cmd)
+	p.tree.close()
+	return err
+}
+
 func (p *execProc) Stdin() io.WriteCloser { return p.stdin }
 func (p *execProc) Stdout() io.Reader     { return p.stdout }
 func (p *execProc) Stderr() string        { return p.stderr.String() }
-func (p *execProc) Wait() error           { return p.cmd.Wait() }
 func (p *execProc) OOMKilled() bool       { return false }
 
 func (p *execProc) Actuals() sandbox.RunActuals { return sandbox.RunActuals{} }

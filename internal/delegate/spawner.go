@@ -294,7 +294,7 @@ type Spawner struct {
 	// supersede the process-global ghClient/model above; tests leave them
 	// nil and the resolver helpers fall back to ghClient/model.
 	ghResolver ghclient.Resolver                                                // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
-	runSecrets agentproc.SecretsReader                                          // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
+	runSecrets agentproc.SecretsReader                                          // per-org LLM-credential reader (system-door reader in both modes; an org with nothing stored resolves to the ambient subscription)
 	modelFor   func(context.Context, string, string) (domain.TeamModels, error) // per-(org, team) model resolver: the default a step inherits plus the set every model is held to
 	// llmResolver is the shared LLM-credential resolver (internal/cred/llmcred,
 	// TFAC-616) — role-mode Bedrock orgs mint short-lived STS session creds

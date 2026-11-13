@@ -9,8 +9,8 @@ import (
 )
 
 // flockEnforced reports whether flockExclusive actually enforces exclusion
-// on this platform. true here (unix); lock_other.go's !unix build reports
-// false, since that no-op build never blocks a second opener. Tests that
+// on this platform. true here (unix) and on windows; lock_other.go's build
+// reports false, since that no-op build never blocks a second opener. Tests that
 // assert cross-process lock behavior gate on this so they degrade to a
 // skip, rather than a false pass or a false failure, on platforms without
 // real advisory locking.

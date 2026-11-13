@@ -338,6 +338,7 @@ func TestExpandHome(t *testing.T) {
 	// dependent on the developer's real home.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir reads this on Windows
 	cases := []struct{ in, want string }{
 		{"~", home},
 		{"~/.local/bin/triagefactory", filepath.Join(home, ".local", "bin", "triagefactory")},
@@ -355,5 +356,46 @@ func TestExpandHome(t *testing.T) {
 		if got != c.want {
 			t.Errorf("ExpandHome(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestExpandHome_BackslashFormOnlyOnWindows(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	got, err := ExpandHome(`~\bin\triagefactory.exe`)
+	if err != nil {
+		t.Fatalf("ExpandHome: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		if want := filepath.Join(home, "bin", "triagefactory.exe"); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	} else if got != `~\bin\triagefactory.exe` {
+		t.Errorf("non-Windows must leave the backslash form unchanged, got %q", got)
+	}
+}
+
+func TestWindowsInstallPath(t *testing.T) {
+	local := t.TempDir()
+	t.Setenv("LOCALAPPDATA", local)
+	got, err := WindowsInstallPath()
+	if err != nil {
+		t.Fatalf("WindowsInstallPath: %v", err)
+	}
+	if want := filepath.Join(local, "Programs", "triagefactory", "triagefactory.exe"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	home := t.TempDir()
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	got, err = WindowsInstallPath()
+	if err != nil {
+		t.Fatalf("WindowsInstallPath fallback: %v", err)
+	}
+	if want := filepath.Join(home, "AppData", "Local", "Programs", "triagefactory", "triagefactory.exe"); got != want {
+		t.Errorf("fallback got %q, want %q", got, want)
 	}
 }

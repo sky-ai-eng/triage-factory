@@ -18,6 +18,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -36,6 +37,13 @@ archives:
   - id: default
     formats:
       - tar.gz
+    # Windows users expect a zip. The binary inside is triagefactory.exe
+    # (goreleaser appends the suffix); the brew formula below sees only the
+    # darwin and linux archives.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE

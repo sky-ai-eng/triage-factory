@@ -131,6 +131,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	}
 	mustClaim := func(t *testing.T, h ClaimPredicateHarness, convID string) *domain.Conversation {
 		t.Helper()
+		awaitClockTick()
 		got := claim(t, h)
 		if got == nil || got.ID != convID {
 			t.Fatalf("ClaimNextConversation = %+v, want conversation %s", got, convID)
@@ -156,6 +157,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	// SetStoredStatus, so release itself does not need to agree with it.
 	release := func(t *testing.T, h ClaimPredicateHarness, orgID, convID, outcome string) {
 		t.Helper()
+		awaitClockTick()
 		var err error
 		switch outcome {
 		case "requeued":

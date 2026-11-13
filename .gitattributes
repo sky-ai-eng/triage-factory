@@ -1,0 +1,33 @@
+# go:embed bytes must be identical on every platform, so text is checked out with LF everywhere.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.mjs text eol=lf
+*.go text eol=lf
+*.txt text eol=lf
+*.sql text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+internal/githooks/pre-push text eol=lf
+internal/githooks/prepare-commit-msg text eol=lf
+internal/githooks/ssh-sign text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.exe binary
+*.wasm binary

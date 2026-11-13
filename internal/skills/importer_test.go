@@ -32,6 +32,13 @@ func newTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+// setHome points os.UserHomeDir at dir: HOME on Unix, USERPROFILE on Windows.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 func chdir(t *testing.T, dir string) {
 	t.Helper()
 	prev, err := os.Getwd()
@@ -110,7 +117,7 @@ func promptHidden(t *testing.T, database *sql.DB, id string) bool {
 
 func TestImportAll_DedupesResolvedSearchDirs(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	chdir(t, home)
 
 	writeSkillFile(t, home, "review-pr", "Review pull requests carefully.")
@@ -137,7 +144,7 @@ func TestImportAll_DedupesResolvedSearchDirs(t *testing.T) {
 func TestImportAll_DedupesByNameAndBodyAcrossLocations(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	chdir(t, project)
 
 	content := "Help resolve merge conflicts and keep diffs small."
@@ -166,7 +173,7 @@ func TestImportAll_DedupesByNameAndBodyAcrossLocations(t *testing.T) {
 func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	chdir(t, project)
 
 	database := newTestDB(t)
@@ -206,7 +213,7 @@ func TestImportAll_UsesDiscoveredPathForDefaultName(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
 	external := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	chdir(t, project)
 
 	targetDir := filepath.Join(external, "real-skill")
@@ -241,7 +248,7 @@ func TestImportAll_UsesDiscoveredPathForDefaultName(t *testing.T) {
 func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	chdir(t, project)
 
 	database := newTestDB(t)

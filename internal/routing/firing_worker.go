@@ -163,9 +163,12 @@ func closedByRunFinish(task *domain.Task) bool {
 }
 
 // newestEventSince returns the event a reroute of f's task routes: the task's
-// newest event when it is newer than the one f was queued for, else f's own.
+// newest event unless it is older than the one f was queued for, else f's own.
 // The comparison is what keeps a task whose timeline is missing f's event
-// from being rerouted with an older one. Nil when f's event row is gone.
+// from being rerouted with an older one. Two events can carry one created_at
+// (a coarse clock, Windows' among them), and the timeline's own tiebreak has
+// already ordered such a pair, so a tie goes to the timeline's newest. Nil
+// when f's event row is gone.
 func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (*domain.Event, error) {
 	ev, err := r.events.GetSystem(ctx, f.OrgID, f.TriggeringEventID)
 	if err != nil || ev == nil {
@@ -182,7 +185,7 @@ func (r *Router) newestEventSince(ctx context.Context, f domain.PendingFiring) (
 	if err != nil {
 		return nil, err
 	}
-	if latest != nil && latest.CreatedAt.After(ev.CreatedAt) {
+	if latest != nil && !latest.CreatedAt.Before(ev.CreatedAt) {
 		return latest, nil
 	}
 	return ev, nil

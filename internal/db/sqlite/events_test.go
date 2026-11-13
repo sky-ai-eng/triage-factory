@@ -69,7 +69,7 @@ func seedSQLiteEntityForEvents(t *testing.T, conn *sql.DB, suffix string) string
 	t.Helper()
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	sourceID := fmt.Sprintf("octo/events-conformance#%s-%d", suffix, now.UnixNano())
+	sourceID := fmt.Sprintf("octo/events-conformance#%s-%s", suffix, uuid.New().String())
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)

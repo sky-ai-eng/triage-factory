@@ -23,16 +23,6 @@ import (
 // `go test` invocation can't create; production never reassigns it.
 var trustedAgentHostSocketRoot = "/run/tf"
 
-// agentHostSocketName, caBundleName and allowedSignersName are the files a
-// run's sidecar creates inside the run's socket directory. Mirrored by
-// cmd/exec/agenthost, which creates them; a drift test there cross-checks the
-// derived paths.
-const (
-	agentHostSocketName = "agenthost.sock"
-	caBundleName        = "ca-bundle.crt"
-	allowedSignersName  = "allowed-signers"
-)
-
 // toolHostSocketDirSuffix names a run's tool-host socket directory beside its
 // socket directory. A dot, because sanitizeSocketName maps every dot in a run
 // id to a dash: no run's socket directory can be named like another run's

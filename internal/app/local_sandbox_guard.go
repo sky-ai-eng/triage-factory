@@ -21,6 +21,7 @@ import (
 // both failures — see localSandboxRefusal.
 func (a *App) checkLocalSandbox() error {
 	if !runmode.LocalSandboxEnabled() {
+		noteNoLocalSandbox()
 		return nil
 	}
 	if err := localsandbox.Probe(); err != nil {

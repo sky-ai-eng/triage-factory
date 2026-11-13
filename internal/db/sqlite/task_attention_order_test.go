@@ -39,7 +39,7 @@ func TestTaskStore_AttentionOrder_SQLite(t *testing.T) {
 				t.Helper()
 				now := time.Now().UTC()
 				entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
-				sourceID := fmt.Sprintf("octo/attn#%s-%d", f.Suffix, now.UnixNano())
+				sourceID := fmt.Sprintf("octo/attn#%s-%s", f.Suffix, uuid.New().String())
 				eventType := domain.EventGitHubPRCICheckFailed
 				repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 				if _, err := conn.Exec(`

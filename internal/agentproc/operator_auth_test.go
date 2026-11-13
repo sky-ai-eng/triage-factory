@@ -37,6 +37,8 @@ func writeOperatorSettings(t *testing.T, content string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// os.UserHomeDir reads USERPROFILE on Windows, not HOME.
+	t.Setenv("USERPROFILE", home)
 	dir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -146,16 +148,17 @@ func TestNewDirectCommand_ForwardsOperatorAuthWithoutACredential(t *testing.T) {
 		t.Fatalf("newDirectCommand: %v", err)
 	}
 
-	idx := slices.Index(cmd.Args, "--settings")
-	if idx < 0 || idx+1 >= len(cmd.Args) {
-		t.Fatalf("argv carries no --settings: %v", cmd.Args)
+	args := commandArgs(t, cmd)
+	idx := slices.Index(args, "--settings")
+	if idx < 0 || idx+1 >= len(args) {
+		t.Fatalf("argv carries no --settings: %v", args)
 	}
-	if !slices.Equal(cmd.Args[:idx], []string{"node", "wrapper.mjs", "--model", "x"}) {
-		t.Errorf("--settings is not appended after the wrapper args: %v", cmd.Args)
+	if !slices.Equal(args[:idx], []string{"node", "wrapper.mjs", "--model", "x"}) {
+		t.Errorf("--settings is not appended after the wrapper args: %v", args)
 	}
 	var settings map[string]any
-	if err := json.Unmarshal([]byte(cmd.Args[idx+1]), &settings); err != nil {
-		t.Fatalf("--settings %q: %v", cmd.Args[idx+1], err)
+	if err := json.Unmarshal([]byte(args[idx+1]), &settings); err != nil {
+		t.Fatalf("--settings %q: %v", args[idx+1], err)
 	}
 	for _, key := range []string{"permissions", "hooks", "enabledPlugins", "statusLine", "env"} {
 		if _, ok := settings[key]; ok {
@@ -199,8 +202,8 @@ func TestNewDirectCommand_StoredCredentialForwardsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newDirectCommand: %v", err)
 	}
-	if slices.Contains(cmd.Args, "--settings") {
-		t.Errorf("a run with a stored credential forwards --settings: %v", cmd.Args)
+	if slices.Contains(commandArgs(t, cmd), "--settings") {
+		t.Errorf("a run with a stored credential forwards --settings: %v", commandArgs(t, cmd))
 	}
 	env := envMap(t, cmd.Env)
 	if got := env["ANTHROPIC_API_KEY"]; got != "sk-stored" {
@@ -235,8 +238,8 @@ func TestNewDirectCommand_ClaudeAIConnectorsOnlyOnTheOperatorLogin(t *testing.T)
 			if err != nil {
 				t.Fatalf("newDirectCommand: %v", err)
 			}
-			if got := slices.Contains(cmd.Args, "--claude-ai-connectors"); got != tc.wantFlag {
-				t.Errorf("--claude-ai-connectors in argv = %v, want %v: %v", got, tc.wantFlag, cmd.Args)
+			if got := slices.Contains(commandArgs(t, cmd), "--claude-ai-connectors"); got != tc.wantFlag {
+				t.Errorf("--claude-ai-connectors in argv = %v, want %v: %v", got, tc.wantFlag, commandArgs(t, cmd))
 			}
 		})
 	}

@@ -16,7 +16,7 @@ func TestExecProc_DrivesSubprocess(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", "echo out; echo err 1>&2")
-	proc, err := newExecProc(cmd)
+	proc, err := newExecProc(cmd, nil)
 	if err != nil {
 		t.Fatalf("newExecProc: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestExecProc_DrivesSubprocess(t *testing.T) {
 // through Wait, matching *exec.Cmd.Wait's contract the callers rely on.
 func TestExecProc_WaitReportsExitError(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 3")
-	proc, err := newExecProc(cmd)
+	proc, err := newExecProc(cmd, nil)
 	if err != nil {
 		t.Fatalf("newExecProc: %v", err)
 	}

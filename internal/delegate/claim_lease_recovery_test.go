@@ -737,6 +737,9 @@ func TestSuspendRecovery_StaleRenewalDoesNotRewindTheBase(t *testing.T) {
 	f := newSuspendFixture(t)
 	st := f.register(t, time.Now().Add(-renewedRecently))
 	issuedBeforeTheSleep, baseBeforeTheSleep := time.Now(), time.Duration(f.asleep.Load())
+	// The recovery stamps its own re-acquire after this instant, by more than a
+	// tick of the clock, which is coarse on Windows.
+	time.Sleep(50 * time.Millisecond)
 	f.lapse(t)
 	f.sleep(suspendPastTheLease)
 	if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,

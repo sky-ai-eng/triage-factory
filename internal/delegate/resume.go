@@ -478,6 +478,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	defer func() { _ = localSbx.Close() }()
 
+	// A cold resume spawns a new session in the same cwd, so the long-name
+	// warning applies to it as it does to a first launch.
+	worktree.WarnIfClaudeSessionNameTooLong(cwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, opts.TeamID)
 	baseOpts := agentproc.RunOptions{
 		Cwd:                cwd,
@@ -497,9 +500,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
+			// The name the agent types, which on Windows is the bare
+			// `triagefactory` rather than the host path, so the rule matches the
+			// command the prompt tells the model to write.
+			SelfBin: agentproc.LocalAgentBinary(selfBin),
 			Extras:  opts.ExtraAllowedTools,
-			GH:      ghChannel != nil,
+			GH:      ghChannel.Live(),
 		}),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,

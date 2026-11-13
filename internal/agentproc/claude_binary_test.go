@@ -3,6 +3,7 @@ package agentproc
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -23,7 +24,12 @@ func TestClaudeBinaryOverride(t *testing.T) {
 	// A valid executable file → its absolute path.
 	t.Run("valid executable", func(t *testing.T) {
 		dir := t.TempDir()
-		bin := filepath.Join(dir, "claude")
+		// Windows decides what is launchable by extension, not by mode bits.
+		name := "claude"
+		if runtime.GOOS == "windows" {
+			name = "claude.exe"
+		}
+		bin := filepath.Join(dir, name)
 		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}

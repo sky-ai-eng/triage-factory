@@ -426,8 +426,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// and the TF binary at cell.TFBinaryPath. The prompt states both concretely,
 	// which is what makes the agent's file tools (no shell expansion) and its
 	// `triagefactory exec ...` invocations resolve regardless of sandbox mode.
-	// selfBin itself stays the host path below for BuildAllowedToolsWithExtras,
-	// whose only reader is the SDK loop, which never runs in a jail.
+	// The allowlist is read only by the SDK loop, which never runs in a jail, so
+	// it takes agentproc.LocalAgentBinary rather than the jail's path: the host
+	// path on unix, the bare name on Windows.
 	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
 	agentPRCheckout := agentVisibleCheckout(cfg.runRoot, cfg.prCheckout)
 	agentBin := agentproc.AgentVisibleBinary(selfBin)
@@ -605,6 +606,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 
+	// Logged at launch so a later failed resume of this session has its cause in
+	// the log of the run that created it. The result is not acted on: the run
+	// proceeds, it only cannot be resumed.
+	worktree.WarnIfClaudeSessionNameTooLong(claudeCwd)
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, teamID)
 	baseOpts := agentproc.RunOptions{
@@ -618,9 +623,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// own installation under the user's own auth, so the allowlist must
 		// not name it at all.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
-			SelfBin: selfBin,
+			// The name the agent types, which on Windows is the bare
+			// `triagefactory` rather than the host path, so the rule matches the
+			// command the prompt tells the model to write.
+			SelfBin: agentproc.LocalAgentBinary(selfBin),
 			Extras:  cfg.extraAllowedTools,
-			GH:      ghChannel != nil,
+			GH:      ghChannel.Live(),
 		}),
 		ExtraEnv:       extraEnv,
 		TraceID:        conversationID,

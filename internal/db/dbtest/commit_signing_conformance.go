@@ -1142,6 +1142,7 @@ func RunCommitSignatureQueueConformance(t *testing.T, mk CommitSignatureQueueFac
 	)
 	request := func(t *testing.T, f CommitSignatureQueueFixture, conversationID, claimID string) domain.CommitSignature {
 		t.Helper()
+		awaitClockTick()
 		row, err := f.Signatures.InsertSystem(ctx, domain.CommitSignature{
 			OrgID:          f.OrgID,
 			ConversationID: conversationID,

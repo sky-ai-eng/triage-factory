@@ -173,50 +173,6 @@ func InitLocalSecretBackend() error {
 	return err
 }
 
-// SweepKeychain best-effort deletes the given keys directly from the OS
-// keychain, bypassing the active-backend selection. cmd/uninstall uses it to
-// remove keychain entries regardless of which backend the running config
-// reads/writes: a box may still hold keychain rows from an earlier
-// keychain-backed run even while TF_SECRETS_BACKEND=file is set now. A no-op
-// when the keychain is unreachable — there's then nothing in it to remove, and
-// the file backend's bag lives under the state root, swept by uninstall's
-// data-dir wipe instead (so uninstall never needs TF_SECRET_ENCRYPTION_KEY).
-// Missing entries are not an error.
-func SweepKeychain(keys []string) error {
-	if !probeKeychain() {
-		return nil
-	}
-	for _, k := range keys {
-		if err := keyring.Delete(service, k); err != nil && err != keyring.ErrNotFound {
-			return fmt.Errorf("keychain delete %s: %w", k, err)
-		}
-	}
-	return nil
-}
-
-// keychainBackend stores secrets in the OS keychain via go-keyring. The desktop
-// default; selected whenever the keychain probe succeeds.
-type keychainBackend struct{}
-
-func (keychainBackend) get(key string) (string, error) {
-	val, err := keyring.Get(service, key)
-	if err == keyring.ErrNotFound {
-		return "", nil
-	}
-	return val, err
-}
-
-func (keychainBackend) put(key, value string) error {
-	return keyring.Set(service, key, value)
-}
-
-func (keychainBackend) delete(key string) error {
-	if err := keyring.Delete(service, key); err != nil && err != keyring.ErrNotFound {
-		return fmt.Errorf("keychain delete %s: %w", key, err)
-	}
-	return nil
-}
-
 var backendLogOnce sync.Once
 
 func logBackend(kind backendKind, detail string) {

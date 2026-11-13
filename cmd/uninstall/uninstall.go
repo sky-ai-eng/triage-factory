@@ -7,8 +7,10 @@
 // What it removes:
 //   - ~/.triagefactory/ in full (db, config, bare repo clones, workspace snapshot blobs)
 //   - all keychain entries under the "triagefactory" service
-//   - the symlink left by `triagefactory install` at its default
-//     destination, when present
+//   - the symlink (macOS/Linux) or copy (Windows) left by
+//     `triagefactory install` at its default destination, when present.
+//     On Windows a copy that is the running executable cannot be deleted,
+//     so it is renamed to triagefactory.exe.old for the user to delete.
 //
 // What it does NOT remove:
 //   - the binary itself. With Homebrew installs, that's `brew uninstall
@@ -27,8 +29,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -61,7 +61,7 @@ func Handle(args []string) {
 		fmt.Println("triagefactory: no on-disk local state found.")
 		fmt.Println("Stored keychain credentials may still be present and can be removed.")
 		fmt.Println()
-		fmt.Println("This is irreversible. The binary itself stays — remove it with `brew uninstall triagefactory` (or by hand for source builds).")
+		fmt.Println("This is irreversible. " + binaryStaysNote)
 
 		if !*yes && !confirm("Clear stored credentials? [y/N] ") {
 			fmt.Println("aborted.")
@@ -79,7 +79,7 @@ func Handle(args []string) {
 
 		fmt.Println("  cleared keychain entries")
 		fmt.Println()
-		fmt.Println("triagefactory uninstall: done. To remove the binary, run `brew uninstall triagefactory`.")
+		fmt.Println("triagefactory uninstall: done. " + binaryDoneNote)
 		return
 	}
 
@@ -88,7 +88,7 @@ func Handle(args []string) {
 		fmt.Printf("  - %s\n", line)
 	}
 	fmt.Println()
-	fmt.Println("This is irreversible. The binary itself stays — remove it with `brew uninstall triagefactory` (or by hand for source builds).")
+	fmt.Println("This is irreversible. " + binaryStaysNote)
 
 	if !*yes && !confirm("Proceed? [y/N] ") {
 		fmt.Println("aborted.")
@@ -127,49 +127,8 @@ func Handle(args []string) {
 		fmt.Println("  cleared keychain entries")
 	}
 
-	if plan.hasInstallLink {
-		info, err := os.Lstat(linkPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: inspect %s: %v\n", linkPath, err)
-			failed = true
-		} else if info.Mode()&os.ModeSymlink == 0 {
-			fmt.Fprintf(os.Stderr, "  warn: skip removing %s: path exists but is not a symlink\n", linkPath)
-		} else {
-			target, err := os.Readlink(linkPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  warn: inspect symlink target %s: %v\n", linkPath, err)
-				failed = true
-			} else {
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(filepath.Dir(linkPath), target)
-				}
-
-				exePath, err := os.Executable()
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "  warn: resolve current executable: %v\n", err)
-					failed = true
-				} else {
-					resolvedTarget := target
-					if p, err := filepath.EvalSymlinks(target); err == nil {
-						resolvedTarget = p
-					}
-
-					resolvedExe := exePath
-					if p, err := filepath.EvalSymlinks(exePath); err == nil {
-						resolvedExe = p
-					}
-
-					if filepath.Clean(resolvedTarget) != filepath.Clean(resolvedExe) {
-						fmt.Fprintf(os.Stderr, "  warn: skip removing %s: symlink points to %q, not the current executable %q\n", linkPath, target, exePath)
-					} else if err := os.Remove(linkPath); err != nil {
-						fmt.Fprintf(os.Stderr, "  warn: remove %s: %v (try: sudo rm %q)\n", linkPath, err, linkPath)
-						failed = true
-					} else {
-						fmt.Printf("  removed install symlink %s\n", linkPath)
-					}
-				}
-			}
-		}
+	if plan.hasInstallLink && removeInstallLink(linkPath) {
+		failed = true
 	}
 
 	fmt.Println()
@@ -177,7 +136,7 @@ func Handle(args []string) {
 		fmt.Println("triagefactory uninstall: completed with warnings (see above).")
 		os.Exit(1)
 	}
-	fmt.Println("triagefactory uninstall: done. To remove the binary, run `brew uninstall triagefactory`.")
+	fmt.Println("triagefactory uninstall: done. " + binaryDoneNote)
 }
 
 // uninstallPlan is the set of artifacts present on disk at invocation
@@ -207,7 +166,7 @@ func (p uninstallPlan) summary() []string {
 	}
 	lines = append(lines, "stored credentials (GitHub + Jira tokens, Anthropic API key, GitHub App keys) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) where there is no keychain")
 	if p.hasInstallLink {
-		lines = append(lines, fmt.Sprintf("install symlink at %s", p.linkPath))
+		lines = append(lines, fmt.Sprintf("%s at %s", installArtifact, p.linkPath))
 	}
 	return lines
 }
@@ -226,24 +185,6 @@ func buildPlan(dataDir, linkPath string) uninstallPlan {
 		}
 	}
 	return p
-}
-
-// defaultInstallLink mirrors the destination logic in cmd/install. We
-// don't try to discover non-default locations: if the user passed
-// --dest somewhere weird at install time, they know where it went and
-// can remove it themselves. False positives would be worse than false
-// negatives here.
-func defaultInstallLink() string {
-	if runtime.GOOS == "darwin" {
-		return "/usr/local/bin/triagefactory"
-	}
-	// Binary symlink location (~/.local/bin), not TF state — resolved via
-	// ExpandHome so os.UserHomeDir stays confined to internal/paths.
-	link, err := paths.ExpandHome("~/.local/bin/triagefactory")
-	if err != nil {
-		return ""
-	}
-	return link
 }
 
 func confirm(prompt string) bool {

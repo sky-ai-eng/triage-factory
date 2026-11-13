@@ -3,6 +3,7 @@ package envfile
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,7 +67,9 @@ func TestUpsert_CreatesAt0600(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat %s: %v", p, err)
 		}
-		if mode := info.Mode().Perm(); mode != 0o600 {
+		// Windows reports POSIX mode bits as 0666; the file inherits the
+		// directory's ACL instead.
+		if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 			t.Errorf("%s mode = %o; want 600", filepath.Base(p), mode)
 		}
 	}

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // KnowledgeDir is the _tfac subdirectory a run's team knowledge is staged
@@ -89,7 +88,7 @@ func WalkScratch(ctx context.Context, wtPath string, visit func(rel, path string
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				return nil
 			}
-			if errors.Is(walkErr, fs.ErrPermission) || errors.Is(walkErr, syscall.ENAMETOOLONG) {
+			if errors.Is(walkErr, fs.ErrPermission) || isNameTooLong(walkErr) {
 				unreadable = append(unreadable, filepath.ToSlash(rel))
 				return nil
 			}

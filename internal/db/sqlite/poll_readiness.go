@@ -64,7 +64,11 @@ func (s *pollReadinessStore) Ready(ctx context.Context, orgID, source string) (b
 	if !restartedAt.Valid {
 		return true, nil
 	}
-	return lastPollAt.Time.After(restartedAt.Time), nil
+	// Not-before rather than after: a restart nulls last_poll_at and
+	// MarkPollComplete admits only a poll that started at or after the restart,
+	// so a stored completion is already post-restart, and a clock that ticks
+	// coarsely (Windows) can stamp both with the same instant.
+	return !lastPollAt.Time.Before(restartedAt.Time), nil
 }
 
 func (s *pollReadinessStore) TakeAnnouncePending(ctx context.Context, orgID, source string) (bool, error) {

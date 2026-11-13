@@ -49,8 +49,8 @@ func makeTestUpstream(t *testing.T) string {
 func withTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("TMPDIR", t.TempDir())
+	setTestHome(t, home)
+	setTestTmp(t, t.TempDir())
 	return home
 }
 

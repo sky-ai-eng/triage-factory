@@ -2,6 +2,7 @@ package install
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -11,8 +12,14 @@ import (
 // past review unannounced. The defaults matter — they're what users
 // see when they run `triagefactory install` with no args.
 func TestDefaultDestination(t *testing.T) {
+	local := t.TempDir()
+	t.Setenv("LOCALAPPDATA", local)
 	got := defaultDestination()
 	switch runtime.GOOS {
+	case "windows":
+		if want := filepath.Join(local, "Programs", "triagefactory", "triagefactory.exe"); got != want {
+			t.Errorf("windows default = %q, want %q", got, want)
+		}
 	case "darwin":
 		if got != "/usr/local/bin/triagefactory" {
 			t.Errorf("darwin default = %q, want /usr/local/bin/triagefactory", got)

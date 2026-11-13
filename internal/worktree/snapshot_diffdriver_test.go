@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,6 +31,9 @@ var sqliteHeader = append([]byte("SQLite format 3\x00"), bytes.Repeat([]byte{0x0
 // with a tree that had changes to diff.
 func withCaptureJailEnv(t *testing.T, fn func()) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the capture child env is the Linux capture jail's (a fixed Unix PATH), which has no git on Windows")
+	}
 	saved := os.Environ()
 	setAll := func(env []string) {
 		os.Clearenv()

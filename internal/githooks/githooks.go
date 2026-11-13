@@ -179,13 +179,31 @@ func Ensure() error {
 // (the operator's ~/.gitconfig stays untouched) and the install is scoped
 // to this one agent process. core.hooksPath is always entry 0 of our block so
 // its index is stable for any test asserting it.
+//
+// On Windows the block also carries core.longpaths=true and an empty
+// credential.helper (the same pairs TF's own git calls carry), and the env
+// gains GCM_INTERACTIVE=never and GIT_TERMINAL_PROMPT=0, and loses any inherited
+// GIT_ASKPASS, SSH_ASKPASS, SSH_ASKPASS_REQUIRE and VSCODE_GIT_* variables, so
+// the agent's git never opens a credential prompt or reaches the operator's
+// askpass helper. That is a courtesy: the agent runs as the operator and can
+// reach a credential manager itself. Other platforms get exactly the entries
+// above.
 func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 	pairs := append([][2]string{{ConfigKey, HostDir()}}, extraPairs...)
+	pairs = append(pairs, platformGitConfigPairs()...)
+	vars := platformGitEnvVars()
+	strip := platformGitEnvStrip()
 	base := gitConfigCount(env)
-	out := make([]string, 0, len(env)+1+2*len(pairs))
+	out := make([]string, 0, len(env)+1+2*len(pairs)+len(vars))
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
 			continue // re-emitted below, bumped to include our entries
+		}
+		if envKeyIn(kv, vars) {
+			continue // replaced by ours below
+		}
+		if envKeyNamed(kv, strip) {
+			continue // dropped with no replacement
 		}
 		out = append(out, kv)
 	}
@@ -196,7 +214,40 @@ func DirectAgentEnv(env []string, extraPairs ...[2]string) []string {
 			"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+kv[1],
 		)
 	}
-	return append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(base+len(pairs)))
+	out = append(out, "GIT_CONFIG_COUNT="+strconv.Itoa(base+len(pairs)))
+	return append(out, vars...)
+}
+
+// envKeyIn reports whether kv ("KEY=value") has the same KEY as any entry of
+// vars (each "KEY=value").
+func envKeyIn(kv string, vars []string) bool {
+	key, _, _ := strings.Cut(kv, "=")
+	for _, v := range vars {
+		if vk, _, _ := strings.Cut(v, "="); vk == key {
+			return true
+		}
+	}
+	return false
+}
+
+// envKeyNamed reports whether kv ("KEY=value") has a KEY equal, ignoring case,
+// to any of names; a name ending in "*" matches every KEY that starts with the
+// rest of it. Windows environment names are case-insensitive, so an inherited
+// "Git_Askpass" is the variable a "GIT_ASKPASS" entry names.
+func envKeyNamed(kv string, names []string) bool {
+	key, _, _ := strings.Cut(kv, "=")
+	for _, n := range names {
+		if prefix, ok := strings.CutSuffix(n, "*"); ok {
+			if len(key) >= len(prefix) && strings.EqualFold(key[:len(prefix)], prefix) {
+				return true
+			}
+			continue
+		}
+		if strings.EqualFold(key, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed

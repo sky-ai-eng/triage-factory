@@ -70,7 +70,9 @@ func sandboxSpec(t *testing.T, runRoot string) *localsandbox.Spec {
 func TestNewDirectCommand_NilSandboxIsUnchanged(t *testing.T) {
 	// An empty HOME, so an auth helper in the developer's own Claude Code
 	// settings doesn't add --settings to the argv under test.
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	opts := RunOptions{Cwd: t.TempDir(), ExtraEnv: []string{"TF_TEST_MARKER=1"}}
 
 	cmd, err := newDirectCommand(context.Background(), opts, []string{"wrapper.mjs", "--model", "x"})
@@ -79,8 +81,8 @@ func TestNewDirectCommand_NilSandboxIsUnchanged(t *testing.T) {
 	}
 
 	// argv: node with the wrapper args, and nothing in front of them.
-	if want := []string{"node", "wrapper.mjs", "--model", "x"}; !reflect.DeepEqual(cmd.Args, want) {
-		t.Errorf("cmd.Args = %v, want %v", cmd.Args, want)
+	if want := []string{"node", "wrapper.mjs", "--model", "x"}; !reflect.DeepEqual(commandArgs(t, cmd), want) {
+		t.Errorf("cmd.Args = %v, want %v", commandArgs(t, cmd), want)
 	}
 	// cmd.Path is exec's PATH resolution of argv[0]; a bwrap prefix would
 	// show up here even if Args somehow matched.

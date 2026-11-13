@@ -154,3 +154,20 @@ func TestResolveAIModelForTeam_UnreadableStateRefuses(t *testing.T) {
 		t.Error("an unreadable settings row resolved a model instead of refusing")
 	}
 }
+
+// A local run reads the credential its org bound. With no reader a run
+// authenticated from the operator's environment whatever the org had stored, so
+// a bound API key was validated, saved and then never used.
+func TestBuildRunCredentials_LocalWiresTheRunSecretsReader(t *testing.T) {
+	stores, _ := enableSetStores(t, nil, nil, "")
+	a := &App{stores: stores}
+	if err := a.buildRunCredentials(); err != nil {
+		t.Fatalf("buildRunCredentials: %v", err)
+	}
+	if a.runSecrets == nil {
+		t.Fatal("local runSecrets is nil: a bound Anthropic key would never reach a run")
+	}
+	if a.llmResolver != nil {
+		t.Error("local built an STS role resolver; role mode is multi-only")
+	}
+}

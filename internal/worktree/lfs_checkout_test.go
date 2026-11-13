@@ -25,7 +25,7 @@ func TestCheckoutLeavesLFSPointers(t *testing.T) {
 		"\trequired = true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_LFS_SKIP_SMUDGE", "0")

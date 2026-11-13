@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -532,7 +533,9 @@ func TestAgentViewPath(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := AgentViewPath(c.hostRoot, c.agentRoot, c.in); got != c.want {
+			// The agent view is a POSIX path; filepath.Join renders it with the
+			// host separator, so compare in slash form.
+			if got := AgentViewPath(c.hostRoot, c.agentRoot, c.in); filepath.ToSlash(got) != c.want {
 				t.Errorf("AgentViewPath(%q, %q, %q) = %q, want %q", c.hostRoot, c.agentRoot, c.in, got, c.want)
 			}
 		})

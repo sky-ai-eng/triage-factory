@@ -53,7 +53,7 @@ func (c *localGitChannel) configPairs(gh *agentproc.GHChannelParams) [][2]string
 		return nil
 	}
 	var pairs [][2]string
-	if gh == nil {
+	if !gh.Live() {
 		pairs = c.proxy.GitConfigPairsWithSSH("", "")
 	} else {
 		pairs = c.proxy.GitConfigPairsWithSSH(gh.Host, gh.CertSourcePath)

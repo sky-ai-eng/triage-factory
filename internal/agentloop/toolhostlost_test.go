@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -87,6 +88,9 @@ func (h *restartableHost) count(name string) int {
 // have.
 func TestSocketToolHost_MarksARequestThatNeverLeft(t *testing.T) {
 	t.Run("the peer is gone before the call", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a write to a closed unix-socket peer succeeds on Windows (buffered), so only the read fails; the tool host runs in the Linux jail")
+		}
 		// A unix socket, as the tool host's is: a write to one whose peer
 		// has closed fails at once rather than being buffered. Not in
 		// t.TempDir(): its path carries the test and subtest names, which put

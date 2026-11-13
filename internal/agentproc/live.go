@@ -263,7 +263,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		cancel()
 		return nil, derr
 	}
-	proc, perr := newExecProc(directCmd)
+	proc, perr := newExecProc(directCmd, configureProcessTree(directCmd))
 	if perr != nil {
 		cancel()
 		return nil, perr

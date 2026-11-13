@@ -35,7 +35,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk"
 import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
 import { createRequire } from "node:module"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 function resolveClaudeBinary() {
@@ -610,7 +610,39 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
   process.exit(0)
 }
 
-const { prompt, options, streamInput, permissionPrompts, toolBatchNotes, tfTools } = parseArgs(process.argv.slice(2))
+// argvFromArgsFile returns the argument list the Go side handed over. Where the
+// OS caps the command line (Windows, 32,767 characters, which a run's system
+// prompt alone can pass) Go writes the whole list as a JSON array of strings to
+// a file and passes exactly `--args-file <path>`. The file is deleted as soon
+// as it is read: it holds the run's prompt and settings, and nothing should
+// find it after the wrapper has it. Any other argv is the list itself.
+function argvFromArgsFile(argv) {
+  if (argv[0] !== "--args-file") return argv
+  if (argv.length !== 2) {
+    process.stderr.write("wrapper: --args-file takes exactly one path and no other arguments\n")
+    process.exit(2)
+  }
+  let list
+  try {
+    list = JSON.parse(readFileSync(argv[1], "utf8"))
+  } catch (err) {
+    process.stderr.write(`wrapper: cannot read args file ${argv[1]}: ${err?.message ?? err}\n`)
+    process.exit(2)
+  }
+  // Best effort: the Go side removes the file again when the process is reaped,
+  // so a failed delete (an antivirus scan holding the file open on Windows, say)
+  // must not stop a run that already has its arguments.
+  try {
+    unlinkSync(argv[1])
+  } catch {}
+  if (!Array.isArray(list) || !list.every((a) => typeof a === "string")) {
+    process.stderr.write("wrapper: args file must hold a JSON array of strings\n")
+    process.exit(2)
+  }
+  return list
+}
+
+const { prompt, options, streamInput, permissionPrompts, toolBatchNotes, tfTools } = parseArgs(argvFromArgsFile(process.argv.slice(2)))
 
 // Forward the spawned Claude Code subprocess's stderr through our own.
 // Without this, the SDK swallows the child's stderr ("ignore" in its

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,6 +70,7 @@ func writeFakeGit(t *testing.T, failCount int) (attempts func() int) {
 	fakebin := t.TempDir()
 	counterFile := filepath.Join(t.TempDir(), "attempts")
 
+	shimName := "git"
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
   n=$(cat %q 2>/dev/null || echo 0)
@@ -82,7 +84,26 @@ if [ "$1" = "worktree" ] && [ "$2" = "add" ]; then
 fi
 exec %q "$@"
 `, counterFile, counterFile, failCount, realGit)
-	if err := os.WriteFile(filepath.Join(fakebin, "git"), []byte(script), 0o755); err != nil {
+	if runtime.GOOS == "windows" {
+		// Windows resolves "git" through PATHEXT and cannot run a #! script, so
+		// the shim is a batch file with the same logic.
+		shimName = "git.cmd"
+		script = fmt.Sprintf("@echo off\r\n"+
+			"if not \"%%1\"==\"worktree\" goto real\r\n"+
+			"if not \"%%2\"==\"add\" goto real\r\n"+
+			"set n=0\r\n"+
+			"if exist \"%[1]s\" set /p n=<\"%[1]s\"\r\n"+
+			"set /a n=n+1\r\n"+
+			">\"%[1]s\" echo %%n%%\r\n"+
+			"if %%n%% GTR %[2]d goto real\r\n"+
+			"echo Preparing worktree (detached HEAD deadbeef) 1>&2\r\n"+
+			"echo fatal: could not open 'worktrees/r/locked' for writing: No such file or directory 1>&2\r\n"+
+			"exit /b 128\r\n"+
+			":real\r\n"+
+			"\"%[3]s\" %%*\r\n"+
+			"exit /b %%errorlevel%%\r\n", counterFile, failCount, realGit)
+	}
+	if err := os.WriteFile(filepath.Join(fakebin, shimName), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake git: %v", err)
 	}
 

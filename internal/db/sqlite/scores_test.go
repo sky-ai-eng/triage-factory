@@ -112,7 +112,7 @@ func seedSQLiteTasks(t *testing.T, conn *sql.DB, n int) []string {
 		entityID := uuid.New().String()
 		taskID := uuid.New().String()
 		eventID := uuid.New().String()
-		sourceID := fmt.Sprintf("octo/conformance-pr#%d-%d", i, now.UnixNano())
+		sourceID := fmt.Sprintf("octo/conformance-pr#%d-%s", i, uuid.New().String())
 		// events_catalog must include the event_type before the FK
 		// fires. The bootstrap seed includes the standard catalog;
 		// "github:pr:opened" is a stable entry that matches

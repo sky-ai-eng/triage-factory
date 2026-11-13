@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc/localsandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -399,7 +398,24 @@ type GHChannelParams struct {
 	// only: a local run executes under the user's real HOME, so without this gh
 	// would read their ~/.config/gh, personal credential included. The sandbox
 	// has no such directory to reach (HOME is the run's own /work).
+	//
+	// A local run whose channel could not start carries this field alone: gh
+	// then finds an empty config dir instead of the user's, and nothing else of
+	// the channel exists. Live tells the two apart.
 	ConfigDir string
+}
+
+// Live reports whether gc is a working channel — an injector the agent's gh
+// can reach — rather than nil or the isolation-only params a run gets when its
+// channel could not start. Anything that grants or advertises real `gh` keys on
+// Live, never on gc being non-nil: an isolation-only run has no TF-owned gh,
+// so the gh on its PATH is the user's.
+//
+// The host alone decides it, because a sidecar's channel carries no trust-file
+// path (its gh trusts the injector through the run's CA bundle); the direct
+// path's own need for one is directGHChannelEnv's to check.
+func (gc *GHChannelParams) Live() bool {
+	return gc != nil && gc.Host != ""
 }
 
 // NoopSink discards all stream events. Suitable for one-shot agent
@@ -523,9 +539,9 @@ type Outcome struct {
 // runmode is multi, rather than running the SDK unsandboxed on the host —
 // see refuseMultiModeSDKLoop.
 //
-// Cancellation: when ctx is cancelled mid-run, the goroutine sends
-// SIGKILL to the entire process group (Setpgid is used so child
-// processes the agent spawned go down with it), then waits for the
+// Cancellation: when ctx is cancelled mid-run, the goroutine kills the
+// whole process tree (a process group on unix, a Job Object on Windows, so
+// child processes the agent spawned go down with it), then waits for the
 // subprocess to exit and returns ctx.Err().
 //
 // Error semantics:
@@ -574,7 +590,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// Local-only, and enforced above: refuseMultiModeSDKLoop already returned
 	// before this point if runmode is multi, so what follows only ever runs
 	// local. newDirectCommand spawns the direct subprocess unconditionally
-	// (its Setpgid + Cancel hook own the SIGKILL-the-process-group teardown)
+	// (configureProcessTree owns the kill-the-process-tree teardown)
 	// — on Linux this is wrapped in the bubblewrap courtesy sandbox
 	// (opts.LocalSandbox) when the caller wired one, which is not a
 	// tenant-isolation boundary and is why multi mode may never reach here.
@@ -593,7 +609,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	if derr != nil {
 		return nil, derr
 	}
-	proc, perr := newExecProc(directCmd)
+	proc, perr := newExecProc(directCmd, configureProcessTree(directCmd))
 	if perr != nil {
 		return nil, perr
 	}
@@ -659,10 +675,10 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // the auth surface of the operator's own Claude Code settings is
 // forwarded on top of it (operatorAuth).
 //
-// Setpgid + the Cancel hook give the caller hard teardown: cancelling
-// runCtx SIGKILLs the whole process group so children the agent spawned
-// go down with it. Shared by the one-shot Run and the interactive
-// RunInteractive so both spawn identically.
+// The returned command has no process-tree teardown yet: the caller passes it
+// to configureProcessTree, which makes cancelling runCtx kill the whole tree
+// so children the agent spawned go down with it. Shared by the one-shot Run
+// and the interactive RunInteractive so both spawn identically.
 func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string) (*exec.Cmd, error) {
 	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.Model, opts.LLMResolver)
 	if err != nil {
@@ -681,6 +697,16 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	argv, err := directArgv(opts, nodeArgs)
 	if err != nil {
 		return nil, err
+	}
+	if useArgsFile {
+		// After every flag above is in nodeArgs, so the file carries the whole
+		// list; nodeArgs is the tail of argv whatever launcher precedes it.
+		split := len(argv) - len(nodeArgs)
+		tail, err := rewriteArgsFile(argsFileDir(), argv[split:])
+		if err != nil {
+			return nil, err
+		}
+		argv = append(slices.Clip(argv[:split]), tail...)
 	}
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = opts.Cwd
@@ -740,7 +766,12 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// an inherited value would decide whether the agent's checkouts download
 	// LFS content, which is TF's call to make the same way in every run.
 	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar})
+	if opts.GHChannel != nil {
+		parentEnv = dropEnvKeysFold(parentEnv, ghInheritedEnvKeys)
+	}
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	// On Windows, the Git Bash the preflight approved; nothing elsewhere.
+	hookEnv = append(hookEnv, gitBashEnv()...)
 	hookEnv = append(hookEnv, backgroundTasksEnvKey+"=1", githooks.LFSSkipSmudgeEnvVar+"=1")
 	if opts.LocalSandbox != nil {
 		// Re-add the marker the strip above removed, deliberately: this process
@@ -765,16 +796,12 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// Claude Code itself applies the two in. Empty when a credential was
 	// resolved.
 	parentEnv = append(parentEnv, auth.env...)
-	cmd.Env = githooks.DirectAgentEnv(mergeEnv(parentEnv, hookEnv, creds), identityPairs...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// Process is non-nil here because the watcher only fires after
-		// Start has succeeded. ESRCH is fine — it just means the
-		// process group already exited on its own between Wait
-		// returning and the cancel watcher reading runCtx.Done(),
-		// which is a race exec handles internally.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	env, err := withAgentBinOnPath(mergeEnv(parentEnv, hookEnv, creds))
+	if err != nil {
+		removeArgsFile(cmd)
+		return nil, err
 	}
+	cmd.Env = githooks.DirectAgentEnv(env, identityPairs...)
 	return cmd, nil
 }
 
@@ -784,7 +811,8 @@ const envClaudeBinary = "TF_CLAUDE_BINARY"
 
 // claudeBinaryOverride resolves TF_CLAUDE_BINARY to an absolute path to an
 // executable file, or "" when unset (normal binary resolution). A set-but-
-// unusable value — missing, a directory, or not executable — is a hard error:
+// unusable value — missing, a directory, or not executable (on Windows, not an
+// .exe or .js file) — is a hard error:
 // an explicit override that's wrong should fail the spawn loudly rather than
 // silently fall back to the bundled binary and mask the misconfiguration.
 func claudeBinaryOverride() (string, error) {
@@ -809,8 +837,8 @@ func claudeBinaryOverride() (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("%s=%q is a directory, not a Claude binary", envClaudeBinary, raw)
 	}
-	if info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("%s=%q is not executable", envClaudeBinary, raw)
+	if err := checkClaudeBinaryRunnable(raw, abs, info); err != nil {
+		return "", err
 	}
 	return abs, nil
 }
