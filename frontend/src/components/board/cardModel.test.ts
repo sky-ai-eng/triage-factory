@@ -263,8 +263,22 @@ describe('deriveCard lifecycle', () => {
     ).toBe('CI Failed')
   })
 
-  it('reads a task ended by hand with no run as done', () => {
-    expect(deriveCard(task({ status: 'done' }), undefined, undefined, NOW).lifecycle).toBe('done')
+  it('reads a closed task with no run as done, dismissed included', () => {
+    for (const status of ['done', 'dismissed']) {
+      expect(deriveCard(task({ status }), undefined, undefined, NOW).lifecycle, status).toBe('done')
+    }
+  })
+
+  it("reads a dismissed task's working run as working", () => {
+    const model = deriveCard(
+      task({ status: 'dismissed' }),
+      conversation({ Status: 'running', current_action: 'Running the tests' }),
+      undefined,
+      NOW,
+    )
+    expect(model.lifecycle).toBe('working')
+    expect(model.command).toBe('Running the tests')
+    expect(model.ticking).toBe(true)
   })
 
   it('reports the chain as shape, only past one step', () => {

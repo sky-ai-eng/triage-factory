@@ -180,9 +180,9 @@ function isOpenTask(task: Task): boolean {
 }
 
 function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
-  // No run: a task, waiting — or, for a task ended by hand with nothing ever
-  // run on it, simply done.
-  if (!run) return task.status === 'done' ? 'done' : 'queued'
+  // No run: a task, waiting — or, for a task closed with nothing ever run on
+  // it, simply done.
+  if (!run) return isOpenTask(task) ? 'queued' : 'done'
   const s = run.Status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'

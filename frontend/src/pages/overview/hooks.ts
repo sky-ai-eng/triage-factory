@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { HttpError, apiJSON, apiList } from '../../lib/apiClient'
 import { ACTIVE_STATUSES, retryingAt } from '../../lib/conversationStatus'
-import { TASK_LIST_PATH, TASK_PAGE_SIZE } from '../../lib/taskList'
+import {
+  CLOSED_TASK_STATUSES,
+  closedSince,
+  TASK_LIST_PATH,
+  TASK_PAGE_SIZE,
+} from '../../lib/taskList'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
 import type { TeamUsage } from '../../hooks/useTeamUsage'
@@ -198,7 +203,8 @@ export function useConversationSets(
  * The rows' tasks, for the reference and the glyph. One list read over the
  * statuses that can carry a conversation — `queued` (a task can hold
  * deliverables and conversations there, claimed or not), `in_progress`, and
- * recent `done` (a settled run still asking) — keyed by task id for the join.
+ * the recently closed, `done` or `dismissed` (a close ends no run, so a closed
+ * task's run can be working or still asking) — keyed by task id for the join.
  */
 export function useTasksIndex(teamId: string, tick: number): Map<string, Task> | null {
   const [got, setGot] = useState<{ team: string; index: Map<string, Task> } | null>(null)
@@ -206,9 +212,9 @@ export function useTasksIndex(teamId: string, tick: number): Map<string, Task> |
     if (!teamId) return
     let live = true
     void apiList<Task>(TASK_LIST_PATH, {
-      statuses: ['queued', 'in_progress', 'done'],
+      statuses: ['queued', 'in_progress', ...CLOSED_TASK_STATUSES],
       team_ids: [teamId],
-      closed_since: new Date(Date.now() - 7 * 86400_000).toISOString(),
+      closed_since: closedSince(),
       page_size: TASK_PAGE_SIZE,
     }).then(
       (page) => {

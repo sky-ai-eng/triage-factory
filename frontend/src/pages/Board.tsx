@@ -977,10 +977,10 @@ export default function Board() {
     [columnByTask],
   )
 
-  // A status write on the task. Complete (drag-to-Done from In Progress)
-  // keeps the card in Done; dismiss (drag-to-Done from Queued) closes it
-  // unworked; in_progress is how a card comes back out of Done. Ending the
-  // task leaves its deliverables as they are.
+  // A status write on the task. Complete (drag-to-Done from In Progress) and
+  // dismiss (drag-to-Done from Queued, closing it unworked) both land the
+  // card in Done; in_progress is how a card comes back out of Done. Ending
+  // the task leaves its deliverables and its runs as they are.
   const patchStatus = useCallback(
     async (taskId: string, status: 'done' | 'dismissed' | 'in_progress', failure: string) => {
       try {
@@ -1218,8 +1218,7 @@ export default function Board() {
         return
       }
 
-      // Any → Done: complete (preserves the card in Done; distinct from queued →
-      // done which dismisses).
+      // Any → Done: complete (distinct from queued → done, which dismisses).
       if (targetCol === 'done') {
         await fireEnd(taskId, 'complete')
         return
@@ -1745,7 +1744,9 @@ const SortableCard = memo(function SortableCard({
         }
         // Allow and Deny are for a reader the permission route accepts; a
         // team viewer sees the ask and the link to the run, not the verbs.
-        interactive={!picker.pickerReadOnly && conversation?.can_write !== false}
+        // That holds in every lane: a close ends no run, so a Done card's
+        // run can be waiting on an answer like any other.
+        interactive={conversation?.can_write !== false}
         assigneeSlot={
           <AssigneePicker
             task={task}
