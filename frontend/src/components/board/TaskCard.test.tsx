@@ -201,6 +201,17 @@ describe('TaskCard, settled', () => {
     expect(screen.getByText('2d ago')).toBeInTheDocument()
     expect(screen.queryByText('View run')).not.toBeInTheDocument()
   })
+
+  it('marks a dismissed task apart from a completed one', () => {
+    const { unmount } = renderCard({ lifecycle: 'done', age: '2d ago' })
+    const completed = document.querySelector('[data-mark="done"] path')?.getAttribute('d')
+    unmount()
+    renderCard({ lifecycle: 'dismissed', age: '2d ago' })
+    const dismissed = document.querySelector('[data-mark="dismissed"] path')?.getAttribute('d')
+    expect(dismissed).toBeTruthy()
+    expect(dismissed).not.toBe(completed)
+    expect(screen.getByText('2d ago')).toBeInTheDocument()
+  })
 })
 
 describe('TaskCard, the task’s own asks', () => {

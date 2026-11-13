@@ -40,8 +40,10 @@ export function pendingCount(pending?: PendingTotals): number {
 
 export type { EventTone }
 
-/** Where the run is, as the status mark encodes it. */
-export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'canceled'
+/** Where the run is, as the status mark encodes it. A card with no run reads
+ *  its task instead: `queued` while the task is open, `done` once it is
+ *  completed, and `dismissed` once a person dismissed it. */
+export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'canceled' | 'dismissed'
 
 export interface CardModel {
   lifecycle: Lifecycle
@@ -180,9 +182,14 @@ function isOpenTask(task: Task): boolean {
 }
 
 function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
-  // No run: a task, waiting — or, for a task closed with nothing ever run on
-  // it, simply done.
-  if (!run) return isOpenTask(task) ? 'queued' : 'done'
+  // No run: the task speaks for the card. Open, it is waiting. Closed with
+  // nothing ever run on it, it is done, or dismissed: the two closes mean
+  // opposite things about whether the work happened, and with no run there
+  // is nothing else on the card to say which.
+  if (!run) {
+    if (isOpenTask(task)) return 'queued'
+    return task.status === 'dismissed' ? 'dismissed' : 'done'
+  }
   const s = run.Status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'

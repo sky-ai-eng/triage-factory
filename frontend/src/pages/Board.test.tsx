@@ -487,11 +487,21 @@ describe('a closed task in Done', () => {
     }
   }
 
-  it('renders a dismissed task with no run as closed, not as queued', async () => {
-    closed = [DISMISSED]
+  it('renders a dismissed task with no run as dismissed: not queued, and not completed', async () => {
+    closed = [
+      DISMISSED,
+      { ...DISMISSED, id: 'task-completed', title: 'Pin the base image', status: 'done' },
+    ]
     renderBoard()
     expect(await screen.findByText(DISMISSED.title)).toBeInTheDocument()
-    expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute('data-mark', 'done')
+    expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'dismissed',
+    )
+    expect(card('Pin the base image').querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'done',
+    )
   })
 
   it("shows a dismissed task's working run and what it is doing", async () => {

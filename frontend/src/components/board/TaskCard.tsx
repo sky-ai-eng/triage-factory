@@ -216,6 +216,9 @@ const SETTLED: Record<Lifecycle, string> = {
   idle: 'Idle after ',
   queued: '',
   working: '',
+  // A task state, read only off a card with no run, so there is no duration
+  // to introduce.
+  dismissed: '',
 }
 
 // The status mark. A card says where the run IS here and nowhere else.
@@ -282,7 +285,9 @@ function StatusMark({
         ? ['cross', 'var(--color-alarm)']
         : lifecycle === 'canceled'
           ? ['dash', 'var(--color-ink-4)']
-          : ['pause', 'var(--color-ink-4)']
+          : lifecycle === 'dismissed'
+            ? ['ban', 'var(--color-ink-4)']
+            : ['pause', 'var(--color-ink-4)']
   return (
     <span aria-hidden data-mark={lifecycle} style={{ ...SLOT, color }}>
       <Glyph kind={kind} size={11} />

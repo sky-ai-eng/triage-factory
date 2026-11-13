@@ -82,6 +82,10 @@ export const GLYPH_PATHS = {
   cross: 'M12 4L4 12M4 4l8 8',
   pause: 'M6 3.2v9.6M10 3.2v9.6',
   dash: 'M3.5 8h9',
+  // A circle struck through: a task a person dismissed. Its own shape because
+  // the check says the work was done and the dash says a run stopped, and a
+  // dismissal is neither.
+  ban: 'M8 2.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM4.1 4.1l7.8 7.8',
 } as const
 
 /** Every mark the table can draw. Exported as a TYPE so a consumer cannot
