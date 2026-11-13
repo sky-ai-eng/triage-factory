@@ -210,6 +210,8 @@ describe('TaskCard, settled', () => {
     const dismissed = document.querySelector('[data-mark="dismissed"] path')?.getAttribute('d')
     expect(dismissed).toBeTruthy()
     expect(dismissed).not.toBe(completed)
+    // The only place the card says so, so the mark carries the word.
+    expect(screen.getByRole('img', { name: 'Dismissed' })).toHaveAttribute('title', 'Dismissed')
     expect(screen.getByText('2d ago')).toBeInTheDocument()
   })
 

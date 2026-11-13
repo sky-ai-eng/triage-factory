@@ -45,9 +45,10 @@ export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'can
 
 export interface CardModel {
   lifecycle: Lifecycle
-  /** A person dismissed the task. A fact about the task, beside the run's
-   *  lifecycle rather than a value of it: a close ends no run, so a dismissed
-   *  task's run can be in any state. */
+  /** The task was dismissed: closed without its work being done, by a person
+   *  or as a duplicate of another task. A fact about the task, beside the
+   *  run's lifecycle rather than a value of it: a close ends no run, so a
+   *  dismissed task's run can be in any state. */
   dismissed: boolean
   /** What the work is, as the scorer summarized it: the task's summary, in
    *  every state. */

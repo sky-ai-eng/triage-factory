@@ -532,7 +532,7 @@ export default function Board() {
       case 'queued':
         return queueListBody(tf, showSnoozedRef.current, fields)
       case 'in_progress':
-        return statusListBody('in_progress', tf, fields)
+        return statusListBody(['in_progress'], tf, fields)
       case 'done':
         return doneListBody(tf, fields)
     }

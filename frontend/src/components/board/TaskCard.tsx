@@ -77,8 +77,8 @@ export interface TaskCardProps {
    *  text. */
   entityHref?: string
   lifecycle: Lifecycle
-  /** A person dismissed the task. The status mark says so once nothing is
-   *  working on it. */
+  /** The task was dismissed, by a person or as a duplicate. The status mark
+   *  says so once nothing is working on it. */
   dismissed?: boolean
   summary?: string
   /** Draw the summary's line boxes in hairlines while it is generated. */
@@ -287,7 +287,16 @@ function StatusMark({
     )
   if (dismissed)
     return (
-      <span aria-hidden data-mark="dismissed" style={{ ...SLOT, color: 'var(--color-ink-4)' }}>
+      // Named, where the other marks are hidden from assistive technology:
+      // their state is also in the footer's words, and a dismissal is in no
+      // other text on the card.
+      <span
+        role="img"
+        aria-label="Dismissed"
+        title="Dismissed"
+        data-mark="dismissed"
+        style={{ ...SLOT, color: 'var(--color-ink-4)' }}
+      >
         <Glyph kind="ban" size={11} />
       </span>
     )

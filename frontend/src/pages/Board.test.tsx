@@ -518,7 +518,10 @@ describe('a closed task in Done', () => {
       ],
     }
     renderBoard()
-    expect(await screen.findByRole('link', { name: /^Ran for / })).toBeInTheDocument()
+    await screen.findByText(DISMISSED.title)
+    expect(
+      await within(card(DISMISSED.title)).findByRole('link', { name: /^Ran for / }),
+    ).toBeInTheDocument()
     expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute(
       'data-mark',
       'dismissed',
