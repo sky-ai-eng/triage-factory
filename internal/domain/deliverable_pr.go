@@ -58,8 +58,9 @@ const (
 	// PRResolutionRejected: a human closed the draft through TF and had its
 	// head branch deleted from the upstream.
 	PRResolutionRejected = "rejected"
-	// PRResolutionGitHub: the reconciler observed the transition on GitHub —
-	// nobody resolved it through TF.
+	// PRResolutionGitHub: the reconciler observed the transition on GitHub.
+	// No person resolved it through TF's deliverable verbs, and who changed
+	// it on GitHub is not recorded: it may have been the run's own agent.
 	PRResolutionGitHub = "github"
 )
 

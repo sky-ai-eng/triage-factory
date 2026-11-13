@@ -519,9 +519,9 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 	next := a
 	next.State = newState
 	if a.Kind == domain.DeliverableKindPullRequest {
-		// Nobody resolved this through TF — the row records that so the
-		// agent-facing note reads "on GitHub" rather than crediting a human
-		// approval or dismissal that never happened.
+		// No person resolved this through TF's deliverable verbs — the row
+		// records that so the agent-facing note reads "on GitHub" rather than
+		// crediting a human approval or dismissal that never happened.
 		next.DetailsJSON = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
 	}
 	updated, err := rc.deliverables.UpsertSystem(ctx, orgID, next)

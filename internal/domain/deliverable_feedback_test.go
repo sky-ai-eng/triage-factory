@@ -102,7 +102,7 @@ func TestWrapSystemNote(t *testing.T) {
 
 // TestDeliverableResolutionNote_ReadsResolution pins that a closed or open PR's
 // note is decided by who resolved it, not by state alone: rejected names the
-// deleted branch, github says the change happened outside Triage Factory, and
+// deleted branch, github says the change was seen on GitHub and credits nobody, and
 // the TF verbs (or a stored row with no resolution) keep the human-action
 // copy.
 func TestDeliverableResolutionNote_ReadsResolution(t *testing.T) {
@@ -121,10 +121,10 @@ func TestDeliverableResolutionNote_ReadsResolution(t *testing.T) {
 	}{
 		{"rejected", pr(DeliverableStatePRClosed, PRResolutionRejected), []string{"rejected", "octo/repo#42", "feature/x", "was deleted"}, []string{"kept", "GitHub"}},
 		{"dismissed", pr(DeliverableStatePRClosed, PRResolutionDismissed), []string{"dismissed", "kept"}, []string{"rejected", "GitHub"}},
-		{"closed on github", pr(DeliverableStatePRClosed, PRResolutionGitHub), []string{"closed without merging on GitHub"}, []string{"human", "kept", "rejected"}},
+		{"closed on github", pr(DeliverableStatePRClosed, PRResolutionGitHub), []string{"closed without merging on GitHub"}, []string{"human", "kept", "rejected", "outside Triage Factory"}},
 		{"closed, no resolution stored", pr(DeliverableStatePRClosed, ""), []string{"dismissed", "kept"}, []string{"rejected", "GitHub"}},
 		{"approved", pr(DeliverableStatePROpen, PRResolutionApproved), []string{"approved", "ready for review"}, []string{"GitHub"}},
-		{"marked ready on github", pr(DeliverableStatePROpen, PRResolutionGitHub), []string{"ready for review on GitHub"}, []string{"human"}},
+		{"marked ready on github", pr(DeliverableStatePROpen, PRResolutionGitHub), []string{"ready for review on GitHub"}, []string{"human", "outside Triage Factory"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -29,6 +29,13 @@ func WrapSystemNote(body string) string {
 	return systemNoteOpen + "\n" + body + "\n" + systemNoteClose
 }
 
+// seenOnGitHub closes the note for a change the reconciler read from GitHub.
+// Nothing records who made such a change, and the agent's own `gh pr ready`
+// or `gh pr close` reaches the row the same way, a poll cycle later. So the
+// note says how TF learned of the change and leaves the agent to recognize
+// its own.
+const seenOnGitHub = " Triage Factory saw this on GitHub some time after it happened, so it may be a change you made yourself."
+
 // DeliverableResolutionNote returns the one-line, agent-facing note for a deliverable
 // just resolved, or "" if the deliverable is not in one of the four reported
 // resolution states. The strings are deliberately distinct so the agent can
@@ -36,14 +43,17 @@ func WrapSystemNote(body string) string {
 // what did it:
 //
 //   - pull_request → open      : approved, marked ready for review — or, when
-//     the details' resolution is github, marked ready on GitHub by someone
+//     the details' resolution is github, marked ready on GitHub
 //   - pull_request → closed    : dismissed, draft closed (branch kept) — or,
 //     per the details' resolution, rejected (closed AND its branch deleted
-//     from the upstream) or closed on GitHub by someone
+//     from the upstream) or closed on GitHub
 //   - review       → submitted : approved, submitted to GitHub
 //   - review       → dismissed : dismissed, discarded unsubmitted — or, per the
 //     details' resolution, discarded because the pull request it reviews
 //     ended
+//
+// A change read from GitHub credits nobody (seenOnGitHub): the reconciler
+// knows the pull request changed, not who changed it.
 //
 // A pull request settled foreign gets no note: no person resolved it, and its
 // run did not open it.
@@ -61,7 +71,7 @@ func DeliverableResolutionNote(a Deliverable) string {
 		switch a.State {
 		case DeliverableStatePROpen:
 			if d.Resolution == PRResolutionGitHub {
-				return fmt.Sprintf("Your draft pull request %s was marked ready for review on GitHub, outside Triage Factory.", ref)
+				return fmt.Sprintf("Your draft pull request %s was marked ready for review on GitHub.%s", ref, seenOnGitHub)
 			}
 			return fmt.Sprintf("A human approved your draft pull request %s and marked it ready for review.", ref)
 		case DeliverableStatePRClosed:
@@ -69,7 +79,7 @@ func DeliverableResolutionNote(a Deliverable) string {
 			case PRResolutionRejected:
 				return fmt.Sprintf("A human rejected your draft pull request %s: it was closed and its branch %s was deleted from the upstream, so the work on it is gone from the remote.", ref, prHeadBranchOrPlaceholder(d))
 			case PRResolutionGitHub:
-				return fmt.Sprintf("Your draft pull request %s was closed without merging on GitHub, outside Triage Factory.", ref)
+				return fmt.Sprintf("Your draft pull request %s was closed without merging on GitHub.%s", ref, seenOnGitHub)
 			}
 			return fmt.Sprintf("A human dismissed your draft pull request %s and closed it (its branch is kept).", ref)
 		}
