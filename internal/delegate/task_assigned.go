@@ -89,8 +89,8 @@ func (s *Spawner) TellTaskAssigned(ctx context.Context, orgID, taskID, assignee 
 	for _, r := range recipients {
 		told := *assignment
 		told.Recurrence = r.EntityID == told.EntityID && r.EventType == told.EventType && r.DedupKey == told.DedupKey
-		if !s.stageNoteAtToolBoundary(ctx, orgID, r.ConversationID, domain.MessageSubtypeInjectionSystemNote,
-			domain.StagedInjectionProducerTaskAssigned, domain.TaskAssignedNote(told), prov) {
+		if _, ok := s.stageNoteAtToolBoundary(ctx, orgID, r.ConversationID, domain.MessageSubtypeInjectionSystemNote,
+			domain.StagedInjectionProducerTaskAssigned, domain.TaskAssignedNote(told), prov); !ok {
 			delegateLog.Warn("the note about an assigned task was not staged; the conversation is not told", "conversation", r.ConversationID, "task_id", taskID)
 		}
 	}
@@ -148,8 +148,8 @@ func (s *Spawner) tellWokenOfSiblingWork(ctx context.Context, orgID, conversatio
 	if body == "" {
 		return
 	}
-	if !s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote,
-		domain.StagedInjectionProducerSiblingWork, body, domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote,
+		domain.StagedInjectionProducerSiblingWork, body, domain.NoteProvenance{}); !ok {
 		delegateLog.Warn("the note listing overlapping work was not staged; the woken conversation is not told", "conversation", conversationID)
 	}
 }
