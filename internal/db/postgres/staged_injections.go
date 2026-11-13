@@ -72,8 +72,9 @@ const withdrawProducerNotesSQL = `
 	   AND subtype = ANY($3::text[]) AND metadata->>'producer' = $4`
 
 // withdrawProducerNotesForTaskSQL scopes withdrawProducerNotesSQL to task
-// $2's conversations. The task store's reopen runs it for the close notes,
-// which a reopen makes false.
+// $2's conversations. The task store's clears of a held close run it in
+// their own statements, since a hold cleared without its close makes its
+// notes false.
 const withdrawProducerNotesForTaskSQL = withdrawProducerNotesSQL + `
 	   AND conversation_id IN (SELECT c.id FROM conversations c WHERE c.org_id = $1 AND c.task_id = $2)`
 

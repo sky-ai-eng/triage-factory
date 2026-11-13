@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -173,7 +175,7 @@ func TestTellTaskClosed_EachClosePathSendsOneNoteOfItsKind(t *testing.T) {
 			f := newClosedTaskFixture(t, "run-closed-"+tc.name)
 			want := tc.close(t, f)
 			// A second tell of the same close, as a resume after it makes.
-			f.s.tellClosedTask(ctx, org, f.convID, f.taskID)
+			f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
 
 			task, err := f.stores.Tasks.GetSystem(ctx, org, f.taskID)
 			if err != nil || task == nil || task.ClosedAt == nil {
@@ -234,7 +236,7 @@ func TestTellTaskClosed_TheWorksOwnCloseTellsNothing(t *testing.T) {
 	}
 
 	f.s.TellWorkingTaskClosed(ctx, org, f.taskID)
-	f.s.tellClosedTask(ctx, org, f.convID, f.taskID)
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
 
 	if notes := f.notes(t); len(notes) != 0 {
 		t.Errorf("staged notes = %+v, want none", notes)
@@ -273,10 +275,10 @@ func TestTellTaskClosed_WhoStartedTheWorkChangesNothing(t *testing.T) {
 	}
 }
 
-// TestTellClosedTask_AResumeAfterTheCloseTellsOnce: a conversation that was
+// TestTellTaskResolved_AResumeAfterTheCloseTellsOnce: a conversation that was
 // not working when its task closed was told nothing then. Its next
 // engagement tells it, and the one after that does not tell it again.
-func TestTellClosedTask_AResumeAfterTheCloseTellsOnce(t *testing.T) {
+func TestTellTaskResolved_AResumeAfterTheCloseTellsOnce(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	f := newClosedTaskFixture(t, "run-parked-at-close")
@@ -292,23 +294,23 @@ func TestTellClosedTask_AResumeAfterTheCloseTellsOnce(t *testing.T) {
 		t.Fatalf("setup: the close told a parked conversation: %+v", notes)
 	}
 
-	f.s.tellClosedTask(ctx, org, f.convID, f.taskID)
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
 	notes := f.notes(t)
 	if len(notes) != 1 || notes[0].Body != domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedCompleted}) {
 		t.Fatalf("notes at the resume = %+v, want the one close note", notes)
 	}
 	// The note is delivered now, and still counts as told.
-	f.s.tellClosedTask(ctx, org, f.convID, f.taskID)
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
 	if again := f.notes(t); len(again) != 0 {
 		t.Errorf("notes at the next resume = %+v, want none", again)
 	}
 }
 
-// TestTellClosedTask_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote: a
+// TestTellTaskResolved_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote: a
 // conversation minted after its task closed is told by its launch's
 // <run_context>, which names how the task closed, and never by a note. An
 // open task's launch says nothing about the task's state.
-func TestTellClosedTask_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote(t *testing.T) {
+func TestTellTaskResolved_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	f := newClosedTaskFixture(t, "run-minted-after-close")
@@ -321,7 +323,7 @@ func TestTellClosedTask_ALaunchAfterTheCloseReadsRunContextAndGetsNoNote(t *test
 		t.Fatalf("mint the conversation after the close: %v", err)
 	}
 
-	f.s.tellClosedTask(ctx, org, f.convID, f.taskID)
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
 	if notes := f.notes(t); len(notes) != 0 {
 		t.Errorf("notes for a launch after the close = %+v, want none", notes)
 	}
@@ -352,10 +354,10 @@ func TestTaskClosedRunContext_NamesNothingASourceAuthored(t *testing.T) {
 	}
 }
 
-// TestTellClosedTask_ACloseAfterAReopenIsToldAgain: the note is keyed on the
+// TestTellTaskResolved_ACloseAfterAReopenIsToldAgain: the note is keyed on the
 // close, so a task an event reopened and something closed again tells its
 // conversation of the second close too.
-func TestTellClosedTask_ACloseAfterAReopenIsToldAgain(t *testing.T) {
+func TestTellTaskResolved_ACloseAfterAReopenIsToldAgain(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	f := newClosedTaskFixture(t, "run-closed-twice")
@@ -370,7 +372,7 @@ func TestTellClosedTask_ACloseAfterAReopenIsToldAgain(t *testing.T) {
 		 WHERE id = ?`, f.taskID); err != nil {
 		t.Fatalf("reopen the task: %v", err)
 	}
-	f.s.tellClosedTask(ctx, org, f.convID, f.taskID)
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
 	if notes := f.notes(t); len(notes) != 0 {
 		t.Fatalf("notes on the reopened task = %+v, want none", notes)
 	}
@@ -412,4 +414,126 @@ func TestTellTaskClosed_AnSDKRunReadsTheNoteAtItsToolBoundaryOrItsResume(t *test
 			t.Errorf("the engagement's first message carries %q, want the close note", block)
 		}
 	})
+}
+
+// holdClose leaves a draft pull request from the conversation awaiting a
+// person, then closes the task on a CI pass, which holds for it. It returns
+// the pass and the conversations the hold reports for its caller to tell.
+func (f closedTaskFixture) holdClose(t *testing.T) (domain.Event, []string) {
+	t.Helper()
+	if _, err := f.database.Exec(`
+		INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id)
+		SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id, ?
+		  FROM conversations WHERE id = ?
+	`, uuid.New().String(), f.entityID, f.convID); err != nil {
+		t.Fatalf("seed the draft pull request: %v", err)
+	}
+	evt := f.event(t, domain.EventGitHubPRCICheckPassed, `{"check_name":"build"}`)
+	out, err := f.stores.Tasks.CloseOrHoldSystem(context.Background(), runmode.LocalDefaultOrgID, f.taskID, db.SiblingEventCloseReason, evt.EventType, evt.ID)
+	if err != nil || !out.Held || !out.NewlyHeld {
+		t.Fatalf("CloseOrHoldSystem = (%+v, %v), want newly held", out, err)
+	}
+	return evt, out.WorkingConversationIDs
+}
+
+// TestTellTaskCloseHeld_TellsOncePerHold: a close that holds for a person
+// tells the working conversation that the event resolved the situation and
+// the task is still open, which is a note of its own and not the close note.
+// A later closing event takes the hold's place and an engagement starting
+// under it tells nothing more, and the close applying later is told as a
+// close.
+func TestTellTaskCloseHeld_TellsOncePerHold(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	f := newClosedTaskFixture(t, "run-close-held")
+	evt, working := f.holdClose(t)
+	hold, err := f.stores.Tasks.CloseDeferralForTaskSystem(ctx, org, f.taskID)
+	if err != nil || hold == nil {
+		t.Fatalf("read the hold: %+v (err %v)", hold, err)
+	}
+
+	f.s.TellTaskCloseHeld(ctx, org, f.taskID, working)
+	// The same hold under a later closing event, met by the next engagement.
+	later := f.event(t, domain.EventGitHubPRCICheckPassed, `{"check_name":"lint"}`)
+	if out, err := f.stores.Tasks.CloseOrHoldSystem(ctx, org, f.taskID, db.SiblingEventCloseReason, later.EventType, later.ID); err != nil || !out.Held || out.NewlyHeld {
+		t.Fatalf("second CloseOrHoldSystem = (%+v, %v), want held, not newly", out, err)
+	}
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
+
+	notes := f.notes(t)
+	if len(notes) != 1 {
+		t.Fatalf("staged notes = %+v, want one for the hold", notes)
+	}
+	want := domain.TaskCloseHeldNote(evt.EventType, currentMetadata(evt))
+	if notes[0].Body != want {
+		t.Errorf("note body = %q\nwant the held-close note %q", notes[0].Body, want)
+	}
+	if notes[0].Body == domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedByEvent, EventType: evt.EventType, MetadataJSON: currentMetadata(evt)}) {
+		t.Error("a held close was told as a close")
+	}
+	wantProv := domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType, TaskClose: domain.TaskCloseHoldKey(hold.HeldSince)}
+	if notes[0].Provenance != wantProv {
+		t.Errorf("note provenance = %+v, want %+v", notes[0].Provenance, wantProv)
+	}
+
+	// The person resolves the draft and the sweep applies the close.
+	if _, err := f.database.Exec(`UPDATE deliverables SET state = 'merged' WHERE conversation_id = ?`, f.convID); err != nil {
+		t.Fatalf("resolve the draft: %v", err)
+	}
+	out, err := f.stores.Tasks.ApplyHeldCloseSystem(ctx, org, f.taskID, later.ID, db.SiblingEventCloseReason, later.EventType)
+	if err != nil || !out.Closed {
+		t.Fatalf("ApplyHeldCloseSystem = (%+v, %v), want closed", out, err)
+	}
+	f.s.TellTaskClosed(ctx, org, f.taskID, out.WorkingConversationIDs)
+	closed := f.notes(t)
+	wantClosed := domain.TaskClosedNote(domain.TaskClose{Kind: domain.TaskClosedByEvent, EventType: later.EventType, MetadataJSON: currentMetadata(later)})
+	if len(closed) != 1 || closed[0].Body != wantClosed {
+		t.Errorf("notes once the close applied = %+v, want the one close note", closed)
+	}
+}
+
+// TestTellTaskCloseHeld_ALaunchUnderTheHoldIsToldByANote: a hold can be
+// cancelled, so it never goes in a launch's <run_context>. A conversation
+// minted after the hold began is told by a note, as a resumed one is.
+func TestTellTaskCloseHeld_ALaunchUnderTheHoldIsToldByANote(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	f := newClosedTaskFixture(t, "run-launched-under-hold")
+	evt, _ := f.holdClose(t)
+	if _, err := f.database.Exec(`UPDATE conversations SET started_at = datetime('now', '+1 hour') WHERE id = ?`, f.convID); err != nil {
+		t.Fatalf("mint the conversation after the hold: %v", err)
+	}
+
+	if line := f.s.closedTaskContext(ctx, org, f.taskID); line != "" {
+		t.Errorf("<run_context> line for a task still open = %q, want none", line)
+	}
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
+	notes := f.notes(t)
+	if len(notes) != 1 || notes[0].Body != domain.TaskCloseHeldNote(evt.EventType, currentMetadata(evt)) {
+		t.Errorf("notes at the launch = %+v, want the one held-close note", notes)
+	}
+}
+
+// TestTellTaskCloseHeld_ACancelledHoldWithdrawsItsUnreadNote: the task's own
+// event arriving again cancels the hold, and a note about the hold that no
+// agent has read yet would then tell it of a resolution that did not last.
+func TestTellTaskCloseHeld_ACancelledHoldWithdrawsItsUnreadNote(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	f := newClosedTaskFixture(t, "run-hold-cancelled")
+	_, working := f.holdClose(t)
+	f.s.TellTaskCloseHeld(ctx, org, f.taskID, working)
+
+	again := f.event(t, domain.EventGitHubPRCICheckFailed, `{"check_name":"build"}`)
+	if _, err := f.stores.Tasks.BumpSystem(ctx, org, f.taskID, again.ID); err != nil {
+		t.Fatalf("BumpSystem: %v", err)
+	}
+
+	if notes := f.notes(t); len(notes) != 0 {
+		t.Errorf("notes after the hold was cancelled = %+v, want none", notes)
+	}
+	f.s.tellTaskResolved(ctx, org, f.convID, f.taskID)
+	if notes := f.notes(t); len(notes) != 0 {
+		t.Errorf("notes at the next engagement = %+v, want none: the task holds no close", notes)
+	}
 }

@@ -82,6 +82,14 @@ func TaskCloseKey(closedAt time.Time) string {
 	return closedAt.UTC().Format(time.RFC3339Nano)
 }
 
+// TaskCloseHoldKey identifies one held close of a task
+// (TaskCloseDeferral.HeldSince), as TaskCloseKey identifies a close. The two
+// never collide, so a conversation told a close is held is still told when it
+// applies.
+func TaskCloseHoldKey(heldSince time.Time) string {
+	return "held:" + heldSince.UTC().Format(time.RFC3339Nano)
+}
+
 // taskClosedGuidance is what an agent does about a close of the task it is
 // working on. A close stops no run, so the decision is the agent's, under its
 // own instructions.
@@ -113,6 +121,25 @@ func TaskClosedNote(c TaskClose) string {
 		return fmt.Sprintf("%s Event metadata:\n%s\n%s", taskCloseCause(c), c.MetadataJSON, guidance)
 	}
 	return taskCloseCause(c) + " " + guidance
+}
+
+// TaskCloseHeldNote is the agent-facing copy telling a conversation that an
+// event resolved the situation its task is about while a deliverable on the
+// task awaits a person, so the task stays open (TaskCloseDeferral). It is the
+// one note about a task that has not closed: without it a run on such a task
+// hears nothing of the event until the person acts. metadataJSON is the
+// closing event's metadata; "" renders a body naming the event type alone.
+// Bare, like TaskClosedNote.
+func TaskCloseHeldNote(eventType, metadataJSON string) string {
+	const held = "The task is still open: a draft pull request or a pending review from the work on it is waiting for a person's decision, " +
+		"and the task closes once they have decided. This run was not stopped. Re-evaluate what you are doing: " +
+		"if your instructions do not need the work to go on now that the situation is resolved, end the workflow with " +
+		"stop_blueprint(type: \"finish\"). If they do, go on."
+	cause := fmt.Sprintf("A %s event resolved the situation this task is about.", eventType)
+	if metadataJSON == "" {
+		return cause + " " + held
+	}
+	return fmt.Sprintf("%s Event metadata:\n%s\n%s", cause, metadataJSON, held)
 }
 
 // TaskClosedRunContext is the <run_context> line of a run launched on a task

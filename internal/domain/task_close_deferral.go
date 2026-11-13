@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // TaskCloseDeferral is a close an event owed a task, held while a deliverable
 // on the task awaits a person's verdict, on a pull request still open: the
 // event resolved the situation the task is about, and the task stays open
@@ -15,4 +17,8 @@ type TaskCloseDeferral struct {
 	TaskID string `json:"task_id"`
 	// EventID is the closing event whose close is held.
 	EventID string `json:"event_id"`
+	// HeldSince is when the hold began. A later closing event takes the
+	// hold's place and keeps this time, so it identifies the hold: the note
+	// telling a conversation of it is sent once per hold (TaskCloseHoldKey).
+	HeldSince time.Time `json:"held_since"`
 }

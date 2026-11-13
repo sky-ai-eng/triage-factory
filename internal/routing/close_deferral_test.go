@@ -124,9 +124,9 @@ func newHeldCIFixture(t *testing.T, sourceID string) heldCIFixture {
 
 // TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose is the headline: the
 // pass holds the close of the task whose draft awaits a person, writes
-// nothing on the work under it, and tells the working conversation nothing:
-// the task is still open, and the note says it is closed. The sibling task
-// with no deliverable closes now.
+// nothing on the work under it, and tells the working conversation that the
+// event resolved the situation, not that the task closed: it is still open.
+// The sibling task with no deliverable closes now.
 func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#held")
 
@@ -140,7 +140,10 @@ func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 		t.Errorf("close audit rows on the held task = %d, want 0", n)
 	}
 	if got := f.sp.notedIDs(); len(got) != 0 {
-		t.Errorf("noted = %v, want nobody: a held close closed nothing", got)
+		t.Errorf("told of a close = %v, want nobody: a held close closed nothing", got)
+	}
+	if got := f.sp.heldNotedIDs(); !slices.Equal(got, []string{f.convID}) {
+		t.Errorf("told the close is held = %v, want [%s]", got, f.convID)
 	}
 	if status, reason, _ := taskRow(t, f.database, f.otherID); status != "done" || reason != "auto_closed_by_event" {
 		t.Errorf("other task = (%q, %q), want closed by the event", status, reason)
@@ -148,8 +151,8 @@ func TestCloseHold_DeliverableAwaitingAPersonHoldsTheClose(t *testing.T) {
 }
 
 // TestCloseHold_SecondClosingEventTakesTheHoldsPlace: a later closing event
-// while the close is held takes its place, and tells the conversations
-// nothing either.
+// while the close is held takes its place, and the conversations, told when
+// the hold began, are not told again.
 func TestCloseHold_SecondClosingEventTakesTheHoldsPlace(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#held-twice")
 
@@ -161,8 +164,11 @@ func TestCloseHold_SecondClosingEventTakesTheHoldsPlace(t *testing.T) {
 	if ev := heldClose(t, f.database, f.taskID); ev == "" || ev == f.eventID {
 		t.Errorf("held close = %q, want the second pass's event", ev)
 	}
+	if got := f.sp.heldNotedIDs(); len(got) != 1 {
+		t.Errorf("told the close is held = %v, want the one note from when the hold began", got)
+	}
 	if got := f.sp.notedIDs(); len(got) != 0 {
-		t.Errorf("noted = %v, want nobody while the close is held", got)
+		t.Errorf("told of a close = %v, want nobody while the close is held", got)
 	}
 }
 
@@ -336,9 +342,10 @@ func TestCloseHoldSweep_AppliesTheCloseOnceThePersonResolvesTheDraft(t *testing.
 	if after := readWorkState(t, f.database, f.runID, f.convID); after != before {
 		t.Errorf("the applied close changed the work on the task:\n before %+v\n after  %+v", before, after)
 	}
-	// The hold told nobody, so this is the one note: the task closed now.
+	// The hold told the conversation the situation resolved; this is the
+	// note that the task closed.
 	if got := f.sp.notedIDs(); !slices.Equal(got, []string{f.convID}) {
-		t.Errorf("noted = %v, want [%s] once the close applied", got, f.convID)
+		t.Errorf("told of the close = %v, want [%s] once it applied", got, f.convID)
 	}
 }
 

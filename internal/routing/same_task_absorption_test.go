@@ -100,6 +100,9 @@ func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string,
 func (s *injectingStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
+func (s *injectingStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
+}
+
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
 	return s.outcome

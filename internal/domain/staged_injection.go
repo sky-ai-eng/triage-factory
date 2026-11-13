@@ -54,9 +54,10 @@ type StagedInjection struct {
 type NoteProvenance struct {
 	EventID   string `json:"event_id,omitempty"`
 	EventType string `json:"event_type,omitempty"`
-	// TaskClose is the close of the conversation's task a close note tells of
-	// (TaskCloseKey). A person's close has no event, so this, not EventID, is
-	// what says a conversation has been told of a close.
+	// TaskClose is the close of the conversation's task a close note tells
+	// of (TaskCloseKey), or the held close (TaskCloseHoldKey). A person's
+	// close has no event, so this, not EventID, is what says a conversation
+	// has been told.
 	TaskClose string `json:"task_close,omitempty"`
 }
 
@@ -109,7 +110,7 @@ func IsStagedInjectionSubtype(subtype string) bool {
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a
 // new producer adds a const without a migration; used for audit/debugging, and
-// the close note's tag is what its withdrawal matches, so renaming one
+// the close notes' tag is what their withdrawal matches, so renaming one
 // strands the rows already staged under the old value.
 const (
 	// StagedInjectionProducerPRNewCommits tags a head-SHA-change note. Nothing
@@ -122,9 +123,11 @@ const (
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
-	// that its task closed (TaskClosedNote). A conversation is told once per
-	// close (StagedInjectionStore.HasNoteForTaskCloseSystem), and a reopen of
-	// the task withdraws the notes still waiting.
+	// that its task closed (TaskClosedNote), or that its close is held for a
+	// person (TaskCloseHeldNote). A conversation is told once per close and
+	// once per hold (StagedInjectionStore.HasNoteForTaskCloseSystem). A
+	// reopen of the task, and a hold cleared without its close, withdraw the
+	// notes still waiting (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
 	// StagedInjectionProducerDeliverableResolved is the note telling an agent
 	// that a deliverable it produced was resolved (DeliverableResolutionNote).

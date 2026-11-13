@@ -528,9 +528,9 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 // enqueue stamps the version on the row; only a direct HandleEvent call
 // arrives without one. See
 // EntityStore.CloseTerminalSystem for the transaction; this is the routing
-// half: the note to the conversations working on each task it closed, sent
-// after the commit as closeTaskOnEvent sends it for a typed close, the
-// follow-up for the pending reviews the transaction dismissed, and
+// half: the note to the conversations working on each task it closed or
+// newly held, sent after the commit as closeTaskOnEvent sends it for a typed
+// close, the follow-up for the pending reviews the transaction dismissed, and
 // the tasks-updated nudge. A task with a deliverable awaiting a person, on a
 // pull request still open, is held in that transaction rather than closed;
 // the entity closes either way.
@@ -567,6 +567,9 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	}
 	for _, h := range res.HeldTasks {
 		routerLog.InfoContext(ctx, "held task close: a deliverable awaits a person", "task_id", h.TaskID, "on_event", evt.EventType, "newly_held", h.NewlyHeld)
+		if h.NewlyHeld {
+			r.spawner.TellTaskCloseHeld(ctx, orgID, h.TaskID, h.WorkingConversationIDs)
+		}
 	}
 	// The close obligation stands in for a close that was lost, so it is not
 	// what a reader would recognize as the closer: to them the entity closed.
@@ -848,10 +851,11 @@ func keepReassign(poolType string) func(domain.Event, closeContext, closeTarget)
 // (TaskStore.CloseOrHoldSystem). Without, it closes at once
 // (TaskStore.CloseOnEventSystem), which a reassignment needs.
 //
-// The close stops nothing. The conversations working on the task are told
-// once it closes, after the commit. A held close tells nothing, the task
-// being still open, and a closing event that finds the close already held
-// only takes its place.
+// The close stops nothing. The conversations working on the task are told,
+// after the commit: that the task closed, or, the first time the close
+// holds, that the event resolved the situation and the task stays open for
+// a person. A closing event that finds the close already held only takes
+// its place.
 func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string, mayHold bool) (dbpkg.TaskCloseOutcome, error) {
 	closeFn := r.tasks.CloseOnEventSystem
 	if mayHold {
@@ -861,8 +865,11 @@ func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt
 	if err != nil {
 		return dbpkg.TaskCloseOutcome{}, err
 	}
-	if out.Closed {
+	switch {
+	case out.Closed:
 		r.spawner.TellTaskClosed(ctx, orgID, taskID, out.WorkingConversationIDs)
+	case out.NewlyHeld:
+		r.spawner.TellTaskCloseHeld(ctx, orgID, taskID, out.WorkingConversationIDs)
 	}
 	return out, nil
 }

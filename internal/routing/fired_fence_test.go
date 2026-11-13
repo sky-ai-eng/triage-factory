@@ -43,6 +43,9 @@ func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []d
 func (s *fenceStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
 }
 
+func (s *fenceStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
+}
+
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }

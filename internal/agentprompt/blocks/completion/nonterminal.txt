@@ -5,7 +5,7 @@ That barely changes how you finish. Stopping normally — a message with no tool
 
 What it does change is `stop_blueprint(type: "finish")`, which from here ends the ENTIRE workflow, skipping every step that would have followed you. Use it only if this step's own instructions gave you explicit criteria for ending early and those criteria are now met — "if there is nothing to review, finish here", or similar. Absent such criteria, never decide on your own that the workflow is over.
 
-There is one exception. If <run_context> says the task was already closed when this run started, or a note tells you it closed while you were working, and this step's instructions do not need the work to go on with the task closed, end the workflow with `stop_blueprint(type: "finish")` rather than handing off: the steps after you would be working on a situation that no longer needs them.
+There is one exception. If <run_context> says the task was already closed when this run started, or a note tells you while you were working that it closed or that the situation it is about resolved, and this step's instructions do not need the work to go on after that, end the workflow with `stop_blueprint(type: "finish")` rather than handing off: the steps after you would be working on a situation that no longer needs them.
 
 HANDOFF. The next step does not see this conversation. It starts fresh, with only its own instructions, the workspace you leave behind, and the notes you write. Your memory file is therefore the entire handoff — everything you learned that the next step would otherwise have to rediscover has to be in it, or it is lost. Write it before you stop.
 </blueprint-nonterminal>

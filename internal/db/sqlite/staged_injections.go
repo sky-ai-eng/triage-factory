@@ -78,8 +78,8 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 
 // withdrawProducerNotesForTask withdraws the notes producer staged on the
 // task's conversations that are still waiting (withdrawProducerNotes). The
-// task store's reopen calls it for the close notes, which a reopen makes
-// false.
+// task store's clears of a held close call it in their own transactions,
+// since a hold cleared without its close makes its notes false.
 func withdrawProducerNotesForTask(ctx context.Context, q queryer, taskID, producer string) error {
 	return withdrawProducerNotes(ctx, q, producer, `conversation_id IN (SELECT c.id FROM conversations c WHERE c.task_id = ?)`, taskID)
 }

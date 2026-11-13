@@ -96,9 +96,10 @@ type StagedInjectionStore interface {
 	DeleteSystem(ctx context.Context, orgID, id string) (consumed bool, err error)
 
 	// HasNoteForTaskCloseSystem reports whether the conversation has been
-	// told of the close taskClose names (domain.TaskCloseKey): a note staged
-	// with that close in its provenance, delivered or still waiting to be. A
-	// withdrawn note (DeleteSystem, or a reopen of the task) never happened
-	// and does not count.
+	// told of the close, or the held close, taskClose names
+	// (domain.TaskCloseKey, domain.TaskCloseHoldKey): a note staged with it
+	// in its provenance, delivered or still waiting to be. A withdrawn note
+	// (DeleteSystem, a reopen of the task, or a hold cleared without its
+	// close) never happened and does not count.
 	HasNoteForTaskCloseSystem(ctx context.Context, orgID, conversationID, taskClose string) (bool, error)
 }

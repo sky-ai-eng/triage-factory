@@ -211,17 +211,20 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		if n := seed.CloseAuditCount(t, holding); n != 0 {
 			t.Errorf("held task close audit rows = %d, want 0", n)
 		}
-		if d := held(t, stores.Tasks, orgID, holding); d == nil || *d != (domain.TaskCloseDeferral{OrgID: orgID, TaskID: holding, EventID: first}) {
-			t.Errorf("held close = %+v, want event %s", d, first)
+		began := held(t, stores.Tasks, orgID, holding)
+		if began == nil || began.OrgID != orgID || began.TaskID != holding || began.EventID != first || began.HeldSince.IsZero() {
+			t.Fatalf("held close = %+v, want event %s with the time the hold began", began, first)
 		}
 
-		// A second closing event while the close is held takes its place.
+		// A second closing event while the close is held takes its place,
+		// and the hold is still the one that began with the first: the time
+		// it began is what a note about the hold is keyed on.
 		out = closeOrHold(t, stores.Tasks, orgID, holding, second)
 		if !out.Held || out.NewlyHeld {
 			t.Errorf("second close = %+v, want held, not newly", out)
 		}
-		if d := held(t, stores.Tasks, orgID, holding); d == nil || d.EventID != second {
-			t.Errorf("held close = %+v, want event %s", d, second)
+		if d := held(t, stores.Tasks, orgID, holding); d == nil || d.EventID != second || !d.HeldSince.Equal(began.HeldSince) {
+			t.Errorf("held close = %+v, want event %s held since %v", d, second, began.HeldSince)
 		}
 		// A held close is the system's bookkeeping: it changes nothing a
 		// person acts on, so a person's pending write on the task stays good.
@@ -557,6 +560,51 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 		if got.CloseReason != db.SiblingEventCloseReason || got.CloseEventType != passed {
 			t.Errorf("close = (%q, %q), want (%s, %s)", got.CloseReason, got.CloseEventType, db.SiblingEventCloseReason, passed)
+		}
+	})
+
+	t.Run("Clearing_a_hold_withdraws_its_close_notes", func(t *testing.T) {
+		stores, orgID, seed := mk(t)
+		// "unheld" is a bump of a task that holds no close: it clears
+		// nothing, so it withdraws nothing.
+		for _, how := range []string{"bump", "clear", "unheld"} {
+			taskID := seed.Task(t)
+			eventID := seed.Event(t, taskID)
+			_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+			if how != "unheld" {
+				seed.DraftPullRequest(t, convID, seed.EntityForTask(t, seed.Task(t)))
+				if out := closeOrHold(t, stores.Tasks, orgID, taskID, eventID); !out.Held {
+					t.Fatalf("%s: CloseOrHoldSystem = %+v, want held", how, out)
+				}
+			}
+			for _, producer := range []string{domain.StagedInjectionProducerTaskClosing, domain.StagedInjectionProducerPRCoherence} {
+				if _, err := stores.StagedInjections.AppendSystem(ctx, orgID, domain.StagedInjection{
+					ConversationID: convID, Subtype: domain.MessageSubtypeInjectionSystemNote,
+					Producer: producer, Body: producer, Provenance: domain.NoteProvenance{EventID: eventID},
+				}); err != nil {
+					t.Fatalf("AppendSystem(%s): %v", producer, err)
+				}
+			}
+			if how == "clear" {
+				if cleared, err := stores.Tasks.ClearCloseDeferralSystem(ctx, orgID, taskID, eventID); err != nil || !cleared {
+					t.Fatalf("ClearCloseDeferralSystem = %v (err %v), want cleared", cleared, err)
+				}
+			} else if _, err := stores.Tasks.BumpSystem(ctx, orgID, taskID, seed.Event(t, taskID)); err != nil {
+				t.Fatalf("BumpSystem: %v", err)
+			}
+			left, err := stores.StagedInjections.FlushPendingSystem(ctx, orgID, convID)
+			if err != nil {
+				t.Fatalf("FlushPendingSystem: %v", err)
+			}
+			want := 1
+			if how == "unheld" {
+				want = 2
+			}
+			if len(left) != want {
+				t.Errorf("%s: still staged = %+v, want %d", how, left, want)
+			} else if want == 1 && left[0].Producer != domain.StagedInjectionProducerPRCoherence {
+				t.Errorf("%s: still staged = %+v, want only the pull request note", how, left)
+			}
 		}
 	})
 }
