@@ -244,10 +244,13 @@ type MemoryAttemptSummary struct {
 // for: it ended, nothing filed a conversation_memory row for it, and no
 // attempt has run recently enough to still be in the backoff.
 //
-// TaskOpen is the sweep's ordering key rather than a fact about the memory: an
-// owed memory on an open task is blocking a person's next delegation, and one
-// on a task that is done or dismissed is only completing the record. The sweep
-// takes the blocking ones first.
+// TaskWorking is the sweep's ordering key rather than a fact about the memory:
+// the task holds a conversation that is still working, and the claim gate
+// drives nothing on a task that owes a memory, so that conversation is waiting
+// for this one. An owed memory on a task with no working conversation holds
+// nothing back yet. The sweep takes the ones something is waiting for first.
+// The task's status is not part of the key: a closed task's next blueprint
+// step waits for its memory exactly as an open task's does.
 type MemoryOwed struct {
 	OrgID          string
 	ConversationID string
@@ -258,16 +261,17 @@ type MemoryOwed struct {
 	// conversation with no task has nobody to hand off to. A conversation
 	// type that owes a memory to something other than a task would need its
 	// own reading of "owed", not a nullable column here.
-	TaskID   string
-	TaskOpen bool
+	TaskID      string
+	TaskWorking bool
 }
 
 // MemoryFailing is what memory generation in one org is failing with now, read
 // from the attempts ledger: the error kinds of the conversations whose memory
-// keeps failing, and how many open tasks are waiting on a memory.
+// keeps failing, and how many tasks are waiting on a memory.
 type MemoryFailing struct {
-	// TasksWaiting counts the org's open tasks holding a conversation that
-	// owes a memory, whatever its attempts came to.
+	// TasksWaiting counts the org's tasks holding a conversation that owes a
+	// memory, whatever its attempts came to, when something waits on it: every
+	// open task, and a closed task with a conversation still working.
 	TasksWaiting int
 	// Kinds is each error kind generation has recently failed with, newest
 	// first and each kind once: the kinds of the failed attempts since the org

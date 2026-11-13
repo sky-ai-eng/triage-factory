@@ -11,7 +11,8 @@ import (
 // with.
 type MemoryFailure struct {
 	ErrorKind domain.MemoryAttemptErrorKind `json:"error_kind"`
-	// TasksWaiting is the org's open tasks waiting on a memory; display only.
+	// TasksWaiting is the org's tasks waiting on a memory
+	// (domain.MemoryFailing.TasksWaiting); display only.
 	TasksWaiting int `json:"tasks_waiting"`
 	// ErrorMessage is the newest such attempt's TF-worded reason; display
 	// only.

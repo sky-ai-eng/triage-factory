@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -203,23 +204,103 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 // TestFollowUpOnTheAbortedStepItselfIsAccepted is the other half: the
 // conversation an aborted blueprint actually stopped on is where
 // current_step_index points, so it resumes — and re-opens its blueprint, which
-// is what distinguishes it from a blueprint that finished.
+// is what distinguishes it from a blueprint that finished. The task's status
+// is no part of it: the blueprint re-opens on a closed task as on an open one.
 func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-aborted", "sess-aborted", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort' WHERE id='r-aborted'`); err != nil {
-		t.Fatalf("abort conversation: %v", err)
-	}
-	bpr := blueprintRunIDForConversation(t, database, "r-aborted")
-	finishBlueprint(t, database, bpr, "aborted", 0)
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	for _, tc := range []struct{ name, closeAs string }{
+		{"task open", ""},
+		{"task done", "done"},
+		{"task dismissed", "dismissed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			database := newDelegateTestDB(t)
+			seedConversation(t, database, "r-aborted", "sess-aborted", t.TempDir())
+			if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort' WHERE id='r-aborted'`); err != nil {
+				t.Fatalf("abort conversation: %v", err)
+			}
+			if tc.closeAs != "" {
+				if _, err := database.Exec(
+					`UPDATE tasks SET status = ? WHERE id = (SELECT task_id FROM conversations WHERE id = 'r-aborted')`, tc.closeAs,
+				); err != nil {
+					t.Fatalf("close task: %v", err)
+				}
+			}
+			bpr := blueprintRunIDForConversation(t, database, "r-aborted")
+			finishBlueprint(t, database, bpr, "aborted", 0)
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
-		t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
+			if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+				t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
+			}
+			if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "running" {
+				t.Errorf("blueprint status = %q, want running — an abort resumes its sequence", gotStatus)
+			}
+		})
 	}
-	if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "running" {
-		t.Errorf("blueprint status = %q, want running — an abort resumes its sequence", gotStatus)
+}
+
+// TestFollowUpOnAnAbortedStep_ContinuesTheBlueprintToItsNextStep drives the
+// whole path a follow-up on an aborted step takes: the wake re-opens the
+// blueprint and withdraws the abort, and the resumed step's `continue` then
+// advances the blueprint to its next step. A closed task takes it exactly as
+// an open one does, and the follow-up leaves the task's status as it found it.
+func TestFollowUpOnAnAbortedStep_ContinuesTheBlueprintToItsNextStep(t *testing.T) {
+	for _, tc := range []struct{ name, closeAs string }{
+		{"task-open", ""},
+		{"task-done", "done"},
+		{"task-dismissed", "dismissed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			s, database, brID, taskID, stepConversationID := reactorFixture(t, "abort-continue-"+tc.name, 2, dbtest.SeedConcluded, "abort")
+			org := runmode.LocalDefaultOrgID
+			if _, err := database.Exec(
+				`UPDATE conversations SET sdk_session_id = 'sess-abort-continue', worktree_path = ? WHERE id = ?`,
+				t.TempDir(), stepConversationID,
+			); err != nil {
+				t.Fatalf("give the step a session and a worktree: %v", err)
+			}
+			finishBlueprint(t, database, brID, "aborted", 0)
+			if tc.closeAs != "" {
+				if _, err := database.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, tc.closeAs, taskID); err != nil {
+					t.Fatalf("close task: %v", err)
+				}
+			}
+			wantTaskStatus := taskStatus(t, database, taskID)
+
+			if err := s.SendMessage(context.Background(), org, stepConversationID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+				t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
+			}
+			if gotStatus, gotStep := blueprintState(t, database, brID); gotStatus != "running" || gotStep != 0 {
+				t.Fatalf("after the follow-up, blueprint = (%q, %d), want (running, 0)", gotStatus, gotStep)
+			}
+
+			// The resumed step gives its new verdict, and the reactor acts on it.
+			if _, err := database.Exec(
+				`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome = 'continue' WHERE id = ?`,
+				stepConversationID,
+			); err != nil {
+				t.Fatalf("conclude the resumed step: %v", err)
+			}
+			conv, err := s.conversations.GetSystem(context.Background(), org, stepConversationID)
+			if err != nil || conv == nil {
+				t.Fatalf("GetSystem: (%v, %v)", conv, err)
+			}
+			conv.TriggerType = "manual"
+			conv.CreatorUserID = runmode.LocalDefaultUserID
+			s.reactToResumedStep(context.Background(), org, conv)
+
+			if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
+				t.Errorf("queued step conversations = %v, want [1] — the blueprint's next step", q)
+			}
+			if gotStatus, gotStep := blueprintState(t, database, brID); gotStatus != "running" || gotStep != 1 {
+				t.Errorf("after the resumed step continued, blueprint = (%q, %d), want (running, 1)", gotStatus, gotStep)
+			}
+			if got := taskStatus(t, database, taskID); got != wantTaskStatus {
+				t.Errorf("task status = %q, want %q — a follow-up does not move the task", got, wantTaskStatus)
+			}
+		})
 	}
 }
 

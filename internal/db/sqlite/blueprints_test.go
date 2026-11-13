@@ -658,10 +658,10 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_ReopenRunForResume pins the resume re-open CAS: an
-// aborted blueprint_run on an open task flips back to running (clearing its
-// abort metadata) so a follow-up on the step that aborted it can re-finalize; a
-// non-aborted row is a guarded no-op. The task gate and the verdict withdrawal
-// are covered by the shared claim predicate conformance.
+// aborted blueprint_run flips back to running (clearing its abort metadata) so
+// a follow-up on the step that aborted it can re-finalize; a non-aborted row
+// is a guarded no-op. The closed-task case and the verdict withdrawal are
+// covered by the shared claim predicate conformance.
 func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints

@@ -1433,11 +1433,13 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, step
 	if !isValidUUID(id) || !isValidUUID(stepConversationID) {
 		return false, nil
 	}
-	// CAS aborted → running while the task is still open and the conversation
-	// is the run's current step, clearing the stale abort metadata, and
-	// withdraw that conversation's verdict in the same statement. The resumed step re-finalizes the blueprint through the
-	// normal post-resume disposition, and a verdict left behind would read as
-	// one it had already given.
+	// CAS aborted → running while the conversation is the run's current step,
+	// clearing the stale abort metadata, and withdraw that conversation's
+	// verdict in the same statement. The resumed step re-finalizes the
+	// blueprint through the normal post-resume disposition, and a verdict left
+	// behind would read as one it had already given. The task's status is not
+	// part of the guard: a blueprint advances by its own state, whether its
+	// task is open or closed.
 	// App pool — runs inside the resume's synthetic-claims tx alongside the run
 	// flip, so the two commit atomically. The withdrawal writes the same
 	// conversation row the flip just wrote, under the same policy.
@@ -1447,9 +1449,6 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, step
 			UPDATE blueprint_runs br
 			SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
 			WHERE br.org_id = $1 AND br.id = $2 AND br.status = 'aborted'
-			  AND EXISTS (SELECT 1 FROM tasks t
-			              WHERE t.org_id = br.org_id AND t.id = br.task_id
-			                AND t.status NOT IN ('done', 'dismissed'))
 			  AND EXISTS (SELECT 1 FROM conversations c
 			              WHERE c.org_id = br.org_id AND c.id = $3
 			                AND c.blueprint_run_id = br.id

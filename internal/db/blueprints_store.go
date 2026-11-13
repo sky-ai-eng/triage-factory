@@ -738,13 +738,13 @@ type BlueprintStore interface {
 	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 
 	// ReopenRunForResume flips an `aborted` blueprint_run back to `running` (a
-	// compare-and-swap guarded on status='aborted' and on its task still being
-	// open), clearing its abort metadata, so a resume of the run's aborting step
-	// can re-run and re-finalize through the normal post-resume disposition.
-	// The blueprint terminated when the step aborted, so without this the
-	// resumed step's new verdict would find a terminal blueprint and never
-	// advance/close it. A follow-up can change the blueprint only while its
-	// task is open, so a task a person has since closed leaves the run aborted.
+	// compare-and-swap guarded on status='aborted'), clearing its abort
+	// metadata, so a resume of the run's aborting step can re-run and
+	// re-finalize through the normal post-resume disposition. The blueprint
+	// terminated when the step aborted, so without this the resumed step's new
+	// verdict would find a terminal blueprint and never advance/close it. The
+	// task's status is not read: a follow-up continues an aborted blueprint on
+	// a closed task as it does on an open one.
 	//
 	// The re-open also withdraws the verdict stepConversationID recorded
 	// (outcome, outcome_reason and the conclusion stamp): a running blueprint
@@ -755,10 +755,9 @@ type BlueprintStore interface {
 	// and no other conversation's verdict is touched.
 	// Returns (true, nil) when it re-opened the row, (false, nil) when the
 	// blueprint was not aborted (already running for an `open` resume,
-	// finished, or finalized by a racing path), its task is closed, or the
-	// conversation is not its current step. Runs inside the same tx as
-	// ConversationStore.MarkQueuedForResume so the run flip and the blueprint
-	// re-open commit atomically.
+	// finished, or finalized by a racing path), or the conversation is not its
+	// current step. Runs inside the same tx as ConversationStore.MarkQueuedForResume
+	// so the run flip and the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID, id, stepConversationID string) (reopened bool, err error)
 
 	// RequestRunCancelSystem raises the DB sequence-cancel signal

@@ -129,10 +129,10 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 // org's page — on a busy deployment they can be none of them while that org
 // owes plenty.
 //
-// Serial by design: the page is ordered open tasks first and then oldest
-// boundary first, which is the order a person waiting would choose, and
-// running it in parallel would spend an org's whole background budget on a
-// backlog that nobody is watching all of.
+// Serial by design: the page is ordered tasks with a working conversation
+// first and then oldest boundary first, which is the order a person waiting
+// would choose, and running it in parallel would spend an org's whole
+// background budget on a backlog that nobody is watching all of.
 //
 // A one-org sweep, the doorbell's, ends by syncing kinds.MemoryGenerationFailing
 // for its org, even when the org owed nothing, so "Retry now" and a model save
