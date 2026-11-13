@@ -15,7 +15,8 @@ import (
 // task with nothing working on it, and the task's own event arrives again (CI
 // fails on the person's next push). The team's trigger matches, and the event
 // is recorded on the task, but it starts no run and queues no firing: the
-// task stays the person's.
+// task stays the person's. Once the person returns the task to the queue, the
+// same event starts a run, so the claim is what held it.
 func TestPersonClaim_OwnEventStartsNoRun(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -92,5 +93,13 @@ func TestPersonClaim_OwnEventStartsNoRun(t *testing.T) {
 	}
 	if task.ClaimedByUserID != runmode.LocalDefaultUserID || task.ClaimedByAgentID != "" {
 		t.Errorf("claim = (agent=%q, user=%q), want the person's claim to stand", task.ClaimedByAgentID, task.ClaimedByUserID)
+	}
+
+	if ok, err := tasks.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, taskID, task.Version); err != nil || !ok {
+		t.Fatalf("return the task to the queue: ok=%v err=%v", ok, err)
+	}
+	emitCI(t, router, entityID, "aidan")
+	if n := atomic.LoadInt64(&stub.calls); n != 1 {
+		t.Errorf("delegations after the requeue = %d, want the trigger to start a run on the unclaimed task", n)
 	}
 }

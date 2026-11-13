@@ -214,6 +214,10 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	if agent, _ := s.claim(t); agent != runmode.LocalDefaultAgentID {
 		t.Errorf("claim = %q, want the bot's claim written with the queued firing", agent)
 	}
+	if s.task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("in-memory task claim = %q, want %q — the cross-team guard reads this on the next matched trigger",
+			s.task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
 }
 
 // TestFold_CommittedClaimClearsTheStaleUserClaimInMemory pins the in-memory

@@ -82,7 +82,7 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// Whatever minted the live conversation holds the gate. A task has one, and
 	// a human's delegation is as much the task's live conversation as an
 	// auto-fired one — so an event landing on a task a person is working gets
-	// folded into their agent's context by the busy branch below, rather than
+	// folded into their agent's context by the fold below, rather than
 	// racing a second agent against it.
 	//
 	// The task is the unit, not the entity. A task is one situation needing
@@ -131,9 +131,9 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 			return false, nil
 		}
 		// The conversation went terminal between the gate read and the
-		// injection attempt, or the injection couldn't be delivered durably — fall
-		// through to the normal deferral so the firing is never silently
-		// dropped.
+		// injection attempt, or the injection couldn't be delivered durably.
+		// The firing is decided below as one with nothing to fold into, so a
+		// failed fold alone never drops it.
 	}
 
 	// A person holding the claim has taken the task off the agent: an event
@@ -364,16 +364,16 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 // about, and the event belongs in front of it. conversationID is its id,
 // resolved by the caller from the firing's own task, so it belongs to that
 // task by construction with no separate ownership check to make. Returns true when the caller should
-// treat the firing as handled; false when the caller must fall through to
-// the normal deferral so the firing is never silently dropped.
+// treat the firing as handled; false when the caller must decide the firing
+// itself, so a failed fold alone never drops it.
 //
 // The one fall-through is StageOrDeliverAdditiveEvent reporting
 // InjectNotDelivered — dropped outright (no live process anywhere, and the
 // durable append itself failed), or staged onto a conversation nothing will
 // read it from (a staged row is read only by a native conversation's running
 // loop or by the conversation's next resume, so one with neither would
-// silently lose it). Neither case has a durable row to fall back on, so this
-// defers.
+// silently lose it). Neither case has a durable row to fall back on, so the
+// caller decides the firing.
 //
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a
 // live remote executor now owns recording task_events 'injected' (or
