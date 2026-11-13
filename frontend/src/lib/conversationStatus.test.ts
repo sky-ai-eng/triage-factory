@@ -181,9 +181,9 @@ describe('chain position and completion', () => {
 
   it('calls a non-final step with no recorded outcome stopped, mirroring the orchestrator', () => {
     // decideBlueprintStep aborts the blueprint on this ("no-outcome"), so
-    // nothing runs after the step and a human owns the task. Reading it as a
-    // hand-off would claim a successor that will never come; reading it as
-    // done would be the original bug.
+    // nothing runs after the step. Reading it as a hand-off would claim a
+    // successor that will never come; reading it as done would be the
+    // original bug.
     expect(completionKind(step(1, 4, { Outcome: '' }))).toBe('stopped')
     expect(completionKind(step(1, 4))).toBe('stopped')
     expect(completionGloss(step(1, 4, { Outcome: '' }))).toBe(
@@ -191,9 +191,7 @@ describe('chain position and completion', () => {
     )
     // The abort keeps its own wording — the agent decided to stop, which is a
     // different thing to tell the viewer than a step that just never said.
-    expect(completionGloss(step(1, 4, { Outcome: 'abort' }))).toBe(
-      'stopped without finishing — the task stays open for a human',
-    )
+    expect(completionGloss(step(1, 4, { Outcome: 'abort' }))).toBe('stopped without finishing')
   })
 
   it('leaves the final step and the single-prompt conversation alone when the outcome is missing', () => {
@@ -226,9 +224,7 @@ describe('chain position and completion', () => {
     expect(completionKind(step(1, 4, { Outcome: 'abort' }))).toBe('stopped')
     expect(completionKind(step(3, 4, { Outcome: 'abort' }))).toBe('stopped')
     expect(completionKind(concluded({ Outcome: 'abort' }))).toBe('stopped')
-    expect(completionGloss(concluded({ Outcome: 'abort' }))).toBe(
-      'stopped without finishing — the task stays open for a human',
-    )
+    expect(completionGloss(concluded({ Outcome: 'abort' }))).toBe('stopped without finishing')
   })
 
   it('answers for concluded conversations only', () => {
@@ -265,10 +261,10 @@ describe('completion read off the blueprint run', () => {
     }
     expect(
       completionGloss(finalStep({ blueprint_run_status: 'cancelled', Outcome: 'finish' })),
-    ).toBe('workflow cancelled — the task stays open for a human')
+    ).toBe('workflow cancelled')
     expect(
       completionGloss(finalStep({ blueprint_run_status: 'failed', Outcome: 'continue' })),
-    ).toBe('the workflow failed — the task stays open for a human')
+    ).toBe('the workflow failed')
   })
 
   it('still calls a step that handed off a hand-off, whatever became of the run after it', () => {

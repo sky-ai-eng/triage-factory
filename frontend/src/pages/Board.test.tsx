@@ -56,7 +56,7 @@ const QUEUES = {
   ingestConversation: () => {},
   dropConversation: () => {},
   refresh: () => {},
-  resolve: async () => {},
+  resolve: vi.fn(async () => {}),
 }
 vi.mock('../hooks/usePermissionQueues', () => ({ usePermissionQueues: () => QUEUES }))
 const TEAMS = { teams: [{ id: 't1', name: 'platform' }], loaded: true }
@@ -107,6 +107,18 @@ const FREE: Task = {
   version: 2,
 } as Task
 
+/** A task a person dismissed, for the tests that put one in Done. */
+const DISMISSED: Task = {
+  id: 'task-dismissed',
+  source: 'github',
+  source_id: 'acme/api#763',
+  title: 'Chase the flaky upload',
+  status: 'dismissed',
+  event_type: 'github:pr:opened',
+  created_at: '2026-09-01T09:00:00Z',
+  version: 6,
+} as Task
+
 /** Its conversation, in whichever state a test puts it. */
 function conversation(status: string): Conversation {
   return {
@@ -125,6 +137,9 @@ let facetBodies: Array<Record<string, unknown>> = []
 /** Every task write the board sent, in call order: its path and its body. */
 let writes: Array<{ path: string; body: Record<string, unknown> }> = []
 let held: Conversation
+/** The closed tasks the Done lane answers with, and their conversations. */
+let closed: Task[]
+let closedRuns: Record<string, Conversation[]>
 /** The can_write every listed task carries; undefined leaves the key off. */
 let taskCanWrite: boolean | undefined
 
@@ -133,7 +148,10 @@ beforeEach(() => {
   facetBodies = []
   writes = []
   held = conversation('completed')
+  closed = []
+  closedRuns = {}
   taskCanWrite = undefined
+  QUEUES.resolve.mockClear()
   api.apiList.mockReset()
   api.apiJSON.mockReset()
   api.apiFetch.mockReset()
@@ -146,7 +164,7 @@ beforeEach(() => {
       ? [HELD]
       : statuses.includes('queued')
         ? [FREE]
-        : []
+        : closed
     const items = lane.map((t) =>
       taskCanWrite === undefined ? t : { ...t, can_write: taskCanWrite },
     )
@@ -159,7 +177,7 @@ beforeEach(() => {
       return { event_types: [{ value: 'github:pr:opened', count: 2 }] }
     }
     if (path === '/api/agent/conversations/list') {
-      return { runs: { [HELD.id]: [held] }, messages: {} }
+      return { runs: { [HELD.id]: [held], ...closedRuns }, messages: {} }
     }
     // A task write answers the task with the version it left, one past the
     // version the board read, whatever the write named.
@@ -227,7 +245,11 @@ describe('the board lanes', () => {
     renderBoard()
     await waitFor(() => expect(listBodies.length).toBe(3))
     const asked = listBodies.flatMap((b) => (b.statuses as string[] | undefined) ?? [])
-    expect(asked.sort()).toEqual(['done', 'in_progress', 'queued'])
+    expect(asked.sort()).toEqual(['dismissed', 'done', 'in_progress', 'queued'])
+    // Done is every closed task, completed or dismissed, inside its window.
+    const done = listBodies.find((b) => (b.statuses as string[]).includes('done'))
+    expect(done?.statuses).toEqual(['done', 'dismissed'])
+    expect(done?.closed_since).toEqual(expect.any(String))
     // The queue holds nobody's work — assigning a task lands it in In Progress
     // — so the lane needs no claim narrowing to be the pickable set.
     const queued = listBodies.find((b) => (b.statuses as string[]).includes('queued'))
@@ -294,7 +316,7 @@ describe('the lane read runs on the server', () => {
 describe('starting a queued task', () => {
   it('makes the drag one call: the claim is what moves the card', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(FREE.title)
 
     await act(async () => {
       await dnd.drop!(FREE.id, 'in_progress')
@@ -322,7 +344,7 @@ describe('starting a queued task', () => {
 
   it('names the version its last write returned on the next one', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(FREE.title)
 
     await act(async () => {
       await dnd.drop!(FREE.id, 'in_progress')
@@ -385,7 +407,7 @@ describe('ending a task', () => {
       unresolved_review_count: 1,
     } as Conversation
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(HELD.title)
 
     await act(async () => {
       await dnd.drop!(HELD.id, 'done')
@@ -403,7 +425,7 @@ describe('ending a task', () => {
 
   it('dismisses a queued task without asking', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(FREE.title)
 
     await act(async () => {
       await dnd.drop!(FREE.id, 'done')
@@ -441,6 +463,102 @@ describe('a permission prompt on a card', () => {
     expect(await screen.findByText('make test')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Allow' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+})
+
+// A close ends no run, so a card in Done can carry one that is working or
+// waiting on an answer, and it shows that run the way an In Progress card does.
+describe('a closed task in Done', () => {
+  afterEach(() => {
+    ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {}
+  })
+
+  function card(title: string) {
+    return screen.getByText(title).closest('[aria-roledescription="sortable"]') as HTMLElement
+  }
+
+  function running(): Conversation {
+    return {
+      ...conversation('running'),
+      ID: 'c-dismissed',
+      TaskID: DISMISSED.id,
+      current_action: 'Reading the upload test',
+      can_write: true,
+    }
+  }
+
+  it('renders a dismissed task with no run as dismissed: not queued, and not completed', async () => {
+    closed = [
+      DISMISSED,
+      { ...DISMISSED, id: 'task-completed', title: 'Pin the base image', status: 'done' },
+    ]
+    renderBoard()
+    expect(await screen.findByText(DISMISSED.title)).toBeInTheDocument()
+    expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'dismissed',
+    )
+    expect(card('Pin the base image').querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'done',
+    )
+  })
+
+  it("draws the dismissal over a dismissed task's finished run", async () => {
+    closed = [DISMISSED]
+    closedRuns = {
+      [DISMISSED.id]: [
+        {
+          ...conversation('open'),
+          ID: 'c-dismissed',
+          TaskID: DISMISSED.id,
+          CompletedAt: '2026-09-01T12:04:00Z',
+          DurationMs: 240_000,
+        },
+      ],
+    }
+    renderBoard()
+    await screen.findByText(DISMISSED.title)
+    expect(
+      await within(card(DISMISSED.title)).findByRole('link', { name: /^Ran for / }),
+    ).toBeInTheDocument()
+    expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'dismissed',
+    )
+  })
+
+  it("shows a dismissed task's working run and what it is doing", async () => {
+    closed = [DISMISSED]
+    closedRuns = { [DISMISSED.id]: [running()] }
+    renderBoard()
+    expect(await screen.findByText('Reading the upload test')).toBeInTheDocument()
+    expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'crates',
+    )
+  })
+
+  it('answers a pending permission with Allow and with Deny', async () => {
+    const run = running()
+    closed = [DISMISSED]
+    closedRuns = { [DISMISSED.id]: [run] }
+    ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
+      [run.ID]: [{ tool_call_id: 'toolu_9', tool_name: 'Bash', input: { command: 'make lint' } }],
+    }
+    renderBoard()
+    expect(await screen.findByText('make lint')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(within(card(DISMISSED.title)).getByRole('button', { name: 'Allow' }))
+    })
+    await act(async () => {
+      fireEvent.click(within(card(DISMISSED.title)).getByRole('button', { name: 'Deny' }))
+    })
+    expect(QUEUES.resolve.mock.calls).toEqual([
+      [run.ID, 'toolu_9', { behavior: 'allow' }],
+      [run.ID, 'toolu_9', { behavior: 'deny' }],
+    ])
   })
 })
 

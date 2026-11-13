@@ -24,6 +24,7 @@ export type GlyphKind =
   | 'cross'
   | 'pause'
   | 'dash'
+  | 'ban'
 
 // The board's kind names onto the table's. `pulls` is the artifact strip's
 // word for a pull request, and `shield` is the product's `gov`.
@@ -38,6 +39,7 @@ const NAME: Record<GlyphKind, GlyphName> = {
   cross: 'cross',
   pause: 'pause',
   dash: 'dash',
+  ban: 'ban',
 }
 
 // The rendered hairline every mark on a card shares.

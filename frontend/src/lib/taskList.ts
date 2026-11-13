@@ -55,9 +55,19 @@ export type TaskListRequest = TaskListFilters & {
  *  past it through the token when a column is genuinely deeper. */
 export const TASK_PAGE_SIZE = 200
 
-/** How far back the board's Done column looks. The server used to apply this
- *  window itself, invisibly; now the surface that wants it asks for it. */
-const DONE_WINDOW_DAYS = 7
+/** The statuses of a closed task, completed or dismissed. One list, because
+ *  a close ends no run: a task in either can still carry a working one, so a
+ *  surface that shows closed tasks' runs needs both. */
+export const CLOSED_TASK_STATUSES = ['done', 'dismissed'] as const
+
+/** How far back a surface looks for closed tasks. The server applies no
+ *  window of its own, so the surface that wants one asks for it. */
+const CLOSED_WINDOW_DAYS = 7
+
+/** The start of that window, as the list's `closed_since`. */
+export function closedSince(): string {
+  return new Date(Date.now() - CLOSED_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+}
 
 /** The queue: the triage deck, the board's Queued lane, and the rail's count.
  *  Still queued and not sleeping — and unclaimed by construction, since
@@ -93,14 +103,14 @@ export function queueCountBody(): TaskListRequest {
   return { ...queueListBody([]), page_size: 0 }
 }
 
-/** One lane of the board by status. */
+/** One lane of the board by its statuses. */
 export function statusListBody(
-  status: string,
+  statuses: readonly string[],
   teamIds: string[],
   filters: TaskListFilters = {},
 ): TaskListRequest {
   return {
-    statuses: [status],
+    statuses: [...statuses],
     team_ids: teamIds,
     include_snoozed: true,
     page_size: TASK_PAGE_SIZE,
@@ -108,12 +118,11 @@ export function statusListBody(
   }
 }
 
-/** The board's Done column: closed work, windowed to the last week. */
+/** The board's Done column: closed tasks, windowed to the last week. */
 export function doneListBody(teamIds: string[], filters: TaskListFilters = {}): TaskListRequest {
-  const since = new Date(Date.now() - DONE_WINDOW_DAYS * 24 * 60 * 60 * 1000)
   return {
-    ...statusListBody('done', teamIds, filters),
-    closed_since: since.toISOString(),
+    ...statusListBody(CLOSED_TASK_STATUSES, teamIds, filters),
+    closed_since: closedSince(),
   }
 }
 

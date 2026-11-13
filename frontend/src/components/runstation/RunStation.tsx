@@ -555,7 +555,7 @@ function IntakeDock({
       ? 'agent is executing — streaming live'
       : isConcluded(conversation)
         ? // The state word above says which ending; this says what it means
-          // for the task, in words. Shared with the rail so the two surfaces
+          // for the work, in words. Shared with the rail so the two surfaces
           // can't drift.
           completionGloss(conversation)
         : conversation.Status === 'open'

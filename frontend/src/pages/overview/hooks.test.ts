@@ -198,10 +198,11 @@ describe('useTasksIndex', () => {
     await settle()
 
     const tasksRead = bodies[paths.findIndex((p) => p.startsWith('/api/tasks/list'))]
-    // The join asks for the three statuses this Overview view needs; including
-    // other statuses like 'snoozed'/'dismissed' would just widen the read.
-    // (The 'done' lane is additionally bounded by closed_since in the request.)
-    expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done'])
+    // The join asks for the statuses a row's task can be in: open, or closed
+    // either way, since a close ends no run. Closed tasks are additionally
+    // bounded by closed_since.
+    expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done', 'dismissed'])
+    expect(tasksRead.closed_since).toEqual(expect.any(String))
     expect(result.current?.get('t-a')?.title).toBe('a')
     expect(result.current?.get('t-b')?.title).toBe('b')
   })

@@ -201,6 +201,46 @@ describe('TaskCard, settled', () => {
     expect(screen.getByText('2d ago')).toBeInTheDocument()
     expect(screen.queryByText('View run')).not.toBeInTheDocument()
   })
+
+  it('marks a dismissed task apart from a completed one', () => {
+    const { unmount } = renderCard({ lifecycle: 'done', age: '2d ago' })
+    const completed = document.querySelector('[data-mark="done"] path')?.getAttribute('d')
+    unmount()
+    renderCard({ lifecycle: 'done', dismissed: true, age: '2d ago' })
+    const dismissed = document.querySelector('[data-mark="dismissed"] path')?.getAttribute('d')
+    expect(dismissed).toBeTruthy()
+    expect(dismissed).not.toBe(completed)
+    // The only place the card says so, so the mark carries the word.
+    expect(screen.getByRole('img', { name: 'Dismissed' })).toHaveAttribute('title', 'Dismissed')
+    expect(screen.getByText('2d ago')).toBeInTheDocument()
+  })
+
+  it('draws the dismissal over every settled run, and keeps the footer on the run', () => {
+    const endings = [
+      ['done', 'Ran for 2:06'],
+      ['failed', 'Failed after 2:06'],
+      ['canceled', 'Canceled after 2:06'],
+      ['idle', 'Idle after 2:06'],
+    ] as const
+    for (const [lifecycle, footer] of endings) {
+      const { unmount } = renderCard({
+        lifecycle,
+        dismissed: true,
+        elapsed: '2:06',
+        href: '/runs/c1',
+      })
+      expect(document.querySelectorAll('[data-mark]'), lifecycle).toHaveLength(1)
+      expect(document.querySelector('[data-mark="dismissed"]'), lifecycle).not.toBeNull()
+      expect(screen.getByRole('link', { name: footer })).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it("keeps the live mark on a dismissed task's working run", () => {
+    renderCard({ lifecycle: 'working', dismissed: true, command: 'Running the tests' })
+    expect(document.querySelector('[data-mark="crates"]')).not.toBeNull()
+    expect(document.querySelector('[data-mark="dismissed"]')).toBeNull()
+  })
 })
 
 describe('TaskCard, the task’s own asks', () => {
