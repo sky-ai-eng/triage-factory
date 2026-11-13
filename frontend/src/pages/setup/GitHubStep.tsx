@@ -193,6 +193,11 @@ export function GitHubModeStep({ state, patch, advance }: StepContext) {
           poll and open pull requests under. This is the org-wide connection, not your personal
           GitHub access.
         </p>
+        <p className="text-body leading-relaxed text-ink-3">
+          Where the connection can read a repository&rsquo;s Dependabot alerts, every member of a
+          team that tracks the repository sees them in Triage Factory, which can include people
+          GitHub doesn&rsquo;t show them to.
+        </p>
       </div>
       <ChoiceCards
         ariaLabel="GitHub access method"

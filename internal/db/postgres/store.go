@@ -328,6 +328,9 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// GitHubRefreshMarks: admin pool only. The receiver that writes marks
 		// is pre-auth and the poll that reads them has no claims.
 		GitHubRefreshMarks: newGitHubRefreshMarkStore(admin),
+		// DependabotAccess: admin pool only. The poll that writes it has no
+		// claims, and its one request-path reader is behind an org-admin gate.
+		DependabotAccess: newRepositoryDependabotAccessStore(admin),
 		// GitHubPendingBinds: admin pool only. The consume finds its row by
 		// nonce hash and learns the org from it, so there is no org for an RLS
 		// policy to gate on before the read; github_pending_binds has RLS

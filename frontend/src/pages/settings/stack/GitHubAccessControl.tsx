@@ -65,6 +65,7 @@ import ConnectGitHubAccount from '../ConnectGitHubAccount'
 import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
 import GitHubWebhookHealthNotice from '../GitHubWebhookHealthNotice'
+import GitHubDependabotNotice from '../GitHubDependabotNotice'
 import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
 import { useGrantFindings } from '../../../hooks/useGrantFindings'
 import { GitHubGrantFindings, GitHubInstallationList } from './GitHubGrantPanel'
@@ -119,6 +120,17 @@ const appPitch = (
     poll under a bot identity of its own — one that doesn&rsquo;t leave with the person who set it
     up — and to have GitHub itself scope each team&rsquo;s access to the repositories that team
     tracks
+  </>
+)
+
+// The scope a token needs to read Dependabot alerts, said wherever a token is
+// entered. repo already includes it, so a token with the scopes asked for above
+// reads alerts on every repository its account may see them on.
+const dependabotScope = (
+  <>
+    Dependabot alerts need <code className="text-ink-2">security_events</code>, which{' '}
+    <code className="text-ink-2">repo</code> includes; a fine-grained token needs read access to
+    Dependabot alerts.
   </>
 )
 
@@ -493,14 +505,14 @@ export default function GitHubAccessControl({
                 Enter the new token, with <code className="text-ink-2">repo</code>,{' '}
                 <code className="text-ink-2">read:org</code>, and{' '}
                 <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
-                show what it can reach before your current token is replaced.
+                show what it can reach before your current token is replaced. {dependabotScope}
               </>
             ) : (
               <>
                 Enter a token with <code className="text-ink-2">repo</code>,{' '}
                 <code className="text-ink-2">read:org</code>, and{' '}
                 <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
-                show what it can reach before anything is stored.
+                show what it can reach before anything is stored. {dependabotScope}
               </>
             )
           }
@@ -830,6 +842,7 @@ export default function GitHubAccessControl({
               isLocal={ctx.isLocal}
             />
           )}
+          {orgId && installCount > 0 && <GitHubDependabotNotice orgId={orgId} credential="app" />}
           <GitHubInstallationList installations={installations} drift={findings.drift} />
           <GitHubGrantFindings findings={findings} />
           {error && <p className="text-ui text-alarm">{error}</p>}
@@ -892,6 +905,9 @@ export default function GitHubAccessControl({
             onDisconnect={(inst) => void disconnectManaged(inst)}
           />
           {installCount > 0 && <GitHubGrantFindings findings={findings} />}
+          {orgId && installCount > 0 && (
+            <GitHubDependabotNotice orgId={orgId} credential="managed" />
+          )}
           {error && <p className="text-ui text-alarm">{error}</p>}
           {orgId && (
             <div className="flex flex-wrap items-center gap-2">
@@ -926,6 +942,7 @@ export default function GitHubAccessControl({
             ) : null}
             . Switch to a GitHub App to {appPitch}.
           </p>
+          {orgId && <GitHubDependabotNotice orgId={orgId} credential="token" />}
           <div className="flex flex-wrap items-center gap-2">
             {/* Rotation lives beside the switch, not inside it: replacing an
                 expired or revoked token is routine hygiene, and routing it
@@ -1190,7 +1207,7 @@ function TokenScreen({
               Enter a token with <code className="text-ink-2">repo</code>,{' '}
               <code className="text-ink-2">read:org</code>, and{' '}
               <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
-              show which repositories it can reach before anything changes.
+              show which repositories it can reach before anything changes. {dependabotScope}
             </>
           )}
         </p>

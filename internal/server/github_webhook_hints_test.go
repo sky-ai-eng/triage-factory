@@ -172,6 +172,36 @@ func TestGitHubWebhook_RefreshMarks_NamesNothing(t *testing.T) {
 	}
 }
 
+// TestGitHubWebhook_DependabotAlertIsRecordedOnly: the App subscribes to
+// dependabot_alert, and a delivery of it in a tracked repository is recorded
+// and acknowledged and does nothing else yet: no mark and no nudge.
+func TestGitHubWebhook_DependabotAlertIsRecordedOnly(t *testing.T) {
+	if hintedEvent("dependabot_alert") {
+		t.Fatal("dependabot_alert is parsed as a refresh hint, which names no alert target yet")
+	}
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	trackHintRepo(t, s, hintRepoID, "api")
+	nudges := captureNudges(s)
+
+	body := []byte(`{"action":"created","alert":{"number":3,"state":"open",` +
+		`"dependency":{"package":{"ecosystem":"npm","name":"lodash"},"manifest_path":"package-lock.json"}},` +
+		`"repository":{"id":9001},"installation":{"id":4242}}`)
+	if rec := postWebhookDelivery(s, "dependabot_alert", sign(body), body, "gh-delivery-dependabot"); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if marks := refreshMarks(t, s); len(marks) != 0 {
+		t.Errorf("marks = %+v, want none", marks)
+	}
+	if n := nudges(); len(n) != 0 {
+		t.Errorf("nudges = %v, want none", n)
+	}
+	if n := deliveryRows(t, s); n != 1 {
+		t.Errorf("delivery rows = %d, want the delivery recorded", n)
+	}
+}
+
 // TestGitHubWebhook_RefreshMarks_UntrackedRepository: a delivery for a
 // repository no team tracks, or one TF holds no row for, is recorded and
 // acknowledged, writes no mark and sends no nudge, and creates no registry row.
