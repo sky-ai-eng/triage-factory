@@ -30,11 +30,12 @@ func WrapSystemNote(body string) string {
 }
 
 // seenOnGitHub closes the note for a change the reconciler read from GitHub.
-// Nothing records who made such a change, and the agent's own `gh pr ready`
-// or `gh pr close` reaches the row the same way, a poll cycle later. So the
+// The reconciler does not look up who made such a change, and the agent's
+// own `gh pr ready` or `gh pr close` reaches the row the same way. So the
 // note says how TF learned of the change and leaves the agent to recognize
-// its own.
-const seenOnGitHub = " Triage Factory saw this on GitHub some time after it happened, so it may be a change you made yourself."
+// its own. It says nothing about when: how soon TF sees a change depends on
+// how it is told of it.
+const seenOnGitHub = " Triage Factory saw this on GitHub and did not check who made the change, so it may be one you made yourself."
 
 // DeliverableResolutionNote returns the one-line, agent-facing note for a deliverable
 // just resolved, or "" if the deliverable is not in one of the four reported
