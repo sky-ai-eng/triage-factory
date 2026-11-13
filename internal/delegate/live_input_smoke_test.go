@@ -414,8 +414,8 @@ func TestLiveInput_ANewEventDuringAReplyIsTheNextTurn(t *testing.T) {
 	e := startSDKLiveCheck(t, "li-event", "Count from 1 to 60, one number per line, with no other text.")
 	time.Sleep(1500 * time.Millisecond)
 	const body = "New commits were pushed to the pull request. Acknowledge this note by replying with exactly the word MANGO."
-	if !e.s.stageNoteAtToolBoundary(e.ctx, e.park.orgID, e.park.conversationID, domain.MessageSubtypeInjectionEvent,
-		domain.StagedInjectionProducerPRNewCommits, body, domain.NoteProvenance{}) {
+	if _, ok := e.s.stageNoteAtToolBoundary(e.ctx, e.park.orgID, e.park.conversationID, domain.MessageSubtypeInjectionEvent,
+		domain.StagedInjectionProducerPRNewCommits, body, domain.NoteProvenance{}); !ok {
 		t.Fatalf("stage failed")
 	}
 

@@ -533,7 +533,7 @@ func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{
 		EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev1",
-	})
+	}).Outcome
 	if outcome != InjectDeliveredRemote {
 		t.Fatalf("outcome = %v, want InjectDeliveredRemote", outcome)
 	}
@@ -555,7 +555,7 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
-	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj2", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{})
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj2", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{}).Outcome
 	if outcome != InjectStagedResumable {
 		t.Fatalf("outcome = %v, want InjectStagedResumable", outcome)
 	}
@@ -583,7 +583,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	s := NewSpawner(database, stores, nil, nil, "m")
 	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
-	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{})
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{}).Outcome
 	if outcome != InjectNotDelivered {
 		t.Fatalf("outcome = %v, want InjectNotDelivered", outcome)
 	}
@@ -640,7 +640,7 @@ func TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutSignal(t *te
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-native",
 		domain.EventGitHubPRCICheckFailed, "CI failed", prov, AdditiveFiringRef{
 			EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev-native",
-		})
+		}).Outcome
 	if outcome != InjectStagedResumable {
 		t.Fatalf("outcome = %v, want InjectStagedResumable", outcome)
 	}
@@ -660,6 +660,51 @@ func TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutSignal(t *te
 	}
 	if firings != 0 {
 		t.Errorf("pending_firings holds %d row(s), want 0", firings)
+	}
+}
+
+// TestStageOrDeliverAdditiveEvent_NamesTheNoteUnderARunningBlueprint: a fold
+// into a step of a running blueprint reports the staged note, so the router
+// holds the firing it replaced behind it. A fold into a conversation whose
+// blueprint has finished (a person's follow-up turn on it) reports none, so
+// the router marks the event injected.
+func TestStageOrDeliverAdditiveEvent_NamesTheNoteUnderARunningBlueprint(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// runStatus settles the conversation's blueprint run; empty leaves
+		// it running.
+		runStatus domain.BlueprintRunStatus
+		wantNote  bool
+	}{
+		{name: "blueprint running", wantNote: true},
+		{name: "blueprint finished", runStatus: domain.BlueprintRunStatusCompleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedConversation(t, database, "r-fold", "sess", "/tmp/wt")
+			setConversationRuntime(t, database, "r-fold", domain.ConversationRuntimeNative)
+			if tc.runStatus != "" {
+				settleConversationBlueprint(t, database, "r-fold", string(tc.runStatus))
+			}
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+			got := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-fold",
+				domain.EventGitHubPRCICheckFailed, "CI failed", domain.NoteProvenance{}, AdditiveFiringRef{})
+			if got.Outcome != InjectStagedResumable {
+				t.Fatalf("outcome = %v, want InjectStagedResumable", got.Outcome)
+			}
+			staged, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, "r-fold")
+			if err != nil || len(staged) != 1 {
+				t.Fatalf("staged = %+v (err=%v), want the one folded note", staged, err)
+			}
+			want := ""
+			if tc.wantNote {
+				want = staged[0].ID
+			}
+			if got.HandedNoteID != want {
+				t.Errorf("HandedNoteID = %q, want %q", got.HandedNoteID, want)
+			}
+		})
 	}
 }
 
@@ -685,7 +730,7 @@ func TestStageOrDeliverAdditiveEvent_FinishedNativeNotDelivered(t *testing.T) {
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-native-done",
 		domain.EventGitHubPRCICheckFailed, "CI failed", domain.NoteProvenance{}, AdditiveFiringRef{
 			EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev1",
-		})
+		}).Outcome
 	if outcome != InjectNotDelivered {
 		t.Fatalf("outcome = %v, want InjectNotDelivered", outcome)
 	}
@@ -942,7 +987,7 @@ func TestStageOrDeliverAdditiveEvent_RemoteSignalCarriesProvenance(t *testing.T)
 
 	want := domain.NoteProvenance{EventID: "ev-remote", EventType: domain.EventGitHubPRCICheckFailed}
 	if outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-prov",
-		domain.EventGitHubPRCICheckFailed, "body", want, AdditiveFiringRef{}); outcome != InjectDeliveredRemote {
+		domain.EventGitHubPRCICheckFailed, "body", want, AdditiveFiringRef{}).Outcome; outcome != InjectDeliveredRemote {
 		t.Fatalf("outcome = %v, want InjectDeliveredRemote", outcome)
 	}
 

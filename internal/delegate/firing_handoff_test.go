@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -231,4 +232,157 @@ func TestHandOffQueuedFirings_LeavesFiringsOnAClosedTask(t *testing.T) {
 		s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
 		requireStillQueued(t, s, entityID, conv.ID)
 	})
+}
+
+// An event folded into an earlier step that concluded without reading it
+// reaches the step starting now: the earlier step's note is withdrawn and the
+// firing names the note staged for this one. That holds for a step of an
+// earlier run too, whose firing was queued before this run started. A firing
+// whose note was read is left for the firing worker to settle as injected.
+func TestHandOffQueuedFirings_TakesOverAnEarlierStepsUnreadNote(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read bool
+		// earlierRun has the run start after the firing was queued, as a
+		// run the firing worker fired once the earlier one ended.
+		earlierRun bool
+	}{
+		{name: "unread"},
+		{name: "unread under an earlier run", earlierRun: true},
+		{name: "read", read: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-next")
+			ctx := context.Background()
+			org := runmode.LocalDefaultOrgID
+			stepIdx := 0
+			dbtest.SeedConversation(t, database, domain.Conversation{
+				ID:                 "step-earlier",
+				TaskID:             taskID,
+				PromptID:           "test-prompt",
+				Status:             "completed",
+				Model:              "claude-sonnet-4-6",
+				BlueprintRunID:     br.ID,
+				BlueprintStepIndex: &stepIdx,
+			})
+
+			// The router's fold into the earlier step: the event staged as
+			// its note, and the firing it replaced held behind the note.
+			eventID := seedFakeEvent(t, database)
+			if _, err := database.Exec(`INSERT INTO task_events (task_id, event_id, kind) VALUES (?, ?, 'bumped')`, taskID, eventID); err != nil {
+				t.Fatalf("seed task event: %v", err)
+			}
+			earlierNote, ok := s.stageInjection(ctx, org, "step-earlier", domain.MessageSubtypeInjectionEvent, domain.EventGitHubPRCICheckFailed,
+				"the earlier step's note", domain.NoteProvenance{EventID: eventID, EventType: domain.EventGitHubPRCICheckFailed})
+			if !ok {
+				t.Fatal("stage the earlier step's note failed")
+			}
+			if _, err := s.pendingFirings.EnqueueHanded(ctx, org, entityID, taskID, triggerID, eventID, earlierNote, db.AgentClaimStamp{}); err != nil {
+				t.Fatalf("hold the firing behind the note: %v", err)
+			}
+			if tc.read {
+				if notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, "step-earlier"); err != nil || len(notes) != 1 {
+					t.Fatalf("read the earlier step's note: %+v, err=%v", notes, err)
+				}
+			}
+
+			run := *br
+			if tc.earlierRun {
+				run.StartedAt = time.Now().Add(time.Hour)
+			}
+			s.handOffQueuedFirings(ctx, org, &run, conv, readTask(t, s, taskID))
+
+			rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("firings = %d rows, err=%v, want 1", len(rows), err)
+			}
+			f := rows[0]
+			notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
+			if err != nil {
+				t.Fatalf("flush the starting step: %v", err)
+			}
+			if tc.read {
+				if f.Status != workitem.StatusReady || f.HandedNoteID != earlierNote {
+					t.Errorf("firing = %+v, want it still naming the read note %q", f, earlierNote)
+				}
+				if len(notes) != 0 {
+					t.Errorf("starting step's notes = %+v, want none for an event already read", notes)
+				}
+				return
+			}
+			if f.Status != workitem.StatusReady || f.HandedNoteID == "" || f.HandedNoteID == earlierNote {
+				t.Errorf("firing = %+v, want it ready and naming a note other than the earlier step's %q", f, earlierNote)
+			}
+			if len(notes) != 1 || notes[0].ID != f.HandedNoteID || notes[0].Provenance.EventID != eventID {
+				t.Errorf("starting step's notes = %+v, want the one the firing names, for event %s", notes, eventID)
+			}
+			if left, err := s.stagedInjections.FlushPendingSystem(ctx, org, "step-earlier"); err != nil || len(left) != 0 {
+				t.Errorf("earlier step's notes = %+v (err=%v), want its note withdrawn", left, err)
+			}
+		})
+	}
+}
+
+// Two firings for one event share a note left unread on an earlier step. The
+// one released is handed a note of its own on the starting step, never the
+// shared note its release withdrew, even while its sibling, whose release was
+// refused, still names that note.
+func TestHandOffQueuedFirings_NeverSharesANoteItWithdrew(t *testing.T) {
+	s, database, br, conv, entityID, taskID, triggerID := handOffFixture(t, "step-next")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	stepIdx := 0
+	dbtest.SeedConversation(t, database, domain.Conversation{
+		ID:                 "step-earlier",
+		TaskID:             taskID,
+		PromptID:           "test-prompt",
+		Status:             "completed",
+		Model:              "claude-sonnet-4-6",
+		BlueprintRunID:     br.ID,
+		BlueprintStepIndex: &stepIdx,
+	})
+	eventID := queueFiring(t, s, database, entityID, taskID, triggerID)
+	seedConversation(t, database, "step-other-blueprint", "sess-other", "/tmp/wt-other")
+	second := seedFakeTrigger(t, database, "step-other-blueprint")
+	if _, _, err := s.pendingFirings.Enqueue(ctx, org, entityID, taskID, second, eventID, db.AgentClaimStamp{}); err != nil {
+		t.Fatalf("enqueue second firing: %v", err)
+	}
+	rows, err := s.pendingFirings.ListForEntity(ctx, org, entityID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("firings = %d rows, err=%v, want 2", len(rows), err)
+	}
+	note := domain.StagedInjection{ConversationID: "step-earlier", Subtype: domain.MessageSubtypeInjectionEvent, Producer: "p", Body: "the earlier step's note",
+		Provenance: domain.NoteProvenance{EventID: eventID, EventType: domain.EventGitHubPRCICheckFailed}}
+	shared, handed, err := s.pendingFirings.HandOffToConversation(ctx, org, rows[0].ID, &note, "")
+	if err != nil || !handed {
+		t.Fatalf("hand the first firing to the earlier step: handed=%v err=%v", handed, err)
+	}
+	if _, handed, err := s.pendingFirings.HandOffToConversation(ctx, org, rows[1].ID, nil, shared); err != nil || !handed {
+		t.Fatalf("hand the second firing the shared note: handed=%v err=%v", handed, err)
+	}
+	// The second firing's release is refused: an operator asked to cancel it.
+	h, ok := s.pendingFirings.(db.WorkKindHandle)
+	if !ok {
+		t.Fatalf("%T does not implement db.WorkKindHandle", s.pendingFirings)
+	}
+	if err := workitem.RequestCancel(ctx, h.Conn(), h.Kind(), org, rows[1].ID, "operator", "stop"); err != nil {
+		t.Fatalf("request cancel: %v", err)
+	}
+
+	s.handOffQueuedFirings(ctx, org, br, conv, readTask(t, s, taskID))
+
+	rows, err = s.pendingFirings.ListForEntity(ctx, org, entityID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("firings = %d rows, err=%v, want 2", len(rows), err)
+	}
+	if rows[0].HandedNoteID == "" || rows[0].HandedNoteID == shared {
+		t.Errorf("released firing names %q, want a note of its own, not the withdrawn %q", rows[0].HandedNoteID, shared)
+	}
+	if rows[1].HandedNoteID != shared {
+		t.Errorf("cancelled firing names %q, want it left naming %q", rows[1].HandedNoteID, shared)
+	}
+	notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
+	if err != nil || len(notes) != 1 || notes[0].ID != rows[0].HandedNoteID {
+		t.Errorf("starting step's notes = %+v (err=%v), want the one the released firing names", notes, err)
+	}
 }
