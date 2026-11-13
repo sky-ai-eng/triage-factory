@@ -19,9 +19,10 @@ import (
 // narrowly as the job allows: the envelope's three known members, the top level
 // of the operation that runs (plus the fragments that operation spreads into
 // it), a node id out of the variables, and whether the request names a pending
-// review anywhere. Nothing walks the arguments, and no text an agent or a
+// review anywhere. Nothing here walks the arguments, and no text an agent or a
 // stranger wrote is ever interpreted — see gqldoc.go for what the reader
-// refuses to look at.
+// refuses to look at. A request that performs no mutation is read separately,
+// for the objects its query addresses (read.go).
 //
 // The mutation names below are the vocabulary GitHub's schema defines, mapped
 // onto the same domain actions the REST shapes produce. One act, one name,

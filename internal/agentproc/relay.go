@@ -41,6 +41,11 @@ const (
 	// A GraphQL write carries what its request envelope disclosed alongside the
 	// wire facts, since its path says only that a POST reached /graphql.
 	OpRecordGHWrite = "record_gh_write"
+	// OpRecordGHRead is the gh-channel injector's record of a pull request or
+	// issue a read addressed, sent once per object per run, with what GitHub
+	// answered the injector for it. The orchestrator records the run's touch
+	// of that entity from it.
+	OpRecordGHRead = "record_gh_read"
 	// OpAuthorizeGHWrite is the gh-channel injector's per-request decision on a
 	// shape the refusal policy gates — a merge, a submitted review, a
 	// repository creation, or a GraphQL request whose act could not be read.
@@ -194,6 +199,22 @@ type RecordGHWriteArgs struct {
 	// GitHub answered the injector for the write's objects
 	// (ghwrite.Observation.Identity): the repository's id and current name,
 	// and the pull request's or issue's node id and kind.
+	RepositoryID   string `json:"repository_id,omitempty"`
+	RepositoryName string `json:"repository_name,omitempty"`
+	ObjectNodeID   string `json:"object_node_id,omitempty"`
+	ObjectKind     string `json:"object_kind,omitempty"`
+}
+
+// RecordGHReadArgs is record_gh_read's payload: the repository and number one
+// read through the gh channel spelled, and what GitHub answered the injector
+// for them (ghwrite.ReadObservation.Identity): the repository's id and current
+// name, and the pull request's or issue's node id and kind. The orchestrator
+// resolves the entity from those ids; the spelling is a display key.
+type RecordGHReadArgs struct {
+	Owner  string `json:"owner"`
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+
 	RepositoryID   string `json:"repository_id,omitempty"`
 	RepositoryName string `json:"repository_name,omitempty"`
 	ObjectNodeID   string `json:"object_node_id,omitempty"`

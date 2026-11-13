@@ -208,3 +208,58 @@ func TestStart_ObserveWriteReachesInjector(t *testing.T) {
 		t.Fatal("a gh-channel write never reached ObserveWrite")
 	}
 }
+
+// TestStart_ObserveReadReachesInjector pins the local half of the read touch:
+// a read through the channel that addresses a pull request reaches the caller's
+// ObserveRead hook with what GitHub calls it. Local mode has no relay hop, so
+// an unwired callback loses every object a local run reads with gh from its
+// touched entities.
+func TestStart_ObserveReadReachesInjector(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/repos/octo/repo/pulls/7" {
+			_, _ = w.Write([]byte(`{"number":7,"node_id":"PR_kw7","base":{"repo":{"id":4,"full_name":"octo/repo"}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer upstream.Close()
+
+	reads := make(chan ghinjector.ObservedRead, 2)
+	cfg := okConfig(t)
+	cfg.Upstream = upstream.URL
+	cfg.ObserveRead = func(_ context.Context, r ghinjector.ObservedRead) { reads <- r }
+	ch, err := Start(cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ch.Close() })
+
+	pem, err := os.ReadFile(ch.CertPath)
+	if err != nil {
+		t.Fatalf("read trust file: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		t.Fatal("trust file carried no usable cert")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	req, _ := http.NewRequest(http.MethodGet, "https://"+ch.Host+"/api/v3/repos/octo/repo/pulls/7/files", nil)
+	req.Header.Set("Authorization", "token "+ch.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request through channel: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case r := <-reads:
+		if r.Owner != "octo" || r.Repo != "repo" || r.Number != 7 || r.Identity.NodeID != "PR_kw7" || r.Identity.RepositoryID != "4" {
+			t.Errorf("observed read = %+v, want octo/repo#7 with its node id and repository id", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a gh-channel read never reached ObserveRead")
+	}
+}

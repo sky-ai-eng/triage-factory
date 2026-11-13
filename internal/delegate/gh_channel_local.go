@@ -111,6 +111,14 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 			// audited from a sandbox.
 			agenthost.RecordGHChannelWrite(ctx, stores, info, w, credential)
 		},
+		ObserveRead: func(ctx context.Context, read ghinjector.ObservedRead) {
+			if !storesSet {
+				return
+			}
+			// The recorder the relayed (multi) path applies, so an object read
+			// here is the touched entity it is from a sandbox.
+			agenthost.RecordGHChannelRead(ctx, stores, info, read)
+		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {
 			// The same decision the sandbox path relays, minus the relay and
 			// minus the re-derivation it exists for: the proxy that recognized

@@ -2896,6 +2896,27 @@ func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Obse
 	RecordGHChannelWrite(ctx, c.stores, c.info, obs, c.githubCredential())
 }
 
+// RecordGHChannelRead records the run's touch of one pull request or issue a
+// read through the real-`gh` channel addressed: the durable
+// (conversation, entity, role='touched') row an addressed exec read records
+// (recordEntityTouch), so an object read with `gh pr view` is a touched entity
+// like one read with `exec gh pr view`. The entity is resolved from
+// obs.Identity, what GitHub answered the injector for the object, never from
+// the spelling the request used; an observation with no node id touches
+// nothing.
+//
+// Exported for the reason RecordGHChannelWrite is: local mode records it with
+// stores and a ConversationInfo in hand, and the relay server applies the
+// sandbox path's record through the same function. A read is no act, so it
+// leaves no audit row. Best-effort.
+func RecordGHChannelRead(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.ReadObservation) {
+	recordEntityTouch(ctx, stores, info, entityCoordinate{
+		provider: domain.ProviderGitHub,
+		target:   domain.PullRequestTarget(obs.Owner+"/"+obs.Repo, obs.Number),
+		github:   obs.Identity,
+	})
+}
+
 // GHWriteDeniedAction builds the audit row for one gh-channel request the
 // refusal policy stopped. Exported for the same reason GHChannelWriteAction is:
 // local mode records it without a LocalClient in hand, and one builder keeps

@@ -616,7 +616,8 @@ func runMayRecordAgainst(ctx context.Context, stores db.Stores, info Conversatio
 // recordEntityTouch resolves-or-creates the touched entity for a coordinate
 // and, when it maps to a real entity, persists a durable
 // (conversation_id, entity_id, role='touched') row. It is the addressed-read
-// path's (Runtime.RecordReadTouch); the write funnel resolves its action's
+// path's: an exec verb's (Runtime.RecordReadTouch) and a read through the
+// real-`gh` channel's (RecordGHChannelRead). The write funnel resolves its action's
 // entity before the write (resolveActionReferences), links the audit row to it,
 // and records the entity's row once the write settles (recordActionMemoryLink), as
 // produced when the action names the object it changed.

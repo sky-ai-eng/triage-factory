@@ -1336,7 +1336,7 @@ func TestGraphQLTable_ActionsAreKnownVocabulary(t *testing.T) {
 // written, parsed in the process holding the run's live GitHub credential. The
 // reader must terminate and must not panic on anything, however malformed.
 //
-// What a crash here costs is the request, not the process: captureGraphQLWrite
+// What a crash here costs is the request, not the process: captureGraphQL
 // runs inside ReverseProxy.Rewrite under http.Server, and net/http recovers a
 // panic per connection — it logs, closes that connection, and every other proxy
 // in the sidecar keeps serving. The containment argument for the goroutines that
