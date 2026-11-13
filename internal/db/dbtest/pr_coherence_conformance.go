@@ -3,7 +3,6 @@ package dbtest
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -406,16 +405,15 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
 		extra.ActiveClaim(t, conversationID)
-		// The turn concluded and its engagement kept the claim warm: nothing
-		// is live to read a note.
-		seed.BackdateCompletedAt(t, conversationID, time.Minute)
+		// The turn ended, parked with no verdict, and its engagement kept the
+		// claim warm: nothing is live to read a note.
 		if _, err := store.SetActiveClaimPhaseSystem(context.Background(), orgID, conversationID, domain.ClaimPhaseWarm); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem(warm): %v", err)
 		}
 
 		targets := lookup(t, store, orgID, query(entityID, eventID, ""))
 		if target := requireOneCoherenceTarget(t, targets, conversationID); target.Active {
-			t.Error("Active = true for a warm claim on a concluded conversation")
+			t.Error("Active = true for a warm claim on a parked conversation")
 		}
 	})
 

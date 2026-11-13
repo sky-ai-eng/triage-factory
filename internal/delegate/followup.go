@@ -172,7 +172,9 @@ func resumableState(status string) bool {
 // deferral spawned in the meantime. Staging is an automated channel and needs
 // an automated reader:
 //
-//   - open, no verdict — a claim picks it back up as soon as input lands.
+//   - open, no verdict — a step parked mid-work, or a person's thread between
+//     turns on a blueprint that is not running. The conversation is still
+//     live, and the claim its next message brings reads the note with it.
 //   - concluded, abort — the agent stopped mid-work; the blueprint re-opens on
 //     the resume, so the work is still in flight in every sense but the row.
 //
@@ -645,17 +647,18 @@ func (s *Spawner) ringWarmWait(ctx context.Context, orgID string, conv *domain.C
 // is also what keeps the claim this wake makes from overlapping the cleanup
 // of the engagement that concluded.
 //
-// It wakes a conversation whose latest disposition is its verdict, or an idle
-// park since: a follow-up on finished work keeps the earlier conclusion stamp
-// when it parks, which keeps it out of the claim queue too, and a message
-// that landed during the turn it parked on would otherwise wait for the next
-// one. An idle park always follows a drain in its engagement, so the claim
-// this makes reads the message first, and a second idle park has nothing left
-// to wake for. Every other park reason is left alone: a stop is a person's or
-// TF's decision the wake must not undo, and a park that waits for a person
-// after its retries are spent would only be retried into the same park. A
-// conversation parked with no verdict at all is claimable by the queue
-// without a wake.
+// It wakes only a concluded conversation. A conversation parked with no
+// verdict is claimable by the queue without a wake, and that includes a
+// follow-up on a finished blueprint, whose resume cleared the verdict and
+// whose turn ends write none: a message that lands as one of its turns ends
+// is the queue's to drive.
+//
+// A concluded row that also carries a park reason is a stored row, which no
+// write produces: a park on top of a verdict. For those rows an idle park is
+// woken for like a verdict, and every other reason is left alone: a stop is a
+// person's or TF's decision the wake must not undo, and a park that waits for
+// a person after its retries are spent would only be retried into the same
+// park.
 //
 // A step the reactor's advance ended is not woken but forwarded: its messages
 // go to the step now running (forwardToCurrentStep). A conversation the wake

@@ -124,7 +124,7 @@ const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `'
 // idleWarmClaimSQL and workingClaimExistsSQL are the Postgres twins'
 // predicates in this dialect, which carry why.
 func idleWarmClaimSQL(cl string) string {
-	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, 0)`
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND r.status = 'open', 0)`
 }
 
 var workingClaimExistsSQL = `EXISTS (
@@ -951,13 +951,18 @@ const conversationTimingStatusSQL = `COALESCE(status, CASE WHEN EXISTS (
 		  AND cl.lease_expires_at > ` + sqliteNowExpr + `)
 	THEN 'running' ELSE 'queued' END)`
 
+// conversationTimingCompletedSQL is the timing projection's Completed: the row
+// is a completed run (db.SQLiteCompletedRunSQL). Coalesced because a
+// mid-flight row's NULL status makes the bare test NULL.
+var conversationTimingCompletedSQL = `COALESCE(` + db.SQLiteCompletedRunSQL("conversations") + `, 0)`
+
 func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT org_id, `+conversationTimingStatusSQL+`, COALESCE(failure_kind, ''),
-		       started_at, completed_at, `+conversationTimingClaimCols+`
+		       started_at, completed_at, `+conversationTimingCompletedSQL+`, `+conversationTimingClaimCols+`
 		FROM conversations
 		WHERE type = 'delegation' AND started_at >= ?
 		ORDER BY started_at DESC
@@ -1015,7 +1020,7 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 	// everywhere (the store-package ratchet enforces it) and the two shapes
 	// differ only in trailing width, which sorts as a tie the id breaks.
 	q := `SELECT org_id, ` + conversationTimingStatusSQL + `, COALESCE(failure_kind, ''),
-	             started_at, completed_at, ` + conversationTimingClaimCols + `
+	             started_at, completed_at, ` + conversationTimingCompletedSQL + `, ` + conversationTimingClaimCols + `
 	      FROM conversations WHERE type = 'delegation' AND org_id = ? AND started_at >= ?`
 	args := []any{orgID, since.UTC()}
 	if !until.IsZero() {
@@ -1742,7 +1747,7 @@ func scanSqliteConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming,
 		var durationMS sql.NullInt64
 		if err := rows.Scan(
 			&t.OrgID, &t.Status, &t.FailureKind,
-			&t.StartedAt, &completedAt, &durationMS, &executorID, &claimedAt,
+			&t.StartedAt, &completedAt, &t.Completed, &durationMS, &executorID, &claimedAt,
 		); err != nil {
 			return nil, err
 		}

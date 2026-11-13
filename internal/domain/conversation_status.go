@@ -27,7 +27,11 @@ import "slices"
 // A conversation parked with its verdict is CONCLUDED — status `open` with
 // CompletedAt set (Conversation.Concluded) — which is what every "will this
 // conversation take more input on its own" question reads instead of a
-// status. Stopping a conversation is a park too — a park that is never
+// status. A verdict is a blueprint step's answer, so a turn writes one only
+// while its blueprint run is running, where the reactor reads it. A turn that
+// ends on a blueprint that has finished, or with no blueprint, parks with no
+// verdict, and the conversation stays live between a person's messages.
+// Stopping a conversation is a park too — a park that is never
 // resumed IS the cancellation, and cancellation itself is already spelled at
 // the task layer (return-to-queue, drag-to-done) and the blueprint layer
 // (`cancel_requested` / BlueprintRunStatusCancelled).
@@ -90,8 +94,10 @@ const (
 	// Derived.
 	StatusRunning = "running"
 	// StatusOpen — a turn ended: parked, not executing, resumed through its
-	// own path rather than the dispatcher. A turn that ended with the step's
-	// verdict parks here too, with CompletedAt set (Conversation.Concluded).
+	// own path rather than the dispatcher. A turn that ended a running
+	// blueprint's step parks here too, with the step's verdict and CompletedAt
+	// set (Conversation.Concluded). A turn that ended on a finished blueprint,
+	// or with no blueprint, parks here with neither.
 	StatusOpen = "open"
 
 	// StatusFailed — the infrastructure under the agent died.
@@ -157,9 +163,13 @@ func IsTerminalConversationStatus(status string) bool {
 // CompletedAt rather than Outcome, because the stamp is the one both kinds of
 // concluded row carry: a conclusion recorded without an outcome token (the
 // reactor resolves an empty outcome by position) is concluded all the same.
-// A wake leaves the stamp in place — a follow-up on finished work parks
-// concluded again — and only the re-open of an aborted blueprint clears it,
-// together with the verdict it withdraws.
+//
+// Only a turn that ends while its blueprint run is running stamps it, and the
+// resume that wakes a concluded conversation clears it together with the
+// verdict. So a step a person follows up on after its blueprint finished is
+// concluded until the first follow-up and not after: between its turns it is
+// `open` with no verdict, and every reader of whether the task's work is over
+// counts it as live.
 func (c *Conversation) Concluded() bool {
 	return c.Status == StatusOpen && c.CompletedAt != nil
 }

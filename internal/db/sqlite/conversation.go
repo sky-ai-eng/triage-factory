@@ -198,30 +198,33 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 	return completeConversationFlip(ctx, q, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
 }
 
-// completeConversationFlip is the terminal status flip, RETURNING the row as
-// Get reads it: always the last statement of its caller's write, so the
-// derived columns it returns reflect the claim writes before it.
+// completeConversationFlip is the write for a turn the model ended on its own
+// (status 'open') or for a failure, RETURNING the row as Get reads it: always
+// the last statement of its caller's write, so the derived columns it returns
+// reflect the claim writes before it.
 //
-// A verdict (status 'open') records no park reason, since nothing stopped the
-// conversation; completed_at is its stamp, and what the idle sweeps age it
-// from. A failure leaves the reason as it was.
+// An `open` write records a verdict only while the conversation's blueprint
+// run is running; any other turn end is parked with no verdict, stamped
+// parked_at. The Postgres twin carries the model.
 func completeConversationFlip(ctx context.Context, q queryer, conversationID, status, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
 		UPDATE conversations
-		SET status = ?,
-		    completed_at = ?,
-		    park_reason = CASE WHEN ? = 'open' THEN NULL ELSE park_reason END,
-		    result_summary = ?,
-		    outcome = ?,
-		    outcome_reason = ?,
-		    failure_kind = ?,
+		SET status = @status,
+		    completed_at = CASE WHEN `+recordsVerdictSQL+` THEN @now END,
+		    parked_at = CASE WHEN `+recordsVerdictSQL+` THEN parked_at ELSE COALESCE(parked_at, @now) END,
+		    park_reason = CASE WHEN @status = 'open' THEN NULL ELSE park_reason END,
+		    result_summary = @summary,
+		    outcome = CASE WHEN `+recordsVerdictSQL+` THEN @outcome END,
+		    outcome_reason = CASE WHEN `+recordsVerdictSQL+` THEN @outcome_reason END,
+		    failure_kind = @failure_kind,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
 		    stop_requested_reason = NULL
-		WHERE id = ?
-		RETURNING `+sqliteConversationReturningColumns, status, time.Now().UTC(), status, resultSummary,
-		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
-		conversationID)
+		WHERE id = @id
+		RETURNING `+sqliteConversationReturningColumns,
+		sql.Named("status", status), sql.Named("now", time.Now().UTC()), sql.Named("summary", resultSummary),
+		sql.Named("outcome", nullIfEmpty(outcome)), sql.Named("outcome_reason", nullIfEmpty(outcomeReason)),
+		sql.Named("failure_kind", nullIfEmpty(failureKind)), sql.Named("id", conversationID))
 	var r domain.Conversation
 	if err := scanConversation(row, &r); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -231,6 +234,12 @@ func completeConversationFlip(ctx context.Context, q queryer, conversationID, st
 	}
 	return &r, nil
 }
+
+// recordsVerdictSQL is the Postgres twin's test in this dialect: every write
+// but an `open` one, and an `open` one whose blueprint run is running.
+const recordsVerdictSQL = `(@status <> 'open' OR EXISTS (
+		        SELECT 1 FROM blueprint_runs br
+		        WHERE br.id = conversations.blueprint_run_id AND br.status = 'running'))`
 
 // complete settles the terminal write on the caller's own transaction — see
 // completeConversationReturning for the shared logic and why the statement
@@ -357,12 +366,13 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 
 // sqliteResumeFlip is the resume's one conversation write, shared by
 // MarkQueuedForResume and ResumeWarmClaimSystem so both take a conversation
-// out of its park under one set of guards. The Postgres twin carries the
-// model.
+// out of its park under one set of guards, and clear the verdict of a
+// finished blueprint's step. The Postgres twin carries the model.
 func sqliteResumeFlip(ctx context.Context, q queryer, conversationID string) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
+		                completed_at = NULL, outcome = NULL, outcome_reason = NULL,
 		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 		                next_attempt_at = NULL,
 		                queued_at = ?,

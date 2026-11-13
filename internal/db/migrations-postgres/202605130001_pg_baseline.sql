@@ -229,6 +229,33 @@ $$;
 -- +goose StatementEnd
 
 
+-- Reads whether one blueprint run completed past the same creator-scoped
+-- blueprint_runs_select policy, so a count of completed runs includes a step a
+-- person followed up on whoever reads it (a plain subquery would find nothing
+-- for a non-creator and drop the run from the count). The org check, the pinned
+-- search_path, and the false answer for a NULL id or a missing row are
+-- tf.blueprint_run_is_running's.
+-- +goose StatementBegin
+CREATE FUNCTION tf.blueprint_run_is_completed(p_id uuid, p_org_id uuid) RETURNS boolean
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+  IF p_id IS NULL THEN
+    RETURN false;
+  END IF;
+  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'blueprint_run_is_completed: requested org % does not match caller org %', p_org_id, tf.current_org_id();
+  END IF;
+  RETURN EXISTS (
+    SELECT 1 FROM blueprint_runs br
+    WHERE br.id = p_id AND br.org_id = p_org_id AND br.status = 'completed'
+  );
+END;
+$$;
+-- +goose StatementEnd
+
+
 -- Answers "is this run the task's newest" past the same creator-scoped
 -- blueprint_runs_select policy, for the terminal-on-last closing hooks: a task
 -- re-delegated by a different user has a newer MANUAL run the resolving caller
@@ -3296,6 +3323,10 @@ GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_app;
+
+
+REVOKE ALL ON FUNCTION tf.blueprint_run_is_completed(p_id uuid, p_org_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.blueprint_run_is_completed(p_id uuid, p_org_id uuid) TO tf_app;
 
 
 REVOKE ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) FROM PUBLIC;
@@ -7313,6 +7344,10 @@ GRANT SELECT ON TABLE public.blueprint_steps TO tf_system;
 -- still the task's newest. EXECUTE is the whole grant it needs: the function is
 -- SECURITY DEFINER and reads blueprint_runs as its owner.
 GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) TO tf_system;
+-- A turn end records a verdict only while the conversation's blueprint run is
+-- running, and a resume on a warm claim refuses a concluded step whose run still
+-- is. Both statements ask through this function, on the executor.
+GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_system;
 -- IncrementUsageSystem bumps a usage counter after resolving the step prompt.
 GRANT SELECT, UPDATE ON TABLE public.prompts TO tf_system;
 GRANT SELECT ON TABLE public.agents TO tf_system;

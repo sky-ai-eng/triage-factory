@@ -283,6 +283,29 @@ func ConcludedConversationSQL(alias string) string {
 	return `(` + alias + `.status = 'open' AND ` + alias + `.completed_at IS NOT NULL)`
 }
 
+// A completed run is a conversation whose work came to an answer: concluded,
+// or parked `open` under a blueprint run that completed. The second arm is a
+// step a person followed up on after its blueprint finished: the follow-up's
+// resume cleared the step's verdict and its turn ends write none, so the run's
+// own status is what still says the work completed. It is what a "runs
+// completed" count reads. The two spellings below differ only in how they read
+// that status.
+
+// SQLiteCompletedRunSQL is a completed run over the alias the caller names.
+func SQLiteCompletedRunSQL(alias string) string {
+	return `(` + ConcludedConversationSQL(alias) + ` OR (` + alias + `.status = 'open' AND EXISTS (
+		SELECT 1 FROM blueprint_runs br_done
+		WHERE br_done.id = ` + alias + `.blueprint_run_id AND br_done.status = 'completed')))`
+}
+
+// PostgresCompletedRunSQL is a completed run over the alias the caller names.
+// It reads the run's status through tf.blueprint_run_is_completed, because
+// blueprint_runs is readable only by a manual run's creator and a count read
+// by a teammate would otherwise leave the run out.
+func PostgresCompletedRunSQL(alias string) string {
+	return `(` + ConcludedConversationSQL(alias) + ` OR (` + alias + `.status = 'open' AND tf.blueprint_run_is_completed(` + alias + `.blueprint_run_id, ` + alias + `.org_id)))`
+}
+
 // SettledConversationSQL is a conversation that takes no more work on its own:
 // failed, or concluded. A follow-up may still wake a concluded one, and the
 // wake is what takes it out of this set.
@@ -752,9 +775,9 @@ type ConversationQueueStore interface {
 	// step's conversation settled (concluded or failed) more than grace ago
 	// and holds no unreleased claim. The reactor that should have
 	// advanced or ended each one never ran. A claim released inside the grace
-	// keeps its run out too, so a conversation resumed and concluded again is
-	// measured from its latest engagement, not from a completion stamp an
-	// earlier one left. Any other `open` step is never stranded: a plain stop
+	// keeps its run out too, so a step is measured from its latest
+	// engagement's release as well as from its stamp. Any other `open` step is
+	// never stranded: a plain stop
 	// leaves the run running on purpose. Cross-org system read, oldest run
 	// first.
 	StrandedBlueprintRunsSystem(ctx context.Context, grace time.Duration, limit int) ([]StrandedRun, error)

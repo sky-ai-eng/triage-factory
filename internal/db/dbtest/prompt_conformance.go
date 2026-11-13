@@ -38,7 +38,17 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 // the inserted run IDs in case the harness wants to clean them up
 // (it doesn't today — the per-test DB reset handles it). promptID is
 // the prompt's id the Stats subtests created via Create.
+//
+// One entry is not a status: SeedFollowedUp, which the seeder stages as `open`
+// with no verdict on a blueprint run of its own that completed.
 type ConversationSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
+
+// SeedFollowedUp is the seed spelling, for a ConversationSeederForStats, of a
+// blueprint's final step that a person followed up on after the blueprint
+// completed: the follow-up's resume cleared the step's verdict and its turn
+// ends write none, so the row is `open` with no conclusion stamp and its
+// blueprint run's status is what says the work completed.
+const SeedFollowedUp = "followed_up"
 
 // RunPromptStoreConformance runs the shared assertion suite against
 // any db.PromptStore impl. Each subtest gets a fresh store via
@@ -347,6 +357,35 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 		if age := time.Since(lastUsed); age < -time.Minute || age > time.Minute {
 			t.Errorf("last_used_at=%s is %s from now, want the newest seeded run (now)", *stats.LastUsedAt, age)
+		}
+	})
+
+	// A completed run is a concluded conversation, or one a person followed up
+	// on after its blueprint completed. The second holds no verdict any more,
+	// and counting only verdicts would turn a run that succeeded into one that
+	// did not the moment somebody replied to it. A step parked with no verdict
+	// under a blueprint still running has not completed anything.
+	t.Run("Stats_CountsAFollowedUpStepOfACompletedBlueprintAsCompleted", func(t *testing.T) {
+		store, orgID, teamID, seedConversations := factory(t)
+		ctx := context.Background()
+		id := "followed-up-p"
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "FU", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		seedConversations(t, id, []string{SeedConcluded, SeedFollowedUp, domain.StatusOpen, "failed"})
+
+		stats, err := store.Stats(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("stats: %v", err)
+		}
+		if stats.TotalRuns != 4 || stats.FailedRuns != 1 {
+			t.Fatalf("total_runs=%d failed_runs=%d, want 4 and 1", stats.TotalRuns, stats.FailedRuns)
+		}
+		if stats.CompletedRuns != 2 {
+			t.Errorf("completed_runs=%d, want 2: the concluded run and the followed-up one, not the step parked under a running blueprint", stats.CompletedRuns)
+		}
+		if stats.SuccessRate < 0.49 || stats.SuccessRate > 0.51 {
+			t.Errorf("success_rate=%f, want 0.50", stats.SuccessRate)
 		}
 	})
 

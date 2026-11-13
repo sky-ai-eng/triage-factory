@@ -229,21 +229,39 @@ func seedPgConversationsForStats(t *testing.T, conn *sql.DB, orgID, userID, prom
 	// (blueprint_runs_one_active_run_per_task), so staging a task's next
 	// engagement settles the one before it — which is what the task moving on
 	// means.
-	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
-		t.Fatalf("settle the task's prior blueprint_run: %v", err)
+	mintRun := func() string {
+		t.Helper()
+		if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE org_id = $1 AND task_id = $2 AND status = 'running'`, orgID, taskID); err != nil {
+			t.Fatalf("settle the task's prior blueprint_run: %v", err)
+		}
+		brID := uuid.New().String()
+		if _, err := conn.Exec(`
+			INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+			VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
+		`, brID, orgID, userID, bpID, taskID); err != nil {
+			t.Fatalf("seed blueprint_run: %v", err)
+		}
+		return brID
 	}
-	brID := uuid.New().String()
-	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
-	`, brID, orgID, userID, bpID, taskID); err != nil {
-		t.Fatalf("seed blueprint_run: %v", err)
+	// A followed-up step gets a blueprint run of its own. Minting these first
+	// and the shared run last leaves every one of them completed and the
+	// shared one running.
+	followedUpRuns := map[int]string{}
+	for i, status := range statusByOffset {
+		if status == dbtest.SeedFollowedUp {
+			followedUpRuns[i] = mintRun()
+		}
 	}
+	brID := mintRun()
 
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
 		conversationID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
+		runID := brID
+		if id, ok := followedUpRuns[i]; ok {
+			runID, status = id, domain.StatusOpen
+		}
 		resolved, concluded := dbtest.SeedStatus(status)
 		var completedAt any
 		if concluded {
@@ -252,7 +270,7 @@ func seedPgConversationsForStats(t *testing.T, conn *sql.DB, orgID, userID, prom
 		if _, err := conn.Exec(`
 			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, blueprint_run_id, completed_at)
 			VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, $5, $6, $7, $8, $9)
-		`, conversationID, orgID, userID, taskID, promptID, resolved, startedAt, brID, completedAt); err != nil {
+		`, conversationID, orgID, userID, taskID, promptID, resolved, startedAt, runID, completedAt); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped

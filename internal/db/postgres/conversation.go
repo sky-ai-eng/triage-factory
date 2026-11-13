@@ -233,9 +233,19 @@ func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, convers
 	return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
 }
 
-// completeConversationFlip is the terminal status flip, RETURNING the
-// conversation row exactly as Get would read it. Always the LAST statement of
-// its caller's write — see settleCompletionCostAndClaim's doc.
+// completeConversationFlip is the write for a turn the model ended on its own
+// (status 'open') or for a failure, RETURNING the conversation row exactly as
+// Get would read it. Always the LAST statement of its caller's write — see
+// settleCompletionCostAndClaim's doc.
+//
+// A verdict (completed_at, outcome, outcome_reason) is a blueprint step's
+// answer, so an `open` write records one only while the conversation's
+// blueprint run is running, where the reactor reads it to advance, finish or
+// abort the run. Any other turn end, on a blueprint that has finished or a
+// conversation with no blueprint, is parked with no verdict and stays live
+// for the next message. The statement decides, so the three conclusion sites
+// (the native runtime's cold and warm turn ends, and the SDK's) cannot
+// disagree, and each reads which it was off the returned row's Concluded.
 func completeConversationFlip(ctx context.Context, q queryer, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	// The conversation carries no accounting cache — cost settled as one
 	// lump on the invocation's last message row above. A resume's terminal
@@ -245,17 +255,20 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 	// A pending stop is cleared rather than honored: the run concluded before
 	// the stop reached it, and the ending is the truer record.
 	//
-	// A verdict (status 'open') records no park reason, since nothing stopped
-	// the conversation; completed_at is its stamp, and what the idle sweeps
-	// age it from. A failure leaves the reason as it was.
+	// An `open` write records no park reason, since nothing stopped the
+	// conversation. A verdict's stamp is completed_at; a turn end with no
+	// verdict takes parked_at, which is what the idle sweeps age it from. A
+	// failure writes its columns whatever the blueprint and leaves the reason
+	// as it was.
 	return writeConversationReturning(ctx, q, `
 		UPDATE conversations
 		SET status = $1,
-		    completed_at = $2,
+		    completed_at = CASE WHEN `+recordsVerdictSQL+` THEN $2::timestamptz END,
+		    parked_at = CASE WHEN `+recordsVerdictSQL+` THEN parked_at ELSE COALESCE(parked_at, $2::timestamptz) END,
 		    park_reason = CASE WHEN $1 = 'open' THEN NULL ELSE park_reason END,
 		    result_summary = $3,
-		    outcome = NULLIF($4, ''),
-		    outcome_reason = NULLIF($5, ''),
+		    outcome = CASE WHEN `+recordsVerdictSQL+` THEN NULLIF($4, '') END,
+		    outcome_reason = CASE WHEN `+recordsVerdictSQL+` THEN NULLIF($5, '') END,
 		    failure_kind = NULLIF($6, ''),
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
@@ -264,6 +277,12 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 		RETURNING *
 	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
 }
+
+// recordsVerdictSQL is completeConversationFlip's test for whether its write
+// records a verdict: every write but an `open` one, and an `open` one whose
+// blueprint run is running. $1 is the status being written. The function
+// answers false for a conversation with no blueprint run.
+const recordsVerdictSQL = `($1 <> 'open' OR tf.blueprint_run_is_running(conversations.blueprint_run_id, conversations.org_id))`
 
 // releaseActiveClaimWithTelemetry is releaseActiveClaim plus the terminal
 // duration/turns stamp — the engagement telemetry the runtime reports per
@@ -458,10 +477,17 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 // and ResumeWarmClaimSystem, so a resume through a warm claim and one through
 // the queue take the conversation out of its park under one set of guards.
 // The caller has locked the row and read calledOff while holding the lock.
+//
+// It clears the verdict. The guard admits a concluded row only when its
+// blueprint is not running, so the verdict it clears is one nothing will read
+// again, and the turn this resume starts ends with no verdict
+// (completeConversationFlip). Left in place, the stamp would make that turn
+// end read as concluded.
 func resumeFlip(ctx context.Context, q queryer, orgID, conversationID string, calledOff bool) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
+		                completed_at = NULL, outcome = NULL, outcome_reason = NULL,
 		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 		                next_attempt_at = NULL,
 		                queued_at = now(),
@@ -514,9 +540,9 @@ func releaseActiveClaimUnlessWarm(ctx context.Context, q queryer, orgID, convers
 	return err
 }
 
-// ConcludeKeepingClaimSystem is CompleteForClaimSystem's verdict for a turn
-// whose engagement stays warm: the same fence and the same conversation write,
-// with the claim kept instead of released. The claim takes the warm phase and
+// ConcludeKeepingClaimSystem is CompleteForClaimSystem's `open` ending for a
+// turn whose engagement stays warm: the same fence and the same conversation
+// write, with the claim kept instead of released. The claim takes the warm phase and
 // the engagement's turn time so far, which is what its eventual release keeps.
 // Its cost needs no lump: the native runtime settles per assistant row.
 func (s *conversationStore) ConcludeKeepingClaimSystem(ctx context.Context, orgID, conversationID, claimID string, durationMs, numTurns int, resultSummary, outcome, outcomeReason string) (*domain.Conversation, error) {
@@ -664,14 +690,14 @@ func workspaceKeyMembersSQL(alias string) string {
 // one of these columns records that something happened at a time — the row
 // was minted, queued, parked, concluded, or superseded — so the largest of
 // them IS when the row last did anything, and no ranking has to be invented.
-// A ranking would also be wrong rather than merely redundant, because the
-// columns are not cleared in step: a resume clears parked_at but leaves
-// completed_at, so a conversation resumed from `completed` (the follow-up
-// path) carries a stale completion AND a fresh queued_at. Rank completed_at
-// first and a month-old run someone followed up on today reads as a month
-// idle; rank queued_at first and a completed run that was never resumed ages
-// from its original enqueue, which is older than its completion. Neither
-// order is right, because what is wanted is the maximum.
+// A ranking would also be wrong rather than merely redundant, because no one
+// column is the newest on every row. A concluded run that was never resumed
+// carries a queued_at older than its completion, so an order that put
+// queued_at first would age it from its original enqueue. A conversation a
+// follow-up resumed carries only its fresh queued_at, the resume having
+// cleared parked_at and completed_at, and the turn that follows stamps a
+// parked_at or completed_at newer than that. Each order is wrong for one of
+// them, because what is wanted is the maximum.
 //
 // GREATEST ignores NULLs in Postgres and started_at is NOT NULL, so the
 // result is never NULL: a row with nothing else stamped ages from its mint.
@@ -2172,9 +2198,9 @@ func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context,
 // status NULL) on a step the claim gate still drives (blueprintStepDrivableSQL):
 // the current step of a run nobody called off, whatever the run's status, so a
 // follow-up mid-flight on a finished blueprint's final step keeps its tree.
-// Once that follow-up's turn ends the row reads as concluded again, and its
-// tree goes like any concluded conversation's: the ending wrote the snapshot
-// the next follow-up rehydrates from. One the gate refuses never runs again,
+// Once that follow-up's turn ends the row is parked with no verdict and is
+// still listed, so a tree its ending left on disk is kept for the next
+// message. One the gate refuses never runs again,
 // so its worktree must NOT be preserved: preserving it would leave a
 // checked-out branch on disk that nothing will use, reviving the "refusing to
 // fetch into a branch checked out in a worktree" loop. Admin pool — the

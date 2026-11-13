@@ -131,9 +131,9 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			{name: "mid_flight", status: "", working: true},
 			{name: "active_claim", status: domain.StatusOpen, working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
-			// A warm claim holds its conversation, but its turn ended and wrote
-			// its verdict, so nothing works under it.
-			{name: "warm_claim", run: string(domain.BlueprintRunStatusCompleted), status: SeedConcluded, phase: domain.ClaimPhaseWarm,
+			// A warm claim holds its conversation, but its turn ended and
+			// parked it with no verdict, so nothing works under it.
+			{name: "warm_claim", run: string(domain.BlueprintRunStatusCompleted), status: domain.StatusOpen, phase: domain.ClaimPhaseWarm,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			// A follow-up resumed the conversation onto its warm claim, whose
 			// engagement is about to drive it.

@@ -236,76 +236,67 @@ func TestOpenUnreadAtConclusionSeries_CreatesEachReasonAtZero(t *testing.T) {
 	}
 }
 
-// TestWakeForUnreadInput_LeavesAStoppedFollowUpParked: a follow-up on concluded
-// work that a person stops keeps its earlier conclusion stamp, and its
-// message, which the stopped claim never delivered, is still on the queue.
-// That is a stop being honoured, not a verdict with input behind it, so
-// nothing wakes it.
-func TestWakeForUnreadInput_LeavesAStoppedFollowUpParked(t *testing.T) {
-	org := runmode.LocalDefaultOrgID
-	ctx := context.Background()
-	s, database, brID, _, convID := reactorFixture(t, "unread-stopped", 1, "", "")
-	markNative(t, database, convID)
-	claimID := holderClaimFor(t, s, org, convID)
-	if _, err := s.conversations.CompleteForClaimSystem(ctx, org, convID, claimID, domain.StatusOpen, 0, 0, 1, "done", "finish", "", ""); err != nil {
-		t.Fatalf("conclude: %v", err)
-	}
-	reactAsTheDispatchDoes(t, s, brID, convID)
-	if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
-		t.Fatalf("follow-up: %v", err)
-	}
-	followUpClaim := holderClaimFor(t, s, org, convID)
-	if flipped, err := s.conversations.ParkOpenForClaimSystem(ctx, org, convID, followUpClaim, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !flipped {
-		t.Fatalf("stop the follow-up = (%v, %v), want (true, nil)", flipped, err)
-	}
+// TestWakeForUnreadInput_LeavesAFollowUpsParkToTheQueue: a follow-up on a
+// finished blueprint parks with no verdict, since its resume cleared the
+// earlier one, so this wake, which is a concluded conversation's, writes
+// nothing to it. Its unread message makes it the queue's to drive, as for any
+// conversation parked with no verdict, whether the turn parked idle with a
+// message that landed during it or a person stopped it before the message was
+// delivered.
+func TestWakeForUnreadInput_LeavesAFollowUpsParkToTheQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		park db.Park
+		// deliverFirst is whether the engagement read the follow-up before a
+		// second message landed and the turn parked.
+		deliverFirst bool
+		wantUnread   string
+	}{
+		{"parked idle with a message that landed during the turn", db.ParkIdle(), true, "and another"},
+		{"stopped before the follow-up was delivered", db.ParkStopped(domain.ParkReasonUserCancelled, ""), false, "one more thing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			org := runmode.LocalDefaultOrgID
+			ctx := context.Background()
+			s, database, brID, _, convID := reactorFixture(t, "unread-followup-park", 1, "", "")
+			markNative(t, database, convID)
+			claimID := holderClaimFor(t, s, org, convID)
+			if _, err := s.conversations.CompleteForClaimSystem(ctx, org, convID, claimID, domain.StatusOpen, 0, 0, 1, "done", "finish", "", ""); err != nil {
+				t.Fatalf("conclude: %v", err)
+			}
+			reactAsTheDispatchDoes(t, s, brID, convID)
+			if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+				t.Fatalf("follow-up: %v", err)
+			}
+			followUpClaim := holderClaimFor(t, s, org, convID)
+			if tc.deliverFirst {
+				if _, _, _, err := s.pendingInput.Consume(ctx, org, convID); err != nil {
+					t.Fatalf("drain the follow-up: %v", err)
+				}
+				if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "and another")); err != nil {
+					t.Fatalf("queue the second message: %v", err)
+				}
+			}
+			if flipped, err := s.conversations.ParkOpenForClaimSystem(ctx, org, convID, followUpClaim, tc.park); err != nil || !flipped {
+				t.Fatalf("park the follow-up = (%v, %v), want (true, nil)", flipped, err)
+			}
+			if conv, err := s.conversations.GetSystem(ctx, org, convID); err != nil || conv == nil || conv.Concluded() {
+				t.Fatalf("parked follow-up = (%+v, %v), want it parked with no verdict", conv, err)
+			}
 
-	s.wakeForUnreadInput(ctx, org, convID)
+			s.wakeForUnreadInput(ctx, org, convID)
 
-	if st := storedStatus(t, database, convID); st != domain.StatusOpen {
-		t.Errorf("stored status = %q, want open — a stopped conversation stays stopped", st)
-	}
-	if got := pendingRows(t, s, convID); len(got) != 1 {
-		t.Errorf("pending rows = %d, want the follow-up still queued for the next message", len(got))
-	}
-}
-
-// TestWakeForUnreadInput_WakesAFollowUpThatParkedIdle: a follow-up on finished
-// work that parks idle, a refused or unrecognized turn for instance, keeps the
-// earlier conclusion stamp, so the claim queue does not take it up. A message
-// that landed during that turn is woken for, as after a verdict.
-func TestWakeForUnreadInput_WakesAFollowUpThatParkedIdle(t *testing.T) {
-	org := runmode.LocalDefaultOrgID
-	ctx := context.Background()
-	s, database, brID, _, convID := reactorFixture(t, "unread-idle", 1, "", "")
-	markNative(t, database, convID)
-	claimID := holderClaimFor(t, s, org, convID)
-	if _, err := s.conversations.CompleteForClaimSystem(ctx, org, convID, claimID, domain.StatusOpen, 0, 0, 1, "done", "finish", "", ""); err != nil {
-		t.Fatalf("conclude: %v", err)
-	}
-	reactAsTheDispatchDoes(t, s, brID, convID)
-	if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
-		t.Fatalf("follow-up: %v", err)
-	}
-	followUpClaim := holderClaimFor(t, s, org, convID)
-	// The engagement drains the follow-up, a second message lands during its
-	// turn, and the turn parks idle.
-	if _, _, _, err := s.pendingInput.Consume(ctx, org, convID); err != nil {
-		t.Fatalf("drain the follow-up: %v", err)
-	}
-	if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "and another")); err != nil {
-		t.Fatalf("queue the second message: %v", err)
-	}
-	if flipped, err := s.conversations.ParkOpenForClaimSystem(ctx, org, convID, followUpClaim, db.ParkIdle()); err != nil || !flipped {
-		t.Fatalf("park the follow-up idle = (%v, %v), want (true, nil)", flipped, err)
-	}
-
-	s.wakeForUnreadInput(ctx, org, convID)
-
-	if st := storedStatus(t, database, convID); st != "" {
-		t.Errorf("stored status = %q, want none — the second message wakes it", st)
-	}
-	if got := pendingRows(t, s, convID); len(got) != 1 || got[0].Content != "and another" {
-		t.Errorf("pending rows = %+v, want the second message queued for the resume", got)
+			if st := storedStatus(t, database, convID); st != domain.StatusOpen {
+				t.Errorf("stored status = %q, want open: this wake is a concluded conversation's", st)
+			}
+			if got := pendingRows(t, s, convID); len(got) != 1 || got[0].Content != tc.wantUnread {
+				t.Errorf("pending rows = %+v, want %q still queued", got, tc.wantUnread)
+			}
+			claimed, err := s.conversationQueue.ClaimNextConversation(ctx, "exec-followup-park", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+			if err != nil || claimed == nil || claimed.ID != convID {
+				t.Errorf("ClaimNextConversation = (%+v, %v), want the queue to drive %s for its unread message", claimed, err, convID)
+			}
+		})
 	}
 }
 

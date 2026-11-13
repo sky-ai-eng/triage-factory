@@ -226,15 +226,17 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 const lapsedClaimOutcomeSQL = `CASE WHEN phase = '` + domain.ClaimPhaseWarm + `' THEN 'completed' ELSE 'reaped' END`
 
 // idleWarmClaimSQL is claim alias cl being a warm claim (domain.ClaimPhaseWarm)
-// whose conversation r still holds the verdict its turn wrote. Its turn has
-// ended and nothing has resumed it, so no agent works under it. A follow-up
+// whose conversation r is still parked where its turn left it. Its turn has
+// ended and nothing has resumed it, so no agent works under it. The test is
+// the park and not a verdict, because a turn that ends under a warm claim is
+// one whose blueprint is not running, and it writes no verdict. A follow-up
 // that resumes the conversation leaves the claim warm until its engagement
 // takes it back up, and from the resume on the claim is the one about to
-// drive the conversation, so it is not idle. A resumed conversation keeps its
-// completed_at, and its NULL status would make the bare test NULL, so the
-// result is coalesced and negates cleanly.
+// drive the conversation, so it is not idle. A resumed conversation's status
+// is NULL, which would make the bare test NULL, so the result is coalesced
+// and negates cleanly.
 func idleWarmClaimSQL(cl string) string {
-	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND ` + db.ConcludedConversationSQL("r") + `, false)`
+	return `COALESCE(` + cl + `.phase = '` + domain.ClaimPhaseWarm + `' AND r.status = 'open', false)`
 }
 
 // workingClaimExistsSQL is activeClaimExistsSQL without an idle warm claim
@@ -1952,13 +1954,18 @@ const conversationTimingClaimLateral = `
 // for the same reason the display ladder says so (liveClaimExistsSQL).
 const conversationTimingStatusSQL = `COALESCE(r.status, CASE WHEN cl.has_active THEN 'running' ELSE 'queued' END)`
 
+// conversationTimingCompletedSQL is the timing projection's Completed: the row
+// is a completed run (db.PostgresCompletedRunSQL). Coalesced because a
+// mid-flight row's NULL status makes the bare test NULL.
+var conversationTimingCompletedSQL = `COALESCE(` + db.PostgresCompletedRunSQL("r") + `, false)`
+
 func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT r.org_id::text, COALESCE(cl.executor_id, ''), `+conversationTimingStatusSQL+`, COALESCE(r.failure_kind, ''),
-		       r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
+		       r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms, `+conversationTimingCompletedSQL+`
 		FROM conversations r
 		`+conversationTimingClaimLateral+`
 		WHERE r.type = 'delegation' AND r.started_at >= $1
@@ -2011,7 +2018,7 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 		limit = 5000
 	}
 	q := `SELECT r.org_id::text, COALESCE(cl.executor_id, ''), ` + conversationTimingStatusSQL + `, COALESCE(r.failure_kind, ''),
-	             r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
+	             r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms, ` + conversationTimingCompletedSQL + `
 	      FROM conversations r
 	      ` + conversationTimingClaimLateral + `
 	      WHERE r.type = 'delegation' AND r.org_id = $1 AND r.started_at >= $2`
@@ -2202,7 +2209,7 @@ func scanConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming, error
 		var durationMS sql.NullInt64
 		if err := rows.Scan(
 			&t.OrgID, &t.ExecutorID, &t.Status, &t.FailureKind,
-			&t.StartedAt, &claimedAt, &completedAt, &durationMS,
+			&t.StartedAt, &claimedAt, &completedAt, &durationMS, &t.Completed,
 		); err != nil {
 			return nil, err
 		}
