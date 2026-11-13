@@ -9,7 +9,7 @@ import (
 
 // RepositoryDependabotAccessStore owns repository_dependabot_access: per
 // repository, whether the org's GitHub credential can read its Dependabot
-// alerts, as the poll's probe last found it, and the state of the poll's
+// alerts, as the poll's probe last found it, and the ETag of the poll's last
 // listing of those alerts. A repository the poll has not probed has no row.
 //
 // Every method is a system method on the admin pool in Postgres, org_id bound
@@ -32,27 +32,23 @@ type RepositoryDependabotAccessStore interface {
 	// repository id.
 	ListSystem(ctx context.Context, orgID, host string) ([]domain.RepositoryDependabotAccess, error)
 
-	// RecordAlertListingSystem stores a full listing of the repository's open
-	// alerts: AlertsListedAt now, and etag as the next listing's condition
-	// ("" for none). The answer and when it was checked are left alone.
-	// Returns the row as stored, or sql.ErrNoRows when the repository has no
-	// answer recorded: the poll lists only a repository whose answer is
-	// readable.
+	// RecordAlertListingSystem stores etag as the condition of the next
+	// listing of the repository's open alerts ("" for none). The answer and
+	// when it was checked are left alone. Returns the row as stored, or
+	// sql.ErrNoRows when the repository has no answer recorded: the poll lists
+	// only a repository whose answer is readable.
 	RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error)
 
-	// ClearUntrackedAlertListingsSystem clears the alert listing of every
+	// ClearUntrackedAlertListingsSystem clears the stored ETag of every
 	// repository of the org that no team tracks on host, the org's GitHub
-	// host. Each one loses its ETag, so its next listing is answered in full.
-	// One on host itself, which every team has untracked, and a retired one
-	// also lose their baseline, so the next listing, once a team tracks the
-	// repository again, is a baseline: tracking is forward-only, and the
-	// alerts that opened while nobody tracked it are history by then. One on
-	// another host keeps its baseline: nobody untracked it, the org moved off
-	// its host, and if the org moves back its listing announces the alerts
-	// that are open then (the poll retired the packages TF held there, closing
-	// their tasks with nothing fixed). Returns how many rows it changed.
-	// Exempt from the returned-row rule: a bulk write the poll makes every
-	// cycle, whose count is for its log line.
+	// host, retired ones included, so the listing that follows a team
+	// tracking it again is answered in full and diffed against the packages
+	// TF holds. A 304 would say nothing changed since a listing whose packages
+	// TF may since have closed without listing it: the poll retires the
+	// packages on another host when the org moves, and a retired repository's
+	// entities close. Returns how many rows it changed. Exempt from the
+	// returned-row rule: a bulk write the poll makes every cycle, whose count
+	// is for its log line.
 	ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error)
 
 	// CountTrackedSystem counts the repositories on host that a team of the

@@ -390,22 +390,27 @@ the `alert_numbers` that were last open; `unreachable` names the same plus the
 `host` the package was listed from and the `reason` (`scope_changed`, as for
 [PR Unreachable](#pr-unreachable)).
 
+A package TF holds no active entity for gets a new one, whose snapshot starts
+empty, so every alert open on the package emits `alert_opened`, however long
+it has been open, as a check already failing on a pull request TF has just
+found emits `ci_check_failed`. A repository's first listing therefore
+announces every open alert, and since `alert_opened` has no `dedup_key`, a
+handler that matches them makes one task per package.
+
 Each package on a host the org has left is retired with `unreachable` at the
 start of the next GitHub cycle, as its pull requests are, and closes with its
 tasks. Nothing fixed its alerts, so pointing the org back at the old host
 announces them again: each package with open alerts gets a new entity, which
-emits `alert_opened` for every open alert except the repository's backlog,
-the alerts its baseline found.
+emits `alert_opened` for every open alert.
 
-A repository's first listing is its baseline: it stores the packages it finds,
-marks their alerts as backlog, and emits no `alert_opened`. So is its first
-listing after every team untracked it on the org's current host. A host change
-is not that: the old host's repositories keep their baselines, and the first
-listing back is answered in full.
 A listing is conditional on the previous one's ETag when that listing fit on
-one page, so an unchanged repository costs a request GitHub does not count
-against the rate limit. A listing that fails changes nothing, and a repository
-GitHub refuses is skipped until the access probe rechecks it.
+one page and every write it made landed, so an unchanged repository costs a
+request GitHub does not count against the rate limit. A repository no team
+tracks on the org's host loses its ETag, so the listing after a team tracks it
+again is answered in full and diffed against the packages TF holds: those of a
+repository every team untracked stay active, and only the alerts that opened
+meanwhile are announced. A listing that fails changes nothing, and a
+repository GitHub refuses is skipped until the access probe rechecks it.
 
 ## Jira Events
 
@@ -1149,7 +1154,7 @@ its identity among active entities. Its `url` is the repository's Dependabot
 alert list filtered to the package's open alerts. The snapshot holds:
 
 - `repo`, `ecosystem`, `package`
-- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `first_patched_version` (empty when none is released), and `baseline`, set on an alert a baseline listing found, which keeps it while the alert stays open and is never diffed
+- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), and `first_patched_version` (empty when none is released)
 
 An empty `alerts` is the terminal snapshot.
 

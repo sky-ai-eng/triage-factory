@@ -179,15 +179,15 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		f := mk(t)
 		repoID := repo(t, f, TestGitHubHost, "api")
 		answer := record(t, f, repoID, domain.DependabotAlertsReadable)
-		if answer.AlertsBaselined() || answer.AlertsETag != "" {
-			t.Fatalf("a new answer carries a listing: %+v", answer)
+		if answer.AlertsETag != "" {
+			t.Fatalf("a new answer carries an ETag: %+v", answer)
 		}
 		listed, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"abc"`)
 		if err != nil {
 			t.Fatalf("RecordAlertListingSystem: %v", err)
 		}
-		if !listed.AlertsBaselined() || listed.AlertsETag != `W/"abc"` {
-			t.Errorf("listing = %+v, want baselined with the ETag", listed)
+		if listed.AlertsETag != `W/"abc"` {
+			t.Errorf("listing = %+v, want the ETag", listed)
 		}
 		if listed.Access != answer.Access || !listed.CheckedAt.Equal(answer.CheckedAt) {
 			t.Errorf("listing moved the answer: %+v, was %+v", listed, answer)
@@ -198,12 +198,12 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 
 		// A later probe replaces the answer and leaves the listing.
 		reprobed := record(t, f, repoID, domain.DependabotAlertsNoPermission)
-		if !reprobed.AlertsBaselined() || reprobed.AlertsETag != `W/"abc"` {
-			t.Errorf("a probe cleared the listing: %+v", reprobed)
+		if reprobed.AlertsETag != `W/"abc"` {
+			t.Errorf("a probe cleared the ETag: %+v", reprobed)
 		}
 	})
 
-	t.Run("Clear_untracked_listings_forgets_this_hosts_and_unconditions_anothers", func(t *testing.T) {
+	t.Run("Clear_untracked_listings_clears_every_untracked_ETag", func(t *testing.T) {
 		f := mk(t)
 		tracked := repo(t, f, TestGitHubHost, "tracked")
 		untracked := repo(t, f, TestGitHubHost, "untracked")
@@ -229,20 +229,18 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		if n != 2 {
 			t.Errorf("changed %d listings, want the untracked one and the other host's", n)
 		}
-		// The tracked repository keeps everything; the one every team
-		// untracked loses its baseline; the other host's keeps its baseline
-		// and loses only its ETag.
-		for id, want := range map[string]struct{ baselined, etag bool }{
-			tracked:   {true, true},
-			untracked: {false, false},
-			elsewhere: {true, false},
+		// Only the repository a team tracks on the host keeps its ETag.
+		for id, wantETag := range map[string]bool{
+			tracked:   true,
+			untracked: false,
+			elsewhere: false,
 		} {
 			a, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, id)
 			if err != nil || a == nil {
 				t.Fatalf("GetSystem(%s): %+v %v", id, a, err)
 			}
-			if a.AlertsBaselined() != want.baselined || (a.AlertsETag != "") != want.etag {
-				t.Errorf("%s listing = %+v, want baselined=%v etag=%v", id, a, want.baselined, want.etag)
+			if (a.AlertsETag != "") != wantETag {
+				t.Errorf("%s listing = %+v, want an ETag: %v", id, a, wantETag)
 			}
 			if a.Access != domain.DependabotAlertsReadable {
 				t.Errorf("%s answer = %s, want it left readable", id, a.Access)
@@ -287,7 +285,7 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 			t.Fatalf("ClearUntrackedAlertListingsSystem under another org: %v", err)
 		}
 		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable || got.AlertsETag != `W/"own"` {
-			t.Errorf("the org's own answer after another org's writes = %+v, %v; want readable with its own listing, untouched", got, err)
+			t.Errorf("the org's own answer after another org's writes = %+v, %v; want readable with its own ETag, untouched", got, err)
 		}
 	})
 }

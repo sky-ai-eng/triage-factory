@@ -21,16 +21,11 @@ func newRepositoryDependabotAccessStore(q queryer) db.RepositoryDependabotAccess
 
 var _ db.RepositoryDependabotAccessStore = (*repositoryDependabotAccessStore)(nil)
 
-const pgDependabotAccessColumns = `repository_id::text, org_id::text, access, checked_at, alerts_listed_at, alerts_etag`
+const pgDependabotAccessColumns = `repository_id::text, org_id::text, access, checked_at, alerts_etag`
 
 func scanPGDependabotAccess(row interface{ Scan(...any) error }) (domain.RepositoryDependabotAccess, error) {
 	var a domain.RepositoryDependabotAccess
-	var listedAt sql.NullTime
-	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &listedAt, &a.AlertsETag)
-	if listedAt.Valid {
-		t := listedAt.Time
-		a.AlertsListedAt = &t
-	}
+	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &a.AlertsETag)
 	return a, err
 }
 
@@ -62,7 +57,7 @@ func (s *repositoryDependabotAccessStore) RecordSystem(ctx context.Context, orgI
 func (s *repositoryDependabotAccessStore) RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error) {
 	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
 		UPDATE repository_dependabot_access
-		   SET alerts_listed_at = statement_timestamp(), alerts_etag = $3
+		   SET alerts_etag = $3
 		 WHERE org_id = $1 AND repository_id = $2
 		RETURNING `+pgDependabotAccessColumns,
 		orgID, repositoryID, etag))
@@ -72,19 +67,15 @@ func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx 
 	if err := db.RequireRepoHost(host); err != nil {
 		return 0, err
 	}
-	// forgets is the repositories whose baseline goes too: on host, or
-	// retired.
-	const forgets = `(rp.host = $2 OR rp.retired_at IS NOT NULL)`
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE repository_dependabot_access a
-		   SET alerts_etag = '',
-		       alerts_listed_at = CASE WHEN `+forgets+` THEN NULL ELSE a.alerts_listed_at END
+		   SET alerts_etag = ''
 		  FROM repositories rp
 		 WHERE rp.id = a.repository_id
 		   AND rp.org_id = a.org_id
 		   AND a.org_id = $1
+		   AND a.alerts_etag <> ''
 		   AND NOT (rp.host = $2 AND rp.retired_at IS NULL AND `+repoTrackedByATeam+`)
-		   AND (a.alerts_etag <> '' OR (a.alerts_listed_at IS NOT NULL AND `+forgets+`))
 	`, orgID, host)
 	if err != nil {
 		return 0, fmt.Errorf("clear untracked dependabot alert listings: %w", err)

@@ -21,16 +21,11 @@ func newRepositoryDependabotAccessStore(q queryer) db.RepositoryDependabotAccess
 
 var _ db.RepositoryDependabotAccessStore = (*repositoryDependabotAccessStore)(nil)
 
-const sqliteDependabotAccessColumns = `repository_id, org_id, access, checked_at, alerts_listed_at, alerts_etag`
+const sqliteDependabotAccessColumns = `repository_id, org_id, access, checked_at, alerts_etag`
 
 func scanSQLiteDependabotAccess(row interface{ Scan(...any) error }) (domain.RepositoryDependabotAccess, error) {
 	var a domain.RepositoryDependabotAccess
-	var listedAt sql.NullTime
-	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &listedAt, &a.AlertsETag)
-	if listedAt.Valid {
-		t := listedAt.Time
-		a.AlertsListedAt = &t
-	}
+	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &a.AlertsETag)
 	return a, err
 }
 
@@ -65,10 +60,10 @@ func (s *repositoryDependabotAccessStore) RecordAlertListingSystem(ctx context.C
 	}
 	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
 		UPDATE repository_dependabot_access
-		   SET alerts_listed_at = ?, alerts_etag = ?
+		   SET alerts_etag = ?
 		 WHERE org_id = ? AND repository_id = ?
 		RETURNING `+sqliteDependabotAccessColumns,
-		time.Now().UTC(), etag, orgID, repositoryID))
+		etag, orgID, repositoryID))
 }
 
 func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error) {
@@ -78,20 +73,15 @@ func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx 
 	if err := db.RequireRepoHost(host); err != nil {
 		return 0, err
 	}
-	// forgets is the repositories whose baseline goes too: on host, or
-	// retired.
-	const forgets = `(repositories.host = ? OR repositories.retired_at IS NOT NULL)`
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE repository_dependabot_access
-		   SET alerts_etag = '',
-		       alerts_listed_at = CASE WHEN `+forgets+` THEN NULL ELSE repository_dependabot_access.alerts_listed_at END
+		   SET alerts_etag = ''
 		  FROM repositories
 		 WHERE repositories.id = repository_dependabot_access.repository_id
 		   AND repository_dependabot_access.org_id = ?
+		   AND repository_dependabot_access.alerts_etag <> ''
 		   AND NOT (repositories.host = ? AND repositories.retired_at IS NULL AND `+repoTrackedByATeam+`)
-		   AND (repository_dependabot_access.alerts_etag <> ''
-		        OR (repository_dependabot_access.alerts_listed_at IS NOT NULL AND `+forgets+`))
-	`, host, orgID, host, host)
+	`, orgID, host)
 	if err != nil {
 		return 0, fmt.Errorf("clear untracked dependabot alert listings: %w", err)
 	}

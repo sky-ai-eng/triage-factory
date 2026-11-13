@@ -19,8 +19,8 @@ import (
 )
 
 // TestVulnerablePackage_AlertsFoldIntoOneTaskAndTheResolutionClosesIt runs the
-// poll and the router together on one package: the baseline makes no task, an
-// alert that opens after it makes one, a second alert folds into it, and the
+// poll and the router together on one package: the alert open at the first
+// listing makes a task, alerts that open after it fold into that task, and the
 // last alert closing closes the task and the entity.
 func TestVulnerablePackage_AlertsFoldIntoOneTaskAndTheResolutionClosesIt(t *testing.T) {
 	database := newTestDB(t)
@@ -90,22 +90,18 @@ func TestVulnerablePackage_AlertsFoldIntoOneTaskAndTheResolutionClosesIt(t *test
 	}
 
 	poll()
-	if got := activeTasks(entity()); len(got) != 0 {
-		t.Fatalf("the baseline made %d tasks, want none", len(got))
-	}
-
-	setOpen(1, 2)
-	poll()
 	tasks := activeTasks(entity())
 	if len(tasks) != 1 || tasks[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
-		t.Fatalf("after an alert opened: tasks = %+v, want one alert_opened task", tasks)
+		t.Fatalf("after the first listing: tasks = %+v, want one alert_opened task", tasks)
 	}
 	taskID := tasks[0].ID
 
+	setOpen(1, 2)
+	poll()
 	setOpen(1, 2, 3)
 	poll()
 	if tasks := activeTasks(entity()); len(tasks) != 1 || tasks[0].ID != taskID {
-		t.Fatalf("after a second alert: tasks = %+v, want the same one task", tasks)
+		t.Fatalf("after two more alerts: tasks = %+v, want the same one task", tasks)
 	}
 
 	setOpen()

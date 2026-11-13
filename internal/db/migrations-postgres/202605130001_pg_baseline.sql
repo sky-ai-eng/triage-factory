@@ -4445,21 +4445,18 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.github_refresh_marks TO tf_
 -- repository). One row per repository, replaced by each probe; a repository
 -- the poll has not probed has no row.
 --
--- Beside the answer, the poll's listing of the repository's open alerts:
--- alerts_listed_at is when the poll last listed them in full, NULL until the
--- repository's baseline listing and again once no team tracks it; alerts_etag
--- is the ETag GitHub answered that listing with, '' when the listing took
--- more than one page.
+-- Beside the answer, alerts_etag: the ETag GitHub answered the poll's last
+-- listing of the repository's open alerts with, the next listing's condition,
+-- '' when there is none to send.
 --
 -- Admin-pool wired with org_id bound per statement; the policy below is
 -- defense-in-depth.
 CREATE TABLE public.repository_dependabot_access (
-    repository_id    uuid NOT NULL,
-    org_id           uuid NOT NULL,
-    access           text NOT NULL CHECK (access IN ('readable', 'no_permission', 'disabled')),
-    checked_at       timestamp with time zone NOT NULL,
-    alerts_listed_at timestamp with time zone,
-    alerts_etag      text DEFAULT ''::text NOT NULL
+    repository_id uuid NOT NULL,
+    org_id        uuid NOT NULL,
+    access        text NOT NULL CHECK (access IN ('readable', 'no_permission', 'disabled')),
+    checked_at    timestamp with time zone NOT NULL,
+    alerts_etag   text DEFAULT ''::text NOT NULL
 );
 
 ALTER TABLE ONLY public.repository_dependabot_access

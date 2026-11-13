@@ -216,16 +216,14 @@ func lodash(number int, severity string) fakeAlert {
 	return fakeAlert{number: number, ecosystem: "npm", pkg: "lodash", severity: severity}
 }
 
-// TestRefreshVulnerablePackages_TheBaselineStoresPackagesAndEmitsNothing: a
+// TestRefreshVulnerablePackages_TheFirstListingAnnouncesEveryOpenAlert: a
 // repository's first listing creates an entity per package, holding its open
-// alerts, and emits nothing; the repository then has a baseline.
-func TestRefreshVulnerablePackages_TheBaselineStoresPackagesAndEmitsNothing(t *testing.T) {
+// alerts, and emits an alert_opened for each alert, on its package's entity.
+func TestRefreshVulnerablePackages_TheFirstListingAnnouncesEveryOpenAlert(t *testing.T) {
 	r := newVulnRig(t, "api")
 	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), fakeAlert{number: 3, ecosystem: "pip", pkg: "django", severity: "medium"})
 
-	if evts := r.mustCycle(); len(evts) != 0 {
-		t.Errorf("baseline emitted %v, want nothing", eventTypes(evts))
-	}
+	evts := r.mustCycle()
 	l := r.pkg("api", "npm", "lodash")
 	if l == nil || l.State != "active" || l.Kind != domain.EntityKindVulnerablePackage || l.Title != "lodash (npm)" {
 		t.Fatalf("lodash entity = %+v, want an active vulnerable package", l)
@@ -237,17 +235,30 @@ func TestRefreshVulnerablePackages_TheBaselineStoresPackagesAndEmitsNothing(t *t
 	if l.URL != wantURL {
 		t.Errorf("url = %q, want %q", l.URL, wantURL)
 	}
-	if d := r.pkg("api", "pip", "django"); d == nil || fmt.Sprint(r.alertNumbers(d)) != "[3]" {
-		t.Errorf("django entity = %+v, want one holding alert 3", d)
+	d := r.pkg("api", "pip", "django")
+	if d == nil || fmt.Sprint(r.alertNumbers(d)) != "[3]" {
+		t.Fatalf("django entity = %+v, want one holding alert 3", d)
+	}
+	got := map[int]string{}
+	for _, evt := range evts {
+		var meta events.GitHubVulnerabilityAlertOpenedMetadata
+		if evt.EventType != domain.EventGitHubVulnerabilityAlertOpened || json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
+			t.Fatalf("emitted %v, want only alert_opened", eventTypes(evts))
+		}
+		got[meta.AlertNumber] = *evt.EntityID
+	}
+	if want := map[int]string{1: l.ID, 2: l.ID, 3: d.ID}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("alert_opened by alert = %v, want %v", got, want)
 	}
 	a, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, l.RepositoryID)
-	if err != nil || a == nil || !a.AlertsBaselined() || a.AlertsETag == "" {
-		t.Errorf("listing = %+v %v, want a baseline with the ETag", a, err)
+	if err != nil || a == nil || a.AlertsETag == "" {
+		t.Errorf("listing = %+v %v, want the ETag stored", a, err)
 	}
 }
 
-// TestRefreshVulnerablePackages_AlertsOpenOnOneEntity: after the baseline, a
-// new alert creates the package's entity and emits one alert_opened; a second
+// TestRefreshVulnerablePackages_AlertsOpenOnOneEntity: in a repository listed
+// with no open alert, a new alert creates the package's entity and emits one
+// alert_opened; a second
 // alert on the package emits a second on the same entity; a cycle with
 // nothing changed is a 304 and emits nothing.
 func TestRefreshVulnerablePackages_AlertsOpenOnOneEntity(t *testing.T) {
@@ -447,38 +458,18 @@ func TestDiffVulnerablePackage(t *testing.T) {
 	}
 }
 
-// baselineMarks maps each open alert of e's snapshot to its backlog mark.
-func (r *vulnRig) baselineMarks(e *domain.Entity) map[int]bool {
-	r.t.Helper()
-	var snap domain.VulnerablePackageSnapshot
-	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
-		r.t.Fatalf("parse snapshot %q: %v", e.SnapshotJSON, err)
-	}
-	out := map[int]bool{}
-	for _, a := range snap.Alerts {
-		out[a.Number] = a.Baseline
-	}
-	return out
-}
-
 // TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed: a
 // package retired by a host change closed with its tasks while its alerts were
 // still open. When the org moves back, the package gets a new entity that
-// announces the alerts TF had announced, and the alerts opened since, but not
-// the backlog the repository's baseline found.
+// announces every alert open on it again.
 func TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed(t *testing.T) {
 	r := newVulnRig(t, "api")
 	ctx := context.Background()
-	r.gh.set("api", lodash(1, "high"))
-	r.mustCycle()
 	r.gh.set("api", lodash(1, "high"), lodash(2, "low"))
-	if evts := r.mustCycle(); len(evts) != 1 {
-		t.Fatalf("setup: alert 2 emitted %v", eventTypes(evts))
+	if evts := r.mustCycle(); len(evts) != 2 {
+		t.Fatalf("setup: the first listing emitted %v", eventTypes(evts))
 	}
 	first := r.pkg("api", "npm", "lodash")
-	if got := r.baselineMarks(first); !got[1] || got[2] {
-		t.Fatalf("marks = %v, want alert 1 backlog and alert 2 announced", got)
-	}
 
 	// The org moves to another host: the package is retired and the router
 	// closes it, and the cycle there forgets the repository's ETag.
@@ -488,55 +479,24 @@ func TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed(t *testin
 	}
 
 	// Back on the host with nothing changed: the listing is answered in full
-	// and alert 2, whose task the retirement closed, is announced again.
+	// and both alerts, whose tasks the retirement closed, are announced again.
 	evts := r.mustCycle()
 	next := r.pkg("api", "npm", "lodash")
 	if next == nil || next.ID == first.ID || next.State != "active" {
 		t.Fatalf("after the return the package is %+v, want a new active entity", next)
 	}
-	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened || *evts[0].EntityID != next.ID {
-		t.Fatalf("the return emitted %v, want one alert_opened on the new entity", eventTypes(evts))
+	if len(evts) != 2 {
+		t.Fatalf("the return emitted %v, want two alert_opened", eventTypes(evts))
 	}
-	var meta events.GitHubVulnerabilityAlertOpenedMetadata
-	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil || meta.AlertNumber != 2 {
-		t.Errorf("metadata = %+v %v, want alert 2", meta, err)
-	}
-	if got := r.baselineMarks(next); !got[1] || got[2] {
-		t.Errorf("marks on the new entity = %v, want alert 1 still backlog", got)
+	for _, evt := range evts {
+		if evt.EventType != domain.EventGitHubVulnerabilityAlertOpened || *evt.EntityID != next.ID {
+			t.Errorf("the return emitted %s on %s, want alert_opened on the new entity", evt.EventType, *evt.EntityID)
+		}
 	}
 
 	// An alert opened after the return is announced as usual.
 	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), lodash(3, "medium"))
 	if evts := r.mustCycle(); len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
 		t.Errorf("a later alert emitted %v, want one alert_opened", eventTypes(evts))
-	}
-}
-
-// TestRefreshVulnerablePackages_TheBacklogMarkFollowsTheAlert: the baseline
-// marks what it found as backlog, an alert announced later is not, and a quiet
-// listing after a team untracked the repository marks only its new alerts.
-func TestRefreshVulnerablePackages_TheBacklogMarkFollowsTheAlert(t *testing.T) {
-	r := newVulnRig(t, "api")
-	ctx := context.Background()
-	r.gh.set("api", lodash(1, "high"))
-	r.mustCycle()
-	r.gh.set("api", lodash(1, "high"), lodash(2, "low"))
-	r.mustCycle()
-
-	// Every team untracks the repository and tracks it again: its next
-	// listing is a baseline, which keeps alert 2's mark and marks alert 3.
-	if _, err := r.database.Exec(`DELETE FROM team_github_repos`); err != nil {
-		t.Fatalf("untrack: %v", err)
-	}
-	if _, err := r.stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, runmode.LocalDefaultOrgID, vulnHost); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	trackRepos(t, r.stores, runmode.LocalDefaultOrgID, []string{"octo/api"})
-	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), lodash(3, "medium"))
-	if evts := r.mustCycle(); len(evts) != 0 {
-		t.Errorf("the baseline after re-tracking emitted %v", eventTypes(evts))
-	}
-	if got := r.baselineMarks(r.pkg("api", "npm", "lodash")); !got[1] || got[2] || !got[3] {
-		t.Errorf("marks = %v, want 1 and 3 backlog, 2 announced", got)
 	}
 }

@@ -175,13 +175,13 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 	}
 }
 
-// forgetUntrackedAlertListings forgets the alert listing of every repository
-// of the org that no team tracks on host (RepositoryDependabotAccessStore's
-// ClearUntrackedAlertListingsSystem), so a repository tracked again lists a
-// baseline first. The cycle runs it before any of its gates, because a
-// repository leaves the tracked set when a team untracks it and also when the
-// org moves to another GitHub host, and an org that has just moved tracks
-// nothing there yet. A write that fails is made again next cycle.
+// forgetUntrackedAlertListings forgets the ETag of every repository of the
+// org that no team tracks on host (RepositoryDependabotAccessStore's
+// ClearUntrackedAlertListingsSystem), so a repository tracked again is listed
+// in full. The cycle runs it before any of its gates, because a repository
+// leaves the tracked set when a team untracks it and also when the org moves
+// to another GitHub host, and an org that has just moved tracks nothing there
+// yet. A write that fails is made again next cycle.
 func (m *Manager) forgetUntrackedAlertListings(ctx context.Context, orgID, host string) {
 	if m.DependabotAccess == nil || host == "" {
 		return
