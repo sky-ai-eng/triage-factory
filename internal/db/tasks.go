@@ -49,6 +49,36 @@ const (
 	UserCompletedCloseReason = "user_completed"
 )
 
+// The close_reason values an event's typed close stamps, by which of the
+// event's tasks it closed.
+const (
+	// SiblingEventCloseReason is on a task another event type resolved: CI
+	// passing closes the CI-failure task. It is the one close a recurrence
+	// of the task's own event reopens (TaskReopened).
+	SiblingEventCloseReason = "auto_closed_by_event"
+	// ReassignedCloseReason is on a task its own event type retired: an
+	// issue assigned again closes the task the previous assignment made,
+	// and the same event then creates the new assignee's.
+	ReassignedCloseReason = "reassigned"
+)
+
+// TaskMint is what a System mint door did with an event's task key
+// (entity, event type, dedup key).
+type TaskMint int
+
+const (
+	// TaskFound: an active task already held the key, and is returned as it
+	// stood.
+	TaskFound TaskMint = iota
+	// TaskCreated: no task held the key, and a new queued task was inserted.
+	TaskCreated
+	// TaskReopened: no active task held the key, and the newest closed task
+	// with it was returned to work in place of a new one, because one of its
+	// conversations is still working: a second task would start a second
+	// agent on the situation the first is already handling.
+	TaskReopened
+)
+
 // UserCloseReason is the close reason CloseByUser stamps for status, one
 // rule for both dialects: dismissed and done each have their own, and any
 // other status is ErrInvalidUserCloseStatus.
@@ -809,7 +839,31 @@ type TaskStore interface {
 	// router mints the terminating transition's own lifecycle task through
 	// this door immediately after closing the entity in the transaction
 	// before it. FindOrCreate / FindOrCreateAt never admit it.
-	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+	//
+	// They also carry the reopen, which is the router's alone: a task a
+	// person creates through FindOrCreate is always new. With no active task
+	// on the key, the newest closed task with it (by closed_at) is reopened
+	// instead of a new one inserted, when all of these hold:
+	//   - it is done with SiblingEventCloseReason. No other close is ever
+	//     reopened: not one that terminated the entity or reconciled it, a
+	//     reassignment, a person's, run_completed, or a duplicate merge. An
+	//     older closed task behind one of those stays closed too;
+	//   - one of its conversations is working, by the predicate that holds
+	//     an event's close;
+	//   - the entity is active. A rider minted on a closed entity is new.
+	// The reopen is one guarded UPDATE in the mint's transaction, under the
+	// same locks. It keeps the claim and sets the status from it (in_progress
+	// when claimed, queued when not, which is what tasks_queue_unclaimed
+	// admits), clears closed_at, close_reason, close_event_type and any held
+	// close, and withdraws the close notes still waiting on the task's
+	// conversations, as Bump does for a hold it clears. The task comes back
+	// in the shape a found one does, with TaskReopened.
+	//
+	// A reopen and another writer that makes a task active on the same key
+	// (a requeue of a closed task, another mint) are decided by the dedup
+	// index: the later one finds the active row, or is refused by the index
+	// with nothing written.
+	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, TaskMint, error)
 
 	// FindOrCreateAtUnlessEntityActiveSystem is FindOrCreateAtSystem's
 	// twin for the became_atomic belated-discovery path (TFAC-579):
@@ -831,7 +885,7 @@ type TaskStore interface {
 	// active-check and its own insert. suppressed=true means the check
 	// found an active task and no row was created or returned (task is
 	// nil); suppressed=false behaves exactly like FindOrCreateAtSystem.
-	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error)
+	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, mint TaskMint, suppressed bool, err error)
 	//
 	// Exempt from the returned-row rule: it reconciles a set, same as
 	// SetVisibilityTeams.

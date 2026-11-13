@@ -35,8 +35,8 @@ type erroringTaskStore struct {
 	db.TaskStore
 }
 
-func (erroringTaskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	return nil, false, errors.New("boom: task upsert failed")
+func (erroringTaskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, db.TaskMint, error) {
+	return nil, db.TaskFound, errors.New("boom: task upsert failed")
 }
 
 // fakeDispositionPublisher captures every published event so tests can

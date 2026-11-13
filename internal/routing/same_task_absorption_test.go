@@ -210,12 +210,12 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 		teamTriggers: map[string][]domain.EventHandler{runmode.LocalDefaultTeamID: {trigger}},
 		taskPriority: 0.5,
 	}
-	bumped, created, err := router.upsertTaskForEvent(context.Background(), runmode.LocalDefaultOrgID, domain.Event{EventType: absorbTestEventType, ID: eventID}, entityID, routing)
+	bumped, mint, err := router.upsertTaskForEvent(context.Background(), runmode.LocalDefaultOrgID, domain.Event{EventType: absorbTestEventType, ID: eventID}, entityID, routing)
 	if err != nil {
 		t.Fatalf("upsertTaskForEvent (bump): %v", err)
 	}
-	if created || bumped == nil || bumped.ID != task.ID {
-		t.Fatalf("expected the second event to bump the existing task %q, got created=%v task=%+v", task.ID, created, bumped)
+	if mint != db.TaskFound || bumped == nil || bumped.ID != task.ID {
+		t.Fatalf("expected the second event to bump the existing task %q, got mint=%v task=%+v", task.ID, mint, bumped)
 	}
 }
 

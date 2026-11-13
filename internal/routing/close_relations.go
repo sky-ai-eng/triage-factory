@@ -94,14 +94,15 @@ type closeRelation struct {
 	// over the per-task typed close; a terminating relation carries no
 	// prepare/keep hooks, since the whole set closes or nothing does.
 	terminatesEntity bool
-	// closeReason audits why the task closed. Defaults to "auto_closed_by_event".
+	// closeReason audits why the task closed. Defaults to
+	// dbpkg.SiblingEventCloseReason.
 	closeReason string
 }
 
 // reason is the close reason the relation audits.
 func (rel *closeRelation) reason() string {
 	if rel.closeReason == "" {
-		return "auto_closed_by_event"
+		return dbpkg.SiblingEventCloseReason
 	}
 	return rel.closeReason
 }
@@ -471,14 +472,19 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				closedTask bool
 				err        error
 			)
+			closedAs := reason
 			if t.EventType == evt.EventType {
 				// A task of the closing event's own type closes at once,
 				// working conversation or not: the event mints its own task
 				// after this phase, and the dedup index admits one active
 				// task per (entity, type, key), so a task held open here
 				// would take the new event as a bump and the new assignee's
-				// team would get no task.
-				closedTask, err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType)
+				// team would get no task. It closes as reassigned for the
+				// same reason: the mint reopens a task a sibling event
+				// closed while a conversation still works on it, and this
+				// one has to stay closed.
+				closedAs = dbpkg.ReassignedCloseReason
+				closedTask, err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, closedAs, evt.EventType)
 			} else {
 				var out dbpkg.TaskCloseOutcome
 				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, reason)
@@ -494,7 +500,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				continue
 			}
 			if closedTask {
-				routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", reason)
+				routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", closedAs)
 				closedAny = true
 				closed++
 			}

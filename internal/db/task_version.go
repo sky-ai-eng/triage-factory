@@ -84,3 +84,18 @@ var RequeueTaskAssigns = []TaskAssign{
 	{Col: "close_deferred_event_id", Expr: "NULL"},
 	{Col: "close_deferred_at", Expr: "NULL"},
 }
+
+// ReopenTaskAssigns is what reopening a closed task writes, in both dialects:
+// the status its claim implies (a claimed task is in progress, and the queue
+// holds only unclaimed ones), no wake time, no close, and no held close. The
+// claim, the owning team, and the scores stay as the close left them. Every
+// value is read off the row or a literal, so it binds nothing.
+var ReopenTaskAssigns = []TaskAssign{
+	{Col: "status", Expr: "CASE WHEN claimed_by_agent_id IS NOT NULL OR claimed_by_user_id IS NOT NULL THEN 'in_progress' ELSE 'queued' END"},
+	{Col: "snooze_until", Expr: "NULL"},
+	{Col: "closed_at", Expr: "NULL"},
+	{Col: "close_reason", Expr: "NULL"},
+	{Col: "close_event_type", Expr: "NULL"},
+	{Col: "close_deferred_event_id", Expr: "NULL"},
+	{Col: "close_deferred_at", Expr: "NULL"},
+}

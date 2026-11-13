@@ -320,7 +320,7 @@ func TestLinearReassign_PriorOwnerClosesNewOwnerMinted(t *testing.T) {
 	if teamIDValue(&active[0]) != teamB {
 		t.Errorf("owner = %q, want team B %q (the new assignee's team)", teamIDValue(&active[0]), teamB)
 	}
-	if status, reason := taskCloseReason(t, database, first[0].ID); status != "done" || reason != "auto_closed_by_event" {
+	if status, reason := taskCloseReason(t, database, first[0].ID); status != "done" || reason != dbpkg.ReassignedCloseReason {
 		t.Errorf("team A's task = (%s, %s), want closed by the reassignment", status, reason)
 	}
 }

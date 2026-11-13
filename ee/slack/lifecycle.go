@@ -206,7 +206,7 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, conve
 
 // handleDisposition reacts to system:routing:disposition for slack:message
 // events only, and every reactive surface here fires ONLY for a message that
-// explicitly @-mentioned the bot. task_created/task_bumped add the single 👀
+// explicitly @-mentioned the bot. task_created/task_bumped/task_reopened add the single 👀
 // reaction (acknowledgeMention); taskless_no_handler/taskless_no_owner post
 // the one-line not-configured reply (replyNotConfigured). Both load the
 // message metadata, gate on its explicit-mention flag, and only then resolve
@@ -227,7 +227,7 @@ func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Eve
 	}
 
 	switch disp.Disposition {
-	case events.DispositionTaskCreated, events.DispositionTaskBumped:
+	case events.DispositionTaskCreated, events.DispositionTaskBumped, events.DispositionTaskReopened:
 		a.acknowledgeMention(ctx, evt.OrgID, disp.EventID)
 	case events.DispositionTasklessNoHandler, events.DispositionTasklessNoOwner:
 		a.replyNotConfigured(ctx, evt.OrgID, disp.EventID)
