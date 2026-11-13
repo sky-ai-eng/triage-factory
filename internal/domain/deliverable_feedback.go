@@ -1,23 +1,19 @@
 package domain
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
-// Deliverable-change agent feedback (TFAC-493). When a deliverable a conversation
+// Deliverable-change agent feedback. When a deliverable a conversation
 // produced is resolved — a human approving or dismissing a draft PR or submitting or
-// dismissing a pending review, GitHub showing a draft PR resolved, or the pull request
+// dismissing a pending review, GitHub showing a pull request resolved, or the pull request
 // a pending review is about ending — the agent that drafted it gets a concise, agent-facing note
 // referencing the id it already knows (the PR number / the review handle it spoke
-// to start-review/finalize-review). The note is delivered live (steered into a
-// warm process) or, for a terminal/paused conversation, bundled into the next resume from
-// the derived deliverable-change ledger — but the *copy* lives here, in one place,
-// so both delivery paths and every resolve handler render the same four strings.
+// to start-review/finalize-review). Whoever resolves the deliverable stages
+// the note on the conversation's staged-injection queue, which every runtime
+// reads — but the *copy* lives here, in one place, so every producer renders
+// the same strings.
 //
-// The four shapes are inferred from (Kind, State) so the live path (which has the
-// just-flipped deliverable in hand) and the ledger path (which re-derives from the
-// deliverable row's terminal state) agree without a second source of truth.
+// The shapes are inferred from (Kind, State) and the resolution the row's
+// details record, so a producer needs only the row as the resolution stored it.
 
 // systemNoteOpen / systemNoteClose wrap an agent-facing note. The agent's
 // position prompt treats a <system-note>…</system-note> block as an out-of-band
@@ -28,9 +24,7 @@ const (
 	systemNoteClose = "</system-note>"
 )
 
-// WrapSystemNote wraps body in <system-note>…</system-note> tags. Used for both
-// a single live-injected resolution note and the bundled ledger block delivered
-// ahead of a resume's user message.
+// WrapSystemNote wraps body in <system-note>…</system-note> tags.
 func WrapSystemNote(body string) string {
 	return systemNoteOpen + "\n" + body + "\n" + systemNoteClose
 }
@@ -54,8 +48,8 @@ func WrapSystemNote(body string) string {
 // A pull request settled foreign gets no note: no person resolved it, and its
 // run did not open it.
 //
-// The note is bare (no <system-note> wrapper) — callers wrap it: the live path
-// wraps one note, the ledger path wraps the joined block.
+// The note is bare (no <system-note> wrapper): it is staged as written, and
+// whatever delivers the staged queue to the agent wraps it.
 func DeliverableResolutionNote(a Deliverable) string {
 	if a.Verification == DeliverableVerificationForeign {
 		return ""
@@ -92,42 +86,6 @@ func DeliverableResolutionNote(a Deliverable) string {
 		}
 	}
 	return ""
-}
-
-// IsResolutionNoteState reports whether (Kind, State) is one of the four
-// resolution states DeliverableResolutionNote renders copy for. The ledger
-// derivation uses it to filter a conversation's deliverables down to the resolved ones
-// before formatting (equivalent to DeliverableResolutionNote(a) != "", named for
-// the predicate's intent).
-func IsResolutionNoteState(a Deliverable) bool {
-	return DeliverableResolutionNote(a) != ""
-}
-
-// DeliverableLedgerBlock renders the bundled <system-note> block prepended ahead of
-// a resume's user message: every resolved deliverable in arts, one bullet each, in
-// the order given (the caller passes them oldest→newest). Returns "" when none of
-// arts is in a reported resolution state, so a resume with no pending changes
-// prepends nothing.
-//
-// The lead-in frames these as out-of-band changes made while the agent was not
-// running — each bullet says who or what made it — and points at the
-// natural-failure contract: a later step that depended on a now-dismissed
-// deliverable just fails and reports it — this block is the explanation, not a
-// guard (TFAC-493).
-func DeliverableLedgerBlock(arts []Deliverable) string {
-	lines := make([]string, 0, len(arts))
-	for i := range arts {
-		if note := DeliverableResolutionNote(arts[i]); note != "" {
-			lines = append(lines, "- "+note)
-		}
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	body := "While you were not running, deliverables you produced were resolved:\n\n" +
-		strings.Join(lines, "\n") +
-		"\n\nThese are informational. A later step that relied on a dismissed deliverable will simply fail and report it."
-	return WrapSystemNote(body)
 }
 
 // prResolutionRef is the PR reference the agent already knows — its

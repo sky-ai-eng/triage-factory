@@ -29,7 +29,11 @@ func TestEntityStore_CloseTerminal_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
-		return stores.Entities, stores.Tasks, orgID, newPgTerminalCloseSeeder(h.AdminDB, orgID, userID)
+		seeder := newPgTerminalCloseSeeder(h.AdminDB, orgID, userID)
+		seeder.Deliverable = func(id string) (*domain.Deliverable, error) {
+			return stores.Deliverables.Get(context.Background(), orgID, id)
+		}
+		return stores.Entities, stores.Tasks, orgID, seeder
 	})
 }
 

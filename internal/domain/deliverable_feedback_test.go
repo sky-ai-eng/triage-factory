@@ -87,9 +87,6 @@ func TestDeliverableResolutionNote_NonResolutionStatesEmpty(t *testing.T) {
 		if note := DeliverableResolutionNote(a); note != "" {
 			t.Errorf("kind=%s state=%s: expected empty note, got %q", a.Kind, a.State, note)
 		}
-		if IsResolutionNoteState(a) {
-			t.Errorf("kind=%s state=%s: IsResolutionNoteState should be false", a.Kind, a.State)
-		}
 	}
 }
 
@@ -103,43 +100,11 @@ func TestWrapSystemNote(t *testing.T) {
 	}
 }
 
-func TestDeliverableLedgerBlock(t *testing.T) {
-	// Empty / no-resolution input prepends nothing.
-	if got := DeliverableLedgerBlock(nil); got != "" {
-		t.Errorf("nil arts: want empty block, got %q", got)
-	}
-	if got := DeliverableLedgerBlock([]Deliverable{
-		{Kind: DeliverableKindPullRequest, State: DeliverableStatePRDraft, Target: "o/r#1"},
-	}); got != "" {
-		t.Errorf("only-unresolved arts: want empty block, got %q", got)
-	}
-
-	arts := []Deliverable{
-		{Kind: DeliverableKindPullRequest, State: DeliverableStatePROpen, Target: "o/r#1"},
-		{Kind: DeliverableKindPullRequest, State: DeliverableStatePRDraft, Target: "o/r#2"}, // unresolved — skipped
-		{ID: "rev-1", Kind: DeliverableKindReview, State: DeliverableStateReviewDismissed, Target: "o/r#3"},
-	}
-	block := DeliverableLedgerBlock(arts)
-	if !strings.HasPrefix(block, "<system-note>") || !strings.HasSuffix(block, "</system-note>") {
-		t.Errorf("ledger block not wrapped: %q", block)
-	}
-	// Exactly two bullets (the resolved PR + the dismissed review; the draft skipped).
-	if n := strings.Count(block, "\n- "); n != 2 {
-		t.Errorf("expected 2 ledger bullets, got %d: %q", n, block)
-	}
-	if !strings.Contains(block, "o/r#1") || !strings.Contains(block, "o/r#3") {
-		t.Errorf("ledger block missing expected refs: %q", block)
-	}
-	if strings.Contains(block, "o/r#2") {
-		t.Errorf("ledger block should not mention the unresolved draft o/r#2: %q", block)
-	}
-}
-
 // TestDeliverableResolutionNote_ReadsResolution pins that a closed or open PR's
 // note is decided by who resolved it, not by state alone: rejected names the
 // deleted branch, github says the change happened outside Triage Factory, and
 // the TF verbs (or a stored row with no resolution) keep the human-action
-// copy. The ledger derivation reads only the row, so it gets the same lines.
+// copy.
 func TestDeliverableResolutionNote_ReadsResolution(t *testing.T) {
 	pr := func(state, resolution string) Deliverable {
 		return Deliverable{
@@ -174,13 +139,7 @@ func TestDeliverableResolutionNote_ReadsResolution(t *testing.T) {
 					t.Errorf("note %q must not contain %q", got, nw)
 				}
 			}
-			if !IsResolutionNoteState(tc.a) {
-				t.Error("must be a resolution-note state so the resume ledger picks it up")
-			}
 		})
-	}
-	if block := DeliverableLedgerBlock([]Deliverable{pr(DeliverableStatePRClosed, PRResolutionRejected)}); !strings.Contains(block, "feature/x") {
-		t.Errorf("ledger block %q should carry the rejection line", block)
 	}
 }
 
@@ -222,10 +181,6 @@ func TestDeliverableResolutionNote_ReviewDismissedByItsPullRequestEnding(t *test
 				}
 			}
 		})
-	}
-	block := DeliverableLedgerBlock([]Deliverable{review(ReviewResolutionPullRequestMerged)})
-	if !strings.Contains(block, "the pull request was merged") || strings.Contains(block, "human") {
-		t.Errorf("ledger block %q should say the pull request merged and credit no person", block)
 	}
 }
 

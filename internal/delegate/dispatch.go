@@ -1497,7 +1497,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// enqueue step, so injections staged AFTER the enqueue are still
 	// picked up (the flush is destructive, so composing it early would
 	// risk losing anything staged in the gap).
-	prepends, prependsUnsent := s.resumeSystemPrepends(stepCtx, orgID, conv)
+	prepends, prependsUnsent := s.resumeSystemPrepends(stepCtx, orgID, conv.ID)
 	message := prepends + agentMessage
 
 	// The resume path's agent-live. It runs no phase ladder — a resume has no

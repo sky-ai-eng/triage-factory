@@ -184,16 +184,19 @@ func (a *App) buildAI() {
 }
 
 // hookReconcilerToSpawner lets a draft PR marked ready on GitHub, rather than
-// through the approval click, still resolve its task: the reconciler observes
-// the transition and the spawner, which owns task placement, runs the closure.
+// through the approval click, still resolve its task, and lets the agent that
+// produced a deliverable learn that GitHub resolved it: the reconciler
+// observes the transition, and the spawner, which owns task placement and the
+// notes staged for a conversation, runs the closure and stages the note.
 // The reconciler is a brain subsystem, so an executor has none to hook — its
 // spawner runs agents, and the control pod's spawner (built too, dispatcher
-// never started) is the one the closure runs on.
+// never started) is the one both run on.
 func (a *App) hookReconcilerToSpawner() {
 	if a.reconcilerCore == nil {
 		return
 	}
 	a.reconcilerCore.SetPullRequestResolvedHook(a.spawner.CloseTaskIfTerminalAndResolved)
+	a.reconcilerCore.SetDeliverableTransitionedHook(a.spawner.TellDeliverableResolved)
 }
 
 // buildExecution constructs the delegation spawner, wiring it to the

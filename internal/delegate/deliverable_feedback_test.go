@@ -8,113 +8,15 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedMessageAt inserts a non-user run message stamped at the given time, so
-// a test can place the deliverable-change ledger watermark (the run's last agent
-// activity) before/after the deliverables it seeds.
-func seedMessageAt(t *testing.T, s *Spawner, conversationID string, at time.Time) {
-	t.Helper()
-	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: conversationID, Role: "assistant", Content: "agent turn", CreatedAt: at,
-	}); err != nil {
-		t.Fatalf("seed agent message: %v", err)
-	}
-}
-
-// seedResolvedDeliverable upserts a deliverable in a given post-resolution state for
-// conversationID (updated_at = now), so the ledger derivation sees it as a human
-// resolution after a past watermark.
-func seedResolvedDeliverable(t *testing.T, s *Spawner, conversationID string, a domain.Deliverable) {
-	t.Helper()
-	a.ConversationID = conversationID
-	a.OrgID = runmode.LocalDefaultOrgID
-	a.TeamID = runmode.LocalDefaultTeamID
-	if _, err := s.deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)); err != nil {
-		t.Fatalf("seed deliverable %s/%s: %v", a.Kind, a.State, err)
-	}
-}
-
-// TestDeliverableLedgerForResume_DerivesResolvedSinceWatermark: a resumable run's
-// ledger bundles exactly the deliverables a human resolved AFTER the agent's last
-// activity, skipping unresolved drafts — derived from the deliverable rows, no
-// ledger table.
-func TestDeliverableLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-led", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-
-	// Watermark in the past, so the deliverables seeded "now" all land after it.
-	seedMessageAt(t, s, "r-led", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
-
-	// Resolved: PR approved (open) and a review dismissed → both reported.
-	approvedPR := domain.NewPullRequestDeliverable("o/r", 1, "node1", "h", "main",
-		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → state=open
-	seedResolvedDeliverable(t, s, "r-led", approvedPR)
-
-	dismissedReview := domain.NewReviewDeliverable("o/r", 3, "node3", "headsha", "r-led")
-	dismissedReview.State = domain.DeliverableStateReviewDismissed
-	seedResolvedDeliverable(t, s, "r-led", dismissedReview)
-
-	// Unresolved draft PR → must NOT appear (still awaiting a human).
-	draftPR := domain.NewPullRequestDeliverable("o/r", 2, "node2", "h", "main",
-		"https://github.com/o/r/pull/2", "PR two", "", true) // draft=true → state=draft
-	seedResolvedDeliverable(t, s, "r-led", draftPR)
-
-	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-led")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
-	}
-
-	block := s.deliverableLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv)
-	if block == "" {
-		t.Fatal("expected a non-empty ledger block")
-	}
-	if !strings.HasPrefix(block, "<system-note>") || !strings.HasSuffix(block, "</system-note>") {
-		t.Errorf("ledger block not wrapped: %q", block)
-	}
-	if !strings.Contains(block, "o/r#1") {
-		t.Errorf("ledger missing the approved PR o/r#1: %q", block)
-	}
-	if !strings.Contains(block, "o/r#3") {
-		t.Errorf("ledger missing the dismissed review on o/r#3: %q", block)
-	}
-	if strings.Contains(block, "o/r#2") {
-		t.Errorf("ledger should not mention the still-draft PR o/r#2: %q", block)
-	}
-}
-
-// TestDeliverableLedgerForResume_ExcludesPreWatermark: a deliverable resolved BEFORE
-// the agent's last activity (e.g. delivered live while the run was warm) is not
-// re-bundled into the ledger — the watermark filters it out.
-func TestDeliverableLedgerForResume_ExcludesPreWatermark(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-pre", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-
-	// Watermark in the FAR future, so the deliverable seeded "now" is before it.
-	seedMessageAt(t, s, "r-pre", time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC))
-
-	approvedPR := domain.NewPullRequestDeliverable("o/r", 1, "node1", "h", "main",
-		"https://github.com/o/r/pull/1", "PR one", "", false)
-	seedResolvedDeliverable(t, s, "r-pre", approvedPR)
-
-	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-pre")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
-	}
-	if block := s.deliverableLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv); block != "" {
-		t.Errorf("expected empty ledger (resolution predates the watermark), got %q", block)
-	}
-}
-
 // waitStagedNotes polls until convID has at least want staged system notes,
-// or fails, and returns their contents. The stage runs on a detached goroutine
-// (InjectDeliverableNote is fire-and-forget), so the side effect is asserted by
-// polling rather than a synchronous read.
+// or fails, and returns their contents. A request handler's stage runs on a
+// detached goroutine (InjectDeliverableNote), so the side effect is asserted
+// by polling rather than a synchronous read.
 func waitStagedNotes(t *testing.T, database *sql.DB, convID string, want int) []string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -150,101 +52,244 @@ func stagedNotes(t *testing.T, database *sql.DB, convID string) []string {
 	return notes
 }
 
-// TestDeliverableLedgerForResume_FallsBackToStartedAt: a run with NO agent messages
-// yet (LastAgentActivityAtSystem ok=false) uses run.StartedAt as the watermark,
-// so a resolution after the run started still lands in the ledger.
-func TestDeliverableLedgerForResume_FallsBackToStartedAt(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-nomsg", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+// resolution is one way a deliverable is resolved: the row as the resolution
+// stored it, and the producer that tells the conversation.
+type resolution struct {
+	name string
+	row  func(conversationID string) domain.Deliverable
+	tell func(s *Spawner, d domain.Deliverable)
+}
 
-	// Pin started_at into the past so the deliverable seeded "now" is unambiguously
-	// after it; insert NO messages, so the watermark must fall back to it.
-	if _, err := database.Exec(`UPDATE conversations SET started_at = ? WHERE id = 'r-nomsg'`,
-		time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
-		t.Fatalf("set started_at: %v", err)
+// resolutions are the four ways a conversation's deliverable is resolved, each
+// told through the producer that resolution really runs: a person's approve
+// or dismiss through the request handlers' detached stage, and a review a
+// pull request's end dismissed through the close's follow-up.
+func resolutions() []resolution {
+	pullRequest := func(state, res string) func(string) domain.Deliverable {
+		return func(conversationID string) domain.Deliverable {
+			return domain.Deliverable{
+				ID: "pr-" + conversationID, ConversationID: conversationID,
+				Kind: domain.DeliverableKindPullRequest, State: state, Target: "o/r#7",
+				DetailsJSON: domain.MarshalPRDeliverableDetails(domain.PRDeliverableDetails{HeadBranch: "tf/fix", Base: "main", Resolution: res}),
+			}
+		}
 	}
-
-	approvedPR := domain.NewPullRequestDeliverable("o/r", 1, "node1", "h", "main",
-		"https://github.com/o/r/pull/1", "PR one", "", false)
-	seedResolvedDeliverable(t, s, "r-nomsg", approvedPR)
-
-	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
+	review := func(res string) func(string) domain.Deliverable {
+		return func(conversationID string) domain.Deliverable {
+			return domain.Deliverable{
+				ID: "review-" + conversationID, ConversationID: conversationID,
+				Kind: domain.DeliverableKindReview, State: domain.DeliverableStateReviewDismissed, Target: "o/r#7",
+				DetailsJSON: domain.MarshalReviewDeliverableDetails(domain.ReviewDeliverableDetails{ReviewEvent: "COMMENT", Resolution: res}),
+			}
+		}
 	}
-	// Sanity: this run genuinely has no agent message, so we exercise the fallback.
-	if _, ok, err := s.conversations.LastAgentActivityAtSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg"); err != nil || ok {
-		t.Fatalf("precondition: want no agent message (ok=false), got ok=%v err=%v", ok, err)
+	person := func(s *Spawner, d domain.Deliverable) { s.InjectDeliverableNote(runmode.LocalDefaultOrgID, d) }
+	closed := func(s *Spawner, d domain.Deliverable) {
+		s.ReviewsDismissedSystem(context.Background(), runmode.LocalDefaultOrgID, []domain.Deliverable{d})
 	}
-
-	block := s.deliverableLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv)
-	if block == "" || !strings.Contains(block, "o/r#1") {
-		t.Errorf("expected the resolution in the ledger via the StartedAt fallback, got %q", block)
+	return []resolution{
+		{"a person's approve", pullRequest(domain.DeliverableStatePROpen, domain.PRResolutionApproved), person},
+		{"a person's dismiss", pullRequest(domain.DeliverableStatePRClosed, domain.PRResolutionDismissed), person},
+		{"a review dismissed by a merge", review(domain.ReviewResolutionPullRequestMerged), closed},
+		{"a review dismissed by a close", review(domain.ReviewResolutionPullRequestClosed), closed},
 	}
 }
 
-// TestInjectDeliverableNote_LiveStagesTheNoteAtTheToolBoundary: resolving a
-// deliverable on a live run stages a single kind-specific note for the warm
-// process (on a detached goroutine), arms its tool boundary, and reports
-// dispatched=true. The next tool batch hands the note to the agent wrapped in
-// <system-note>.
-func TestInjectDeliverableNote_LiveStagesTheNoteAtTheToolBoundary(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	// Register a live handle so getProc (the liveness gate) sees the run as warm.
-	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
-	s.getProc("run-live").boundary.take() // armed from registration
+// reader is one way a conversation comes to read its staged notes: the
+// runtime and state it is in when the note is staged, and the read that
+// follows, which returns what the agent was handed.
+type reader struct {
+	name  string
+	setup func(t *testing.T, s *Spawner, database *sql.DB, conversationID string)
+	read  func(t *testing.T, s *Spawner, database *sql.DB, conversationID string) string
+}
 
-	art := domain.Deliverable{Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePROpen, Target: "o/r#7"}
-	if dispatched := s.InjectDeliverableNote(runmode.LocalDefaultOrgID, "run-live", art); !dispatched {
-		t.Fatal("expected dispatched=true for a live run")
+// nativeRead is a native loop's drain: every pending row in the assembly
+// window is marked delivered, and what it read goes into the next request.
+func nativeRead(t *testing.T, s *Spawner, database *sql.DB, conversationID string) string {
+	t.Helper()
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	var claimID string
+	if err := database.QueryRow(`SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, conversationID).Scan(&claimID); err != nil {
+		claimID = markEngaged(t, database, conversationID)
 	}
-	notes := waitStagedNotes(t, database, "run-live", 1)
-	if len(notes) != 1 || !strings.Contains(notes[0], "o/r#7") || !strings.Contains(notes[0], "approved") {
-		t.Fatalf("staged notes = %q, want one note naming the deliverable and its resolution", notes)
+	tr := newNativeTranscript(s, org, conversationID, claimID)
+	rows, err := tr.ListForAssembly(ctx, org, conversationID)
+	if err != nil {
+		t.Fatalf("list for assembly: %v", err)
 	}
-	batch := s.notesAtToolBatch(runmode.LocalDefaultOrgID, "run-live", "").Text
-	if !strings.Contains(batch, "<system-note>") || !strings.Contains(batch, "o/r#7") {
-		t.Errorf("the next tool batch handed over %q, want the note wrapped in <system-note>", batch)
+	var ids []int
+	var read []string
+	for _, r := range rows {
+		if pendingRow(r) {
+			ids = append(ids, r.ID)
+			read = append(read, r.Content)
+		}
+	}
+	if len(ids) > 0 {
+		if err := tr.MarkDelivered(ctx, org, conversationID, ids, ""); err != nil {
+			t.Fatalf("mark delivered: %v", err)
+		}
+	}
+	return strings.Join(read, "\n")
+}
+
+func readers() []reader {
+	return []reader{
+		{
+			name: "a working native conversation, at its next model call",
+			setup: func(t *testing.T, _ *Spawner, database *sql.DB, conversationID string) {
+				markEngaged(t, database, conversationID)
+				markNative(t, database, conversationID)
+			},
+			read: nativeRead,
+		},
+		{
+			name: "a parked native conversation, at its next engagement",
+			setup: func(t *testing.T, _ *Spawner, database *sql.DB, conversationID string) {
+				setConversationStatus(t, database, conversationID, domain.StatusOpen)
+				markNative(t, database, conversationID)
+			},
+			read: nativeRead,
+		},
+		{
+			name: "a live SDK process, at its next tool batch",
+			setup: func(_ *testing.T, s *Spawner, _ *sql.DB, conversationID string) {
+				s.registerProc(runmode.LocalDefaultOrgID, conversationID, &agentproc.LiveRun{})
+				s.getProc(conversationID).boundary.take() // armed from registration
+			},
+			read: func(_ *testing.T, s *Spawner, _ *sql.DB, conversationID string) string {
+				// The boundary is armed after the row commits, on the stager's
+				// goroutine, so the first batch may come a moment early.
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					if text := s.notesAtToolBatch(runmode.LocalDefaultOrgID, conversationID, "").Text; text != "" || time.Now().After(deadline) {
+						return text
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			},
+		},
+		{
+			name: "a parked SDK conversation, at its next resume",
+			setup: func(t *testing.T, _ *Spawner, database *sql.DB, conversationID string) {
+				setConversationStatus(t, database, conversationID, domain.StatusOpen)
+			},
+			read: func(_ *testing.T, s *Spawner, _ *sql.DB, conversationID string) string {
+				block, _ := s.resumeSystemPrepends(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+				return block
+			},
+		},
 	}
 }
 
-// TestInjectDeliverableNote_TerminalNoOp: with no live process, InjectDeliverableNote
-// stages nothing (it must not restart the agent) and reports dispatched=false
-// — the resolution surfaces via the derived ledger on the next resume instead.
-// dispatched=false means no goroutine was spawned, so nothing can be staged
-// later.
-func TestInjectDeliverableNote_TerminalNoOp(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "run-dead", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+// TestDeliverableResolved_EveryConversationIsToldOnce: however a deliverable
+// is resolved, and whatever runtime and state its conversation is in, exactly
+// one note is staged, the conversation's next read hands it to the agent
+// once, and the read after that hands it nothing.
+func TestDeliverableResolved_EveryConversationIsToldOnce(t *testing.T) {
+	for _, res := range resolutions() {
+		for _, rd := range readers() {
+			t.Run(res.name+" reaches "+rd.name, func(t *testing.T) {
+				const conversationID = "r-resolved"
+				database := newDelegateTestDB(t)
+				seedConversation(t, database, conversationID, "sess", "/tmp/wt")
+				s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+				rd.setup(t, s, database, conversationID)
 
-	art := domain.Deliverable{Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePRClosed, Target: "o/r#7"}
-	if dispatched := s.InjectDeliverableNote(runmode.LocalDefaultOrgID, "run-dead", art); dispatched {
-		t.Error("expected dispatched=false for a run with no live process")
-	}
-	if notes := stagedNotes(t, database, "run-dead"); len(notes) != 0 {
-		t.Errorf("staged notes = %q, want none (a terminal run is told through the ledger)", notes)
+				d := res.row(conversationID)
+				want := domain.DeliverableResolutionNote(d)
+				if want == "" {
+					t.Fatal("the fixture is not a resolution a note reports")
+				}
+				res.tell(s, d)
+
+				if staged := waitStagedNotes(t, database, conversationID, 1); len(staged) != 1 || staged[0] != want {
+					t.Fatalf("staged notes = %q, want exactly the one resolution note", staged)
+				}
+				if got := rd.read(t, s, database, conversationID); strings.Count(got, want) != 1 {
+					t.Errorf("the read handed the agent %q, want the resolution note once", got)
+				}
+				if left := stagedNotes(t, database, conversationID); len(left) != 0 {
+					t.Errorf("still staged after the read: %q", left)
+				}
+				if again := rd.read(t, s, database, conversationID); strings.Contains(again, want) {
+					t.Errorf("a second read handed the agent the note again: %q", again)
+				}
+			})
+		}
 	}
 }
 
-// TestInjectDeliverableNote_NonResolutionStateNoOp: a non-resolution deliverable state
-// (an unresolved draft) produces no note, even on a live run.
-func TestInjectDeliverableNote_NonResolutionStateNoOp(t *testing.T) {
+// TestDeliverableResolved_AFinishedConversationKeepsItsNoteForAResume: a note
+// is staged on a conversation that has finished too, where nothing reads it
+// until a person resumes the conversation, and the row does not make the
+// conversation look like it has input to run on.
+func TestDeliverableResolved_AFinishedConversationKeepsItsNoteForAResume(t *testing.T) {
+	const conversationID = "r-finished"
 	database := newDelegateTestDB(t)
-	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
+	seedConversation(t, database, conversationID, "sess", "/tmp/wt")
+	setConversationStatus(t, database, conversationID, "completed")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
 
-	art := domain.Deliverable{Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePRDraft, Target: "o/r#7"}
-	if dispatched := s.InjectDeliverableNote(runmode.LocalDefaultOrgID, "run-live", art); dispatched {
-		t.Error("expected dispatched=false for a non-resolution state")
+	d := resolutions()[0].row(conversationID)
+	s.TellDeliverableResolved(context.Background(), runmode.LocalDefaultOrgID, d)
+
+	if staged := stagedNotes(t, database, conversationID); len(staged) != 1 {
+		t.Fatalf("staged notes = %q, want the one note kept for a resume", staged)
 	}
-	// Deterministic: the empty-note guard returns before the `go func`, so no
-	// goroutine is spawned and nothing is staged without any wait.
-	if notes := stagedNotes(t, database, "run-live"); len(notes) != 0 {
+	rows := allRows(t, s, conversationID)
+	for _, r := range rows {
+		if waitingMessage(r) {
+			t.Errorf("the note reads as a person's waiting input, which would wake the conversation: %+v", r)
+		}
+	}
+}
+
+// TestDeliverableResolved_NothingToReportStagesNothing: a deliverable that is
+// not in a reported resolution state, or whose conversation was purged, gets
+// no note.
+func TestDeliverableResolved_NothingToReportStagesNothing(t *testing.T) {
+	const conversationID = "r-unresolved"
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, conversationID, "sess", "/tmp/wt")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	s.registerProc(runmode.LocalDefaultOrgID, conversationID, &agentproc.LiveRun{})
+
+	draft := domain.Deliverable{ConversationID: conversationID, Kind: domain.DeliverableKindPullRequest, State: domain.DeliverableStatePRDraft, Target: "o/r#7"}
+	purged := resolutions()[0].row("")
+	for _, d := range []domain.Deliverable{draft, purged} {
+		// Neither starts a goroutine, so there is nothing to wait for.
+		s.InjectDeliverableNote(runmode.LocalDefaultOrgID, d)
+		s.TellDeliverableResolved(context.Background(), runmode.LocalDefaultOrgID, d)
+	}
+	if notes := stagedNotes(t, database, conversationID); len(notes) != 0 {
 		t.Errorf("staged notes = %q, want none", notes)
+	}
+}
+
+// TestHandlePRCoherence_LiveSDKProcessReadsTheNoteAtItsNextToolBatch: a PR
+// status note staged for a conversation with a live SDK process is handed to
+// the agent at the process's next tool batch, once.
+func TestHandlePRCoherence_LiveSDKProcessReadsTheNoteAtItsNextToolBatch(t *testing.T) {
+	s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRCICheckFailed, events.GitHubPRCICheckFailedMetadata{
+		Repo: "o/r", PRNumber: 7, HeadSHA: "new-head", CheckName: "test",
+	})
+	org := runmode.LocalDefaultOrgID
+	s.registerProc(org, conversationID, &agentproc.LiveRun{})
+	s.getProc(conversationID).boundary.take() // armed from registration
+
+	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+
+	staged := stagedNotes(t, s.database, conversationID)
+	if len(staged) != 1 {
+		t.Fatalf("staged notes = %q, want the one PR status note", staged)
+	}
+	if got := s.notesAtToolBatch(org, conversationID, "").Text; strings.Count(got, staged[0]) != 1 {
+		t.Errorf("the next tool batch handed over %q, want the PR status note once", got)
+	}
+	if again := s.notesAtToolBatch(org, conversationID, "").Text; again != "" {
+		t.Errorf("the batch after it handed over %q, want nothing", again)
 	}
 }

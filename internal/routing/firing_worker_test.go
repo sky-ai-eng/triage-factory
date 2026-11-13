@@ -40,7 +40,7 @@ type stubDelegator struct {
 	stopped []string
 	// dismissed is every review handed to ReviewsDismissedSystem, so a test
 	// can assert a close reached the dismissal's follow-up.
-	dismissed []dbpkg.DismissedReview
+	dismissed []domain.Deliverable
 	// noted is every conversation id handed to TellTaskClosing, so a
 	// test can tell a close that held and told its conversations.
 	noted []string
@@ -153,17 +153,17 @@ func (s *stubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause del
 // Recording only: what the real follow-up sends and closes is the spawner's to
 // prove, and what a router test can prove is that the close handed it the
 // reviews its transaction dismissed.
-func (s *stubDelegator) ReviewsDismissedSystem(_ context.Context, orgID string, reviews []dbpkg.DismissedReview) {
+func (s *stubDelegator) ReviewsDismissedSystem(_ context.Context, orgID string, reviews []domain.Deliverable) {
 	s.mu.Lock()
 	s.dismissed = append(s.dismissed, reviews...)
 	s.mu.Unlock()
 }
 
 // dismissedCopy is the reviews ReviewsDismissedSystem was called with.
-func (s *stubDelegator) dismissedCopy() []dbpkg.DismissedReview {
+func (s *stubDelegator) dismissedCopy() []domain.Deliverable {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]dbpkg.DismissedReview(nil), s.dismissed...)
+	return append([]domain.Deliverable(nil), s.dismissed...)
 }
 
 // stoppedCopy is the blueprint-run ids StopBlueprintRun was called with.

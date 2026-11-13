@@ -69,7 +69,17 @@ type Reconciler struct {
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
+	// transitioned runs after each transition this reconciler applied to a
+	// conversation's deliverable commits. nil skips it, as for prResolved.
+	transitioned DeliverableTransitionedHook
 }
+
+// DeliverableTransitionedHook is what the reconciler calls for each
+// transition it applied to a deliverable a conversation produced, with the
+// row as it stored it. A transition found here happened on GitHub, where no
+// handler of ours saw it, so this is how the agent that produced the
+// deliverable is told of one that resolved it.
+type DeliverableTransitionedHook func(ctx context.Context, orgID string, d domain.Deliverable)
 
 // PullRequestResolvedHook is what the reconciler calls when a draft pull
 // request became ready somewhere other than the approval click — a human on
@@ -133,6 +143,18 @@ func (rc *Reconciler) SetPullRequestResolvedHook(h PullRequestResolvedHook) {
 // own check that a brain's reconciler was not left without one.
 func (rc *Reconciler) HasPullRequestResolvedHook() bool {
 	return rc.prResolved != nil
+}
+
+// SetDeliverableTransitionedHook installs what each applied transition runs.
+// Set once at wiring, before any cycle runs.
+func (rc *Reconciler) SetDeliverableTransitionedHook(h DeliverableTransitionedHook) {
+	rc.transitioned = h
+}
+
+// HasDeliverableTransitionedHook reports whether that hook is installed, for
+// the wiring's check.
+func (rc *Reconciler) HasDeliverableTransitionedHook() bool {
+	return rc.transitioned != nil
 }
 
 // ReconcileOrg runs the PR-deliverable backstop, then lists the org's
@@ -462,6 +484,9 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			continue
 		}
 		transitioned = append(transitioned, updated)
+		if rc.transitioned != nil && updated.ConversationID != "" {
+			rc.transitioned(writeCtx, orgID, updated)
+		}
 		if a.ConversationID != "" && isDraftResolved(a, newState) {
 			resolvedConversations[a.ConversationID] = true
 		}

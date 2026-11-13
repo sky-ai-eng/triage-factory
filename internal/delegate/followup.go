@@ -151,8 +151,9 @@ func endedBlock(reason domain.EndedReason) string {
 // no coherent workspace to rehydrate. It is also an ended conversation, which
 // the rung above this one refuses first and for a reason a person can read.
 // Runs never park for approval; a concluded run that left an unresolved
-// deliverable (draft PR / ready review) resumes through this same path plus the
-// feedback ledger, not through a parked status.
+// deliverable (draft PR / ready review) resumes through this same path, and
+// reads how the deliverable was resolved from its staged notes, not through
+// a parked status.
 func resumableState(status string) bool {
 	return status == domain.StatusOpen
 }
@@ -473,8 +474,8 @@ func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, org
 // its own message is there: an undelivered row reads a parked conversation as
 // queued.
 //
-// The out-of-band <system-note> prepends (staged injections + the deliverable
-// ledger) are deliberately NOT composed here. Delivery belongs to whichever
+// The out-of-band <system-note> prepend (the staged injections) is
+// deliberately NOT composed here. Delivery belongs to whichever
 // executor claims the row, and composing the prepend now would destructively
 // flush the staged-injection queue at enqueue time, losing anything staged in
 // the gap before the claim; Spawner.dispatchResumeClaim composes it immediately
@@ -1075,32 +1076,17 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 	return blueprintCalledOff(br), nil
 }
 
-// resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
-// ahead of a resuming run's user message, in their final read order
-// [staged injections][deliverable ledger]:
-//
-//   - the durable staged-injection queue flush (TFAC-501) — every producer-
-//     agnostic injection staged while the run wasn't running (e.g. the new-commits
-//     freshness injection), destructively flushed (delivered exactly once); and
-//   - the deliverable-change ledger (TFAC-493) — every deliverable this run produced
-//     that was resolved while it wasn't running, derived from the deliverable rows
-//     (no ledger table).
-//
-// The deliverable ledger is composed first and the staged-injection flush second, so
-// the injection block lands FIRST in the returned prefix (each step writes to the
-// front). Both are out-of-band <system-note> blocks, so their order relative to
-// each other is cosmetic. Returns "" (prepend nothing) when neither has anything
-// pending; a read failure in either source degrades to no block for that source,
-// never blocking the resume. The callback is the staged injections' opening-unsent
-// return (stagedInjectionsForEngagement), nil when none were flushed.
-func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, conv *domain.Conversation) (string, func()) {
-	var prefix string
-	if block := s.deliverableLedgerForResume(ctx, orgID, conv); block != "" {
-		prefix = block + "\n\n"
+// resumeSystemPrepends is the out-of-band <system-note> block prepended ahead
+// of a resuming run's user message: the conversation's staged injections,
+// every note staged while the run wasn't running, flushed so each is
+// delivered exactly once. Returns "" (prepend nothing) when nothing is
+// staged; a read failure degrades to no block, never blocking the resume.
+// The callback is the staged injections' opening-unsent return
+// (stagedInjectionsForEngagement), nil when none were flushed.
+func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID, conversationID string) (string, func()) {
+	block, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
+	if block == "" {
+		return "", unsent
 	}
-	block, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conv.ID)
-	if block != "" {
-		prefix = block + "\n\n" + prefix
-	}
-	return prefix, unsent
+	return block + "\n\n", unsent
 }

@@ -95,7 +95,7 @@ type ReviewDeliverableProposed struct {
 //   - Resolution: what dismissed the review when it was not a person — the
 //     pull request it reviews ending (ReviewResolution*). Empty on a review a
 //     person resolved, which is every review resolved through TF's verbs; the
-//     resume ledger reads it to say which happened.
+//     agent-facing resolution note reads it to say which happened.
 //
 // NodeID is retained for backward compatibility with rows written before the
 // local-staging rework; it is no longer populated (review reconciliation is moot

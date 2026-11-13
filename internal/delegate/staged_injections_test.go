@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -218,59 +217,41 @@ func TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly(t *testing.T) {
 	}
 }
 
-// TestResumeSystemPrepends_OrdersInjectionsThenLedger: a resumable run with BOTH
-// a staged injection AND a human-resolved deliverable composes both <system-note>
-// blocks ahead of the user's text, staged-injection block first:
-// [staged injections][deliverable ledger]. Guards the composed order against a
-// refactor dropping or reordering a block (the components are tested individually
-// elsewhere; this pins SendMessage's assembly).
-func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
+// TestResumeSystemPrepends_CarriesTheStagedNotesOnce: a resume's prefix is
+// the conversation's staged notes in one <system-note> block, and a second
+// resume prepends nothing.
+func TestResumeSystemPrepends_CarriesTheStagedNotesOnce(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-compose", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
 
-	// Deliverable ledger: a watermark in the past so the resolved PR lands in it.
-	seedMessageAt(t, s, "r-compose", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
-	approvedPR := domain.NewPullRequestDeliverable("o/r", 1, "node1", "h", "main",
-		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → open (approved)
-	seedResolvedDeliverable(t, s, "r-compose", approvedPR)
-
-	// Staged injection on the same run.
 	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
 		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
+	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
+		domain.NoteProducerDeliverableResolved, "the resolution note body")
 
-	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
+	prefix, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, "r-compose")
+	for _, body := range []string{"the staged injection body", "the resolution note body"} {
+		if strings.Count(prefix, body) != 1 {
+			t.Errorf("prefix %q should carry %q once", prefix, body)
+		}
 	}
-	prefix, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
-
-	inj := strings.Index(prefix, "the staged injection body")
-	ledger := strings.Index(prefix, "o/r#1")
-	if inj < 0 || ledger < 0 {
-		t.Fatalf("a block is missing: injection=%d ledger=%d in %q", inj, ledger, prefix)
+	if strings.Count(prefix, "<system-note>") != 1 {
+		t.Errorf("want one <system-note> block, got %d: %q", strings.Count(prefix, "<system-note>"), prefix)
 	}
-	if inj > ledger {
-		t.Errorf("staged-injection block must precede the deliverable ledger: %q", prefix)
-	}
-	if strings.Count(prefix, "<system-note>") != 2 {
-		t.Errorf("want two distinct <system-note> blocks, got %d: %q", strings.Count(prefix, "<system-note>"), prefix)
+	if again, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, "r-compose"); again != "" {
+		t.Errorf("a second resume prepended %q, want nothing", again)
 	}
 }
 
-// TestResumeSystemPrepends_EmptyWhenNothingPending: no staged injection and no
-// resolved deliverable → empty prefix, so a plain resume prepends nothing.
+// TestResumeSystemPrepends_EmptyWhenNothingPending: nothing staged → empty
+// prefix, so a plain resume prepends nothing.
 func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-none", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	ctx := context.Background()
-	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
-	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
-	}
-	if got, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
+	if got, _ := s.resumeSystemPrepends(context.Background(), runmode.LocalDefaultOrgID, "r-none"); got != "" {
 		t.Errorf("want empty prefix when nothing pending, got %q", got)
 	}
 }

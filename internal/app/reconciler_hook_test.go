@@ -51,4 +51,7 @@ func TestHookReconcilerToSpawner_BrainWiresTheClosure(t *testing.T) {
 	if !a.reconcilerCore.HasPullRequestResolvedHook() {
 		t.Error("the brain's reconciler was left without the task-closure hook")
 	}
+	if !a.reconcilerCore.HasDeliverableTransitionedHook() {
+		t.Error("the brain's reconciler was left without the hook that tells an agent its deliverable was resolved on GitHub")
+	}
 }

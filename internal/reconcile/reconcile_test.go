@@ -490,6 +490,53 @@ func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 	}
 }
 
+// TestReconcile_ATransitionHandsItsStoredRowToTheHook: a transition the
+// reconciler applies is one nobody resolved through TF, so the hook that
+// tells the producing agent gets the row as stored: its new state, the
+// resolution naming GitHub, and the conversation to tell. A deliverable no
+// conversation produced has nobody to tell.
+func TestReconcile_ATransitionHandsItsStoredRowToTheHook(t *testing.T) {
+	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
+	const conversationID = "77777777-7777-7777-7777-777777777777"
+	seedConversation("ent-7", conversationID)
+
+	draft := domain.NewPullRequestDeliverable("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", true)
+	draft.ConversationID = conversationID
+	seedArt(draft)
+	detached := domain.NewPullRequestDeliverable("octo/repo", 8, "PR_8", "x", "main", "u", "t", "b", true)
+	seedArt(detached)
+
+	stub := &stubGH{prs: map[string]string{
+		"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false),
+		"PR_8": prNodeJSON("PR_8", 8, "OPEN", false, false),
+	}}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores, TrustRecords, nil)
+	var told []domain.Deliverable
+	rc.SetDeliverableTransitionedHook(func(_ context.Context, _ string, d domain.Deliverable) { told = append(told, d) })
+
+	if err := rc.ReconcileOrg(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+	assertState(t, conn, runmode.LocalDefaultOrgID, detached.DedupKey, domain.DeliverableStatePROpen)
+	if len(told) != 1 || told[0].ConversationID != conversationID || told[0].State != domain.DeliverableStatePROpen {
+		t.Fatalf("hook calls = %+v, want one, for the conversation's pull request, now open", told)
+	}
+	if d, _ := domain.ParsePRDeliverableDetails(told[0].DetailsJSON); d.Resolution != domain.PRResolutionGitHub {
+		t.Errorf("resolution handed to the hook = %q, want %q", d.Resolution, domain.PRResolutionGitHub)
+	}
+	if domain.DeliverableResolutionNote(told[0]) == "" {
+		t.Error("the row handed to the hook renders no resolution note")
+	}
+
+	// The next cycle finds nothing to apply, so nobody is told twice.
+	if err := rc.ReconcileOrg(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("second ReconcileOrg: %v", err)
+	}
+	if len(told) != 1 {
+		t.Errorf("hook calls after a second cycle = %d, want still 1", len(told))
+	}
+}
+
 // TestReconcile_OpenNeverReturnsToDraft pins the one-way rule: a PR that
 // already left draft — the approval click, or a ready observed above — is not
 // re-drafted when a human converts it back on GitHub. The row stays open, no
