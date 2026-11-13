@@ -77,6 +77,9 @@ export interface TaskCardProps {
    *  text. */
   entityHref?: string
   lifecycle: Lifecycle
+  /** A person dismissed the task. The status mark says so once nothing is
+   *  working on it. */
+  dismissed?: boolean
   summary?: string
   /** Draw the summary's line boxes in hairlines while it is generated. */
   summaryPending?: boolean
@@ -216,12 +219,16 @@ const SETTLED: Record<Lifecycle, string> = {
   idle: 'Idle after ',
   queued: '',
   working: '',
-  // A task state, read only off a card with no run, so there is no duration
-  // to introduce.
-  dismissed: '',
 }
 
 // The status mark. A card says where the run IS here and nowhere else.
+//
+// One task fact overrides it: a dismissed task whose run has settled draws the
+// dismissal. The two closes mean opposite things about whether the work was
+// wanted, and a finished run's check on a dismissed card would read as the
+// task completed. A working run keeps the live mark, since that the agent is
+// still acting is the more urgent thing to know, and the footer goes on
+// stating how a settled run ended.
 //
 // An 11px slot whatever the state, so the title's first line never shifts:
 // queued centres a 7px dot in it, the settled states draw a glyph, and a
@@ -243,9 +250,11 @@ const LIVE_SIZE = 20
 
 function StatusMark({
   lifecycle,
+  dismissed,
   liveState,
 }: {
   lifecycle: Lifecycle
+  dismissed: boolean
   liveState: 'running' | 'idle'
 }) {
   if (lifecycle === 'working')
@@ -276,6 +285,12 @@ function StatusMark({
         />
       </span>
     )
+  if (dismissed)
+    return (
+      <span aria-hidden data-mark="dismissed" style={{ ...SLOT, color: 'var(--color-ink-4)' }}>
+        <Glyph kind="ban" size={11} />
+      </span>
+    )
   // Settled. Only failure spends a hue — the rest are ink, because "it ended"
   // is not news.
   const [kind, color]: [GlyphKind, string] =
@@ -285,9 +300,7 @@ function StatusMark({
         ? ['cross', 'var(--color-alarm)']
         : lifecycle === 'canceled'
           ? ['dash', 'var(--color-ink-4)']
-          : lifecycle === 'dismissed'
-            ? ['ban', 'var(--color-ink-4)']
-            : ['pause', 'var(--color-ink-4)']
+          : ['pause', 'var(--color-ink-4)']
   return (
     <span aria-hidden data-mark={lifecycle} style={{ ...SLOT, color }}>
       <Glyph kind={kind} size={11} />
@@ -337,6 +350,7 @@ export function TaskCard({
   entity,
   entityHref,
   lifecycle,
+  dismissed = false,
   summary,
   summaryPending = false,
   event,
@@ -487,7 +501,7 @@ export function TaskCard({
     >
       <Brackets lit={hover} asking={asking} />
       <div className="tc-head">
-        <StatusMark lifecycle={lifecycle} liveState={liveState} />
+        <StatusMark lifecycle={lifecycle} dismissed={dismissed} liveState={liveState} />
         {/* The source id is a definition of the title, not a datum of its own,
             so it is a hint rather than a line — that is the whole reason the
             card can afford a two-line title. Tooltip stays inert when there is

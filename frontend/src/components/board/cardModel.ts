@@ -40,13 +40,15 @@ export function pendingCount(pending?: PendingTotals): number {
 
 export type { EventTone }
 
-/** Where the run is, as the status mark encodes it. A card with no run reads
- *  its task instead: `queued` while the task is open, `done` once it is
- *  completed, and `dismissed` once a person dismissed it. */
-export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'canceled' | 'dismissed'
+/** Where the run is, as the status mark encodes it. */
+export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'canceled'
 
 export interface CardModel {
   lifecycle: Lifecycle
+  /** A person dismissed the task. A fact about the task, beside the run's
+   *  lifecycle rather than a value of it: a close ends no run, so a dismissed
+   *  task's run can be in any state. */
+  dismissed: boolean
   /** What the work is, as the scorer summarized it: the task's summary, in
    *  every state. */
   summary?: string
@@ -143,6 +145,7 @@ export function deriveCard(
 
   return {
     lifecycle,
+    dismissed: task.status === 'dismissed',
     summary,
     // A closed task is never scored, so it waits on no summary.
     summaryPending: !summary && task.scoring_status !== 'scored' && isOpenTask(task),
@@ -182,14 +185,9 @@ function isOpenTask(task: Task): boolean {
 }
 
 function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
-  // No run: the task speaks for the card. Open, it is waiting. Closed with
-  // nothing ever run on it, it is done, or dismissed: the two closes mean
-  // opposite things about whether the work happened, and with no run there
-  // is nothing else on the card to say which.
-  if (!run) {
-    if (isOpenTask(task)) return 'queued'
-    return task.status === 'dismissed' ? 'dismissed' : 'done'
-  }
+  // No run: a task, waiting — or, for a task closed with nothing ever run on
+  // it, simply done.
+  if (!run) return isOpenTask(task) ? 'queued' : 'done'
   const s = run.Status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'

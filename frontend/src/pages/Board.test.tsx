@@ -316,7 +316,7 @@ describe('the lane read runs on the server', () => {
 describe('starting a queued task', () => {
   it('makes the drag one call: the claim is what moves the card', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(FREE.title)
 
     await act(async () => {
       await dnd.drop!(FREE.id, 'in_progress')
@@ -344,7 +344,7 @@ describe('starting a queued task', () => {
 
   it('names the version its last write returned on the next one', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(FREE.title)
 
     await act(async () => {
       await dnd.drop!(FREE.id, 'in_progress')
@@ -407,7 +407,7 @@ describe('ending a task', () => {
       unresolved_review_count: 1,
     } as Conversation
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(HELD.title)
 
     await act(async () => {
       await dnd.drop!(HELD.id, 'done')
@@ -425,7 +425,7 @@ describe('ending a task', () => {
 
   it('dismisses a queued task without asking', async () => {
     renderBoard()
-    await waitFor(() => expect(listBodies.length).toBe(3))
+    await screen.findByText(FREE.title)
 
     await act(async () => {
       await dnd.drop!(FREE.id, 'done')
@@ -501,6 +501,27 @@ describe('a closed task in Done', () => {
     expect(card('Pin the base image').querySelector('[data-mark]')).toHaveAttribute(
       'data-mark',
       'done',
+    )
+  })
+
+  it("draws the dismissal over a dismissed task's finished run", async () => {
+    closed = [DISMISSED]
+    closedRuns = {
+      [DISMISSED.id]: [
+        {
+          ...conversation('open'),
+          ID: 'c-dismissed',
+          TaskID: DISMISSED.id,
+          CompletedAt: '2026-09-01T12:04:00Z',
+          DurationMs: 240_000,
+        },
+      ],
+    }
+    renderBoard()
+    expect(await screen.findByRole('link', { name: /^Ran for / })).toBeInTheDocument()
+    expect(card(DISMISSED.title).querySelector('[data-mark]')).toHaveAttribute(
+      'data-mark',
+      'dismissed',
     )
   })
 
