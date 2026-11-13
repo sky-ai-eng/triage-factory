@@ -212,9 +212,9 @@ const (
 	DispositionTasklessNoOwner   = "taskless_no_owner"
 	DispositionTaskCreated       = "task_created"
 	DispositionTaskBumped        = "task_bumped"
-	// DispositionTaskReopened means the event's task had closed while one of
-	// its conversations was still working, and the event returned that task
-	// to work instead of creating a second one.
+	// DispositionTaskReopened means the event's task had closed while a
+	// blueprint was still running on it, and the event returned that task to
+	// work instead of creating a second one.
 	DispositionTaskReopened = "task_reopened"
 	// DispositionError means the pipeline hit an internal failure (a store
 	// query it depends on errored) rather than reaching a legitimate

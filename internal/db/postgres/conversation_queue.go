@@ -297,6 +297,21 @@ func taskWorkingSQL(orgExpr, taskExpr string) string {
 		  AND ` + workingConversationSQL + `)`
 }
 
+// taskWorkingUnderRunningBlueprintSQL is the task (orgExpr, taskExpr) holding
+// a conversation that is working (workingConversationSQL) under a blueprint
+// run that is running and that nobody has called off. A person's follow-up on
+// a finished blueprint is working from the moment it is queued until its turn
+// ends, with no run finish ahead of it, and taskWorkingSQL counts it. The join
+// is an inner one, so a conversation with no blueprint run never qualifies.
+func taskWorkingUnderRunningBlueprintSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM conversations r
+		JOIN blueprint_runs br_r ON br_r.org_id = r.org_id AND br_r.id = r.blueprint_run_id
+		WHERE r.org_id = ` + orgExpr + ` AND r.task_id = ` + taskExpr + `
+		  AND br_r.status = 'running' AND NOT br_r.cancel_requested
+		  AND ` + workingConversationSQL + `)`
+}
+
 // personMessageSQL is a message row m_p that a person wrote: a plain or
 // steered user message with an author, delivered or still waiting, and not
 // withdrawn. Every row TF writes itself carries a subtype of its own, so these

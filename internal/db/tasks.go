@@ -77,9 +77,9 @@ const (
 	// TaskCreated: no task held the key, and a new queued task was inserted.
 	TaskCreated
 	// TaskReopened: no active task held the key, and the newest closed task
-	// with it was returned to work in place of a new one, because one of its
-	// conversations is still working: a second task would start a second
-	// agent on the situation the first is already handling.
+	// with it was returned to work in place of a new one, because a blueprint
+	// is still running on it: a second task would start a second agent on the
+	// situation the first is already handling.
 	TaskReopened
 )
 
@@ -839,7 +839,13 @@ type TaskStore interface {
 	//     reassignment, a person's, run_completed, or a duplicate merge. An
 	//     older closed task behind one of those stays closed too;
 	//   - one of its conversations is working, by the predicate that picks
-	//     the conversations a close tells;
+	//     the conversations a close tells, under a blueprint run that is
+	//     running and that nobody has called off. A person's follow-up on a
+	//     finished blueprint is working and reopens nothing: no run finish is
+	//     ahead of it to close the task again, so the event is a new
+	//     situation and gets a new task. A follow-up that returned an aborted
+	//     blueprint to running (BlueprintStore.ReopenRunForResume) is under a
+	//     running blueprint, and reopens;
 	//   - the entity is active. A rider minted on a closed entity is new.
 	// The reopen is one guarded UPDATE in the mint's transaction, under the
 	// same locks. It keeps the claim and sets the status from it (in_progress

@@ -16,7 +16,8 @@ import (
 // recurrence returns to work, what the reopen writes, and every case where
 // the mint creates a task instead. It runs on the held-close suite's stores
 // and seeder: a reopen is decided by the working conversations a close
-// reports, and it clears a hold left on the closed row.
+// reports, narrowed to those under a running blueprint, and it clears a hold
+// left on the closed row.
 //
 // Most of the cases assert that the mint creates a task. A reopen that
 // reaches a task it should have left closed puts a card back on the board
@@ -132,7 +133,7 @@ func RunTaskReopenConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 		}
 	})
 
-	t.Run("No_working_conversation_creates_a_task", func(t *testing.T) {
+	t.Run("Nothing_working_under_a_running_blueprint_creates_a_task", func(t *testing.T) {
 		cases := []struct {
 			name  string
 			stage func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string)
@@ -147,6 +148,22 @@ func RunTaskReopenConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 			{name: "blueprint called off", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
 				runID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
 				seed.CallOff(t, runID)
+			}},
+			// A claim keeps the conversation working through the cancel, so
+			// only the blueprint's own state refuses this one.
+			{name: "blueprint called off mid-turn", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
+				runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+				seed.Claim(t, convID)
+				seed.CallOff(t, runID)
+			}},
+			// The conversation is working, and its blueprint is not running:
+			// nothing ahead of it would close a reopened task again.
+			{name: "follow-up on a finished blueprint", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
+				seed.BlueprintAndConversation(t, taskID, string(domain.BlueprintRunStatusCompleted), "")
+			}},
+			{name: "follow-up mid-turn on a finished blueprint", stage: func(t *testing.T, seed TaskCloseDeferralSeeder, taskID string) {
+				_, convID := seed.BlueprintAndConversation(t, taskID, string(domain.BlueprintRunStatusCompleted), "")
+				seed.Claim(t, convID)
 			}},
 		}
 		for _, tc := range cases {
