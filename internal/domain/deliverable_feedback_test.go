@@ -143,6 +143,28 @@ func TestDeliverableResolutionNote_ReadsResolution(t *testing.T) {
 	}
 }
 
+// TestDeliverableResolutionNote_LinksThePullRequestWhenTheRowHoldsItsURL: a
+// pull request's note names it as a markdown link to its URL, and by its bare
+// reference when the row holds none.
+func TestDeliverableResolutionNote_LinksThePullRequestWhenTheRowHoldsItsURL(t *testing.T) {
+	const ref, url = "octo/repo#42", "https://github.com/octo/repo/pull/42"
+	for _, state := range []string{DeliverableStatePROpen, DeliverableStatePRClosed} {
+		for _, resolution := range []string{"", PRResolutionGitHub, PRResolutionRejected} {
+			a := Deliverable{
+				Kind: DeliverableKindPullRequest, Target: ref, State: state,
+				DetailsJSON: MarshalPRDeliverableDetails(PRDeliverableDetails{HeadBranch: "feature/x", Resolution: resolution}),
+			}
+			if got := DeliverableResolutionNote(a); !strings.Contains(got, ref) || strings.Contains(got, "](") {
+				t.Errorf("state=%s resolution=%q with no URL: note %q should name the bare reference", state, resolution, got)
+			}
+			a.URL = url
+			if got := DeliverableResolutionNote(a); !strings.Contains(got, "["+ref+"]("+url+")") {
+				t.Errorf("state=%s resolution=%q: note %q should link the reference to the pull request", state, resolution, got)
+			}
+		}
+	}
+}
+
 // TestDeliverableResolutionNote_ReviewDismissedByItsPullRequestEnding pins that
 // a review the pull request's end dismissed says so, naming how it ended, and
 // never credits a person; a review with no resolution keeps the person's copy.

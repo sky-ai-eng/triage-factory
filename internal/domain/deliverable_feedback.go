@@ -31,11 +31,10 @@ func WrapSystemNote(body string) string {
 
 // seenOnGitHub closes the note for a change the reconciler read from GitHub.
 // The reconciler does not look up who made such a change, and the agent's
-// own `gh pr ready` or `gh pr close` reaches the row the same way. So the
-// note says how TF learned of the change and leaves the agent to recognize
-// its own. It says nothing about when: how soon TF sees a change depends on
-// how it is told of it.
-const seenOnGitHub = " Triage Factory saw this on GitHub and did not check who made the change, so it may be one you made yourself."
+// own `gh pr ready` or `gh pr close` reaches the row the same way. How soon
+// TF sees a change depends on how it is told of it. So the note commits to
+// neither who nor when, and leaves the agent to recognize its own change.
+const seenOnGitHub = " Triage Factory may not have detected this immediately, and it could be in response to a change you made yourself."
 
 // DeliverableResolutionNote returns the one-line, agent-facing note for a deliverable
 // just resolved, or "" if the deliverable is not in one of the four reported
@@ -100,19 +99,26 @@ func DeliverableResolutionNote(a Deliverable) string {
 }
 
 // prResolutionRef is the PR reference the agent already knows — its
-// owner/repo#number Target, which NewPullRequestDeliverable always stamps. Falls
+// owner/repo#number Target, which NewPullRequestDeliverable always stamps —
+// as a markdown link to the pull request when the row holds its URL. Falls
 // back to ExternalID (the bare PR number) if the Target is malformed, then to a
 // neutral placeholder, so the note never renders "pull request " with an empty
 // id (the placeholder reads grammatically; both fallbacks are unreachable for a
 // well-formed PR deliverable).
 func prResolutionRef(a Deliverable) string {
-	if a.Target != "" {
-		return a.Target
+	ref := "(reference unavailable)"
+	switch {
+	case a.Target != "":
+		ref = a.Target
+	case a.ExternalID != "":
+		ref = "#" + a.ExternalID
+	default:
+		return ref
 	}
-	if a.ExternalID != "" {
-		return "#" + a.ExternalID
+	if a.URL == "" {
+		return ref
 	}
-	return "(reference unavailable)"
+	return "[" + ref + "](" + a.URL + ")"
 }
 
 // reviewEndedReason is the clause saying how the pull request a dismissed
