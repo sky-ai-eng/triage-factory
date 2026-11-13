@@ -138,8 +138,9 @@ import (
 // with what it closed), MergeDuplicateEntitiesSystem (a composition across
 // tables that answers with the surviving id), and FoldStubEntitySystem (a
 // composition across tables whose surviving row is the caller's).
-// FindOrCreate, FindOrCreateSystem and FindOrCreateLinearSystem already
-// return the row, StampExternalIDSystem returns the row it stamped, and
+// FindOrCreate, FindOrCreateSystem, FindOrCreateLinearSystem and
+// FindOrCreateVulnerablePackageSystem already return the row,
+// StampExternalIDSystem returns the row it stamped, and
 // RenameSystem is a composition across entities, deliverables and the audit
 // ledger that answers with what it moved.
 
@@ -505,7 +506,8 @@ type EntityStore interface {
 	//
 	//   - github: exact. Terminality is self-contained in the snapshot
 	//     (merged, or state CLOSED/MERGED), the same predicate the tracker
-	//     applies at discovery.
+	//     applies at discovery; for a vulnerable package, no open alert left
+	//     (an empty alerts array).
 	//   - jira: a superset. Terminality is per-project configuration —
 	//     jira_project_status_rules' done statuses — so this filters on
 	//     jiraDone, the caller's FLAT UNION across projects, and the caller
@@ -570,6 +572,19 @@ type EntityStore interface {
 	// through here. Admin pool: the tracker and the exec recording funnel
 	// create Jira rows with no JWT claims.
 	FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error)
+
+	// FindOrCreateVulnerablePackageSystem is FindOrCreateSystem for a
+	// vulnerable package (source 'github', kind 'vulnerable_package'), whose
+	// key (domain.VulnerablePackageSourceID) is its identity among ACTIVE rows:
+	// it returns the active row holding key in scope, or creates one, and never
+	// returns a closed row. A package whose alerts all closed is done, and a
+	// later alert on it is a new entity rather than a reopened one. The new row
+	// references the registry row of the repository the key names, got or
+	// created in the same transaction, as every GitHub row does. A key that is
+	// not a vulnerable package's is refused (ValidateVulnerablePackageEntityCreate)
+	// before anything is read. title and url are written on create only. Admin
+	// pool: the tracker creates these rows with no JWT claims.
+	FindOrCreateVulnerablePackageSystem(ctx context.Context, orgID, scope, key, title, url string) (*domain.Entity, bool, error)
 
 	// UpdateSnapshotCASSystem writes the tracker snapshot under a
 	// compare-and-swap on poll_seq (TFAC-579): the write only lands when
@@ -934,6 +949,16 @@ func ValidateJiraEntityCreate(key, issueID string, project domain.JiraProjectRef
 		return fmt.Errorf("create jira entity %s: empty issue id", key)
 	case project.ID == "" || project.Key == "":
 		return fmt.Errorf("%w: %s", ErrEntityJiraProjectRequired, key)
+	}
+	return nil
+}
+
+// ValidateVulnerablePackageEntityCreate is FindOrCreateVulnerablePackageSystem's
+// argument check, shared by both dialects: the key must name a repository, an
+// ecosystem and a package.
+func ValidateVulnerablePackageEntityCreate(key string) error {
+	if _, _, _, ok := domain.SplitVulnerablePackageSourceID(key); !ok {
+		return fmt.Errorf("create vulnerable package entity: %q is not owner/repo#ecosystem:name", key)
 	}
 	return nil
 }

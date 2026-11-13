@@ -533,7 +533,7 @@ const repoHeldUntracked = `NOT ` + repoTrackedByATeam + `
 	   AND e.source = 'github'
 	   AND e.scope = repositories.host
 	   AND e.state = 'active'
-	   AND e.kind <> 'issue'
+	   AND e.kind NOT IN ('issue', 'vulnerable_package')
 )`
 
 func (s *repoStore) ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {

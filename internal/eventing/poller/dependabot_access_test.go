@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -228,4 +229,156 @@ func probeCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
 		p.add(pass.client, pass.repos)
 	}
 	p.run(ctx)
+}
+
+// listingManager is a Manager with the stores the alert listing writes
+// through, publishing into rec.
+func listingManager(database *sql.DB, stores db.Stores, rec *eventRecorder) *Manager {
+	m := NewManager(database, rec, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, stores.Orgs, stores.JiraStatusRules, stores.JiraProjects, stores.LinearTeamRules, stores.TeamGitHubGroups, nil, stores.GitHubApps, nil, nil, nil)
+	m.DependabotAccess = stores.DependabotAccess
+	return m
+}
+
+// listCycle runs one org cycle's probe and then its alert listings over passes.
+func listCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
+	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
+	for _, pass := range passes {
+		p.add(pass.client, pass.repos)
+	}
+	p.run(ctx)
+	p.listAlerts(ctx)
+}
+
+// TestDependabotListing_ListsOnlyReadableRepositories: after the probe, the
+// alerts of each repository whose answer is readable are listed and its
+// packages stored, and a repository whose answer is anything else is not
+// listed at all.
+func TestDependabotListing_ListsOnlyReadableRepositories(t *testing.T) {
+	ctx := context.Background()
+	lodash := `[{"number":1,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"lodash"},"manifest_path":"package.json"},"security_advisory":{"ghsa_id":"GHSA-1","severity":"high"},"security_vulnerability":{"severity":"high"}}]`
+	gh, client := newAlertsServer(t, func(repo string) (int, string) {
+		if repo == "readable" {
+			return http.StatusOK, lodash
+		}
+		return http.StatusForbidden, `{"message":"Resource not accessible by integration"}`
+	})
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/readable", "octo/refused"})
+	rec := &eventRecorder{}
+	m := listingManager(database, stores, rec)
+
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/readable", "octo/refused"}})
+
+	if n := gh.count("readable"); n != 2 {
+		t.Errorf("readable: %d requests, want the probe and the listing", n)
+	}
+	if n := gh.count("refused"); n != 1 {
+		t.Errorf("refused: %d requests, want the probe alone", n)
+	}
+	e, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/readable#npm:lodash")
+	if err != nil || e == nil || e.State != "active" {
+		t.Fatalf("the readable repository's package = %+v, %v; want an active entity", e, err)
+	}
+	if len(rec.events) != 0 {
+		t.Errorf("the baseline emitted %d events", len(rec.events))
+	}
+	a, err := stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, e.RepositoryID)
+	if err != nil || a == nil || !a.AlertsBaselined() {
+		t.Errorf("readable's listing = %+v, %v; want a baseline", a, err)
+	}
+}
+
+// TestDependabotListing_ANoAnswerProbeListsNothing: a cycle whose probe got no
+// answer lists no alerts.
+func TestDependabotListing_ANoAnswerProbeListsNothing(t *testing.T) {
+	ctx := context.Background()
+	gh, client := newAlertsServer(t, func(string) (int, string) {
+		return http.StatusUnauthorized, `{"message":"Bad credentials"}`
+	})
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
+	repos, _, err := stores.Repos.ListTrackedSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.Unwindowed)
+	if err != nil || len(repos) != 1 {
+		t.Fatalf("tracked = %v, %v", repos, err)
+	}
+	// A readable answer due for its recheck: the probe asks, gets no answer,
+	// and the listing waits.
+	if _, err := stores.DependabotAccess.RecordSystem(ctx, runmode.LocalDefaultOrgID, repos[0].ID, domain.DependabotAlertsReadable); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE repository_dependabot_access SET checked_at = ?`, time.Now().Add(-domain.DependabotAccessRecheck-time.Minute).UTC()); err != nil {
+		t.Fatalf("age answer: %v", err)
+	}
+
+	listCycle(ctx, listingManager(database, stores, &eventRecorder{}), dependabotPass{client, []string{"octo/a"}})
+
+	if n := gh.total(); n != 1 {
+		t.Errorf("requests = %d, want the probe alone", n)
+	}
+}
+
+// TestDependabotListing_AnUntrackedRepositoryLosesItsBaseline: a repository no
+// team tracks any more has its listing forgotten, so tracking it again starts
+// from a baseline rather than emitting for every alert opened meanwhile.
+func TestDependabotListing_AnUntrackedRepositoryLosesItsBaseline(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	bodyB := `[]`
+	gh, client := newAlertsServer(t, func(repo string) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if repo == "b" {
+			return http.StatusOK, bodyB
+		}
+		return http.StatusOK, `[]`
+	})
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a", "octo/b"})
+	rec := &eventRecorder{}
+	m := listingManager(database, stores, rec)
+	names := []string{"octo/a", "octo/b"}
+	listCycle(ctx, m, dependabotPass{client, names})
+
+	listing := func(name string) *domain.RepositoryDependabotAccess {
+		t.Helper()
+		row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: dbtest.TestGitHubHost, Owner: "octo", Repo: name})
+		if err != nil || row == nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		a, err := stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
+		if err != nil || a == nil {
+			t.Fatalf("read %s's answer: %v", name, err)
+		}
+		return a
+	}
+	if !listing("b").AlertsBaselined() {
+		t.Fatal("b has no baseline after its first listing")
+	}
+
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
+	if listing("b").AlertsBaselined() {
+		t.Error("b kept its baseline after no team tracked it")
+	}
+	if !listing("a").AlertsBaselined() {
+		t.Error("a lost its baseline though it is still tracked")
+	}
+
+	// Tracked again with an alert open: the listing is a baseline again.
+	mu.Lock()
+	bodyB = `[{"number":1,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"left-pad"}},"security_advisory":{"ghsa_id":"GHSA-1","severity":"low"}}]`
+	mu.Unlock()
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, names)
+	listCycle(ctx, m, dependabotPass{client, names})
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.events) != 0 {
+		t.Errorf("tracking b again emitted %d events, want its baseline to emit none", len(rec.events))
+	}
+	if gh.count("b") == 0 {
+		t.Error("b was not listed after it was tracked again")
+	}
 }

@@ -1,0 +1,448 @@
+package tracker
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+const vulnHost = "https://github.com"
+
+// fakeAlert is one open alert the fake serves.
+type fakeAlert struct {
+	number    int
+	ecosystem string
+	pkg       string
+	severity  string
+}
+
+// alertsFake is a GitHub serving each repository's open Dependabot alerts,
+// with an ETag over the body that it honors, and a status a test can set per
+// repository instead.
+type alertsFake struct {
+	mu          sync.Mutex
+	alerts      map[string][]fakeAlert // by repository name, under octo/
+	status      map[string]int
+	requests    map[string]int
+	notModified map[string]int
+}
+
+func newAlertsFake(t *testing.T) (*alertsFake, *ghclient.Client) {
+	t.Helper()
+	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}}
+	srv := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	return f, ghclient.NewClient(srv.URL, "tok")
+}
+
+func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
+	_, rest, _ := strings.Cut(r.URL.Path, "/repos/octo/")
+	repo, suffix, _ := strings.Cut(rest, "/")
+	if suffix != "dependabot/alerts" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests[repo]++
+	if status := f.status[repo]; status != 0 {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+		return
+	}
+	var objs []string
+	for _, a := range f.alerts[repo] {
+		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","updated_at":"2026-11-0%dT00:00:00Z",
+			"dependency":{"package":{"ecosystem":%q,"name":%q},"manifest_path":"package.json","scope":"runtime"},
+			"security_advisory":{"ghsa_id":"GHSA-%d","cve_id":null,"severity":%q},
+			"security_vulnerability":{"package":{"ecosystem":%q,"name":%q},"severity":%q,"first_patched_version":{"identifier":"9.9.9"}}}`,
+			a.number, 1+a.number%9, a.ecosystem, a.pkg, a.number, a.severity, a.ecosystem, a.pkg, a.severity))
+	}
+	body := "[" + strings.Join(objs, ",") + "]"
+	sum := sha256.Sum256([]byte(body))
+	etag := `W/"` + hex.EncodeToString(sum[:8]) + `"`
+	if r.Header.Get("If-None-Match") == etag {
+		f.notModified[repo]++
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	_, _ = w.Write([]byte(body))
+}
+
+func (f *alertsFake) set(repo string, alerts ...fakeAlert) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alerts[repo] = alerts
+}
+
+func (f *alertsFake) fail(repo string, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.status[repo] = status
+}
+
+func (f *alertsFake) counts(repo string) (requests, notModified int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests[repo], f.notModified[repo]
+}
+
+// vulnRig is a tracked set whose alerts the org's credential can read.
+type vulnRig struct {
+	t        *testing.T
+	gh       *alertsFake
+	client   *ghclient.Client
+	database *sql.DB
+	stores   db.Stores
+	pub      *recordingPublisher
+	repos    []string
+}
+
+func newVulnRig(t *testing.T, repos ...string) *vulnRig {
+	t.Helper()
+	gh, client := newAlertsFake(t)
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	names := make([]string, 0, len(repos))
+	for _, r := range repos {
+		names = append(names, "octo/"+r)
+	}
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, names)
+	r := &vulnRig{t: t, gh: gh, client: client, database: database, stores: stores, pub: &recordingPublisher{}, repos: repos}
+	for _, row := range r.rows() {
+		if _, err := stores.DependabotAccess.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID, domain.DependabotAlertsReadable); err != nil {
+			t.Fatalf("record access for %s: %v", row.Slug(), err)
+		}
+	}
+	return r
+}
+
+func (r *vulnRig) rows() []domain.Repository {
+	r.t.Helper()
+	rows, _, err := r.stores.Repos.ListTrackedSystem(context.Background(), runmode.LocalDefaultOrgID, vulnHost, db.Unwindowed)
+	if err != nil {
+		r.t.Fatalf("list tracked: %v", err)
+	}
+	return rows
+}
+
+func (r *vulnRig) tracker() *Tracker {
+	s := r.stores
+	return New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID).
+		WithDependabotAccess(s.DependabotAccess)
+}
+
+// cycle lists every tracked repository's alerts with the listing state as
+// stored, and returns the events the cycle enqueued and the pass's error.
+func (r *vulnRig) cycle() ([]domain.Event, error) {
+	r.t.Helper()
+	ctx := context.Background()
+	var listings []AlertListing
+	for _, row := range r.rows() {
+		a, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
+		if err != nil || a == nil {
+			r.t.Fatalf("read access of %s: %+v %v", row.Slug(), a, err)
+		}
+		listings = append(listings, AlertListing{Repository: row, Access: *a})
+	}
+	before := r.pub.count()
+	_, err := r.tracker().RefreshVulnerablePackages(ctx, vulnHost, r.client, listings)
+	r.pub.mu.Lock()
+	defer r.pub.mu.Unlock()
+	return append([]domain.Event(nil), r.pub.events[before:]...), err
+}
+
+// mustCycle is cycle for a pass that must succeed.
+func (r *vulnRig) mustCycle() []domain.Event {
+	r.t.Helper()
+	evts, err := r.cycle()
+	if err != nil {
+		r.t.Fatalf("RefreshVulnerablePackages: %v", err)
+	}
+	return evts
+}
+
+// pkg reads the entity under the package's key: the active row, else the most
+// recently closed.
+func (r *vulnRig) pkg(repo, ecosystem, name string) *domain.Entity {
+	r.t.Helper()
+	e, err := r.stores.Entities.GetBySourceSystem(context.Background(), runmode.LocalDefaultOrgID, "github", vulnHost, domain.VulnerablePackageSourceID("octo/"+repo, ecosystem, name))
+	if err != nil {
+		r.t.Fatalf("read package %s: %v", name, err)
+	}
+	return e
+}
+
+func (r *vulnRig) alertNumbers(e *domain.Entity) []int {
+	r.t.Helper()
+	var snap domain.VulnerablePackageSnapshot
+	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
+		r.t.Fatalf("parse snapshot %q: %v", e.SnapshotJSON, err)
+	}
+	out := []int{}
+	for _, a := range snap.Alerts {
+		out = append(out, a.Number)
+	}
+	return out
+}
+
+// closeAsRouted closes e the way the router's terminating close does.
+func (r *vulnRig) closeAsRouted(e *domain.Entity) {
+	r.t.Helper()
+	res, err := r.stores.Entities.CloseTerminalSystem(context.Background(), runmode.LocalDefaultOrgID, e.ID, nil,
+		[]string{domain.EventGitHubVulnerabilityAlertOpened}, "entity_closed", domain.EventGitHubVulnerabilityResolved, "")
+	if err != nil || !res.Closed {
+		r.t.Fatalf("close %s: %+v %v", e.SourceID, res, err)
+	}
+}
+
+func lodash(number int, severity string) fakeAlert {
+	return fakeAlert{number: number, ecosystem: "npm", pkg: "lodash", severity: severity}
+}
+
+// TestRefreshVulnerablePackages_TheBaselineStoresPackagesAndEmitsNothing: a
+// repository's first listing creates an entity per package, holding its open
+// alerts, and emits nothing; the repository then has a baseline.
+func TestRefreshVulnerablePackages_TheBaselineStoresPackagesAndEmitsNothing(t *testing.T) {
+	r := newVulnRig(t, "api")
+	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), fakeAlert{number: 3, ecosystem: "pip", pkg: "django", severity: "medium"})
+
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Errorf("baseline emitted %v, want nothing", eventTypes(evts))
+	}
+	l := r.pkg("api", "npm", "lodash")
+	if l == nil || l.State != "active" || l.Kind != domain.EntityKindVulnerablePackage || l.Title != "lodash (npm)" {
+		t.Fatalf("lodash entity = %+v, want an active vulnerable package", l)
+	}
+	if got := r.alertNumbers(l); fmt.Sprint(got) != "[1 2]" {
+		t.Errorf("lodash alerts = %v, want [1 2]", got)
+	}
+	wantURL := "https://github.com/octo/api/security/dependabot?q=is%3Aopen+ecosystem%3Anpm+package%3Alodash"
+	if l.URL != wantURL {
+		t.Errorf("url = %q, want %q", l.URL, wantURL)
+	}
+	if d := r.pkg("api", "pip", "django"); d == nil || fmt.Sprint(r.alertNumbers(d)) != "[3]" {
+		t.Errorf("django entity = %+v, want one holding alert 3", d)
+	}
+	a, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, l.RepositoryID)
+	if err != nil || a == nil || !a.AlertsBaselined() || a.AlertsETag == "" {
+		t.Errorf("listing = %+v %v, want a baseline with the ETag", a, err)
+	}
+}
+
+// TestRefreshVulnerablePackages_AlertsOpenOnOneEntity: after the baseline, a
+// new alert creates the package's entity and emits one alert_opened; a second
+// alert on the package emits a second on the same entity; a cycle with
+// nothing changed is a 304 and emits nothing.
+func TestRefreshVulnerablePackages_AlertsOpenOnOneEntity(t *testing.T) {
+	r := newVulnRig(t, "api")
+	r.mustCycle()
+
+	r.gh.set("api", lodash(5, "medium"))
+	evts := r.mustCycle()
+	if got := eventTypes(evts); fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityAlertOpened+"]" {
+		t.Fatalf("first alert emitted %v, want one alert_opened", got)
+	}
+	e := r.pkg("api", "npm", "lodash")
+	if e == nil || *evts[0].EntityID != e.ID {
+		t.Fatalf("event entity = %v, want the package's entity %+v", *evts[0].EntityID, e)
+	}
+	var meta events.GitHubVulnerabilityAlertOpenedMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	want := events.GitHubVulnerabilityAlertOpenedMetadata{
+		Repo: "octo/api", RepositoryID: e.RepositoryID, Ecosystem: "npm", Package: "lodash",
+		AlertNumber: 5, GHSAID: "GHSA-5", Severity: "medium", ManifestPath: "package.json",
+		Scope: "runtime", FirstPatchedVersion: "9.9.9", HighestSeverity: "medium",
+	}
+	if meta != want {
+		t.Errorf("metadata = %+v, want %+v", meta, want)
+	}
+	if evts[0].DedupKey != "" || evts[0].OccurredAt.IsZero() {
+		t.Errorf("event = %+v, want an empty dedup key and the alert's time", evts[0])
+	}
+
+	r.gh.set("api", lodash(5, "medium"), lodash(6, "critical"))
+	evts = r.mustCycle()
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened || *evts[0].EntityID != e.ID {
+		t.Fatalf("second alert emitted %v, want one alert_opened on the same entity", eventTypes(evts))
+	}
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil || meta.AlertNumber != 6 || meta.HighestSeverity != "critical" {
+		t.Errorf("metadata = %+v %v, want alert 6 with the package's highest severity critical", meta, err)
+	}
+
+	_, before := r.gh.counts("api")
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Errorf("an unchanged cycle emitted %v", eventTypes(evts))
+	}
+	if _, after := r.gh.counts("api"); after != before+1 {
+		t.Errorf("the unchanged cycle's listing was not answered 304 (%d -> %d)", before, after)
+	}
+}
+
+// TestRefreshVulnerablePackages_TheLastAlertClosingResolves: an alert closing
+// while another stays open emits nothing and updates the snapshot; the last
+// one closing emits one resolved with the terminal snapshot, and once the
+// entity has closed, a later alert on the package creates a new entity.
+func TestRefreshVulnerablePackages_TheLastAlertClosingResolves(t *testing.T) {
+	r := newVulnRig(t, "api")
+	r.gh.set("api", lodash(1, "high"), lodash(2, "low"))
+	r.mustCycle()
+	first := r.pkg("api", "npm", "lodash")
+
+	r.gh.set("api", lodash(2, "low"))
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Errorf("one alert closing emitted %v, want nothing", eventTypes(evts))
+	}
+	if got := r.alertNumbers(r.pkg("api", "npm", "lodash")); fmt.Sprint(got) != "[2]" {
+		t.Errorf("alerts = %v, want [2]", got)
+	}
+
+	r.gh.set("api")
+	evts := r.mustCycle()
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityResolved || *evts[0].EntityID != first.ID {
+		t.Fatalf("the last alert closing emitted %v, want one resolved on the entity", eventTypes(evts))
+	}
+	var meta events.GitHubVulnerabilityResolvedMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil || fmt.Sprint(meta.AlertNumbers) != "[2]" || meta.Package != "lodash" {
+		t.Errorf("metadata = %+v %v, want lodash with alert 2", meta, err)
+	}
+	resolved := r.pkg("api", "npm", "lodash")
+	if got := r.alertNumbers(resolved); len(got) != 0 {
+		t.Errorf("alerts after resolution = %v, want none", got)
+	}
+
+	// Until the router closes it, the entity stays as it is and a new alert
+	// waits for it; nothing more is emitted, since the resolution is queued.
+	r.gh.set("api", lodash(3, "critical"))
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Errorf("an alert before the close landed emitted %v", eventTypes(evts))
+	}
+	r.closeAsRouted(resolved)
+
+	evts = r.mustCycle()
+	next := r.pkg("api", "npm", "lodash")
+	if next == nil || next.ID == first.ID || next.State != "active" {
+		t.Fatalf("after the close the package is %+v, want a new active entity", next)
+	}
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened || *evts[0].EntityID != next.ID {
+		t.Errorf("the later alert emitted %v, want one alert_opened on the new entity", eventTypes(evts))
+	}
+}
+
+// TestRefreshVulnerablePackages_ALostCloseIsOwed: a resolution whose close
+// never landed is owed one on the next cycle, unchanged listing or not.
+func TestRefreshVulnerablePackages_ALostCloseIsOwed(t *testing.T) {
+	r := newVulnRig(t, "api")
+	r.gh.set("api", lodash(1, "high"))
+	r.mustCycle()
+	r.gh.set("api")
+	r.mustCycle()
+	// The resolution was consumed without closing the entity.
+	if _, err := r.database.Exec(`UPDATE event_queue SET status = 'done'`); err != nil {
+		t.Fatalf("settle queue: %v", err)
+	}
+
+	evts := r.mustCycle()
+	if len(evts) != 1 || evts[0].EventType != domain.EventSystemEntityCloseOwed {
+		t.Errorf("the cycle after a lost close emitted %v, want the close obligation", eventTypes(evts))
+	}
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Errorf("an obligation already owed was owed again: %v", eventTypes(evts))
+	}
+}
+
+// TestRefreshVulnerablePackages_AFailedListingChangesNothing: a repository
+// GitHub refuses is skipped and the next one is listed; any other failure
+// ends the pass. Neither resolves a package.
+func TestRefreshVulnerablePackages_AFailedListingChangesNothing(t *testing.T) {
+	r := newVulnRig(t, "api", "web")
+	r.gh.set("api", lodash(1, "high"))
+	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"})
+	r.mustCycle()
+
+	r.gh.fail("api", http.StatusForbidden)
+	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"}, fakeAlert{number: 2, ecosystem: "npm", pkg: "react", severity: "low"})
+	evts, err := r.cycle()
+	if err != nil {
+		t.Fatalf("a refused repository failed the pass: %v", err)
+	}
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
+		t.Errorf("emitted %v, want only web's new alert", eventTypes(evts))
+	}
+	if e := r.pkg("api", "npm", "lodash"); e.State != "active" || fmt.Sprint(r.alertNumbers(e)) != "[1]" {
+		t.Errorf("the refused repository's package = %+v, want it untouched", e)
+	}
+
+	r.gh.fail("api", http.StatusUnauthorized)
+	if _, err := r.cycle(); err == nil {
+		t.Error("a refused credential did not end the pass")
+	}
+	if e := r.pkg("api", "npm", "lodash"); e.State != "active" || fmt.Sprint(r.alertNumbers(e)) != "[1]" {
+		t.Errorf("after a failed listing the package = %+v, want it untouched", e)
+	}
+}
+
+// TestRefreshVulnerablePackages_NoStoreListsNothing: a tracker without the
+// access store makes no request.
+func TestRefreshVulnerablePackages_NoStoreListsNothing(t *testing.T) {
+	r := newVulnRig(t, "api")
+	s := r.stores
+	tr := New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID)
+	if _, err := tr.RefreshVulnerablePackages(context.Background(), vulnHost, r.client, []AlertListing{{Repository: r.rows()[0]}}); err != nil {
+		t.Fatalf("RefreshVulnerablePackages: %v", err)
+	}
+	if n, _ := r.gh.counts("api"); n != 0 {
+		t.Errorf("requests = %d, want none", n)
+	}
+}
+
+// TestDiffVulnerablePackage covers the diff alone: each newly open alert
+// emits, a closing one does not, and resolved fires only on the move to no
+// open alert.
+func TestDiffVulnerablePackage(t *testing.T) {
+	snap := func(numbers ...int) domain.VulnerablePackageSnapshot {
+		s := domain.VulnerablePackageSnapshot{Repo: "octo/api", Ecosystem: "npm", Package: "lodash", Alerts: []domain.DependabotAlert{}}
+		for _, n := range numbers {
+			s.Alerts = append(s.Alerts, domain.DependabotAlert{Number: n, Severity: "low"})
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name       string
+		prev, curr domain.VulnerablePackageSnapshot
+		want       []string
+	}{
+		{"nothing changed", snap(1, 2), snap(1, 2), nil},
+		{"two new alerts", snap(1), snap(1, 2, 3), []string{domain.EventGitHubVulnerabilityAlertOpened, domain.EventGitHubVulnerabilityAlertOpened}},
+		{"one closes, one stays", snap(1, 2), snap(2), nil},
+		{"one closes, another opens", snap(1), snap(2), []string{domain.EventGitHubVulnerabilityAlertOpened}},
+		{"the last closes", snap(1, 2), snap(), []string{domain.EventGitHubVulnerabilityResolved}},
+		{"still none", snap(), snap(), nil},
+		{"from no snapshot", domain.VulnerablePackageSnapshot{}, snap(4), []string{domain.EventGitHubVulnerabilityAlertOpened}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eventTypes(DiffVulnerablePackage(tc.prev, tc.curr, "e1", "r1", nil))
+			if fmt.Sprint(got) != fmt.Sprint(append([]string{}, tc.want...)) {
+				t.Errorf("events = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

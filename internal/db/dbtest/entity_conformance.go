@@ -1000,6 +1000,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 				e, _, err = s.FindOrCreateLinearSystem(ctx, orgID, TestScope(source), sourceID, "uuid-"+sourceID, "team-tc", sourceID, "")
 			case "jira":
 				e, _, err = s.FindOrCreateJiraSystem(ctx, orgID, TestScope(source), sourceID, "id-"+sourceID, TestJiraProject, sourceID, "")
+			case "vulnerable_package":
+				e, _, err = s.FindOrCreateVulnerablePackageSystem(ctx, orgID, TestScope("github"), sourceID, sourceID, "")
 			default:
 				e, _, err = s.FindOrCreate(ctx, orgID, source, TestScope(source), sourceID, "", "pr", sourceID, "")
 			}
@@ -1049,6 +1051,10 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// state id is reached by the ref's name.
 		linearOtherDone := seedSnap("ENG-tc-other-done", "linear", `{"identifier":"ENG-tc-other-done","state":{"id":"ls-other","name":"Done","type":"started"}}`)
 		linearNoID := seedSnap("ENG-tc-no-id", "linear", `{"identifier":"ENG-tc-no-id","state":{"name":"Done","type":"completed"}}`)
+		// A vulnerable package is terminal once no alert is open on it; a
+		// pull request's state keys say nothing about it.
+		vulnResolved := seedSnap("owner/repo#npm:tc-resolved", "vulnerable_package", `{"repo":"owner/repo","ecosystem":"npm","package":"tc-resolved","alerts":[]}`)
+		vulnOpen := seedSnap("owner/repo#npm:tc-open", "vulnerable_package", `{"repo":"owner/repo","ecosystem":"npm","package":"tc-open","alerts":[{"number":1,"ghsa_id":"GHSA-1","severity":"high","manifest_path":"package.json"}]}`)
 		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
 		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
@@ -1075,7 +1081,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// Every row but the freshly polled one was last polled an hour ago,
 		// well past a fifteen-minute grace.
-		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, jiraOtherDone, jiraWontDo, jiraCategoryDone, jiraCategoryLive, linearByID, linearByName, linearLive, linearOtherDone, linearNoID, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
+		for _, id := range []string{merged, closedState, open, noSnapshot, vulnResolved, vulnOpen, jiraDone, jiraRenamed, jiraLive, jiraOtherDone, jiraWontDo, jiraCategoryDone, jiraCategoryLive, linearByID, linearByName, linearLive, linearOtherDone, linearNoID, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
 			seed.BackdatePoll(t, id, time.Hour)
 		}
 		const grace = 15 * time.Minute
@@ -1095,6 +1101,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}{
 			{merged, "a merged PR"},
 			{closedState, "a CLOSED PR"},
+			{vulnResolved, "a vulnerable package with no open alert left"},
 			{jiraDone, "a Jira issue in a done status, matched by name because its snapshot predates status ids"},
 			{jiraRenamed, "a Jira issue whose done status was renamed, matched by id"},
 			{linearByID, "a Linear issue whose done state was renamed, matched by id"},
@@ -1113,6 +1120,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			id, why string
 		}{
 			{open, "an open PR"},
+			{vulnOpen, "a vulnerable package with an open alert"},
 			{noSnapshot, "an entity with no stored snapshot"},
 			{jiraLive, "a Jira issue in a live status"},
 			{jiraCategoryLive, "a Jira issue in a status no done ref names, filed under a category other than done"},

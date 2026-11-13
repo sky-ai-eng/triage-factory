@@ -194,6 +194,23 @@ An org whose webhooks arrive reads close to 0. An org connected with a token,
 or with an App that has no webhook URL, receives no webhooks, so every change
 its timers find is counted.
 
+### Dependabot alert listings
+
+Each GitHub poll lists the open Dependabot alerts of every tracked repository
+whose alerts the org's credential can read.
+`tf_github_dependabot_listings_total` counts those listings by `outcome`:
+
+| `outcome`      | Meaning                                                                    |
+| -------------- | -------------------------------------------------------------------------- |
+| `listed`       | GitHub returned the alerts, which changed since the previous listing       |
+| `not_modified` | Unchanged since the previous listing; the request costs no rate limit      |
+| `refused`      | GitHub refused the repository; it is skipped until access is rechecked     |
+| `failed`       | Any other failure; that poll's remaining listings wait for the next one    |
+
+A steady rate of `failed` means no new alert reaches Triage Factory. A
+repository whose alerts get `refused` every poll has lost access, which the
+org's GitHub access settings page shows within a day.
+
 ### Mergeability probes
 
 Triage Factory learns whether a pull request conflicts by asking GitHub only

@@ -101,6 +101,15 @@ func entityByKey(ctx context.Context, q queryer, source, scope, sourceID, extern
 		source, scope, sourceID, externalID, externalID))
 }
 
+// activeEntityByKey is the active row holding the key, or nil. Keys are unique
+// among active rows, so there is at most one.
+func activeEntityByKey(ctx context.Context, q queryer, source, scope, sourceID string) (*domain.Entity, error) {
+	return scanEntityRow(q.QueryRowContext(ctx, `
+		SELECT `+entitySelectCols+` FROM entities
+		WHERE source = ? AND scope = ? AND source_id = ? AND state = 'active'`,
+		source, scope, sourceID))
+}
+
 func entityByExternalID(ctx context.Context, q queryer, source, scope, externalID string) (*domain.Entity, error) {
 	return scanEntityRow(q.QueryRowContext(ctx, `
 		SELECT `+entitySelectCols+` FROM entities
@@ -211,21 +220,28 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ str
 // --- Mutation ---
 
 func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
-	return s.findOrCreate(ctx, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url)
+	return s.findOrCreate(ctx, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url, false)
+}
+
+func (s *entityStore) FindOrCreateVulnerablePackageSystem(ctx context.Context, orgID, scope, key, title, url string) (*domain.Entity, bool, error) {
+	if err := db.ValidateVulnerablePackageEntityCreate(key); err != nil {
+		return nil, false, err
+	}
+	return s.findOrCreate(ctx, orgID, domain.ProviderGitHub, scope, key, "", domain.EntityContainer{}, domain.EntityKindVulnerablePackage, title, url, true)
 }
 
 func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error) {
 	if err := db.ValidateLinearEntityCreate(identifier, issueID, linearTeamID); err != nil {
 		return nil, false, err
 	}
-	return s.findOrCreate(ctx, orgID, domain.ProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url)
+	return s.findOrCreate(ctx, orgID, domain.ProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url, false)
 }
 
 func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error) {
 	if err := db.ValidateJiraEntityCreate(key, issueID, project); err != nil {
 		return nil, false, err
 	}
-	return s.findOrCreate(ctx, orgID, domain.ProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url)
+	return s.findOrCreate(ctx, orgID, domain.ProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url, false)
 }
 
 // findOrCreate is the identity rule's find-or-create. container is what a new
@@ -233,8 +249,9 @@ func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, 
 // row's project. With it empty, such a row is found but not created. A new
 // GitHub row is created referencing its repository's registry row, and a new
 // Jira row its project's, each got or created in the same transaction as the
-// insert (db.GitHubEntityRepoRef names the repository).
-func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID string, container domain.EntityContainer, kind, title, url string) (*domain.Entity, bool, error) {
+// insert (db.GitHubEntityRepoRef names the repository). activeOnly finds only
+// an active row by the key, so a key whose row closed gets a new one.
+func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID string, container domain.EntityContainer, kind, title, url string, activeOnly bool) (*domain.Entity, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
@@ -242,6 +259,9 @@ func (s *entityStore) findOrCreate(ctx context.Context, orgID, source, scope, so
 		return nil, false, fmt.Errorf("%w: %s %s", db.ErrEntityScopeRequired, source, sourceID)
 	}
 	find := func(q queryer) (*domain.Entity, error) {
+		if activeOnly {
+			return activeEntityByKey(ctx, q, source, scope, sourceID)
+		}
 		if externalID != "" {
 			if e, err := entityByExternalID(ctx, q, source, scope, externalID); err != nil || e != nil {
 				return e, err
@@ -751,6 +771,8 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		    (source = 'github' AND (
 		       json_extract(snapshot_json, '$.merged') = 1
 		       OR upper(COALESCE(json_extract(snapshot_json, '$.state'), '')) IN ('CLOSED', 'MERGED')
+		       OR (kind = 'vulnerable_package' AND json_type(snapshot_json, '$.alerts') = 'array'
+		           AND json_array_length(snapshot_json, '$.alerts') = 0)
 		    ))`+jiraArm+linearArm+`
 		  )
 		ORDER BY created_at ASC, id ASC`+limitClause, args...)

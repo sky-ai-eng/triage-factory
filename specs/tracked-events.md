@@ -364,6 +364,36 @@ it was added on, so after a host change the poller, the profiler and team
 tracking see only the new host's repositories, and the old host's stay on file
 untouched for a switch back.
 
+## GitHub Vulnerable Package Events
+
+A vulnerable package is one package of one ecosystem in a tracked repository
+with at least one open Dependabot alert. It is an entity of kind
+`vulnerable_package`, one per package however many alerts it has (one per
+advisory, and one per manifest the package appears in). Each GitHub cycle
+lists the open alerts of every tracked repository whose alerts the org's
+credential can read, groups them by package, and diffs each package's alerts
+by number against its stored snapshot.
+
+| Event | ID | Trigger | `dedup_key` |
+|-------|----|---------|-------------|
+| **Vulnerability Alert Opened** | `github:vulnerability:alert_opened` | An alert is open that was not open on the previous listing: created, reopened, or reintroduced. One event per alert | — |
+| **Vulnerability Resolved** | `github:vulnerability:resolved` | The package has no open alert left. Terminating: it closes the entity and its tasks, and a later alert on the package creates a new entity | — |
+
+An alert closing while another stays open on the package emits nothing; the
+snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
+`ghsa_id`, `cve_id`, `severity`, `manifest_path`, `scope`,
+`first_patched_version`), the package (`ecosystem`, `package`), the repository
+(`repo`, `repository_id`), and `highest_severity`, the highest severity among
+the package's open alerts. `resolved` names the package, the repository, and
+the `alert_numbers` that were last open.
+
+A repository's first listing is its baseline: it stores the packages it finds
+and emits no `alert_opened`. So is its first listing after no team tracked it.
+A listing is conditional on the previous one's ETag when that listing fit on
+one page, so an unchanged repository costs a request GitHub does not count
+against the rate limit. A listing that fails changes nothing, and a repository
+GitHub refuses is skipped until the access probe rechecks it.
+
 ## Jira Events
 
 ### Actionable
@@ -1096,6 +1126,19 @@ A GitHub handler predicate names people and teams by GitHub's id, which a rename
 As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
 Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate.repo_in`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
+
+### GitHub Vulnerable Package Snapshot
+
+The entity carries `source_id` (`owner/repo#ecosystem:name`, e.g.
+`octo/api#npm:lodash`), `scope` (the org's GitHub host) and `repository_id`.
+It has no `external_id`: GitHub has no object for the grouping, so the key is
+its identity among active entities. Its `url` is the repository's Dependabot
+alert list filtered to the package's open alerts. The snapshot holds:
+
+- `repo`, `ecosystem`, `package`
+- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `first_patched_version` (empty when none is released)
+
+An empty `alerts` is the terminal snapshot.
 
 ### Jira Issue Snapshot
 

@@ -41,10 +41,12 @@ func (t *Tracker) RetireGitHubOutOfScope(ctx context.Context, scope string) int 
 	forgotten := map[string]bool{}
 	for _, e := range entities {
 		// An issue entity is not the pull request poller's to retire: it
-		// polls no issue, and the unreachable event is a pull request's.
+		// polls no issue, and the unreachable event is a pull request's. Nor
+		// is a vulnerable package, which no pull request event describes; one
+		// on a host the org has left is listed no more and stays active.
 		// TODO(TFAC-1276): an issue entity on a host the org has left stays
 		// active; retiring it needs an event of its own or a silent close.
-		if e.Scope == scope || e.Kind == domain.EntityKindIssue {
+		if e.Scope == scope || e.Kind == domain.EntityKindIssue || e.Kind == domain.EntityKindVulnerablePackage {
 			continue
 		}
 		t.forgetPullsCursor(ctx, e.RepositoryID, forgotten)

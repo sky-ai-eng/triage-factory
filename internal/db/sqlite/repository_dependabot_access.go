@@ -21,11 +21,16 @@ func newRepositoryDependabotAccessStore(q queryer) db.RepositoryDependabotAccess
 
 var _ db.RepositoryDependabotAccessStore = (*repositoryDependabotAccessStore)(nil)
 
-const sqliteDependabotAccessColumns = `repository_id, org_id, access, checked_at`
+const sqliteDependabotAccessColumns = `repository_id, org_id, access, checked_at, alerts_listed_at, alerts_etag`
 
 func scanSQLiteDependabotAccess(row interface{ Scan(...any) error }) (domain.RepositoryDependabotAccess, error) {
 	var a domain.RepositoryDependabotAccess
-	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt)
+	var listedAt sql.NullTime
+	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &listedAt, &a.AlertsETag)
+	if listedAt.Valid {
+		t := listedAt.Time
+		a.AlertsListedAt = &t
+	}
 	return a, err
 }
 
@@ -52,6 +57,40 @@ func (s *repositoryDependabotAccessStore) RecordSystem(ctx context.Context, orgI
 		return domain.RepositoryDependabotAccess{}, fmt.Errorf("upsert repository_dependabot_access: %w", err)
 	}
 	return a, nil
+}
+
+func (s *repositoryDependabotAccessStore) RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.RepositoryDependabotAccess{}, err
+	}
+	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
+		UPDATE repository_dependabot_access
+		   SET alerts_listed_at = ?, alerts_etag = ?
+		 WHERE org_id = ? AND repository_id = ?
+		RETURNING `+sqliteDependabotAccessColumns,
+		time.Now().UTC(), etag, orgID, repositoryID))
+}
+
+func (s *repositoryDependabotAccessStore) ClearAlertListingSystem(ctx context.Context, orgID, repositoryID string) (domain.RepositoryDependabotAccess, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.RepositoryDependabotAccess{}, err
+	}
+	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
+		UPDATE repository_dependabot_access
+		   SET alerts_listed_at = NULL, alerts_etag = ''
+		 WHERE org_id = ? AND repository_id = ?
+		RETURNING `+sqliteDependabotAccessColumns,
+		orgID, repositoryID))
+}
+
+// scanWrittenDependabotAccess decodes an UPDATE … RETURNING of one answer's
+// row, passing sql.ErrNoRows through as the miss.
+func scanWrittenDependabotAccess(row *sql.Row) (domain.RepositoryDependabotAccess, error) {
+	a, err := scanSQLiteDependabotAccess(row)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.RepositoryDependabotAccess{}, fmt.Errorf("update repository_dependabot_access listing: %w", err)
+	}
+	return a, err
 }
 
 func (s *repositoryDependabotAccessStore) GetSystem(ctx context.Context, orgID, repositoryID string) (*domain.RepositoryDependabotAccess, error) {

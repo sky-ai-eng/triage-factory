@@ -46,12 +46,32 @@ const DependabotAccessRecheck = 24 * time.Hour
 const DependabotAccessStaleAfter = 2 * DependabotAccessRecheck
 
 // RepositoryDependabotAccess is the stored answer for one repository: its
-// registry row, the answer, and when GitHub gave it.
+// registry row, the answer, and when GitHub gave it. Beside it is the state of
+// the poll's listing of the repository's open alerts, which runs only where
+// the answer is readable.
 type RepositoryDependabotAccess struct {
 	RepositoryID string
 	OrgID        string
 	Access       DependabotAlertsAccess
 	CheckedAt    time.Time
+
+	// AlertsListedAt is when the poll last listed the repository's open
+	// alerts in full. nil when it has not since the repository was last
+	// tracked: the next listing is then the repository's baseline, which
+	// stores the packages it finds and emits nothing for the alerts already
+	// open.
+	AlertsListedAt *time.Time
+	// AlertsETag is the ETag GitHub answered that listing with, sent back as
+	// the next listing's condition. "" when the listing took more than one
+	// page: GitHub orders the open alerts newest first, so an alert closing
+	// past the first page leaves the first page, and its ETag, unchanged.
+	AlertsETag string
+}
+
+// AlertsBaselined reports whether the repository's alerts have a baseline, so
+// a listing of them emits.
+func (a RepositoryDependabotAccess) AlertsBaselined() bool {
+	return a.AlertsListedAt != nil
 }
 
 // DependabotAccessCounts counts an org's tracked repositories on one GitHub

@@ -240,6 +240,15 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
+	// A vulnerable package has no open alert left → close its alert tasks and
+	// flip it closed. A later alert on the package creates a new entity, so
+	// nothing reopens this one.
+	{
+		onEvents:         []string{domain.EventGitHubVulnerabilityResolved},
+		closes:           vulnerablePackageCloseTypes(),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
 	// A Jira issue completed → same entity-wide close + terminate.
 	{
 		onEvents:         []string{domain.EventJiraIssueCompleted},
@@ -341,6 +350,13 @@ func githubPRCloseTypesExcept(terminators ...string) []string {
 	return append(out, requestedPartyGitHubEventTypes...)
 }
 
+// vulnerablePackageCloseTypes is what a vulnerable package's resolution cleans
+// up: every task its alerts opened. The resolved event's own type is not in
+// it, so the lifecycle task the event mints afterwards survives.
+func vulnerablePackageCloseTypes() []string {
+	return []string{domain.EventGitHubVulnerabilityAlertOpened}
+}
+
 // jiraIssueTerminalCloseTypes is the Jira analog: every assignee-centric type
 // EXCEPT the terminating completed event, plus the unassigned pool task.
 func jiraIssueTerminalCloseTypes() []string {
@@ -356,8 +372,9 @@ func jiraIssueUnreachableCloseTypes() []string {
 }
 
 // closeOwedCloseTypes is what the poll's close obligation cleans up: the
-// union of the GitHub terminal and unreachable sets and the Jira and Linear
-// completed and unreachable sets, deduplicated, minus every terminating event's own type.
+// union of the GitHub terminal and unreachable sets, the vulnerable-package
+// set, and the Jira and Linear completed and unreachable sets, deduplicated,
+// minus every terminating event's own type.
 // An entity has one source, so the types of the other sources are no-ops.
 // The subtraction is explicit rather than inherited, because each issue
 // source's two sets spare only their own terminator: the obligation does not
@@ -372,6 +389,7 @@ func closeOwedCloseTypes() []string {
 	var out []string
 	sets := [][]string{
 		githubPRTerminalCloseTypes(), githubPRCloseTypesExcept(domain.EventGitHubPRUnreachable),
+		vulnerablePackageCloseTypes(),
 		jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes(),
 		linearCloseTypesExcept(domain.EventLinearIssueCompleted), linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
 	}

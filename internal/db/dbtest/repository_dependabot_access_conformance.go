@@ -2,6 +2,8 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -173,6 +175,64 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 	})
 
+	t.Run("Record_listing_returns_the_stored_row_and_keeps_the_answer", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		answer := record(t, f, repoID, domain.DependabotAlertsReadable)
+		if answer.AlertsBaselined() || answer.AlertsETag != "" {
+			t.Fatalf("a new answer carries a listing: %+v", answer)
+		}
+		listed, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"abc"`)
+		if err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		if !listed.AlertsBaselined() || listed.AlertsETag != `W/"abc"` {
+			t.Errorf("listing = %+v, want baselined with the ETag", listed)
+		}
+		if listed.Access != answer.Access || !listed.CheckedAt.Equal(answer.CheckedAt) {
+			t.Errorf("listing moved the answer: %+v, was %+v", listed, answer)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordAlertListingSystem", listed, func() (*domain.RepositoryDependabotAccess, error) {
+			return f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID)
+		})
+
+		// A later probe replaces the answer and leaves the listing.
+		reprobed := record(t, f, repoID, domain.DependabotAlertsNoPermission)
+		if !reprobed.AlertsBaselined() || reprobed.AlertsETag != `W/"abc"` {
+			t.Errorf("a probe cleared the listing: %+v", reprobed)
+		}
+	})
+
+	t.Run("Clear_listing_forgets_the_baseline", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		record(t, f, repoID, domain.DependabotAlertsReadable)
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"abc"`); err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		cleared, err := f.Stores.DependabotAccess.ClearAlertListingSystem(ctx, f.OrgID, repoID)
+		if err != nil {
+			t.Fatalf("ClearAlertListingSystem: %v", err)
+		}
+		if cleared.AlertsBaselined() || cleared.AlertsETag != "" || cleared.Access != domain.DependabotAlertsReadable {
+			t.Errorf("cleared = %+v, want the readable answer with no listing", cleared)
+		}
+		AssertWriteReturnedStoredRow(t, "ClearAlertListingSystem", cleared, func() (*domain.RepositoryDependabotAccess, error) {
+			return f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID)
+		})
+	})
+
+	t.Run("A_listing_without_an_answer_is_a_miss", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, ""); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("RecordAlertListingSystem with no answer: err = %v, want sql.ErrNoRows", err)
+		}
+		if _, err := f.Stores.DependabotAccess.ClearAlertListingSystem(ctx, f.OrgID, repoID); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("ClearAlertListingSystem with no answer: err = %v, want sql.ErrNoRows", err)
+		}
+	})
+
 	t.Run("Another_orgs_answer_is_not_read", func(t *testing.T) {
 		f := mk(t)
 		if f.OtherOrgID == "" {
@@ -186,8 +246,11 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		if _, err := f.Stores.DependabotAccess.RecordSystem(ctx, f.OtherOrgID, repoID, domain.DependabotAlertsDisabled); err == nil {
 			t.Error("RecordSystem wrote an answer for another org's repository")
 		}
-		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable {
-			t.Errorf("the org's own answer after another org's write = %+v, %v; want readable, untouched", got, err)
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OtherOrgID, repoID, `W/"x"`); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("RecordAlertListingSystem under another org: err = %v, want sql.ErrNoRows", err)
+		}
+		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable || got.AlertsBaselined() {
+			t.Errorf("the org's own answer after another org's writes = %+v, %v; want readable with no listing, untouched", got, err)
 		}
 	})
 }

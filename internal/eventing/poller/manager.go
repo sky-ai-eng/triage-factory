@@ -149,9 +149,10 @@ type Manager struct {
 	RefreshMarks db.GitHubRefreshMarkStore
 
 	// DependabotAccess records, per tracked repository, whether the org's
-	// GitHub credential can read its Dependabot alerts: the scheduled cycle
-	// probes each repository its credentials read once a day
-	// (dependabotProbe). nil probes nothing.
+	// GitHub credential can read its Dependabot alerts, and the state of the
+	// listing of them: the scheduled cycle probes each repository its
+	// credentials read once a day, and lists the open alerts of each one that
+	// can be read (dependabotProbe). nil probes and lists nothing.
 	DependabotAccess db.RepositoryDependabotAccessStore
 
 	// TriggerScorer kicks the org's scorer after a narrowed pass emitted
@@ -285,7 +286,8 @@ func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, m.mergeability, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery).
 		WithChangeClock(m.ChangeClock).
-		WithTaskClosedTeller(m.TaskClosed)
+		WithTaskClosedTeller(m.TaskClosed).
+		WithDependabotAccess(m.DependabotAccess)
 }
 
 // sourceDisabled reports whether this cycle must not run, and the span outcome
@@ -1128,6 +1130,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	}
 	if rateLimitErr == nil {
 		probe.run(ctx)
+		probe.listAlerts(ctx)
 	}
 
 	// Decide the cycle's actual resume point once, after every installation
@@ -1298,6 +1301,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		probe := m.newDependabotProbe(orgID, scope)
 		probe.add(client, repos)
 		probe.run(ctx)
+		probe.listAlerts(ctx)
 	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
 	return rerr == nil
