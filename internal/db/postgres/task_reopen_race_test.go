@@ -168,6 +168,9 @@ func TestTaskReopen_Postgres_RacingARequeueLeavesOneActiveTask(t *testing.T) {
 				active = append(active, id)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("round %d: read tasks: %v", round, err)
+		}
 		if err := rows.Close(); err != nil {
 			t.Fatalf("round %d: close rows: %v", round, err)
 		}

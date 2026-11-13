@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -111,6 +112,9 @@ func (f reopenFixture) ciTaskIDs(t *testing.T) []string {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list ci tasks: %v", err)
+	}
 	return ids
 }
 
@@ -166,6 +170,46 @@ func TestReopen_OwnEventReopensTheTaskClosedUnderWorkingWork(t *testing.T) {
 	}
 	if runs != 1 {
 		t.Errorf("blueprint runs on the entity = %d, want the one already working", runs)
+	}
+}
+
+// TestReopen_BetweenStepsQueuesTheEventForTheNextStep: the recurrence lands
+// after one blueprint step concluded and before the next starts. The run is
+// still working, so the task reopens, but no conversation is live to fold the
+// event into. It is queued on the reopened task for the next step, and no
+// second run starts beside the one already working.
+func TestReopen_BetweenStepsQueuesTheEventForTheNextStep(t *testing.T) {
+	f := newReopenFixture(t, "owner/repo#reopened-between-steps")
+	if _, err := f.database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, f.convID); err != nil {
+		t.Fatalf("conclude the step: %v", err)
+	}
+	f.closeBySibling(t)
+
+	emitCI(t, f.router, f.entityID, "aidan")
+
+	disp := f.lastDisposition(t)
+	if disp.Disposition != events.DispositionTaskReopened || disp.TaskID != f.taskID {
+		t.Errorf("disposition = %q on task %q, want %q on %q", disp.Disposition, disp.TaskID, events.DispositionTaskReopened, f.taskID)
+	}
+	if got := f.ciTaskIDs(t); !slices.Equal(got, []string{f.taskID}) {
+		t.Errorf("ci tasks on the entity = %v, want only the reopened %s", got, f.taskID)
+	}
+	if len(f.fold.folded) != 0 {
+		t.Errorf("folded into = %v, want nothing: no conversation is live between steps", f.fold.folded)
+	}
+	var runs int
+	if err := f.database.QueryRow(`SELECT COUNT(*) FROM blueprint_runs WHERE task_id = ?`, f.taskID).Scan(&runs); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if runs != 1 {
+		t.Errorf("blueprint runs on the task = %d, want the one already working", runs)
+	}
+	firings, err := sqlitestore.New(f.database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, f.entityID)
+	if err != nil {
+		t.Fatalf("list pending firings: %v", err)
+	}
+	if len(firings) != 1 || firings[0].TaskID != f.taskID || firings[0].TriggeringEventID != disp.EventID {
+		t.Errorf("pending firings = %+v, want the recurrence queued on the reopened task", firings)
 	}
 }
 

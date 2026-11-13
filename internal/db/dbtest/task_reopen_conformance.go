@@ -18,9 +18,9 @@ import (
 // and seeder, since a reopen and a held close are decided by the same working
 // conversation.
 //
-// The cases that create carry the weight. A reopen that reaches a task it
-// should have left closed puts a card back on the board that a person, a
-// merge, or a reassignment resolved.
+// Most of the cases assert that the mint creates a task. A reopen that
+// reaches a task it should have left closed puts a card back on the board
+// that a person, a merge, or a reassignment resolved.
 func RunTaskReopenConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 	t.Helper()
 	ctx := context.Background()

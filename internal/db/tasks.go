@@ -859,6 +859,11 @@ type TaskStore interface {
 	// conversations, as Bump does for a hold it clears. The task comes back
 	// in the shape a found one does, with TaskReopened.
 	//
+	// These doors are outside the returned-row rule: they return the task
+	// joined to its entity, which the router reads and no RETURNING can
+	// project, so a created or reopened row is read back inside the mint's
+	// own transaction, under the locks that wrote it.
+	//
 	// A reopen and another writer that makes a task active on the same key
 	// (a requeue of a closed task, another mint) are decided by the dedup
 	// index: the later one finds the active row, or is refused by the index

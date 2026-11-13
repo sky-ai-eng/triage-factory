@@ -107,6 +107,20 @@ func (rel *closeRelation) reason() string {
 	return rel.closeReason
 }
 
+// reasonFor is the close reason the relation audits on a task of taskType
+// that an event of eventType closes. A task of the closing event's own type
+// is the one a reassignment retires, and closes as reassigned: the event
+// mints the new assignee's task after the close phase, and the mint reopens
+// a task a sibling event closed while a conversation still works on it, so
+// this one must not carry the sibling reason. Every reader of a typed
+// relation's reason for one task asks here, so the two cannot disagree.
+func (rel *closeRelation) reasonFor(eventType, taskType string) string {
+	if eventType == taskType {
+		return dbpkg.ReassignedCloseReason
+	}
+	return rel.reason()
+}
+
 // closeReasonReconciled is the close reason the poll's close obligation
 // stamps on the tasks it closes. Deliberately distinct from the event-driven
 // reasons ("auto_closed_by_event", "entity_closed"): those name a transition
@@ -449,7 +463,6 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			}
 		}
 
-		reason := rel.reason()
 		// close_event_type records the events_catalog type that triggered the
 		// close. Every close here is event-driven (runCloses only runs from an
 		// event), so it is always set — for entity-wide "entity_closed" closes as
@@ -472,22 +485,18 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				closedTask bool
 				err        error
 			)
-			closedAs := reason
+			closedAs := rel.reasonFor(evt.EventType, t.EventType)
 			if t.EventType == evt.EventType {
 				// A task of the closing event's own type closes at once,
 				// working conversation or not: the event mints its own task
 				// after this phase, and the dedup index admits one active
 				// task per (entity, type, key), so a task held open here
 				// would take the new event as a bump and the new assignee's
-				// team would get no task. It closes as reassigned for the
-				// same reason: the mint reopens a task a sibling event
-				// closed while a conversation still works on it, and this
-				// one has to stay closed.
-				closedAs = dbpkg.ReassignedCloseReason
+				// team would get no task.
 				closedTask, err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, closedAs, evt.EventType)
 			} else {
 				var out dbpkg.TaskCloseOutcome
-				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, reason)
+				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, closedAs)
 				closedTask = out.Closed
 				if out.Held {
 					routerLog.InfoContext(ctx, "held task close", "task_id", t.ID, "on_event", evt.EventType,
