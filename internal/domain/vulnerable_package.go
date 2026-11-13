@@ -91,8 +91,9 @@ const (
 
 // DependabotAlert is one open Dependabot alert, as a vulnerable package's
 // snapshot records it: the fields that tell one alert from another and that
-// a person deciding on the upgrade reads. Advisory text is not kept here: it
-// is written outside the org, and the snapshot is diff state.
+// a person deciding on the upgrade reads. The advisory's Markdown description
+// is not kept: it has no length limit and is repeated on every alert of the
+// advisory, and the summary names what the advisory is about.
 type DependabotAlert struct {
 	// Number is the alert's number in its repository, which GitHub never
 	// reuses there and which survives the alert being fixed and reopened.
@@ -101,6 +102,9 @@ type DependabotAlert struct {
 	// the advisory has none.
 	GHSAID string `json:"ghsa_id"`
 	CVEID  string `json:"cve_id,omitempty"`
+	// Summary is the advisory's one-line plain-text summary, at most 1,024
+	// characters. It is written outside the org.
+	Summary string `json:"summary,omitempty"`
 	// Severity is one of the DependabotSeverity values.
 	Severity string `json:"severity"`
 	// ManifestPath is the manifest the vulnerable dependency was found in,
@@ -109,6 +113,9 @@ type DependabotAlert struct {
 	// Scope is DependabotScopeRuntime or DependabotScopeDevelopment, empty
 	// when GitHub does not know.
 	Scope string `json:"scope,omitempty"`
+	// VulnerableVersionRange is the package versions the vulnerability
+	// affects, in GitHub's range syntax, as "< 4.17.21".
+	VulnerableVersionRange string `json:"vulnerable_version_range,omitempty"`
 	// FirstPatchedVersion is the first version that fixes the vulnerability,
 	// empty when none has been released.
 	FirstPatchedVersion string `json:"first_patched_version,omitempty"`

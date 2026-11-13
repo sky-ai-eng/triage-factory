@@ -171,12 +171,14 @@ type restDependabotAlert struct {
 	SecurityAdvisory struct {
 		GHSAID   string  `json:"ghsa_id"`
 		CVEID    *string `json:"cve_id"`
+		Summary  string  `json:"summary"`
 		Severity string  `json:"severity"`
 	} `json:"security_advisory"`
 	SecurityVulnerability struct {
-		Package             restDependabotPackage `json:"package"`
-		Severity            string                `json:"severity"`
-		FirstPatchedVersion *struct {
+		Package                restDependabotPackage `json:"package"`
+		Severity               string                `json:"severity"`
+		VulnerableVersionRange string                `json:"vulnerable_version_range"`
+		FirstPatchedVersion    *struct {
 			Identifier string `json:"identifier"`
 		} `json:"first_patched_version"`
 	} `json:"security_vulnerability"`
@@ -208,10 +210,12 @@ func appendOpenDependabotAlerts(alerts []OpenDependabotAlert, owner, repo string
 			severity = a.SecurityAdvisory.Severity
 		}
 		alert := domain.DependabotAlert{
-			Number:       a.Number,
-			GHSAID:       a.SecurityAdvisory.GHSAID,
-			Severity:     severity,
-			ManifestPath: a.Dependency.ManifestPath,
+			Number:                 a.Number,
+			GHSAID:                 a.SecurityAdvisory.GHSAID,
+			Summary:                a.SecurityAdvisory.Summary,
+			Severity:               severity,
+			ManifestPath:           a.Dependency.ManifestPath,
+			VulnerableVersionRange: a.SecurityVulnerability.VulnerableVersionRange,
 		}
 		if a.SecurityAdvisory.CVEID != nil {
 			alert.CVEID = *a.SecurityAdvisory.CVEID

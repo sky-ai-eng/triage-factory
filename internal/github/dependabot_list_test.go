@@ -54,8 +54,8 @@ func TestClient_ListOpenDependabotAlerts_OnePage(t *testing.T) {
 	want := []OpenDependabotAlert{{
 		Ecosystem: "npm", Package: "lodash",
 		Alert: domain.DependabotAlert{
-			Number: 3, GHSAID: "GHSA-0003", CVEID: "CVE-2026-0003", Severity: "high",
-			ManifestPath: "app/package.json", Scope: "runtime", FirstPatchedVersion: "2.0.0",
+			Number: 3, GHSAID: "GHSA-0003", CVEID: "CVE-2026-0003", Summary: "advisory text", Severity: "high",
+			ManifestPath: "app/package.json", Scope: "runtime", VulnerableVersionRange: "< 2.0.0", FirstPatchedVersion: "2.0.0",
 		},
 		UpdatedAt: time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC),
 	}}

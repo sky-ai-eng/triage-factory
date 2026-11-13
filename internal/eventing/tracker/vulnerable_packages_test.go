@@ -69,9 +69,9 @@ func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
 	for _, a := range f.alerts[repo] {
 		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","updated_at":"2026-11-0%dT00:00:00Z",
 			"dependency":{"package":{"ecosystem":%q,"name":%q},"manifest_path":"package.json","scope":"runtime"},
-			"security_advisory":{"ghsa_id":"GHSA-%d","cve_id":null,"severity":%q},
-			"security_vulnerability":{"package":{"ecosystem":%q,"name":%q},"severity":%q,"first_patched_version":{"identifier":"9.9.9"}}}`,
-			a.number, 1+a.number%9, a.ecosystem, a.pkg, a.number, a.severity, a.ecosystem, a.pkg, a.severity))
+			"security_advisory":{"ghsa_id":"GHSA-%d","cve_id":null,"summary":"advisory %d","severity":%q},
+			"security_vulnerability":{"package":{"ecosystem":%q,"name":%q},"severity":%q,"vulnerable_version_range":"< 9.9.9","first_patched_version":{"identifier":"9.9.9"}}}`,
+			a.number, 1+a.number%9, a.ecosystem, a.pkg, a.number, a.number, a.severity, a.ecosystem, a.pkg, a.severity))
 	}
 	body := "[" + strings.Join(objs, ",") + "]"
 	sum := sha256.Sum256([]byte(body))
@@ -280,8 +280,8 @@ func TestRefreshVulnerablePackages_AlertsOpenOnOneEntity(t *testing.T) {
 	}
 	want := events.GitHubVulnerabilityAlertOpenedMetadata{
 		Repo: "octo/api", RepositoryID: e.RepositoryID, Ecosystem: "npm", Package: "lodash",
-		AlertNumber: 5, GHSAID: "GHSA-5", Severity: "medium", ManifestPath: "package.json",
-		Scope: "runtime", FirstPatchedVersion: "9.9.9", HighestSeverity: "medium",
+		AlertNumber: 5, GHSAID: "GHSA-5", Summary: "advisory 5", Severity: "medium", ManifestPath: "package.json",
+		Scope: "runtime", VulnerableVersionRange: "< 9.9.9", FirstPatchedVersion: "9.9.9", HighestSeverity: "medium",
 	}
 	if meta != want {
 		t.Errorf("metadata = %+v, want %+v", meta, want)

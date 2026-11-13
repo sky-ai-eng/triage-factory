@@ -382,8 +382,8 @@ by number against its stored snapshot.
 
 An alert closing while another stays open on the package emits nothing; the
 snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
-`ghsa_id`, `cve_id`, `severity`, `manifest_path`, `scope`,
-`first_patched_version`), the package (`ecosystem`, `package`), the repository
+`ghsa_id`, `cve_id`, `summary`, `severity`, `manifest_path`, `scope`,
+`vulnerable_version_range`, `first_patched_version`), the package (`ecosystem`, `package`), the repository
 (`repo`, `repository_id`), and `highest_severity`, the highest severity among
 the package's open alerts. `resolved` names the package, the repository, and
 the `alert_numbers` that were last open; `unreachable` names the same plus the
@@ -1154,7 +1154,7 @@ its identity among active entities. Its `url` is the repository's Dependabot
 alert list filtered to the package's open alerts. The snapshot holds:
 
 - `repo`, `ecosystem`, `package`
-- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), and `first_patched_version` (empty when none is released)
+- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `summary` (the advisory's one-line summary, written outside the org; its Markdown description is not kept), `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `vulnerable_version_range` (as `< 4.17.21`), and `first_patched_version` (empty when none is released). Only the set of numbers is diffed: a change to another field rewrites the snapshot and emits nothing
 
 An empty `alerts` is the terminal snapshot.
 
