@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,15 +34,16 @@ type importStubCfg struct {
 // importFullPerms grants every permission the manifest requests, so a stub left
 // at the default passes the preflight cleanly.
 var importFullPerms = map[string]string{
-	"emails":        "read",
-	"issues":        "write",
-	"pull_requests": "write",
-	"contents":      "write",
-	"metadata":      "read",
-	"checks":        "read",
-	"actions":       "read",
-	"statuses":      "read",
-	"members":       "read",
+	"emails":               "read",
+	"issues":               "write",
+	"pull_requests":        "write",
+	"contents":             "write",
+	"metadata":             "read",
+	"checks":               "read",
+	"actions":              "read",
+	"statuses":             "read",
+	"members":              "read",
+	"vulnerability_alerts": "read",
 }
 
 func newImportStub(t *testing.T, cfg importStubCfg) *httptest.Server {
@@ -336,6 +338,30 @@ func TestGitHubAppImport_SoftPermGap(t *testing.T) {
 	}
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app == nil {
 		t.Error("no app row after acknowledged soft gap")
+	}
+}
+
+// TestGitHubAppImport_DependabotAlertsIsSoft: an App without the Dependabot
+// alerts permission imports with a warning naming the feature it turns off,
+// never a refusal.
+func TestGitHubAppImport_DependabotAlertsIsSoft(t *testing.T) {
+	granted := maps.Clone(importFullPerms)
+	delete(granted, "vulnerability_alerts")
+
+	_, hard, soft := preflightImportPermissions(granted)
+	if len(hard) != 0 {
+		t.Fatalf("hard gaps = %+v, want none", hard)
+	}
+	if len(soft) != 1 || soft[0].Permission != "vulnerability_alerts" || soft[0].Required != "read" {
+		t.Fatalf("soft gaps = %+v, want vulnerability_alerts at read", soft)
+	}
+	if msg := softGapMessage(soft); !strings.Contains(msg, "Dependabot alerts") {
+		t.Errorf("soft-gap message %q does not name the feature it turns off", msg)
+	}
+
+	granted["vulnerability_alerts"] = "write"
+	if _, _, soft := preflightImportPermissions(granted); len(soft) != 0 {
+		t.Errorf("write did not satisfy read: soft gaps = %+v", soft)
 	}
 }
 

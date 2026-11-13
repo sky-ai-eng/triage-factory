@@ -121,6 +121,8 @@ func New(conn *sql.DB) db.Stores {
 		// GitHubRefreshMarks: admin-pool-only in Postgres; one connection
 		// here, for the same reason as GitHubDeliveries.
 		GitHubRefreshMarks: newGitHubRefreshMarkStore(conn),
+		// DependabotAccess: admin-pool-only in Postgres; one connection here.
+		DependabotAccess: newRepositoryDependabotAccessStore(conn),
 		// GitHubPendingBinds is admin-pool-only in Postgres; SQLite collapses
 		// to the one connection. Nothing writes it in a local install (the bind
 		// ceremony needs a deployment App), but the impl is real so the

@@ -156,6 +156,12 @@ func (s *Server) registerGitHubRoutes() {
 	s.apiMutating("POST /api/orgs/{org_id}/github/commit-signer/rotate", s.handleCommitSignerRotate)
 	s.api("GET /api/orgs/{org_id}/github/commit-identity", s.handleCommitIdentityGet)
 
+	// How many of the org's tracked repositories its GitHub credential can
+	// read Dependabot alerts on, as the poll last found them: a statistic node,
+	// org-admin because it describes the org's credential. See
+	// github_dependabot_access.go.
+	s.api("GET /api/orgs/{org_id}/github/dependabot-access", s.handleGitHubDependabotAccess)
+
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login). start
 	// redirects to {github_base_url}/login/oauth/authorize; callback exchanges

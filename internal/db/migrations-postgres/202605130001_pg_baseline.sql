@@ -4439,6 +4439,42 @@ GRANT ALL ON TABLE public.github_refresh_marks TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.github_refresh_marks TO tf_app;
 
 
+-- Whether the org's GitHub credential can read a repository's Dependabot
+-- alerts, as GitHub last answered the poll's probe: readable, no_permission
+-- (the credential was refused), or disabled (alerts are turned off on the
+-- repository). One row per repository, replaced by each probe; a repository
+-- the poll has not probed has no row. Only a readable repository is polled
+-- for alerts.
+--
+-- Admin-pool wired with org_id bound per statement; the policy below is
+-- defense-in-depth.
+CREATE TABLE public.repository_dependabot_access (
+    repository_id uuid NOT NULL,
+    org_id        uuid NOT NULL,
+    access        text NOT NULL CHECK (access IN ('readable', 'no_permission', 'disabled')),
+    checked_at    timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.repository_dependabot_access
+    ADD CONSTRAINT repository_dependabot_access_pkey PRIMARY KEY (repository_id);
+
+ALTER TABLE ONLY public.repository_dependabot_access
+    ADD CONSTRAINT repository_dependabot_access_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.repository_dependabot_access
+    ADD CONSTRAINT repository_dependabot_access_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
+
+ALTER TABLE public.repository_dependabot_access ENABLE ROW LEVEL SECURITY;
+CREATE POLICY repository_dependabot_access_all ON public.repository_dependabot_access
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.repository_dependabot_access TO postgres;
+GRANT ALL ON TABLE public.repository_dependabot_access TO anon;
+GRANT ALL ON TABLE public.repository_dependabot_access TO authenticated;
+GRANT ALL ON TABLE public.repository_dependabot_access TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.repository_dependabot_access TO tf_app;
+
+
 -- The pending-bind record: one row per initiated deployment-App bind ceremony.
 --
 -- When one App key serves many workspaces, the org<->installation mapping has

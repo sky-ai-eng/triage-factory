@@ -52,6 +52,7 @@ one person leaving: `https://github.com/organizations/<org>/settings/apps/new`
 | Checks                | Read-only                 |
 | Commit statuses       | Read-only                 |
 | Contents              | Read and write            |
+| Dependabot alerts     | Read-only                 |
 | Issues                | Read and write            |
 | Metadata              | Read-only (set by GitHub) |
 | Pull requests         | Read and write            |
@@ -67,8 +68,8 @@ one person leaving: `https://github.com/organizations/<org>/settings/apps/new`
 If you change permissions later, each account that installed the App must
 accept the new set on GitHub before it takes effect.
 
-**Subscribe to events:** Check run, Check suite, Issue comment, Pull request,
-Pull request review, Pull request review comment, Push.
+**Subscribe to events:** Check run, Check suite, Dependabot alert, Issue comment,
+Pull request, Pull request review, Pull request review comment, Push.
 
 Press **Create GitHub App**.
 

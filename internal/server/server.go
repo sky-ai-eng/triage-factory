@@ -71,6 +71,9 @@ type Server struct {
 	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	reachableRepos   db.ReachableReposStore  // the reachable-repo mirror the picker lists from and the team-repos write gate validates against
 	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
+	// dependabotAccess is, per tracked repository, whether the org's GitHub
+	// credential can read its Dependabot alerts, as the poll last found it.
+	dependabotAccess db.RepositoryDependabotAccessStore
 	// githubPendingBinds holds the in-flight deployment-App bind ceremonies —
 	// the durable half of the CSRF pair the managed-bind callback consumes to
 	// learn which org a returning installation belongs to.
@@ -573,6 +576,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		githubApps:         stores.GitHubApps,
 		reachableRepos:     stores.ReachableRepos,
 		githubDeliveries:   stores.GitHubDeliveries,
+		dependabotAccess:   stores.DependabotAccess,
 		githubPendingBinds: stores.GitHubPendingBinds,
 		jiraApps:           stores.JiraApps,
 		authEvents:         stores.AuthEvents,

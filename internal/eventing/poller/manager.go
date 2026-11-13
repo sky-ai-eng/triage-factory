@@ -148,6 +148,12 @@ type Manager struct {
 	// gate (tests, and any embedder that hasn't wired it).
 	RefreshMarks db.GitHubRefreshMarkStore
 
+	// DependabotAccess records, per tracked repository, whether the org's
+	// GitHub credential can read its Dependabot alerts: the scheduled cycle
+	// probes each repository its credentials read once a day
+	// (dependabotProbe). nil probes nothing.
+	DependabotAccess db.RepositoryDependabotAccessStore
+
 	// TriggerScorer kicks the org's scorer after a narrowed pass emitted
 	// events, as the completed-poll notice kicks it after a scheduled cycle,
 	// so the tasks those events create are scored now. nil-safe.
@@ -1038,6 +1044,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle.
 	grants := make(map[string]tracker.GitHubReach, len(installs))
 	defer func() { m.rememberGrants(orgID, installs, grants) }()
+	probe := m.newDependabotProbe(ctx, orgID, scope)
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
@@ -1117,6 +1124,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			rateLimitResumeFrom, rateLimitErr = resumeFrom, rl
 			break
 		}
+		probe.run(ctx, client, scoped)
 	}
 
 	// Decide the cycle's actual resume point once, after every installation
@@ -1283,7 +1291,9 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		marks.honorReach(tracker.ReachAll())
 	}
 	var rl *ghclient.ErrRateLimited
-	errors.As(rerr, &rl)
+	if !errors.As(rerr, &rl) {
+		m.newDependabotProbe(ctx, orgID, scope).run(ctx, client, repos)
+	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
 	return rerr == nil
 }

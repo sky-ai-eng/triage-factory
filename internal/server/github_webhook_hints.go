@@ -59,9 +59,11 @@ type hintCheck struct {
 	} `json:"pull_requests"`
 }
 
-// hintedEvent reports whether eventName is one of the content events TF's
-// App subscribes to (the manifest's default_events, less the installation
-// events), each of which names what changed.
+// hintedEvent reports whether eventName is a content event TF reads a refresh
+// hint from, each of which names what changed. The App subscribes to one
+// content event that is not here: dependabot_alert names an alert, which no
+// refresh target can hold, so its delivery is recorded and acknowledged and
+// marks nothing.
 func hintedEvent(eventName string) bool {
 	switch eventName {
 	case "pull_request", "pull_request_review", "pull_request_review_comment",

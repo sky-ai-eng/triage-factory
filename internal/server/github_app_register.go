@@ -221,6 +221,11 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			// nowhere in this codebase, because it is enforced entirely by
 			// GitHub in response to this one line.
 			"members": "read",
+			// The "Dependabot alerts" repository permission: listing a
+			// repository's alerts, and receiving dependabot_alert deliveries,
+			// which GitHub sends only to an App holding it. Read-only: TF
+			// never dismisses an alert.
+			"vulnerability_alerts": "read",
 		},
 		"default_events": []string{
 			"pull_request",
@@ -230,6 +235,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			"push",
 			"check_run",
 			"check_suite",
+			"dependabot_alert",
 		},
 	}
 	// GitHub's manifest flow requires a non-blank, publicly-reachable hook
