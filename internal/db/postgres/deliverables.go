@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -526,6 +527,29 @@ func (s *deliverableStore) SettleVerificationSystem(ctx context.Context, orgID, 
 		return false, err
 	}
 	return n == 1, nil
+}
+
+func (s *deliverableStore) TransitionStateSystem(ctx context.Context, orgID, id, from, to, detailsJSON string) (*domain.Deliverable, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, nil
+	}
+	var a domain.Deliverable
+	err := scanDeliverable(s.admin.QueryRowContext(ctx, `
+		UPDATE deliverables
+		SET state        = $1,
+		    details_json = COALESCE(NULLIF($2, ''), details_json),
+		    updated_at   = now()
+		WHERE org_id = $3 AND id = $4 AND state = $5
+		RETURNING `+pgDeliverableColumns,
+		to, detailsJSON, orgID, id, from,
+	), &a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
 }
 
 // --- Helpers ---

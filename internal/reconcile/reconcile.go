@@ -477,10 +477,15 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		if !ok || newState == a.State {
 			continue
 		}
-		updated, err := rc.applyTransition(writeCtx, orgID, a, newState)
+		updated, moved, err := rc.applyTransition(writeCtx, orgID, a, newState)
 		if err != nil {
 			reconcileLog.WarnContext(ctx, "apply deliverable transition failed",
 				"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState, "error", err)
+			continue
+		}
+		if !moved {
+			// Another pass, or a person's resolution, moved the row since
+			// this one read it, and has announced what it wrote.
 			continue
 		}
 		transitioned = append(transitioned, updated)
@@ -513,25 +518,27 @@ func isDraftResolved(a domain.Deliverable, newState string) bool {
 		newState != domain.DeliverableStatePRDraft
 }
 
-// applyTransition writes the new state (admin pool) and broadcasts the change.
+// applyTransition moves a from the state this pass read to newState (admin
+// pool) and broadcasts the change. The write is guarded on the state read, so
+// of two passes that read the same state one moves the row; moved is false
+// for the other, which wrote nothing and has nothing to announce.
 // Best-effort WS: a dropped broadcast must not undo the transition.
-func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Deliverable, newState string) (domain.Deliverable, error) {
-	next := a
-	next.State = newState
+func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Deliverable, newState string) (updated domain.Deliverable, moved bool, err error) {
+	details := ""
 	if a.Kind == domain.DeliverableKindPullRequest {
 		// No person resolved this through TF's deliverable verbs — the row
 		// records that so the agent-facing note reads "on GitHub" rather than
 		// crediting a human approval or dismissal that never happened.
-		next.DetailsJSON = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
+		details = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
 	}
-	updated, err := rc.deliverables.UpsertSystem(ctx, orgID, next)
-	if err != nil {
-		return domain.Deliverable{}, err
+	stored, err := rc.deliverables.TransitionStateSystem(ctx, orgID, a.ID, a.State, newState, details)
+	if err != nil || stored == nil {
+		return domain.Deliverable{}, false, err
 	}
-	rc.broadcast(ctx, orgID, updated)
+	rc.broadcast(ctx, orgID, *stored)
 	reconcileLog.InfoContext(ctx, "deliverable reconciled",
 		"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
-	return updated, nil
+	return *stored, true, nil
 }
 
 // broadcast pushes the transition to the frontend as a dedicated deliverable_updated

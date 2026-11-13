@@ -537,6 +537,44 @@ func TestReconcile_ATransitionHandsItsStoredRowToTheHook(t *testing.T) {
 	}
 }
 
+// TestReconcile_OverlappingPassesApplyATransitionOnce: two passes that read
+// the same draft before either wrote both find GitHub showing it ready. The
+// first moves the row and runs both hooks; the second, still holding the row
+// as a draft, moves nothing and announces nothing.
+func TestReconcile_OverlappingPassesApplyATransitionOnce(t *testing.T) {
+	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
+	const conversationID = "77777777-7777-7777-7777-777777777777"
+	seedConversation("ent-7", conversationID)
+
+	draft := domain.NewPullRequestDeliverable("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", true)
+	draft.ConversationID = conversationID
+	seedArt(draft)
+
+	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores, TrustRecords, nil)
+	var told, resolved int
+	rc.SetDeliverableTransitionedHook(func(context.Context, string, domain.Deliverable) { told++ })
+	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { resolved++ })
+
+	// What both passes read.
+	arts, err := stores.Deliverables.ListNonTerminalBySystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("ListNonTerminalBySystem: %v", err)
+	}
+	first, err := rc.Reconcile(context.Background(), runmode.LocalDefaultOrgID, arts)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first pass = (%+v, %v), want the one transition", first, err)
+	}
+	second, err := rc.Reconcile(context.Background(), runmode.LocalDefaultOrgID, arts)
+	if err != nil || len(second) != 0 {
+		t.Fatalf("second pass over the same read = (%+v, %v), want no transition", second, err)
+	}
+	assertState(t, conn, runmode.LocalDefaultOrgID, draft.DedupKey, domain.DeliverableStatePROpen)
+	if told != 1 || resolved != 1 {
+		t.Errorf("hooks ran (transitioned %d, resolved %d), want each once", told, resolved)
+	}
+}
+
 // TestReconcile_OpenNeverReturnsToDraft pins the one-way rule: a PR that
 // already left draft — the approval click, or a ready observed above — is not
 // re-drafted when a human converts it back on GitHub. The row stays open, no
