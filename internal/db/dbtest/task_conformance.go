@@ -1823,6 +1823,40 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		}
 	})
 
+	t.Run("List_ids_narrow_to_the_named_tasks", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		_, _, openID := seed(t, "ids-open")
+		_, _, closedID := seed(t, "ids-closed")
+		seed(t, "ids-unnamed")
+		if _, err := s.Close(ctx, orgID, closedID, "test", ""); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		// The named tasks whatever their lane, in the default order's lane
+		// structure: the open one ahead of the closed one.
+		f := db.TaskListFilter{IDs: []string{closedID, openID}, IncludeSnoozed: true}
+		ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50})
+		if want := []string{openID, closedID}; !slices.Equal(ids, want) || total != 2 {
+			t.Errorf("named tasks = %v (total %d), want %v (total 2)", ids, total, want)
+		}
+
+		// The filter ANDs with a lane like every other.
+		f.Statuses = []string{"done"}
+		if ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{closedID}) || total != 1 {
+			t.Errorf("named tasks in the done lane = %v (total %d), want just the closed one", ids, total)
+		}
+
+		// An id that names no task matches nothing, and so does one the
+		// store cannot read as an id: the HTTP layer refuses a malformed id,
+		// and the store answers an honest empty rather than widening.
+		for _, named := range [][]string{{"00000000-0000-4000-8000-000000000000"}, {"not-a-task-id"}} {
+			f := db.TaskListFilter{IDs: named, IncludeSnoozed: true}
+			if ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50}); len(ids) != 0 || total != 0 {
+				t.Errorf("ids %v returned %v (total %d), want an empty page", named, ids, total)
+			}
+		}
+	})
+
 	t.Run("List_filters_compose", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, freeID := seed(t, "compose-free")

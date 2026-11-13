@@ -40,6 +40,9 @@ export type TaskListFilters = {
 /** The body of POST /api/tasks/list, named field by field so a lane's query is
  *  checkable at the call site rather than at the server. */
 export type TaskListRequest = TaskListFilters & {
+  /** Only the tasks with these ids, for a surface that already holds the ids
+   *  of the tasks it shows. At most one full page of them (200). */
+  ids?: string[]
   statuses?: string[]
   team_ids?: string[]
   only_unclaimed?: boolean

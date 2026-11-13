@@ -193,18 +193,61 @@ describe('useConversationSets', () => {
 })
 
 describe('useTasksIndex', () => {
-  it('joins over the statuses a task can carry a conversation in', async () => {
-    const { result } = renderHook(() => useTasksIndex('t1', 0))
+  const taskBodies = () => bodies.filter((_, i) => paths[i].startsWith('/api/tasks/list'))
+  const mountIndex = (taskIds: string[], tick = 0) =>
+    renderHook(({ ids, t }: { ids: string[]; t: number }) => useTasksIndex('t1', ids, t), {
+      initialProps: { ids: taskIds, t: tick },
+    })
+
+  it('reads exactly the tasks the rows name, and nothing narrows them but the ids', async () => {
+    // Two rows on one task, and a run with no task at all.
+    const { result } = mountIndex(['t-b', 't-a', 't-a', ''])
     await settle()
 
-    const tasksRead = bodies[paths.findIndex((p) => p.startsWith('/api/tasks/list'))]
-    // The join asks for the statuses a row's task can be in: open, or closed
-    // either way, since a close ends no run. Closed tasks are additionally
-    // bounded by closed_since.
-    expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done', 'dismissed'])
-    expect(tasksRead.closed_since).toEqual(expect.any(String))
+    // No statuses, no close window, no team: a row's task is read whatever
+    // its lane and whenever it closed, snoozed ones included.
+    expect(taskBodies()).toEqual([{ ids: ['t-a', 't-b'], include_snoozed: true, page_size: 2 }])
     expect(result.current?.get('t-a')?.title).toBe('a')
     expect(result.current?.get('t-b')?.title).toBe('b')
+  })
+
+  it('reads nothing when no row names a task', async () => {
+    const { result } = mountIndex(['', ''])
+    await settle()
+    expect(taskBodies()).toHaveLength(0)
+    expect(result.current?.size).toBe(0)
+  })
+
+  it('does not re-read when the rows name the same tasks in a new array', async () => {
+    const { rerender } = mountIndex(['t-a', 't-b'])
+    await settle()
+    // The running set's transcript refetch hands back new arrays of the same
+    // rows, once per window while an agent works.
+    rerender({ ids: ['t-b', 't-a'], t: 0 })
+    await settle()
+    expect(taskBodies()).toHaveLength(1)
+
+    // The page tick still refetches: a task can change without its id moving.
+    rerender({ ids: ['t-b', 't-a'], t: 1 })
+    await settle()
+    expect(taskBodies()).toHaveLength(2)
+  })
+
+  it('keeps the last answer while the read for moved rows is out', async () => {
+    const { result, rerender } = mountIndex(['t-a'])
+    await settle()
+    expect(result.current?.get('t-a')?.title).toBe('a')
+
+    rerender({ ids: ['t-a', 't-c'], t: 0 })
+    // The new read has not landed; the row that kept its task keeps its
+    // reference meanwhile.
+    expect(result.current?.get('t-a')?.title).toBe('a')
+    await settle()
+    expect(taskBodies().at(-1)).toEqual({
+      ids: ['t-a', 't-c'],
+      include_snoozed: true,
+      page_size: 2,
+    })
   })
 })
 

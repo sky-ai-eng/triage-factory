@@ -1,12 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { HttpError, apiJSON, apiList } from '../../lib/apiClient'
 import { ACTIVE_STATUSES, retryingAt } from '../../lib/conversationStatus'
-import {
-  CLOSED_TASK_STATUSES,
-  closedSince,
-  TASK_LIST_PATH,
-  TASK_PAGE_SIZE,
-} from '../../lib/taskList'
+import { TASK_LIST_PATH, type TaskListRequest } from '../../lib/taskList'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
 import type { TeamUsage } from '../../hooks/useTeamUsage'
@@ -199,27 +194,40 @@ export function useConversationSets(
   return got.team === teamId ? got : { needs: null, running: null }
 }
 
+/** The index when no row names a task: known to be empty, so not a read. */
+const NO_TASKS: ReadonlyMap<string, Task> = new Map()
+
 /**
- * The rows' tasks, for the reference and the glyph. One list read over the
- * statuses that can carry a conversation — `queued` (a task can hold
- * deliverables and conversations there, claimed or not), `in_progress`, and
- * the recently closed, `done` or `dismissed` (a close ends no run, so a closed
- * task's run can be working or still asking) — keyed by task id for the join.
+ * The rows' tasks, for the reference and the glyph, read by the ids the rows
+ * name, so a row has its task whatever its lane and however long ago it
+ * closed. A close ends no run, and a snoozed task can still have a run
+ * asking, so nothing but the ids narrows the read: no statuses, no close
+ * window, and `include_snoozed`. No team narrowing either, since the ids are
+ * the subject and the server's visibility still applies.
+ *
+ * The rows are a few of each set's first page, far fewer than the server's
+ * cap on `ids`, which is one full page; asking for as many rows as ids is
+ * what lets one read answer every one of them.
+ *
+ * The answer is keyed by team rather than by the ids. When the rows move, the
+ * index answers for the ids it last read until the read for the new ones
+ * lands, so a row that keeps its task keeps its reference meanwhile. The ids
+ * are canonicalized into one key, so the running set's transcript refetch,
+ * which hands back a new array of the same rows, buys no task read.
  */
-export function useTasksIndex(teamId: string, tick: number): Map<string, Task> | null {
-  const [got, setGot] = useState<{ team: string; index: Map<string, Task> } | null>(null)
+export function useTasksIndex(
+  teamId: string,
+  taskIds: readonly string[],
+  tick: number,
+): ReadonlyMap<string, Task> | null {
+  const key = [...new Set(taskIds.filter(Boolean))].sort().join(',')
+  const [got, setGot] = useState<{ team: string; index: ReadonlyMap<string, Task> } | null>(null)
   useEffect(() => {
-    if (!teamId) return
+    if (!teamId || !key) return
     let live = true
-    // TODO(TFAC-1400): this is one page, and closed tasks get the rows the
-    // open ones leave, so a team with more tasks than the page holds can show
-    // a row with no task reference. The rows' tasks should be read by id.
-    void apiList<Task>(TASK_LIST_PATH, {
-      statuses: ['queued', 'in_progress', ...CLOSED_TASK_STATUSES],
-      team_ids: [teamId],
-      closed_since: closedSince(),
-      page_size: TASK_PAGE_SIZE,
-    }).then(
+    const ids = key.split(',')
+    const body: TaskListRequest = { ids, include_snoozed: true, page_size: ids.length }
+    void apiList<Task>(TASK_LIST_PATH, body).then(
       (page) => {
         if (live) setGot({ team: teamId, index: new Map(page.items.map((t) => [t.id, t])) })
       },
@@ -228,7 +236,8 @@ export function useTasksIndex(teamId: string, tick: number): Map<string, Task> |
     return () => {
       live = false
     }
-  }, [teamId, tick])
+  }, [teamId, key, tick])
+  if (!key) return NO_TASKS
   return got && got.team === teamId ? got.index : null
 }
 

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
@@ -139,6 +141,7 @@ func TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor(t *testing.T) {
 		value any
 	}{
 		{"search", "ci"},
+		{"ids", []string{uuid.NewString()}},
 		{"event_types", []string{domain.EventGitHubPRCICheckFailed}},
 		{"sort_key", "title"},
 		{"sort_dir", "asc"},

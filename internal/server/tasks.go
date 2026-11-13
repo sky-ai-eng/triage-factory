@@ -239,6 +239,10 @@ type taskLaneRequest struct {
 type taskListRequest struct {
 	taskLaneRequest
 
+	// IDs narrows to the tasks with these ids, for a caller that already
+	// holds the ids of the tasks it shows. Validated by taskListIDs. Empty =
+	// every id.
+	IDs []string `json:"ids"`
 	// CreatedBefore (RFC3339) is CreatedSince's other half: rows created at
 	// or before it. The pair is how a lane asks for a window rather than a
 	// ray, and either end may stand alone. It sits with the reader's own
@@ -329,12 +333,36 @@ func parseTaskWindow(v *httpx.Validation, field, raw string) (*time.Time, string
 	return &ts, ts.Format(time.RFC3339Nano)
 }
 
+// maxTaskListIDs caps how many ids one task-list read names. It is one full
+// page, so a read that names its tasks and asks for that many rows gets every
+// one of them on its first page.
+const maxTaskListIDs = httpx.MaxPageSize
+
+// taskListIDs validates the list's ids filter and returns it canonicalized.
+// Each id must be a task id in canonical form (httpx.IsCanonicalID): SQLite
+// compares the text, so another spelling of the same uuid would match nothing
+// and answer an empty page for a filter the caller believes is right. The cap
+// counts distinct ids, so a repeated id does not spend it.
+func taskListIDs(v *httpx.Validation, raw []string) []string {
+	for i, id := range raw {
+		if !httpx.IsCanonicalID(id) {
+			v.Invalid(fmt.Sprintf("ids[%d]", i), fmt.Sprintf("%q is not a task id in canonical form", id))
+		}
+	}
+	ids := httpx.CanonicalStrings(raw)
+	if len(ids) > maxTaskListIDs {
+		v.OutOfRange("ids", fmt.Sprintf("ids accepts at most %d task ids per request; got %d", maxTaskListIDs, len(ids)))
+	}
+	return ids
+}
+
 // taskListFilterKey is the canonicalized form of a taskListRequest's filters —
 // sorted, deduped, and normalized — that the page token is fingerprinted
 // against. Two requests that mean the same query fingerprint identically, and
 // a token minted for one filter set is refused for another.
 type taskListFilterKey struct {
 	Statuses       []string `json:"statuses"`
+	IDs            []string `json:"ids"`
 	TeamIDs        []string `json:"team_ids"`
 	OnlyUnclaimed  bool     `json:"only_unclaimed"`
 	IncludeSnoozed bool     `json:"include_snoozed"`
@@ -672,6 +700,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 
 	var v httpx.Validation
 	filter, laneKeys := resolveTaskLane(&v, req.taskLaneRequest)
+	filter.IDs = taskListIDs(&v, req.IDs)
 	var createdBeforeKey string
 	filter.CreatedBefore, createdBeforeKey = parseTaskWindow(&v, "created_before", req.CreatedBefore)
 	filter.EventTypes = httpx.CanonicalStrings(req.EventTypes)
@@ -691,6 +720,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	filter.SortKey, filter.SortDir = order.Key, order.Dir
 	page := httpx.ResolveKeysetPage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       filter.Statuses,
+		IDs:            filter.IDs,
 		TeamIDs:        filter.TeamIDs,
 		OnlyUnclaimed:  filter.OnlyUnclaimed,
 		IncludeSnoozed: filter.IncludeSnoozed,
@@ -794,6 +824,7 @@ func (s *Server) addTaskCanWrite(ctx context.Context, orgID, userID string, item
 type taskFacetsRequest struct {
 	taskLaneRequest
 
+	IDs           json.RawMessage `json:"ids"`
 	EventTypes    json.RawMessage `json:"event_types"`
 	Search        json.RawMessage `json:"search"`
 	SortKey       json.RawMessage `json:"sort_key"`
@@ -860,6 +891,7 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 		sent   json.RawMessage
 		reason string
 	}{
+		{"ids", req.IDs, narrows},
 		{"event_types", req.EventTypes, narrows},
 		{"search", req.Search, narrows},
 		{"sort_key", req.SortKey, narrows},

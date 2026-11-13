@@ -169,6 +169,9 @@ var TaskListStatuses = []string{
 // which lane, the rest narrow within it:
 //
 //   - Statuses: match any of these (see TaskListStatuses). Empty = all.
+//   - IDs: when non-empty, only the tasks with these ids, for a surface that
+//     already holds the ids of the tasks it shows. Empty = every id. An id
+//     that names no visible task matches nothing; it never widens the set.
 //   - TeamIDs: the per-page *multi-team* view scope. Empty = the union of the
 //     viewer's teams (the RLS-scoped default). Non-empty narrows to tasks any
 //     of those teams owns (team_id) or can see (a task_teams visibility row) —
@@ -222,6 +225,7 @@ var TaskListStatuses = []string{
 //     refuses that combination rather than silently ignoring it.
 type TaskListFilter struct {
 	Statuses       []string
+	IDs            []string
 	TeamIDs        []string
 	OnlyUnclaimed  bool
 	IncludeSnoozed bool
