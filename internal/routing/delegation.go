@@ -18,8 +18,8 @@ import (
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
 // queues. Order of checks: task gate (per-task, auto-only) → fold into the
-// task's live conversation → breaker (per-(entity, trigger)) → fire or
-// enqueue.
+// task's live conversation → a person's claim → breaker (per-(entity,
+// trigger)) → fire or enqueue.
 //
 // Breaker is a hard skip for a firing that would start or queue a run — a
 // tripped breaker means the user has work to investigate before more
@@ -43,11 +43,10 @@ import (
 // an immediate fireDelegate success, or a new row landed in pending_firings
 // (queued because the task was busy; the commitment is real even though
 // the conversation hasn't started yet). Every other exit — already claimed by
-// another team, the bot disabled for the team, no agent bootstrapped, the
-// breaker tripped, a duplicate already queued, a replay hitting
-// ErrAlreadyFired, or a task that closed under the fire
-// — returns (false, nil): nothing new happened on this call, and nothing
-// should.
+// another team or by a person, the bot disabled for the team, no agent
+// bootstrapped, the breaker tripped, a duplicate already queued, a replay
+// hitting ErrAlreadyFired, or a task that closed under the fire — returns
+// (false, nil): nothing new happened on this call, and nothing should.
 //
 // A non-nil error is the third outcome, and it means something else: a
 // dependency this decision rests on failed, so whether the trigger should
@@ -83,7 +82,7 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// Whatever minted the live conversation holds the gate. A task has one, and
 	// a human's delegation is as much the task's live conversation as an
 	// auto-fired one — so an event landing on a task a person is working gets
-	// folded into their agent's context by the busy branch below, rather than
+	// folded into their agent's context by the fold below, rather than
 	// racing a second agent against it.
 	//
 	// The task is the unit, not the entity. A task is one situation needing
@@ -111,39 +110,50 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 			return false, fmt.Errorf("task gate queued query: %w", err)
 		}
 	}
-	if hasActive || hasQueued {
-		// A busy gate now always means THIS task's own conversation is live,
-		// so absorption is the default rather than a same-task special case:
-		// fold the event into the conversation instead of deferring a second
-		// one. Only a firing with no live conversation to fold into (hasQueued
-		// with the conversation already gone) still defers.
-		if hasActive {
-			// The claim rides whichever durable write the injection makes —
-			// folding an event into the live conversation is the bot taking
-			// responsibility for this task exactly as a fresh fire or a
-			// deferral is. The conversation belongs to this same task, so the
-			// standing claim is normally already the bot's and the stamp is a
-			// race-safe no-op; it moves only when the task was user-requeued
-			// while its conversation stayed live, which this new event
-			// re-commits.
-			if r.tryAdditiveInjection(ctx, orgID, entityID, activeConversationID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
-				if injectedConversationID != nil {
-					*injectedConversationID = activeConversationID
-				}
-				return false, nil
+	if hasActive {
+		// A busy gate with a live conversation means THIS task's own
+		// conversation is live, so absorption is the default rather than a
+		// same-task special case: fold the event into the conversation
+		// instead of deferring a second one.
+		//
+		// The claim rides whichever durable write the injection makes —
+		// folding an event into the live conversation is the bot taking
+		// responsibility for this task exactly as a fresh fire or a
+		// deferral is. The conversation belongs to this same task, so the
+		// standing claim is normally already the bot's and the stamp is a
+		// race-safe no-op; it moves only when the task was user-requeued
+		// while its conversation stayed live, which this new event
+		// re-commits.
+		if r.tryAdditiveInjection(ctx, orgID, entityID, activeConversationID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
+			if injectedConversationID != nil {
+				*injectedConversationID = activeConversationID
 			}
-			// The conversation went terminal between the gate read and the
-			// injection attempt, or the injection couldn't be delivered durably — fall
-			// through to the normal deferral so the firing is never silently
-			// dropped.
+			return false, nil
 		}
-		if tripped, err := r.breakerGate(ctx, orgID, task, trigger, entityID); err != nil || tripped {
-			return false, err
-		}
-		return r.enqueueBusyFiring(ctx, orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
+		// The conversation went terminal between the gate read and the
+		// injection attempt, or the injection couldn't be delivered durably.
+		// The firing is decided below as one with nothing to fold into, so a
+		// failed fold alone never drops it.
 	}
+
+	// A person holding the claim has taken the task off the agent: an event
+	// starts no run on it and queues no firing for it. The check sits below
+	// the fold because an event still belongs in front of a conversation live
+	// on a person's task, and above every exit that starts or queues a run.
+	// It reads the claim the caller's task carries, so a person claiming
+	// after that read is decided by the claim stamp instead.
+	if task.ClaimedByUserID != "" {
+		routerLog.Info("auto-trigger skipped: task claimed by a person", "task_id", task.ID, "trigger", trigger.ID)
+		return false, nil
+	}
+
 	if tripped, err := r.breakerGate(ctx, orgID, task, trigger, entityID); err != nil || tripped {
 		return false, err
+	}
+	if hasActive || hasQueued {
+		// Nothing folded: the live conversation went away under the fold, or
+		// older firings are queued with no conversation to fold into.
+		return r.enqueueBusyFiring(ctx, orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
 	}
 
 	// The firing is one transaction (see BlueprintStore.CreateRunWithFirstStepSystem):
@@ -354,16 +364,16 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 // about, and the event belongs in front of it. conversationID is its id,
 // resolved by the caller from the firing's own task, so it belongs to that
 // task by construction with no separate ownership check to make. Returns true when the caller should
-// treat the firing as handled; false when the caller must fall through to
-// the normal deferral so the firing is never silently dropped.
+// treat the firing as handled; false when the caller must decide the firing
+// itself, so a failed fold alone never drops it.
 //
 // The one fall-through is StageOrDeliverAdditiveEvent reporting
 // InjectNotDelivered — dropped outright (no live process anywhere, and the
 // durable append itself failed), or staged onto a conversation nothing will
 // read it from (a staged row is read only by a native conversation's running
 // loop or by the conversation's next resume, so one with neither would
-// silently lose it). Neither case has a durable row to fall back on, so this
-// defers.
+// silently lose it). Neither case has a durable row to fall back on, so the
+// caller decides the firing.
 //
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a
 // live remote executor now owns recording task_events 'injected' (or
