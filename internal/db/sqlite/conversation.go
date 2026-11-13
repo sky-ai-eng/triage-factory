@@ -1273,8 +1273,14 @@ func liveTopLevelConversationSQL(alias string) string {
 	return `(` + alias + `.ended_at IS NULL AND ` + alias + `.parent_conversation_id IS NULL)`
 }
 
-var liveConversationForTaskSQL = `(` + liveTopLevelConversationSQL("r") + `
-		       AND ` + db.UnsettledConversationSQL("r") + `)`
+var liveConversationForTaskSQL = liveConversationSQL("r")
+
+// liveConversationSQL is liveConversationForTaskSQL's predicate over the
+// alias the caller names, for a statement that asks it of two conversations.
+func liveConversationSQL(alias string) string {
+	return `(` + liveTopLevelConversationSQL(alias) + `
+		       AND ` + db.UnsettledConversationSQL(alias) + `)`
+}
 
 // HasLiveConversationForTask reports whether the task holds a live
 // conversation, of any trigger type.

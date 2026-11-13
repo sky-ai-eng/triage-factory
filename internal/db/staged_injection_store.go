@@ -102,4 +102,21 @@ type StagedInjectionStore interface {
 	// (DeleteSystem, a reopen of the task, or a hold cleared without its
 	// close) never happened and does not count.
 	HasNoteForTaskCloseSystem(ctx context.Context, orgID, conversationID, taskClose string) (bool, error)
+
+	// RetireStaleAssignmentNotesSystem withdraws the conversation's waiting
+	// assignment notes (domain.StagedInjectionProducerTaskAssigned) that are
+	// no longer true, as DeleteSystem withdraws one, and reports how many. A
+	// note says who holds a task now, so it is stale when its task
+	// (NoteProvenance.AssignedTask) is gone or has closed with no
+	// conversation working on it (the predicate WorkingConversationIDsSystem
+	// reads by), when the task's claim is no longer its assignee
+	// (NoteProvenance.Assignee), or when a newer waiting assignment note of
+	// the conversation names the same task. A closed task that a
+	// conversation is still working keeps its note, as TaskStore's
+	// SiblingWorkSystem keeps it listed: the work the note warns of goes on.
+	// What is left is at most one note per task, each still true, whatever
+	// its age. Called before a turn reads the queue.
+	//
+	// Exempt from the returned-row rule: it is a bulk write.
+	RetireStaleAssignmentNotesSystem(ctx context.Context, orgID, conversationID string) (retired int, err error)
 }

@@ -205,6 +205,16 @@ const (
 	// disposition values.
 	EventSystemRoutingDisposition = "system:routing:disposition"
 
+	// EventSystemTaskAssigned marks a task gaining a new assignee: the
+	// agent's claim stamp landing, or a person's claim, takeover,
+	// reassignment or Delegate. It is published after the write commits, by
+	// the router or by whichever control pod served the request, and carries
+	// no entity, so the router never sees it. Its one subscriber tells the
+	// live conversations whose work overlaps the task
+	// (delegate.Spawner.HandleTaskAssigned). See
+	// internal/domain/events/system.go for the metadata shape.
+	EventSystemTaskAssigned = "system:task:assigned"
+
 	// EventSystemEntityCloseOwed is the poll's close obligation: a refresh
 	// found an entity still active whose stored snapshot was ALREADY terminal
 	// on the previous cycle, and no terminating close for it is unsettled in
@@ -349,6 +359,7 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
 		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},
 		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
+		{ID: EventSystemTaskAssigned, Source: "system", Category: "task", Label: "Task Assigned", Description: "A task gained a new assignee: the agent's claim landed, or a person claimed, took over, reassigned or delegated it"},
 		{ID: EventSystemEntityCloseOwed, Source: "system", Category: "entity", Label: "Entity close owed", Description: "The poll observed a terminal snapshot on an active entity with no close in flight"},
 	}
 }

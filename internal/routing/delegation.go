@@ -458,8 +458,9 @@ func claimStamp(agentID, actingTeamID string) dbpkg.AgentClaimStamp {
 // claimCommitted reconciles the router with a claim stamp that has already
 // committed inside its engagement's transaction: it updates the in-memory
 // task — the cross-team guard reads ClaimedByAgentID when this same event's
-// next matched trigger comes round — and broadcasts task_claimed so the Board
-// re-renders its per-claim lanes.
+// next matched trigger comes round — broadcasts task_claimed so the Board
+// re-renders its per-claim lanes, and publishes the assignment for the
+// conversations whose work overlaps the task (publishTaskAssigned).
 //
 // claimed=false is the store's three-way refusal: a user beat the bot to the
 // claim (don't steal), the bot already owns it (idempotent no-op), or the task
@@ -494,6 +495,23 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 		OrgID: orgID,
 		Data:  map[string]any{},
 	})
+	r.publishTaskAssigned(orgID, task.ID, agentID)
+}
+
+// publishTaskAssigned publishes system:task:assigned for an agent's claim
+// stamp that landed, after the transaction it rode committed. Its subscriber
+// tells the live conversations whose work overlaps the task. It is published
+// exactly where task_claimed is broadcast: a refused or idempotent stamp
+// moved nothing, and a second run under a claim the agent already holds
+// stamps nothing, so neither is a new assignee. Best effort: the claim
+// stands whatever becomes of the event.
+func (r *Router) publishTaskAssigned(orgID, taskID, agentID string) {
+	evt, err := events.TaskAssigned(orgID, taskID, agentID, "")
+	if err != nil {
+		routerLog.Warn("build the task assignment event failed", "task_id", taskID, "error", err)
+		return
+	}
+	r.publisher.Publish(evt)
 }
 
 // syncClaimAfterCommit reads back the claim and the owner that rode the
@@ -526,6 +544,7 @@ func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *d
 			OrgID: orgID,
 			Data:  map[string]any{},
 		})
+		r.publishTaskAssigned(orgID, task.ID, agentID)
 	}
 }
 
