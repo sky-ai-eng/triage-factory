@@ -145,10 +145,13 @@ func (s *stagedInjectionStore) HasNoteForTaskCloseSystem(ctx context.Context, or
 }
 
 func (s *stagedInjectionStore) RetireStaleAssignmentNotesSystem(ctx context.Context, orgID, conversationID string) (int, error) {
-	// A note is kept only while an open task still carries its assignee, so
-	// a task that closed, changed hands, went back to the queue, or is gone
-	// retires it by the one NOT EXISTS. The id is compared as a uuid so the
-	// lookup is the primary key's, and only where the stored value is one.
+	// A note is kept only while its task still carries its assignee and is
+	// open or still worked, so a task that closed with nobody working it,
+	// changed hands, went back to the queue, or is gone retires it by the
+	// one NOT EXISTS. A close stops no conversation, so a closed task a
+	// conversation is working is still overlapping work, as it is in the
+	// launch's listing. The id is compared as a uuid so the lookup is the
+	// primary key's, and only where the stored value is one.
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE messages m SET window_state = 'inactive'
 		 WHERE m.org_id = $1::uuid AND m.conversation_id = $2::uuid
@@ -159,7 +162,7 @@ func (s *stagedInjectionStore) RetireStaleAssignmentNotesSystem(ctx context.Cont
 		             WHERE x.org_id = m.org_id
 		               AND x.id = CASE WHEN m.metadata->>'assigned_task' ~ '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
 		                               THEN (m.metadata->>'assigned_task')::uuid END
-		               AND x.status NOT IN ('done', 'dismissed')
+		               AND (x.status NOT IN ('done', 'dismissed') OR `+taskWorkingSQL("x.org_id", "x.id")+`)
 		               AND m.metadata->>'assignee' = CASE
 		                       WHEN x.claimed_by_agent_id IS NOT NULL THEN 'agent:' || x.claimed_by_agent_id::text
 		                       WHEN x.claimed_by_user_id IS NOT NULL THEN 'user:' || x.claimed_by_user_id::text END)

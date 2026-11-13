@@ -107,9 +107,13 @@ type StagedInjectionStore interface {
 	// assignment notes (domain.StagedInjectionProducerTaskAssigned) that are
 	// no longer true, as DeleteSystem withdraws one, and reports how many. A
 	// note says who holds a task now, so it is stale when its task
-	// (NoteProvenance.AssignedTask) has closed or is gone, when the task's
-	// claim is no longer its assignee (NoteProvenance.Assignee), or when a
-	// newer waiting assignment note of the conversation names the same task.
+	// (NoteProvenance.AssignedTask) is gone or has closed with no
+	// conversation working on it (the predicate WorkingConversationIDsSystem
+	// reads by), when the task's claim is no longer its assignee
+	// (NoteProvenance.Assignee), or when a newer waiting assignment note of
+	// the conversation names the same task. A closed task that a
+	// conversation is still working keeps its note, as TaskStore's
+	// SiblingWorkSystem keeps it listed: the work the note warns of goes on.
 	// What is left is at most one note per task, each still true, whatever
 	// its age. Called before a turn reads the queue.
 	//

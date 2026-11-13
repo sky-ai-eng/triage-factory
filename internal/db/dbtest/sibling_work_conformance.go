@@ -305,6 +305,13 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 		closedNote := note(t, closed, holder)
 		closeTask(t, stores, orgID, closed)
 
+		// A close stops no conversation, so the work this note warns of
+		// goes on.
+		closedWorking := held(t)
+		closedWorkingNote := note(t, closedWorking, holder)
+		seed.BlueprintAndConversation(t, closedWorking, "running", "")
+		closeTask(t, stores, orgID, closedWorking)
+
 		changedNote := note(t, held(t), domain.AgentAssignee(uuid.New().String()))
 
 		twice := held(t)
@@ -343,7 +350,7 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 		for _, n := range left {
 			ids = append(ids, n.ID)
 		}
-		if want := []string{newerNote, stillTrue, other.ID}; !slices.Equal(ids, want) {
+		if want := []string{closedWorkingNote, newerNote, stillTrue, other.ID}; !slices.Equal(ids, want) {
 			t.Errorf("still waiting = %v, want %v (retired: closed %s, changed %s, older %s, gone %s)",
 				ids, want, closedNote, changedNote, olderNote, goneNote)
 		}

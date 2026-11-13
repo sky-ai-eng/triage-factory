@@ -192,9 +192,12 @@ func (s *stagedInjectionStore) RetireStaleAssignmentNotesSystem(ctx context.Cont
 	args = append(args, domain.StagedInjectionProducerTaskAssigned)
 	args = append(args, subtypeArgs...)
 	args = append(args, domain.StagedInjectionProducerTaskAssigned)
-	// A note is kept only while an open task still carries its assignee, so
-	// a task that closed, changed hands, went back to the queue, or is gone
-	// retires it by the one NOT EXISTS.
+	// A note is kept only while its task still carries its assignee and is
+	// open or still worked, so a task that closed with nobody working it,
+	// changed hands, went back to the queue, or is gone retires it by the
+	// one NOT EXISTS. A close stops no conversation, so a closed task a
+	// conversation is working is still overlapping work, as it is in the
+	// launch's listing.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
 		 WHERE org_id = ? AND conversation_id = ?
@@ -203,7 +206,7 @@ func (s *stagedInjectionStore) RetireStaleAssignmentNotesSystem(ctx context.Cont
 		   AND (NOT EXISTS (
 		            SELECT 1 FROM tasks x
 		             WHERE x.id = json_extract(messages.metadata, '$.assigned_task')
-		               AND x.status NOT IN ('done', 'dismissed')
+		               AND (x.status NOT IN ('done', 'dismissed') OR `+taskWorkingSQL("x.id")+`)
 		               AND json_extract(messages.metadata, '$.assignee') = CASE
 		                       WHEN x.claimed_by_agent_id IS NOT NULL THEN 'agent:' || x.claimed_by_agent_id
 		                       WHEN x.claimed_by_user_id IS NOT NULL THEN 'user:' || x.claimed_by_user_id END)
