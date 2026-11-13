@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -547,6 +548,29 @@ func (s *deliverableStore) SettleVerificationSystem(ctx context.Context, orgID, 
 		return false, err
 	}
 	return n == 1, nil
+}
+
+func (s *deliverableStore) TransitionStateSystem(ctx context.Context, orgID, id, from, to, detailsJSON string) (*domain.Deliverable, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	var a domain.Deliverable
+	err := scanDeliverable(s.q.QueryRowContext(ctx, `
+		UPDATE deliverables
+		SET state        = ?,
+		    details_json = COALESCE(NULLIF(?, ''), details_json),
+		    updated_at   = CURRENT_TIMESTAMP
+		WHERE org_id = ? AND id = ? AND state = ?
+		RETURNING `+deliverableColumns,
+		to, detailsJSON, orgID, id, from,
+	), &a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
 }
 
 // --- Helpers ---

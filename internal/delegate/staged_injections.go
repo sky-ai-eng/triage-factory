@@ -1,7 +1,6 @@
-// Generic staged-injection queue, generalized from the deliverable-change
-// feedback. A note is persisted to the durable staged-injection queue
-// (db.StagedInjectionStore, backed by undelivered messages rows) as the bare
-// injection, under the subtype that says what it is for:
+// The staged-injection queue. A note for an agent is persisted to the durable
+// queue (db.StagedInjectionStore, backed by undelivered messages rows) as the
+// bare injection, under the subtype that says what it is for:
 // injection:event for a new-event injection, injection:system-note for every
 // other note. A native loop reads the rows itself before its next model call.
 // An SDK conversation has them flushed — bundled into one <system-note> with
@@ -11,10 +10,9 @@
 // batch (notesAtToolBatch), or as its next turn when one of them is a
 // new-event injection and the turn ends first.
 //
-// Unlike the deliverable-change ledger (which DERIVES its terminal injections from
-// the deliverable rows, so it needs no queue), a producer here has no durable row
-// of its own to re-derive from — the PR coherence feed is such a producer.
-// That's why this half is a real durable queue, not a derivation.
+// The queue is the only place a note waits: no producer keeps a second record
+// to deliver from, so a note whose stage fails is lost, and one staged is
+// delivered once.
 
 package delegate
 
@@ -254,10 +252,6 @@ func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.
 // (agentproc.RunOptions.OnOpeningUnsent) that returns the flushed injections
 // to the queue if the message never reaches the agent, nil when nothing was
 // flushed.
-//
-// This is the durable sibling of deliverableLedgerForResume — SendMessage
-// prepends both, so a resume that has both a resolved deliverable and a staged
-// injection carries two <system-note> blocks ahead of the user's text.
 func (s *Spawner) stagedInjectionsForEngagement(ctx context.Context, orgID, conversationID string) (string, func()) {
 	injections := s.flushStagedInjections(ctx, orgID, conversationID)
 	if len(injections) == 0 {

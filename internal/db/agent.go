@@ -1337,17 +1337,6 @@ type ConversationStore interface {
 	// runtime into a conversation somebody else now owns.
 	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error)
 
-	// LastAgentActivityAtSystem returns the created_at of the conversation's most
-	// recent non-user messages row (role <> 'user') — the "agent last
-	// ran" watermark the deliverable-change feedback ledger derives
-	// against. ok=false (zero time) when the conversation has no agent messages
-	// yet, so the caller falls back to the conversation's start. User messages
-	// are excluded so a just-recorded resume message can't poison the
-	// watermark, and the agent's own messages advance it past anything injected
-	// live. Admin pool: the resume path runs on a detached goroutine with no
-	// JWT claims.
-	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
-
 	// HasPersonMessageSystem reports whether a person has written to the
 	// conversation: a plain or steered user message with an author, delivered
 	// or still waiting, and not withdrawn. Every row TF writes itself carries

@@ -36,8 +36,8 @@ type PRDeliverableSnapshot struct {
 //     GitHub. The state alone cannot say: a closed PR was dismissed with its
 //     branch kept, rejected with its branch deleted, or closed by someone on
 //     GitHub, and the agent-facing resolution note has to read differently for
-//     each. It lives on the PR row because that note is derived from this row
-//     alone — the resume ledger re-reads it with no join. Stored rows written
+//     each. It lives on the PR row because that note is rendered from this
+//     row alone, with no join. Stored rows written
 //     before the field existed carry none, and read as the TF verb their
 //     state implies.
 type PRDeliverableDetails struct {
@@ -58,8 +58,9 @@ const (
 	// PRResolutionRejected: a human closed the draft through TF and had its
 	// head branch deleted from the upstream.
 	PRResolutionRejected = "rejected"
-	// PRResolutionGitHub: the reconciler observed the transition on GitHub —
-	// nobody resolved it through TF.
+	// PRResolutionGitHub: the reconciler observed the transition on GitHub.
+	// No person resolved it through TF's deliverable verbs, and who changed
+	// it on GitHub is not recorded: it may have been the run's own agent.
 	PRResolutionGitHub = "github"
 )
 

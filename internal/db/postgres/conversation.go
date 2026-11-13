@@ -2261,27 +2261,6 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 	return id, nil
 }
 
-// LastAgentActivityAtSystem returns the created_at of the conversation's
-// newest non-user message (the deliverable-change ledger watermark). Ordered by id
-// DESC (the monotonic sequence) so the watermark is the genuinely last-inserted
-// agent row. Admin pool: the resume path holds no JWT claims. ok=false when the
-// conversation has no agent message yet.
-func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (time.Time, bool, error) {
-	var at time.Time
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT created_at FROM messages
-		WHERE org_id = $1 AND conversation_id = $2 AND role <> 'user'
-		ORDER BY id DESC LIMIT 1
-	`, orgID, conversationID).Scan(&at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	return at, true, nil
-}
-
 func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
 	var wrote bool
 	err := s.admin.QueryRowContext(ctx, `

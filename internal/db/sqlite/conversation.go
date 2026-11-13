@@ -2089,34 +2089,6 @@ func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conv
 	return result, nil
 }
 
-// LastAgentActivityAtSystem returns the created_at of the run's newest non-user
-// message (the deliverable-change ledger watermark). Ordered by id DESC —
-// the monotonic insertion order — rather than MAX(created_at), so the watermark
-// is the genuinely last-inserted agent row and never trips over mixed timestamp
-// text formats in a lexical MAX. ok=false when the run has no agent message yet.
-//
-// assertLocalOrg above is SQLite's hard single-tenant gate; org_id is also kept
-// in the WHERE to mirror the Postgres twin (defense-in-depth, and resilience if a
-// multi-org SQLite path ever lands).
-func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (time.Time, bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return time.Time{}, false, err
-	}
-	var at time.Time
-	err := s.q.QueryRowContext(ctx, `
-		SELECT created_at FROM messages
-		WHERE org_id = ? AND conversation_id = ? AND role <> 'user'
-		ORDER BY id DESC LIMIT 1
-	`, orgID, conversationID).Scan(&at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	return at, true, nil
-}
-
 func (s *conversationStore) WarmWaitStateSystem(ctx context.Context, orgID, conversationID string) (db.WarmWaitState, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.WarmWaitState{}, err

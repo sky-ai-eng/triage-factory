@@ -230,17 +230,11 @@ type TerminalCloseResult struct {
 	HeldTasks []HeldTaskClose
 	// DismissedReviews are the pending reviews of the entity this call closed,
 	// which it dismissed: a review of a pull request that merged or closed
-	// can no longer be posted. Empty for an entity no review is about.
-	DismissedReviews []DismissedReview
-}
-
-// DismissedReview is one pending review deliverable a terminating close
-// dismissed.
-type DismissedReview struct {
-	DeliverableID string
-	// ConversationID is the conversation that staged the review; "" when that
-	// conversation was purged.
-	ConversationID string
+	// can no longer be posted. Each is the row as the dismissal stored it,
+	// ordered by id, so it carries the resolution the close stamped and the
+	// conversation that staged the review ("" when that conversation was
+	// purged). Empty for an entity no review is about.
+	DismissedReviews []domain.Deliverable
 }
 
 // HeldTaskClose is one task a terminating close held rather than closed.
@@ -701,8 +695,9 @@ type EntityStore interface {
 	// whichever task's conversation staged it. Each records the resolution
 	// closeEventType names (domain.ReviewResolutionForClose), so the agent that
 	// staged it is told the pull request ended rather than that a person
-	// dismissed it. The caller announces each one and re-checks its task for
-	// closing after the commit. No other deliverable is written here: a pull
+	// dismissed it. After the commit the caller announces each one, tells the
+	// conversation that staged it, and re-checks its task for closing. No
+	// other deliverable is written here: a pull
 	// request deliverable follows GitHub through the reconciler.
 	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)
 

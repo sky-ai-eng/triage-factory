@@ -112,8 +112,8 @@ type Spawner struct {
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
 	// deliverables holds the work a conversation prepared for a person. Read
 	// by the blueprint's task-close check (taskHasUnresolvedDeliverables), the
-	// resume note on a deliverable a person resolved, the turn-end nudge, the
-	// task context, and the PR coherence injection's pending-review lookup.
+	// turn-end nudge, the task context, and the PR coherence injection's
+	// pending-review lookup.
 	// Admin-pool System methods only.
 	deliverables db.DeliverableStore
 	// artifacts reads the objects a conversation changed, from the
@@ -1767,18 +1767,20 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 // the closed pull request's pending reviews, once it has committed
 // (db.TerminalCloseResult.DismissedReviews). Each review is announced on the
 // conversation that staged it, beside the resource-wide ping the counters of
-// unresolved work follow, and each such conversation's task is then checked
-// for closing by CloseTaskIfTerminalAndResolved, the rule a person's
-// resolution of a deliverable uses: a task whose run finished and which only
-// that review held open closes now. A review whose conversation was purged
-// belongs to no task and is only counted in the ping.
+// unresolved work follow, and that conversation is told its review was
+// discarded and why (TellDeliverableResolved). Each such conversation's task
+// is then checked for closing by CloseTaskIfTerminalAndResolved, the rule a
+// person's resolution of a deliverable uses: a task whose run finished and
+// which only that review held open closes now. A review whose conversation
+// was purged belongs to no task and is only counted in the ping.
 //
 // Best-effort, as the rest of the post-commit cascade is: the dismissal has
-// committed, a dropped frame is repaired by the client's next refetch, and
-// the close check fails closed. Detached from the caller's cancellation: a
-// replayed close finds the entity closed and dismisses nothing, so nothing
-// walks back here for a dismissal that already landed.
-func (s *Spawner) ReviewsDismissedSystem(ctx context.Context, orgID string, reviews []db.DismissedReview) {
+// committed, a dropped frame is repaired by the client's next refetch, a
+// failed stage loses that review's note, and the close check fails closed.
+// Detached from the caller's cancellation: a replayed close finds the entity
+// closed and dismisses nothing, so nothing walks back here for a dismissal
+// that already landed, and each note is staged once.
+func (s *Spawner) ReviewsDismissedSystem(ctx context.Context, orgID string, reviews []domain.Deliverable) {
 	if len(reviews) == 0 {
 		return
 	}
@@ -1791,8 +1793,9 @@ func (s *Spawner) ReviewsDismissedSystem(ctx context.Context, orgID string, revi
 			continue
 		}
 		frames.DeliverableUpdated(ctx, orgID, r.ConversationID, conversationframe.DeliverableUpdate{
-			DeliverableID: r.DeliverableID, State: domain.DeliverableStateReviewDismissed,
+			DeliverableID: r.ID, State: r.State,
 		})
+		s.TellDeliverableResolved(ctx, orgID, r)
 		if !seen[r.ConversationID] {
 			seen[r.ConversationID] = true
 			conversations = append(conversations, r.ConversationID)

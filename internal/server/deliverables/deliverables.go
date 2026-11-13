@@ -83,15 +83,14 @@ func deliverableIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return httpx.UUIDPathOr404(w, r, "id", "deliverable")
 }
 
-// injectDeliverableNote feeds the deliverable's drafting conversation the agent-
-// facing <system-note> for a just-completed resolution. Fully decoupled from
-// the resolution itself: a live conversation is steered (the actual delivery
-// runs on a detached goroutine inside the spawner, so this returns immediately
-// and never blocks the response); a terminal/paused conversation gets nothing
-// here and re-derives the same note from the deliverable row into its ledger on
-// the next resume. Never gates the blueprint (TFAC-379 #2). The deliverable
-// passed must carry its post-resolution State so the right kind-specific copy
-// is rendered.
+// injectDeliverableNote tells the deliverable's drafting conversation about a
+// just-completed resolution: the note is staged for the agent, whatever the
+// conversation's runtime or state, and reaches it at its next tool boundary
+// or its next engagement. Decoupled from the resolution itself: the stage
+// runs on a detached goroutine inside the spawner, so this returns
+// immediately and never blocks the response, and it never gates the
+// blueprint. The deliverable passed must carry its post-resolution state and
+// details so the right copy is rendered.
 func (ah *Handler) injectDeliverableNote(orgID string, a domain.Deliverable) {
 	if a.ConversationID == "" || ah.spawner == nil {
 		return
@@ -100,7 +99,7 @@ func (ah *Handler) injectDeliverableNote(orgID string, a domain.Deliverable) {
 	if sp == nil {
 		return
 	}
-	sp.InjectDeliverableNote(orgID, a.ConversationID, a)
+	sp.InjectDeliverableNote(orgID, a)
 }
 
 // JSON is the wire shape of one conversation deliverable in the
@@ -985,17 +984,11 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
-	// Step 3: tell the drafting agent its PR was approved — live if the
-	// conversation is warm, else via its ledger on resume. Decoupled from
-	// the resolution above. Note the one carve-out to the ledger's "never
-	// miss" property: if the best-effort flip in step 1 failed (logged
-	// above), the deliverable row stays at state=draft, so a terminal
-	// conversation's resume can't re-derive this note — the live steer is
-	// then the only delivery. That double-failure (flip failed AND no warm
-	// process) drops the note, which is acceptable here: the GitHub PR is
-	// already open (the authoritative fact), and the un-flipped draft has
-	// bigger problems than the note (it also blocks terminal-on-last
-	// closure until reconciliation).
+	// Step 3: tell the drafting agent its PR was approved. Decoupled from the
+	// resolution above, and from the best-effort flip in step 1: the note is
+	// rendered from the copy in hand, so the agent is told even when that
+	// flip failed. The GitHub PR is open either way, which is the fact the
+	// note reports.
 	ah.injectDeliverableNote(orgID, openArt)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -1098,7 +1091,7 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 	}
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
-	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
+	// Tell the drafting agent its draft PR was dismissed.
 	ah.injectDeliverableNote(orgID, closed)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -1272,8 +1265,7 @@ func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Reques
 
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
-	// Tell the drafting agent — live if warm, else via its ledger on resume,
-	// which re-derives the rejection from the resolution on the row.
+	// Tell the drafting agent its draft PR was rejected.
 	ah.injectDeliverableNote(orgID, closed)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{

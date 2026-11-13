@@ -212,6 +212,47 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 		}
 	})
 
+	t.Run("A_state_transition_lands_once", func(t *testing.T) {
+		// Two reconcile passes can read the same state. The write is guarded
+		// on it, so the first gets the stored row and the second gets none
+		// and changes nothing.
+		s, orgID, teamID := mk(t)
+		draft := domain.NewPullRequestDeliverable("octo/api", 11, "PR_t11", "feat", "main", "https://github.com/octo/api/pull/11", "Title", "Body", true)
+		draft.TeamID, draft.Scope = teamID, TestGitHubHost
+		stored, err := s.Deliverables.UpsertSystem(ctx, orgID, draft)
+		if err != nil {
+			t.Fatalf("UpsertSystem: %v", err)
+		}
+		read := func() (*domain.Deliverable, error) { return s.Deliverables.Get(ctx, orgID, stored.ID) }
+		stamped := domain.StampPRResolution(stored.DetailsJSON, domain.PRResolutionGitHub)
+
+		won, err := s.Deliverables.TransitionStateSystem(ctx, orgID, stored.ID, domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen, stamped)
+		if err != nil || won == nil {
+			t.Fatalf("first transition = (%+v, %v), want the stored row", won, err)
+		}
+		if won.State != domain.DeliverableStatePROpen || won.DetailsJSON != stamped {
+			t.Errorf("first transition stored (%q, %q), want open with the stamped details", won.State, won.DetailsJSON)
+		}
+		AssertWriteReturnedStoredRow(t, "TransitionStateSystem", *won, read)
+
+		lost, err := s.Deliverables.TransitionStateSystem(ctx, orgID, stored.ID, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, `{"head_branch":"other"}`)
+		if err != nil || lost != nil {
+			t.Fatalf("second transition from the state the first left = (%+v, %v), want (nil, nil)", lost, err)
+		}
+		AssertWriteReturnedStoredRow(t, "TransitionStateSystem (after a lost transition)", *won, read)
+
+		// Empty details keep the row's.
+		kept, err := s.Deliverables.TransitionStateSystem(ctx, orgID, stored.ID, domain.DeliverableStatePROpen, domain.DeliverableStatePRMerged, "")
+		if err != nil || kept == nil || kept.DetailsJSON != stamped {
+			t.Fatalf("transition with no details = (%+v, %v), want the row with its details kept", kept, err)
+		}
+		AssertWriteReturnedStoredRow(t, "TransitionStateSystem (no details)", *kept, read)
+
+		if got, err := s.Deliverables.TransitionStateSystem(ctx, orgID, "not-a-deliverable-id", domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen, ""); err != nil || got != nil {
+			t.Errorf("transition of an unknown id = (%+v, %v), want (nil, nil)", got, err)
+		}
+	})
+
 	for _, door := range []struct {
 		name   string
 		upsert func(s db.DeliverableStore, orgID string, a domain.Deliverable) (domain.Deliverable, error)

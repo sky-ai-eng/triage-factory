@@ -517,7 +517,7 @@ func (ah *Handler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, 
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.ConversationID)
 
-	// Tell the drafting agent its review was submitted (live or via the ledger).
+	// Tell the drafting agent its review was submitted.
 	// submitted keeps art.ID — the review handle the agent spoke to start-review —
 	// so the note references the id it already knows.
 	ah.injectDeliverableNote(orgID, submitted)
@@ -573,7 +573,7 @@ func (ah *Handler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, 
 	cleanupCtx := context.WithoutCancel(r.Context())
 	ah.pingConversationsResolved(orgID)
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
-	// Tell the drafting agent its review was dismissed (live or via the ledger).
+	// Tell the drafting agent its review was dismissed.
 	ah.injectDeliverableNote(orgID, dismissed)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{

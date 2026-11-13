@@ -106,7 +106,7 @@ func (refusingDelegator) StopConversationAndCancelBlueprint(string, string, stri
 
 func (refusingDelegator) StopBlueprintRun(string, string, delegate.StopCause) error { return nil }
 
-func (refusingDelegator) ReviewsDismissedSystem(context.Context, string, []dbpkg.DismissedReview) {}
+func (refusingDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {}
 
 func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
