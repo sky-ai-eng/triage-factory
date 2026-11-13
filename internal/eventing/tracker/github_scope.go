@@ -11,7 +11,8 @@ import (
 
 // RetireGitHubOutOfScope retires every active GitHub entity keyed under a host
 // other than scope, emitting github:pr:unreachable with reason scope_changed for
-// each, and returns how many it emitted. The poller runs it once per org cycle,
+// each pull request and github:vulnerability:unreachable for each vulnerable
+// package, and returns how many it emitted. The poller runs it once per org cycle,
 // before discovery, and also when the org tracks nothing on its current host —
 // which is every org that has just moved, since the tracked set does not carry
 // over.
@@ -40,13 +41,19 @@ func (t *Tracker) RetireGitHubOutOfScope(ctx context.Context, scope string) int 
 	retired := 0
 	forgotten := map[string]bool{}
 	for _, e := range entities {
+		if e.Scope == scope {
+			continue
+		}
+		if e.Kind == domain.EntityKindVulnerablePackage {
+			t.emitVulnerablePackageUnreachable(ctx, e, t.entityRepository(ctx, e), events.GitHubUnreachableScopeChanged)
+			retired++
+			continue
+		}
 		// An issue entity is not the pull request poller's to retire: it
-		// polls no issue, and the unreachable event is a pull request's. Nor
-		// is a vulnerable package, which no pull request event describes; one
-		// on a host the org has left is listed no more and stays active.
+		// polls no issue, and the unreachable event is a pull request's.
 		// TODO(TFAC-1276): an issue entity on a host the org has left stays
 		// active; retiring it needs an event of its own or a silent close.
-		if e.Scope == scope || e.Kind == domain.EntityKindIssue || e.Kind == domain.EntityKindVulnerablePackage {
+		if e.Kind == domain.EntityKindIssue {
 			continue
 		}
 		t.forgetPullsCursor(ctx, e.RepositoryID, forgotten)
@@ -150,6 +157,45 @@ func (t *Tracker) emitGitHubUnreachable(ctx context.Context, e domain.Entity, re
 		// following the pull request when the org's host changed, which is
 		// observed here; consumers fall back to created_at. created_at is set
 		// for the bus, which hands this struct to subscribers as-is.
+		CreatedAt: time.Now(),
+	})
+}
+
+// emitVulnerablePackageUnreachable publishes github:vulnerability:unreachable
+// for e, naming the package and the alerts last open on it from its stored
+// snapshot, else the package from its key. The repository's name is its
+// registry row's when that can be read (entityRepository), which no rename
+// leaves stale. Publish, not the snapshot-CAS enqueue, for the reason
+// emitGitHubUnreachable gives.
+func (t *Tracker) emitVulnerablePackageUnreachable(ctx context.Context, e domain.Entity, repo *domain.Repository, reason string) {
+	snap, ok := storedVulnerablePackageSnapshot(e)
+	if !ok {
+		snap.Repo, snap.Ecosystem, snap.Package, _ = domain.SplitVulnerablePackageSourceID(e.SourceID)
+	}
+	if repo != nil {
+		snap.Repo = repo.Slug()
+	}
+	numbers := make([]int, 0, len(snap.Alerts))
+	for _, a := range snap.Alerts {
+		numbers = append(numbers, a.Number)
+	}
+	entityID := e.ID
+	trackerLog.InfoContext(ctx, "TF will not follow this vulnerable package any more; retiring entity",
+		"source_id", e.SourceID, "entity_id", e.ID, "host", e.Scope, "reason", reason)
+	t.publish(ctx, domain.Event{
+		OrgID:     t.orgID,
+		EventType: domain.EventGitHubVulnerabilityUnreachable,
+		EntityID:  &entityID,
+		MetadataJSON: mustJSON(events.GitHubVulnerabilityUnreachableMetadata{
+			Repo:         snap.Repo,
+			RepositoryID: e.RepositoryID,
+			Ecosystem:    snap.Ecosystem,
+			Package:      snap.Package,
+			AlertNumbers: numbers,
+			Host:         e.Scope,
+			Reason:       reason,
+		}),
+		// Nothing at GitHub happened, as for a pull request's unreachable.
 		CreatedAt: time.Now(),
 	})
 }

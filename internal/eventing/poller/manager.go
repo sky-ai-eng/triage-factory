@@ -841,6 +841,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// that does not work on the new host is no reason to keep the old host's
 	// pull requests open.
 	m.trackerForOrg(orgID).RetireGitHubOutOfScope(ctx, scope)
+	m.forgetUntrackedAlertListings(ctx, orgID, scope)
 
 	// Refresh what the App can reach before reading any of it, and BEFORE the
 	// tracked-set gate below: an org that tracks nothing is precisely the org

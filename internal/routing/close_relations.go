@@ -240,12 +240,21 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
-	// A vulnerable package has no open alert left → close its alert tasks and
-	// flip it closed. A later alert on the package creates a new entity, so
-	// nothing reopens this one.
+	// A vulnerable package has no open alert left → close every task on it
+	// and flip it closed. A later alert on the package creates a new entity,
+	// so nothing reopens this one.
 	{
 		onEvents:         []string{domain.EventGitHubVulnerabilityResolved},
-		closes:           vulnerablePackageCloseTypes(),
+		closes:           vulnerablePackageCloseTypesExcept(domain.EventGitHubVulnerabilityResolved),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
+	// TF stopped following a vulnerable package (its host is no longer the
+	// org's) → the same entity-wide close + terminate, sparing only its own
+	// type, as a pull request's unreachable does.
+	{
+		onEvents:         []string{domain.EventGitHubVulnerabilityUnreachable},
+		closes:           vulnerablePackageCloseTypesExcept(domain.EventGitHubVulnerabilityUnreachable),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
@@ -350,11 +359,21 @@ func githubPRCloseTypesExcept(terminators ...string) []string {
 	return append(out, requestedPartyGitHubEventTypes...)
 }
 
-// vulnerablePackageCloseTypes is what a vulnerable package's resolution cleans
-// up: every task its alerts opened. The resolved event's own type is not in
-// it, so the lifecycle task the event mints afterwards survives.
-func vulnerablePackageCloseTypes() []string {
-	return []string{domain.EventGitHubVulnerabilityAlertOpened}
+// vulnerablePackageCloseTypesExcept builds a vulnerable package's entity-wide
+// close set: every type of the package's events minus the terminating event's
+// own, so the lifecycle task that event mints afterwards survives.
+func vulnerablePackageCloseTypesExcept(terminator string) []string {
+	var out []string
+	for _, et := range []string{
+		domain.EventGitHubVulnerabilityAlertOpened,
+		domain.EventGitHubVulnerabilityResolved,
+		domain.EventGitHubVulnerabilityUnreachable,
+	} {
+		if et != terminator {
+			out = append(out, et)
+		}
+	}
+	return out
 }
 
 // jiraIssueTerminalCloseTypes is the Jira analog: every assignee-centric type
@@ -389,7 +408,8 @@ func closeOwedCloseTypes() []string {
 	var out []string
 	sets := [][]string{
 		githubPRTerminalCloseTypes(), githubPRCloseTypesExcept(domain.EventGitHubPRUnreachable),
-		vulnerablePackageCloseTypes(),
+		vulnerablePackageCloseTypesExcept(domain.EventGitHubVulnerabilityResolved),
+		vulnerablePackageCloseTypesExcept(domain.EventGitHubVulnerabilityUnreachable),
 		jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes(),
 		linearCloseTypesExcept(domain.EventLinearIssueCompleted), linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
 	}

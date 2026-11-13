@@ -203,23 +203,50 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 	})
 
-	t.Run("Clear_listing_forgets_the_baseline", func(t *testing.T) {
+	t.Run("Clear_untracked_listings_keeps_only_the_hosts_tracked_set", func(t *testing.T) {
 		f := mk(t)
-		repoID := repo(t, f, TestGitHubHost, "api")
-		record(t, f, repoID, domain.DependabotAlertsReadable)
-		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"abc"`); err != nil {
-			t.Fatalf("RecordAlertListingSystem: %v", err)
+		tracked := repo(t, f, TestGitHubHost, "tracked")
+		untracked := repo(t, f, TestGitHubHost, "untracked")
+		elsewhere := repo(t, f, TestOtherGitHubHost, "elsewhere")
+		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestGitHubHost, []string{tracked}); err != nil {
+			t.Fatalf("track on %s: %v", TestGitHubHost, err)
 		}
-		cleared, err := f.Stores.DependabotAccess.ClearAlertListingSystem(ctx, f.OrgID, repoID)
+		// Tracked on its own host, which is not the host the clear keeps.
+		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestOtherGitHubHost, []string{elsewhere}); err != nil {
+			t.Fatalf("track on %s: %v", TestOtherGitHubHost, err)
+		}
+		for _, id := range []string{tracked, untracked, elsewhere} {
+			record(t, f, id, domain.DependabotAlertsReadable)
+			if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, id, `W/"abc"`); err != nil {
+				t.Fatalf("RecordAlertListingSystem: %v", err)
+			}
+		}
+
+		n, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OrgID, TestGitHubHost)
 		if err != nil {
-			t.Fatalf("ClearAlertListingSystem: %v", err)
+			t.Fatalf("ClearUntrackedAlertListingsSystem: %v", err)
 		}
-		if cleared.AlertsBaselined() || cleared.AlertsETag != "" || cleared.Access != domain.DependabotAlertsReadable {
-			t.Errorf("cleared = %+v, want the readable answer with no listing", cleared)
+		if n != 2 {
+			t.Errorf("cleared %d listings, want the untracked one and the other host's", n)
 		}
-		AssertWriteReturnedStoredRow(t, "ClearAlertListingSystem", cleared, func() (*domain.RepositoryDependabotAccess, error) {
-			return f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID)
-		})
+		for id, wantKept := range map[string]bool{tracked: true, untracked: false, elsewhere: false} {
+			a, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, id)
+			if err != nil || a == nil {
+				t.Fatalf("GetSystem(%s): %+v %v", id, a, err)
+			}
+			if a.AlertsBaselined() != wantKept || (a.AlertsETag != "") != wantKept {
+				t.Errorf("%s listing = %+v, want kept=%v", id, a, wantKept)
+			}
+			if a.Access != domain.DependabotAlertsReadable {
+				t.Errorf("%s answer = %s, want it left readable", id, a.Access)
+			}
+		}
+		if n, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OrgID, TestGitHubHost); err != nil || n != 0 {
+			t.Errorf("a second clear = %d, %v; want nothing left to clear", n, err)
+		}
+		if _, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OrgID, ""); err == nil {
+			t.Error("a clear with no host was not refused")
+		}
 	})
 
 	t.Run("A_listing_without_an_answer_is_a_miss", func(t *testing.T) {
@@ -227,9 +254,6 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		repoID := repo(t, f, TestGitHubHost, "api")
 		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, ""); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("RecordAlertListingSystem with no answer: err = %v, want sql.ErrNoRows", err)
-		}
-		if _, err := f.Stores.DependabotAccess.ClearAlertListingSystem(ctx, f.OrgID, repoID); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("ClearAlertListingSystem with no answer: err = %v, want sql.ErrNoRows", err)
 		}
 	})
 
@@ -249,8 +273,14 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OtherOrgID, repoID, `W/"x"`); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("RecordAlertListingSystem under another org: err = %v, want sql.ErrNoRows", err)
 		}
-		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable || got.AlertsBaselined() {
-			t.Errorf("the org's own answer after another org's writes = %+v, %v; want readable with no listing, untouched", got, err)
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"own"`); err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		if _, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OtherOrgID, TestGitHubHost); err != nil {
+			t.Fatalf("ClearUntrackedAlertListingsSystem under another org: %v", err)
+		}
+		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable || got.AlertsETag != `W/"own"` {
+			t.Errorf("the org's own answer after another org's writes = %+v, %v; want readable with its own listing, untouched", got, err)
 		}
 	})
 }

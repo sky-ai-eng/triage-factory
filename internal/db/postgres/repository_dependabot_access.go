@@ -68,13 +68,29 @@ func (s *repositoryDependabotAccessStore) RecordAlertListingSystem(ctx context.C
 		orgID, repositoryID, etag))
 }
 
-func (s *repositoryDependabotAccessStore) ClearAlertListingSystem(ctx context.Context, orgID, repositoryID string) (domain.RepositoryDependabotAccess, error) {
-	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
-		UPDATE repository_dependabot_access
+func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return 0, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE repository_dependabot_access a
 		   SET alerts_listed_at = NULL, alerts_etag = ''
-		 WHERE org_id = $1 AND repository_id = $2
-		RETURNING `+pgDependabotAccessColumns,
-		orgID, repositoryID))
+		 WHERE a.org_id = $1
+		   AND a.alerts_listed_at IS NOT NULL
+		   AND NOT EXISTS (
+		     SELECT 1 FROM repositories rp
+		      WHERE rp.id = a.repository_id
+		        AND rp.org_id = a.org_id
+		        AND rp.host = $2
+		        AND rp.retired_at IS NULL
+		        AND `+repoTrackedByATeam+`
+		   )
+	`, orgID, host)
+	if err != nil {
+		return 0, fmt.Errorf("clear untracked dependabot alert listings: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 // scanWrittenDependabotAccess decodes an UPDATE … RETURNING of one answer's

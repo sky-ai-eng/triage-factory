@@ -117,6 +117,12 @@ const (
 	// The package has no open alert left. Terminating: it closes the entity
 	// and its tasks, and a later alert on the package creates a new entity.
 	EventGitHubVulnerabilityResolved = "github:vulnerability:resolved"
+	// TF no longer follows the package: the org's GitHub base URL now names
+	// another host, whose listings cannot answer for this one's repositories.
+	// Terminating, like resolved, but says nothing about the alerts, so a
+	// handler on resolved never takes a host change for a fix. Emitted without
+	// asking GitHub, as github:pr:unreachable is.
+	EventGitHubVulnerabilityUnreachable = "github:vulnerability:unreachable"
 )
 
 // Jira events
@@ -247,8 +253,8 @@ const (
 
 // EntityTerminatingEventTypes is the set of source transitions that
 // terminate an entity: a merged, closed or unreachable pull request, a
-// vulnerable package with no open alert left, a completed or unreachable Jira
-// or Linear issue. The routing package derives the same set from its
+// vulnerable package with no open alert left or no longer followed, a
+// completed or unreachable Jira or Linear issue. The routing package derives the same set from its
 // close relations; a routing test asserts the two agree, so the store layer
 // can read it without importing the router.
 func EntityTerminatingEventTypes() []string {
@@ -257,6 +263,7 @@ func EntityTerminatingEventTypes() []string {
 		EventGitHubPRClosed,
 		EventGitHubPRUnreachable,
 		EventGitHubVulnerabilityResolved,
+		EventGitHubVulnerabilityUnreachable,
 		EventJiraIssueCompleted,
 		EventJiraIssueUnreachable,
 		EventLinearIssueCompleted,
@@ -338,6 +345,7 @@ func AllEventTypes() []EventType {
 		// --- GitHub vulnerable packages (Dependabot alerts) ---
 		{ID: EventGitHubVulnerabilityAlertOpened, Source: "github", Category: "vulnerability", Label: "Vulnerability Alert Opened", Description: "A Dependabot alert opened on a package in a tracked repository: created, reopened, or reintroduced. Alerts already open when Triage Factory first listed the repository emit nothing"},
 		{ID: EventGitHubVulnerabilityResolved, Source: "github", Category: "vulnerability", Label: "Vulnerability Resolved", Description: "A package in a tracked repository has no open Dependabot alert left: each was fixed or dismissed"},
+		{ID: EventGitHubVulnerabilityUnreachable, Source: "github", Category: "vulnerability", Label: "Vulnerability Unreachable", Description: "Triage Factory no longer follows a vulnerable package — the org's GitHub base URL now names another host, which cannot vouch for the old host's repositories. Says nothing about the package's alerts. Never asked of GitHub"},
 
 		// --- Jira ---
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you"},

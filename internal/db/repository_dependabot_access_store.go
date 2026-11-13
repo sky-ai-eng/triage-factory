@@ -40,13 +40,16 @@ type RepositoryDependabotAccessStore interface {
 	// readable.
 	RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error)
 
-	// ClearAlertListingSystem forgets the repository's alert listing, so the
-	// next listing is a baseline: the poll clears it for a repository no team
-	// tracks, because tracking is forward-only and the alerts that open while
-	// nobody tracks the repository are history once it is tracked again.
-	// Returns the row as stored, or sql.ErrNoRows when the repository has no
-	// answer recorded.
-	ClearAlertListingSystem(ctx context.Context, orgID, repositoryID string) (domain.RepositoryDependabotAccess, error)
+	// ClearUntrackedAlertListingsSystem forgets the alert listing of every
+	// repository of the org that no team tracks on host: one no team tracks,
+	// one on another host (the org's previous one, whose tracked set did not
+	// carry over), and a retired one. Each one's next listing, once it is
+	// tracked on the org's host again, is then a baseline: tracking is
+	// forward-only, and the alerts that opened while nobody tracked the
+	// repository are history by then. Returns how many listings it forgot.
+	// Exempt from the returned-row rule: a bulk write the poll makes every
+	// cycle, whose count is for its log line.
+	ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error)
 
 	// CountTrackedSystem counts the repositories on host that a team of the
 	// org tracks, by their answer. A tracked repository with no answer, or

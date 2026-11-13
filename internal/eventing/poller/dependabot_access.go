@@ -2,7 +2,6 @@ package poller
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log/slog"
 	"slices"
@@ -35,11 +34,9 @@ type dependabotProbe struct {
 	passes []dependabotPass
 
 	// What run read and answered, for listAlerts: the tracked repositories
-	// with their answers, the untracked repositories with a listing, and
-	// whether every probe due got an answer.
-	targets   map[string]dependabotTarget
-	untracked []string
-	answered  bool
+	// with their answers, and whether every probe due got an answer.
+	targets  map[string]dependabotTarget
+	answered bool
 }
 
 // dependabotPass is one credential and the repositories it reads.
@@ -75,12 +72,12 @@ func (p *dependabotProbe) run(ctx context.Context) {
 	if p == nil || len(p.passes) == 0 {
 		return
 	}
-	targets, untracked, err := p.load(ctx)
+	targets, err := p.load(ctx)
 	if err != nil {
 		githubLog.WarnContext(ctx, "read dependabot access answers failed; none probed this cycle", "org", p.orgID, "error", err)
 		return
 	}
-	p.targets, p.untracked = targets, untracked
+	p.targets = targets
 	p.answered = p.probe(ctx, targets)
 }
 
@@ -143,18 +140,13 @@ func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependab
 	return true
 }
 
-// listAlerts runs after run: it clears the listing of each repository no team
-// tracks, and lists the open alerts of every repository a pass added whose
-// answer is readable, under the credential of the first pass that added it
-// (tracker.RefreshVulnerablePackages). A cycle whose probes got no answer
-// lists nothing, and a listing that gets none ends the cycle's listings.
-// nil-safe.
+// listAlerts runs after run: it lists the open alerts of every repository a
+// pass added whose answer is readable, under the credential of the first pass
+// that added it (tracker.RefreshVulnerablePackages). A cycle whose probes got
+// no answer lists nothing, and a listing that gets none ends the cycle's
+// listings. nil-safe.
 func (p *dependabotProbe) listAlerts(ctx context.Context) {
-	if p == nil || p.targets == nil {
-		return
-	}
-	p.forgetListings(ctx, p.untracked)
-	if !p.answered {
+	if p == nil || p.targets == nil || !p.answered {
 		return
 	}
 	targets := p.targets
@@ -183,13 +175,24 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 	}
 }
 
-// forgetListings clears the alert listing of each repository in untracked, so
-// its next listing, once a team tracks it again, is a baseline.
-func (p *dependabotProbe) forgetListings(ctx context.Context, untracked []string) {
-	for _, repositoryID := range untracked {
-		if _, err := p.m.DependabotAccess.ClearAlertListingSystem(ctx, p.orgID, repositoryID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			githubLog.ErrorContext(ctx, "clear dependabot alert listing of an untracked repository failed", "org", p.orgID, "repository_id", repositoryID, "error", err)
-		}
+// forgetUntrackedAlertListings forgets the alert listing of every repository
+// of the org that no team tracks on host (RepositoryDependabotAccessStore's
+// ClearUntrackedAlertListingsSystem), so a repository tracked again lists a
+// baseline first. The cycle runs it before any of its gates, because a
+// repository leaves the tracked set when a team untracks it and also when the
+// org moves to another GitHub host, and an org that has just moved tracks
+// nothing there yet. A write that fails is made again next cycle.
+func (m *Manager) forgetUntrackedAlertListings(ctx context.Context, orgID, host string) {
+	if m.DependabotAccess == nil || host == "" {
+		return
+	}
+	n, err := m.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, orgID, host)
+	if err != nil {
+		githubLog.ErrorContext(ctx, "forget the dependabot alert listings of untracked repositories failed", "org", orgID, "error", err)
+		return
+	}
+	if n > 0 {
+		githubLog.InfoContext(ctx, "forgot the dependabot alert listings of untracked repositories", "org", orgID, "count", n)
 	}
 }
 
@@ -201,33 +204,25 @@ type dependabotTarget struct {
 }
 
 // load reads the org's tracked repositories on the host and the answers
-// recorded for them, keyed by owner/repo. untracked is the repositories no
-// team tracks whose alerts have a listing recorded.
-func (p *dependabotProbe) load(ctx context.Context) (targets map[string]dependabotTarget, untracked []string, err error) {
+// recorded for them, keyed by owner/repo.
+func (p *dependabotProbe) load(ctx context.Context) (map[string]dependabotTarget, error) {
 	tracked, _, err := p.m.repos.ListTrackedSystem(ctx, p.orgID, p.host, db.Unwindowed)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	answers, err := p.m.DependabotAccess.ListSystem(ctx, p.orgID, p.host)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	byRepo := make(map[string]*domain.RepositoryDependabotAccess, len(answers))
 	for i := range answers {
 		byRepo[answers[i].RepositoryID] = &answers[i]
 	}
-	targets = make(map[string]dependabotTarget, len(tracked))
+	out := make(map[string]dependabotTarget, len(tracked))
 	for _, r := range tracked {
-		targets[r.Slug()] = dependabotTarget{repository: r, answer: byRepo[r.ID]}
-		delete(byRepo, r.ID)
+		out[r.Slug()] = dependabotTarget{repository: r, answer: byRepo[r.ID]}
 	}
-	for id, a := range byRepo {
-		if a.AlertsBaselined() {
-			untracked = append(untracked, id)
-		}
-	}
-	slices.Sort(untracked)
-	return targets, untracked, nil
+	return out, nil
 }
 
 // checkedAt is when the target's answer was recorded, zero when it has none,

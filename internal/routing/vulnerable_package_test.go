@@ -119,17 +119,84 @@ func TestVulnerablePackage_AlertsFoldIntoOneTaskAndTheResolutionClosesIt(t *test
 	}
 }
 
-// TestVulnerablePackageResolved_TerminatesAndClosesAlertTasks pins the close
-// relation the resolved event fires.
-func TestVulnerablePackageResolved_TerminatesAndClosesAlertTasks(t *testing.T) {
-	rel := terminatingRelationFor(domain.EventGitHubVulnerabilityResolved)
-	if rel == nil {
-		t.Fatal("github:vulnerability:resolved terminates nothing")
+// TestVulnerablePackageTerminators_CloseEveryOtherTask pins the close
+// relations the resolved and unreachable events fire: each terminates the
+// entity and closes every vulnerable-package task but its own type's.
+func TestVulnerablePackageTerminators_CloseEveryOtherTask(t *testing.T) {
+	for terminator, want := range map[string][]string{
+		domain.EventGitHubVulnerabilityResolved:    {domain.EventGitHubVulnerabilityAlertOpened, domain.EventGitHubVulnerabilityUnreachable},
+		domain.EventGitHubVulnerabilityUnreachable: {domain.EventGitHubVulnerabilityAlertOpened, domain.EventGitHubVulnerabilityResolved},
+	} {
+		rel := terminatingRelationFor(terminator)
+		if rel == nil {
+			t.Errorf("%s terminates nothing", terminator)
+			continue
+		}
+		if fmt.Sprint(rel.closes) != fmt.Sprint(want) {
+			t.Errorf("%s closes %v, want %v", terminator, rel.closes, want)
+		}
+		if !domain.TaskMayRideClosedEntity(terminator) {
+			t.Errorf("%s's own task may not ride the entity it closed", terminator)
+		}
 	}
-	if fmt.Sprint(rel.closes) != fmt.Sprint([]string{domain.EventGitHubVulnerabilityAlertOpened}) {
-		t.Errorf("resolved closes %v, want the alert_opened tasks", rel.closes)
+}
+
+// capturePublisher keeps what a tracker published, for a test to route.
+type capturePublisher struct{ events []domain.Event }
+
+func (p *capturePublisher) Publish(_ context.Context, evt domain.Event) {
+	p.events = append(p.events, evt)
+}
+func (p *capturePublisher) PublishPreEnqueued(context.Context, domain.Event) {}
+
+// TestVulnerablePackage_AHostChangeClosesThePackageAndItsTasks: once the org's
+// GitHub host changes, the retirement's unreachable event closes a package on
+// the old host and the task its alert made.
+func TestVulnerablePackage_AHostChangeClosesThePackageAndItsTasks(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	st := sqlitestore.New(database)
+	ctx := context.Background()
+	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	if err := dbtest.TrackRepos(ctx, st.Repos, st.TeamGitHubRepos, org, team, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "octo", Repo: "api"}}); err != nil {
+		t.Fatalf("track octo/api: %v", err)
 	}
-	if !domain.TaskMayRideClosedEntity(domain.EventGitHubVulnerabilityResolved) {
-		t.Error("the resolved event's own task may not ride the entity it closed")
+	seedMatchAllRule(t, database, team, domain.EventGitHubVulnerabilityAlertOpened)
+	router := firingRouter(database, &stubDelegator{db: database})
+
+	e, _, err := st.Entities.FindOrCreateVulnerablePackageSystem(ctx, org, dbtest.TestGitHubHost, "octo/api#npm:lodash", "lodash (npm)", "")
+	if err != nil {
+		t.Fatalf("create package: %v", err)
+	}
+	snap := `{"repo":"octo/api","ecosystem":"npm","package":"lodash","alerts":[{"number":1,"ghsa_id":"GHSA-1","severity":"high","manifest_path":"package.json"}]}`
+	if ok, err := st.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, snap, e.PollSeq); err != nil || !ok {
+		t.Fatalf("snapshot: ok=%v err=%v", ok, err)
+	}
+	opened := tracker.DiffVulnerablePackage(domain.VulnerablePackageSnapshot{}, domain.VulnerablePackageSnapshot{
+		Repo: "octo/api", Ecosystem: "npm", Package: "lodash",
+		Alerts: []domain.DependabotAlert{{Number: 1, GHSAID: "GHSA-1", Severity: "high"}},
+	}, e.ID, e.RepositoryID, nil)
+	for _, evt := range opened {
+		evt.OrgID = org
+		mustHandle(t, router, evt)
+	}
+	ts := testTaskStore(database)
+	if tasks, _ := ts.FindActiveByEntity(ctx, org, e.ID); len(tasks) != 1 {
+		t.Fatalf("setup: %d active tasks, want the alert's one", len(tasks))
+	}
+
+	pub := &capturePublisher{}
+	tr := tracker.New(database, pub, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Deliverables, st.ExternalActions, st.EventQueue, st.PRMergeability, org)
+	if n := tr.RetireGitHubOutOfScope(ctx, dbtest.TestOtherGitHubHost); n != 1 || len(pub.events) != 1 || pub.events[0].EventType != domain.EventGitHubVulnerabilityUnreachable {
+		t.Fatalf("retired %d, published %v; want one unreachable", n, pub.events)
+	}
+	mustHandle(t, router, pub.events[0])
+
+	after, err := st.Entities.GetSystem(ctx, org, e.ID)
+	if err != nil || after == nil || after.State != "closed" {
+		t.Errorf("the package after the host change = %+v, %v; want it closed", after, err)
+	}
+	if tasks, _ := ts.FindActiveByEntity(ctx, org, e.ID); len(tasks) != 0 {
+		t.Errorf("%d tasks still active after the host change, want none", len(tasks))
 	}
 }

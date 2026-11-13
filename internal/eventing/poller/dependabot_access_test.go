@@ -239,8 +239,11 @@ func listingManager(database *sql.DB, stores db.Stores, rec *eventRecorder) *Man
 	return m
 }
 
-// listCycle runs one org cycle's probe and then its alert listings over passes.
+// listCycle runs what one org cycle does about Dependabot alerts, in its
+// order: the untracked listings are forgotten, then the probe, then the
+// listings over passes.
 func listCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
+	m.forgetUntrackedAlertListings(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
 	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
 	for _, pass := range passes {
 		p.add(pass.client, pass.repos)
@@ -380,5 +383,43 @@ func TestDependabotListing_AnUntrackedRepositoryLosesItsBaseline(t *testing.T) {
 	}
 	if gh.count("b") == 0 {
 		t.Error("b was not listed after it was tracked again")
+	}
+}
+
+// TestDependabotListing_AHostRoundTripStartsFromABaseline: an org that moves
+// to another GitHub host, tracking nothing there, and back finds its
+// repositories' listings forgotten, so the alerts that opened meanwhile are a
+// baseline rather than a burst of alert_opened.
+func TestDependabotListing_AHostRoundTripStartsFromABaseline(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	body := `[]`
+	_, client := newAlertsServer(t, func(string) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return http.StatusOK, body
+	})
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
+	rec := &eventRecorder{}
+	m := listingManager(database, stores, rec)
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
+
+	// A cycle on the other host, where the org tracks nothing yet.
+	m.forgetUntrackedAlertListings(ctx, runmode.LocalDefaultOrgID, dbtest.TestOtherGitHubHost)
+
+	mu.Lock()
+	body = `[{"number":1,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"left-pad"}},"security_advisory":{"ghsa_id":"GHSA-1","severity":"low"}}]`
+	mu.Unlock()
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
+	rec.mu.Lock()
+	n := len(rec.events)
+	rec.mu.Unlock()
+	if n != 0 {
+		t.Errorf("returning to the host emitted %d events, want a quiet baseline", n)
+	}
+	if e, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/a#npm:left-pad"); err != nil || e == nil {
+		t.Errorf("the baseline stored no package: %+v %v", e, err)
 	}
 }

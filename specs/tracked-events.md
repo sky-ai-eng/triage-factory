@@ -378,6 +378,7 @@ by number against its stored snapshot.
 |-------|----|---------|-------------|
 | **Vulnerability Alert Opened** | `github:vulnerability:alert_opened` | An alert is open that was not open on the previous listing: created, reopened, or reintroduced. One event per alert | — |
 | **Vulnerability Resolved** | `github:vulnerability:resolved` | The package has no open alert left. Terminating: it closes the entity and its tasks, and a later alert on the package creates a new entity | — |
+| **Vulnerability Unreachable** | `github:vulnerability:unreachable` | TF no longer follows the package: the org's GitHub base URL now names another host. Terminating, like `resolved`, but says nothing about the alerts. Never asked of GitHub | — |
 
 An alert closing while another stays open on the package emits nothing; the
 snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
@@ -385,10 +386,19 @@ snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
 `first_patched_version`), the package (`ecosystem`, `package`), the repository
 (`repo`, `repository_id`), and `highest_severity`, the highest severity among
 the package's open alerts. `resolved` names the package, the repository, and
-the `alert_numbers` that were last open.
+the `alert_numbers` that were last open; `unreachable` names the same plus the
+`host` the package was listed from and the `reason` (`scope_changed`, as for
+[PR Unreachable](#pr-unreachable)).
+
+Each package on a host the org has left is retired with `unreachable` at the
+start of the next GitHub cycle, as its pull requests are, and closes with its
+tasks. Pointing the org back at the old host lists its repositories from a new
+baseline, so a package with open alerts gets a new entity and no events.
 
 A repository's first listing is its baseline: it stores the packages it finds
-and emits no `alert_opened`. So is its first listing after no team tracked it.
+and emits no `alert_opened`. So is its first listing after no team tracked it
+on the org's current host, whether a team untracked it or the org moved to
+another host and back.
 A listing is conditional on the previous one's ETag when that listing fit on
 one page, so an unchanged repository costs a request GitHub does not count
 against the rate limit. A listing that fails changes nothing, and a repository
