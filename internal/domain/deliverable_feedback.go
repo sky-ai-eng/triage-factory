@@ -79,7 +79,9 @@ func DeliverableResolutionNote(a Deliverable) string {
 			case PRResolutionRejected:
 				return fmt.Sprintf("A human rejected your draft pull request %s: it was closed and its branch %s was deleted from the upstream, so the work on it is gone from the remote.", ref, prHeadBranchOrPlaceholder(d))
 			case PRResolutionGitHub:
-				return fmt.Sprintf("Your draft pull request %s was closed without merging on GitHub.%s", ref, seenOnGitHub)
+				// The reconciler closes a pull request that had left draft
+				// the same way, so this line does not call it one.
+				return fmt.Sprintf("Your pull request %s was closed without merging on GitHub.%s", ref, seenOnGitHub)
 			}
 			return fmt.Sprintf("A human dismissed your draft pull request %s and closed it (its branch is kept).", ref)
 		}

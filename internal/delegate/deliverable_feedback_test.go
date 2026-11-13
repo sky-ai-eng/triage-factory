@@ -177,7 +177,7 @@ func readers() []reader {
 				setConversationStatus(t, database, conversationID, domain.StatusOpen)
 			},
 			read: func(_ *testing.T, s *Spawner, _ *sql.DB, conversationID string) string {
-				block, _ := s.resumeSystemPrepends(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+				block, _ := s.stagedInjectionsForEngagement(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 				return block
 			},
 		},

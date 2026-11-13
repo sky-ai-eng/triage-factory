@@ -484,8 +484,8 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			continue
 		}
 		if !moved {
-			// Another pass, or a person's resolution, moved the row since
-			// this one read it, and has announced what it wrote.
+			// The row left the state this pass read before the write, so
+			// this pass made no transition and has none to announce.
 			continue
 		}
 		transitioned = append(transitioned, updated)

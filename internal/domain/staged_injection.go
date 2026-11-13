@@ -119,13 +119,11 @@ const (
 	// (StagedInjectionStore.HasNoteForEventSystem), and a hold cleared
 	// without its close withdraws the notes still waiting (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
+	// StagedInjectionProducerDeliverableResolved is the note telling an agent
+	// that a deliverable it produced was resolved (DeliverableResolutionNote).
+	// Stored message rows carry the value, so it keeps its spelling.
+	StagedInjectionProducerDeliverableResolved = "artifact_resolved"
 )
-
-// NoteProducerDeliverableResolved tags the note telling an agent that a
-// deliverable it produced was resolved (DeliverableResolutionNote). It is one
-// of the producer tags above. Stored message rows carry the value, so it keeps
-// its spelling.
-const NoteProducerDeliverableResolved = "artifact_resolved"
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path
 // prepends ahead of a parked conversation's user message: every staged

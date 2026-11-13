@@ -217,45 +217,6 @@ func TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly(t *testing.T) {
 	}
 }
 
-// TestResumeSystemPrepends_CarriesTheStagedNotesOnce: a resume's prefix is
-// the conversation's staged notes in one <system-note> block, and a second
-// resume prepends nothing.
-func TestResumeSystemPrepends_CarriesTheStagedNotesOnce(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-compose", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	ctx := context.Background()
-
-	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
-		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
-	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
-		domain.NoteProducerDeliverableResolved, "the resolution note body")
-
-	prefix, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, "r-compose")
-	for _, body := range []string{"the staged injection body", "the resolution note body"} {
-		if strings.Count(prefix, body) != 1 {
-			t.Errorf("prefix %q should carry %q once", prefix, body)
-		}
-	}
-	if strings.Count(prefix, "<system-note>") != 1 {
-		t.Errorf("want one <system-note> block, got %d: %q", strings.Count(prefix, "<system-note>"), prefix)
-	}
-	if again, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, "r-compose"); again != "" {
-		t.Errorf("a second resume prepended %q, want nothing", again)
-	}
-}
-
-// TestResumeSystemPrepends_EmptyWhenNothingPending: nothing staged → empty
-// prefix, so a plain resume prepends nothing.
-func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-none", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if got, _ := s.resumeSystemPrepends(context.Background(), runmode.LocalDefaultOrgID, "r-none"); got != "" {
-		t.Errorf("want empty prefix when nothing pending, got %q", got)
-	}
-}
-
 // TestStagedInjectionsForEngagement_NilStoreSafe: a spawner with no staged-injection store
 // (partial test bundle) degrades to "" rather than panicking.
 func TestStagedInjectionsForEngagement_NilStoreSafe(t *testing.T) {

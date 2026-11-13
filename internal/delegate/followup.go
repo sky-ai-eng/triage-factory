@@ -1075,18 +1075,3 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 	}
 	return blueprintCalledOff(br), nil
 }
-
-// resumeSystemPrepends is the out-of-band <system-note> block prepended ahead
-// of a resuming run's user message: the conversation's staged injections,
-// every note staged while the run wasn't running, flushed so each is
-// delivered exactly once. Returns "" (prepend nothing) when nothing is
-// staged; a read failure degrades to no block, never blocking the resume.
-// The callback is the staged injections' opening-unsent return
-// (stagedInjectionsForEngagement), nil when none were flushed.
-func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID, conversationID string) (string, func()) {
-	block, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
-	if block == "" {
-		return "", unsent
-	}
-	return block + "\n\n", unsent
-}

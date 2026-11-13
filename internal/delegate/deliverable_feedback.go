@@ -42,7 +42,7 @@ func (s *Spawner) TellDeliverableResolved(ctx context.Context, orgID string, d d
 		return
 	}
 	s.stageNoteAtToolBoundary(ctx, orgID, d.ConversationID, domain.MessageSubtypeInjectionSystemNote,
-		domain.NoteProducerDeliverableResolved, note, domain.NoteProvenance{})
+		domain.StagedInjectionProducerDeliverableResolved, note, domain.NoteProvenance{})
 }
 
 // InjectDeliverableNote is TellDeliverableResolved for a request handler
