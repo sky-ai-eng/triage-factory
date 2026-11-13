@@ -72,19 +72,19 @@ func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx 
 	if err := db.RequireRepoHost(host); err != nil {
 		return 0, err
 	}
+	// forgets is the repositories whose baseline goes too: on host, or
+	// retired.
+	const forgets = `(rp.host = $2 OR rp.retired_at IS NOT NULL)`
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE repository_dependabot_access a
-		   SET alerts_listed_at = NULL, alerts_etag = ''
-		 WHERE a.org_id = $1
-		   AND a.alerts_listed_at IS NOT NULL
-		   AND NOT EXISTS (
-		     SELECT 1 FROM repositories rp
-		      WHERE rp.id = a.repository_id
-		        AND rp.org_id = a.org_id
-		        AND rp.host = $2
-		        AND rp.retired_at IS NULL
-		        AND `+repoTrackedByATeam+`
-		   )
+		   SET alerts_etag = '',
+		       alerts_listed_at = CASE WHEN `+forgets+` THEN NULL ELSE a.alerts_listed_at END
+		  FROM repositories rp
+		 WHERE rp.id = a.repository_id
+		   AND rp.org_id = a.org_id
+		   AND a.org_id = $1
+		   AND NOT (rp.host = $2 AND rp.retired_at IS NULL AND `+repoTrackedByATeam+`)
+		   AND (a.alerts_etag <> '' OR (a.alerts_listed_at IS NOT NULL AND `+forgets+`))
 	`, orgID, host)
 	if err != nil {
 		return 0, fmt.Errorf("clear untracked dependabot alert listings: %w", err)

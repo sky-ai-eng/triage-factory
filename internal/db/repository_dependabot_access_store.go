@@ -40,13 +40,17 @@ type RepositoryDependabotAccessStore interface {
 	// readable.
 	RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error)
 
-	// ClearUntrackedAlertListingsSystem forgets the alert listing of every
-	// repository of the org that no team tracks on host: one no team tracks,
-	// one on another host (the org's previous one, whose tracked set did not
-	// carry over), and a retired one. Each one's next listing, once it is
-	// tracked on the org's host again, is then a baseline: tracking is
-	// forward-only, and the alerts that opened while nobody tracked the
-	// repository are history by then. Returns how many listings it forgot.
+	// ClearUntrackedAlertListingsSystem clears the alert listing of every
+	// repository of the org that no team tracks on host, the org's GitHub
+	// host. Each one loses its ETag, so its next listing is answered in full.
+	// One on host itself, which every team has untracked, and a retired one
+	// also lose their baseline, so the next listing, once a team tracks the
+	// repository again, is a baseline: tracking is forward-only, and the
+	// alerts that opened while nobody tracked it are history by then. One on
+	// another host keeps its baseline: nobody untracked it, the org moved off
+	// its host, and if the org moves back its listing announces the alerts
+	// that are open then (the poll retired the packages TF held there, closing
+	// their tasks with nothing fixed). Returns how many rows it changed.
 	// Exempt from the returned-row rule: a bulk write the poll makes every
 	// cycle, whose count is for its log line.
 	ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error)

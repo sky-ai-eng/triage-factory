@@ -112,6 +112,12 @@ type DependabotAlert struct {
 	// FirstPatchedVersion is the first version that fixes the vulnerability,
 	// empty when none has been released.
 	FirstPatchedVersion string `json:"first_patched_version,omitempty"`
+	// Baseline marks an alert TF found already open in a baseline listing, so
+	// it emitted nothing: the repository's backlog. It stays with the alert
+	// while the alert is open, and a package's next entity, once a host change
+	// retired this one, inherits it, so the backlog never gets a task while
+	// the alerts TF did announce are announced again.
+	Baseline bool `json:"baseline,omitempty"`
 }
 
 // VulnerablePackageSnapshot is the stored state of a vulnerable package: its
@@ -151,6 +157,18 @@ func (s VulnerablePackageSnapshot) Alert(number int) (DependabotAlert, bool) {
 		return DependabotAlert{}, false
 	}
 	return s.Alerts[i], true
+}
+
+// BaselineAlerts is the snapshot holding only its alerts marked Baseline.
+func (s VulnerablePackageSnapshot) BaselineAlerts() VulnerablePackageSnapshot {
+	out := s
+	out.Alerts = []DependabotAlert{}
+	for _, a := range s.Alerts {
+		if a.Baseline {
+			out.Alerts = append(out.Alerts, a)
+		}
+	}
+	return out
 }
 
 // SortDependabotAlerts orders alerts by number, the order a snapshot stores

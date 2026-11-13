@@ -446,3 +446,97 @@ func TestDiffVulnerablePackage(t *testing.T) {
 		})
 	}
 }
+
+// baselineMarks maps each open alert of e's snapshot to its backlog mark.
+func (r *vulnRig) baselineMarks(e *domain.Entity) map[int]bool {
+	r.t.Helper()
+	var snap domain.VulnerablePackageSnapshot
+	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
+		r.t.Fatalf("parse snapshot %q: %v", e.SnapshotJSON, err)
+	}
+	out := map[int]bool{}
+	for _, a := range snap.Alerts {
+		out[a.Number] = a.Baseline
+	}
+	return out
+}
+
+// TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed: a
+// package retired by a host change closed with its tasks while its alerts were
+// still open. When the org moves back, the package gets a new entity that
+// announces the alerts TF had announced, and the alerts opened since, but not
+// the backlog the repository's baseline found.
+func TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed(t *testing.T) {
+	r := newVulnRig(t, "api")
+	ctx := context.Background()
+	r.gh.set("api", lodash(1, "high"))
+	r.mustCycle()
+	r.gh.set("api", lodash(1, "high"), lodash(2, "low"))
+	if evts := r.mustCycle(); len(evts) != 1 {
+		t.Fatalf("setup: alert 2 emitted %v", eventTypes(evts))
+	}
+	first := r.pkg("api", "npm", "lodash")
+	if got := r.baselineMarks(first); !got[1] || got[2] {
+		t.Fatalf("marks = %v, want alert 1 backlog and alert 2 announced", got)
+	}
+
+	// The org moves to another host: the package is retired and the router
+	// closes it, and the cycle there forgets the repository's ETag.
+	r.closeAsRouted(first)
+	if _, err := r.stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, runmode.LocalDefaultOrgID, "https://ghe.example.com"); err != nil {
+		t.Fatalf("clear on the other host: %v", err)
+	}
+
+	// Back on the host with nothing changed: the listing is answered in full
+	// and alert 2, whose task the retirement closed, is announced again.
+	evts := r.mustCycle()
+	next := r.pkg("api", "npm", "lodash")
+	if next == nil || next.ID == first.ID || next.State != "active" {
+		t.Fatalf("after the return the package is %+v, want a new active entity", next)
+	}
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened || *evts[0].EntityID != next.ID {
+		t.Fatalf("the return emitted %v, want one alert_opened on the new entity", eventTypes(evts))
+	}
+	var meta events.GitHubVulnerabilityAlertOpenedMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil || meta.AlertNumber != 2 {
+		t.Errorf("metadata = %+v %v, want alert 2", meta, err)
+	}
+	if got := r.baselineMarks(next); !got[1] || got[2] {
+		t.Errorf("marks on the new entity = %v, want alert 1 still backlog", got)
+	}
+
+	// An alert opened after the return is announced as usual.
+	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), lodash(3, "medium"))
+	if evts := r.mustCycle(); len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
+		t.Errorf("a later alert emitted %v, want one alert_opened", eventTypes(evts))
+	}
+}
+
+// TestRefreshVulnerablePackages_TheBacklogMarkFollowsTheAlert: the baseline
+// marks what it found as backlog, an alert announced later is not, and a quiet
+// listing after a team untracked the repository marks only its new alerts.
+func TestRefreshVulnerablePackages_TheBacklogMarkFollowsTheAlert(t *testing.T) {
+	r := newVulnRig(t, "api")
+	ctx := context.Background()
+	r.gh.set("api", lodash(1, "high"))
+	r.mustCycle()
+	r.gh.set("api", lodash(1, "high"), lodash(2, "low"))
+	r.mustCycle()
+
+	// Every team untracks the repository and tracks it again: its next
+	// listing is a baseline, which keeps alert 2's mark and marks alert 3.
+	if _, err := r.database.Exec(`DELETE FROM team_github_repos`); err != nil {
+		t.Fatalf("untrack: %v", err)
+	}
+	if _, err := r.stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, runmode.LocalDefaultOrgID, vulnHost); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	trackRepos(t, r.stores, runmode.LocalDefaultOrgID, []string{"octo/api"})
+	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), lodash(3, "medium"))
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Errorf("the baseline after re-tracking emitted %v", eventTypes(evts))
+	}
+	if got := r.baselineMarks(r.pkg("api", "npm", "lodash")); !got[1] || got[2] || !got[3] {
+		t.Errorf("marks = %v, want 1 and 3 backlog, 2 announced", got)
+	}
+}

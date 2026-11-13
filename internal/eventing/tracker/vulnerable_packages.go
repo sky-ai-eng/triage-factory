@@ -43,10 +43,15 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 //     github:vulnerability:resolved, whose terminating close closes the
 //     entity. A later alert on the package creates a new entity.
 //
-// A repository's first listing, and its first after no team tracked it, is
-// its baseline: it stores what it finds and emits no alert_opened, because the
-// alerts already open are history. A package TF holds that the baseline finds
-// resolved still emits resolved, since that closes work TF already has.
+// A repository's first listing, and its first after no team tracked it on the
+// org's host, is its baseline: it stores what it finds and emits no
+// alert_opened, because the alerts already open are history, and marks each
+// alert it stored as backlog (domain.DependabotAlert.Baseline). A package TF
+// holds that the baseline finds resolved still emits resolved, since that
+// closes work TF already has. A package whose entity closed without resolving,
+// retired by a host change, gets a new entity the next time it is listed,
+// which announces every open alert but the backlog again: the retirement
+// closed their tasks without anything fixing them.
 //
 // A listing is conditional on the previous one's ETag, so an unchanged
 // repository costs a request that does not count against the rate limit. A
@@ -164,7 +169,23 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 	for _, key := range slices.Sorted(maps.Keys(packages)) {
 		snap := packages[key]
 		e, ok := held[key]
+		var inherited *domain.VulnerablePackageSnapshot
 		if !ok {
+			// The package's previous entity, closed by a resolution or a host
+			// change, hands the new one its backlog, so the alerts TF never
+			// announced stay quiet and the ones it did are announced again.
+			prior, err := t.entities.GetBySourceSystem(ctx, t.orgID, domain.ProviderGitHub, scope, key)
+			if err != nil {
+				trackerLog.ErrorContext(ctx, "read a vulnerable package's previous entity failed", "org", t.orgID, "source_id", key, "error", err)
+				complete = false
+				continue
+			}
+			if prior != nil {
+				if closed, ok := storedVulnerablePackageSnapshot(*prior); ok {
+					backlog := closed.BaselineAlerts()
+					inherited = &backlog
+				}
+			}
 			created, _, err := t.entities.FindOrCreateVulnerablePackageSystem(ctx, t.orgID, scope, key,
 				domain.VulnerablePackageTitle(snap.Ecosystem, snap.Package),
 				domain.VulnerablePackageURL(scope, repo.Slug(), snap.Ecosystem, snap.Package))
@@ -175,7 +196,7 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 			}
 			e = *created
 		}
-		n, landed := t.applyVulnerablePackage(ctx, e, repo, snap, baselined, updatedAt)
+		n, landed := t.applyVulnerablePackage(ctx, e, repo, snap, baselined, updatedAt, inherited)
 		emitted += n
 		complete = complete && landed
 	}
@@ -231,22 +252,28 @@ func groupDependabotAlerts(repoSlug string, alerts []ghclient.OpenDependabotAler
 
 // applyVulnerablePackage commits curr, a package's open alerts, as entity e's
 // snapshot, with an alert_opened for each alert e's stored snapshot did not
-// hold. Without a baseline nothing is emitted. landed reports whether the
-// write went through.
+// hold. An entity with no stored snapshot is diffed from inherited, the
+// backlog of the package's previous entity, when it has one. Without a
+// baseline nothing is emitted. landed reports whether the write went through.
 //
 // An entity whose stored snapshot is already terminal has had its resolution
 // emitted and is waiting on its close: alerts open on the package again belong
 // to the entity the next listing creates once this one has closed, so nothing
 // is written here, and the close is owed if it was lost.
-func (t *Tracker) applyVulnerablePackage(ctx context.Context, e domain.Entity, repo domain.Repository, curr domain.VulnerablePackageSnapshot, baselined bool, updatedAt map[int]time.Time) (emitted int, landed bool) {
+func (t *Tracker) applyVulnerablePackage(ctx context.Context, e domain.Entity, repo domain.Repository, curr domain.VulnerablePackageSnapshot, baselined bool, updatedAt map[int]time.Time, inherited *domain.VulnerablePackageSnapshot) (emitted int, landed bool) {
 	prev, hasPrev := storedVulnerablePackageSnapshot(e)
 	if hasPrev && prev.Terminal() {
 		n, _ := t.oweVulnerablePackageClose(ctx, e)
 		return n, false
 	}
+	from := prev
+	if !hasPrev && inherited != nil {
+		from = *inherited
+	}
+	markBaselineAlerts(&curr, from, baselined)
 	var evts []domain.Event
 	if baselined {
-		evts = DiffVulnerablePackage(prev, curr, e.ID, repo.ID, updatedAt)
+		evts = DiffVulnerablePackage(from, curr, e.ID, repo.ID, updatedAt)
 	}
 	ok, enqueued, err := t.commitRefresh(ctx, t.orgID, e.ID, canonicalVulnerablePackageJSON(prev, hasPrev), mustJSON(curr), e.PollSeq, evts)
 	if err != nil {
@@ -258,6 +285,19 @@ func (t *Tracker) applyVulnerablePackage(ctx context.Context, e domain.Entity, r
 		return 0, false
 	}
 	return enqueued, true
+}
+
+// markBaselineAlerts sets each of curr's alerts' Baseline: an alert from held
+// keeps its mark, and any other is backlog only when the listing is a baseline
+// (baselined false), the one listing that announces nothing.
+func markBaselineAlerts(curr *domain.VulnerablePackageSnapshot, from domain.VulnerablePackageSnapshot, baselined bool) {
+	for i := range curr.Alerts {
+		if held, ok := from.Alert(curr.Alerts[i].Number); ok {
+			curr.Alerts[i].Baseline = held.Baseline
+		} else {
+			curr.Alerts[i].Baseline = !baselined
+		}
+	}
 }
 
 // resolveVulnerablePackage applies a listing that holds no open alert of the

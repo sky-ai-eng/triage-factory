@@ -392,13 +392,16 @@ the `alert_numbers` that were last open; `unreachable` names the same plus the
 
 Each package on a host the org has left is retired with `unreachable` at the
 start of the next GitHub cycle, as its pull requests are, and closes with its
-tasks. Pointing the org back at the old host lists its repositories from a new
-baseline, so a package with open alerts gets a new entity and no events.
+tasks. Nothing fixed its alerts, so pointing the org back at the old host
+announces them again: each package with open alerts gets a new entity, which
+emits `alert_opened` for every open alert except the repository's backlog,
+the alerts its baseline found.
 
-A repository's first listing is its baseline: it stores the packages it finds
-and emits no `alert_opened`. So is its first listing after no team tracked it
-on the org's current host, whether a team untracked it or the org moved to
-another host and back.
+A repository's first listing is its baseline: it stores the packages it finds,
+marks their alerts as backlog, and emits no `alert_opened`. So is its first
+listing after every team untracked it on the org's current host. A host change
+is not that: the old host's repositories keep their baselines, and the first
+listing back is answered in full.
 A listing is conditional on the previous one's ETag when that listing fit on
 one page, so an unchanged repository costs a request GitHub does not count
 against the rate limit. A listing that fails changes nothing, and a repository
@@ -1146,7 +1149,7 @@ its identity among active entities. Its `url` is the repository's Dependabot
 alert list filtered to the package's open alerts. The snapshot holds:
 
 - `repo`, `ecosystem`, `package`
-- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `first_patched_version` (empty when none is released)
+- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `first_patched_version` (empty when none is released), and `baseline`, set on an alert a baseline listing found, which keeps it while the alert stays open and is never diffed
 
 An empty `alerts` is the terminal snapshot.
 

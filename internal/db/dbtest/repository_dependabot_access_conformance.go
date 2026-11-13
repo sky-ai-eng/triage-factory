@@ -203,7 +203,7 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 	})
 
-	t.Run("Clear_untracked_listings_keeps_only_the_hosts_tracked_set", func(t *testing.T) {
+	t.Run("Clear_untracked_listings_forgets_this_hosts_and_unconditions_anothers", func(t *testing.T) {
 		f := mk(t)
 		tracked := repo(t, f, TestGitHubHost, "tracked")
 		untracked := repo(t, f, TestGitHubHost, "untracked")
@@ -227,15 +227,22 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 			t.Fatalf("ClearUntrackedAlertListingsSystem: %v", err)
 		}
 		if n != 2 {
-			t.Errorf("cleared %d listings, want the untracked one and the other host's", n)
+			t.Errorf("changed %d listings, want the untracked one and the other host's", n)
 		}
-		for id, wantKept := range map[string]bool{tracked: true, untracked: false, elsewhere: false} {
+		// The tracked repository keeps everything; the one every team
+		// untracked loses its baseline; the other host's keeps its baseline
+		// and loses only its ETag.
+		for id, want := range map[string]struct{ baselined, etag bool }{
+			tracked:   {true, true},
+			untracked: {false, false},
+			elsewhere: {true, false},
+		} {
 			a, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, id)
 			if err != nil || a == nil {
 				t.Fatalf("GetSystem(%s): %+v %v", id, a, err)
 			}
-			if a.AlertsBaselined() != wantKept || (a.AlertsETag != "") != wantKept {
-				t.Errorf("%s listing = %+v, want kept=%v", id, a, wantKept)
+			if a.AlertsBaselined() != want.baselined || (a.AlertsETag != "") != want.etag {
+				t.Errorf("%s listing = %+v, want baselined=%v etag=%v", id, a, want.baselined, want.etag)
 			}
 			if a.Access != domain.DependabotAlertsReadable {
 				t.Errorf("%s answer = %s, want it left readable", id, a.Access)

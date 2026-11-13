@@ -386,11 +386,12 @@ func TestDependabotListing_AnUntrackedRepositoryLosesItsBaseline(t *testing.T) {
 	}
 }
 
-// TestDependabotListing_AHostRoundTripStartsFromABaseline: an org that moves
-// to another GitHub host, tracking nothing there, and back finds its
-// repositories' listings forgotten, so the alerts that opened meanwhile are a
-// baseline rather than a burst of alert_opened.
-func TestDependabotListing_AHostRoundTripStartsFromABaseline(t *testing.T) {
+// TestDependabotListing_AHostRoundTripKeepsTheBaseline: an org that moves to
+// another GitHub host, tracking nothing there, and back keeps its
+// repositories' baselines, since nobody untracked them, and loses their ETags,
+// so the first listing back is answered in full and announces the alert that
+// opened meanwhile.
+func TestDependabotListing_AHostRoundTripKeepsTheBaseline(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex
 	body := `[]`
@@ -414,12 +415,12 @@ func TestDependabotListing_AHostRoundTripStartsFromABaseline(t *testing.T) {
 	mu.Unlock()
 	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
 	rec.mu.Lock()
-	n := len(rec.events)
-	rec.mu.Unlock()
-	if n != 0 {
-		t.Errorf("returning to the host emitted %d events, want a quiet baseline", n)
-	}
-	if e, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/a#npm:left-pad"); err != nil || e == nil {
-		t.Errorf("the baseline stored no package: %+v %v", e, err)
+	defer rec.mu.Unlock()
+	if len(rec.events) != 1 || rec.events[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
+		var got []string
+		for _, e := range rec.events {
+			got = append(got, e.EventType)
+		}
+		t.Errorf("returning to the host emitted %v, want the alert that opened meanwhile", got)
 	}
 }
