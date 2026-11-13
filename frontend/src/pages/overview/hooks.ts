@@ -211,6 +211,9 @@ export function useTasksIndex(teamId: string, tick: number): Map<string, Task> |
   useEffect(() => {
     if (!teamId) return
     let live = true
+    // TODO(TFAC-1400): this is one page, and closed tasks get the rows the
+    // open ones leave, so a team with more tasks than the page holds can show
+    // a row with no task reference. The rows' tasks should be read by id.
     void apiList<Task>(TASK_LIST_PATH, {
       statuses: ['queued', 'in_progress', ...CLOSED_TASK_STATUSES],
       team_ids: [teamId],
