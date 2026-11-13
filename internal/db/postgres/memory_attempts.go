@@ -115,12 +115,17 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingWindow
 	}
 	var out domain.MemoryFailing
-	// "Waiting" is the task read's memory_pending, in the same words.
+	// "Waiting" is the task read's memory_pending, in the same words, on a
+	// task something waits on: an open one, whose next delegation the memory
+	// holds back, or a closed one with a conversation still working, which the
+	// claim gate holds back the same way.
 	if err := s.admin.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM tasks t
-		WHERE t.org_id = $1 AND t.status NOT IN ('done', 'dismissed')
+		WHERE t.org_id = $1
 		  AND `+taskMemoryPendingSQL("t.org_id", "t.id")+`
+		  AND (t.status NOT IN ('done', 'dismissed')
+		       OR `+taskWorkingSQL("t.org_id", "t.id")+`)
 	`, orgID).Scan(&out.TasksWaiting); err != nil {
 		return domain.MemoryFailing{}, wrapAdminPoolPermErr(err, "conversation_memory_attempts.FailingSystem")
 	}

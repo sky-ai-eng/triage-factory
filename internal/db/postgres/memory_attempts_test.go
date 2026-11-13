@@ -57,6 +57,19 @@ func TestMemoryAttemptStore_Postgres(t *testing.T) {
 					`UPDATE tasks SET status = $2 WHERE id = (SELECT task_id FROM conversations WHERE id = $1)`, conversationID, status)
 				return conversationID
 			},
+			QueueNextConversation: func(t *testing.T, afterConversationID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id,
+					                           trigger_type, status, blueprint_run_id, blueprint_step_index)
+					SELECT $2, org_id, creator_user_id, team_id, visibility, task_id, prompt_id,
+					       trigger_type, NULL, blueprint_run_id, blueprint_step_index + 1
+					FROM conversations WHERE id = $1`, afterConversationID, uuid.New().String())
+				pgtest.MustExec(t, h.AdminDB, `
+					UPDATE blueprint_runs
+					SET current_step_index = (SELECT blueprint_step_index + 1 FROM conversations WHERE id = $1)
+					WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = $1)`, afterConversationID)
+			},
 			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
 				t.Helper()
 				at := time.Now().UTC().Add(-age)

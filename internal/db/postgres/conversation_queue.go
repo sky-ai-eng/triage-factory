@@ -268,12 +268,11 @@ const warmTreeHeldSQL = `EXISTS (
 // the current step of a running blueprint nobody called off that has given it
 // an answer (settled) the blueprint has not acted on yet. That last arm is a
 // blueprint between two steps: its next step has no conversation yet, and the
-// work on the task is not over until the blueprint has advanced or ended. A conversation parked on a person, and a
-// concluded or failed one its blueprint has moved past, are not working. An
-// event close holds while one of the task's conversations is
-// (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
-// none is (TaskStore.ListActiveCloseDeferralsSystem), so the two read this
-// one predicate.
+// work on the task is not over until the blueprint has advanced or ended. A
+// conversation parked on a person, and a concluded or failed one its blueprint
+// has moved past, are not working. The task's status is no part of it: a
+// conversation on a closed task is working on the same terms as one on an open
+// task.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
 	  AND (` + workingClaimExistsSQL + `
@@ -288,6 +287,15 @@ var workingConversationSQL = `r.parent_conversation_id IS NULL
 	               WHERE br_s.org_id = r.org_id AND br_s.id = r.blueprint_run_id
 	                 AND br_s.status = 'running' AND NOT br_s.cancel_requested
 	                 AND br_s.current_step_index = r.blueprint_step_index)))`
+
+// taskWorkingSQL is the task (orgExpr, taskExpr) holding a conversation that
+// is working (workingConversationSQL).
+func taskWorkingSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM conversations r
+		WHERE r.org_id = ` + orgExpr + ` AND r.task_id = ` + taskExpr + `
+		  AND ` + workingConversationSQL + `)`
+}
 
 // personMessageSQL is a message row m_p that a person wrote: a plain or
 // steered user message with an author, delivered or still waiting, and not

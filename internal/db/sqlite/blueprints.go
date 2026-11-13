@@ -1270,20 +1270,19 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, step
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// CAS aborted → running while the task is still open and the conversation
-	// is the run's current step, clearing the stale abort metadata, then
-	// withdraw that conversation's verdict. The
-	// resumed step re-finalizes the blueprint through the normal post-resume
-	// disposition, and a verdict left behind would read as one it had already
-	// given. One transaction, so a reopened run never carries a stale verdict.
+	// CAS aborted → running while the conversation is the run's current step,
+	// clearing the stale abort metadata, then withdraw that conversation's
+	// verdict. The resumed step re-finalizes the blueprint through the normal
+	// post-resume disposition, and a verdict left behind would read as one it
+	// had already given. One transaction, so a reopened run never carries a
+	// stale verdict. The task's status is not part of the guard: a blueprint
+	// advances by its own state, whether its task is open or closed.
 	var reopened bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE blueprint_runs
 			SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
 			WHERE id = ? AND status = 'aborted'
-			  AND EXISTS (SELECT 1 FROM tasks t
-			              WHERE t.id = blueprint_runs.task_id AND t.status NOT IN ('done', 'dismissed'))
 			  AND EXISTS (SELECT 1 FROM conversations c
 			              WHERE c.id = ? AND c.blueprint_run_id = blueprint_runs.id
 			                AND c.blueprint_step_index = blueprint_runs.current_step_index)

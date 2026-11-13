@@ -5205,8 +5205,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("owed = %v, want exactly [%s] — %s filed its memory and %s never ended",
 				ids, owing, settled, live)
 		}
-		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskOpen {
-			t.Errorf("owed row = %+v, want org %s task %s open", owed[0], orgID, taskID)
+		if owed[0].OrgID != orgID || owed[0].TaskID != taskID || !owed[0].TaskWorking {
+			t.Errorf("owed row = %+v, want org %s task %s with %s working on it", owed[0], orgID, taskID, live)
 		}
 	})
 
@@ -5393,50 +5393,51 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("ListMemoryOwed_OrdersOpenTasksFirstThenOldestBoundary", func(t *testing.T) {
+	t.Run("ListMemoryOwed_OrdersTasksWithWorkFirstThenOldestBoundary", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		if seed.BackdateEndedAt == nil || seed.SetTaskStatus == nil {
 			t.Skip("harness cannot stage boundary ages or task statuses")
 		}
 
-		// Three owing conversations: two on open tasks, one on a task nobody
-		// is waiting on. The closed one ended longest ago, so ordering by age
-		// alone would put it first — which is exactly the answer the open-task
-		// term exists to prevent.
-		newOpen := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		oldOpen := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		closedTaskConv := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		ages := map[string]time.Duration{
-			newOpen:        1 * time.Hour,
-			oldOpen:        6 * time.Hour,
-			closedTaskConv: 24 * time.Hour,
-		}
-		for id, age := range ages {
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+		// Four owing conversations. Two are on tasks with a conversation
+		// waiting to be driven, which the claim gate holds back until the
+		// memory exists; one of those tasks is closed. Two are on tasks with
+		// nothing working; one of those is closed. The idle ones ended longest
+		// ago, so ordering by age alone would put them first, and ordering by
+		// task status would split each pair.
+		owing := func(working bool, closeAs string, age time.Duration) string {
+			t.Helper()
+			ent := seed.Entity(t, "owed-order-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+			id := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
+			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedStepAdvanced); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 			seed.BackdateEndedAt(t, id, age)
-		}
-		closedTask := ""
-		for _, o := range mustListMemoryOwed(t, store, ctx) {
-			if o.ConversationID == closedTaskConv {
-				closedTask = o.TaskID
+			if working {
+				seedConversationForTaskTest(t, orgID, taskID, "", seed)
 			}
+			if closeAs != "" {
+				seed.SetTaskStatus(t, taskID, closeAs)
+			}
+			return id
 		}
-		if closedTask == "" {
-			t.Fatal("precondition: the closed-task fixture is not owed")
-		}
-		seed.SetTaskStatus(t, closedTask, "done")
+		workingClosed := owing(true, "done", 1*time.Hour)
+		workingOpen := owing(true, "", 6*time.Hour)
+		idleOpen := owing(false, "", 24*time.Hour)
+		idleClosed := owing(false, "dismissed", 48*time.Hour)
 
-		got := memoryOwedIDs(mustListMemoryOwed(t, store, ctx))
-		want := []string{oldOpen, newOpen, closedTaskConv}
+		owed := mustListMemoryOwed(t, store, ctx)
+		got := memoryOwedIDs(owed)
+		want := []string{workingOpen, workingClosed, idleClosed, idleOpen}
 		if !slices.Equal(got, want) {
-			t.Errorf("owed order = %v, want %v — open tasks first (they are blocking somebody), then oldest boundary", got, want)
+			t.Errorf("owed order = %v, want %v — tasks with a working conversation first, closed or open, then oldest boundary", got, want)
 		}
-		for _, o := range mustListMemoryOwed(t, store, ctx) {
-			if (o.ConversationID == closedTaskConv) == o.TaskOpen {
-				t.Errorf("row %+v: task_open disagrees with the task's status", o)
+		for _, o := range owed {
+			if wantWorking := o.ConversationID == workingOpen || o.ConversationID == workingClosed; o.TaskWorking != wantWorking {
+				t.Errorf("row %+v: task_working = %v, want %v", o, o.TaskWorking, wantWorking)
 			}
 		}
 	})

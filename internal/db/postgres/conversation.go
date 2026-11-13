@@ -853,16 +853,20 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	// nullable parameter compared against the row so one statement serves
 	// both scopes — a second query text would be the same SQL twice, with two
 	// chances to disagree about what is owed.
+	//
+	// The ordering key is the task holding a working conversation, never its
+	// status: the claim gate holds that conversation back until the memory
+	// exists, on a closed task as on an open one.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT owed.org_id::text, owed.id::text, owed.task_id::text,
-		       (t.status NOT IN ('done', 'dismissed')) AS task_open
+		       `+taskWorkingSQL("t.org_id", "t.id")+` AS task_working
 		FROM conversations owed, tasks t
 		WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
 		  AND ($1::uuid IS NULL OR owed.org_id = $1::uuid)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM conversation_memory_attempts att
 		      WHERE att.conversation_id = owed.id AND att.started_at > $2)
-		ORDER BY task_open DESC, owed.ended_at ASC, owed.id ASC
+		ORDER BY task_working DESC, owed.ended_at ASC, owed.id ASC
 		LIMIT $3
 	`, nullIfEmpty(orgID), time.Now().UTC().Add(-backoff), limit)
 	if err != nil {
@@ -872,7 +876,7 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	var out []domain.MemoryOwed
 	for rows.Next() {
 		var o domain.MemoryOwed
-		if err := rows.Scan(&o.OrgID, &o.ConversationID, &o.TaskID, &o.TaskOpen); err != nil {
+		if err := rows.Scan(&o.OrgID, &o.ConversationID, &o.TaskID, &o.TaskWorking); err != nil {
 			return nil, err
 		}
 		out = append(out, o)

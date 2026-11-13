@@ -86,12 +86,12 @@ const (
 	// or it came to rest on one).
 	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
 	// ResumeBlockedBlueprintCancelled — the workspace survives but the
-	// blueprint was called off at its own layer (its task closed or swiped, its
-	// team archived, the run cancelled outright), so nothing under it runs
-	// again. As permanent as the rung above, and split from it because the two
-	// put different sentences in front of a person: nothing here moved past
-	// anything — the work itself was ended, and the stop note on the transcript
-	// names the lifecycle event that ended it.
+	// blueprint was called off at its own layer (the run cancelled outright,
+	// its team archived), so nothing under it runs again. As permanent as the
+	// rung above, and split from it because the two put different sentences in
+	// front of a person: nothing here moved past anything — the work itself
+	// was ended, and the stop note on the transcript names the lifecycle event
+	// that ended it.
 	ResumeBlockedBlueprintCancelled = "blueprint_cancelled"
 	// ResumeBlockedModelNotEnabled — the model a resume would run on is one the
 	// team's enable-set no longer includes: its default, or the model the step
@@ -999,7 +999,6 @@ var errWakeRefused = errors.New("wake refused")
 // since it cannot show delivery is coming and a false success is worse than a
 // conflict the client resolves by refreshing.
 func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, conv domain.Conversation) (flipped bool, err error) {
-	// A follow-up can change the blueprint only while its task is still open.
 	// An aborted blueprint terminated when its step stopped, and the step it
 	// stopped on is this conversation, on its abort verdict. Re-open it to
 	// running in the same tx as the flip, withdrawing the verdict that aborted
@@ -1010,9 +1009,10 @@ func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, 
 	// it either way — but for disposition: an abort is work that paused
 	// mid-plan. A blueprint that FINISHED is the opposite case and stays
 	// finished; finished machinery never restarts and the follow-up rides it
-	// as-is. ReopenRunForResume's CAS is what decides: status 'aborted' and a
-	// task still open, so it is a no-op on a finished or still-running
-	// blueprint and on a task a person has since closed.
+	// as-is. ReopenRunForResume's CAS is what decides: status 'aborted', so it
+	// is a no-op on a finished or still-running blueprint. The task's status
+	// decides nothing here: the follow-up continues the blueprint on a closed
+	// task exactly as on an open one.
 	reopenAbortedBlueprint := conv.Concluded()
 
 	f, err := ts.Conversations.MarkQueuedForResume(ctx, orgID, conv.ID)
