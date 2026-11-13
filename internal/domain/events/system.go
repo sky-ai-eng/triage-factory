@@ -246,6 +246,32 @@ func (p SystemRoutingDispositionPredicate) Matches(m SystemRoutingDispositionMet
 }
 
 // -----------------------------------------------------------------------------
+// system:task:assigned — a task gained a new assignee, published after the
+// write that assigned it commits. The agent's stamp is published by the
+// router; a person's claim, takeover, reassignment and Delegate by the server.
+// A mint, a refused or idempotent stamp, a requeue, and a second run under a
+// claim the agent already holds publish none: none of them changes who holds
+// the task. Bus-only and best effort: a process that dies between the commit
+// and the publish loses the event.
+// -----------------------------------------------------------------------------
+
+// SystemTaskAssignedMetadata names the task and its new assignee. Exactly one
+// of AgentID and UserID is set.
+type SystemTaskAssignedMetadata struct {
+	TaskID  string `json:"task_id"`
+	AgentID string `json:"agent_id,omitempty"`
+	UserID  string `json:"user_id,omitempty"`
+}
+
+// No predicate fields — never user-addressable; the schema exists so the
+// envelope validates and introspects like every other event type.
+type SystemTaskAssignedPredicate struct{}
+
+func (p SystemTaskAssignedPredicate) Matches(m SystemTaskAssignedMetadata) bool {
+	return true
+}
+
+// -----------------------------------------------------------------------------
 // system:entity:close_owed — the poll observed an active entity whose stored
 // snapshot was already terminal on the previous cycle, with no terminating
 // close unsettled in the queue. Enqueued by the tracker through the
@@ -293,4 +319,5 @@ func init() {
 	Register(NewSchema[SystemConversationResumedMetadata, SystemConversationResumedPredicate](domain.EventSystemConversationResumed, OwnershipUnrouted))
 	Register(NewSchema[SystemRoutingDispositionMetadata, SystemRoutingDispositionPredicate](domain.EventSystemRoutingDisposition, OwnershipUnrouted))
 	Register(NewSchema[SystemEntityCloseOwedMetadata, SystemEntityCloseOwedPredicate](domain.EventSystemEntityCloseOwed, OwnershipUnrouted))
+	Register(NewSchema[SystemTaskAssignedMetadata, SystemTaskAssignedPredicate](domain.EventSystemTaskAssigned, OwnershipUnrouted))
 }

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -53,6 +55,50 @@ func TestTaskReopen_Postgres(t *testing.T) {
 			Conversations:    stores.Conversations,
 			UserID:           userID,
 		}, orgID, newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
+	})
+}
+
+// TestSiblingWork_Postgres runs the shared overlapping-work suite against the
+// Postgres impl, on the held-close suite's stores and seeder. Every read and
+// the retire are admin-pool only, so the stores run on the admin connection,
+// as in production. Skips cleanly when Docker isn't available.
+func TestSiblingWork_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunSiblingWorkConformance(t, func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.SiblingWorkSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := seedPgOrgUserAgent(t, h)
+		return dbtest.TaskCloseDeferralStores{
+				Tasks:            stores.Tasks,
+				Entities:         stores.Entities,
+				StagedInjections: stores.StagedInjections,
+				Conversations:    stores.Conversations,
+				UserID:           userID,
+			}, orgID, dbtest.SiblingWorkSeeder{
+				TaskCloseDeferralSeeder: newPgCloseDeferralSeeder(h.AdminDB, orgID, userID),
+				Touch: func(t *testing.T, conversationID, entityID string) {
+					t.Helper()
+					if _, err := h.AdminDB.Exec(`
+						INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role)
+						VALUES ($1, $2, $3, 'touched')
+					`, orgID, conversationID, entityID); err != nil {
+						t.Fatalf("seed touch: %v", err)
+					}
+				},
+				MoveToOtherTeam: func(t *testing.T, taskID string) {
+					t.Helper()
+					teamID := uuid.New().String()
+					if _, err := h.AdminDB.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+						teamID, orgID, "other-"+teamID[:8], "Other"); err != nil {
+						t.Fatalf("seed team: %v", err)
+					}
+					if _, err := h.AdminDB.Exec(`UPDATE tasks SET team_id = $3 WHERE org_id = $1 AND id = $2`, orgID, taskID, teamID); err != nil {
+						t.Fatalf("move task: %v", err)
+					}
+				},
+			}
 	})
 }
 

@@ -2,14 +2,17 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -307,8 +310,32 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			OrgID: orgID,
 			Data:  map[string]any{},
 		})
+		s.publishTaskAssigned(orgID, id, "", userID)
 	}
 	return selfClaimed{jira: jiraUserClient, linear: linearUserClient, landing: landing, version: written}, true
+}
+
+// publishTaskAssigned publishes system:task:assigned for a claim write that
+// landed and gave the task a new assignee, after its transaction committed:
+// exactly one of agentID and userID names who. Its subscriber tells the live
+// conversations whose work overlaps the task. An idempotent re-claim changes
+// nobody and publishes nothing. Best effort: the claim stands whatever
+// becomes of the event.
+func (s *Server) publishTaskAssigned(orgID, taskID, agentID, userID string) {
+	if s.bus == nil {
+		return
+	}
+	raw, err := json.Marshal(events.SystemTaskAssignedMetadata{TaskID: taskID, AgentID: agentID, UserID: userID})
+	if err != nil {
+		taskActionLog.Warn("marshal task assignment metadata failed", "task", taskID, "error", err)
+		return
+	}
+	s.bus.Publish(domain.Event{
+		OrgID:        orgID,
+		EventType:    domain.EventSystemTaskAssigned,
+		MetadataJSON: string(raw),
+		OccurredAt:   time.Now().UTC(),
+	})
 }
 
 // linearUserCredentialMissingMessage is the claim's refusal for an
@@ -478,6 +505,7 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		OrgID: orgID,
 		Data:  map[string]any{},
 	})
+	s.publishTaskAssigned(orgID, id, "", targetUserID)
 	// The CAS landed at the version the caller read and moved the claim to
 	// another user, which db.TaskSetSQL counts as one change. It is reported
 	// from that rather than read back because the write ran on the admin pool:
@@ -676,6 +704,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 			OrgID: orgID,
 			Data:  map[string]any{},
 		})
+		s.publishTaskAssigned(orgID, id, a.ID, "")
 	}
 	return handed, true
 }

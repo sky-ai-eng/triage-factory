@@ -1015,6 +1015,39 @@ type TaskStore interface {
 	// bound by argument.
 	WorkingConversationIDsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
+	// AssignmentSystem returns the task's current assignment as the
+	// conversations whose work overlaps it are told of it: the task's
+	// identity, its entity's key, who holds it, and the names the note uses
+	// (the person's display name, the task's team's name). nil when the task
+	// is missing, closed, or held by nobody, since none of those is an
+	// assignment to tell. Recurrence is the caller's to set, per recipient.
+	// Admin pool, org_id bound by argument: the teller runs without claims,
+	// and users is readable only to the people who share an org with the row.
+	AssignmentSystem(ctx context.Context, orgID, taskID string) (*domain.TaskAssignment, error)
+
+	// SiblingWorkRecipientsSystem returns every live conversation whose work
+	// overlaps the task: the conversations that read new input on their own
+	// (the predicate LiveConversationIDForTaskSystem reads by) and that the
+	// task relates to. A task X relates to a conversation C on task T when X
+	// is not T, C's team can see X (it owns X or is in X's visibility set),
+	// and one of these holds: X and T are on one entity; C touched X's
+	// entity (a conversation_memory_entities row, under any role); or a live
+	// conversation on X touched T's entity. Each result carries the
+	// conversation's own task's identity. Ordered by the conversation's
+	// start, then id. SiblingWorkSystem reads the same relation from the
+	// other side, so a conversation is told of a task exactly when that task
+	// would be in its listing. Admin pool, org_id bound by argument.
+	SiblingWorkRecipientsSystem(ctx context.Context, orgID, taskID string) ([]domain.SiblingWorkRecipient, error)
+
+	// SiblingWorkSystem returns the tasks that overlap the conversation's
+	// work and that someone is on: every task that relates to the
+	// conversation (SiblingWorkRecipientsSystem's relation) and is either
+	// open with an assignee or has a working conversation, the predicate
+	// WorkingConversationIDsSystem reads by. Ordered by the task's creation,
+	// then id. Empty for a conversation with no task. Admin pool, org_id
+	// bound by argument.
+	SiblingWorkSystem(ctx context.Context, orgID, conversationID string) ([]domain.SiblingTask, error)
+
 	// LatestEventIDSystem returns the id of the newest event that spawned or
 	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'
 	// or 'injected' (a bump folded into a live conversation, whose row
@@ -1098,3 +1131,16 @@ const (
 	// shouldn't steal.
 	HandoffRefused
 )
+
+// SiblingTaskHolder names a listed task's holder from its two claim columns,
+// of which at most one is set. Both dialects' SiblingWorkSystem scan through
+// it.
+func SiblingTaskHolder(byAgent, byPerson bool) domain.SiblingTaskHolder {
+	switch {
+	case byAgent:
+		return domain.SiblingTaskHeldByAgent
+	case byPerson:
+		return domain.SiblingTaskHeldByPerson
+	}
+	return domain.SiblingTaskUnheld
+}

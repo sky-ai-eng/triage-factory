@@ -2,7 +2,10 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // AdditiveEventInjection is the agent-facing copy for an additive event that
@@ -183,4 +186,173 @@ func taskCloseCause(c TaskClose) string {
 		return "This task was closed: the situation it is about is over."
 	}
 	return fmt.Sprintf("A %s event closed this task.", c.EventType)
+}
+
+// TaskAssignment is an open task and who holds it, as a conversation whose
+// work overlaps the task is told when the task gains that assignee.
+type TaskAssignment struct {
+	TaskID string
+	// EntityID, EventType and DedupKey are the task's identity among the
+	// tasks of its entity; a recipient whose own task carries the same three
+	// is a recurrence (Recurrence).
+	EntityID  string
+	EventType string
+	DedupKey  string
+	// EntitySourceID is the entity's key (entities.source_id): a pull
+	// request's "owner/repo#18", a Jira key, a Linear identifier.
+	EntitySourceID string
+	// AgentID or UserID is the assignee; exactly one is set.
+	AgentID string
+	UserID  string
+	// AssigneeName is a person's display name, "" when they have none.
+	AssigneeName string
+	// TeamName is the task's team, which the agent is named by.
+	TeamName string
+	// Recurrence says the recipient's own task has this task's entity, event
+	// type and dedup key. At most one active task carries a given three, so
+	// the recipient's is closed and this one is the event happening again.
+	Recurrence bool
+}
+
+// Assignee spells the assignment's holder as a note's provenance records it
+// (AgentAssignee, UserAssignee).
+func (a TaskAssignment) Assignee() string {
+	if a.AgentID != "" {
+		return AgentAssignee(a.AgentID)
+	}
+	return UserAssignee(a.UserID)
+}
+
+// taskOverlapGuidance is what an agent does about work on another task that
+// overlaps its own. Nothing is stopped or handed over: the two go on side by
+// side, so the agent is told what it will meet.
+const taskOverlapGuidance = "Work on that task may touch the same branch or issue as yours: " +
+	"fetch before you push, and expect commits you did not make."
+
+// TaskAssignedNote is the agent-facing copy telling a conversation that
+// someone took on another task its work overlaps: which task, on what, and
+// who. A recurrence has its own wording, because the task named is the
+// recipient's own situation come back. Bare, like TaskClosedNote.
+func TaskAssignedNote(a TaskAssignment) string {
+	who := noteLine(a.AssigneeName)
+	switch {
+	case a.AgentID != "" && noteLine(a.TeamName) != "":
+		who = "the agent for team " + noteLine(a.TeamName)
+	case a.AgentID != "":
+		who = "the agent"
+	case who == "":
+		who = "a teammate"
+	}
+	if a.Recurrence {
+		return fmt.Sprintf("The %s event this conversation's task was about happened again on %s after that task closed. "+
+			"It is now task %s, and %s took it on. %s",
+			a.EventType, a.EntitySourceID, a.TaskID, who, taskOverlapGuidance)
+	}
+	return fmt.Sprintf("%s took on task %s, a %s task on %s. %s",
+		upperFirst(who), a.TaskID, a.EventType, a.EntitySourceID, taskOverlapGuidance)
+}
+
+// noteLine fits a name a person chose (a display name, a team's name) into a
+// sentence of a note: one line, no surrounding space.
+func noteLine(name string) string {
+	return strings.Join(strings.Fields(name), " ")
+}
+
+// upperFirst capitalizes the first letter of a phrase that opens a sentence.
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[size:]
+}
+
+// SiblingTaskHolder is who holds a task that overlaps a conversation's work.
+type SiblingTaskHolder int
+
+const (
+	// SiblingTaskUnheld is a task nobody holds.
+	SiblingTaskUnheld SiblingTaskHolder = iota
+	// SiblingTaskHeldByAgent is a task the agent's claim is on.
+	SiblingTaskHeldByAgent
+	// SiblingTaskHeldByPerson is a task a person claimed.
+	SiblingTaskHeldByPerson
+)
+
+// SiblingTask is one task that overlaps a conversation's work, as the
+// conversation is shown it (TaskStore.SiblingWorkSystem).
+type SiblingTask struct {
+	TaskID         string
+	EventType      string
+	EntitySourceID string
+	// Closed says the task is done or dismissed.
+	Closed bool
+	Holder SiblingTaskHolder
+	// TeamName is the task's team, "" for a task with none.
+	TeamName string
+	// Working says a conversation is working on the task.
+	Working bool
+}
+
+// SiblingWorkRecipient is one live conversation whose work overlaps a task,
+// with the identity of the conversation's own task
+// (TaskStore.SiblingWorkRecipientsSystem).
+type SiblingWorkRecipient struct {
+	ConversationID string
+	TaskID         string
+	EntityID       string
+	EventType      string
+	DedupKey       string
+}
+
+// SiblingWorkRunContext is the <run_context> block of a launch whose work
+// overlaps other tasks: one line per task, "" for none. It says what was
+// true at the launch, since the block is fixed for the conversation's life
+// and a later assignment reaches the run as a note. It names no person, and
+// nothing a source authored beyond the entity's key.
+func SiblingWorkRunContext(tasks []SiblingTask) string {
+	return siblingWorkBlock("Overlapping work: when this run started, these other tasks were on the pull request or issue this task is on, "+
+		"or on one that this run's work or theirs touched.", tasks)
+}
+
+// SiblingWorkNote is the agent-facing copy catching up a conversation that
+// had concluded and was woken by a person's message: the same listing as the
+// launch's block, as of the wake. "" for none. Bare, like TaskClosedNote.
+func SiblingWorkNote(tasks []SiblingTask) string {
+	return siblingWorkBlock("This is the work that overlaps this conversation's now: these other tasks are on the pull request or issue this task is on, "+
+		"or on one that this conversation's work or theirs touched.", tasks)
+}
+
+// siblingWorkBlock renders the listing under leadIn, shared by the launch's
+// block and the wake's note so the two describe a task the same way.
+func siblingWorkBlock(leadIn string, tasks []SiblingTask) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(leadIn + " Their work may touch the same branch or issue as yours: fetch before you push, and expect commits you did not make.")
+	for _, t := range tasks {
+		state := "open"
+		if t.Closed {
+			state = "closed"
+		}
+		holder := "held by nobody"
+		team := noteLine(t.TeamName)
+		switch {
+		case t.Holder == SiblingTaskHeldByAgent && team != "":
+			holder = "held by the agent for team " + team
+		case t.Holder == SiblingTaskHeldByAgent:
+			holder = "held by the agent"
+		case t.Holder == SiblingTaskHeldByPerson && team != "":
+			holder = "held by a person on team " + team
+		case t.Holder == SiblingTaskHeldByPerson:
+			holder = "held by a person"
+		}
+		working := "no conversation is working on it"
+		if t.Working {
+			working = "a conversation is working on it"
+		}
+		fmt.Fprintf(&b, "\n- task %s (%s on %s): %s, %s, %s", t.TaskID, t.EventType, t.EntitySourceID, state, holder, working)
+	}
+	return b.String()
 }

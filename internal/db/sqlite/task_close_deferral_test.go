@@ -25,10 +25,55 @@ func TestTaskReopen_SQLite(t *testing.T) {
 	dbtest.RunTaskReopenConformance(t, newSQLiteCloseDeferralFactory())
 }
 
+// TestSiblingWork_SQLite runs the shared overlapping-work suite against the
+// SQLite impl, on the held-close suite's stores and seeder.
+func TestSiblingWork_SQLite(t *testing.T) {
+	mk := newSQLiteCloseDeferral()
+	dbtest.RunSiblingWorkConformance(t, func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.SiblingWorkSeeder) {
+		t.Helper()
+		conn, stores, orgID, seed := mk(t)
+		return stores, orgID, dbtest.SiblingWorkSeeder{
+			TaskCloseDeferralSeeder: seed,
+			Touch: func(t *testing.T, conversationID, entityID string) {
+				t.Helper()
+				if _, err := conn.Exec(`
+					INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role)
+					VALUES (?, ?, ?, 'touched')
+				`, orgID, conversationID, entityID); err != nil {
+					t.Fatalf("seed touch: %v", err)
+				}
+			},
+			MoveToOtherTeam: func(t *testing.T, taskID string) {
+				t.Helper()
+				teamID := uuid.New().String()
+				if _, err := conn.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
+					teamID, orgID, "other-"+teamID[:8], "Other"); err != nil {
+					t.Fatalf("seed team: %v", err)
+				}
+				if _, err := conn.Exec(`UPDATE tasks SET team_id = ? WHERE id = ?`, teamID, taskID); err != nil {
+					t.Fatalf("move task: %v", err)
+				}
+			},
+		}
+	})
+}
+
 // newSQLiteCloseDeferralFactory hands each call a fresh in-memory DB with the
 // held-close suite's stores and seeder over it.
 func newSQLiteCloseDeferralFactory() dbtest.TaskCloseDeferralFactory {
+	mk := newSQLiteCloseDeferral()
 	return func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
+		t.Helper()
+		_, stores, orgID, seed := mk(t)
+		return stores, orgID, seed
+	}
+}
+
+// newSQLiteCloseDeferral is newSQLiteCloseDeferralFactory with the connection
+// handed back as well, for a suite that seeds rows of its own beside the
+// seeder's.
+func newSQLiteCloseDeferral() func(t *testing.T) (*sql.DB, dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
+	return func(t *testing.T) (*sql.DB, dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
 		t.Helper()
 		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
@@ -78,7 +123,7 @@ func newSQLiteCloseDeferralFactory() dbtest.TaskCloseDeferralFactory {
 				exec(t, "resolve drafts", `UPDATE deliverables SET state = 'open' WHERE conversation_id = ? AND state = 'draft'`, conversationID)
 			},
 		}
-		return dbtest.TaskCloseDeferralStores{
+		return conn, dbtest.TaskCloseDeferralStores{
 			Tasks:            stores.Tasks,
 			Entities:         stores.Entities,
 			StagedInjections: stores.StagedInjections,

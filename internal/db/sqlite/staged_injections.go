@@ -183,6 +183,45 @@ func (s *stagedInjectionStore) HasNoteForTaskCloseSystem(ctx context.Context, or
 	return told, err
 }
 
+func (s *stagedInjectionStore) RetireStaleAssignmentNotesSystem(ctx context.Context, orgID, conversationID string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	subtypes, subtypeArgs := inListArgs(domain.StagedInjectionSubtypes)
+	args := append([]any{orgID, conversationID}, subtypeArgs...)
+	args = append(args, domain.StagedInjectionProducerTaskAssigned)
+	args = append(args, subtypeArgs...)
+	args = append(args, domain.StagedInjectionProducerTaskAssigned)
+	// A note is kept only while an open task still carries its assignee, so
+	// a task that closed, changed hands, went back to the queue, or is gone
+	// retires it by the one NOT EXISTS.
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE messages SET window_state = 'inactive'
+		 WHERE org_id = ? AND conversation_id = ?
+		   AND delivered = 0 AND window_state = 'active' AND role = 'user'
+		   AND subtype IN (`+subtypes+`) AND json_extract(metadata, '$.producer') = ?
+		   AND (NOT EXISTS (
+		            SELECT 1 FROM tasks x
+		             WHERE x.id = json_extract(messages.metadata, '$.assigned_task')
+		               AND x.status NOT IN ('done', 'dismissed')
+		               AND json_extract(messages.metadata, '$.assignee') = CASE
+		                       WHEN x.claimed_by_agent_id IS NOT NULL THEN 'agent:' || x.claimed_by_agent_id
+		                       WHEN x.claimed_by_user_id IS NOT NULL THEN 'user:' || x.claimed_by_user_id END)
+		        OR EXISTS (
+		            SELECT 1 FROM messages n
+		             WHERE n.conversation_id = messages.conversation_id
+		               AND n.delivered = 0 AND n.window_state = 'active' AND n.role = 'user'
+		               AND n.subtype IN (`+subtypes+`) AND json_extract(n.metadata, '$.producer') = ?
+		               AND json_extract(n.metadata, '$.assigned_task') = json_extract(messages.metadata, '$.assigned_task')
+		               AND n.id > messages.id))
+	`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("retire stale assignment notes: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // stagedInjectionIDLess orders decimal message-row ids numerically (a
 // lexical sort would put "10" before "9").
 func stagedInjectionIDLess(a, b string) bool {
