@@ -351,9 +351,9 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		// The one exemption: the lifecycle task the terminating transition
 		// mints on the entity it just closed. It is minted, it is the only
 		// open task on the entity, and the checker's read does not count it.
-		riding, created, err := tasks.FindOrCreateAtSystem(ctx, orgID, "", entityID, domain.EventGitHubPRMerged, "", eventID, 0.5, time.Now().UTC())
-		if err != nil || !created || riding == nil {
-			t.Fatalf("mint the riding task on the closed entity: task=%v created=%v err=%v", riding, created, err)
+		riding, mint, err := tasks.FindOrCreateAtSystem(ctx, orgID, "", entityID, domain.EventGitHubPRMerged, "", eventID, 0.5, time.Now().UTC())
+		if err != nil || mint != db.TaskCreated || riding == nil {
+			t.Fatalf("mint the riding task on the closed entity: task=%v mint=%v err=%v", riding, mint, err)
 		}
 		if open, err := tasks.ListOpenOnClosedEntitiesSystem(ctx, orgID); err != nil || len(open) != 0 {
 			t.Errorf("open-on-closed = %v (err %v), want none — the riding task lives on a closed entity by design", open, err)

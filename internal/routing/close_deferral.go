@@ -270,7 +270,7 @@ func (r *Router) deferredCloseReason(ctx context.Context, orgID string, evt doma
 		if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(task)) {
 			continue
 		}
-		return rel.reason(), true, nil
+		return rel.reasonFor(evt.EventType, task.EventType), true, nil
 	}
 	return "", false, nil
 }

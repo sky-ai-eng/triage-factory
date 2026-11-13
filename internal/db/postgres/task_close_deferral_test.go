@@ -35,6 +35,28 @@ func TestTaskCloseDeferral_Postgres(t *testing.T) {
 	})
 }
 
+// TestTaskReopen_Postgres runs the shared reopen suite against the Postgres
+// impl, on the held-close suite's stores and seeder. The reopen is the System
+// mint doors' alone, so the stores run on the admin connection, as in
+// production. Skips cleanly when Docker isn't available.
+func TestTaskReopen_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunTaskReopenConformance(t, func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := seedPgOrgUserAgent(t, h)
+		return dbtest.TaskCloseDeferralStores{
+			Tasks:            stores.Tasks,
+			Entities:         stores.Entities,
+			StagedInjections: stores.StagedInjections,
+			Conversations:    stores.Conversations,
+			UserID:           userID,
+		}, orgID, newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
+	})
+}
+
 // TestTaskCloseDeferral_Postgres_ListsEveryOrg pins the list read's scope:
 // the sweep is one loop over every org, so it reads every live org's
 // held closes, each row naming the org it belongs to, and none of a deleted

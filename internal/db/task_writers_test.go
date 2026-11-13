@@ -57,6 +57,7 @@ var taskWriters = map[string]taskWriter{
 	"postgres/tasks.go closeOrHoldTask":            notBumping("the held close; the close it applies goes through closeTaskRow"),
 	"postgres/tasks.go closeTaskRow":               bumping(),
 	"postgres/tasks.go reassignClaimToUser":        bumping(),
+	"postgres/tasks.go reopenClosedTask":           bumping(),
 	"postgres/tasks.go setOwnerTeam":               bumping(),
 	"postgres/tasks.go stampAgentClaimIfUnclaimed": bumping(),
 	"sqlite/entities.go moveEntityReferences":      bumping(),
@@ -79,6 +80,7 @@ var taskWriters = map[string]taskWriter{
 	"sqlite/tasks.go closeOrHoldTask":              notBumping("the held close; the close it applies goes through closeTaskRow"),
 	"sqlite/tasks.go closeTaskRow":                 bumping(),
 	"sqlite/tasks.go reassignClaimToUserSQLite":    bumping(),
+	"sqlite/tasks.go reopenClosedTask":             bumping(),
 	"sqlite/tasks.go setOwnerTeam":                 bumping(),
 	"sqlite/tasks.go stampAgentClaimIfUnclaimed":   bumping(),
 }

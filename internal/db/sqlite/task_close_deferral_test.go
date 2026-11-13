@@ -18,7 +18,19 @@ import (
 // TestTaskCloseDeferral_SQLite runs the shared held-close suite against the
 // SQLite impl, a fresh in-memory DB per subtest.
 func TestTaskCloseDeferral_SQLite(t *testing.T) {
-	dbtest.RunTaskCloseDeferralConformance(t, func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
+	dbtest.RunTaskCloseDeferralConformance(t, newSQLiteCloseDeferralFactory())
+}
+
+// TestTaskReopen_SQLite runs the shared reopen suite against the SQLite impl,
+// on the held-close suite's stores and seeder.
+func TestTaskReopen_SQLite(t *testing.T) {
+	dbtest.RunTaskReopenConformance(t, newSQLiteCloseDeferralFactory())
+}
+
+// newSQLiteCloseDeferralFactory hands each call a fresh in-memory DB with the
+// held-close suite's stores and seeder over it.
+func newSQLiteCloseDeferralFactory() dbtest.TaskCloseDeferralFactory {
+	return func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
 		t.Helper()
 		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
@@ -80,5 +92,5 @@ func TestTaskCloseDeferral_SQLite(t *testing.T) {
 			Conversations:    stores.Conversations,
 			UserID:           runmode.LocalDefaultUserID,
 		}, runmode.LocalDefaultOrgID, seed
-	})
+	}
 }

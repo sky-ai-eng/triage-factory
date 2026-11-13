@@ -315,7 +315,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 
 	// Find or create the single task for this (entity, event_type,
 	// dedup_key); record visibility + lifecycle and enqueue scoring.
-	task, created, err := r.upsertTaskForEvent(ctx, orgID, evt, entityID, routing)
+	task, mint, err := r.upsertTaskForEvent(ctx, orgID, evt, entityID, routing)
 	if errors.Is(err, dbpkg.ErrEntityClosed) {
 		// The entity closed between the lifecycle gate above and the mint's
 		// own transaction, and the mint refused rather than strand a task on
@@ -338,15 +338,19 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 		return nil
 	}
 	disp.TaskID = task.ID
-	if created {
+	switch mint {
+	case dbpkg.TaskCreated:
 		disp.Disposition = events.DispositionTaskCreated
-	} else {
+	case dbpkg.TaskReopened:
+		disp.Disposition = events.DispositionTaskReopened
+	default:
 		disp.Disposition = events.DispositionTaskBumped
 	}
 
 	// Auto-delegate matching triggers in priority order. The disposition stays
-	// task_created/task_bumped even when a trigger failed: the task really was
-	// minted, and that is what the sentinel's audience asked about. The
+	// task_created/task_bumped/task_reopened even when a trigger failed: the
+	// task really was minted, and that is what the sentinel's audience asked
+	// about. The
 	// returned error is the other audience — the worker, which retries the
 	// event so the trigger gets its second chance.
 	fired, injectedConversationID, err := r.fireMatchedTriggers(ctx, orgID, evt, entityID, task, routing)
@@ -714,18 +718,24 @@ func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string,
 	}, true, nil
 }
 
-// upsertTaskForEvent finds or creates the single task for this (entity,
-// event_type, dedup_key), records its visibility set + spawned/bumped
+// upsertTaskForEvent finds, creates or reopens the single task for this
+// (entity, event_type, dedup_key), records its visibility set + spawned/bumped
 // lifecycle, enqueues scoring, and broadcasts.
 //
 // Three outcomes, kept distinguishable so the caller never confuses a real
 // failure with a deliberate no-op:
-//   - (task, created, nil)  — success; created reports which.
-//   - (nil, false, nil)     — the became_atomic dedup suppression: an active
+//   - (task, mint, nil)  — success; mint reports whether the task was found
+//     active, created, or reopened (dbpkg.TaskMint).
+//   - (nil, _, nil)      — the became_atomic dedup suppression: an active
 //     task already covers the entity, so no new one is minted. Legitimate,
 //     not an error.
-//   - (nil, false, err)     — a store failure; no task exists to report.
-func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, created bool, err error) {
+//   - (nil, _, err)      — a store failure; no task exists to report.
+//
+// A reopened task is recorded as a found one is: the event is a 'bumped'
+// task_event, which is the kind the fold into the task's working conversation
+// then marks injected. The reopen cleared the hold and withdrew the close
+// notes itself, so the bump a found task takes is skipped.
+func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, mint dbpkg.TaskMint, err error) {
 	ctx, span := tracer.Start(ctx, "route.task", trace.WithAttributes(telemetry.EntityID(entityID)))
 	defer span.End()
 
@@ -759,7 +769,7 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		// gap between the check and the insert. The event is still
 		// recorded; only task creation is skipped.
 		var suppressed bool
-		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
+		task, mint, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
 			// A closed entity is an answer the caller classifies and logs
 			// at its own level, not a failure of this stage.
@@ -767,22 +777,22 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 				span.SetStatus(codes.Error, "find or create task")
 				routerLog.ErrorContext(ctx, "became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
 			}
-			return nil, false, err
+			return nil, dbpkg.TaskFound, err
 		}
 		if suppressed {
 			// Anticipated: the dedup rule doing its job, not a failure.
 			span.SetAttributes(telemetry.Outcome("suppressed_entity_active"))
 			routerLog.WarnContext(ctx, "became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
-			return nil, false, nil
+			return nil, dbpkg.TaskFound, nil
 		}
 	} else {
-		task, created, err = r.tasks.FindOrCreateAtSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
+		task, mint, err = r.tasks.FindOrCreateAtSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
 			if !errors.Is(err, dbpkg.ErrEntityClosed) {
 				span.SetStatus(codes.Error, "find or create task")
 				routerLog.ErrorContext(ctx, "failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
 			}
-			return nil, false, err
+			return nil, dbpkg.TaskFound, err
 		}
 	}
 
@@ -794,12 +804,18 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		routerLog.Error("failed to set visibility teams for task", "task_id", task.ID, "error", err)
 	}
 
-	if created {
+	switch mint {
+	case dbpkg.TaskCreated:
 		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, evt.ID, "spawned"); err != nil {
 			routerLog.Error("failed to record spawned task_event", "task_id", task.ID, "error", err)
 		}
 		routerLog.Info("created task", "task_id", task.ID, "event_type", evt.EventType, "entity_id", entityID, "owner_team", routing.ownerTeam, "visible_teams", len(routing.visibleTeams))
-	} else {
+	case dbpkg.TaskReopened:
+		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, evt.ID, "bumped"); err != nil {
+			routerLog.Error("failed to record bumped task_event", "task_id", task.ID, "error", err)
+		}
+		routerLog.Info("reopened task", "task_id", task.ID, "event_type", evt.EventType, "entity_id", entityID)
+	default:
 		if _, err := r.tasks.BumpSystem(ctx, orgID, task.ID, evt.ID); err != nil {
 			routerLog.Error("failed to bump task", "task_id", task.ID, "error", err)
 		}
@@ -813,7 +829,7 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	r.scorer.Trigger(orgID)
 	r.broadcastTasksUpdated(orgID)
 	span.SetAttributes(telemetry.TaskID(task.ID))
-	return task, created, nil
+	return task, mint, nil
 }
 
 // fireMatchedTriggers auto-delegates the matched triggers against the task

@@ -617,8 +617,8 @@ func (s *taskStore) FindActiveByEntitySystem(ctx context.Context, orgID, entityI
 	return s.FindActiveByEntity(ctx, orgID, entityID)
 }
 
-func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	return s.findOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, domain.TaskMayRideClosedEntity(eventType))
+func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, db.TaskMint, error) {
+	return s.findOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, domain.TaskMayRideClosedEntity(eventType), true)
 }
 
 // FindOrCreateAtUnlessEntityActiveSystem mirrors the plain check-then-act
@@ -627,16 +627,16 @@ func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, ent
 // real lock on Postgres. SQLite/local is single-connection N=1 — there's no
 // concurrent writer for a lock to exclude — so this exists for interface
 // conformance with the Postgres impl rather than a correctness fix here.
-func (s *taskStore) FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error) {
+func (s *taskStore) FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, mint db.TaskMint, suppressed bool, err error) {
 	active, err := s.FindActiveByEntitySystem(ctx, orgID, entityID)
 	if err != nil {
-		return nil, false, false, err
+		return nil, db.TaskFound, false, err
 	}
 	if len(active) > 0 {
-		return nil, false, true, nil
+		return nil, db.TaskFound, true, nil
 	}
-	task, created, err = s.FindOrCreateAtSystem(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
-	return task, created, false, err
+	task, mint, err = s.FindOrCreateAtSystem(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+	return task, mint, false, err
 }
 
 func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error {
@@ -854,18 +854,19 @@ func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, e
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	return s.findOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, false)
+	task, mint, err := s.findOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, false, false)
+	return task, mint == db.TaskCreated, err
 }
 
-// findOrCreateAt is the mint both doors share. admitRider is the System
-// door's alone: the request path never admits a task onto a closed entity,
-// whatever its event type.
-func (s *taskStore) findOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time, admitRider bool) (*domain.Task, bool, error) {
+// findOrCreateAt is the mint both doors share. admitRider and reopen are the
+// System door's alone: the request path never admits a task onto a closed
+// entity, whatever its event type, and a task a person creates is always new.
+func (s *taskStore) findOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time, admitRider, reopen bool) (*domain.Task, db.TaskMint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, false, err
+		return nil, db.TaskFound, err
 	}
 	var task *domain.Task
-	var created bool
+	var mint db.TaskMint
 	// One transaction, entity first: the entity-active check and the
 	// select-or-insert commit together, so a terminating close cannot land
 	// between them and leave a task on an entity nothing will close again.
@@ -876,13 +877,13 @@ func (s *taskStore) findOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 			return err
 		}
 		var err error
-		task, created, err = findOrCreateTaskAtLocked(ctx, tx, entityID, teamID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		task, mint, err = findOrCreateTaskAtLocked(ctx, tx, entityID, teamID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, reopen)
 		return err
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, db.TaskFound, err
 	}
-	return task, created, nil
+	return task, mint, nil
 }
 
 // assertEntityActive is the mint's half of the mint/close serialization: a
@@ -906,8 +907,9 @@ func assertEntityActive(ctx context.Context, q queryer, entityID string, admitRi
 }
 
 // findOrCreateTaskAtLocked is FindOrCreateAt's select-or-insert, run on a
-// transaction that has already verified the entity is active.
-func findOrCreateTaskAtLocked(ctx context.Context, q queryer, entityID, teamID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+// transaction that has already verified the entity is active. With reopen,
+// a miss on the active row tries reopenClosedTask before it inserts.
+func findOrCreateTaskAtLocked(ctx context.Context, q queryer, entityID, teamID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time, reopen bool) (*domain.Task, db.TaskMint, error) {
 	// teamID is the owning/attributed team stamped on a new row. Empty is
 	// allowed and means "unresolved owner" — author-centric routing couldn't
 	// pick a single team — and is inserted as NULL. A NULL-team task is still
@@ -931,10 +933,20 @@ func findOrCreateTaskAtLocked(ctx context.Context, q queryer, entityID, teamID, 
 		LIMIT 1
 	`, entityID, eventType, dedupKey), &existing)
 	if err == nil {
-		return &existing, false, nil
+		return &existing, db.TaskFound, nil
 	}
 	if err != sql.ErrNoRows {
-		return nil, false, err
+		return nil, db.TaskFound, err
+	}
+
+	if reopen {
+		reopened, err := reopenClosedTask(ctx, q, entityID, eventType, dedupKey)
+		if err != nil {
+			return nil, db.TaskFound, err
+		}
+		if reopened != nil {
+			return reopened, db.TaskReopened, nil
+		}
 	}
 
 	// Create new task. The partial unique index on
@@ -963,16 +975,58 @@ func findOrCreateTaskAtLocked(ctx context.Context, q queryer, entityID, teamID, 
 			LIMIT 1
 		`, entityID, eventType, dedupKey), &raced)
 		if err2 == nil {
-			return &raced, false, nil
+			return &raced, db.TaskFound, nil
 		}
-		return nil, false, err
+		return nil, db.TaskFound, err
 	}
 
 	task, err := getTaskRow(ctx, q, id)
 	if err != nil {
-		return nil, false, err
+		return nil, db.TaskFound, err
 	}
-	return task, true, nil
+	return task, db.TaskCreated, nil
+}
+
+// reopenClosedTask is the Postgres twin's: the mint's reopen, on the mint's
+// transaction, after its active-row lookup missed. The transaction is the
+// lock: one writer at a time. nil means nothing qualified and the mint
+// inserts.
+func reopenClosedTask(ctx context.Context, q queryer, entityID, eventType, dedupKey string) (*domain.Task, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		UPDATE tasks
+		   SET `+db.TaskSetSQL(db.ReopenTaskAssigns...)+`
+		 WHERE id = (
+		       SELECT c.id FROM tasks c
+		        WHERE c.entity_id = ?1 AND c.event_type = ?2 AND c.dedup_key = ?3
+		          AND c.status IN ('done', 'dismissed')
+		        ORDER BY c.closed_at DESC, c.created_at DESC, c.id DESC
+		        LIMIT 1)
+		   AND status = 'done'
+		   AND close_reason = '`+db.SiblingEventCloseReason+`'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM tasks a
+		        WHERE a.entity_id = ?1 AND a.event_type = ?2 AND a.dedup_key = ?3
+		          AND a.status NOT IN ('done', 'dismissed'))
+		   AND EXISTS (
+		       SELECT 1 FROM entities e
+		        WHERE e.id = tasks.entity_id AND e.state = 'active')
+		   AND EXISTS (
+		       SELECT 1 FROM conversations r
+		        WHERE r.task_id = tasks.id
+		          AND `+workingConversationSQL+`)
+		RETURNING id
+	`, entityID, eventType, dedupKey).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reopen closed task: %w", err)
+	}
+	if err := withdrawProducerNotesForTask(ctx, q, id, domain.StagedInjectionProducerTaskClosing); err != nil {
+		return nil, fmt.Errorf("withdraw close notes: %w", err)
+	}
+	return getTaskRow(ctx, q, id)
 }
 
 func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
