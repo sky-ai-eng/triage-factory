@@ -33,7 +33,7 @@ func TestStopBlueprintRun_TearsDownTheRunItsIDNames(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTaskClosed); err != nil {
+	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTeamArchived); err != nil {
 		t.Fatalf("StopBlueprintRun: %v", err)
 	}
 	// Nothing holds the queued step, so the dispatcher settles its stop.
@@ -64,8 +64,8 @@ func TestStopBlueprintRun_TearsDownTheRunItsIDNames(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("stop notes = %d, want 1 — each stopped step explains its own ending", len(notes))
 	}
-	if notes[0].Content != StopCauseTaskClosed.note() {
-		t.Errorf("note = %q, want %q", notes[0].Content, StopCauseTaskClosed.note())
+	if notes[0].Content != StopCauseTeamArchived.note() {
+		t.Errorf("note = %q, want %q", notes[0].Content, StopCauseTeamArchived.note())
 	}
 }
 
@@ -85,7 +85,7 @@ func TestStopBlueprintRun_NoStepConversations_FinalizesTheRun(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTaskClosed); err != nil {
+	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTeamArchived); err != nil {
 		t.Fatalf("StopBlueprintRun: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestStopBlueprintRun_RefusesAConversationID(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, conversationID, StopCauseTaskClosed)
+	err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, conversationID, StopCauseTeamArchived)
 	if !errors.Is(err, ErrNoSuchBlueprintRun) {
 		t.Fatalf("StopBlueprintRun with a conversation id = %v, want ErrNoSuchBlueprintRun", err)
 	}
@@ -130,7 +130,7 @@ func TestStopConversationAndCancelBlueprint_RefusesABlueprintRunID(t *testing.T)
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, brID, "", StopCauseTaskClosed)
+	err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, brID, "", StopCauseTeamArchived)
 	if !errors.Is(err, ErrNoActiveConversation) {
 		t.Fatalf("StopConversationAndCancelBlueprint with a blueprint_run id = %v, want ErrNoActiveConversation", err)
 	}
@@ -170,7 +170,7 @@ func TestStopBlueprintRun_CancelSignalFailure_TearsNothingDown(t *testing.T) {
 	stores.Blueprints = cancelSignalFailingBlueprints{BlueprintStore: stores.Blueprints}
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTaskClosed); err == nil {
+	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTeamArchived); err == nil {
 		t.Fatal("StopBlueprintRun returned nil after the cancel signal failed to commit")
 	}
 
@@ -207,7 +207,7 @@ func TestStopBlueprintRun_ConcludedRunIsItsOwnAnswer(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTaskClosed)
+	err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseTeamArchived)
 	if !errors.Is(err, ErrBlueprintRunConcluded) {
 		t.Fatalf("StopBlueprintRun on a concluded run = %v, want ErrBlueprintRunConcluded", err)
 	}

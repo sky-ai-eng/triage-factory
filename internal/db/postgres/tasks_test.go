@@ -65,6 +65,34 @@ func TestTaskStore_Postgres(t *testing.T) {
 	})
 }
 
+// TestTaskStatusChecks_Postgres runs the schema-constraint suite behind the
+// task store's guarded status writes against the Postgres schema, both pools
+// on AdminDB like the suite above.
+func TestTaskStatusChecks_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunTaskStatusCheckConformance(t, func(t *testing.T) dbtest.TaskStatusCheckFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		return dbtest.TaskStatusCheckFixture{
+			Store:   stores.Tasks,
+			OrgID:   orgID,
+			AgentID: agentID,
+			UserID:  userID,
+			Seed: func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
+				t.Helper()
+				return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
+			},
+			WriteStatus: func(taskID, status string) error {
+				_, err := h.AdminDB.Exec(`UPDATE tasks SET status = $1 WHERE org_id = $2 AND id = $3`, status, orgID, taskID)
+				return err
+			},
+		}
+	})
+}
+
 // TestTaskVersion_Postgres runs the task-version suite against the Postgres
 // impl, both pools on AdminDB like the suite above.
 func TestTaskVersion_Postgres(t *testing.T) {
@@ -766,7 +794,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 	}
 	bumpID := seed("ap-bump")
 	closeID := seed("ap-close")
-	statusID := seed("ap-status")
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
@@ -785,8 +812,8 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 			}
 		}
 
-		if _, err := store.SetStatus(ctx, orgID, bumpID, "snoozed"); err != nil {
-			return fmt.Errorf("seed snoozed: %w", err)
+		if ok, err := store.SnoozeTask(ctx, orgID, bumpID, time.Now().Add(time.Hour), dbtest.TaskVersion(t, store, orgID, bumpID)); err != nil || !ok {
+			return fmt.Errorf("seed snoozed: ok=%v err=%w", ok, err)
 		}
 		bumped, err := store.Bump(ctx, orgID, bumpID, "")
 		if err != nil {
@@ -799,12 +826,6 @@ func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
 			return fmt.Errorf("Close: %w", err)
 		}
 		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.Close", closed, bareRead(closeID))
-
-		status, err := store.SetStatus(ctx, orgID, statusID, "in_progress")
-		if err != nil {
-			return fmt.Errorf("SetStatus: %w", err)
-		}
-		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetStatus", status, bareRead(statusID))
 		return nil
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)

@@ -270,10 +270,10 @@ const warmTreeHeldSQL = `EXISTS (
 // blueprint between two steps: its next step has no conversation yet, and the
 // work on the task is not over until the blueprint has advanced or ended. A conversation parked on a person, and a
 // concluded or failed one its blueprint has moved past, are not working. An
-// event close holds while one of the task's conversations is
-// (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
-// none is (TaskStore.ListActiveCloseDeferralsSystem), so the two read this
-// one predicate.
+// event's close reports the task's working conversations for its caller to
+// tell (TaskCloseOutcome.WorkingConversationIDs), and the router's mint
+// reopens a task a sibling event closed while one of its conversations is
+// working, so the two read this one predicate.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
 	  AND (` + workingClaimExistsSQL + `
@@ -297,23 +297,6 @@ const personMessageSQL = `m_p.role = 'user'
 	  AND m_p.subtype IN ('', '` + domain.MessageSubtypeInjectionSteer + `')
 	  AND m_p.user_id IS NOT NULL
 	  AND NOT (m_p.delivered = false AND m_p.window_state = 'inactive')`
-
-// personDrivenConversationSQL is conversation r's work being a person's: they
-// delegated it, which every step of its blueprint inherits, or they have
-// written to it (personMessageSQL). The close note tells such work what
-// happened without telling it to stop.
-const personDrivenConversationSQL = `(r.creator_user_id IS NOT NULL OR EXISTS (
-		SELECT 1 FROM messages m_p
-		WHERE m_p.org_id = r.org_id AND m_p.conversation_id = r.id
-		  AND ` + personMessageSQL + `))`
-
-// expiringConversationSQL is conversation r still working on a task whose
-// close holds, on work an event started that nobody has asked to stop: the
-// work the close note told to wrap up, which the close-hold sweep stops once
-// the hold is older than its limit.
-var expiringConversationSQL = workingConversationSQL + `
-	  AND NOT ` + personDrivenConversationSQL + `
-	  AND r.stop_requested_at IS NULL`
 
 // nextAttemptDueSQL is the time gate: no hand-back is holding the row back, or
 // the wait it set is over. statement_timestamp(), the clock the claim leases

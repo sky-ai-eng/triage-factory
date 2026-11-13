@@ -127,10 +127,10 @@ func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintSequenceFactory) 
 }
 
 // RunEventFiringOnAResolvedTaskConformance pins the check an event-triggered
-// firing makes under the task's lock: a task that closed, or whose close an
-// event holds, after the router's reads starts no run, while a replay of a
-// firing that did commit still reads as one and a person may still delegate
-// on a held task.
+// firing makes under the task's lock: a task that closed after the router's
+// reads starts no run, while a replay of a firing that did commit still reads
+// as one. A task that only holds a close is still open, and an event firing
+// on it starts its run.
 func RunEventFiringOnAResolvedTaskConformance(t *testing.T, mk BlueprintSequenceFactory) {
 	t.Helper()
 	for _, how := range []string{"closed", "held"} {
@@ -157,6 +157,13 @@ func RunEventFiringOnAResolvedTaskConformance(t *testing.T, mk BlueprintSequence
 			if inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{}, "", sc.Step(replay, 0)); err != nil || inserted {
 				t.Errorf("a replay of the committed firing on a %s task = (%v, %v), want the fence's inserted=false", how, inserted, err)
 			}
+			if how == "held" {
+				mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent)
+				if n := sc.RunCount(t, taskID); n != 2 {
+					t.Errorf("blueprint_runs on the held task = %d, want the first and the new firing's", n)
+				}
+				return
+			}
 			if _, err := fireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent); !errors.Is(err, db.ErrTaskClosedForEventRun) {
 				t.Fatalf("an event firing on a %s task = %v, want db.ErrTaskClosedForEventRun", how, err)
 			}
@@ -165,9 +172,6 @@ func RunEventFiringOnAResolvedTaskConformance(t *testing.T, mk BlueprintSequence
 			}
 			if n := sc.ConversationCount(t, taskID); n != 1 {
 				t.Errorf("conversations on the task = %d, want only the first's", n)
-			}
-			if how == "held" {
-				mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerManual)
 			}
 		})
 	}
@@ -312,12 +316,12 @@ func RunFiringDelegationBoundaryConformance(t *testing.T, mk BlueprintSequenceFa
 		return c
 	}
 
-	held := sc.NewTask(t)
-	_, unreplaced := fireOne(held)
+	closed := sc.NewTask(t)
+	_, unreplaced := fireOne(closed)
 	sc.SetConversationStatus(t, unreplaced, SeedConcluded)
-	sc.HoldTaskClose(t, held)
-	if _, err := fireRun(t, store, sc, held, domain.BlueprintTriggerEvent); !errors.Is(err, db.ErrTaskClosedForEventRun) {
-		t.Fatalf("an event firing on a held task = %v, want db.ErrTaskClosedForEventRun", err)
+	sc.CloseTask(t, closed)
+	if _, err := fireRun(t, store, sc, closed, domain.BlueprintTriggerEvent); !errors.Is(err, db.ErrTaskClosedForEventRun) {
+		t.Fatalf("an event firing on a closed task = %v, want db.ErrTaskClosedForEventRun", err)
 	}
 	if c := ended(unreplaced); c.EndedAt != nil {
 		t.Errorf("a refused firing ended %s (%q), want it left for the run that replaces it", unreplaced, c.EndedReason)

@@ -36,12 +36,12 @@ func TestEntityStore_CloseTerminal_SQLite(t *testing.T) {
 	})
 }
 
-// newSQLiteTerminalCloseSeeder extends the cancel-intent seeder with the
+// newSQLiteTerminalCloseSeeder extends the close seeder with the
 // entity side the terminating-close suite reads and moves.
 func newSQLiteTerminalCloseSeeder(conn *sql.DB) dbtest.EntityTerminalCloseSeeder {
-	base, entityForTask := newSQLiteCloseIntentSeeder(conn)
+	base, entityForTask := newSQLiteCloseSeeder(conn)
 	return dbtest.EntityTerminalCloseSeeder{
-		TaskCloseCancelIntentSeeder: base,
+		TaskCloseSeeder: base,
 		EntityForTask: func(t *testing.T, taskID string) string {
 			t.Helper()
 			id, ok := entityForTask[taskID]

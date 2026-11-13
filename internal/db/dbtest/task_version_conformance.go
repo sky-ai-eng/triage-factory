@@ -242,8 +242,6 @@ func RunTaskVersionConformance(t *testing.T, mk TaskVersionFactory) {
 		step("RequeueTask of a task already in the queue", 0, func(v int64) (*domain.Task, error) {
 			return landed("RequeueTask")(s.RequeueTask(ctx, h.OrgID, taskID, v))
 		})
-		step("SetStatus", 1, func(int64) (*domain.Task, error) { return row(s.SetStatus(ctx, h.OrgID, taskID, "in_progress")) })
-		step("SetStatus to the status it holds", 0, func(int64) (*domain.Task, error) { return row(s.SetStatus(ctx, h.OrgID, taskID, "in_progress")) })
 		step("Close", 1, func(int64) (*domain.Task, error) { return row(s.Close(ctx, h.OrgID, taskID, "run_completed", "")) })
 	})
 

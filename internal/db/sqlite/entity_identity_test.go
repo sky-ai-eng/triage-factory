@@ -35,6 +35,12 @@ func TestEntityIdentity_SQLite(t *testing.T) {
 				t.Helper()
 				return seedSQLiteIdentityTask(t, conn, entityID, suffix)
 			},
+			WorkingRun: func(t *testing.T, taskID string) func(t *testing.T) dbtest.TaskCloseWorkState {
+				t.Helper()
+				work, _ := newSQLiteCloseSeeder(conn)
+				runID, convID := work.BlueprintAndConversation(t, taskID, "running", "")
+				return func(t *testing.T) dbtest.TaskCloseWorkState { return work.WorkState(t, runID, convID) }
+			},
 			RawActionURL: func(t *testing.T, dedupKey string) (string, string) {
 				t.Helper()
 				var u, cur string

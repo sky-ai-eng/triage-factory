@@ -1350,6 +1350,7 @@ func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userI
 }
 
 // patchClose is the terminal arm: dismissed (walked away) or done (resolved).
+// It never holds, whatever is working on the task or awaiting the person.
 // The store's close carries the terminal predicate itself — the pre-read in
 // the handler answers the common case early, but only the predicate rules out
 // a close landing between the two, which is what a second close rewriting
@@ -1363,8 +1364,7 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	})
 	if errors.Is(err, db.ErrTaskVersion) {
 		// Changed since the pre-read, by a close or anything else a person
-		// acts on. Nothing was written, and nothing below runs: no run
-		// stopped, no deliverable torn down.
+		// acts on. Nothing was written.
 		writeTaskVersionConflict(w)
 		return 0, false
 	}
@@ -1378,11 +1378,10 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 		internalError(w, "tasks", err)
 		return 0, false
 	}
-	// Stop any in-flight run. The task's deliverables are left as they are: a
+	// The close is the whole write. A run working on the task goes on, its
+	// blueprint with it, and the task's deliverables are left as they are: a
 	// draft PR stays on GitHub for the person to decide, and a staged review
 	// is dismissed only when the pull request it reviews merges or closes.
-	cleanupCtx := context.WithoutCancel(r.Context())
-	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
 	s.broadcastTaskStatus(orgID)
 	return closed.Version, true
 }

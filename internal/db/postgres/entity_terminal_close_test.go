@@ -33,12 +33,12 @@ func TestEntityStore_CloseTerminal_Postgres(t *testing.T) {
 	})
 }
 
-// newPgTerminalCloseSeeder extends the cancel-intent seeder with the entity
+// newPgTerminalCloseSeeder extends the close seeder with the entity
 // side the terminating-close suite reads and moves.
 func newPgTerminalCloseSeeder(conn *sql.DB, orgID, userID string) dbtest.EntityTerminalCloseSeeder {
-	base, entityForTask := newPgCloseIntentSeeder(conn, orgID, userID)
+	base, entityForTask := newPgCloseSeeder(conn, orgID, userID)
 	return dbtest.EntityTerminalCloseSeeder{
-		TaskCloseCancelIntentSeeder: base,
+		TaskCloseSeeder: base,
 		EntityForTask: func(t *testing.T, taskID string) string {
 			t.Helper()
 			id, ok := entityForTask[taskID]

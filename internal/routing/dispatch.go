@@ -42,22 +42,18 @@ import (
 // silently consumed.
 //
 // The tails that hang off those stages stay log-and-continue and never reach
-// the return: task visibility writes, Bump, the run-stop cascade's KILL half
-// on a closed task, the agent-claim stamp, and the scorer nudge. Each is
+// the return: task visibility writes, Bump, the note telling a closed task's
+// working conversations, the agent-claim stamp, and the scorer nudge. Each is
 // either repaired by the next event on the entity, unreachable by a replay
 // anyway, or cosmetic, and promoting them would replay a whole event —
 // re-running its stages and re-recording its audit rows — to fix something
 // that heals on its own or that the replay cannot touch.
 //
-// The run-stop cascade is split along exactly that line (see
-// closeTaskWithAudit): the durable stop INTENT commits with the task close, so
-// the obligation covers it, while the kill that acts on it stays best-effort
-// out here. A kill that never lands no longer strands anything — the claim
-// gate refuses a cancel-requested blueprint and the dispatcher's settlement
-// finalizes it, intent or not — so
-// there is nothing left for a replay to owe. The task_events audit row moved
-// into the close tx for the same reason it always sat next to the close, and
-// it is INSERT-or-nothing, so a replay still cannot double it.
+// A task's close and its task_events audit row are one transaction (see
+// closeTaskOnEvent), so the obligation covers both, and the audit row is
+// INSERT-or-nothing, so a replay cannot double it. The close writes nothing
+// else: it stops no conversation and calls off no blueprint, so there is no
+// stop for a replay to owe.
 //
 // Replay is safe by construction, so an error asks for one freely: the task
 // upsert is a FindOrCreate under the tasks dedup partial index, and trigger

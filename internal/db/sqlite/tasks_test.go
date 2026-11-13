@@ -72,6 +72,44 @@ func TestTaskStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestTaskStatusChecks_SQLite runs the schema-constraint suite behind the
+// task store's guarded status writes against the SQLite schema.
+func TestTaskStatusChecks_SQLite(t *testing.T) {
+	dbtest.RunTaskStatusCheckConformance(t, func(t *testing.T) dbtest.TaskStatusCheckFixture {
+		t.Helper()
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
+		if err != nil {
+			t.Fatalf("open in-memory db: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		conn.SetMaxOpenConns(1)
+		conn.SetMaxIdleConns(1)
+		if err := db.BootstrapSchemaForTest(conn); err != nil {
+			t.Fatalf("bootstrap schema: %v", err)
+		}
+		if _, err := conn.Exec(
+			`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+			runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+		); err != nil {
+			t.Fatalf("seed local agent: %v", err)
+		}
+		return dbtest.TaskStatusCheckFixture{
+			Store:   sqlitestore.New(conn).Tasks,
+			OrgID:   runmode.LocalDefaultOrgID,
+			AgentID: runmode.LocalDefaultAgentID,
+			UserID:  runmode.LocalDefaultUserID,
+			Seed: func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
+				t.Helper()
+				return seedSQLiteTaskChain(t, conn, suffix)
+			},
+			WriteStatus: func(taskID, status string) error {
+				_, err := conn.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
+				return err
+			},
+		}
+	})
+}
+
 // TestTaskVersion_SQLite runs the task-version suite against the SQLite impl,
 // a fresh in-memory DB per subtest.
 func TestTaskVersion_SQLite(t *testing.T) {

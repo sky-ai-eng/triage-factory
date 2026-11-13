@@ -1,15 +1,12 @@
 package domain
 
-// TaskCloseDeferral is a close an event owed a task, held while one of the
-// task's conversations was still working: the event resolved the situation
-// the task is about, and closing the task then would stop the work under it.
-// Each working conversation is told instead, and the router's sweep applies
-// the close once none of the task's conversations is working, if it still
-// holds then. A deliverable on the task that awaits a person's verdict, on
-// a pull request still open, holds it too, until the person resolves it.
-// The task's own event arriving again cancels it. Work an event started that
-// is still going once the close has held for the sweep's limit is stopped;
-// a person's work is not.
+// TaskCloseDeferral is a close an event owed a task, held while a deliverable
+// on the task awaits a person's verdict, on a pull request still open: the
+// event resolved the situation the task is about, and the task stays open
+// until the person resolves the deliverable. The router's sweep then applies
+// the close, if it still holds. The task's own event arriving again cancels
+// it. Nothing else holds a close: not a conversation working on the task,
+// which a close leaves working.
 //
 // It is the tasks columns close_deferred_event_id and close_deferred_at
 // (when the hold began), read only while the task is active.

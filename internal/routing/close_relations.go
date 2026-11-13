@@ -8,7 +8,6 @@ import (
 	"slices"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
@@ -41,6 +40,14 @@ import (
 // entity's version the event was judged at — see HandleEvent's terminating
 // arm. The relation data is the same shape either way; terminatesEntity is
 // what picks the mechanism.
+//
+// Either way a close writes the task's close and nothing else: the terminal
+// flip and its audit row. It stops no conversation and calls off no
+// blueprint, so the work on a task goes on after the task closes, a
+// blueprint's remaining steps included; the conversations working at the
+// close are told (tellTaskClosing). One thing holds an event's close: a
+// deliverable on the task awaiting a person, on a pull request still open
+// (close_deferral.go).
 
 // closeContext is the per-firing value a relation's prepare step computes once
 // and its keep predicate consumes per target (a reviewer dedup key, the new
@@ -97,6 +104,15 @@ type closeRelation struct {
 	// closeReason audits why the task closed. Defaults to
 	// dbpkg.SiblingEventCloseReason.
 	closeReason string
+	// reassigns marks a reassignment: the task of the closing event's own
+	// type is the one the previous assignment made. It closes at once and
+	// never holds, because the event mints the new assignee's task after the
+	// close phase and the dedup index admits one active task per (entity,
+	// type, key): a task held open here would take the event as a bump, and
+	// the new assignee's team would get no task. It closes as
+	// dbpkg.ReassignedCloseReason, which the mint's reopen never matches.
+	// Every other target of the relation is an ordinary sibling close.
+	reassigns bool
 }
 
 // reason is the close reason the relation audits.
@@ -107,15 +123,17 @@ func (rel *closeRelation) reason() string {
 	return rel.closeReason
 }
 
+// retiresAssignment reports whether a task of taskType is the one the
+// relation's reassignment (reassigns) retires on an event of eventType.
+func (rel *closeRelation) retiresAssignment(eventType, taskType string) bool {
+	return rel.reassigns && eventType == taskType
+}
+
 // reasonFor is the close reason the relation audits on a task of taskType
-// that an event of eventType closes. A task of the closing event's own type
-// is the one a reassignment retires, and closes as reassigned: the event
-// mints the new assignee's task after the close phase, and the mint reopens
-// a task a sibling event closed while a conversation still works on it, so
-// this one must not carry the sibling reason. Every reader of a typed
-// relation's reason for one task asks here, so the two cannot disagree.
+// that an event of eventType closes. Every reader of a typed relation's
+// reason for one task asks here, so the two cannot disagree.
 func (rel *closeRelation) reasonFor(eventType, taskType string) string {
-	if eventType == taskType {
+	if rel.retiresAssignment(eventType, taskType) {
 		return dbpkg.ReassignedCloseReason
 	}
 	return rel.reason()
@@ -188,19 +206,19 @@ var closeRelations = []closeRelation{
 	// A Jira or Linear issue was (re)assigned → retire the stale
 	// assigned/available tasks that no longer reflect the assignment, so the
 	// new assignment mints a fresh task owned by the new assignee's team.
-	// The assigned task closes at once even under a working conversation;
-	// runCloses says why.
 	{
-		onEvents: []string{domain.EventJiraIssueAssigned},
-		closes:   []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable},
-		prepare:  prepareJiraReassign,
-		keep:     keepReassign(domain.EventJiraIssueAvailable),
+		onEvents:  []string{domain.EventJiraIssueAssigned},
+		closes:    []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable},
+		prepare:   prepareJiraReassign,
+		keep:      keepReassign(domain.EventJiraIssueAvailable),
+		reassigns: true,
 	},
 	{
-		onEvents: []string{domain.EventLinearIssueAssigned},
-		closes:   []string{domain.EventLinearIssueAssigned, domain.EventLinearIssueAvailable},
-		prepare:  prepareLinearReassign,
-		keep:     keepReassign(domain.EventLinearIssueAvailable),
+		onEvents:  []string{domain.EventLinearIssueAssigned},
+		closes:    []string{domain.EventLinearIssueAssigned, domain.EventLinearIssueAvailable},
+		prepare:   prepareLinearReassign,
+		keep:      keepReassign(domain.EventLinearIssueAvailable),
+		reassigns: true,
 	},
 	// A PR terminated → close every in-flight task on the entity and flip it
 	// closed. The terminating events themselves are excluded from the close
@@ -481,34 +499,17 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(t)) {
 				continue
 			}
-			var (
-				closedTask bool
-				err        error
-			)
 			closedAs := rel.reasonFor(evt.EventType, t.EventType)
-			if t.EventType == evt.EventType {
-				// A task of the closing event's own type closes at once,
-				// working conversation or not: the event mints its own task
-				// after this phase, and the dedup index admits one active
-				// task per (entity, type, key), so a task held open here
-				// would take the new event as a bump and the new assignee's
-				// team would get no task.
-				closedTask, err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, closedAs, evt.EventType)
-			} else {
-				var out dbpkg.TaskCloseOutcome
-				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, closedAs)
-				closedTask = out.Closed
-				if out.Held {
-					routerLog.InfoContext(ctx, "held task close", "task_id", t.ID, "on_event", evt.EventType,
-						"working", len(out.WorkingConversationIDs), "awaiting_person", out.AwaitingPerson, "newly_held", out.NewlyHeld)
-				}
-			}
+			out, err := r.closeTaskOnEvent(ctx, orgID, t.ID, evt, closedAs, !rel.retiresAssignment(evt.EventType, t.EventType))
 			if err != nil {
 				routerLog.Error("close: failed to close task", "task_id", t.ID, "on_event", evt.EventType, "error", err)
 				errs = append(errs, fmt.Errorf("close task %s: %w", t.ID, err))
 				continue
 			}
-			if closedTask {
+			if out.Held {
+				routerLog.InfoContext(ctx, "held task close: a deliverable awaits a person", "task_id", t.ID, "on_event", evt.EventType, "newly_held", out.NewlyHeld)
+			}
+			if out.Closed {
 				routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", closedAs)
 				closedAny = true
 				closed++
@@ -527,12 +528,12 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 // enqueue stamps the version on the row; only a direct HandleEvent call
 // arrives without one. See
 // EntityStore.CloseTerminalSystem for the transaction; this is the routing
-// half: the post-commit stop of the conversations the transaction stamped,
-// sequenced exactly as closeTaskWithAudit sequences it for a typed close, the
-// follow-up for the pending reviews the transaction dismissed, and the
-// tasks-updated nudge. A task with a working conversation is held in that
-// transaction rather than closed, and its conversations are told after the
-// commit, as closeOrHoldTaskWithAudit tells them; the entity closes either way.
+// half: the note to the conversations working on each task it closed or
+// newly held, sent after the commit as closeTaskOnEvent sends it for a typed
+// close, the follow-up for the pending reviews the transaction dismissed, and
+// the tasks-updated nudge. A task with a deliverable awaiting a person, on a
+// pull request still open, is held in that transaction rather than closed;
+// the entity closes either way.
 //
 // closed=false means the guard declined and nothing was written: the entity
 // reopened (or was re-polled) between the event's enqueue and now, so the
@@ -565,8 +566,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 		return false, nil
 	}
 	for _, h := range res.HeldTasks {
-		routerLog.InfoContext(ctx, "held task close", "task_id", h.TaskID, "on_event", evt.EventType,
-			"working", len(h.WorkingConversationIDs), "awaiting_person", h.AwaitingPerson, "newly_held", h.NewlyHeld)
+		routerLog.InfoContext(ctx, "held task close: a deliverable awaits a person", "task_id", h.TaskID, "on_event", evt.EventType, "newly_held", h.NewlyHeld)
 		if h.NewlyHeld {
 			r.tellTaskClosing(ctx, orgID, evt, h.TaskID, h.WorkingConversationIDs)
 		}
@@ -580,7 +580,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	notify.ResolveEvents(ctx, orgID, entityID, closedBy, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
-		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
+		r.tellTaskClosing(ctx, orgID, evt, taskID, res.WorkingConversationIDs[taskID])
 	}
 	if len(res.DismissedReviews) > 0 {
 		routerLog.InfoContext(ctx, "dismissed pending reviews of the closed pull request",
@@ -846,100 +846,25 @@ func keepReassign(poolType string) func(domain.Event, closeContext, closeTarget)
 
 // --- shared close helpers (used by the driver) ------------------------------
 
-// stopConversationsOnClosedTask asks the spawner to stop the conversations the close just ended
-// and cancel the blueprints behind them: the stop note on the transcript, the
-// stop intent, and the kill signal. The park is the settlement's, written by
-// the conversation's holder or, for one nobody holds, by the dispatcher.
-// conversationIDs is the then-active set the close
-// transaction read and stamped, so this acts on exactly what closed rather
-// than on a second, later read.
+// closeTaskOnEvent is a typed relation's close of one task. With mayHold it
+// is held while one of the task's deliverables awaits a person
+// (TaskStore.CloseOrHoldSystem). Without, it closes at once
+// (TaskStore.CloseOnEventSystem), which a reassignment needs.
 //
-// The blueprint half rides along because this is the task's own disposition:
-// nothing will resume these conversations, so leaving their blueprints frozen
-// 'running' would hold worktrees for finished work. Its `cancel_requested`
-// write lands on a flag the tx already set — an idempotent re-set, which
-// RequestRunCancelSystem's `cancel_requested = false` guard turns into a
-// no-op that reports changed=false, and every caller of it already treats
-// that as "already called off" rather than a failure.
-//
-// Errors are logged and swallowed, and this is the best-effort HALF of a split
-// the close transaction owns the other side of. The intent is durable before
-// this runs, so a kill that never lands no longer forgets the conversation:
-// the claim gate refuses to drive a cancel-requested blueprint, and the
-// conversation's next settlement, by its holder or by the dispatcher once no
-// claim holds it, finalizes the blueprint. What is lost is
-// only promptness — a live agent may finish the turn it is on. "no active
-// conversation" from the spawner is expected when a conversation races us to
-// natural completion; the conversation ends up terminal either way.
-//
-// So this stays OUT of the close phase's routing obligation, but for a
-// narrower reason than before: a replay could not repair it anyway (a replayed
-// close finds no active task and never walks back here), and now there is
-// nothing left for it to repair.
-func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversationIDs []string) {
-	for _, id := range conversationIDs {
-		if err := r.spawner.StopConversationAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
-			routerLog.Error("stop conversation on task close failed", "conversation", id, "task_id", taskID, "error", err)
-		}
+// The close stops nothing. The conversations working on the task are told,
+// after the commit: when the task closes, and the first time it holds. A
+// closing event that finds the close already held only takes its place.
+func (r *Router) closeTaskOnEvent(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string, mayHold bool) (dbpkg.TaskCloseOutcome, error) {
+	closeFn := r.tasks.CloseOnEventSystem
+	if mayHold {
+		closeFn = r.tasks.CloseOrHoldSystem
 	}
-}
-
-// closeOrHoldTaskWithAudit is a typed relation's close of a task: closed
-// through closeTaskWithAudit's rows and post-commit sequence while nothing on
-// the task is working and none of its deliverables awaits a person, and held
-// otherwise (TaskStore.CloseOrHoldSystem), with the note sent to each working
-// conversation the first time the task holds. A closing event that finds the
-// close already held only takes its place, since the conversations were told
-// when it began. A deliverable awaiting a person holds the close because
-// closing the task would retire it before they act on it.
-func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string) (dbpkg.TaskCloseOutcome, error) {
-	out, err := r.tasks.CloseOrHoldSystem(ctx, orgID, taskID, closeReason, evt.EventType, evt.ID)
+	out, err := closeFn(ctx, orgID, taskID, closeReason, evt.EventType, evt.ID)
 	if err != nil {
 		return dbpkg.TaskCloseOutcome{}, err
 	}
-	switch {
-	case out.Closed:
-		r.stopConversationsOnClosedTask(orgID, taskID, out.ActiveConversationIDs)
-	case out.Held && out.NewlyHeld:
+	if out.Closed || out.NewlyHeld {
 		r.tellTaskClosing(ctx, orgID, evt, taskID, out.WorkingConversationIDs)
 	}
 	return out, nil
-}
-
-// closeTaskWithAudit closes a task, records the closing event in task_events,
-// and stops the conversations working on it, whatever they are doing. Only a
-// typed close of a task of its own event's type takes it directly; every
-// other event close holds while the task is worked on
-// (closeOrHoldTaskWithAudit), and closes through the same rows and the same
-// post-commit sequence when it does not. The terminating close runs that body
-// inside the entity store's transaction and then the same sequence
-// (runTerminatingClose), so cancellation + audit are uniform.
-//
-// The first three writes — the task's terminal flip, the audit row, and
-// `cancel_requested` on the blueprints behind the task's then-active
-// conversations — are one transaction. Task state is the authoritative
-// invalidation surface, and the intent to stop what it invalidates has to be as
-// durable as the invalidation itself: the kill below is reachable exactly once,
-// so a close that committed without the intent could leave a conversation the
-// system has forgotten it meant to stop, with no replay able to reach it.
-//
-// The kill then follows, post-commit and best-effort. The close leaves the
-// task's deliverables alone: a draft PR stays on GitHub for a person to
-// decide, and the reconciler keeps its state current whatever its task's
-// status.
-//
-// Only a close this call actually performed cascades, and closed reports
-// whether it did: an already-terminal task returns no conversation ids, so a
-// replayed close neither stamps nor stops — the conversation under it may be
-// one a user resumed after the close, which the resume ladder deliberately
-// allows.
-func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) (closed bool, err error) {
-	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
-	if err != nil {
-		return false, err
-	}
-	if closed {
-		r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
-	}
-	return closed, nil
 }

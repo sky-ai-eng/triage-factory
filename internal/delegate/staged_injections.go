@@ -96,10 +96,10 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 //
 // Work a person drives (a conversation a person delegated, or one a person has
 // written to) is told what happened without what to do about it
-// (personStarted). A task held for a person's deliverable is
-// engaged almost only that way, by the person asking for changes before they
-// resolve it. Best effort: a failed read or stage logs, and the turn runs
-// without the note.
+// (personStarted). A close holds only for a person's deliverable, so a held
+// task is engaged almost only that way, by the person asking for changes
+// before they resolve it. Best effort: a failed read or stage logs, and the
+// turn runs without the note.
 func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.Conversation, taskID string) {
 	if s.tasks == nil || s.events == nil {
 		return
@@ -141,10 +141,9 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 // Three kinds of firing are left as they are. One queued before the run
 // started waits for a run of its own, as it did when this run was fired ahead
 // of it. One for the event the run itself fired from has nothing to tell the
-// run. And nothing is handed over on a task that is closed, snoozed or
-// holding a close: an event queued behind one of those is answered by it,
-// which is the firing worker's skip to make, and the engagement has just been
-// told the task is resolved (tellHeldClose).
+// run. And nothing is handed over on a task that is closed or snoozed: an
+// event queued behind one of those is answered by it, which is the firing
+// worker's skip to make.
 //
 // One event queues a firing per matched trigger; its note is staged once and
 // every such firing names it. The note and the mark commit together per
@@ -152,7 +151,7 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 // stays unmarked, for a later engagement under the run or for the firing
 // worker once the run ends.
 func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *domain.BlueprintRun, conv *domain.Conversation, task *domain.Task) {
-	if s.pendingFirings == nil || s.events == nil || s.tasks == nil || br == nil || br.Status != domain.BlueprintRunStatusRunning {
+	if s.pendingFirings == nil || s.events == nil || br == nil || br.Status != domain.BlueprintRunStatusRunning {
 		return
 	}
 	if task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
@@ -164,15 +163,7 @@ func (s *Spawner) handOffQueuedFirings(ctx context.Context, orgID string, br *do
 		delegateLog.Warn("read the task's queued firings failed; the engagement starts without their events", "task_id", taskID, "conversation", conv.ID, "error", err)
 		return
 	}
-	// Most engagements start with nothing queued, and the hold is only worth
-	// reading for one that has something to hand over.
 	if len(firings) == 0 {
-		return
-	}
-	if hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID); err != nil {
-		delegateLog.Warn("read the task's held close failed; its queued firings are not handed over", "task_id", taskID, "conversation", conv.ID, "error", err)
-		return
-	} else if hold != nil {
 		return
 	}
 	// The note each event is staged as, by event id: the ones this pass

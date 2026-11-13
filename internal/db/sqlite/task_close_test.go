@@ -16,11 +16,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTaskStore_CloseWithConversationCancelIntent_SQLite runs the shared close-carries-
-// stop-intent suite against the SQLite impl. Each subtest gets a fresh
-// in-memory DB, so the exact-count assertions can't pick up a sibling's rows.
-func TestTaskStore_CloseWithConversationCancelIntent_SQLite(t *testing.T) {
-	dbtest.RunTaskCloseCancelIntentConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskCloseCancelIntentSeeder) {
+// TestTaskStore_Close_SQLite runs the shared plain-close suite against the
+// SQLite impl. Each subtest gets a fresh in-memory DB, so the exact-count
+// assertions can't pick up a sibling's rows.
+func TestTaskStore_Close_SQLite(t *testing.T) {
+	dbtest.RunTaskCloseConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskCloseSeeder) {
 		t.Helper()
 		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
@@ -32,25 +32,25 @@ func TestTaskStore_CloseWithConversationCancelIntent_SQLite(t *testing.T) {
 		if err := db.BootstrapSchemaForTest(conn); err != nil {
 			t.Fatalf("bootstrap schema: %v", err)
 		}
-		seeder, _ := newSQLiteCloseIntentSeeder(conn)
+		seeder, _ := newSQLiteCloseSeeder(conn)
 		return sqlitestore.New(conn).Tasks, runmode.LocalDefaultOrgID, seeder
 	})
 }
 
-// newSQLiteCloseIntentSeeder builds the (task, event, blueprint, conversation)
+// newSQLiteCloseSeeder builds the (task, event, blueprint, conversation)
 // seeder against one in-memory database, and returns the task→entity map it
 // keeps so a suite that also needs the entity side can read it. Shared with
 // the terminating-close suite, which stages the same graph.
-func newSQLiteCloseIntentSeeder(conn *sql.DB) (dbtest.TaskCloseCancelIntentSeeder, map[string]string) {
+func newSQLiteCloseSeeder(conn *sql.DB) (dbtest.TaskCloseSeeder, map[string]string) {
 	// entityForTask lets Event() find the entity a seeded task hangs off,
 	// so the closing event lands on the same entity production would put
 	// it on. Keyed per factory call, which is per subtest.
 	entityForTask := map[string]string{}
 
-	seeder := dbtest.TaskCloseCancelIntentSeeder{
+	seeder := dbtest.TaskCloseSeeder{
 		Task: func(t *testing.T) string {
 			t.Helper()
-			entityID, _, taskID := seedSQLiteTaskChain(t, conn, "close-intent-"+uuid.New().String()[:8])
+			entityID, _, taskID := seedSQLiteTaskChain(t, conn, "close-"+uuid.New().String()[:8])
 			entityForTask[taskID] = entityID
 			return taskID
 		},
@@ -101,6 +101,23 @@ func newSQLiteCloseIntentSeeder(conn *sql.DB) (dbtest.TaskCloseCancelIntentSeede
 			}
 			return flag != 0
 		},
+		WorkState: func(t *testing.T, blueprintRunID, conversationID string) dbtest.TaskCloseWorkState {
+			t.Helper()
+			var st dbtest.TaskCloseWorkState
+			if blueprintRunID != "" {
+				if err := conn.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = ?`,
+					blueprintRunID).Scan(&st.RunStatus, &st.CancelRequested); err != nil {
+					t.Fatalf("read blueprint run: %v", err)
+				}
+			}
+			if err := conn.QueryRow(`
+					SELECT COALESCE(status, ''), stop_requested_at IS NOT NULL, ended_at IS NOT NULL
+					  FROM conversations WHERE id = ?`,
+				conversationID).Scan(&st.ConversationStatus, &st.StopRequested, &st.Ended); err != nil {
+				t.Fatalf("read conversation: %v", err)
+			}
+			return st
+		},
 		TaskStatus: func(t *testing.T, taskID string) string {
 			t.Helper()
 			var status string
@@ -123,8 +140,8 @@ func newSQLiteCloseIntentSeeder(conn *sql.DB) (dbtest.TaskCloseCancelIntentSeede
 
 // seedSQLiteBlueprintRun mints a blueprint + blueprint_run on the task in the
 // named status. seedBlueprintRunForConversation (the shared FK-target fixture) always
-// writes 'running'; this suite needs a finished one too, since "a blueprint
-// that already ended is never stamped" is half of what it asserts.
+// writes 'running'; the suites that share this seeder need a finished one
+// too.
 func seedSQLiteBlueprintRun(t *testing.T, conn *sql.DB, taskID, status string) string {
 	t.Helper()
 	blueprintID := "bp_" + uuid.New().String()
@@ -157,7 +174,7 @@ func seedSQLiteStepPrompt(t *testing.T, conn *sql.DB) string {
 	t.Helper()
 	id := fmt.Sprintf("p_%s", uuid.New().String())
 	if _, err := conn.Exec(
-		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'Close Intent', 'body', ?, ?)`,
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'Close', 'body', ?, ?)`,
 		id, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

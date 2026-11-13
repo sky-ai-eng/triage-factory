@@ -76,10 +76,8 @@ func newReopenFixture(t *testing.T, sourceID string) reopenFixture {
 	return f
 }
 
-// closeBySibling closes the fixture's task as CI passing closes it. It goes
-// through the store because the router's own close of a task with a working
-// conversation is a held close, and the reopen is for the task that closed
-// with its conversation still working.
+// closeBySibling closes the fixture's task as CI passing closes it: the row
+// the router's close writes, with the task's conversation left working.
 func (f reopenFixture) closeBySibling(t *testing.T) {
 	t.Helper()
 	if _, err := testTaskStore(f.database).CloseSystem(t.Context(), runmode.LocalDefaultOrgID, f.taskID, dbpkg.SiblingEventCloseReason, domain.EventGitHubPRCICheckPassed); err != nil {
@@ -248,7 +246,7 @@ func TestReopen_NothingWorkingCreatesANewTask(t *testing.T) {
 // closes as reassigned and the new assignee's team gets a task of its own.
 func TestReopen_ReassignmentLeavesTheOldTaskClosed(t *testing.T) {
 	database, router, _, teamB, entityID := reassignFixture(t)
-	router.spawner = &stoppingSpawner{}
+	router.spawner = &stubDelegator{}
 	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
 	first := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
 	if len(first) != 1 {

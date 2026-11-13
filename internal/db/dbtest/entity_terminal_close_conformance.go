@@ -20,16 +20,16 @@ import (
 // Its own factory rather than a ride on EntityStoreFactory because the
 // method under test writes across entities, tasks, task_events and
 // blueprint_runs, and reads conversations: the fixtures are the ones
-// TaskCloseCancelIntentSeeder already knows how to stage, plus the entity
+// TaskCloseSeeder already knows how to stage, plus the entity
 // each task hangs off.
 type EntityTerminalCloseFactory func(t *testing.T) (entities db.EntityStore, tasks db.TaskStore, orgID string, seed EntityTerminalCloseSeeder)
 
 // EntityTerminalCloseSeeder stages what the terminating close spans and
-// reads back what it wrote. The embedded cancel-intent seeder stages tasks
+// reads back what it wrote. The embedded close seeder stages tasks
 // (each on a fresh entity), events, blueprints and conversations; the extra
 // callbacks reach the entity side.
 type EntityTerminalCloseSeeder struct {
-	TaskCloseCancelIntentSeeder
+	TaskCloseSeeder
 
 	// EntityForTask returns the entity a seeded task hangs off.
 	EntityForTask func(t *testing.T, taskID string) (entityID string)
@@ -70,7 +70,7 @@ type EntityTerminalCloseSeeder struct {
 // serialization, TaskStore's refusal to mint on a closed entity.
 //
 // The declined cases carry the weight. A close that lands against the wrong
-// version cancels work on a pull request someone just reopened, and a close
+// version closes the tasks of a pull request someone just reopened, and a close
 // that lands half — tasks flipped, entity not, or the reverse — is exactly
 // the state the invariant forbids. So every guard miss is asserted as "nothing
 // at all was written", against every table the transaction touches.
@@ -86,9 +86,12 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		entityID := seed.EntityForTask(t, taskA)
 		taskB := seed.TaskOnEntity(t, entityID, review)
 		eventID := seed.Event(t, taskA)
-		// Parked on a person: still active, so the close stops it, and not
-		// working, so the close is not held.
-		brID, convID := seed.BlueprintAndConversation(t, taskA, "running", domain.StatusOpen)
+		// One task's conversation is working and the other's is parked on a
+		// person. The close leaves both, and the blueprints behind them, as
+		// they were, and reports the working one for the caller to tell.
+		brID, convID := seed.BlueprintAndConversation(t, taskA, "running", "")
+		parkedRun, parkedConv := seed.BlueprintAndConversation(t, taskB, "running", domain.StatusOpen)
+		working, parked := seed.WorkState(t, brID, convID), seed.WorkState(t, parkedRun, parkedConv)
 		_, seq := seed.EntityRow(t, entityID)
 
 		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review}, "entity_closed", domain.EventGitHubPRMerged, eventID)
@@ -101,8 +104,11 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		if len(res.ClosedTaskIDs) != 2 {
 			t.Errorf("ClosedTaskIDs = %v, want both tasks", res.ClosedTaskIDs)
 		}
-		if got := res.ActiveConversationIDs[taskA]; len(got) != 1 || got[0] != convID {
-			t.Errorf("active conversations for %s = %v, want exactly [%s]", taskA, got, convID)
+		if got := res.WorkingConversationIDs[taskA]; len(got) != 1 || got[0] != convID {
+			t.Errorf("working conversations for %s = %v, want exactly [%s]", taskA, got, convID)
+		}
+		if got := res.WorkingConversationIDs[taskB]; len(got) != 0 {
+			t.Errorf("working conversations for %s = %v, want none: its conversation is parked", taskB, got)
 		}
 		if state, _ := seed.EntityRow(t, entityID); state != "closed" {
 			t.Errorf("entity state = %q, want closed", state)
@@ -112,8 +118,11 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 				t.Errorf("task %s status = %q, want done", id, got)
 			}
 		}
-		if !seed.CancelRequested(t, brID) {
-			t.Error("cancel_requested = false; the terminating close must carry the stop intent exactly as a typed close does")
+		if got := seed.WorkState(t, brID, convID); got != working {
+			t.Errorf("the close changed the working conversation or its blueprint:\n before %+v\n after  %+v", working, got)
+		}
+		if got := seed.WorkState(t, parkedRun, parkedConv); got != parked {
+			t.Errorf("the close changed the parked conversation or its blueprint:\n before %+v\n after  %+v", parked, got)
 		}
 		if n := seed.CloseAuditCount(t, taskA); n != 1 {
 			t.Errorf("close-audit rows on %s = %d, want 1", taskA, n)
@@ -194,12 +203,12 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 	t.Run("Version_guard_miss_writes_nothing", func(t *testing.T) {
 		// The reopen race: the event was judged at version N, and a poll
 		// has since re-judged the entity. Nothing may land — not the task,
-		// not its audit row, not the cancel intent, not the entity.
+		// not its audit row, not the entity.
 		entities, _, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		entityID := seed.EntityForTask(t, taskID)
 		eventID := seed.Event(t, taskID)
-		brID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+		_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
 		reviewID := seed.Review(t, convID, entityID, domain.DeliverableStateReviewPending)
 		_, judgedAt := seed.EntityRow(t, entityID)
 		seed.BumpPollSeq(t, entityID)
@@ -216,9 +225,6 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		}
 		if got := seed.TaskStatus(t, taskID); got != "queued" {
 			t.Errorf("task status = %q, want queued", got)
-		}
-		if seed.CancelRequested(t, brID) {
-			t.Error("cancel_requested = true after a declined close; a reopened pull request's run was cancelled")
 		}
 		if n := seed.CloseAuditCount(t, taskID); n != 0 {
 			t.Errorf("close-audit rows = %d, want 0", n)

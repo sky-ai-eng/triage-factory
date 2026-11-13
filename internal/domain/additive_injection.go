@@ -32,11 +32,11 @@ func AdditiveEventInjection(eventType, metadataJSON string) string {
 const taskClosingGuidance = "If your own work caused this, finish what you were doing. Otherwise start nothing new on this task and wrap up."
 
 // TaskClosingInjection is the agent-facing copy telling a conversation on a
-// task whose close is held that an event resolved the situation the task is
-// about, so the task closes once the work on it is finished: the
-// conversations working when the close was held, each one engaged while it
-// still is, and a deliverable awaiting a person. metadataJSON is the closing event's metadata JSON; "" renders
-// a body naming the event type alone. Bare, like AdditiveEventInjection.
+// task that an event resolved the situation the task is about: the
+// conversations working when the event closed the task or its close began
+// to hold, and each one engaged while a close is held. metadataJSON is the
+// closing event's metadata JSON; "" renders a body naming the event type
+// alone. Bare, like AdditiveEventInjection.
 func TaskClosingInjection(eventType, metadataJSON string) string {
 	return taskClosingNote(eventType, metadataJSON, taskClosingGuidance+" ")
 }

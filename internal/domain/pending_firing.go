@@ -75,13 +75,12 @@ const (
 // a store read, a spawner refusal — is a typed requeue outcome on the block
 // instead, never a skip reason.
 const (
-	// PendingFiringSkipTaskClosed: the task is done, dismissed or snoozed, or
-	// holds a close (TaskCloseDeferral). A task its run's finish closed is
+	// PendingFiringSkipTaskClosed: the task is done, dismissed or snoozed.
+	// A task its run's finish closed is
 	// the exception, PendingFiringSkipRerouted. A snooze is on the same axis
 	// as a close — the person said "not now" — and a snooze wake mints a new
 	// event and a new firing if the trigger still matches, so the queued one
-	// is the wrong path to wake it. A held close is a close waiting only for the
-	// work already on the task, which a firing would add to.
+	// is the wrong path to wake it.
 	PendingFiringSkipTaskClosed      = "task_closed"
 	PendingFiringSkipTriggerDisabled = "trigger_disabled"
 	PendingFiringSkipBreakerTripped  = "breaker_tripped"

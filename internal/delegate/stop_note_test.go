@@ -162,7 +162,7 @@ func TestStopConversationAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	seedConversation(t, database, "r-closed", "sess-closed", "/tmp/wt-closed")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-closed", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-closed", "", StopCauseTeamArchived); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -170,8 +170,8 @@ func TestStopConversationAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("stop notes = %d, want 1", len(notes))
 	}
-	if notes[0].Content != StopCauseTaskClosed.note() {
-		t.Errorf("content = %q, want %q", notes[0].Content, StopCauseTaskClosed.note())
+	if notes[0].Content != StopCauseTeamArchived.note() {
+		t.Errorf("content = %q, want %q", notes[0].Content, StopCauseTeamArchived.note())
 	}
 	if notes[0].Content == stopNoteBySystem {
 		t.Error("a lifecycle teardown wrote the generic system note; the cause is what the reader needs")
@@ -193,7 +193,7 @@ func TestStopConversationAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTeamArchived); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -201,13 +201,13 @@ func TestStopConversationAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing
 	if len(notes) != 1 {
 		t.Fatalf("stop notes = %d, want 1 — a parked conversation torn down by its task explains nothing without it", len(notes))
 	}
-	if notes[0].Content != StopCauseTaskClosed.note() {
-		t.Errorf("content = %q, want %q", notes[0].Content, StopCauseTaskClosed.note())
+	if notes[0].Content != StopCauseTeamArchived.note() {
+		t.Errorf("content = %q, want %q", notes[0].Content, StopCauseTeamArchived.note())
 	}
 
-	// A second teardown reaching the same row — the router closes the task,
-	// then the team is archived — says nothing new, so it writes nothing.
-	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+	// A second teardown reaching the same row — the task is requeued, then
+	// the team is archived — says nothing new, so it writes nothing.
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTeamArchived); err != nil {
 		t.Fatalf("second teardown: %v", err)
 	}
 	if notes := stopNotes(t, database, "r-parked-teardown"); len(notes) != 1 {

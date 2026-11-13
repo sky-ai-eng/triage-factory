@@ -839,7 +839,7 @@ func TestWarmClaim_ResumeTellsAHeldClose(t *testing.T) {
 		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, now())
 	`, eventID, f.orgID, task.EntityID, domain.EventGitHubPRCICheckPassed)
 	out, err := f.stores.Tasks.CloseOrHoldSystem(ctx, f.orgID, f.taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID)
-	if err != nil || !out.Held || !out.AwaitingPerson || len(out.WorkingConversationIDs) != 0 {
+	if err != nil || !out.Held || len(out.WorkingConversationIDs) != 0 {
 		t.Fatalf("close = (%+v, %v), want held for the review with no working conversation to tell", out, err)
 	}
 

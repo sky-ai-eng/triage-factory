@@ -58,22 +58,29 @@ func enqueueMerged(t *testing.T, database *sql.DB, entityID string) {
 }
 
 // taskCloseOutageStore fails ONE named task's typed close, so a test can watch
-// its siblings close on the same pass instead of being cancelled by it. The
-// typed close the router performs is the combined one — task flip, audit row,
-// and stop intent in a single transaction — so that is what this intercepts.
-// A terminating close does not pass through here: it is one transaction on
-// the entity store (closeTerminalOutageStore fails that one).
+// its siblings close on the same pass instead of being cancelled by it. It
+// intercepts both of the typed close's doors: the one that may hold, and the
+// reassignment's, which never does. A terminating close does not pass through
+// here: it is one transaction on the entity store (closeTerminalOutageStore
+// fails that one).
 type taskCloseOutageStore struct {
 	dbpkg.TaskStore
 	failTaskID string
 	o          *outage
 }
 
-func (s *taskCloseOutageStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskCloseOutageStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (dbpkg.TaskCloseOutcome, error) {
 	if taskID == s.failTaskID && s.o.down() {
-		return false, nil, errOutage
+		return dbpkg.TaskCloseOutcome{}, errOutage
 	}
-	return s.TaskStore.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+	return s.TaskStore.CloseOrHoldSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+}
+
+func (s *taskCloseOutageStore) CloseOnEventSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (dbpkg.TaskCloseOutcome, error) {
+	if taskID == s.failTaskID && s.o.down() {
+		return dbpkg.TaskCloseOutcome{}, errOutage
+	}
+	return s.TaskStore.CloseOnEventSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 }
 
 func closeAuditCount(t *testing.T, database *sql.DB, taskID string) int {

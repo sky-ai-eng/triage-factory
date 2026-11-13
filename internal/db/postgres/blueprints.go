@@ -833,8 +833,8 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 			return nil
 		}
 
-		// An event-triggered firing on a task that closed, or whose close an
-		// event holds, since the router's reads. After the fence, so a replay
+		// An event-triggered firing on a task that closed since the router's
+		// reads. After the fence, so a replay
 		// of a firing that did commit still answers inserted=false; the
 		// error rolls back the run step 2 wrote.
 		if event && !open {
@@ -958,9 +958,8 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, fro
 // lockFiringTask takes the row lock on a firing's task, and reports
 // db.ErrNoSuchTask when there is no such row — the firing's first statement,
 // so a task that does not exist is refused before anything is written. open
-// reports a task neither closed nor holding a close, read under the lock,
-// which is what orders the firing against a close: the close writes this row
-// too.
+// reports a task that is not closed, read under the lock, which is what
+// orders the firing against a close: the close writes this row too.
 //
 // SELECT … FOR UPDATE rather than a write: this is about lock ORDER (see the
 // call site), and a firing whose fence catches a replay has to leave the task
@@ -972,7 +971,7 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, fro
 func lockFiringTask(ctx context.Context, q queryer, orgID, taskID string) (open bool, teamID string, err error) {
 	var team sql.NullString
 	err = q.QueryRowContext(ctx, `
-		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL, team_id::text
+		SELECT status NOT IN ('done', 'dismissed'), team_id::text
 		  FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, taskID).Scan(&open, &team)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, "", db.ErrNoSuchTask

@@ -156,6 +156,10 @@ type EntityIdentitySeeder struct {
 	// Task inserts a task against entityID and returns its id.
 	Task func(t *testing.T, entityID, suffix string) string
 
+	// WorkingRun puts a running blueprint with a conversation mid-flight on
+	// the task, and returns a read of the pair's state.
+	WorkingRun func(t *testing.T, taskID string) (state func(t *testing.T) TaskCloseWorkState)
+
 	// RawActionURL reads one external_actions row's url and current_url as
 	// stored, keyed by dedup_key; current_url is "" when NULL.
 	RawActionURL func(t *testing.T, dedupKey string) (url, currentURL string)
@@ -438,6 +442,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		newer, _ = s.Entities.GetSystem(ctx, orgID, newer.ID)
 		dupTask := seed.Task(t, newer.ID, "dup")
+		// A run is working on the task the merge dismisses.
+		dupWork := seed.WorkingRun(t, dupTask)
+		dupWorkBefore := dupWork(t)
 		soloTask := seed.Task(t, newer.ID, "solo")
 		third, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, jiraScope, "THIRD-1", "10003", TestJiraProject, "Third", "")
 		if err != nil {
@@ -466,6 +473,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, newer.ID, older.ID)
 		if err != nil || survivor != older.ID {
 			t.Fatalf("merge = (%s, %v), want the older row %s to survive", survivor, err, older.ID)
+		}
+		if after := dupWork(t); after != dupWorkBefore {
+			t.Errorf("the merge changed the run on the task it dismissed:\n before %+v\n after  %+v", dupWorkBefore, after)
 		}
 		if gone, _ := s.Entities.GetSystem(ctx, orgID, newer.ID); gone != nil {
 			t.Fatalf("the newer row still exists: %+v", gone)
@@ -622,6 +632,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		intoTask := seed.Task(t, into.ID, "dup")
 		dupTask := seed.Task(t, stub.ID, "dup")
+		// A run is working on the task the fold dismisses.
+		dupWork := seed.WorkingRun(t, dupTask)
+		dupWorkBefore := dupWork(t)
 		soloTask := seed.Task(t, stub.ID, "solo")
 		third, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/third#1", "PR_third", "pr", "Third", "")
 		if err != nil {
@@ -657,6 +670,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 
 		if err := s.Entities.FoldStubEntitySystem(ctx, orgID, stub.ID, into.ID); err != nil {
 			t.Fatalf("FoldStubEntitySystem: %v", err)
+		}
+		if after := dupWork(t); after != dupWorkBefore {
+			t.Errorf("the fold changed the run on the task it dismissed:\n before %+v\n after  %+v", dupWorkBefore, after)
 		}
 		if gone, _ := s.Entities.GetSystem(ctx, orgID, stub.ID); gone != nil {
 			t.Fatalf("the stub still exists: %+v", gone)

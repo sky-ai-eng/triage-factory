@@ -113,12 +113,12 @@ const (
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
-	// still working on a task that an event resolved it, and that the task
-	// closes once the work on it is finished, in either version
+	// still working on a task that an event resolved it, in either version
 	// (TaskClosingInjection, or TaskClosingNotice for work a person started).
 	// A conversation is told once per closing event
 	// (StagedInjectionStore.HasNoteForEventSystem), and a hold cleared
-	// without its close withdraws the notes still waiting (TaskStore.Bump).
+	// without its close, or a reopen of the task, withdraws the notes still
+	// waiting (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
 )
 

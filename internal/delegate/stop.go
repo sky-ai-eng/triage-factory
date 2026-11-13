@@ -6,7 +6,9 @@
 // intermediate blueprint step, a final step, the only step, or a conversation
 // with no blueprint at all. The agent stops, the conversation parks `open`,
 // and everything outside the conversation freezes. Nothing continues until
-// someone resumes it or, for task-driven work, dispositions the task.
+// someone resumes it or, for task-driven work, moves the task off it: a
+// requeue, a new delegation, or a person's claim. Closing the task is not one
+// of those; a close leaves the conversation and its blueprint as they are.
 //
 // Cancellation is a real concept, but it belongs to the layers that own a
 // lifecycle: the blueprint has cancel_requested / BlueprintRunStatusCancelled
@@ -36,7 +38,8 @@
 //
 // A frozen blueprint is the deliberate cost of that. A stopped step leaves its
 // blueprint 'running' with no queued step and no live claim, holding its
-// worktree, until the conversation is resumed or the task is dispositioned —
+// worktree, until the conversation is resumed, the run is cancelled, or the
+// task is moved off it —
 // so every surface that counts live blueprints counts it.
 //
 // That cost is bounded to the stopped conversation's own task, and it has to
@@ -150,15 +153,8 @@ func (s *Spawner) SettleTaskStops(ctx context.Context, orgID, taskID string) err
 type StopCause string
 
 const (
-	// StopCauseTaskClosed — the system decided the task is resolved (its
-	// entity merged, closed, or otherwise stopped needing attention).
-	StopCauseTaskClosed StopCause = "task_closed"
-	// StopCauseCloseHoldExpired — an event resolved the task while the
-	// conversation was working, and it was still working when the close-hold
-	// limit ran out. Its own cause rather than a close because the task can
-	// stay open after it, held by a person's work or deliverable.
-	StopCauseCloseHoldExpired StopCause = "close_hold_expired"
-	// StopCauseTaskDispositioned — a user swiped the task away.
+	// StopCauseTaskDispositioned — a person claimed a task the agent did not
+	// hold. Closing a task is not a cause: no close stops a conversation.
 	StopCauseTaskDispositioned StopCause = "task_dispositioned"
 	// StopCauseTaskRequeued — a user returned the task to the queue. Its own
 	// cause rather than a disposition because the task is still open: what
@@ -180,10 +176,6 @@ const (
 // knows from the row's presence.
 func (c StopCause) note() string {
 	switch c {
-	case StopCauseTaskClosed:
-		return "Run stopped: the task it was working on was closed."
-	case StopCauseCloseHoldExpired:
-		return "Run stopped: the task it was working on was resolved, and the run had not finished in the time allowed after that."
 	case StopCauseTaskDispositioned:
 		return "Run stopped: the task it was working on was dispositioned."
 	case StopCauseTaskRequeued:
@@ -231,8 +223,8 @@ func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 // name spells both halves because only the first is addressed: the id is a
 // conversation's, and the blueprint_run reached through it is a consequence.
 // That second half belongs to callers that own a lifecycle one layer up and
-// have already decided it is over — a task closed by the router, a task
-// swiped by a user, a team archived. Nothing will resume those conversations,
+// have already decided it is over — a task requeued, handed to a new
+// delegation or claimed by a person, a team archived. Nothing will resume those conversations,
 // so freezing their blueprints 'running' would hold a worktree and inflate
 // every live-blueprint count for work that is finished.
 //

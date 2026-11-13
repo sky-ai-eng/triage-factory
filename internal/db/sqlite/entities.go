@@ -956,7 +956,7 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 // survivor, the step a duplicate merge and a stub fold share. The loser's
 // active tasks whose slot the survivor already holds are dismissed in place
 // first, which takes them out of the partial unique index the repoint would
-// otherwise trip.
+// otherwise trip. The dismissal writes the tasks alone, as on Postgres.
 func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID string) error {
 	if _, err := q.ExecContext(ctx, `
 		UPDATE tasks
@@ -970,15 +970,6 @@ func moveEntityReferences(ctx context.Context, q queryer, loserID, survivorID st
 		              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`,
 		time.Now().UTC(), db.DuplicateEntityMergedCloseReason, loserID, survivorID); err != nil {
 		return fmt.Errorf("dismiss duplicate tasks: %w", err)
-	}
-	if _, err := q.ExecContext(ctx, `
-		UPDATE blueprint_runs SET cancel_requested = 1
-		WHERE status = 'running' AND cancel_requested = 0 AND id IN (
-			SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id = c.task_id
-			WHERE t.entity_id = ? AND t.close_reason = ? AND c.blueprint_run_id IS NOT NULL
-			  AND `+db.UnsettledConversationSQL("c")+`)`,
-		loserID, db.DuplicateEntityMergedCloseReason); err != nil {
-		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
 	}
 	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "deliverables", "external_actions"} {
 		if _, err := q.ExecContext(ctx, `UPDATE `+table+` SET entity_id = ? WHERE entity_id = ?`, survivorID, loserID); err != nil {
@@ -1101,7 +1092,7 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.TerminalCloseResult{}, err
 	}
-	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
+	res := db.TerminalCloseResult{WorkingConversationIDs: map[string][]string{}}
 	err := inTx(ctx, s.q, func(q queryer) error {
 		var state string
 		var pollSeq int64
@@ -1137,7 +1128,7 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return fmt.Errorf("list open tasks: %w", err)
 		}
 		for _, taskID := range taskIDs {
-			out, err := closeOrHoldTask(ctx, q, taskID, closeReason, closeEventType, closingEventID, false)
+			out, err := closeTaskOnEvent(ctx, q, taskID, closeReason, closeEventType, closingEventID, closeOrHold)
 			if err != nil {
 				return fmt.Errorf("task %s: %w", taskID, err)
 			}
@@ -1145,11 +1136,10 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			case out.Held:
 				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{
 					TaskID: taskID, NewlyHeld: out.NewlyHeld, WorkingConversationIDs: out.WorkingConversationIDs,
-					AwaitingPerson: out.AwaitingPerson,
 				})
 			case out.Closed:
 				res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
-				res.ActiveConversationIDs[taskID] = out.ActiveConversationIDs
+				res.WorkingConversationIDs[taskID] = out.WorkingConversationIDs
 			}
 		}
 		return nil

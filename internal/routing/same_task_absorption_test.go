@@ -94,14 +94,6 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 	return "run-" + task.ID, nil
 }
 
-func (s *injectingStubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
-	return nil
-}
-
-func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
-	return nil
-}
-
 func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string, []db.DismissedReview) {
 }
 

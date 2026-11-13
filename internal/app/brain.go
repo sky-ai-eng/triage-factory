@@ -91,12 +91,11 @@ func (a *App) startBrain(term int64) {
 	// its transition implies. The scan is its only schedule: a probe is not
 	// ripe until well after its admission. Same single-worker discipline.
 	go a.mergeability.RunMergeabilityProbes(brainCtx, mergeability.DefaultScanInterval)
-	// Close-hold sweep: applies the closes the router held on tasks while
-	// their conversations worked, once none of them is working and the close
-	// still holds, and drops the ones that no longer do. Work an event started
-	// that is still going once a close has held for TF_CLOSE_HOLD_TIMEOUT is
-	// stopped. One sweeper across every org, like the workers above.
-	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval, a.closeHoldTimeout)
+	// Close-hold sweep: applies the closes the router held on tasks while a
+	// deliverable on them awaited a person, once the person has resolved it
+	// and the close still holds, and drops the ones that no longer do. One
+	// sweeper across every org, like the workers above.
+	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval)
 	// Breaker sync: resolves the tripped-breaker notifications whose breakers
 	// no longer hold — a person's run completed, the entity closed, the
 	// trigger changed — none of which reaches the gate that opened them.

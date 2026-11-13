@@ -794,8 +794,8 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 			return nil
 		}
 
-		// An event-triggered firing on a task that closed, or whose close an
-		// event holds, since the router's reads. After the fence, so a replay
+		// An event-triggered firing on a task that closed since the router's
+		// reads. After the fence, so a replay
 		// of a firing that did commit still answers inserted=false; the
 		// error rolls back the run step 2 wrote.
 		if event && !open {
@@ -906,14 +906,14 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, id string, from, to i
 
 // lockFiringTask reports db.ErrNoSuchTask when a firing names a task that does
 // not exist — the firing's first statement, so it is refused before anything
-// is written — and open for a task neither closed nor holding a close. The
+// is written — and open for a task that is not closed. The
 // Postgres twin takes a row lock in the same statement; SQLite has one
 // connection and nothing to order against, so this is the read alone. teamID
 // is the task's team ("" for none).
 func lockFiringTask(ctx context.Context, q queryer, taskID string) (open bool, teamID string, err error) {
 	var team sql.NullString
 	err = q.QueryRowContext(ctx, `
-		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL, team_id
+		SELECT status NOT IN ('done', 'dismissed'), team_id
 		  FROM tasks WHERE id = ?`, taskID).Scan(&open, &team)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, "", db.ErrNoSuchTask
