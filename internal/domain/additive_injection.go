@@ -50,6 +50,12 @@ func TaskClosingNotice(eventType, metadataJSON string) string {
 
 // taskClosingNote is the close note with guidance, "" or a sentence and its
 // trailing space, ahead of its last line.
+//
+// TODO(TFAC-1392): the last line is true of neither close the note is sent
+// on. A task an event closes at once is closed before the note is read, and a
+// held close applies when a person resolves the deliverable. An agent reading
+// it is told to expect a close that has happened or that its work does not
+// bring.
 func taskClosingNote(eventType, metadataJSON, guidance string) string {
 	if metadataJSON == "" {
 		return fmt.Sprintf(

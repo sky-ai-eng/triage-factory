@@ -102,6 +102,9 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 	if s.tasks == nil || s.events == nil {
 		return
 	}
+	// TODO(TFAC-1392): an engagement that starts on a task already closed is
+	// told nothing here, so a blueprint step minted after the close, and a
+	// conversation resumed after it, run without knowing the task is resolved.
 	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
 	if err != nil {
 		delegateLog.Warn("read the task's held close failed; the engagement starts without the close note", "task_id", taskID, "error", err)

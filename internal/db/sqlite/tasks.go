@@ -1077,8 +1077,8 @@ func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, close
 // closeTaskRow is Close's body, reporting the closed row via RETURNING or
 // nil when the state-guarded WHERE matched nothing — a missing id, or a task
 // already terminal (the same guard that makes a replayed close a no-op).
-// An event's close shares it (closeTaskOnEvent), so every close writes the
-// same columns and agrees on what "did this land" means.
+// An event's close shares it (closeTaskOnEvent), so the two write the same
+// columns and agree on what "did this land" means.
 func closeTaskRow(ctx context.Context, q queryer, taskID, closeReason, closeEventType string) (*domain.Task, error) {
 	var cet *string
 	if closeEventType != "" {

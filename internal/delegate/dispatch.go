@@ -821,9 +821,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 
 	// Ahead of the fork between the resume path and the step launch, so the
-	// note reaches the agent whichever one drives it.
-	s.tellHeldClose(gateCtx, orgID, conv, task.ID)
+	// notes reach the agent whichever one drives it. The queued events go
+	// first: staged notes are read oldest first, and an event queued on a
+	// task that holds a close came before the event that resolved it, so the
+	// agent reads them in the order they happened.
 	s.handOffQueuedFirings(gateCtx, orgID, br, conv, task)
+	s.tellHeldClose(gateCtx, orgID, conv, task.ID)
 
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable

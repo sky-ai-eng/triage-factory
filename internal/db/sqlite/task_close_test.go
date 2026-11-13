@@ -93,14 +93,6 @@ func newSQLiteCloseSeeder(conn *sql.DB) (dbtest.TaskCloseSeeder, map[string]stri
 			}
 			return convID
 		},
-		CancelRequested: func(t *testing.T, blueprintRunID string) bool {
-			t.Helper()
-			var flag int
-			if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&flag); err != nil {
-				t.Fatalf("read cancel_requested: %v", err)
-			}
-			return flag != 0
-		},
 		WorkState: func(t *testing.T, blueprintRunID, conversationID string) dbtest.TaskCloseWorkState {
 			t.Helper()
 			var st dbtest.TaskCloseWorkState

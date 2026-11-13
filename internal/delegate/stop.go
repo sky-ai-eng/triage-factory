@@ -381,8 +381,9 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// conversations routinely, because every caller enumerates non-terminal
 	// runs and `open` is non-terminal — and for those it is the first and
 	// last thing the transcript will ever say about why the work ended. Skip
-	// it there and a swiped or closed task silently ends a conversation with
-	// no explanation at all, which is the case this note exists for.
+	// it there and a requeued task or an archived team silently ends a
+	// conversation with no explanation at all, which is the case this note
+	// exists for.
 	if cancelBlueprint || conv.Status != domain.StatusOpen {
 		s.insertStopNote(orgID, conversationID, userID, note)
 	}
@@ -477,8 +478,8 @@ func (s *Spawner) insertStopNote(orgID, conversationID, userID, content string) 
 	}
 	ctx := context.Background()
 	// Never say the same thing twice in a row. Two teardowns can reach one
-	// conversation — a task closed by the router and then swiped, an archived
-	// team over a task that already closed — and each enumerates every
+	// conversation — a task requeued and then delegated again, an archived
+	// team over a task a person already claimed — and each enumerates every
 	// non-terminal run, so the second arrives at a row the first already
 	// explained. The engine's guard is reused rather than reimplemented: it
 	// walks back only to the last human input, so a stop after a resume is a

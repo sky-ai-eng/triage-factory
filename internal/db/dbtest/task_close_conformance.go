@@ -53,9 +53,6 @@ type TaskCloseSeeder struct {
 	// parent, in the given stored status. Returns its id.
 	BareConversation func(t *testing.T, taskID, convStatus string) (convID string)
 
-	// CancelRequested reads a blueprint_run's cancel_requested flag.
-	CancelRequested func(t *testing.T, blueprintRunID string) bool
-
 	// WorkState reads the blueprint run and the conversation under it.
 	WorkState func(t *testing.T, blueprintRunID, conversationID string) TaskCloseWorkState
 

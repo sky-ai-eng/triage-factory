@@ -442,7 +442,8 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 // best-effort spelling for the callers that don't.
 //
 // Only the blueprint's own cancel verbs and the lifecycle teardown one layer up
-// (a closed or swiped task, an archived team) reach this. Stopping a
+// (a task requeued, delegated again or claimed by a person, an archived team)
+// reach this. Stopping a
 // conversation must not: the signal is what turns a parked step into a
 // permanently unresumable one.
 func (s *Spawner) raiseBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) error {

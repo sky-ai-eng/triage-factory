@@ -97,14 +97,6 @@ func newPgCloseSeeder(conn *sql.DB, orgID, userID string) (dbtest.TaskCloseSeede
 			}
 			return convID
 		},
-		CancelRequested: func(t *testing.T, blueprintRunID string) bool {
-			t.Helper()
-			var flag bool
-			if err := conn.QueryRow(`SELECT cancel_requested FROM blueprint_runs WHERE id = $1`, blueprintRunID).Scan(&flag); err != nil {
-				t.Fatalf("read cancel_requested: %v", err)
-			}
-			return flag
-		},
 		WorkState: func(t *testing.T, blueprintRunID, conversationID string) dbtest.TaskCloseWorkState {
 			t.Helper()
 			var st dbtest.TaskCloseWorkState
