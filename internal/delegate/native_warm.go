@@ -349,10 +349,9 @@ func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time
 
 // readWarmWait reads what the wait acts on: a person's message waiting, and
 // the conversation having ended, which no follow-up resumes, so a warm claim
-// on it serves nothing. A new delegation on the task ends it; the task
-// closing does not. A conversation that is gone reads as ended. A read that
-// fails answers that neither holds, and the next ring or backstop tick asks
-// again.
+// on it serves nothing. A conversation that is gone reads as ended. A read
+// that fails answers that neither holds, and the next ring or backstop tick
+// asks again.
 func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitState {
 	st, err := s.conversations.WarmWaitStateSystem(ctx, n.orgID, n.conversationID)
 	if errors.Is(err, db.ErrNoSuchConversation) {

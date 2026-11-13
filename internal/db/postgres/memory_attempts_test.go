@@ -65,6 +65,10 @@ func TestMemoryAttemptStore_Postgres(t *testing.T) {
 					SELECT $2, org_id, creator_user_id, team_id, visibility, task_id, prompt_id,
 					       trigger_type, NULL, blueprint_run_id, blueprint_step_index + 1
 					FROM conversations WHERE id = $1`, afterConversationID, uuid.New().String())
+				pgtest.MustExec(t, h.AdminDB, `
+					UPDATE blueprint_runs
+					SET current_step_index = (SELECT blueprint_step_index + 1 FROM conversations WHERE id = $1)
+					WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = $1)`, afterConversationID)
 			},
 			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
 				t.Helper()

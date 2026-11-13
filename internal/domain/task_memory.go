@@ -245,12 +245,12 @@ type MemoryAttemptSummary struct {
 // attempt has run recently enough to still be in the backoff.
 //
 // TaskWorking is the sweep's ordering key rather than a fact about the memory:
-// the task holds a conversation that is still working, and the claim gate
-// drives nothing on a task that owes a memory, so that conversation is waiting
-// for this one. An owed memory on a task with no working conversation holds
-// nothing back yet. The sweep takes the ones something is waiting for first.
-// The task's status is not part of the key: a closed task's next blueprint
-// step waits for its memory exactly as an open task's does.
+// the task holds a conversation that is still working. Nothing on a task is
+// claimed while it owes a memory, so that work's next claim is the one most
+// likely to be waiting, and the sweep takes those tasks first. An owed memory
+// on a task with no working conversation holds nothing back until something
+// is delegated. The task's status is not part of the key: a closed task's
+// next blueprint step needs its memory exactly as an open task's does.
 type MemoryOwed struct {
 	OrgID          string
 	ConversationID string

@@ -45,8 +45,9 @@ type MemoryAttemptSeeder struct {
 	OwingConversation func(t *testing.T, suffix string, taskOpen bool) (conversationID string)
 
 	// QueueNextConversation adds, on afterConversationID's task and blueprint
-	// run, a conversation at the next step index that nothing has claimed:
-	// what a blueprint's advance leaves waiting to be driven.
+	// run, a conversation at the next step index that nothing has claimed, and
+	// moves the run's pointer to it: what a blueprint's advance leaves waiting
+	// to be driven.
 	QueueNextConversation func(t *testing.T, afterConversationID string)
 
 	// AgeAttempt rewrites an attempt's started_at, and its completed_at when

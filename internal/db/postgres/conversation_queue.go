@@ -272,8 +272,7 @@ const warmTreeHeldSQL = `EXISTS (
 // conversation parked on a person, and a concluded or failed one its blueprint
 // has moved past, are not working. The task's status is no part of it: a
 // conversation on a closed task is working on the same terms as one on an open
-// task. Every reader that asks whether work is under way on a task reads this
-// one predicate.
+// task.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
 	  AND (` + workingClaimExistsSQL + `

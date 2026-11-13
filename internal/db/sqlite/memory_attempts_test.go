@@ -65,6 +65,12 @@ func TestMemoryAttemptStore_SQLite(t *testing.T) {
 					FROM conversations WHERE id = ?`, uuid.New().String(), afterConversationID); err != nil {
 					t.Fatalf("queue the next conversation: %v", err)
 				}
+				if _, err := conn.Exec(`
+					UPDATE blueprint_runs
+					SET current_step_index = (SELECT blueprint_step_index + 1 FROM conversations WHERE id = ?1)
+					WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?1)`, afterConversationID); err != nil {
+					t.Fatalf("move the run's pointer: %v", err)
+				}
 			},
 			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
 				t.Helper()
