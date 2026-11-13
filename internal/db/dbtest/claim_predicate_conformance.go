@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -1026,6 +1027,67 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		}
 		if got.ResultSummary != "done" {
 			t.Errorf("result summary after the resume = %q, want it kept", got.ResultSummary)
+		}
+	})
+
+	// The timing projection's Completed follows the run, not the stamp. A
+	// follow-up's turn end on a blueprint that is not running records no
+	// verdict, so the row is open with no completed_at either way, and the
+	// run's own status is what tells a finished run a person followed up on
+	// from one that aborted.
+	t.Run("TimingCountsAFollowedUpStepByItsRunsStatus", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			blueprint string
+			want      bool
+		}{
+			{"run completed", "completed", true},
+			{"run aborted", "aborted", false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := mk(t)
+				convID := h.StageDelegation(t, "sdk")
+				mustClaim(t, h, convID)
+				completed := func(t *testing.T) bool {
+					t.Helper()
+					timings, err := h.Stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, h.OrgID, time.Unix(0, 0), time.Time{}, 0)
+					if err != nil || len(timings) != 1 {
+						t.Fatalf("RecentConversationTimingsForOrgSystem = (%d rows, %v), want the fixture's one conversation", len(timings), err)
+					}
+					fleet, err := h.Stores.ConversationQueue.RecentConversationTimingsSystem(ctx, time.Unix(0, 0), 0)
+					if err != nil || len(fleet) != 1 {
+						t.Fatalf("RecentConversationTimingsSystem = (%d rows, %v), want the fixture's one conversation", len(fleet), err)
+					}
+					if fleet[0].Completed != timings[0].Completed {
+						t.Fatalf("Completed = %v across orgs and %v for the org, want the two reads to agree", fleet[0].Completed, timings[0].Completed)
+					}
+					return timings[0].Completed
+				}
+				if completed(t) {
+					t.Fatalf("Completed while the first turn is in flight = true, want false")
+				}
+				if _, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "done", "finish", "", ""); err != nil {
+					t.Fatalf("record verdict: %v", err)
+				}
+				if !completed(t) {
+					t.Fatalf("Completed with the step's verdict recorded = false, want true")
+				}
+				h.SetBlueprintState(t, tc.blueprint, 0)
+				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+					t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
+				}
+				mustClaim(t, h, convID)
+				row, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "answered", "continue", "", "")
+				if err != nil || row == nil {
+					t.Fatalf("end the follow-up's turn: row=%v err=%v", row, err)
+				}
+				if row.Status != domain.StatusOpen || row.Concluded() {
+					t.Fatalf("the follow-up's turn end = (status %q, concluded %v), want open with no verdict; the fixture has not staged the precondition", row.Status, row.Concluded())
+				}
+				if got := completed(t); got != tc.want {
+					t.Errorf("Completed after the follow-up's turn = %v, want %v", got, tc.want)
+				}
+			})
 		}
 	})
 

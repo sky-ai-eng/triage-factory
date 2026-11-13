@@ -1092,9 +1092,8 @@ func (s *Spawner) recordNativeResult(
 	// closes the run off; on a finished blueprint, or with none, the store
 	// records no verdict and the conversation stays live for the next message
 	// (ConversationStore.CompleteForClaimSystem). One fenced write for both
-	// trigger types — the fence's ownership check stands in for the RLS pass
-	// the former synthetic-claims route provided, the same trade the SDK
-	// completion path makes.
+	// trigger types, on the admin pool: the fence's ownership check is what
+	// authorizes it, the same trade the SDK completion path makes.
 	//
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is

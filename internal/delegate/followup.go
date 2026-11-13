@@ -172,7 +172,9 @@ func resumableState(status string) bool {
 // deferral spawned in the meantime. Staging is an automated channel and needs
 // an automated reader:
 //
-//   - open, no verdict — a claim picks it back up as soon as input lands.
+//   - open, no verdict — a step parked mid-work, or a person's thread between
+//     turns on a blueprint that is not running. The conversation is still
+//     live, and the claim its next message brings reads the note with it.
 //   - concluded, abort — the agent stopped mid-work; the blueprint re-opens on
 //     the resume, so the work is still in flight in every sense but the row.
 //
