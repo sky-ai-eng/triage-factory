@@ -295,7 +295,8 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 		mt = MaxOutputTokens(req.Provider, req.Model)
 	}
 	params.MaxCompletionTokens = &mt
-	if req.Temperature != nil {
+	// A model that refuses sampling parameters answers any temperature with a 400.
+	if req.Temperature != nil && acceptsSampling(req.Model) {
 		temp := *req.Temperature
 		params.Temperature = &temp
 	}

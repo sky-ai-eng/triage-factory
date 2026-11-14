@@ -398,3 +398,19 @@ func findAssistant(t *testing.T, areq *anthropic.AnthropicMessageRequest, textCo
 	t.Fatalf("no assistant message containing %q", textContains)
 	return anthropic.AnthropicMessage{}
 }
+
+// A model whose datasheet row refuses sampling parameters goes to the wire with
+// no temperature, since the provider answers one with a 400; a model that takes
+// them keeps the caller's.
+func TestWire_TemperatureOnlyWhereTheModelTakesIt(t *testing.T) {
+	temp := 0.1
+	for _, c := range []struct {
+		model string
+		sent  bool
+	}{{"claude-haiku-5-5", false}, {"claude-haiku-4-5", true}} {
+		areq := toAnthropic(t, Request{Provider: ProviderAnthropic, Model: c.model, Rows: []domain.Message{{Role: "user", Content: "hi"}}, Temperature: &temp})
+		if got := areq.Temperature != nil; got != c.sent {
+			t.Errorf("%s: temperature sent = %v, want %v", c.model, got, c.sent)
+		}
+	}
+}

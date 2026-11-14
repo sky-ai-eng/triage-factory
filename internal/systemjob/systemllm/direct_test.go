@@ -220,12 +220,16 @@ func TestComplete_Direct_RequestShape(t *testing.T) {
 		"org-1/anthropic_api_key":  "sk-ant-test",
 		"org-1/anthropic_base_url": srv.URL,
 	}
-	if _, err := NewRecorder(nil).Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
+	// A model that takes sampling parameters, since only on one does the
+	// caller's temperature reach the wire.
+	opts := completeOpts("org-1", secrets)
+	opts.Model = "claude-haiku-4-5"
+	if _, err := NewRecorder(nil).Complete(context.Background(), opts); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
 	body := h.LastBody()
-	if got := body["model"]; got != domain.ModelHaiku {
+	if got := body["model"]; got != opts.Model {
 		t.Errorf("model = %v, want the org's background-jobs model", got)
 	}
 	if got, ok := body["temperature"].(float64); !ok || got != 0.1 {
