@@ -87,7 +87,9 @@ var _ cell.Jail = (*toolHostJail)(nil)
 // on a connection nobody was ever going to make.
 //
 // The span's status on a failure is a fixed message and the error is never
-// recorded on it: an exit's error carries the tool host's stderr.
+// recorded on it: an exit's error carries the tool host's stderr. A ctx that
+// ends is the engagement stopping, not the tool host failing, so it is an
+// outcome and leaves the status unset.
 func (j *toolHostJail) Connect(ctx context.Context, timeout time.Duration) (net.Conn, error) {
 	_, span := tracer.Start(ctx, "agent.tool_host.connect")
 	defer span.End()
@@ -113,7 +115,7 @@ func (j *toolHostJail) Connect(ctx context.Context, timeout time.Duration) (net.
 		span.SetStatus(codes.Error, "the tool host exited before connecting")
 		return nil, fmt.Errorf("gvisor: tool host exited before connecting (%v); stderr: %s", j.waitErr, j.run.Stderr())
 	case <-ctx.Done():
-		span.SetStatus(codes.Error, "the context ended before the tool host connected")
+		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return nil, ctx.Err()
 	case <-time.After(timeout):
 		span.SetStatus(codes.Error, "the tool host did not connect within the timeout")
