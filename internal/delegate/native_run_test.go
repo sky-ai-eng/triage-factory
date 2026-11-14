@@ -430,30 +430,20 @@ func TestNativeBashMemBudgetMB_StaysUnderTheCeiling(t *testing.T) {
 	}
 }
 
-// TestColdCompactionModelFor pins the cold model to Haiku 5.5 on the
-// engagement's own provider, under the id that provider's credential calls. A
-// known answer must be a model the native universe offers: the credential
-// whitelist names it, and the ledger prices it from the catalog. A key the
+// TestColdCompactionModelFor: Haiku 5.5 on the engagement's provider, offered
+// by the native universe so the whitelist and the price lookup hold; a key the
 // catalog does not know answers itself.
 func TestColdCompactionModelFor(t *testing.T) {
-	cases := []struct {
-		name, model, want string
-		offered           bool
-	}{
-		{"anthropic", domain.ModelOpus, "claude-haiku-5-5", true},
-		{"bedrock", "us.anthropic.claude-opus-5-5", "us.anthropic.claude-haiku-5-5", true},
-		{"unknown key", "claude-nobody-ships", "claude-nobody-ships", false},
-	}
 	u := modelcatalog.UniverseFor(true)
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := coldCompactionModelFor(c.model)
-			if got != c.want {
-				t.Fatalf("coldCompactionModelFor(%q) = %q, want %q", c.model, got, c.want)
-			}
-			if c.offered && !u.Offers(got) {
-				t.Errorf("cold model %q is not offered by the native universe", got)
-			}
-		})
+	for _, c := range []struct{ model, want string }{
+		{domain.ModelOpus, "claude-haiku-5-5"},
+		{"us.anthropic.claude-opus-5-5", "us.anthropic.claude-haiku-5-5"},
+		{"claude-nobody-ships", "claude-nobody-ships"},
+	} {
+		if got := coldCompactionModelFor(c.model); got != c.want {
+			t.Errorf("coldCompactionModelFor(%q) = %q, want %q", c.model, got, c.want)
+		} else if got != c.model && !u.Offers(got) {
+			t.Errorf("cold model %q is not offered by the native universe", got)
+		}
 	}
 }

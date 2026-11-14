@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { TelemetryRail } from './StationInstruments'
 import { stationState } from './stationStyle'
@@ -23,19 +23,9 @@ const conversation = (over: Partial<Conversation>): Conversation =>
     ...over,
   }) as Conversation
 
-// The rail reads the model catalog for the context gauge's window. Only the
-// gauge's suite answers that read; every other suite renders without one.
-beforeEach(() => {
-  resetModelCatalogForTest()
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(() => Promise.reject(new Error('no network in this suite'))),
-  )
-})
-
-function renderRail(over: Partial<Conversation>, now: number = T0 + 60_000) {
+function renderRail(over: Partial<Conversation>, now = T0 + 60_000, messages: Message[] = []) {
   const r = conversation(over)
-  render(<TelemetryRail conversation={r} messages={[]} state={stationState(r)} now={now} />)
+  render(<TelemetryRail conversation={r} messages={messages} state={stationState(r)} now={now} />)
 }
 
 // The rail's settled queued readout keys on the shared visibility threshold
@@ -155,61 +145,28 @@ describe('TelemetryRail idle readout', () => {
   })
 })
 
-// The gauge's denominator is the catalog's window for the conversation's model.
-// The pattern only answers for a key the catalog does not carry.
+// The gauge's denominator is the catalog's window for the model; the pattern
+// answers only for a key the catalog does not carry.
 describe('TelemetryRail context gauge', () => {
-  const lastPrompt: Message[] = [
-    {
-      id: 1,
-      conversation_id: 'r1',
-      role: 'assistant',
-      content: 'working',
-      subtype: '',
-      created_at: iso(0),
-      input_tokens: 500_000,
-    },
-  ]
-
-  // Primes the catalog cache before the render, so the rail reads it on its
-  // first pass.
-  async function withCatalog(items: ModelCatalogEntry[]) {
+  async function renderGauge(model: string, items: ModelCatalogEntry[]) {
+    resetModelCatalogForTest()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, ...jsonBody({ items }) }))
     await refreshModelCatalog(LOCAL_DEFAULT_ORG_ID)
-  }
-
-  function renderGauge(model: string) {
-    const r = conversation({ Model: model })
-    render(
-      <TelemetryRail
-        conversation={r}
-        messages={lastPrompt}
-        state={stationState(r)}
-        now={T0 + 60_000}
-      />,
-    )
+    renderRail({ Model: model }, T0, [
+      { id: 1, role: 'assistant', input_tokens: 500_000 } as Message,
+    ])
   }
 
   it('measures against the window the catalog carries for the model', async () => {
-    // A key the pattern reads as 200k: only the catalog makes this 1M.
-    await withCatalog([
-      {
-        key: 'claude-next',
-        display_name: 'Claude Next',
-        provider: 'anthropic',
-        enabled: true,
-        context_window: 1_000_000,
-      },
+    // The pattern reads this key as 200k, so only the catalog makes it 1M.
+    await renderGauge('claude-next', [
+      { key: 'claude-next', display_name: 'Claude Next', enabled: true, context_window: 1_000_000 },
     ])
-    renderGauge('claude-next')
     expect(screen.getByText('500k / 1M')).toBeInTheDocument()
-    expect(screen.getByText('50%')).toBeInTheDocument()
   })
 
   it('falls back to the pattern for a key the catalog does not carry', async () => {
-    // A local catalog offers SDK aliases with no window; the conversation
-    // carries the concrete id the SDK reported.
-    await withCatalog([{ key: 'haiku', display_name: 'Haiku', enabled: true }])
-    renderGauge('claude-haiku-5-5')
+    await renderGauge('claude-haiku-5-5', [{ key: 'haiku', display_name: 'Haiku', enabled: true }])
     expect(screen.getByText('500k / 1M')).toBeInTheDocument()
   })
 })

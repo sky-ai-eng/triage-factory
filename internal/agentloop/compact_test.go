@@ -472,8 +472,7 @@ func TestColdResume_CompactsBeforeTheFirstCall(t *testing.T) {
 	}}
 	engine := newTestEngine(tr, provider, newScriptedToolHost())
 
-	// The conversation's own cap is set apart from the summarize model's,
-	// since the two models' maximums are the same.
+	// Both models' maximums are 128k, so the conversation's cap is set apart.
 	params := testParams()
 	params.MaxTokens = 8192
 	result := engine.Run(context.Background(), params)
