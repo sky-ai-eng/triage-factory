@@ -77,6 +77,7 @@ var approvedKeys = []string{
 	"transport",
 	"turn",
 	"upstream",
+	"url.template",
 	"work.kind",
 	"workspace.provenance",
 }
@@ -100,6 +101,7 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		Model("claude-sonnet-4-5"), MaxTokens(32000), TokensInput(10), TokensOutput(20),
 		TokensCacheRead(30), TokensCacheWrite(40), LLMCostUSD(0.01), FirstChunk(800 * time.Millisecond),
 		Tool("bash"), Turn(3), StopReason("tool_calls"), MemoryKills(1),
+		URLTemplate("/repos/{owner}/{repo}/pulls/{}"),
 	}
 	for _, kv := range produced {
 		if !slices.Contains(approvedKeys, string(kv.Key)) {
@@ -147,6 +149,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"Model":            true, "MaxTokens": true, "TokensInput": true, "TokensOutput": true,
 		"TokensCacheRead": true, "TokensCacheWrite": true, "LLMCostUSD": true, "FirstChunk": true,
 		"Tool": true, "Turn": true, "StopReason": true, "MemoryKills": true,
+		"URLTemplate": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

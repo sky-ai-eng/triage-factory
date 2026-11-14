@@ -47,6 +47,12 @@ func TestMemoryAttemptStore_SQLite(t *testing.T) {
 				if taskOpen {
 					status = "queued"
 				}
+				// A turn, since only a conversation that has run owes a memory.
+				if _, err := conn.Exec(
+					`INSERT INTO messages (conversation_id, role, subtype, content) VALUES (?, 'assistant', '', 'a turn')`,
+					conversationID); err != nil {
+					t.Fatalf("seed an assistant turn: %v", err)
+				}
 				if _, err := conn.Exec(`UPDATE conversations SET ended_at = ?, ended_reason = 'failed' WHERE id = ?`,
 					time.Now().UTC(), conversationID); err != nil {
 					t.Fatalf("end conversation: %v", err)

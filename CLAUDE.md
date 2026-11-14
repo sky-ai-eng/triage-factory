@@ -72,7 +72,8 @@ Claims                              ← one row per executor engagement with a c
 
 **Conversations · messages · claims** is the unified agent data model (it replaced
 the former `runs` fusion table): a *conversation* is the
-durable context — type (`delegation` | `interactive` reserved |
+durable context — type (`delegation` | `interactive`, minted by a person's
+claim as the conversation they work the task in |
 namespaced `subagent:<kind>` reserved), task/trigger linkage, work-lifecycle
 status (stored vocabulary `queued|running|open|terminals` — spend and KV-cache
 warmth are derived from `messages`, never stored), `runtime` ratchet

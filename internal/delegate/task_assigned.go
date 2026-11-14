@@ -61,6 +61,11 @@ func storedID(id string) string {
 // (domain.TaskAssignedNote). The note is staged for the conversation's next
 // tool boundary (stageNoteAtToolBoundary), never as a turn of its own.
 //
+// When the assignee is a person, the task's own conversation is told too, if
+// it has one that has run: the task is now assigned to that person, and the
+// messages from here on are theirs. Same producer and provenance as the notes
+// above, so the same rules retire it.
+//
 // The note is composed from the task as stored. A task that has closed, or
 // whose claim is no longer assignee, tells nothing: the write that moved it
 // on published an event of its own, or left nobody holding it.
@@ -93,6 +98,19 @@ func (s *Spawner) TellTaskAssigned(ctx context.Context, orgID, taskID, assignee 
 			domain.StagedInjectionProducerTaskAssigned, domain.TaskAssignedNote(told), prov); !ok {
 			delegateLog.Warn("the note about an assigned task was not staged; the conversation is not told", "conversation", r.ConversationID, "task_id", taskID)
 		}
+	}
+	// The task's own conversation, when a person now holds the task: a
+	// reassign within the team keeps the conversation, so it is told who its
+	// messages come from now. A conversation that has never run has nobody to
+	// correct, which covers the one a claim just minted.
+	if assignment.UserID == "" || assignment.ConversationID == "" || !assignment.ConversationHasRun {
+		return
+	}
+	own := *assignment
+	own.Own = true
+	if _, ok := s.stageNoteAtToolBoundary(ctx, orgID, own.ConversationID, domain.MessageSubtypeInjectionSystemNote,
+		domain.StagedInjectionProducerTaskAssigned, domain.TaskAssignedNote(own), prov); !ok {
+		delegateLog.Warn("the note naming the task's new assignee was not staged; its conversation is not told", "conversation", own.ConversationID, "task_id", taskID)
 	}
 }
 

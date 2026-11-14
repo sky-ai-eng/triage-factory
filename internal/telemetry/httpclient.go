@@ -20,7 +20,10 @@ import (
 // "<upstream>.http" — one name per client, since otelhttp's default of
 // "HTTP GET" makes every outbound call indistinguishable and the obvious
 // fix, naming the span after the URL, is what scrub.go exists to prevent.
-// What the call was *for* comes from the parent span.
+// What the call was *for* comes from the parent span. A "github" span also
+// carries url.template, the endpoint it called with every tenant name
+// replaced (githubURLTemplate), because one parent span can hold several
+// GitHub calls and their paths are the only thing that tells them apart.
 //
 // The transport is the choke point rather than each call site because it
 // sees retries the caller's span can't separate and can't be bypassed by a
@@ -36,6 +39,9 @@ func TracedTransport(base http.RoundTripper, upstream string) http.RoundTripper 
 	name := upstream + ".http"
 	if base == nil {
 		base = sharedTransport
+	}
+	if upstream == "github" {
+		base = githubTemplateTransport{base: base}
 	}
 	return otelhttp.NewTransport(base,
 		otelhttp.WithTracerProvider(childOnlyProvider{inner: ScrubbedTracerProvider()}),

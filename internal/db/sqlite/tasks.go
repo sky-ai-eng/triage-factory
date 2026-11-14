@@ -2045,6 +2045,7 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
 		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
+		  AND ` + db.ConversationHasRunSQL("owed") + `
 		  AND NOT EXISTS (
 		      SELECT 1 FROM conversation_memory mem
 		      WHERE mem.conversation_id = owed.id)`
@@ -2131,7 +2132,10 @@ var sqliteTaskColumnsWithEntity = `
 	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "outcome") + `, ''),
 	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_kind") + `, ''),
 	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_message") + `, ''),
-	` + taskMemoryAttemptSQL("t.org_id", "t.id", "started_at")
+	` + taskMemoryAttemptSQL("t.org_id", "t.id", "started_at") + `,
+	-- The task's current conversation (domain.Task.ConversationID): the row
+	-- the claim scan treats as owning the task's tree, by the same definition.
+	COALESCE(` + taskLiveConversationSQL("t.org_id", "t.id") + `, '')`
 
 // sqliteTaskListProjection is the SELECT list and the scan targets for one
 // List page: the canonical columns every task read projects, plus this order's
@@ -2221,6 +2225,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&t.MemoryPending,
 		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
 		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,
+		&t.ConversationID,
 	)
 }
 

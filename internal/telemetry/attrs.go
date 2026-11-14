@@ -73,6 +73,7 @@ const (
 	keyLLMCostUSD     = attribute.Key("llm.cost_usd")
 	keyFirstChunkMS   = attribute.Key("llm.first_chunk_ms")
 	keyMemoryKills    = attribute.Key("memory.kills")
+	keyURLTemplate    = attribute.Key("url.template")
 )
 
 // Opaque row identifiers, the backbone of the set. Each is the id and
@@ -279,3 +280,11 @@ func Tool(name string) attribute.KeyValue        { return keyTool.String(name) }
 func Turn(n int) attribute.KeyValue              { return keyTurn.Int(n) }
 func StopReason(class string) attribute.KeyValue { return keyStopReason.String(class) }
 func MemoryKills(n int) attribute.KeyValue       { return keyMemoryKills.Int(n) }
+
+// URLTemplate is the endpoint an outbound request called, as a path template
+// whose every segment is either the upstream's own path word or a placeholder
+// ("/repos/{owner}/{repo}/pulls/{}/reviews"), never a path with a name in it.
+// A template comes from a normalizer that keeps a segment only when it is on
+// a fixed list of the upstream's words (githubURLTemplate), so a repository,
+// branch, or file name reaches it only by equalling one of those words.
+func URLTemplate(template string) attribute.KeyValue { return keyURLTemplate.String(template) }

@@ -71,6 +71,7 @@ func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.Syste
 			GitHubRefreshMarks: newGitHubRefreshMarkStore(tx),
 			Blueprints:         newBlueprintStore(tx),
 			Tasks:              newTaskStore(tx, tx),
+			Conversations:      newConversationStore(tx),
 			Ext:                db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 		})
 	})

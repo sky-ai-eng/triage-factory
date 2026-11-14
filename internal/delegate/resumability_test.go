@@ -294,3 +294,65 @@ func (c *capturedEvents) conversationUpdates(t *testing.T, conversationID string
 	}
 	return out
 }
+
+// TestSendMessage_AnInteractiveConversationIsNotSteerable: the dispatcher has
+// one execution path, the blueprint step's, and fails a claimed conversation
+// with no blueprint run. Until it runs the conversation a person's claim
+// mints, a message to one is refused before anything is written, so the
+// conversation is never woken into that failure. The composer reads the same
+// refusal.
+func TestSendMessage_AnInteractiveConversationIsNotSteerable(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	ctx := context.Background()
+	// A task whose agent conversation a takeover ended, and the conversation
+	// the person's claim minted in its place.
+	const agentConversation = "r-agent-before-takeover"
+	seedConversation(t, database, agentConversation, "sess", t.TempDir())
+	var taskID string
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, agentConversation).Scan(&taskID); err != nil {
+		t.Fatalf("read the task: %v", err)
+	}
+	if _, err := stores.Conversations.EndConversationSystem(ctx, runmode.LocalDefaultOrgID, agentConversation, domain.EndedTakenOver); err != nil {
+		t.Fatalf("end the agent's conversation: %v", err)
+	}
+	minted, err := stores.Conversations.MintForPersonClaimSystem(ctx, runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID)
+	if err != nil || minted == nil {
+		t.Fatalf("MintForPersonClaimSystem = (%v, %v)", minted, err)
+	}
+	s := NewSpawner(database, stores, nil, nil, "m")
+
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, minted.ID)
+	if err != nil || conv == nil {
+		t.Fatalf("load the minted conversation: %v", err)
+	}
+	if conv.Type != domain.ConversationTypeInteractive {
+		t.Fatalf("the read carries type %q, want %q: the refusal keys on it", conv.Type, domain.ConversationTypeInteractive)
+	}
+	ok, reason := s.ResumabilityFor(ctx, runmode.LocalDefaultOrgID, conv)
+	if ok || reason != ResumeBlockedNotSteerable {
+		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedNotSteerable)
+	}
+	if err := s.SendMessage(ctx, runmode.LocalDefaultOrgID, minted.ID, runmode.LocalDefaultUserID, "hello"); !errors.Is(err, ErrConversationNotSteerable) {
+		t.Errorf("SendMessage err = %v, want ErrConversationNotSteerable", err)
+	}
+
+	// Refused before anything was written: no message, and still parked.
+	var messages int
+	var status string
+	if err := database.QueryRow(`
+		SELECT (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id), COALESCE(c.status, '')
+		FROM conversations c WHERE c.id = ?`, minted.ID).Scan(&messages, &status); err != nil {
+		t.Fatalf("read the minted conversation: %v", err)
+	}
+	if messages != 0 || status != domain.StatusOpen {
+		t.Errorf("after the refused send: messages = %d, status = %q; want none and %q", messages, status, domain.StatusOpen)
+	}
+	after, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, minted.ID)
+	if err != nil || after == nil {
+		t.Fatalf("re-read the minted conversation: %v", err)
+	}
+	if after.Status != domain.StatusOpen {
+		t.Errorf("display status after the refused send = %q, want %q: nothing woke it", after.Status, domain.StatusOpen)
+	}
+}

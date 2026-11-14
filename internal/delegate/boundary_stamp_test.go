@@ -279,6 +279,7 @@ func TestEndedFollowUpBlock_CoversTheWholeVocabulary(t *testing.T) {
 		ResumeBlockedEndedRequeued:     true,
 		ResumeBlockedEndedDelegated:    true,
 		ResumeBlockedEndedTakenOver:    true,
+		ResumeBlockedEndedReassigned:   true,
 		ResumeBlockedEndedStepAdvanced: true,
 		ResumeBlockedEndedTeamArchived: true,
 		ResumeBlockedEndedFailed:       true,

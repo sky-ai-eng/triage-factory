@@ -571,7 +571,7 @@ This task has {K} prior conversations. Their memory files are at _tfac/entity-me
 <section class="block" id="manual">
   <div class="section-label">§9</div>
   <h2>The manual conversation</h2>
-  <p class="lede">A conversation a person drives on a task — the <code>interactive</code> type the vocabulary reserved and nothing mints today. This section defines what that conversation <em>is</em> once it exists, because §5, §6, §7 and §13 all depend on it: its row, its claim, its prompt, its workspace, its steady state, its end. How one is <em>started</em> — the route and its body, the preconditions, the Board gesture, what the task's column does — is deliberately not here; it is TFAC-378's and the Board v1's (§15).</p>
+  <p class="lede">A conversation a person drives on a task — the <code>interactive</code> type, minted by a person's claim on the task. This section defines what that conversation <em>is</em> once it exists, because §5, §6, §7 and §13 all depend on it: its row, its claim, its prompt, its workspace, its steady state, its end. How one is <em>started</em> is not here: a person's claim mints it, and the Board gesture around that claim is the Board v1's (§15).</p>
 
   <ul class="tight">
     <li><strong>Row:</strong> <code>type = 'interactive'</code> — the column that says what kind of conversation this is, and the one thing every reader keys on; <code>task_id</code> and <code>team_id</code> from the task; <code>creator_user_id</code> the person; no blueprint run, no step index, no <code>prompt_id</code>. The <code>origin</code> column is not this spec's concern: it is baseline headroom ("blueprint-step delegation vs other creation modes"), written only by its DEFAULT and read by nothing in Go, whose sole effect is the CHECK <code>conversations_origin_requires_parents</code> — a row with <code>origin = 'blueprint'</code> must carry its run, task and prompt. A manual conversation carries none, so whatever opens one writes a non-<code>blueprint</code> value there, and what that value is (or whether the column survives, given <code>type</code> already answers the question) is TFAC-378's call.</li>
@@ -615,10 +615,10 @@ This task has {K} prior conversations. Their memory files are at _tfac/entity-me
       <h5>conversations <span class="h-meta">boundary + interactive row</span></h5>
       <ul>
         <li class="shared"><span class="col-name">task_id, blueprint_run_id, blueprint_step_index</span> unchanged</li>
-        <li class="shared"><span class="col-name">type</span> 'interactive' — the reserved value, written by whatever opens a manual conversation (§9, §15)</li>
-        <li class="shared"><span class="col-name">origin</span> untouched by this spec — a DEFAULT-only column nothing reads; a manual conversation needs a non-'blueprint' value to satisfy the CHECK, which is TFAC-378's to name or retire (§9)</li>
+        <li class="shared"><span class="col-name">type</span> 'interactive' — written by a person's claim, which opens the manual conversation (§9, §15)</li>
+        <li class="shared"><span class="col-name">origin</span> a column nothing reads; a manual conversation carries 'interactive', a non-'blueprint' value that satisfies the CHECK (§9)</li>
         <li class="added"><span class="col-name">ended_at</span> timestamptz — set by a boundary</li>
-        <li class="added"><span class="col-name">ended_reason</span> text — requeued | delegated | taken_over | step_advanced | team_archived | failed; app-validated, NULL while open — task end is not among them (§4)</li>
+        <li class="added"><span class="col-name">ended_reason</span> text — requeued | delegated | taken_over | reassigned | step_advanced | team_archived | failed; app-validated, NULL while open — task end is not among them (§4)</li>
         <li class="shared"><span class="col-name">archived_at</span> stays unused here (no Clear)</li>
       </ul>
     </div>

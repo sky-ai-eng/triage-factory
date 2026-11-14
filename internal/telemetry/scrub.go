@@ -28,9 +28,10 @@ import (
 // span name is the matched route, uninterpolated (GET
 // /api/repos/by-name/{owner}/{repo}) on the server side and the client's
 // identity outbound; server.address is the host, and method and status
-// describe the exchange. The one real loss is diagnosing an unrecognized
-// path from a trace alone — accepted, because the alternative is exporting
-// every path that ever reaches TF.
+// describe the exchange, and a GitHub client span carries url.template, its
+// path with every tenant name replaced (githubURLTemplate). The one real loss
+// is diagnosing an unrecognized path from a trace alone — accepted, because
+// the alternative is exporting every path that ever reaches TF.
 var scrubbedAttrs = map[attribute.Key]struct{}{
 	"url.full":  {},
 	"url.path":  {},

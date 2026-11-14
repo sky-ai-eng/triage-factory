@@ -304,8 +304,84 @@ func TestFulfil_GeneratesFromTheTranscript(t *testing.T) {
 	if f.taskPending() {
 		t.Error("the task must stop waiting once its memory lands")
 	}
-	if len(f.notified) != 1 || !strings.HasPrefix(f.notified[0], f.taskID+":") {
-		t.Errorf("notifications = %v, want one for the task", f.notified)
+	if len(f.notified) != 2 || !strings.HasPrefix(f.notified[0], f.taskID+":") || !strings.HasPrefix(f.notified[1], f.taskID+":") {
+		t.Errorf("notifications = %v, want two for the task: the attempt opening and closing", f.notified)
+	}
+}
+
+// TestFulfil_AnnouncesWhenAnAttemptOpensAndWhenItCloses: every write to the
+// attempts ledger reaches the task's watchers, so a person watching a wait
+// sees it being worked, and sees it fail as surely as they see it end. Each
+// announcement is checked against the ledger as it stood when it was made.
+func TestFulfil_AnnouncesWhenAnAttemptOpensAndWhenItCloses(t *testing.T) {
+	noModel := fmt.Errorf("%w: the background jobs model setting is empty — pick one in Settings", systemllm.ErrNoModel)
+	for _, tc := range []struct {
+		name        string
+		ran         bool
+		resolve     systemllm.ModelFunc
+		wantOutcome domain.MemoryAttemptOutcome
+		wantMemory  bool
+	}{
+		{name: "a generated memory", ran: true, wantOutcome: domain.MemoryAttemptGenerated, wantMemory: true},
+		{name: "an empty memory", wantOutcome: domain.MemoryAttemptEmpty, wantMemory: true},
+		{
+			name: "a failed attempt with no model", ran: true,
+			resolve:     func(context.Context, string) (string, error) { return "", noModel },
+			wantOutcome: domain.MemoryAttemptFailed,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.message(roleUser, "", "do the thing")
+			if tc.ran {
+				f.message(roleAssistant, "", "worked on it")
+			}
+			f.end()
+			if tc.resolve != nil {
+				f.mgr.models = tc.resolve
+			}
+
+			// What the ledger and the memory row read at each announcement.
+			type seen struct {
+				task    string
+				outcome domain.MemoryAttemptOutcome
+				open    bool
+				memory  bool
+			}
+			var announced []seen
+			f.mgr.notify = func(_, taskID, _ string) {
+				attempt := f.newestAttempt()
+				if attempt == nil {
+					t.Errorf("announced with no attempt row on the conversation")
+					return
+				}
+				announced = append(announced, seen{
+					task: taskID, outcome: attempt.Outcome, open: attempt.CompletedAt == nil, memory: f.memory() != nil,
+				})
+			}
+
+			if err := f.mgr.Fulfil(t.Context(), f.orgID, f.conversationID); err != nil {
+				t.Fatalf("Fulfil: %v", err)
+			}
+
+			if len(announced) != 2 {
+				t.Fatalf("announcements = %+v, want two: one when the attempt opens and one when it closes", announced)
+			}
+			opened, closed := announced[0], announced[1]
+			if opened.task != f.taskID || closed.task != f.taskID {
+				t.Errorf("announced tasks = %q, %q; want %q both times", opened.task, closed.task, f.taskID)
+			}
+			if !opened.open || opened.memory {
+				t.Errorf("first announcement saw %+v, want the attempt still open and no memory row yet", opened)
+			}
+			if closed.open || closed.outcome != tc.wantOutcome {
+				t.Errorf("second announcement saw %+v, want the attempt closed as %q", closed, tc.wantOutcome)
+			}
+			if closed.memory != tc.wantMemory {
+				t.Errorf("second announcement saw memory = %v, want %v: a memory row is filed ahead of the close that reports it",
+					closed.memory, tc.wantMemory)
+			}
+		})
 	}
 }
 

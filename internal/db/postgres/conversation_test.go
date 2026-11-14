@@ -238,6 +238,25 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("backdate completed_at of %s: %v", conversationID, err)
 			}
 		},
+		StoredShape: func(t *testing.T, conversationID string) dbtest.StoredConversationShape {
+			t.Helper()
+			var shape dbtest.StoredConversationShape
+			if err := conn.QueryRow(
+				`SELECT type, origin, visibility, COALESCE(status, '') FROM conversations WHERE id = $1`, conversationID,
+			).Scan(&shape.Type, &shape.Origin, &shape.Visibility, &shape.Status); err != nil {
+				t.Fatalf("read the stored shape of %s: %v", conversationID, err)
+			}
+			for _, col := range dbtest.MintNullColumns {
+				var set bool
+				if err := conn.QueryRow(`SELECT `+col+` IS NOT NULL FROM conversations WHERE id = $1`, conversationID).Scan(&set); err != nil {
+					t.Fatalf("read %s of %s: %v", col, conversationID, err)
+				}
+				if set {
+					shape.NonNull = append(shape.NonNull, col)
+				}
+			}
+			return shape
+		},
 		ParkedAtSet: func(t *testing.T, conversationID string) bool {
 			t.Helper()
 			var set bool

@@ -395,10 +395,17 @@ are unauthenticated without TLS, so keep the backend internal. Log lines written
 inside a span carry `trace_id` and `span_id`, and `/metrics` serves exemplars
 to a scraper that negotiates OpenMetrics.
 
+Each process exports its spans, and its `target_info` metric, under
+`service.name` `triagefactory-control` or `triagefactory-executor`
+(`triagefactory` in local mode), with `service.instance.id` set to the
+instance id the [fleet console](fleet-console.md) shows. To see one executor's
+spans, search `{ resource.service.instance.id = "…" }`.
+
 **Why a span failed.** A failed span's status names the step that failed, never
 the error, because an error's text can name repositories, branches, and git
-remotes. The error is logged on a line carrying the same `trace_id`, so copy
-the trace id from the span and search the logs of the pod that ran it:
+remotes. The error is logged on a line carrying the same `trace_id`. Copy the
+trace id from the span and search the logs of the service its `service.name`
+names, `control` or `executor`:
 
 ```sh
 docker compose logs executor | grep <trace_id>
