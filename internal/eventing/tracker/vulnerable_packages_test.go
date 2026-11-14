@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const vulnHost = "https://github.com"
@@ -164,20 +168,56 @@ func (r *vulnRig) tracker() *Tracker {
 // stored, and returns the events the cycle enqueued and the pass's error.
 func (r *vulnRig) cycle() ([]domain.Event, error) {
 	r.t.Helper()
-	ctx := context.Background()
+	evts, _, err := r.list(r.listings())
+	return evts, err
+}
+
+// listings is every tracked repository with its listing state as stored.
+func (r *vulnRig) listings() []AlertListing {
+	r.t.Helper()
 	var listings []AlertListing
 	for _, row := range r.rows() {
-		a, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
+		a, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID)
 		if err != nil || a == nil {
 			r.t.Fatalf("read access of %s: %+v %v", row.Slug(), a, err)
 		}
 		listings = append(listings, AlertListing{Repository: row, Access: *a})
 	}
+	return listings
+}
+
+// list runs one pass over listings, and returns the events it enqueued, how
+// many listings it finished, and its error.
+func (r *vulnRig) list(listings []AlertListing) ([]domain.Event, int, error) {
+	r.t.Helper()
 	before := r.pub.count()
-	_, err := r.tracker().RefreshVulnerablePackages(ctx, vulnHost, r.client, listings)
+	_, finished, err := r.tracker().RefreshVulnerablePackages(context.Background(), vulnHost, r.client, listings)
 	r.pub.mu.Lock()
 	defer r.pub.mu.Unlock()
-	return append([]domain.Event(nil), r.pub.events[before:]...), err
+	return append([]domain.Event(nil), r.pub.events[before:]...), finished, err
+}
+
+// marked is listings with each named repository's listing marked.
+func marked(listings []AlertListing, repos ...string) []AlertListing {
+	out := slices.Clone(listings)
+	for i := range out {
+		if slices.Contains(repos, out[i].Repository.Repo) {
+			out[i].Marked = true
+		}
+	}
+	return out
+}
+
+// etag is the repository's stored listing condition.
+func (r *vulnRig) etag(repo string) string {
+	r.t.Helper()
+	for _, l := range r.listings() {
+		if l.Repository.Repo == repo {
+			return l.Access.AlertsETag
+		}
+	}
+	r.t.Fatalf("no tracked repository %s", repo)
+	return ""
 }
 
 // mustCycle is cycle for a pass that must succeed.
@@ -429,7 +469,7 @@ func TestRefreshVulnerablePackages_NoStoreListsNothing(t *testing.T) {
 	r := newVulnRig(t, "api")
 	s := r.stores
 	tr := New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID)
-	if _, err := tr.RefreshVulnerablePackages(context.Background(), vulnHost, r.client, []AlertListing{{Repository: r.rows()[0]}}); err != nil {
+	if _, _, err := tr.RefreshVulnerablePackages(context.Background(), vulnHost, r.client, []AlertListing{{Repository: r.rows()[0]}}); err != nil {
 		t.Fatalf("RefreshVulnerablePackages: %v", err)
 	}
 	if n, _ := r.gh.counts("api"); n != 0 {
@@ -622,4 +662,136 @@ func TestRetireUnreadableVulnerablePackages(t *testing.T) {
 	if w, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, web.RepositoryID); err != nil || w == nil || w.AlertsETag == "" {
 		t.Errorf("web's answer = %+v, %v; want it untouched", w, err)
 	}
+}
+
+// TestRefreshVulnerablePackages_AMarkedListingSendsNoCondition: a listing a
+// mark names is answered in full where its stored ETag would have been
+// answered 304, emits nothing when nothing changed, and leaves the new
+// listing's ETag as the next condition.
+func TestRefreshVulnerablePackages_AMarkedListingSendsNoCondition(t *testing.T) {
+	r := newVulnRig(t, "api")
+	r.gh.set("api", lodash(1, "high"))
+	r.mustCycle()
+	stored := r.etag("api")
+	if stored == "" {
+		t.Fatal("the first listing stored no ETag")
+	}
+
+	evts, _, err := r.list(marked(r.listings(), "api"))
+	if err != nil {
+		t.Fatalf("marked listing: %v", err)
+	}
+	if len(evts) != 0 {
+		t.Errorf("an unchanged marked listing emitted %v, want nothing", eventTypes(evts))
+	}
+	if requests, notModified := r.gh.counts("api"); requests != 2 || notModified != 0 {
+		t.Errorf("requests = %d, 304s = %d; want the marked listing answered in full", requests, notModified)
+	}
+	if got := r.etag("api"); got != stored {
+		t.Errorf("ETag after the marked listing = %q, want %q", got, stored)
+	}
+
+	// The next unmarked listing is conditional again.
+	r.mustCycle()
+	if _, notModified := r.gh.counts("api"); notModified != 1 {
+		t.Errorf("304s = %d after an unmarked listing, want 1", notModified)
+	}
+
+	// A marked listing that finds a new alert announces it, as any listing
+	// does.
+	r.gh.set("api", lodash(1, "high"), lodash(2, "high"))
+	evts, _, err = r.list(marked(r.listings(), "api"))
+	if err != nil {
+		t.Fatalf("marked listing: %v", err)
+	}
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
+		t.Errorf("emitted %v, want one alert_opened", eventTypes(evts))
+	}
+}
+
+// TestRefreshVulnerablePackages_ReportsHowFarItGot: finished counts the
+// listings the pass is done with, a refused repository included, and stops at
+// the one whose failure ended the pass.
+func TestRefreshVulnerablePackages_ReportsHowFarItGot(t *testing.T) {
+	r := newVulnRig(t, "a", "b", "c")
+	listings := r.listings()
+	if _, finished, err := r.list(listings); err != nil || finished != 3 {
+		t.Fatalf("finished %d, %v; want all 3", finished, err)
+	}
+
+	r.gh.fail("a", http.StatusForbidden)
+	r.gh.fail("b", http.StatusUnauthorized)
+	_, finished, err := r.list(r.listings())
+	if err == nil || finished != 1 {
+		t.Errorf("finished %d, %v; want 1 (a refused and skipped) and the error that ended the pass at b", finished, err)
+	}
+	if requests, _ := r.gh.counts("c"); requests != 1 {
+		t.Errorf("c was requested %d times, want only on the first pass", requests)
+	}
+}
+
+// TestRefreshVulnerablePackages_CountsMissedHints: a listing of a tracked
+// repository no mark named that announced a change against an earlier listing
+// counts a missed hint. A repository's first listing, a marked listing, an
+// untracked repository's listing and an unchanged one do not.
+func TestRefreshVulnerablePackages_CountsMissedHints(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := stats.Load()
+	stats.Store(newInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { stats.Store(prev) })
+
+	r := newVulnRig(t, "api", "web")
+	// First listings: api's open alert is announced, web has none. Neither
+	// had an earlier listing to miss a hint against.
+	r.gh.set("api", lodash(1, "high"))
+	r.mustCycle()
+	if got := missedHintsByRule(t, reader); len(got) != 0 {
+		t.Fatalf("missed hints after the first listings = %v, want none", got)
+	}
+
+	// Unmarked changes: a new alert on api's package, and web's first alert,
+	// which its stored ETag says it did not have before.
+	r.gh.set("api", lodash(1, "high"), lodash(2, "high"))
+	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"})
+	r.mustCycle()
+	// A marked change, an unchanged listing, and an untracked repository's.
+	r.gh.set("api", lodash(1, "high"), lodash(2, "high"), lodash(3, "high"))
+	if _, _, err := r.list(marked(r.listings(), "api")); err != nil {
+		t.Fatalf("marked listing: %v", err)
+	}
+	r.mustCycle()
+	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"}, fakeAlert{number: 2, ecosystem: "npm", pkg: "react", severity: "low"})
+	untracked := r.listings()
+	for i := range untracked {
+		untracked[i].Untracked = true
+	}
+	if evts, _, err := r.list(untracked); err != nil || len(evts) != 1 {
+		t.Fatalf("untracked listing emitted %v, %v; want web's new alert", eventTypes(evts), err)
+	}
+
+	if got := missedHintsByRule(t, reader); len(got) != 1 || got[string(missedHintDependabotListing)] != 2 {
+		t.Errorf("missed hints = %v; want 2 under rule=%s, for the two unmarked changes", got, missedHintDependabotListing)
+	}
+}
+
+// missedHintsByRule reads the missed-hint counter's totals by rule.
+func missedHintsByRule(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != missedHintsMetric {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+				rule, _ := dp.Attributes.Value(attribute.Key("rule"))
+				got[rule.AsString()] += dp.Value
+			}
+		}
+	}
+	return got
 }

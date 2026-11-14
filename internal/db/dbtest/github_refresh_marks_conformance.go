@@ -101,6 +101,24 @@ func RunGitHubRefreshMarkConformance(t *testing.T, mk GitHubRefreshMarkFactory) 
 		}
 	})
 
+	t.Run("Alert_deliveries_collapse_onto_one_row", func(t *testing.T) {
+		// The alerts target has no value: every delivery about the
+		// repository's alerts, whichever alert it names, is the one mark.
+		f := mk(t)
+		repoID := repo(t, f, "api")
+		first := mark(t, f, repoID, domain.DependabotAlertsRefreshTarget())
+		if first.Target != domain.DependabotAlertsRefreshTarget() || first.Revision != 1 {
+			t.Errorf("first alerts mark = %+v, want a revision-1 row for the repository's alerts", first)
+		}
+		second := mark(t, f, repoID, domain.DependabotAlertsRefreshTarget())
+		if second.ID != first.ID || second.Revision != 2 {
+			t.Errorf("second alerts mark = %+v, want row %s at revision 2", second, first.ID)
+		}
+		AssertWriteReturnedStoredRow(t, "MarkSystem (alerts)", second, func() (*domain.GitHubRefreshMark, error) {
+			return f.Stores.GitHubRefreshMarks.GetSystem(ctx, f.OrgID, first.ID)
+		})
+	})
+
 	t.Run("Distinct_targets_are_distinct_rows", func(t *testing.T) {
 		f := mk(t)
 		api, web := repo(t, f, "api"), repo(t, f, "web")
@@ -115,8 +133,10 @@ func RunGitHubRefreshMarkConformance(t *testing.T, mk GitHubRefreshMarkFactory) 
 			{api, domain.BranchRefreshTarget("main")},
 			// The same value under another kind is another target.
 			{api, domain.BranchRefreshTarget("7")},
+			{api, domain.DependabotAlertsRefreshTarget()},
 			// The same target in another repository is another mark.
 			{web, domain.PullRequestRefreshTarget(7)},
+			{web, domain.DependabotAlertsRefreshTarget()},
 		}
 		ids := map[string]bool{}
 		for _, c := range targets {
@@ -143,6 +163,7 @@ func RunGitHubRefreshMarkConformance(t *testing.T, mk GitHubRefreshMarkFactory) 
 			{Kind: domain.GitHubRefreshHeadSHA, Value: strings.ToUpper(refreshSHA)},
 			{Kind: domain.GitHubRefreshHeadSHA, Value: refreshSHA[:12]},
 			{Kind: domain.GitHubRefreshBranch, Value: ""},
+			{Kind: domain.GitHubRefreshDependabotAlerts, Value: "7"},
 		} {
 			if m, err := f.Stores.GitHubRefreshMarks.MarkSystem(ctx, f.OrgID, repoID, target); err == nil {
 				t.Errorf("MarkSystem(%+v) = %+v, want a refusal", target, m)

@@ -21,10 +21,12 @@ import (
 
 // The narrowed pass: a GitHub webhook delivery leaves refresh marks naming
 // what changed (db.GitHubRefreshMarkStore), and the narrowed pass refreshes
-// what an org's marks name, in the marked repositories only
-// (tracker.RefreshMarkedGitHub), seconds after the delivery rather than at the
-// org's next scheduled cycle. The scheduled cycle honors the marks too, so a
-// mark no narrowed pass reached is refreshed there.
+// what an org's marks name, in the marked repositories only, seconds after the
+// delivery rather than at the org's next scheduled cycle: the pull requests
+// and branches a mark names (tracker.RefreshMarkedGitHub), and the Dependabot
+// alerts of a repository a mark names them in
+// (tracker.RefreshVulnerablePackages). The scheduled cycle honors the marks
+// too, so a mark no narrowed pass reached is refreshed there.
 
 // hintDebounce is how long after a receiver's nudge the narrowed pass runs, so
 // the deliveries one change sends (a push's pull_request, push and check_suite
@@ -228,6 +230,15 @@ func (m *Manager) refreshMarkedGitHubForOrg(ctx context.Context, orgID string) {
 		span.SetAttributes(telemetry.Outcome("untracked"))
 		return
 	}
+	alerts := m.markedAlertListings(ctx, orgID, scope, ledger, repos)
+	repos = slices.DeleteFunc(repos, func(r domain.Repository) bool {
+		_, listed := alerts[r.ID]
+		return !listed && !ledger.pullRequestsMarked(r.ID)
+	})
+	if len(repos) == 0 {
+		span.SetAttributes(telemetry.Outcome("alerts_unlisted"))
+		return
+	}
 	// A host that is not answering costs the first request its retries and
 	// the rest one attempt each, as in the scheduled cycle.
 	ctx = upstream.WithFailFast(ctx)
@@ -239,7 +250,7 @@ func (m *Manager) refreshMarkedGitHubForOrg(ctx context.Context, orgID string) {
 			span.SetAttributes(telemetry.Outcome("no_credential"))
 			return
 		}
-		n, _ := m.runNarrowed(ctx, orgID, scope, client, self, repos, resolver, ledger)
+		n, _ := m.runMarked(ctx, orgID, scope, client, self, repos, alerts, resolver, ledger)
 		events += n
 	} else {
 		installs, err := m.apps.ListInstallationsOnHostSystem(ctx, orgID, scope)
@@ -274,7 +285,7 @@ func (m *Manager) refreshMarkedGitHubForOrg(ctx context.Context, orgID string) {
 				githubLog.DebugContext(ctx, "resolve client for the narrowed pass failed; its marks wait", "org", orgID, "installation", inst.InstallationID, "error", err)
 				continue
 			}
-			n, err := m.runNarrowed(ctx, orgID, scope, client, domain.GitHubAccount{}, handed, resolver, ledger)
+			n, err := m.runMarked(ctx, orgID, scope, client, domain.GitHubAccount{}, handed, alerts, resolver, ledger)
 			events += n
 			// The scheduled cycle's rule: a rate limit stops the fan-out
 			// rather than spend the other installations' budgets finding the
@@ -291,9 +302,44 @@ func (m *Manager) refreshMarkedGitHubForOrg(ctx context.Context, orgID string) {
 	}
 }
 
+// runMarked refreshes what the marks on repos name under client: a
+// RefreshMarkedGitHub over the repositories a mark names pull requests or a
+// branch in (runNarrowed), then a listing of the alerts of each one alerts
+// holds (runNarrowedAlerts). A rate limit on the first skips the second. The
+// error joins both passes' errors.
+func (m *Manager) runMarked(ctx context.Context, orgID, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []domain.Repository, alerts map[string]tracker.AlertListing, resolver tracker.ReviewerResolver, ledger *markLedger) (int, error) {
+	var prs []domain.Repository
+	var listings []tracker.AlertListing
+	for _, r := range repos {
+		if ledger.pullRequestsMarked(r.ID) {
+			prs = append(prs, r)
+		}
+		if l, ok := alerts[r.ID]; ok {
+			listings = append(listings, l)
+		}
+	}
+	events := 0
+	var prErr error
+	if len(prs) > 0 {
+		var n int
+		n, prErr = m.runNarrowed(ctx, orgID, scope, client, self, prs, resolver, ledger)
+		events += n
+		var rl *ghclient.ErrRateLimited
+		if errors.As(prErr, &rl) {
+			return events, prErr
+		}
+	}
+	if len(listings) == 0 {
+		return events, prErr
+	}
+	n, alertsErr := m.runNarrowedAlerts(ctx, orgID, scope, client, listings, ledger)
+	return events + n, errors.Join(prErr, alertsErr)
+}
+
 // runNarrowed runs one RefreshMarkedGitHub over repos and records the outcome
-// in ledger: the marks on repos are honored when the pass completes. A rate
-// limit holds the org's GitHub polls, narrowed and scheduled, until it resets.
+// in ledger: the marks on repos naming pull requests or a branch are honored
+// when the pass completes. A rate limit holds the org's GitHub polls, narrowed
+// and scheduled, until it resets.
 func (m *Manager) runNarrowed(ctx context.Context, orgID, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []domain.Repository, resolver tracker.ReviewerResolver, ledger *markLedger) (int, error) {
 	slugs := make([]string, len(repos))
 	for i, r := range repos {
@@ -311,6 +357,69 @@ func (m *Manager) runNarrowed(ctx context.Context, orgID, scope string, client *
 	}
 	ledger.honor(repos)
 	return n, nil
+}
+
+// runNarrowedAlerts lists the alerts of the repositories listings hold, each
+// one marked, under client, and records the outcome in ledger: the alert mark
+// on each repository the listing finished is honored, a repository whose
+// listing GitHub refused or answered unusably included, since the scheduled
+// cycle lists it as long as its recorded answer says the alerts are readable.
+// A rate limit holds the org's GitHub polls, as in runNarrowed.
+func (m *Manager) runNarrowedAlerts(ctx context.Context, orgID, scope string, client *ghclient.Client, listings []tracker.AlertListing, ledger *markLedger) (int, error) {
+	n, finished, err := m.trackerForOrg(orgID).RefreshVulnerablePackages(ctx, scope, client, listings)
+	ledger.honorAlerts(listings[:finished])
+	if err != nil {
+		var rl *ghclient.ErrRateLimited
+		if errors.As(err, &rl) {
+			m.holdPoll("github", orgID, rl.ResumeAt)
+		} else {
+			githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "narrowed dependabot alerts listing failed; its marks wait for the next pass", "org", orgID, "error", err)
+		}
+	}
+	return n, err
+}
+
+// markedAlertListings is the listing a narrowed pass makes for each of repos
+// whose alerts a mark names, by registry row id: marked, with the repository's
+// recorded answer. A mark on a repository whose alerts the poll does not list,
+// with an answer that says they cannot be read or none, names nothing a pass
+// refreshes and is cleared. A failed read of the answers lists no alerts this
+// pass and leaves their marks for the next.
+func (m *Manager) markedAlertListings(ctx context.Context, orgID, scope string, ledger *markLedger, repos []domain.Repository) map[string]tracker.AlertListing {
+	var marked []domain.Repository
+	for _, r := range repos {
+		if ledger.alertsMarked(r.ID) {
+			marked = append(marked, r)
+		}
+	}
+	if len(marked) == 0 {
+		return nil
+	}
+	if m.DependabotAccess == nil {
+		for _, r := range marked {
+			ledger.dropUnlistedAlerts(r.ID)
+		}
+		return nil
+	}
+	answers, err := m.DependabotAccess.ListSystem(ctx, orgID, scope)
+	if err != nil {
+		githubLog.ErrorContext(ctx, "read dependabot access answers for the narrowed pass failed; its alert marks wait", "org", orgID, "error", err)
+		return nil
+	}
+	byRepo := make(map[string]domain.RepositoryDependabotAccess, len(answers))
+	for _, a := range answers {
+		byRepo[a.RepositoryID] = a
+	}
+	out := make(map[string]tracker.AlertListing, len(marked))
+	for _, r := range marked {
+		a, ok := byRepo[r.ID]
+		if !ok || a.Access != domain.DependabotAlertsReadable {
+			ledger.dropUnlistedAlerts(r.ID)
+			continue
+		}
+		out[r.ID] = tracker.AlertListing{Repository: r, Access: a, Marked: true}
+	}
+	return out
 }
 
 // markedPATPass is patPass for the narrowed pass: the org's personal-token
@@ -422,10 +531,12 @@ func (m *Manager) pruneKnown(activeOrgIDs []string) {
 }
 
 // markLedger is one pass's account of the refresh marks it read: the ones it
-// honored, which a pass over their repository completed after the read, and
-// the ones that name nothing the poll refreshes, on a repository no team
-// tracks any more. commit clears both kinds; every other mark stays for the
-// next pass.
+// honored, which a pass over what they name in their repository completed
+// after the read (its pull requests for a mark naming pull requests or a
+// branch, a listing of its alerts for one naming its Dependabot alerts), and
+// the ones that name nothing the poll refreshes: on a repository no team
+// tracks any more, or no credential reads, or naming alerts the poll does not
+// list. commit clears both kinds; every other mark stays for the next pass.
 type markLedger struct {
 	m     *Manager
 	orgID string
@@ -477,6 +588,34 @@ func (l *markLedger) marks() []domain.GitHubRefreshMark {
 	return l.read
 }
 
+// pullRequestsMarked reports whether a mark the ledger read names pull
+// requests or a branch in the repository whose registry row is repositoryID.
+// nil-safe.
+func (l *markLedger) pullRequestsMarked(repositoryID string) bool {
+	return l.marked(repositoryID, isPullRequestTarget)
+}
+
+// alertsMarked reports whether a mark the ledger read names the Dependabot
+// alerts of the repository whose registry row is repositoryID. nil-safe.
+func (l *markLedger) alertsMarked(repositoryID string) bool {
+	return l.marked(repositoryID, domain.GitHubRefreshTarget.DependabotAlerts)
+}
+
+func (l *markLedger) marked(repositoryID string, kind func(domain.GitHubRefreshTarget) bool) bool {
+	if l == nil {
+		return false
+	}
+	return slices.ContainsFunc(l.read, func(mark domain.GitHubRefreshMark) bool {
+		return mark.RepositoryID == repositoryID && kind(mark.Target)
+	})
+}
+
+// isPullRequestTarget reports whether a target names pull requests or a
+// branch, which a pass over the repository's pull requests refreshes.
+func isPullRequestTarget(t domain.GitHubRefreshTarget) bool {
+	return !t.DependabotAlerts()
+}
+
 // markedRepos is the tracked repositories the marks name, in the order of
 // their oldest mark.
 func (l *markLedger) markedRepos() []domain.Repository {
@@ -491,17 +630,48 @@ func (l *markLedger) markedRepos() []domain.Repository {
 	return out
 }
 
-// honor records that a pass over repos completed.
+// honor records that a pass over repos' pull requests completed, which honors
+// their marks naming pull requests or a branch. A mark naming a repository's
+// alerts waits for a listing of them (honorAlerts).
 func (l *markLedger) honor(repos []domain.Repository) {
 	if l == nil {
 		return
 	}
-	in := make(map[string]bool, len(repos))
-	for _, r := range repos {
-		in[r.ID] = true
+	ids := make([]string, len(repos))
+	for i, r := range repos {
+		ids[i] = r.ID
 	}
+	l.settle(ids, isPullRequestTarget)
+}
+
+// honorAlerts records that the listing of the alerts of each of listings'
+// repositories finished, which honors the marks naming them. nil-safe.
+func (l *markLedger) honorAlerts(listings []tracker.AlertListing) {
+	if l == nil {
+		return
+	}
+	ids := make([]string, len(listings))
+	for i, listing := range listings {
+		ids[i] = listing.Repository.ID
+	}
+	l.settle(ids, domain.GitHubRefreshTarget.DependabotAlerts)
+}
+
+// dropUnlistedAlerts records that the poll does not list the alerts of the
+// repository whose registry row is repositoryID, so a mark naming them names
+// nothing a pass refreshes. nil-safe.
+func (l *markLedger) dropUnlistedAlerts(repositoryID string) {
+	if l == nil {
+		return
+	}
+	l.settle([]string{repositoryID}, domain.GitHubRefreshTarget.DependabotAlerts)
+}
+
+// settle records as done each mark the ledger read on a repository in ids
+// whose target kind holds.
+func (l *markLedger) settle(ids []string, kind func(domain.GitHubRefreshTarget) bool) {
 	for _, mark := range l.read {
-		if in[mark.RepositoryID] {
+		if slices.Contains(ids, mark.RepositoryID) && kind(mark.Target) {
 			l.done[mark.ID] = true
 		}
 	}
@@ -509,7 +679,8 @@ func (l *markLedger) honor(repos []domain.Repository) {
 
 // honorReach records that a scheduled pass under a credential whose reach is
 // reach completed: its own pull requests are those of every tracked
-// repository the reach holds, whichever of them it was handed.
+// repository the reach holds, whichever of them it was handed. Like honor, it
+// leaves the marks naming alerts to the cycle's listing of them.
 func (l *markLedger) honorReach(reach tracker.GitHubReach) {
 	if l == nil {
 		return

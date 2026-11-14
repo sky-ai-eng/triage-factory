@@ -252,12 +252,12 @@ func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, or
 		// Resolved ahead of the transaction, which in SQLite holds the one
 		// connection a read outside it would wait on. A failed read leaves the
 		// delivery unrecorded, so a redelivery applies it.
-		repositoryID, err := s.trackedHintRepository(ctx, orgID, host, d.hint)
+		marks, err := s.hintMarks(ctx, orgID, host, d.hint)
 		if err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
-		fresh, marked, err = s.recordContentDelivery(ctx, orgID, d, repositoryID)
+		fresh, marked, err = s.recordContentDelivery(ctx, orgID, d, marks)
 		s.pruneWebhookDeliveries(ctx)
 		if err != nil {
 			internalError(w, "github-webhook", err)

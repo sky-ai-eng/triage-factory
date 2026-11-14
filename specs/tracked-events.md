@@ -398,6 +398,14 @@ found emits `ci_check_failed`. A repository's first listing therefore
 announces every open alert, and since `alert_opened` has no `dedup_key`, a
 handler that matches them makes one task per package.
 
+A `dependabot_alert` webhook delivery is a hint, as a pull request's are. For
+a tracked repository whose alerts the poll lists, it marks the repository's
+alerts, whichever alert and action it names, except `assignees_changed`, which
+changes nothing the snapshot holds. A few seconds later the narrowed pass lists
+the marked repository's alerts and runs the same diff, so a new alert is
+announced without waiting for the next cycle. A marked listing sends no ETag,
+and a cycle that reaches the mark first lists the repository the same way.
+
 Each package on a host the org has left is retired with `unreachable` at the
 start of the next GitHub cycle, as its pull requests are, and closes with its
 tasks. Nothing fixed its alerts, so pointing the org back at the old host

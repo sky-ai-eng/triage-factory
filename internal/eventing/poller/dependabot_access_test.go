@@ -239,7 +239,7 @@ func TestDependabotProbe_NoStoreProbesNothing(t *testing.T) {
 
 // probeCycle runs one org cycle's probe over passes.
 func probeCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
-	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
+	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, nil)
 	for _, pass := range passes {
 		p.add(pass.client, pass.repos, pass.reach)
 	}
@@ -259,7 +259,7 @@ func listingManager(database *sql.DB, stores db.Stores, rec *eventRecorder) *Man
 // listings over passes.
 func listCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
 	m.forgetUntrackedAlertListings(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
-	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
+	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, nil)
 	for _, pass := range passes {
 		p.add(pass.client, pass.repos, pass.reach)
 	}

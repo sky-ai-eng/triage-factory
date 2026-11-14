@@ -1047,7 +1047,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle.
 	grants := make(map[string]tracker.GitHubReach, len(installs))
 	defer func() { m.rememberGrants(orgID, installs, grants) }()
-	probe := m.newDependabotProbe(orgID, scope)
+	probe := m.newDependabotProbe(orgID, scope, marks)
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
@@ -1300,7 +1300,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	}
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(rerr, &rl) {
-		probe := m.newDependabotProbe(orgID, scope)
+		probe := m.newDependabotProbe(orgID, scope, marks)
 		probe.add(client, repos, tracker.ReachAll())
 		probe.run(ctx)
 		probe.listAlerts(ctx)
@@ -1318,7 +1318,9 @@ func (m *Manager) refreshHeldGitHubPAT(ctx context.Context, conn *cycleConnectio
 		return
 	}
 	m.refreshHeldGitHub(ctx, orgID, scope, client, self, tracker.ReachAll(), resolver)
-	probe := m.newDependabotProbe(orgID, scope)
+	// No marks: the org tracks nothing, and a mark on a repository no team
+	// tracks is cleared when the cycle reads it.
+	probe := m.newDependabotProbe(orgID, scope, nil)
 	probe.add(client, nil, tracker.ReachAll())
 	probe.run(ctx)
 	probe.listAlerts(ctx)

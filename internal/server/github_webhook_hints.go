@@ -28,6 +28,7 @@ type refreshHint struct {
 // hintPayload is the subset of a content delivery's payload a hint is read
 // from. GitHub sends each block only on the events that carry it.
 type hintPayload struct {
+	Action     string `json:"action"`
 	Repository *struct {
 		ID int64 `json:"id"`
 	} `json:"repository"`
@@ -41,6 +42,9 @@ type hintPayload struct {
 	CheckRun   *hintCheck `json:"check_run"`
 	CheckSuite *hintCheck `json:"check_suite"`
 	Ref        string     `json:"ref"`
+	// Alert is read only for its presence: what changed on it is left to the
+	// listing.
+	Alert json.RawMessage `json:"alert"`
 }
 
 // hintCheck is the part of a check_run or check_suite object a hint reads:
@@ -60,14 +64,12 @@ type hintCheck struct {
 }
 
 // hintedEvent reports whether eventName is a content event TF reads a refresh
-// hint from, each of which names what changed. The App subscribes to one
-// content event that is not here: dependabot_alert names an alert, which no
-// refresh target can hold, so its delivery is recorded and acknowledged and
-// marks nothing.
+// hint from, each of which names what changed. They are every content event
+// the App subscribes to.
 func hintedEvent(eventName string) bool {
 	switch eventName {
 	case "pull_request", "pull_request_review", "pull_request_review_comment",
-		"issue_comment", "check_run", "check_suite", "push":
+		"issue_comment", "check_run", "check_suite", "push", "dependabot_alert":
 		return true
 	}
 	return false
@@ -82,6 +84,10 @@ func hintedEvent(eventName string) bool {
 //   - check_run, check_suite: the head SHA, and each listed pull request in
 //     the delivery's own repository.
 //   - push: the branch; a tag push names nothing.
+//   - dependabot_alert: the repository's alerts, which one listing reads
+//     whichever alert the delivery is about. An assignees_changed delivery
+//     names nothing: who an alert is assigned to is not something TF records,
+//     and it opens or closes no alert.
 //
 // A hint naming nothing has no targets. Every error is a property of the
 // payload alone — it does not parse, it names no repository, or a value it
@@ -134,6 +140,13 @@ func parseRefreshHint(eventName string, body []byte) (*refreshHint, error) {
 		if branch, ok := strings.CutPrefix(p.Ref, "refs/heads/"); ok {
 			h.add(domain.BranchRefreshTarget(branch))
 		}
+	case "dependabot_alert":
+		if alert := bytes.TrimSpace(p.Alert); len(alert) == 0 || bytes.Equal(alert, []byte("null")) {
+			return nil, errors.New("dependabot_alert payload missing alert")
+		}
+		if p.Action != "assignees_changed" {
+			h.add(domain.DependabotAlertsRefreshTarget())
+		}
 	}
 
 	for _, target := range h.targets {
@@ -164,23 +177,21 @@ func (h *refreshHint) add(target domain.GitHubRefreshTarget) {
 // installation event, and writes the refresh marks it stands for in the same
 // transaction: a delivery is never recorded as handled without its marks, and
 // a failed mark write rolls the record back so a redelivery applies the
-// delivery. repositoryID is the tracked registry row the hint's repository
-// resolved to, or "" for a delivery that marks nothing — no hint, no targets,
-// or a repository no team tracks — which is recorded all the same.
-// fresh=false is a duplicate: nothing was written. marked counts the marks
-// written.
-func (s *Server) recordContentDelivery(ctx context.Context, orgID string, d verifiedDelivery, repositoryID string) (fresh bool, marked int, err error) {
+// delivery. marks is what hintMarks resolved the delivery's hint to; a
+// delivery that marks nothing is recorded all the same. fresh=false is a
+// duplicate: nothing was written. marked counts the marks written.
+func (s *Server) recordContentDelivery(ctx context.Context, orgID string, d verifiedDelivery, marks hintedMarks) (fresh bool, marked int, err error) {
 	err = s.tx.SystemWithTx(ctx, orgID, func(tx db.SystemTxStores) error {
 		marked = 0
 		var err error
 		if fresh, err = tx.GitHubDeliveries.MarkDeliveredSystem(ctx, d.installationID, d.deliveryID); err != nil {
 			return fmt.Errorf("record delivery: %w", err)
 		}
-		if !fresh || repositoryID == "" {
+		if !fresh {
 			return nil
 		}
-		for _, target := range d.hint.targets {
-			if _, err := tx.GitHubRefreshMarks.MarkSystem(ctx, orgID, repositoryID, target); err != nil {
+		for _, target := range marks.targets {
+			if _, err := tx.GitHubRefreshMarks.MarkSystem(ctx, orgID, marks.repositoryID, target); err != nil {
 				return fmt.Errorf("refresh mark %s %s: %w", target.Kind, target.Value, err)
 			}
 			marked++
@@ -193,22 +204,60 @@ func (s *Server) recordContentDelivery(ctx context.Context, orgID string, d veri
 	return fresh, marked, nil
 }
 
-// trackedHintRepository resolves a hint's repository to the tracked registry
-// row on host, or "" when there is nothing to mark: no hint, a hint naming no
-// target, or a repository with no row or one no team tracks. No row is
-// created: a repository TF holds nothing for is one the poll does not poll.
-func (s *Server) trackedHintRepository(ctx context.Context, orgID, host string, hint *refreshHint) (string, error) {
+// hintedMarks is the refresh marks a delivery writes: targets, in the tracked
+// registry row repositoryID. The zero value writes none.
+type hintedMarks struct {
+	repositoryID string
+	targets      []domain.GitHubRefreshTarget
+}
+
+// hintMarks resolves a hint to the marks it writes: its repository's tracked
+// registry row on host, and the targets in it the poll refreshes. It writes
+// none for no hint, a hint naming no target, or a repository with no row or
+// one no team tracks. No row is created: a repository TF holds nothing for is
+// one the poll does not poll. The repository's Dependabot alerts are marked
+// only when the poll lists them, which is when the recorded answer says they
+// can be read; for any other answer, or none yet, the listing a mark asks for
+// is one the poll does not make.
+func (s *Server) hintMarks(ctx context.Context, orgID, host string, hint *refreshHint) (hintedMarks, error) {
 	if hint == nil || len(hint.targets) == 0 {
-		return "", nil
+		return hintedMarks{}, nil
 	}
 	repo, err := s.repos.GetTrackedByExternalIDSystem(ctx, orgID, host, hint.repositoryExternalID)
 	if err != nil {
-		return "", fmt.Errorf("resolve hinted repository: %w", err)
+		return hintedMarks{}, fmt.Errorf("resolve hinted repository: %w", err)
 	}
 	if repo == nil {
-		return "", nil
+		return hintedMarks{}, nil
 	}
-	return repo.ID, nil
+	targets := hint.targets
+	if slices.ContainsFunc(targets, domain.GitHubRefreshTarget.DependabotAlerts) {
+		listed, err := s.dependabotAlertsListed(ctx, orgID, repo.ID)
+		if err != nil {
+			return hintedMarks{}, err
+		}
+		if !listed {
+			targets = slices.DeleteFunc(slices.Clone(targets), domain.GitHubRefreshTarget.DependabotAlerts)
+		}
+	}
+	if len(targets) == 0 {
+		return hintedMarks{}, nil
+	}
+	return hintedMarks{repositoryID: repo.ID, targets: targets}, nil
+}
+
+// dependabotAlertsListed reports whether the poll lists the Dependabot alerts
+// of the repository whose registry row is repositoryID: its recorded answer
+// says they can be read.
+func (s *Server) dependabotAlertsListed(ctx context.Context, orgID, repositoryID string) (bool, error) {
+	if s.dependabotAccess == nil {
+		return false, nil
+	}
+	answer, err := s.dependabotAccess.GetSystem(ctx, orgID, repositoryID)
+	if err != nil {
+		return false, fmt.Errorf("read hinted repository's dependabot access: %w", err)
+	}
+	return answer != nil && answer.Access == domain.DependabotAlertsReadable, nil
 }
 
 // pruneWebhookDeliveries sweeps expired delivery records after a delivery is

@@ -4395,8 +4395,9 @@ REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service
 -- Pending refresh marks: one row per target in a tracked repository that a
 -- GitHub webhook delivery said changed, written in the transaction that
 -- records the delivery in github_webhook_deliveries. kind says what target
--- holds: a pull request number in decimal, a head SHA, or a branch name
--- without refs/heads/. Deliveries naming the same target land on one row:
+-- holds: a pull request number in decimal, a head SHA, a branch name without
+-- refs/heads/, or nothing for dependabot_alerts, which names the repository's
+-- alerts as a whole. Deliveries naming the same target land on one row:
 -- each bumps revision and marked_at, and first_marked_at stays. A pass clears
 -- a mark only at the revision it read, so a delivery landing mid-pass keeps
 -- its mark.
@@ -4407,11 +4408,12 @@ CREATE TABLE public.github_refresh_marks (
     id              uuid NOT NULL DEFAULT gen_random_uuid(),
     org_id          uuid NOT NULL,
     repository_id   uuid NOT NULL,
-    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch')),
-    target          text NOT NULL CHECK (target <> ''),
+    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch', 'dependabot_alerts')),
+    target          text NOT NULL,
     revision        bigint NOT NULL DEFAULT 1,
     first_marked_at timestamp with time zone NOT NULL,
-    marked_at       timestamp with time zone NOT NULL
+    marked_at       timestamp with time zone NOT NULL,
+    CHECK ((kind = 'dependabot_alerts') = (target = ''))
 );
 
 ALTER TABLE ONLY public.github_refresh_marks

@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -59,6 +60,13 @@ type reachGitHub struct {
 	// as "token METHOD path".
 	requests int
 	paths    []string
+	// alerts, once serveAlerts sets it, is each repository's Dependabot
+	// alerts listing body by full name; alertStatus a status a repository's
+	// listing answers instead. alertReads records each listing as "token
+	// full_name", with " conditional" when it sent an If-None-Match.
+	alerts      map[string]string
+	alertStatus map[string]int
+	alertReads  []string
 }
 
 func newReachGitHub(t *testing.T, repos []reachRepo, grants, readable map[string][]string) *reachGitHub {
@@ -97,6 +105,8 @@ func (f *reachGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		f.serveGraphQL(w, r, token)
 	case isBranchRefRead(r):
 		http.NotFound(w, r)
+	case strings.HasSuffix(r.URL.Path, "/dependabot/alerts"):
+		f.serveAlertListing(w, r, token)
 	default:
 		name, ok := repoFromPullsPath(r.URL.Path)
 		repo, known := f.repo(name)
@@ -162,6 +172,64 @@ func (f *reachGitHub) serveGraphQL(w http.ResponseWriter, r *http.Request, token
 		body += `,"errors":[` + strings.Join(errs, ",") + `]`
 	}
 	_, _ = w.Write([]byte(body + `}`))
+}
+
+// serveAlerts has the fake answer Dependabot alert listings, each
+// repository's with body, an ETag over it, and a 304 to a matching
+// If-None-Match.
+func (f *reachGitHub) serveAlerts(bodies map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alerts = maps.Clone(bodies)
+	f.alertStatus = map[string]int{}
+}
+
+// failAlerts has repo's alert listing answer status.
+func (f *reachGitHub) failAlerts(repo string, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alertStatus[repo] = status
+}
+
+// takeAlertReads returns the alert listings since the last call.
+func (f *reachGitHub) takeAlertReads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.alertReads
+	f.alertReads = nil
+	return out
+}
+
+func (f *reachGitHub) serveAlertListing(w http.ResponseWriter, r *http.Request, token string) {
+	_, rest, _ := strings.Cut(r.URL.Path, "/repos/")
+	name := strings.TrimSuffix(rest, "/dependabot/alerts")
+	conditional := r.Header.Get("If-None-Match")
+	f.mu.Lock()
+	body, ok := f.alerts[name]
+	status := f.alertStatus[name]
+	read := token + " " + name
+	if conditional != "" {
+		read += " conditional"
+	}
+	f.alertReads = append(f.alertReads, read)
+	f.mu.Unlock()
+	if !ok {
+		f.t.Errorf("unexpected alerts listing: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected", http.StatusNotFound)
+		return
+	}
+	if status != 0 {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		return
+	}
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256([]byte(body)))
+	if conditional == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	_, _ = w.Write([]byte(body))
 }
 
 // merge makes the batch refresh answer nodeID as merged from now on.
