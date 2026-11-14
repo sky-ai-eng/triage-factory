@@ -270,7 +270,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	ctx = detachEngagement(ctx)
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
-	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
+	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID).actFor(creatorUserID)
 	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, taskMemories, launchText.taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)

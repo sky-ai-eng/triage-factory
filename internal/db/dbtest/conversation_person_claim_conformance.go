@@ -199,6 +199,21 @@ func runPersonClaimMintConformance(t *testing.T, mk ConversationStoreFactory) {
 			t.Error("has_run = true on a conversation holding only user rows")
 		}
 
+		// An assistant row no model produced is not a turn either: the SDK
+		// runtime's own row for a call that failed before the model answered,
+		// and a stored failure record flagged is_error.
+		for _, row := range []domain.Message{
+			{ConversationID: minted.ID, Role: "assistant", Content: "API Error: overloaded", Model: domain.ModelSynthetic},
+			{ConversationID: minted.ID, Role: "assistant", Content: "Error: the runtime would not start", IsError: true},
+		} {
+			if _, err := store.InsertMessage(ctx, orgID, &row); err != nil {
+				t.Fatalf("InsertMessage (assistant %q): %v", row.Content, err)
+			}
+		}
+		if hasRun() {
+			t.Error("has_run = true on a conversation whose only assistant rows no model produced")
+		}
+
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
 			ConversationID: minted.ID, Role: "assistant", Content: "a turn",
 		}); err != nil {

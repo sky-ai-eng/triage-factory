@@ -323,9 +323,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// cd's into a checkout beneath it — the PR's, or one `workspace add` made.
 	claudeCwd := cfg.runRoot
 	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
-	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
+	// for this cwd. Safety-railed to only touch entries under $TMPDIR. A
+	// conversation a person works in keeps it as a blueprint step does: its
+	// next message resumes this session, whatever this turn ended on.
 	defer func() {
-		if cfg.isBlueprintStep {
+		if cfg.isBlueprintStep || cfg.interactive {
 			return
 		}
 		if parked {
@@ -821,12 +823,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // note was flushed.
 //
 // A conversation a person works in (interactive) opens on the person's own
-// message rather than a mission, so its opening ends with the messages they
-// left waiting, after the notes, as one final block. Their rows are already
-// on the transcript, where the opening is sequenced ahead of them
-// (mintOpeningRows), so nothing is written for them: they are only taken off
-// the queue, here, past every hand-back and just before the runtime starts,
-// which is where the resume path takes its message too (dispatchResumeClaim).
+// messages rather than a mission, so its opening ends with what they have
+// asked (firstTurnPersonInput), after the notes, as one final block. Their
+// rows are already on the transcript, where the opening is sequenced ahead of
+// them (mintOpeningRows), so nothing is written for them: the waiting ones are
+// only taken off the queue, here, past every hand-back and just before the
+// runtime starts, which is where the resume path takes its message too
+// (dispatchResumeClaim).
 func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
@@ -860,8 +863,8 @@ func (s *Spawner) composeLaunchTurn(
 		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: notes})
 	}
 	if interactive {
-		if waiting := s.takeWaitingPersonInput(ctx, orgID, conversationID); waiting != "" {
-			blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: waiting})
+		if asked := s.firstTurnPersonInput(ctx, orgID, conversationID); asked != "" {
+			blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: asked})
 		}
 	}
 	opts.Message = ""
@@ -869,28 +872,44 @@ func (s *Spawner) composeLaunchTurn(
 	return nil
 }
 
-// takeWaitingPersonInput takes the messages a person left waiting on the
-// conversation off the queue and returns them joined, oldest first, or "" when
-// there are none.
+// firstTurnPersonInput is everything a person has asked a conversation that
+// has never run, oldest first and joined as the resume path joins its queue
+// (db.PendingInputSeparator), or "" when they have asked nothing.
 //
-// A failed take sends the turn without them and leaves the rows undelivered.
-// That is the recoverable way to be wrong: the rows still wake the
-// conversation once this turn ends, and by then it has a session, so the
-// resume path delivers them.
-func (s *Spawner) takeWaitingPersonInput(ctx context.Context, orgID, conversationID string) string {
-	if s.pendingInput == nil {
-		return ""
-	}
-	msg, _, ok, err := s.pendingInput.Consume(ctx, orgID, conversationID)
+// The waiting messages are not the whole of it. A message an earlier
+// engagement took off the queue without any model answering it (a claim that
+// paused before its agent ran, a hand-back at shutdown) is delivered but
+// unanswered, and this launch starts a session that has seen none of it. So
+// the delivered ones come from the transcript and the waiting ones from the
+// queue, which takes them in the same read that returns them and so cannot
+// miss one that arrives between the two.
+//
+// A take that fails leaves the waiting messages out of this turn. That is the
+// recoverable way to be wrong: still waiting, they wake the conversation once
+// this turn ends, and by then it has a session, so the resume delivers them.
+func (s *Spawner) firstTurnPersonInput(ctx context.Context, orgID, conversationID string) string {
+	var asked []string
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("take the person's waiting messages for the first turn failed; the turn starts without them, and they wake the conversation again once it ends",
+		delegateLog.Warn("read the messages a person already sent for the first turn failed; the turn carries only the waiting ones",
 			"conversation", conversationID, "error", err)
-		return ""
 	}
-	if !ok {
-		return ""
+	for _, r := range rows {
+		if isPersonMessage(r) && (r.Delivered == nil || *r.Delivered) {
+			asked = append(asked, r.Content)
+		}
 	}
-	return msg
+	if s.pendingInput != nil {
+		msg, _, ok, err := s.pendingInput.Consume(ctx, orgID, conversationID)
+		switch {
+		case err != nil:
+			delegateLog.Warn("take the person's waiting messages for the first turn failed; the turn starts without them, and they wake the conversation again once it ends",
+				"conversation", conversationID, "error", err)
+		case ok:
+			asked = append(asked, msg)
+		}
+	}
+	return strings.Join(asked, db.PendingInputSeparator)
 }
 
 // continuationNote is the note a launch resuming a session sends, by how the

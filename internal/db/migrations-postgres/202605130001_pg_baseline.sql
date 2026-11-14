@@ -7269,9 +7269,9 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.notification_marks TO tf_app;
 -- (delegated and interactive conversations) and headless system jobs onto a
 -- single category axis. Delegations split manual (per-user) from autonomous; an
 -- interactive conversation is a person's spend, so it is manual whatever its
--- trigger_type, attributed to the person whose message started the turn
--- (messages.user_id stamps a turn's rows) so a reassign that keeps the
--- conversation moves each later turn to its new holder. System jobs are
+-- trigger_type, and charged to the row's own user, falling back to the
+-- creator: a reassignment within the team keeps the conversation, and each
+-- turn is the spend of the person who asked for it. System jobs are
 -- 'system_overhead' with the job as subtype. source_id is cast to text so the
 -- UNION's column type is uniform. security_invoker (PG 15+) is required so the
 -- base tables' RLS applies under the querying app-pool identity.

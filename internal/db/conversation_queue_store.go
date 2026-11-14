@@ -337,8 +337,15 @@ func UnsettledConversationSQL(alias string) string {
 // row, and a conversation nobody has typed in collects them, so a user row
 // says nothing about whether an engagement produced a turn. Served by
 // idx_messages_conversation.
+//
+// Only an assistant row a model produced counts. The SDK runtime writes its
+// own assistant row for a call that failed before the model answered
+// (domain.ModelSynthetic), and stored failure records include assistant rows
+// flagged is_error. Neither is a turn, so a conversation holding only those
+// has done no work to remember.
 func ConversationHasRunSQL(alias string) string {
-	return `EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = ` + alias + `.id AND hr.role = 'assistant')`
+	return `EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = ` + alias + `.id AND hr.role = 'assistant'
+		AND NOT COALESCE(hr.is_error, FALSE) AND COALESCE(hr.model, '') <> '` + domain.ModelSynthetic + `')`
 }
 
 // EpisodeStartSQL renders when a conversation's current queue episode began,

@@ -273,7 +273,10 @@ func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
-func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *domain.Conversation, task domain.Task) (*runSidecar, error) {
+//
+// actingUserID is the person the engagement acts for, which the sandbox's
+// verbs are attributed to (see the dispatcher's actingUserID).
+func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *domain.Conversation, task domain.Task, actingUserID string) (*runSidecar, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
@@ -313,7 +316,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	stores, storesSet := s.getStores()
 	info := agenthost.ConversationInfo{
 		OrgID:            orgID,
-		UserID:           conv.CreatorUserID,
+		UserID:           actingUserID,
 		ConversationID:   conv.ID,
 		TeamID:           conv.TeamID,
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,

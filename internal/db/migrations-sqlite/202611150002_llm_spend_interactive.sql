@@ -1,11 +1,11 @@
 -- +goose Up
 -- llm_spend counts an interactive conversation's spend beside a delegation's.
 -- A chat is a person's spend, so it is a 'manual' row whatever trigger_type
--- its mint stamped. Its creator is the person whose message started the turn
--- (messages.user_id stamps a turn's rows), so after a reassign that keeps the
--- conversation each turn lands on the person who asked for it; a delegation
--- row keeps the conversation's creator. source stays 'run', the stored value
--- readers key on.
+-- its mint stamped, and it is charged to the row's own user rather than the
+-- conversation's creator: a reassignment within the team keeps the
+-- conversation, and each turn is the spend of the person who asked for it. A
+-- row with no user falls back to the creator. A delegation row keeps the
+-- conversation's creator. source stays 'run', the stored value readers key on.
 DROP VIEW llm_spend;
 CREATE VIEW llm_spend AS
   SELECT 'run' AS source,

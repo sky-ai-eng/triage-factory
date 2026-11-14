@@ -996,11 +996,13 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 }
 
 // startsFresh reports whether waking conv launches its first turn rather than
-// resuming one: a conversation a person works in that has never run (the
-// conversation has no assistant message, db.ConversationHasRunSQL). The
-// dispatcher launches such a conversation with the person's message as its
-// first turn, building or restoring the task's workspace as a delegation's
-// first step does, so nothing it would resume from has to exist yet.
+// resuming one: a conversation a person works in that has never run
+// (db.ConversationHasRunSQL). It is the one test for that, which the send gate,
+// the dispatcher's routing and the upstream hand-back all ask, so a message
+// the gate accepts is one the dispatcher launches. A launch of such a
+// conversation opens a fresh session carrying everything the person has
+// asked, in the task's workspace built or restored as a delegation's first
+// step's is, so nothing it would resume from has to exist yet.
 //
 // Only that type qualifies. A delegation that never ran and came to rest has
 // a blueprint step behind it, which the dispatcher resumes rather than

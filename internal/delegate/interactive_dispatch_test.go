@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
@@ -18,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // interactiveFixture is a Jira task a person holds, and the conversation their
@@ -99,9 +103,9 @@ var errLaunchRecorded = errors.New("the test's runtime recorded the launch and d
 // run and refuse to start.
 func (f *interactiveFixture) recordLaunch() *liveRunSpec {
 	got := &liveRunSpec{}
-	f.s.startLiveRun = func(_ context.Context, spec liveRunSpec) (*agentproc.LiveRun, error) {
+	f.s.liveRunOverride = func(_ context.Context, spec liveRunSpec) liveOutcome {
 		*got = spec
-		return nil, errLaunchRecorded
+		return liveOutcome{err: errLaunchRecorded}
 	}
 	return got
 }
@@ -112,8 +116,8 @@ func (f *interactiveFixture) dispatch(t *testing.T, message string) *liveRunSpec
 	t.Helper()
 	launched := f.recordLaunch()
 	claimed := f.claim(t, message)
-	if claimed.BlueprintRunID != "" || claimed.SessionID != "" {
-		t.Fatalf("claimed conversation = (blueprint run %q, session %q), want neither", claimed.BlueprintRunID, claimed.SessionID)
+	if claimed.BlueprintRunID != "" {
+		t.Fatalf("claimed conversation has blueprint run %q, want none", claimed.BlueprintRunID)
 	}
 	f.s.dispatchClaimedConversation(context.Background(), claimed, time.Now())
 	if launched.opts.Cwd == "" {
@@ -330,5 +334,203 @@ func TestFailureBeforeTheModelSpokeOwesNoMemory(t *testing.T) {
 	}
 	if claimed == nil || claimed.ID != task.ConversationID {
 		t.Errorf("claimed %+v, want the replacement %s with no memory owed ahead of it", claimed, task.ConversationID)
+	}
+}
+
+// endTurn makes the SDK process stand-in end one turn the way a model ending
+// its reply does: the stream stamps its session, the reply lands through the
+// launch's own sink, and the session file is on disk where --resume reads
+// it. It records the spec it was handed.
+func (f *interactiveFixture) endTurn(t *testing.T, sessionID, reply string) *liveRunSpec {
+	t.Helper()
+	got := &liveRunSpec{}
+	f.s.liveRunOverride = func(_ context.Context, spec liveRunSpec) liveOutcome {
+		*got = spec
+		sink := spec.sink.(*conversationSink)
+		if err := sink.OnSession(sessionID); err != nil {
+			t.Errorf("stamp the session: %v", err)
+		}
+		if err := sink.OnMessage(&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: reply}); err != nil {
+			t.Errorf("record the reply: %v", err)
+		}
+		path, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(spec.park.claudeCwd), sessionID)
+		if err != nil {
+			t.Fatalf("ClaudeSessionPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("make the session dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write the session file: %v", err)
+		}
+		return liveOutcome{result: &agentproc.Result{StopReason: "end_turn", Result: reply}, sessionID: sessionID}
+	}
+	return got
+}
+
+// seedPerson adds a second person who can hold the task and send messages.
+func (f *interactiveFixture) seedPerson(t *testing.T, name string) string {
+	t.Helper()
+	id := uuid.New().String()
+	if _, err := f.database.Exec(`INSERT INTO users (id, display_name) VALUES (?, ?)`, id, name); err != nil {
+		t.Fatalf("seed %s: %v", name, err)
+	}
+	return id
+}
+
+// TestDispatch_InteractiveSDKTurnKeepsItsSession: a turn the model ends
+// itself leaves the conversation open for the person's next message, which
+// resumes this session, so the session file the next --resume reads survives
+// the turn's end.
+func TestDispatch_InteractiveSDKTurnKeepsItsSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newInteractiveFixture(t, "1421-keep")
+	launched := f.endTurn(t, "sess-1421-keep", "the build is red because a test is flaky")
+	claimed := f.claim(t, "why is the build red?")
+	f.s.dispatchClaimedConversation(context.Background(), claimed, time.Now())
+
+	if launched.opts.Cwd == "" {
+		t.Fatal("the runtime was never started")
+	}
+	conv, err := f.stores.Conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: (%v, %v)", conv, err)
+	}
+	if conv.Status != domain.StatusOpen || conv.EndedAt != nil {
+		t.Fatalf("after the turn: (status %q, ended %v), want open and un-ended", conv.Status, conv.EndedAt)
+	}
+	if !sessionTranscriptExists(launched.park.claudeCwd, "sess-1421-keep") {
+		t.Error("the turn's end removed the session file the next message resumes from")
+	}
+}
+
+// TestDispatch_InteractiveSDKFirstTurnCarriesEverythingAsked: a message an
+// earlier engagement took off the queue without any model answering it (a
+// claim that paused before its agent ran, which settles the waiting input) is
+// still part of what the person has asked, so the first turn carries it ahead
+// of the message that woke the conversation.
+func TestDispatch_InteractiveSDKFirstTurnCarriesEverythingAsked(t *testing.T) {
+	f := newInteractiveFixture(t, "1421-asked")
+	delivered := true
+	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: f.conv.ID, UserID: runmode.LocalDefaultUserID, Role: "user",
+		Content: "why is the build red?", Delivered: &delivered,
+	}); err != nil {
+		t.Fatalf("record the settled message: %v", err)
+	}
+	launched := f.dispatch(t, "try again")
+
+	want := "why is the build red?" + db.PendingInputSeparator + "try again"
+	blocks := launched.opts.OpeningBlocks
+	if len(blocks) == 0 || blocks[len(blocks)-1].Text != want {
+		t.Errorf("the first turn ends with %q, want %q", blockTexts(blocks), want)
+	}
+}
+
+// TestDispatch_InteractiveSDKSessionThatNeverSpokeStartsFresh: a first turn
+// can be stopped or handed back after its session started and before the
+// model said anything. The send gate reads that conversation as one that has
+// not run, so the dispatcher must too: it starts a fresh session carrying the
+// person's message rather than resuming one that holds no turn.
+func TestDispatch_InteractiveSDKSessionThatNeverSpokeStartsFresh(t *testing.T) {
+	f := newInteractiveFixture(t, "1421-unspoken")
+	if _, err := f.database.Exec(`UPDATE conversations SET sdk_session_id = 'sess-unspoken' WHERE id = ?`, f.conv.ID); err != nil {
+		t.Fatalf("stamp a session: %v", err)
+	}
+	launched := f.dispatch(t, "why is the build red?")
+
+	if launched.opts.SessionID != "" {
+		t.Errorf("the launch resumes session %q, which took no turn", launched.opts.SessionID)
+	}
+	blocks := launched.opts.OpeningBlocks
+	if len(blocks) == 0 || blocks[len(blocks)-1].Text != "why is the build red?" {
+		t.Errorf("the first turn = %q, want it to end with the person's message", blockTexts(blocks))
+	}
+}
+
+// TestDispatch_InteractiveTurnActsForThePersonWhoAsked: a reassignment within
+// the team keeps the conversation, so its creator is no longer the person
+// talking to it. A turn acts for the person whose message it answers, and the
+// rows the turn writes are theirs, which is what the spend view charges.
+func TestDispatch_InteractiveTurnActsForThePersonWhoAsked(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newInteractiveFixture(t, "1421-asker")
+	bob := f.seedPerson(t, "Bob")
+	if _, err := f.database.Exec(`UPDATE tasks SET claimed_by_user_id = ? WHERE id = ?`, bob, f.taskID); err != nil {
+		t.Fatalf("reassign the task: %v", err)
+	}
+	ctx := context.Background()
+	launched := f.endTurn(t, "sess-1421-asker", "here is what I found")
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, bob, "what changed?"); err != nil {
+		t.Fatalf("SendMessage as the new holder: %v", err)
+	}
+	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil {
+		t.Fatalf("ClaimNextConversation = (%v, %v)", claimed, err)
+	}
+	claimed.OrgID = runmode.LocalDefaultOrgID
+	f.s.dispatchClaimedConversation(ctx, claimed, time.Now())
+
+	sink, ok := launched.sink.(*conversationSink)
+	if !ok || sink.creatorUserID != bob {
+		t.Errorf("the launch acts for %q, want the person who asked (%s), not the conversation's creator", sink.creatorUserID, bob)
+	}
+	var replyUser string
+	if err := f.database.QueryRow(
+		`SELECT COALESCE(user_id, '') FROM messages WHERE conversation_id = ? AND role = 'assistant'`, f.conv.ID,
+	).Scan(&replyUser); err != nil {
+		t.Fatalf("read the reply: %v", err)
+	}
+	if replyUser != bob {
+		t.Errorf("the reply is attributed to %q, want %s", replyUser, bob)
+	}
+}
+
+// TestNativeTranscript_AttributesATurnToThePersonItAnswers: the native loop's
+// own rows arrive unattributed. They belong to the person the engagement acts
+// for until a person's message is delivered, and to that message's sender
+// from then on, so a warm engagement that answers a second person charges
+// that person for the answer.
+func TestNativeTranscript_AttributesATurnToThePersonItAnswers(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-native-asker", "", t.TempDir())
+	claimID := markEngaged(t, database, "r-native-asker")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	bob := uuid.New().String()
+	if _, err := database.Exec(`INSERT INTO users (id, display_name) VALUES (?, 'Bob')`, bob); err != nil {
+		t.Fatalf("seed Bob: %v", err)
+	}
+
+	tr := newNativeTranscript(s, org, "r-native-asker", claimID).actFor(runmode.LocalDefaultUserID)
+	reply := func(content string) string {
+		t.Helper()
+		id, err := tr.Insert(ctx, org, &domain.Message{ConversationID: "r-native-asker", Role: "assistant", Content: content})
+		if err != nil {
+			t.Fatalf("insert %q: %v", content, err)
+		}
+		var user string
+		if err := database.QueryRow(`SELECT COALESCE(user_id, '') FROM messages WHERE id = ?`, id).Scan(&user); err != nil {
+			t.Fatalf("read %q: %v", content, err)
+		}
+		return user
+	}
+	if got := reply("before anyone else spoke"); got != runmode.LocalDefaultUserID {
+		t.Errorf("a row before any delivered message is attributed to %q, want the person the engagement acts for", got)
+	}
+
+	asked, err := s.conversations.InsertMessageSystem(ctx, org, pendingUserInput("r-native-asker", bob, "and the other test?"))
+	if err != nil {
+		t.Fatalf("queue Bob's message: %v", err)
+	}
+	if _, err := tr.ListForAssembly(ctx, org, "r-native-asker"); err != nil {
+		t.Fatalf("ListForAssembly: %v", err)
+	}
+	if err := tr.MarkDelivered(ctx, org, "r-native-asker", []int{int(asked)}, ""); err != nil {
+		t.Fatalf("deliver Bob's message: %v", err)
+	}
+	if got := reply("answering Bob"); got != bob {
+		t.Errorf("the answer to Bob's message is attributed to %q, want %s", got, bob)
 	}
 }

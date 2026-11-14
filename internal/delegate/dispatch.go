@@ -864,11 +864,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// itself on its first iteration. Routing one here would hand a native
 	// conversation to a path that resumes a Claude session it never had.
 	//
-	// Nor does an SDK conversation a person works in that has no session yet.
-	// It has never run, so there is no session for the resume to continue:
-	// the person's message is its first turn, which the launch below sends
-	// after the opening (composeLaunchTurn).
-	firstTurn := interactive && conv.SessionID == ""
+	// Nor does an SDK conversation a person works in that has never run
+	// (startsFresh, the send gate's own test). A session it holds took no
+	// turn, so there is nothing for a resume to continue: the person's
+	// messages are its first turn, which the launch below sends after the
+	// opening (composeLaunchTurn) in a fresh session.
+	firstTurn := startsFresh(conv)
 	if s.pendingInput != nil && undeliveredRowsFor(conv.Runtime) == inputRoleStagedResume && !firstTurn {
 		if msg, userID, ok, perr := s.pendingInput.Peek(gateCtx, orgID, conv.ID); perr != nil {
 			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "conversation", conv.ID, "error", perr)
@@ -917,6 +918,22 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// on an unwired fixture. A bring-up failure (brain not provisioning) is a
 	// transient setup failure — requeue like any other. Torn down after the run.
 	closeGate("passed", nil)
+
+	// Whom this engagement acts for: its sandbox's verbs, its audit rows, its
+	// commits' co-author and its transcript rows all name this person. A
+	// delegation acts for whoever delegated it. A conversation a person works
+	// in acts for the person whose message it is answering, who is not its
+	// creator once a reassignment within the team has kept the conversation.
+	actingUserID := conv.CreatorUserID
+	if interactive {
+		actingUserID = s.turnRequester(gateCtx, orgID, conv, task)
+	}
+	// A session that took no turn is not resumed: the launch opens a fresh
+	// one and sends the whole of what the person has asked so far.
+	priorSessionID := conv.SessionID
+	if firstTurn {
+		priorSessionID = ""
+	}
 
 	// The per-conversation cancel handle, registered HERE — before the
 	// sidecar, the git channel, the fetch and the clone — rather than at the
@@ -1014,7 +1031,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		return true
 	}
 
-	sidecar, err := s.bringUpRunSidecar(stepCtx, orgID, conv, *task)
+	sidecar, err := s.bringUpRunSidecar(stepCtx, orgID, conv, *task, actingUserID)
 	if err != nil {
 		if disposedDuringBringUp() {
 			return
@@ -1026,7 +1043,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	defer sidecar.Close()
 	localGit, err := s.startLocalGitChannel(stepCtx, orgID, *task, agenthost.ConversationInfo{
 		OrgID:            orgID,
-		UserID:           conv.CreatorUserID,
+		UserID:           actingUserID,
 		ConversationID:   conv.ID,
 		TeamID:           conv.TeamID,
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
@@ -1221,9 +1238,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// refusal means a successor owns the conversation.
 	var disp engagementDisposition
 	if conv.Runtime == domain.ConversationRuntimeNative {
-		disp = s.runNativeAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID)
+		disp = s.runNativeAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, actingUserID)
 	} else {
-		disp = s.runAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID, conv.SessionID)
+		disp = s.runAgent(stepCtx, conv.ID, *task, mission, cfg, time.Now(), conv.Model, conv.TriggerType, actingUserID, priorSessionID)
 	}
 
 	// A stop during bring-up produces neither of the dispositions below — both
@@ -1480,7 +1497,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// worktree needs the network — the shared bare is a blobless partial clone,
 	// so the rebuild's checkout triggers a lazy promisor fetch. The sidecar's
 	// git proxy is the only credential an executor has for it.
-	sidecar, esErr := s.bringUpRunSidecar(stepCtx, orgID, conv, *task)
+	sidecar, esErr := s.bringUpRunSidecar(stepCtx, orgID, conv, *task, userID)
 	if esErr != nil {
 		// Still pre-agent: the sidecar is part of the runtime coming up, so
 		// the answer is another attempt, not a dead conversation.
@@ -2526,9 +2543,9 @@ func (s *Spawner) requeueClaim(orgID string, conv domain.Conversation, outcome d
 // wake it (the follow-up path refuses one with no session to resume), so a
 // park would leave it where nothing reaches it; it takes the setup budget's
 // exhausted disposition instead (disposeOfUnreachableUpstream), which fails a
-// step that never ran. A conversation a person works in is not the exception:
-// with no session its next claim launches a first turn rather than a resume,
-// so a message does wake it.
+// step that never ran. A conversation a person works in that has never run is
+// not the exception: its next claim launches a first turn rather than a
+// resume, and the send gate accepts a message to it (startsFresh).
 func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	prior := conv.UpstreamHandBacks
 	if prior+1 < s.budgetLimit(db.BudgetUpstream) {
@@ -2544,7 +2561,7 @@ func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.Blueprint
 	}
 	dispatchLog.Warn("an upstream stayed unreachable through every retry the upstream budget allows",
 		"conversation", conv.ID, "upstream_hand_backs", prior, "error", cause)
-	if conv.Runtime != domain.ConversationRuntimeNative && conv.SessionID == "" && conv.Type != domain.ConversationTypeInteractive {
+	if conv.Runtime != domain.ConversationRuntimeNative && conv.SessionID == "" && !startsFresh(&conv) {
 		return s.disposeOfUnreachableUpstream(orgID, br, conv, cause)
 	}
 	s.parkWithStopNote(orgID, conv, domain.ParkReasonUpstreamUnavailable,
@@ -2767,6 +2784,27 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 		s.kickMemoryOwed(orgID, ended.ID)
 		s.replaceFailedInteractive(orgID, ended)
 	}
+}
+
+// turnRequester is the person a conversation a person works in is answering
+// on this claim: the sender of the newest message waiting for it, else the
+// task's holder, else the conversation's creator. A claim with no message
+// waiting is a re-claim after a crash or a hand-back, whose turn the holder
+// asked for.
+func (s *Spawner) turnRequester(ctx context.Context, orgID string, conv *domain.Conversation, task *domain.Task) string {
+	if s.pendingInput != nil {
+		_, userID, ok, err := s.pendingInput.Peek(ctx, orgID, conv.ID)
+		if err != nil {
+			dispatchLog.Warn("read the waiting messages to find whom this turn is for failed; acting for the task's holder",
+				"conversation", conv.ID, "error", err)
+		} else if ok && userID != "" {
+			return userID
+		}
+	}
+	if task != nil && task.ClaimedByUserID != "" {
+		return task.ClaimedByUserID
+	}
+	return conv.CreatorUserID
 }
 
 // replaceFailedInteractive gives a person back a conversation to address when

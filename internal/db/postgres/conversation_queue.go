@@ -586,7 +586,8 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	COALESCE((SELECT prior.outcome FROM claims prior
 	          WHERE prior.conversation_id = candidate.id AND prior.released_at IS NOT NULL
 	          ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.id DESC
-	          LIMIT 1), '') AS last_hand_back_outcome`
+	          LIMIT 1), '') AS last_hand_back_outcome,
+	` + db.ConversationHasRunSQL("candidate") + ` AS has_run`
 
 // orgActiveCTE counts each org's engagements rather than its stored
 // statuses: an unreleased claim is an occupied slot, a warm one included.
@@ -2243,7 +2244,7 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
 		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks,
-		&r.JailLosses, &r.LastHandBackOutcome)
+		&r.JailLosses, &r.LastHandBackOutcome, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

@@ -377,10 +377,11 @@ type Spawner struct {
 	// field when set; zero keeps each constant. Only tests set it, through
 	// setActivityTimings.
 	activityTimingsOverride activityTimings
-	// startLiveRun replaces the SDK process start (agentproc.RunInteractive)
-	// when set, and is handed the whole spec the driver would run. Only tests
-	// set it, to read what a launch hands the runtime.
-	startLiveRun func(context.Context, liveRunSpec) (*agentproc.LiveRun, error)
+	// liveRunOverride stands in for the SDK process and its driver when set:
+	// it is handed the spec runLiveAndDrive would start and returns the
+	// outcome the driver would have. Only tests set it, to read what a launch
+	// hands the runtime and to end a turn without a process.
+	liveRunOverride func(context.Context, liveRunSpec) liveOutcome
 
 	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	firingWaker    FiringWaker    // nil-safe; set post-construction via SetFiringWaker

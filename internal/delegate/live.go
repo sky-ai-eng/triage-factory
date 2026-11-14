@@ -205,17 +205,12 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 		return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 	}
 	spec.opts.TFTools = sdkTFTools(spec.hasBlueprint)
+	if s.liveRunOverride != nil {
+		return s.liveRunOverride(ctx, spec)
+	}
 	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
 
-	var (
-		lr  *agentproc.LiveRun
-		err error
-	)
-	if s.startLiveRun != nil {
-		lr, err = s.startLiveRun(ctx, spec)
-	} else {
-		lr, err = agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
-	}
+	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
 	if err != nil {
 		return liveOutcome{err: err}
 	}
