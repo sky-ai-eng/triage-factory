@@ -1,6 +1,9 @@
 package domain
 
-import "slices"
+import (
+	"slices"
+	"time"
+)
 
 // The conversation status vocabulary and its classifiers — one Go home for
 // both halves of a set of names that is otherwise spelled as bare strings in
@@ -319,6 +322,32 @@ type ConversationAwaitingPerson struct {
 	ParkReason    ParkReason
 	// EntitySourceID is the key of the entity its task is about, e.g.
 	// owner/repo#18. Display only; empty when the task names no entity.
+	EntitySourceID string
+}
+
+// PauseNoticeDue is a park that waits on the person who delegated the
+// conversation and whose notice has not been opened.
+type PauseNoticeDue struct {
+	OrgID string
+	// ParkedAt identifies the park: it is set when the conversation parks and
+	// cleared when a claim or a resume takes it off, so each park has its own.
+	ParkedAt time.Time
+	ConversationAwaitingPerson
+}
+
+// FailureNoticeDue is a failed conversation a person delegated whose failure
+// notice has not been posted.
+type FailureNoticeDue struct {
+	OrgID          string
+	ConversationID string
+	// CreatorUserID is the person who delegated it, never empty.
+	CreatorUserID string
+	FailureKind   ConversationFailureKind
+	// ResultSummary is the text the failure stored. Display only.
+	ResultSummary string
+	// EntitySourceID is the key of the entity its task is about. Display
+	// only; empty when the conversation has no task or the task names no
+	// entity.
 	EntitySourceID string
 }
 

@@ -647,7 +647,7 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 
 // markFailedIfActive is the infra-failure terminal and its claim release on
 // one transaction; MarkFailedIfActiveForClaimSystem is its only door.
-func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
+func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conversationID, failureKind, summary string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -660,10 +660,11 @@ func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conve
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
 			    failure_kind = ?,
+			    result_summary = COALESCE(NULLIF(?, ''), result_summary),
 			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			WHERE id = ?
 			  AND `+db.UnsettledConversationSQL("conversations")+`
-		`, time.Now().UTC(), nullIfEmpty(failureKind), conversationID)
+		`, time.Now().UTC(), nullIfEmpty(failureKind), summary, conversationID)
 		if err != nil {
 			return err
 		}
@@ -1718,29 +1719,12 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	reasons := domain.ParkReasonsAwaitingPerson()
-	args := make([]any, 0, len(reasons)+1)
-	args = append(args, orgID)
-	for _, r := range reasons {
-		args = append(args, string(r))
-	}
-	// A claim clears park_reason as it takes a row off its park, so a
-	// conversation someone woke leaves the set at its claim. The entity is
-	// outer-joined: its key is display only, and a task that names none still
-	// leaves its delegator waiting.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
-		FROM conversations c
-		JOIN tasks t ON t.id = c.task_id
-		LEFT JOIN entities e ON e.id = t.entity_id
-		WHERE c.org_id = ?
-		  AND c.status = 'open'
-		  AND c.park_reason IN (`+strings.TrimRight(strings.Repeat("?, ", len(reasons)), ", ")+`)
-		  AND c.creator_user_id IS NOT NULL
-		  AND c.ended_at IS NULL
-		  AND c.archived_at IS NULL
+		`+parkedForPersonSQL+`
+		  AND c.org_id = ?
 		ORDER BY c.id
-	`, args...)
+	`, append(parkedForPersonReasons(), orgID)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1756,6 +1740,120 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	// The Postgres twin carries the reasoning. The marker is a copy of
+	// parked_at's own text (MarkPauseNoticedSystem), so IS NOT compares one
+	// layout against itself.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT c.org_id, c.parked_at, c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
+		`+parkedForPersonSQL+`
+		  AND c.parked_at IS NOT NULL
+		  AND c.pause_noticed_parked_at IS NOT c.parked_at
+		ORDER BY c.parked_at, c.id
+		LIMIT ?
+	`, append(parkedForPersonReasons(), limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PauseNoticeDue
+	for rows.Next() {
+		var d domain.PauseNoticeDue
+		var reason string
+		if err := rows.Scan(&d.OrgID, &d.ParkedAt, &d.ConversationID, &d.CreatorUserID, &reason, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.ParkReason = domain.ParkReason(reason)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	// parked_at is written in more than one layout (a bound time, SQLite's
+	// own CURRENT_TIMESTAMP), so the match normalizes both sides; the marker
+	// takes the column's own text, which is what the list compares it with.
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE conversations SET pause_noticed_parked_at = parked_at
+		WHERE id = ?
+		  AND strftime('%Y-%m-%d %H:%M:%f', parked_at) = strftime('%Y-%m-%d %H:%M:%f', ?)
+	`, conversationID, parkedAt.UTC())
+	return err
+}
+
+func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT c.org_id, c.id, c.creator_user_id,
+		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
+		FROM conversations c
+		LEFT JOIN tasks t ON t.id = c.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE c.status = 'failed'
+		  AND c.failure_noticed_at IS NULL
+		  AND c.creator_user_id IS NOT NULL
+		ORDER BY c.completed_at, c.id
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.FailureNoticeDue
+	for rows.Next() {
+		var d domain.FailureNoticeDue
+		var kind string
+		if err := rows.Scan(&d.OrgID, &d.ConversationID, &d.CreatorUserID, &kind, &d.ResultSummary, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.FailureKind = domain.ConversationFailureKind(kind)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE conversations SET failure_noticed_at = ?
+		WHERE id = ? AND failure_noticed_at IS NULL
+	`, time.Now().UTC(), conversationID)
+	return err
+}
+
+// parkedForPersonSQL is the Postgres twin's parkedForPersonSQL, with the reasons
+// as the leading placeholders parkedForPersonReasons binds.
+var parkedForPersonSQL = `
+		FROM conversations c
+		JOIN tasks t ON t.id = c.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE c.status = 'open'
+		  AND c.park_reason IN (` + strings.TrimRight(strings.Repeat("?, ", len(domain.ParkReasonsAwaitingPerson())), ", ") + `)
+		  AND c.creator_user_id IS NOT NULL
+		  AND c.ended_at IS NULL
+		  AND c.archived_at IS NULL`
+
+// parkedForPersonReasons is the bind for parkedForPersonSQL's reasons, as a
+// fresh slice a caller appends its own arguments to.
+func parkedForPersonReasons() []any {
+	reasons := domain.ParkReasonsAwaitingPerson()
+	args := make([]any, len(reasons))
+	for i, r := range reasons {
+		args[i] = string(r)
+	}
+	return args
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
@@ -2048,13 +2146,13 @@ func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, c
 	return n > 0, err
 }
 
-func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
+func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		f, err := (&conversationStore{q: q}).markFailedIfActive(ctx, orgID, conversationID, failureKind)
+		f, err := (&conversationStore{q: q}).markFailedIfActive(ctx, orgID, conversationID, failureKind, summary)
 		flipped = f
 		return err
 	})

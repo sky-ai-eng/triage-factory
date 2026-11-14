@@ -362,7 +362,9 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 				// A settled stop parks the conversation, possibly for a
 				// reason that waits on its delegator (a stall whose
 				// engagement was lost before it parked itself).
-				s.notePaused(st.OrgID, conv)
+				if waitsOnDelegator(conv) {
+					s.kickDelegatorNotice(st.OrgID)
+				}
 			}
 		}
 		if st.BlueprintRunID == "" || s.blueprints == nil {
@@ -2600,7 +2602,8 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 // transcript saying what happened, the waiting input settled so `open` does not
 // immediately re-claim, the park itself fenced on this claim, the two surfaces
 // a person watching either the conversation or the board reads from, and the
-// notification for the person who delegated it, who is often watching neither.
+// doorbell for the notification the person who delegated it gets, who is often
+// watching neither.
 //
 // The note and the reason are the caller's because they are the only parts that
 // differ, and they are what a person is actually told — a park that describes
@@ -2637,7 +2640,7 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 		return
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
-	s.noteConversationPaused(orgID, conv.ID)
+	s.kickDelegatorNotice(orgID)
 }
 
 // failClaimedConversation writes the terminal and the boundary for a claimed
@@ -2659,7 +2662,7 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
 	bgCtx := context.Background()
 	s.releaseActivity(conv.ID, conv.ClaimID)
-	failed, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
+	failed, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified), reason)
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",
 			"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID, "error", err)
@@ -2669,7 +2672,7 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
 	}
 	if failed {
-		s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureUnclassified, reason)
+		s.kickDelegatorNotice(orgID)
 	}
 	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
 	if err != nil {
