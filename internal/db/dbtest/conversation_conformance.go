@@ -252,11 +252,34 @@ type ConversationSeeder struct {
 	// names rather than on whichever claim happens to be live.
 	PendingPermission func(t *testing.T, conversationID, claimID, toolCallID string) string
 
+	// StoredShape reads the conversation's stored columns that no store read
+	// projects, so the suite can assert what a mint writes column by column.
+	StoredShape func(t *testing.T, conversationID string) StoredConversationShape
+
 	// AgentID returns an identifier suitable for the
 	// StampAgentClaim agentID and the conversation row's actor_agent_id.
 	// Backends use this to thread their own seeded agent row (the
 	// Postgres path needs a real FK; SQLite is more relaxed).
 	AgentID string
+}
+
+// StoredConversationShape is a conversations row as stored, for the columns
+// the suite asserts a mint by. Status is the stored column, "" for SQL NULL,
+// where every store read answers the derived display status. NonNull names
+// which of MintNullColumns hold a value.
+type StoredConversationShape struct {
+	Type, Origin, Visibility, Status string
+	NonNull                          []string
+}
+
+// MintNullColumns is the conversations columns a person's claim leaves NULL
+// (ConversationStore.MintForPersonClaim). Each backend's StoredShape reads
+// them by this list, so the two cannot check different columns.
+var MintNullColumns = []string{
+	"prompt_id", "model", "worktree_path", "trigger_id", "actor_agent_id",
+	"blueprint_run_id", "blueprint_step_index", "preferred_executor_id",
+	"park_reason", "completed_at", "outcome", "outcome_reason", "queued_at",
+	"sdk_session_id", "ended_at", "parent_conversation_id",
 }
 
 // RunConversationStoreConformance covers the ConversationStore contract every
@@ -3472,54 +3495,66 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	runPersonClaimMintConformance(t, mk)
+
 	// --- Boundaries ---
 	//
 	// A task owns its conversations, and ended_at/ended_reason record the
 	// moment one stopped being the live one. The stamp is about the task
 	// moving on, so none of these assertions is conditioned on status.
 
-	t.Run("EndConversationsForTask_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "end-all")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	// Both doors: the request's, and its admin-pool twin a transaction with no
+	// claims uses.
+	for _, door := range []struct {
+		name string
+		end  func(db.ConversationStore, context.Context, string, string, domain.EndedReason) ([]domain.Conversation, error)
+	}{
+		{"EndConversationsForTask", db.ConversationStore.EndConversationsForTask},
+		{"EndConversationsForTaskSystem", db.ConversationStore.EndConversationsForTaskSystem},
+	} {
+		t.Run(door.name+"_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			ctx := context.Background()
+			ent := seed.Entity(t, "end-all")
+			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// One per rung of the status ladder the stamp is NOT conditioned on:
-		// mid-flight, parked, cleanly concluded, failed. The `completed` row
-		// is the one a conditioned predicate would miss — a requeued task's
-		// abort row is exactly what the boundary has to end.
-		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
-		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
-		concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
+			// One per rung of the status ladder the stamp is NOT conditioned on:
+			// mid-flight, parked, cleanly concluded, failed. The `completed` row
+			// is the one a conditioned predicate would miss — a requeued task's
+			// abort row is exactly what the boundary has to end.
+			live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+			parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
+			concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
+			failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
 
-		before := time.Now().UTC().Add(-time.Second)
-		stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
-		if err != nil {
-			t.Fatalf("EndConversationsForTask: %v", err)
-		}
-		want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
-		if len(stamped) != len(want) {
-			t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
-		}
-		for _, c := range stamped {
-			if _, ok := want[c.ID]; !ok {
-				t.Errorf("stamped an unexpected conversation %s", c.ID)
+			before := time.Now().UTC().Add(-time.Second)
+			stamped, err := door.end(store, ctx, orgID, taskID, domain.EndedRequeued)
+			if err != nil {
+				t.Fatalf("%s: %v", door.name, err)
 			}
-			if c.EndedReason != domain.EndedRequeued {
-				t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+			want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
+			if len(stamped) != len(want) {
+				t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
 			}
-			if c.EndedAt == nil || c.EndedAt.Before(before) {
-				t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+			for _, c := range stamped {
+				if _, ok := want[c.ID]; !ok {
+					t.Errorf("stamped an unexpected conversation %s", c.ID)
+				}
+				if c.EndedReason != domain.EndedRequeued {
+					t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+				}
+				if c.EndedAt == nil || c.EndedAt.Before(before) {
+					t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+				}
+				// The returned row IS the stored row, laterals and all — nobody
+				// should re-read to broadcast what the write handed back.
+				AssertWriteReturnedStoredRow(t, door.name+" "+c.ID, c, func() (*domain.Conversation, error) {
+					return store.Get(ctx, orgID, c.ID)
+				})
 			}
-			// The returned row IS the stored row, laterals and all — nobody
-			// should re-read to broadcast what the write handed back.
-			AssertWriteReturnedStoredRow(t, "EndConversationsForTask "+c.ID, c, func() (*domain.Conversation, error) {
-				return store.Get(ctx, orgID, c.ID)
-			})
-		}
-	})
+		})
+	}
 
 	t.Run("EndConversationsForTask_SkipsSubagentAndAlreadyEndedRows", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
@@ -3619,6 +3654,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			if _, err := store.EndConversationsForTask(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
 				t.Errorf("EndConversationsForTask(%q) err = %v, want ErrInvalidEndedReason", reason, err)
+			}
+			if _, err := store.EndConversationsForTaskSystem(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
+				t.Errorf("EndConversationsForTaskSystem(%q) err = %v, want ErrInvalidEndedReason", reason, err)
 			}
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -5244,7 +5282,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		settled := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		for _, id := range []string{owing, settled} {
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 		}
@@ -5298,7 +5336,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Ended after it parked: nothing resumes it.
 		ended := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		park(ended, domain.ParkReasonLaunchFailed)
-		if _, err := store.EndConversationSystem(ctx, orgID, ended, domain.EndedRequeued); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, ended, domain.EndedRequeued); err != nil {
 			t.Fatalf("end: %v", err)
 		}
 		// A trigger fired it: nobody delegated it to wait on.
@@ -5359,7 +5397,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
 			t.Fatalf("end: %v", err)
 		}
 
@@ -5390,7 +5428,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedFailed); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, conversationID, domain.EndedFailed); err != nil {
 			t.Fatalf("end: %v", err)
 		}
 		seed.SetConversationMemory(t, conversationID, NullMemorySentinel, domain.MemorySourceNone)
@@ -5418,7 +5456,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		end := func(suffix string) string {
 			t.Helper()
 			id := seedConversationForTest(t, orgID, seed, SeedConcluded)
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %s: %v", suffix, err)
 			}
 			return id
@@ -5466,7 +5504,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 			id := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedStepAdvanced); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedStepAdvanced); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 			seed.BackdateEndedAt(t, id, age)
@@ -5501,7 +5539,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		for i := range 3 {
 			id := seedConversationForTest(t, orgID, seed, SeedConcluded)
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %d: %v", i, err)
 			}
 		}
@@ -5524,6 +5562,45 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// A conversation that never ran has no turn to remember, so its boundary
+	// owes nothing: a person who claims a task and hands it back without
+	// typing leaves no debt for the sweep to work.
+	t.Run("ListMemoryOwed_SkipsAConversationThatNeverRan", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "owed-never-ran")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		untouched, err := store.MintForPersonClaim(ctx, orgID, taskID, userID)
+		if err != nil || untouched == nil {
+			t.Fatalf("MintForPersonClaim = (%v, %v)", untouched, err)
+		}
+		// A staged note is a user row. It is not a turn.
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: untouched.ID, Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note",
+		}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		if _, err := store.EndConversationSystem(ctx, orgID, untouched.ID, domain.EndedRequeued); err != nil {
+			t.Fatalf("end the untouched conversation: %v", err)
+		}
+		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 0 {
+			t.Fatalf("owed = %v, want none — the conversation never ran", ids)
+		}
+
+		// The same boundary on one that ran does owe.
+		ran, err := store.MintForPersonClaim(ctx, orgID, taskID, userID)
+		if err != nil || ran == nil {
+			t.Fatalf("second MintForPersonClaim = (%v, %v)", ran, err)
+		}
+		if _, err := endRanConversation(t, store, ctx, orgID, ran.ID, domain.EndedRequeued); err != nil {
+			t.Fatalf("end the conversation that ran: %v", err)
+		}
+		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 1 || ids[0] != ran.ID {
+			t.Errorf("owed = %v, want [%s]", ids, ran.ID)
+		}
+	})
+
 	// A subagent row belongs to its spawner's engagement, so its boundary owes
 	// no handoff — the same rule that keeps the task's stamp off it.
 	t.Run("ListMemoryOwed_SkipsSubagentRows", func(t *testing.T) {
@@ -5532,13 +5609,33 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		parent := seedConversationForTest(t, orgID, seed, "running")
 		sub := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		seed.SetParentConversation(t, sub, parent)
-		if _, err := store.EndConversationSystem(ctx, orgID, sub, domain.EndedFailed); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, sub, domain.EndedFailed); err != nil {
 			t.Fatalf("end the subagent conversation: %v", err)
 		}
 		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 0 {
 			t.Errorf("owed = %v, want none — a subagent's boundary is its spawner's business", ids)
 		}
 	})
+}
+
+// seedAssistantTurn gives a conversation an assistant message, which is what
+// makes it one that has run (db.ConversationHasRunSQL). An ended conversation
+// owes a memory only if it has, so a fixture staging a debt stages a turn.
+func seedAssistantTurn(t *testing.T, store db.ConversationStore, ctx context.Context, orgID, conversationID string) {
+	t.Helper()
+	if _, err := store.InsertMessageSystem(ctx, orgID, &domain.Message{
+		ConversationID: conversationID, Role: "assistant", Content: "a turn",
+	}); err != nil {
+		t.Fatalf("seed an assistant turn on %s: %v", conversationID, err)
+	}
+}
+
+// endRanConversation ends a conversation that has run: it stages the turn,
+// then stamps the boundary on the admin pool.
+func endRanConversation(t *testing.T, store db.ConversationStore, ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	t.Helper()
+	seedAssistantTurn(t, store, ctx, orgID, conversationID)
+	return store.EndConversationSystem(ctx, orgID, conversationID, reason)
 }
 
 // mustListMemoryOwed runs the sweep read with the suite's standard backoff and

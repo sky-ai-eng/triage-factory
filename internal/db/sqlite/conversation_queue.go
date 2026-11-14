@@ -201,7 +201,7 @@ const deferredSQL = awaitingDrivingSQL + `
 const eligibleForDrivingSQL = needsDrivingSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied over a LEFT
-// JOIN so a conversation with no blueprint parent (interactive, tomorrow)
+// JOIN so a conversation with no blueprint parent (an interactive one)
 // is not filtered out by the join itself. The rest — why a called-off
 // blueprint drives nothing and is checked on both of its columns, why
 // a blueprint drives only the one conversation its `current_step_index`

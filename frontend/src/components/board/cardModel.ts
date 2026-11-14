@@ -94,6 +94,8 @@ export function deriveCard(
   now: number = Date.now(),
 ): CardModel {
   const queuedTask = task.status === 'queued' || task.status === 'snoozed'
+  // TODO(TFAC-1423): a conversation whose has_run is false counts as no run
+  // here, so a task a person just claimed stops reading as idle.
   const hasRun = !!conversation && !queuedTask
   const lifecycle = lifecycleOf(task, hasRun ? conversation : undefined)
   const working = lifecycle === 'working'

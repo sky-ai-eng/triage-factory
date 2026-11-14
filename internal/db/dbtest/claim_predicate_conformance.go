@@ -911,7 +911,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	t.Run("AQueuedStepOnATaskStillOwingAMemoryIsNotClaimed", func(t *testing.T) {
 		h := mk(t)
 		owing := h.StageDelegation(t, "sdk")
-		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, owing, domain.EndedRequeued); err != nil {
+		if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, owing, domain.EndedRequeued); err != nil {
 			t.Fatalf("end the owing conversation: %v", err)
 		}
 		// The next step, minted the way the reactor mints one: the pointer
@@ -930,6 +930,50 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Fatalf("file the owed memory: %v", err)
 		}
 		mustClaim(t, h, next)
+	})
+
+	// The same gate holds the conversation a person's claim mints. A takeover
+	// ends the agent's conversation and mints the person's in one transaction,
+	// so the person's first message arrives while the agent's memory is still
+	// owed. The minted row is parked, so nothing drives it until that message;
+	// then the message makes it drivable in every respect but the memory, and
+	// it is claimed once the memory row lands.
+	t.Run("AnInteractiveConversationWokenByAMessageWaitsForTheOwedMemory", func(t *testing.T) {
+		h := mk(t)
+		owing := h.StageDelegation(t, "sdk")
+		agents, err := h.Stores.Conversations.GetSystem(ctx, h.OrgID, owing)
+		if err != nil || agents == nil {
+			t.Fatalf("read the agent's conversation: (%v, %v)", agents, err)
+		}
+		if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, owing, domain.EndedTakenOver); err != nil {
+			t.Fatalf("end the agent's conversation: %v", err)
+		}
+		persons, err := h.Stores.Conversations.MintForPersonClaimSystem(ctx, h.OrgID, agents.TaskID, agents.CreatorUserID)
+		if err != nil || persons == nil {
+			t.Fatalf("MintForPersonClaimSystem = (%v, %v)", persons, err)
+		}
+
+		// Parked with no input: not drivable, memory or no memory. A staged
+		// note does not wake it either.
+		mustNotClaim(t, h)
+		note := userRow("a staged note", false)
+		note.Subtype = domain.MessageSubtypeInjectionSystemNote
+		h.InsertRow(t, persons.ID, note)
+		mustNotClaim(t, h)
+
+		// The person's message wakes it, and the owed memory holds it.
+		h.InsertRow(t, persons.ID, userRow("what happened here?", false))
+		if got := h.DisplayStatus(t, persons.ID); got != domain.StatusQueued {
+			t.Errorf("display status = %q after the person's message, want %q", got, domain.StatusQueued)
+		}
+		mustNotClaim(t, h)
+
+		if _, err := h.Stores.TaskMemory.UpsertAgentMemorySystem(
+			ctx, h.OrgID, owing, "", "what the agent tried", domain.MemorySourceGenerated,
+		); err != nil {
+			t.Fatalf("file the owed memory: %v", err)
+		}
+		mustClaim(t, h, persons.ID)
 	})
 
 	// A conversation that ended and DID leave a memory owes nothing, so its

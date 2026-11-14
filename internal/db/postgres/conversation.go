@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
@@ -1294,6 +1295,61 @@ func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, 
 	return endConversationsForTask(ctx, s.q, orgID, taskID, reason)
 }
 
+func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return endConversationsForTask(ctx, s.admin, orgID, taskID, reason)
+}
+
+func (s *conversationStore) MintForPersonClaim(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error) {
+	return mintForPersonClaim(ctx, s.q, orgID, taskID, userID)
+}
+
+func (s *conversationStore) MintForPersonClaimSystem(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error) {
+	return mintForPersonClaim(ctx, s.admin, orgID, taskID, userID)
+}
+
+// mintForPersonClaim is the statement both doors run. Every column is written
+// explicitly: the row has no blueprint run, so it must not take the origin
+// column's 'blueprint' default, and runtime is stamped 'native' here and 'sdk'
+// in the SQLite sibling for the reason insertConversation gives. team_id is
+// read off the task in the statement, after the claim's consolidation on the
+// same transaction.
+//
+// The NOT EXISTS is the task's one-conversation rule, applied by the write
+// rather than by a read before it: a task that still holds an un-ended
+// top-level conversation keeps that one. Under the app pool the subquery is
+// RLS-filtered, and it agrees with the insert: a caller who can write the
+// task's team reads that team's conversations.
+func mintForPersonClaim(ctx context.Context, q queryer, orgID, taskID, userID string) (*domain.Conversation, error) {
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
+	r, err := writeConversationReturning(ctx, q, `
+		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, worktree_path,
+		                  trigger_type, trigger_id, origin, team_id, visibility, creator_user_id,
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
+		                  status, parked_at, park_reason, completed_at, outcome, outcome_reason,
+		                  queued_at)
+		SELECT $1::uuid, t.org_id, '`+domain.ConversationTypeInteractive+`', '`+domain.ConversationRuntimeNative+`', t.id, NULL, NULL, NULL,
+		       'manual', NULL, '`+domain.ConversationOriginInteractive+`', t.team_id, 'team', $2::uuid,
+		       NULL, NULL, NULL, NULL,
+		       'open', $3::timestamptz, NULL, NULL, NULL, NULL,
+		       NULL
+		FROM tasks t
+		WHERE t.org_id = $4 AND t.id = $5
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations live
+		      WHERE live.org_id = t.org_id AND live.task_id = t.id
+		        AND `+liveTopLevelConversationSQL("live")+`)
+		RETURNING *
+	`, uuid.New().String(), userID, time.Now().UTC(), orgID, taskID)
+	// The guard declining is the answer, not a miss: the task has its
+	// conversation already.
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
+}
+
 func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
 	if !domain.IsEndedReason(string(reason)) {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
@@ -1400,7 +1456,11 @@ func endConversation(ctx context.Context, q queryer, orgID, conversationID strin
 // `none` row is a run that concluded with nothing to say; neither is the
 // agent, so neither clears the flag. The store door holds agent_content NULL
 // exactly when source is `none`, which is why content is not consulted here.
-const pgConversationColumns = `
+//
+// A var rather than a const because has_run is the shared
+// db.ConversationHasRunSQL, so this read and the owed-memory condition ask
+// "has it run" in the same words.
+var pgConversationColumns = `
 	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), ` + pgDisplayStatusSQL + `, COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
@@ -1421,7 +1481,9 @@ const pgConversationColumns = `
 	r.ended_at, COALESCE(r.ended_reason, ''),
 	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
 	cl.last_activity_at, COALESCE(cl.current_op, ''),
-	r.next_attempt_at
+	r.next_attempt_at,
+	` + db.ConversationHasRunSQL("r") + ` AS has_run,
+	r.type
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
@@ -2927,6 +2989,7 @@ func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...a
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,
 		&lastActivityAt, &r.ClaimCurrentOp,
 		&nextAttemptAt,
+		&r.HasRun, &r.Type,
 	}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err

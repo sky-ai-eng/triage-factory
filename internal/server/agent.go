@@ -645,11 +645,15 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// with the legacy set they belong to; empty string when the conversation holds
 		// none (still executing, an infra failure, or an outcome gate that
 		// exhausted its retries).
-		"Outcome":              conv.Outcome,
-		"OutcomeReason":        conv.OutcomeReason,
-		"FailureKind":          string(conv.FailureKind),
-		"SessionID":            conv.SessionID,
-		"MemoryMissing":        conv.MemoryMissing,
+		"Outcome":       conv.Outcome,
+		"OutcomeReason": conv.OutcomeReason,
+		"FailureKind":   string(conv.FailureKind),
+		"SessionID":     conv.SessionID,
+		"MemoryMissing": conv.MemoryMissing,
+		// Whether the conversation holds an assistant message. A conversation a
+		// person's claim minted reads false until its first turn.
+		"has_run":              conv.HasRun,
+		"type":                 conv.Type,
 		"TriggerType":          conv.TriggerType,
 		"TriggerID":            conv.TriggerID,
 		"actor_agent_id":       conv.ActorAgentID,

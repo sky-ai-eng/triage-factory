@@ -357,6 +357,62 @@ describe('the lane read runs on the server', () => {
   })
 })
 
+/** The conversations the board's cards link to, one entry per distinct id. */
+function runLinks(): string[] {
+  const ids = Array.from(document.querySelectorAll('a[href*="/runs/"]')).map(
+    (a) => (a.getAttribute('href') ?? '').split('/runs/')[1],
+  )
+  return [...new Set(ids)]
+}
+
+describe('the conversation a card shows', () => {
+  it("keeps the run a person took over when their claim's conversation has not run", async () => {
+    // The list answers newest first, and the claim's conversation is newer
+    // than the run it took the task from.
+    const claimed = {
+      ...conversation('open'),
+      ID: 'c-claim',
+      StartedAt: '2026-09-01T13:00:00Z',
+      type: 'interactive',
+      has_run: false,
+    } as Conversation
+    api.apiJSON.mockImplementation(async (path: string) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') return { event_types: [] }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    })
+    renderBoard()
+    await screen.findByText(HELD.title)
+
+    expect(runLinks()).toEqual([held.ID])
+  })
+
+  it("shows a claim's conversation once it has run", async () => {
+    const claimed = {
+      ...conversation('open'),
+      ID: 'c-claim',
+      StartedAt: '2026-09-01T13:00:00Z',
+      type: 'interactive',
+      has_run: true,
+    } as Conversation
+    api.apiJSON.mockImplementation(async (path: string) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') return { event_types: [] }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    })
+    renderBoard()
+    await screen.findByText(HELD.title)
+
+    expect(runLinks()).toEqual(['c-claim'])
+  })
+})
+
 describe('starting a queued task', () => {
   it('makes the drag one call: the claim is what moves the card', async () => {
     renderBoard()

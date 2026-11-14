@@ -262,6 +262,12 @@ export interface Conversation {
   // ConversationStatus union, on purpose — see the alias for why the wire field stays
   // open-world and how the lint rule closes the branching over it.
   Status: ConversationStatusValue
+  // type is the kind of conversation: 'delegation', or 'interactive' for the
+  // one a person's claim opens on the task they hold.
+  type?: string
+  // has_run is whether the agent has taken a turn in the conversation. A
+  // person's claim opens one that reads false until its first message runs.
+  has_run?: boolean
   Model: string
   StartedAt: string
   // QueuedAt is when the conversation last entered the queue; ClaimedAt is when the
@@ -449,8 +455,8 @@ export interface Conversation {
   resume_blocked_reason?: string
   // The boundary: when this conversation stopped being its task's live one,
   // and why — one of 'requeued' | 'delegated' | 'taken_over' |
-  // 'step_advanced' | 'team_archived' | 'failed' (internal/domain's
-  // EndedReason). Both keys are absent while it is open, and they travel
+  // 'reassigned' | 'step_advanced' | 'team_archived' | 'failed'
+  // (internal/domain's EndedReason). Both keys are absent while it is open, and they travel
   // together: the stamp writes both or neither.
   ended_at?: string
   ended_reason?: string

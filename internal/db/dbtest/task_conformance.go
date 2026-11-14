@@ -2120,8 +2120,105 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		if fromList.MemoryAttempt != nil && got.MemoryAttempt != nil && *fromList.MemoryAttempt != *got.MemoryAttempt {
 			t.Errorf("List attempt = %+v, Get attempt = %+v", *fromList.MemoryAttempt, *got.MemoryAttempt)
 		}
+		if fromList.ConversationID != got.ConversationID {
+			t.Errorf("List says conversation_id=%q, Get says %q — one column list, two answers",
+				fromList.ConversationID, got.ConversationID)
+		}
 		return *got
 	}
+
+	// The task's conversation_id is its newest un-ended top-level
+	// conversation, read by the definition the claim scan compares a
+	// candidate against. Each case stages a task's conversations and names
+	// the one the read must answer, "" for none.
+	t.Run("ConversationIDIsTheTasksNewestUnendedConversation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			stage func(t *testing.T, h TaskMemoryPendingHarness, taskID string) (want string)
+		}{
+			{
+				name:  "a task with no conversation",
+				stage: func(*testing.T, TaskMemoryPendingHarness, string) string { return "" },
+			},
+			{
+				name: "a task with one un-ended conversation",
+				stage: func(t *testing.T, h TaskMemoryPendingHarness, taskID string) string {
+					return h.Conversation(t, taskID, "only")
+				},
+			},
+			{
+				name: "an ended conversation beside a newer un-ended one",
+				stage: func(t *testing.T, h TaskMemoryPendingHarness, taskID string) string {
+					ended := h.Conversation(t, taskID, "ended")
+					if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, ended, domain.EndedTakenOver); err != nil {
+						t.Fatalf("EndConversationSystem: %v", err)
+					}
+					return h.Conversation(t, taskID, "newer")
+				},
+			},
+			{
+				name: "a task whose only conversation has ended",
+				stage: func(t *testing.T, h TaskMemoryPendingHarness, taskID string) string {
+					ended := h.Conversation(t, taskID, "ended-only")
+					if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, ended, domain.EndedRequeued); err != nil {
+						t.Fatalf("EndConversationSystem: %v", err)
+					}
+					return ""
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := mk(t)
+				taskID := h.Task(t, "conversation-id")
+				want := tc.stage(t, h, taskID)
+				if got := readBoth(t, h, taskID); got.ConversationID != want {
+					t.Errorf("conversation_id = %q, want %q", got.ConversationID, want)
+				}
+			})
+		}
+	})
+
+	// Only a conversation that has run owes a memory. One that ended with no
+	// assistant message has no turn to remember: the task does not read
+	// pending, and the sweep does not enumerate it. A staged note is a user
+	// row and changes neither.
+	t.Run("AnEndedConversationOwesAMemoryOnlyIfItHasRun", func(t *testing.T) {
+		h := mk(t)
+		owedIDs := func(t *testing.T) []string {
+			t.Helper()
+			return memoryOwedIDs(mustListMemoryOwed(t, h.Stores.Conversations, ctx))
+		}
+
+		untouchedTask := h.Task(t, "never-ran")
+		untouched := h.Conversation(t, untouchedTask, "never-ran")
+		if _, err := h.Stores.Conversations.InsertMessageSystem(ctx, h.OrgID, &domain.Message{
+			ConversationID: untouched, Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a staged note",
+		}); err != nil {
+			t.Fatalf("stage a note: %v", err)
+		}
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, untouched, domain.EndedRequeued); err != nil {
+			t.Fatalf("EndConversationSystem: %v", err)
+		}
+		if got := readBoth(t, h, untouchedTask); got.MemoryPending || got.MemoryAttempt != nil {
+			t.Errorf("memory_pending = %v, memory_attempt = %+v on a task whose ended conversation never ran; want nothing owed",
+				got.MemoryPending, got.MemoryAttempt)
+		}
+		if ids := owedIDs(t); len(ids) != 0 {
+			t.Errorf("ListMemoryOwedSystem = %v, want none: the conversation never ran", ids)
+		}
+
+		ranTask := h.Task(t, "ran")
+		ran := h.Conversation(t, ranTask, "ran")
+		if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, ran, domain.EndedRequeued); err != nil {
+			t.Fatalf("end the conversation that ran: %v", err)
+		}
+		if got := readBoth(t, h, ranTask); !got.MemoryPending {
+			t.Error("memory_pending = false on a task whose ended conversation ran and left no memory")
+		}
+		if ids := owedIDs(t); len(ids) != 1 || ids[0] != ran {
+			t.Errorf("ListMemoryOwedSystem = %v, want [%s]", ids, ran)
+		}
+	})
 
 	t.Run("ATaskWhoseConversationsAreAllLiveOwesNothing", func(t *testing.T) {
 		h := mk(t)
@@ -2141,7 +2238,7 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		h := mk(t)
 		taskID := h.Task(t, "owing")
 		convID := h.Conversation(t, taskID, "owing")
-		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedRequeued); err != nil {
+		if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, convID, domain.EndedRequeued); err != nil {
 			t.Fatalf("EndConversationSystem: %v", err)
 		}
 
@@ -2161,7 +2258,7 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		h := mk(t)
 		taskID := h.Task(t, "attempt")
 		convID := h.Conversation(t, taskID, "attempt")
-		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedFailed); err != nil {
+		if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, convID, domain.EndedFailed); err != nil {
 			t.Fatalf("EndConversationSystem: %v", err)
 		}
 
@@ -2219,7 +2316,7 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		h := mk(t)
 		taskID := h.Task(t, "settled")
 		convID := h.Conversation(t, taskID, "settled")
-		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, convID, domain.EndedTakenOver); err != nil {
+		if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, convID, domain.EndedTakenOver); err != nil {
 			t.Fatalf("EndConversationSystem: %v", err)
 		}
 		if _, err := h.Stores.MemoryAttempts.BeginAttemptSystem(ctx, h.OrgID, convID); err != nil {
@@ -2256,7 +2353,7 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		older := h.Conversation(t, taskID, "newest-debt-old")
 		newer := h.Conversation(t, taskID, "newest-debt-new")
 		for id, age := range map[string]time.Duration{older: 2 * time.Hour, newer: time.Hour} {
-			if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 			h.BackdateEndedAt(t, id, age)
@@ -2320,7 +2417,7 @@ func RunTaskMemoryPendingConformance(t *testing.T, mk TaskMemoryPendingFactory) 
 		settled := h.Conversation(t, taskID, "mixed-a")
 		owing := h.Conversation(t, taskID, "mixed-b")
 		for _, id := range []string{settled, owing} {
-			if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, id, domain.EndedStepAdvanced); err != nil {
+			if _, err := endRanConversation(t, h.Stores.Conversations, ctx, h.OrgID, id, domain.EndedStepAdvanced); err != nil {
 				t.Fatalf("EndConversationSystem %s: %v", id, err)
 			}
 		}

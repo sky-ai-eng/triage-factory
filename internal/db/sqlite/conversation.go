@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // conversationStore is the SQLite impl of db.ConversationStore over the
@@ -685,6 +686,49 @@ func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, 
 	return endConversationsScoped(ctx, s.q, orgID, reason, "task_id = ?", taskID, "")
 }
 
+func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return s.EndConversationsForTask(ctx, orgID, taskID, reason)
+}
+
+// MintForPersonClaim mirrors the Postgres statement of the same name, which
+// carries the model. runtime is stamped 'sdk' and team_id is the local team,
+// as insertConversation writes them here.
+func (s *conversationStore) MintForPersonClaim(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, model, worktree_path,
+		                  trigger_type, trigger_id, origin, team_id, visibility, creator_user_id,
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
+		                  status, parked_at, park_reason, completed_at, outcome, outcome_reason,
+		                  queued_at)
+		SELECT ?, '`+domain.ConversationTypeInteractive+`', '`+domain.ConversationRuntimeSDK+`', t.id, NULL, NULL, NULL,
+		       'manual', NULL, '`+domain.ConversationOriginInteractive+`', ?, 'team', ?,
+		       NULL, NULL, NULL, NULL,
+		       'open', ?, NULL, NULL, NULL, NULL,
+		       NULL
+		FROM tasks t
+		WHERE t.id = ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations live
+		      WHERE live.task_id = t.id
+		        AND `+liveTopLevelConversationSQL("live")+`)
+		RETURNING `+sqliteConversationReturningColumns,
+		uuid.New().String(), runmode.LocalDefaultTeamID, userID, time.Now().UTC(), taskID)
+	r, err := scanConversationReturning(row)
+	// The guard declining is the answer, not a miss: the task has its
+	// conversation already.
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
+}
+
+func (s *conversationStore) MintForPersonClaimSystem(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error) {
+	return s.MintForPersonClaim(ctx, orgID, taskID, userID)
+}
+
 func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
 	return endConversationsScoped(ctx, s.q, orgID, reason, "team_id = ?", teamID, "")
 }
@@ -803,7 +847,7 @@ func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, co
 // budget's current-episode counter (episodeAttemptsSQL, conversation_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
-const sqliteConversationColumns = `
+var sqliteConversationColumns = `
 	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
 	` + sqliteDisplayStatusSQL + `,
 	r.model, r.started_at, r.queued_at,
@@ -830,7 +874,9 @@ const sqliteConversationColumns = `
 	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
 	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
 	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `'), '') AS current_op,
-	r.next_attempt_at
+	r.next_attempt_at,
+	` + db.ConversationHasRunSQL("r") + ` AS has_run,
+	r.type
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
@@ -934,7 +980,7 @@ const sqliteConversationAttentionSQL = `(
 // SetWorktreePath and their System/ForClaimSystem twins) as `RETURNING ` +
 // sqliteConversationReturningColumns, always as the LAST statement of its
 // transaction — see completeConversationReturning for why order matters here.
-const sqliteConversationReturningColumns = `
+var sqliteConversationReturningColumns = `
 	id, COALESCE(task_id, ''), COALESCE(runtime, ''),
 	` + sqliteReturningDisplayStatusSQL + `,
 	model, started_at, queued_at,
@@ -961,7 +1007,9 @@ const sqliteConversationReturningColumns = `
 	stop_requested_at, COALESCE(stop_requested_by, ''), COALESCE(stop_requested_reason, ''),
 	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
 	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `'), '') AS current_op,
-	next_attempt_at
+	next_attempt_at,
+	` + db.ConversationHasRunSQL("conversations") + ` AS has_run,
+	type
 `
 
 // sqliteReturningDisplayStatusSQL is sqliteDisplayStatusSQL rewritten against
@@ -2817,6 +2865,7 @@ func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,
 		&lastActivityAt, &r.ClaimCurrentOp,
 		&nextAttemptAt,
+		&r.HasRun, &r.Type,
 	); err != nil {
 		return err
 	}

@@ -296,3 +296,90 @@ func TestDispatch_RetiresAStaleAssignmentNoteBeforeTheTurn(t *testing.T) {
 		t.Errorf("retired = %v, want the closed task's note withdrawn and the other kept", retired)
 	}
 }
+
+// TestTellTaskAssigned_TheTasksOwnConversationIsToldWhoHoldsItNow: a reassign
+// within a team keeps the task's conversation, so when a person now holds the
+// task, that conversation is told the task is assigned to them and the
+// messages from here on are theirs. Only a conversation that has run: one
+// that never ran has nobody to correct, which is every conversation a claim
+// has just minted.
+func TestTellTaskAssigned_TheTasksOwnConversationIsToldWhoHoldsItNow(t *testing.T) {
+	f := newSiblingWorkFixture(t, "c-own")
+	ctx := context.Background()
+	if ok, err := f.stores.Tasks.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultUserID,
+		dbtest.TaskVersion(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID)); err != nil || !ok {
+		t.Fatalf("ClaimQueuedForUser = %v (err %v)", ok, err)
+	}
+	holder := domain.UserAssignee(runmode.LocalDefaultUserID)
+
+	assignment, err := f.stores.Tasks.AssignmentSystem(ctx, runmode.LocalDefaultOrgID, f.taskID)
+	if err != nil || assignment == nil {
+		t.Fatalf("AssignmentSystem = %v (err %v)", assignment, err)
+	}
+	if assignment.ConversationID != f.convID || assignment.ConversationHasRun {
+		t.Fatalf("assignment names conversation %q, has run = %v; want %q, which has not run",
+			assignment.ConversationID, assignment.ConversationHasRun, f.convID)
+	}
+
+	// It has not run: nobody is told.
+	f.s.TellTaskAssigned(ctx, runmode.LocalDefaultOrgID, f.taskID, holder)
+	if got := f.notes(t, domain.StagedInjectionProducerTaskAssigned); len(got) != 0 {
+		t.Fatalf("a conversation that never ran was staged %d assignment notes, want none: %+v", len(got), got)
+	}
+
+	// A staged note is a user row, and is not a run either.
+	if _, err := f.stores.Conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: f.convID, Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note",
+	}); err != nil {
+		t.Fatalf("insert a note: %v", err)
+	}
+	f.s.TellTaskAssigned(ctx, runmode.LocalDefaultOrgID, f.taskID, holder)
+	if got := f.notes(t, domain.StagedInjectionProducerTaskAssigned); len(got) != 0 {
+		t.Fatalf("a conversation holding only a user row was staged %d assignment notes, want none", len(got))
+	}
+
+	// It has run: it is told once, as the task's own conversation.
+	if _, err := f.stores.Conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: f.convID, Role: "assistant", Content: "a turn",
+	}); err != nil {
+		t.Fatalf("insert an assistant turn: %v", err)
+	}
+	f.s.TellTaskAssigned(ctx, runmode.LocalDefaultOrgID, f.taskID, holder)
+	got := f.notes(t, domain.StagedInjectionProducerTaskAssigned)
+	if len(got) != 1 {
+		t.Fatalf("staged %d assignment notes on the task's own conversation, want one: %+v", len(got), got)
+	}
+	note := got[0]
+	if note.Subtype != domain.MessageSubtypeInjectionSystemNote {
+		t.Errorf("subtype = %q, want a system note", note.Subtype)
+	}
+	if want := (domain.NoteProvenance{AssignedTask: f.taskID, Assignee: holder}); note.Provenance != want {
+		t.Errorf("provenance = %+v, want %+v", note.Provenance, want)
+	}
+	own := *assignment
+	own.ConversationHasRun, own.Own = true, true
+	if note.Body != domain.TaskAssignedNote(own) {
+		t.Errorf("the note is not the own-conversation wording:\n got: %s\nwant: %s", note.Body, domain.TaskAssignedNote(own))
+	}
+	// The same task told as overlapping work reads differently, so the body
+	// above is the Own wording and nothing else.
+	overlap := *assignment
+	if note.Body == domain.TaskAssignedNote(overlap) {
+		t.Error("the own-conversation note reads the same as the note about overlapping work")
+	}
+
+	// The agent holding the task tells its conversation nothing: the note is
+	// about which person the messages come from.
+	if _, err := f.database.Exec(`INSERT INTO agents (id, org_id, display_name) VALUES (?, ?, 'Agent')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed the agent: %v", err)
+	}
+	if _, _, err := f.stores.Tasks.HandoffAgentClaim(ctx, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID,
+		dbtest.TaskVersion(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID)); err != nil {
+		t.Fatalf("HandoffAgentClaim: %v", err)
+	}
+	f.s.TellTaskAssigned(ctx, runmode.LocalDefaultOrgID, f.taskID, domain.AgentAssignee(runmode.LocalDefaultAgentID))
+	if got := f.notes(t, domain.StagedInjectionProducerTaskAssigned); len(got) != 0 {
+		t.Errorf("an assignment to the agent staged %d notes on the task's own conversation, want none", len(got))
+	}
+}

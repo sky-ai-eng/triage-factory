@@ -899,6 +899,13 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 			return e
 		}
 		taskID = task.ID
+		// The task's queued firings are cancelled ahead of the claim write,
+		// for the reason and in the order cancelFiringsForPersonClaim gives.
+		// A task the find just created has none.
+		cancelled, e := cancelFiringsForPersonClaim(r.Context(), tx, b.orgID, task.ID, b.userID)
+		if e != nil {
+			return e
+		}
 		// Claim is on the responsibility axis, not status. Stamp the user
 		// claim optimistically — if the task pre-existed in some non-queued
 		// state or was already claimed by someone else, surface that as a
@@ -907,10 +914,27 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		// claim the same way.
 		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID, task.Version)
 		if errors.Is(e, db.ErrTaskVersion) {
+			claimOK, e = false, nil
+		}
+		if e != nil {
+			return e
+		}
+		if !claimOK {
+			// A refused claim commits the event it recorded. It may not
+			// commit a cancellation request, so one that was recorded rolls
+			// the transaction back with it.
+			if cancelled > 0 {
+				return errClaimRefused
+			}
 			return nil
 		}
+		// The claim landed from the queue, which is not a boundary: the
+		// person's conversation is minted, and nothing is ended.
+		_, e = mintForPersonClaim(r.Context(), tx, b.orgID, task.ID, b.userID)
 		return e
-	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+	}); errors.Is(err, errClaimRefused) {
+		claimOK = false
+	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
 		return stockFailed(snap.Key, httpx.ReasonTeamArchived,
 			"the ticket's task is on an archived team, and you're on no active team it can move to")
 	} else if err != nil {

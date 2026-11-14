@@ -45,9 +45,19 @@ func watchMemoryDoorbell(s *Server) *doorbell {
 	return d
 }
 
-// seedLiveConversation puts one un-ended conversation on taskID and returns its
-// id. It is SQL because a store method that mints one also needs a blueprint run.
+// seedLiveConversation puts one un-ended conversation that has run on taskID
+// and returns its id. It is SQL because a store method that mints one also
+// needs a blueprint run.
 func seedLiveConversation(t *testing.T, s *Server, taskID string) string {
+	t.Helper()
+	id := seedUnrunConversation(t, s, taskID)
+	execSQL(t, s.db, `INSERT INTO messages (conversation_id, role, subtype, content) VALUES (?, 'assistant', '', 'a turn')`, id)
+	return id
+}
+
+// seedUnrunConversation puts one un-ended conversation on taskID that holds no
+// assistant message, and returns its id.
+func seedUnrunConversation(t *testing.T, s *Server, taskID string) string {
 	t.Helper()
 	id := uuid.New().String()
 	execSQL(t, s.db, `
@@ -95,6 +105,30 @@ func TestEndTaskConversations_RingsOncePerStampedConversation(t *testing.T) {
 	}
 	if !rung[first] || !rung[second] {
 		t.Errorf("rings %v do not cover both stamped conversations (%s, %s)", got, first, second)
+	}
+}
+
+// A stamped conversation that never ran rings nothing: it has no turn to
+// remember, so it owes no memory and there is no attempt to open for it. A
+// staged note on it is a user row, and changes nothing.
+func TestEndTaskConversations_RingsNothingForAConversationThatNeverRan(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	d := watchMemoryDoorbell(s)
+
+	taskID := seedDoorbellTask(t, s)
+	ran := seedLiveConversation(t, s, taskID)
+	untouched := seedUnrunConversation(t, s, taskID)
+	execSQL(t, s.db, `INSERT INTO messages (conversation_id, role, subtype, content) VALUES (?, 'user', ?, 'a note')`,
+		untouched, domain.MessageSubtypeInjectionSystemNote)
+
+	s.endTaskConversations(context.Background(), runmode.LocalDefaultOrgID,
+		runmode.LocalDefaultUserID, taskID, domain.EndedRequeued)
+
+	got := d.taken()
+	if len(got) != 1 || got[0][1] != ran {
+		t.Errorf("rings = %v, want one, for the conversation that ran (%s)", got, ran)
 	}
 }
 
