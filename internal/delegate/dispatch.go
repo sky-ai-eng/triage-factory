@@ -1509,10 +1509,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		message = prepends + "\n\n" + agentMessage
 	}
 
-	// The resume path's agent-live. It runs no phase ladder — a resume has no
-	// fetch or clone to report — so this is where its setup ends and its turn
-	// begins: every hand-back is behind us and the runtime is about to come up.
-	s.endEngagement(conv.ID, engagementLive)
+	// The resume path's agent-live: every hand-back is behind us and the
+	// runtime is about to come up. It clears the phase rather than only ending
+	// the engagement, because a cold rehydrate above left the claim at
+	// cloning. The fence result is not acted on, as on the step path: the
+	// resume's first claim-fenced write meets the same fence.
+	s.updatePhase(stepCtx, orgID, conv.ID, conv.ClaimID, "")
 
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,

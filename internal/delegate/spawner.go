@@ -1417,6 +1417,10 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 	if phase == "" {
 		s.endEngagement(conversationID, engagementLive)
 	}
+	// No store, no claim row to write and no stored status to announce.
+	if s.conversations == nil {
+		return false
+	}
 	// Detached from cancellation exactly as the former context.Background()
 	// was — a shutdown mid-setup must not abort the progress write — but
 	// WithoutCancel keeps the caller's values, so the write lands inside the

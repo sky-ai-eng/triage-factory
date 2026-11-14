@@ -908,12 +908,12 @@ type ConversationQueueStore interface {
 
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
-	// phase='awaiting_credentials'. One scan serves the whole provisioner:
-	// the phase column is the substrate and ConversationType is how the
-	// caller routes. The brain-side backstop sweep's input; primary
-	// provisioning happens synchronously off the executor's cred_request
-	// tf_ctl notification, and this recovers whatever the lossy relay
-	// dropped.
+	// phase='awaiting_credentials' and holds no sealed bundle yet. One scan
+	// serves the whole provisioner: the phase column is the substrate and
+	// ConversationType is how the caller routes. The brain-side backstop
+	// sweep's input; primary provisioning happens synchronously off the
+	// executor's cred_request tf_ctl notification, and this recovers
+	// whatever the lossy relay dropped.
 	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsConversation, error)
 
 	// ListActiveNeedingCredentialRefresh returns every conversation with a
@@ -1109,9 +1109,14 @@ type AwaitingCredentialsConversation struct {
 	ConversationType string
 	TeamID           string
 	TaskID           string
-	ExecutorID       string
-	BootEpoch        int64
-	ClaimedAt        time.Time
+	// ClaimID is the active claim's id, empty when the conversation has none.
+	// The provisioner writes a bundle by this id, because the key it seals to
+	// belongs to this claim and the conversation can hold another by the time
+	// the write lands.
+	ClaimID    string
+	ExecutorID string
+	BootEpoch  int64
+	ClaimedAt  time.Time
 	// CredPubKey is the per-run sidecar public key recorded by
 	// MarkAwaitingCredentials; empty when the claim was parked without one.
 	CredPubKey string
