@@ -18,13 +18,12 @@ var githubNamedSegments = map[string][]string{
 }
 
 // githubPathWords are GitHub's own words in the paths TF requests: the literal
-// segments of the REST, GraphQL, OAuth, release-download, and smart-HTTP
-// paths built in internal/github, cmd/exec, internal/proxy, internal/ghcli,
-// and the GitHub App handlers. A segment on this list is the same in every
-// tenant's request, so it can name the endpoint; every other segment is
-// replaced. The list is an allowlist on purpose: a word TF starts requesting
-// without adding it here shows as "{}", which costs a reader some precision,
-// where a denylist that missed a name would export it.
+// segments of its REST, GraphQL, OAuth, release-download, and smart-HTTP
+// paths. A segment on this list is the same in every tenant's request, so it
+// can name the endpoint; every other segment is replaced. The list is an
+// allowlist on purpose: a word TF starts requesting without adding it here
+// shows as "{}", which costs a reader some precision, where a denylist that
+// missed a name would export it.
 var githubPathWords = map[string]struct{}{
 	"access_token":     {},
 	"access_tokens":    {},
