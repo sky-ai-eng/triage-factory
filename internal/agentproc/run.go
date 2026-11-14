@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc/localsandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -129,6 +130,32 @@ type RunOptions struct {
 	// as every spawn does by default (wrapper.mjs). The delegate sets it from
 	// the team's choice; the system jobs leave it false.
 	ClaudeAIConnectors bool
+
+	// Plugins are the team's local plugins prepared for this spawn
+	// (PreparePlugins): each is passed to Claude Code as a local plugin with
+	// MCP discovery skipped, bound read-only into the local sandbox, and has
+	// its env set under TF's own. A required one makes the wrapper refuse
+	// every tool call until Claude Code reports it loaded, and fails the run
+	// when it is not (ErrPluginNotLoaded). Interactive-mode only, since the
+	// check lives in the streaming wrapper: Run refuses a call that carries
+	// any. nil emits nothing, and the spawn is byte-identical to one before
+	// plugins existed.
+	Plugins []Plugin
+
+	// PluginInitTimeout bounds how long a run with a required plugin waits,
+	// after its first input, for Claude Code's init. Zero resolves
+	// TF_PLUGIN_INIT_TIMEOUT (PluginInitTimeout).
+	PluginInitTimeout time.Duration
+
+	// OnPluginsLoaded, when non-nil, is called with each report the wrapper
+	// makes about Plugins, on the reader goroutine; it must not block. A run
+	// given no plugins gets no report.
+	OnPluginsLoaded func(PluginsReport)
+
+	// OnPluginEnvKeyDropped, when non-nil, is called for each plugin env key
+	// the spawn left out because TF sets the same key for the run, or because
+	// it is no longer allowed.
+	OnPluginEnvKeyDropped func(key, reason string)
 
 	// Interactive switches the invocation into the SDK's streaming-input
 	// mode: BuildArgs emits `--input-format stream-json` and omits
@@ -545,6 +572,9 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	if len(opts.OpeningBlocks) > 0 {
 		return nil, errors.New("opening blocks are an interactive-mode message; the one-shot -p path takes Message")
 	}
+	if len(opts.Plugins) > 0 {
+		return nil, errors.New("local plugins load only in interactive mode, where the wrapper checks them; the one-shot -p path takes none")
+	}
 
 	// Derived ctx so the stream-error path can SIGKILL the process
 	// group via cmd.Cancel without affecting the caller's ctx. Without
@@ -765,6 +795,18 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// Claude Code itself applies the two in. Empty when a credential was
 	// resolved.
 	parentEnv = append(parentEnv, auth.env...)
+	// The team's plugin env goes ahead of every key TF sets for the run, and
+	// a key TF sets is dropped from it rather than left to lose a duplicate
+	// resolution: the git config block DirectAgentEnv writes, the resolved
+	// credentials, the operator's auth env and everything in hookEnv.
+	// Empty, and the env unchanged, when the run carries no plugins.
+	if len(opts.Plugins) > 0 {
+		tfSet := append(append(append([]string(nil), hookEnv...), auth.env...), "GIT_CONFIG_COUNT=")
+		for k := range creds {
+			tfSet = append(tfSet, k+"=")
+		}
+		hookEnv = append(pluginEnvForSpawn(opts.Plugins, tfSet, opts.OnPluginEnvKeyDropped), hookEnv...)
+	}
 	cmd.Env = githooks.DirectAgentEnv(mergeEnv(parentEnv, hookEnv, creds), identityPairs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

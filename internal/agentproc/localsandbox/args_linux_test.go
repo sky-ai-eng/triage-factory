@@ -772,3 +772,136 @@ func TestSmokeTest_ValidatesThePlanNotJustTheNamespace(t *testing.T) {
 		}
 	}
 }
+
+// TestArgs_PluginsBindStrictlyAfterTheMasksAndTheReadOnlyBinds pins where a
+// plugin directory sits in the plan. After the masks, or the tmpfs hides it;
+// strict, so a directory that vanished fails the mount instead of coming back
+// as an empty one; after the -try bind-backs and before the grants.
+func TestArgs_PluginsBindStrictlyAfterTheMasksAndTheReadOnlyBinds(t *testing.T) {
+	spec := Spec{
+		RunRoot:          "/tmp/triagefactory-runs/rk1",
+		ClaudeProjectDir: testProjectDir,
+		AddDirs:          []string{"/home/dev/notes"},
+		ReadOnly:         []string{"/home/dev/src/tf/triagefactory"},
+		Plugins:          []string{"/home/dev/plugins/guard", "/opt/other-plugin"},
+	}
+	got, err := Args(spec, testHost())
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	lastMask := lastIndexOfFlag(got, "--tmpfs")
+	readOnlyAt := indexOfOp(got, "--ro-bind-try", "/home/dev/src/tf/triagefactory")
+	grantAt := indexOfOp(got, "--bind", "/home/dev/notes")
+	if readOnlyAt < 0 || grantAt < 0 {
+		t.Fatalf("plan lacks the read-only bind or the grant: %v", got)
+	}
+	for _, dir := range spec.Plugins {
+		at := indexOfOp(got, "--ro-bind", dir)
+		if at < 0 {
+			t.Fatalf("plan does not bind plugin %s with --ro-bind: %v", dir, got)
+		}
+		if got[at+2] != dir {
+			t.Errorf("plugin %s is bound at %s; every path is bound where it lives", dir, got[at+2])
+		}
+		if at < lastMask {
+			t.Errorf("plugin bind at %d precedes the last mask at %d; the tmpfs would hide it", at, lastMask)
+		}
+		if at < readOnlyAt {
+			t.Errorf("plugin bind at %d precedes the read-only bind-backs at %d", at, readOnlyAt)
+		}
+		if at > grantAt {
+			t.Errorf("plugin bind at %d follows the grants at %d", at, grantAt)
+		}
+		for _, flag := range []string{"--ro-bind-try", "--bind", "--bind-try"} {
+			if indexOfOp(got, flag, dir) >= 0 {
+				t.Errorf("plugin %s is also bound with %s", dir, flag)
+			}
+		}
+	}
+	if first, second := indexOfOp(got, "--ro-bind", spec.Plugins[0]), indexOfOp(got, "--ro-bind", spec.Plugins[1]); first > second {
+		t.Errorf("plugins are bound out of order: %d, %d", first, second)
+	}
+}
+
+func TestArgs_PluginsAreDeduplicatedAndCleaned(t *testing.T) {
+	got, err := Args(Spec{
+		RunRoot:          "/tmp/triagefactory-runs/rk1",
+		ClaudeProjectDir: testProjectDir,
+		Plugins:          []string{"/opt/plugin", "/opt/plugin/", "/opt//plugin"},
+	}, testHost())
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	n := 0
+	for i := 0; i+1 < len(got); i++ {
+		if got[i] == "--ro-bind" && got[i+1] == "/opt/plugin" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("/opt/plugin bound %d times, want once: %v", n, got)
+	}
+}
+
+// An empty list is the plan that existed before plugins did.
+func TestArgs_EmptyPluginsLeaveThePlanUnchanged(t *testing.T) {
+	base := Spec{
+		RunRoot:          "/tmp/triagefactory-runs/rk1",
+		ClaudeProjectDir: testProjectDir,
+		AddDirs:          []string{"/home/dev/notes"},
+		ReadOnly:         []string{"/home/dev/src/tf/triagefactory"},
+	}
+	withEmpty := base
+	withEmpty.Plugins = []string{}
+	want, err := Args(base, testHost())
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	got, err := Args(withEmpty, testHost())
+	if err != nil {
+		t.Fatalf("Args with an empty list: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("an empty plugin list changed the plan\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestArgs_RejectsARelativePlugin(t *testing.T) {
+	for _, plugin := range []string{"plugins/guard", "guard", ""} {
+		got, err := Args(Spec{
+			RunRoot:          "/tmp/triagefactory-runs/rk1",
+			ClaudeProjectDir: testProjectDir,
+			Plugins:          []string{"/opt/ok", plugin},
+		}, testHost())
+		if err == nil {
+			t.Errorf("plugin %q: Args = %v, want an error", plugin, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not an absolute path") {
+			t.Errorf("plugin %q: error %q does not say the path is not absolute", plugin, err)
+		}
+	}
+}
+
+func TestPreflight_NamesAMissingPlugin(t *testing.T) {
+	root := t.TempDir()
+	host := testHost()
+	host.ClaudeDir = filepath.Join(root, "claude")
+	projectDir := filepath.Join(host.ClaudeDir, "projects", "-run")
+	present := filepath.Join(root, "present")
+	missing := filepath.Join(root, "gone")
+	if err := os.MkdirAll(present, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Preflight(Spec{RunRoot: root, ClaudeProjectDir: projectDir, Plugins: []string{present}}, host); err != nil {
+		t.Fatalf("Preflight with a plugin on disk: %v", err)
+	}
+	err := Preflight(Spec{RunRoot: root, ClaudeProjectDir: projectDir, Plugins: []string{present, missing}}, host)
+	if err == nil {
+		t.Fatal("Preflight accepted a plugin that does not exist")
+	}
+	if !strings.Contains(err.Error(), "local plugin") || !strings.Contains(err.Error(), missing) {
+		t.Errorf("Preflight error %q does not name the local plugin %q", err, missing)
+	}
+}

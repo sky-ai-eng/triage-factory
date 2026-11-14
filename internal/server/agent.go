@@ -30,7 +30,10 @@ import (
 // reconciler are read through getters so the handler always sees the current
 // instance, (re)wired onto the server after construction.
 type agentHandler struct {
-	tx         db.TxRunner
+	tx db.TxRunner
+	// az answers the conversation-write probe, and decides who sees a plugin
+	// segment's paths and failure text: the team admins who may read and
+	// write the team's plugin list.
 	az         *authz.Checker
 	ws         *websocket.Hub
 	spawner    func() *delegate.Spawner
@@ -124,6 +127,14 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 			}
 		}
 		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], actionCounts[conv.ID], progress, "")
+		// What each engagement's plugins did, per segment. Best-effort display
+		// enrichment like the lookups above: a failure omits the key (logged)
+		// and never fails the status fetch.
+		if claims, lerr := tx.Conversations.ListClaimsForConversation(r.Context(), orgID, conv.ID); lerr != nil {
+			serverLog.Warn("claim lookup for plugin_segments failed; omitting it", "conversation", conv.ID, "error", lerr)
+		} else if segments := pluginSegments(claims); len(segments) > 0 {
+			resp["plugin_segments"] = segments
+		}
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -133,9 +144,94 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		notFound(w, "conversation")
 		return
 	}
+	ag.redactPluginSegments(r.Context(), resp, orgID, userID, conv.TeamID)
 	addResumability(r.Context(), resp, orgID, conv, ag.spawner())
 	ag.addCanWrite(r.Context(), orgID, userID, []string{conv.ID}, []map[string]any{resp})
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// redactPluginSegments narrows the plugin segments for a reader who is not an
+// admin of the conversation's team. Plugin paths, load-error text and the
+// paths in a plugin_not_loaded error are operator detail, shown with the
+// plugin list itself only to team admins (the team settings GET draws the
+// same line); everyone else sees whether the plugins loaded, their names and
+// versions, and the bare failure code. A failed admin check redacts too.
+func (ag *agentHandler) redactPluginSegments(ctx context.Context, resp map[string]any, orgID, userID, teamID string) {
+	segments, ok := resp["plugin_segments"].([]pluginSegment)
+	if !ok || len(segments) == 0 {
+		return
+	}
+	if ag.az != nil && teamID != "" {
+		isAdmin, err := ag.az.UserIsTeamAdmin(ctx, userID, orgID, teamID)
+		if err != nil {
+			serverLog.Warn("team admin check for plugin_segments failed; redacting them", "team", teamID, "error", err)
+		} else if isAdmin {
+			return
+		}
+	}
+	resp["plugin_segments"] = redactedPluginSegments(segments)
+}
+
+// redactedPluginSegments is segments with every path and free-text failure
+// reason removed.
+func redactedPluginSegments(segments []pluginSegment) []pluginSegment {
+	out := make([]pluginSegment, len(segments))
+	for i, seg := range segments {
+		seg.Error = redactPluginError(seg.Error)
+		if seg.PluginsLoaded != nil {
+			pl := domain.PluginsLoaded{OK: seg.PluginsLoaded.OK}
+			for _, p := range seg.PluginsLoaded.Plugins {
+				pl.Plugins = append(pl.Plugins, domain.LoadedPlugin{Name: p.Name, Version: p.Version, Required: p.Required})
+			}
+			for _, f := range seg.PluginsLoaded.Failed {
+				pl.Failed = append(pl.Failed, domain.PluginFailure{Reason: "did not load", Required: f.Required})
+			}
+			seg.PluginsLoaded = &pl
+		}
+		out[i] = seg
+	}
+	return out
+}
+
+// redactPluginError keeps the machine prefix of a plugin_not_loaded error and
+// drops the paths and reasons after it. Any other error is left alone: the
+// conversation resource already carries it.
+func redactPluginError(e string) string {
+	if strings.HasPrefix(e, "plugin_not_loaded") {
+		return "plugin_not_loaded"
+	}
+	return e
+}
+
+// pluginSegment is one engagement's plugin record on the conversation
+// resource: the claim it belongs to, when it ran and how it ended, and what
+// its wrapper reported. A resume is its own engagement, so a conversation
+// carries one per segment that had plugins, oldest first.
+type pluginSegment struct {
+	ClaimID       string                `json:"claim_id"`
+	ClaimedAt     time.Time             `json:"claimed_at"`
+	ReleasedAt    *time.Time            `json:"released_at,omitempty"`
+	Outcome       string                `json:"outcome,omitempty"`
+	Error         string                `json:"error,omitempty"`
+	PluginsLoaded *domain.PluginsLoaded `json:"plugins_loaded,omitempty"`
+}
+
+// pluginSegments projects the engagements that had plugins: those whose
+// wrapper reported, and those the plugin check failed before any report
+// (their error names plugin_not_loaded). An engagement given none is left
+// out, so a conversation of a team with no plugins carries no key at all.
+func pluginSegments(claims []domain.Claim) []pluginSegment {
+	var out []pluginSegment
+	for _, c := range claims {
+		if c.PluginsLoaded == nil && !strings.HasPrefix(c.Error, "plugin_not_loaded") {
+			continue
+		}
+		out = append(out, pluginSegment{
+			ClaimID: c.ID, ClaimedAt: c.ClaimedAt, ReleasedAt: c.ReleasedAt,
+			Outcome: c.Outcome, Error: c.Error, PluginsLoaded: c.PluginsLoaded,
+		})
+	}
+	return out
 }
 
 // addCanWrite puts requireWritableConversation's answer on each conversation

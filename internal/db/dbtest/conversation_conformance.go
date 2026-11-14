@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -2773,6 +2774,107 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// over accounting.
 		if _, err := store.RecordClaimSandboxStatsSystem(ctx, orgID, uuid.New().String(), &peak, &cpu); err != nil {
 			t.Errorf("RecordClaimSandboxStatsSystem unknown claim: %v, want a silent no-op", err)
+		}
+	})
+
+	// plugins_loaded is one record per engagement: a resume is its own claim,
+	// so the second segment of a conversation must not overwrite the first's
+	// report, and the report lands on a released claim (the wrapper's report
+	// can arrive as the engagement ends).
+	t.Run("RecordClaimPluginsLoadedSystem_RecordsPerClaim", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+
+		first, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-plugins-1", 1)
+		if err != nil || first == nil {
+			t.Fatalf("SetExecutorSystem 1 = (%v, %v)", first, err)
+		}
+		if released, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil || released == nil {
+			t.Fatalf("SetExecutorSystem release = (%v, %v)", released, err)
+		}
+		second, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-plugins-2", 2)
+		if err != nil || second == nil {
+			t.Fatalf("SetExecutorSystem 2 = (%v, %v)", second, err)
+		}
+		if first.ID == second.ID {
+			t.Fatalf("a resume reused claim %s, want a claim of its own", first.ID)
+		}
+
+		listed := func() map[string]domain.Claim {
+			t.Helper()
+			claims, err := store.ListClaimsForConversation(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("ListClaimsForConversation: %v", err)
+			}
+			byID := map[string]domain.Claim{}
+			for _, c := range claims {
+				byID[c.ID] = c
+			}
+			return byID
+		}
+
+		// A claim nothing reported on reads nil, not an empty report.
+		before := listed()
+		if len(before) != 2 {
+			t.Fatalf("claims = %d, want 2", len(before))
+		}
+		for id, c := range before {
+			if c.PluginsLoaded != nil {
+				t.Errorf("claim %s before any report: PluginsLoaded = %+v, want nil", id, c.PluginsLoaded)
+			}
+		}
+
+		failed := domain.PluginsLoaded{
+			OK:     false,
+			Failed: []domain.PluginFailure{{Path: "/opt/plugins/guard", Reason: "not loaded", Required: true}},
+		}
+		got, err := store.RecordClaimPluginsLoadedSystem(ctx, orgID, first.ID, failed)
+		if err != nil || got == nil {
+			t.Fatalf("RecordClaimPluginsLoadedSystem first = (%v, %v)", got, err)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordClaimPluginsLoadedSystem", *got, func() (*domain.Claim, error) {
+			c, ok := listed()[first.ID]
+			if !ok {
+				return nil, nil
+			}
+			return &c, nil
+		})
+
+		loaded := domain.PluginsLoaded{
+			OK:      true,
+			Plugins: []domain.LoadedPlugin{{Name: "guard", Version: "1.2.0", Path: "/opt/plugins/guard", Required: true}},
+		}
+		if _, err := store.RecordClaimPluginsLoadedSystem(ctx, orgID, second.ID, loaded); err != nil {
+			t.Fatalf("RecordClaimPluginsLoadedSystem second: %v", err)
+		}
+		after := listed()
+		if !reflect.DeepEqual(after[first.ID].PluginsLoaded, &failed) {
+			t.Errorf("first claim = %+v, want its own report %+v", after[first.ID].PluginsLoaded, &failed)
+		}
+		if !reflect.DeepEqual(after[second.ID].PluginsLoaded, &loaded) {
+			t.Errorf("second claim = %+v, want its own report %+v", after[second.ID].PluginsLoaded, &loaded)
+		}
+
+		// A later report on the same engagement replaces the earlier one.
+		if _, err := store.RecordClaimPluginsLoadedSystem(ctx, orgID, first.ID, loaded); err != nil {
+			t.Fatalf("RecordClaimPluginsLoadedSystem replace: %v", err)
+		}
+		if got := listed()[first.ID].PluginsLoaded; !reflect.DeepEqual(got, &loaded) {
+			t.Errorf("replaced report = %+v, want %+v", got, &loaded)
+		}
+
+		// The write lands on a released claim: the first claim was released
+		// above, and it just took a report.
+		if listed()[first.ID].ReleasedAt == nil {
+			t.Errorf("first claim is unreleased, want the released-claim case exercised")
+		}
+
+		// An unknown claim id is a no-op, not an error.
+		for _, id := range []string{uuid.New().String(), "not-a-uuid"} {
+			if c, err := store.RecordClaimPluginsLoadedSystem(ctx, orgID, id, loaded); err != nil || c != nil {
+				t.Errorf("RecordClaimPluginsLoadedSystem unknown claim %q = (%+v, %v), want (nil, nil)", id, c, err)
+			}
 		}
 	})
 

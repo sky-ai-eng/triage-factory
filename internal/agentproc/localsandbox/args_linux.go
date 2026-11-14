@@ -36,7 +36,7 @@ func Args(spec Spec, host Host) ([]string, error) {
 	if host.Cwd == "" {
 		return nil, errors.New("localsandbox: Host.Cwd is required")
 	}
-	paths := append(append([]string{spec.RunRoot, host.Home, host.Cwd}, spec.AddDirs...), spec.ReadOnly...)
+	paths := append(append(append([]string{spec.RunRoot, host.Home, host.Cwd}, spec.AddDirs...), spec.ReadOnly...), spec.Plugins...)
 	if spec.AllowedSignersFile != "" {
 		paths = append(paths, spec.AllowedSignersFile)
 	}
@@ -134,6 +134,13 @@ func Args(spec Spec, host Host) ([]string, error) {
 	// failing to exec, not as an unrelated mount error.
 	args = appendBindTry(args, "--ro-bind-try", spec.ReadOnly...)
 
+	// The run's local plugins, read-only and strict: the agent can read a
+	// plugin's code but not rewrite the hooks that guard it, and a plugin
+	// directory missing at spawn fails the mount rather than loading nothing.
+	for _, dir := range dedupe(spec.Plugins) {
+		args = append(args, "--ro-bind", dir, dir)
+	}
+
 	// Phase 3 — grants last, so a directory the operator explicitly handed
 	// this run wins over anything above it. rw because that is what the grant
 	// means.
@@ -214,6 +221,11 @@ func Preflight(spec Spec, host Host) error {
 	}
 	for _, dir := range dedupe(spec.AddDirs) {
 		if err := mustExist(dir, "--add-dir grant"); err != nil {
+			return err
+		}
+	}
+	for _, dir := range dedupe(spec.Plugins) {
+		if err := mustExist(dir, "local plugin"); err != nil {
 			return err
 		}
 	}

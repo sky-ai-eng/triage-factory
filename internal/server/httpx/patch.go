@@ -1,10 +1,12 @@
 package httpx
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 )
 
 // The PATCH field vocabulary. A partial update has to distinguish three things
@@ -62,6 +64,52 @@ func PatchFloat(v *Validation, raw json.RawMessage, field string) (float64, Patc
 // the field's own question, not this reader's.
 func PatchStrings(v *Validation, raw json.RawMessage, field string) ([]string, PatchState) {
 	return patchValue[[]string](v, raw, field)
+}
+
+// PatchJSON reads a `[]T | null` PATCH field whose elements are JSON objects
+// decoded into T. Absent and null mean what they do for PatchStrings: absent
+// keeps the stored list, null clears it, and a list is the whole value.
+//
+// Decoding is strict, as the body's own is: a key T has no field for is
+// refused rather than dropped, since a caller that misspells one would
+// otherwise get a save with the setting missing. Elements are not checked
+// beyond their JSON types; what a valid element is belongs to the field.
+func PatchJSON[T any](v *Validation, raw json.RawMessage, field string) ([]T, PatchState) {
+	if raw == nil {
+		return nil, PatchAbsent
+	}
+	if string(raw) == "null" {
+		return nil, PatchClear
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var out []T
+	if err := dec.Decode(&out); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		switch name, unknown := unknownFieldName(err); {
+		case unknown:
+			v.Add(ErrorItem{
+				Reason:  ReasonUnknownField,
+				Message: field + " entries have no field " + strconv.Quote(name),
+				Field:   field + "[]." + name,
+			})
+		case errors.As(err, &typeErr) && typeErr.Field != "":
+			path, fieldType := jsonFieldPath(reflect.TypeFor[[]T](), typeErr.Field)
+			if fieldType == nil {
+				fieldType = typeErr.Type
+			}
+			named := field + "[]." + path
+			message := named + " has the wrong type"
+			if want, _ := jsonType(fieldType, typeErr); want != "" {
+				message = named + " must be " + want
+			}
+			v.Add(ErrorItem{Reason: ReasonInvalidField, Message: message, Field: named})
+		default:
+			v.Invalid(field, field+" must be an array of objects, or null")
+		}
+		return nil, patchInvalid
+	}
+	return out, PatchSet
 }
 
 // patchValue is the shared body of the readers above: absent stays absent, the

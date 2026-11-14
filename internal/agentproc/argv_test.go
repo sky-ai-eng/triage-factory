@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildArgs_InitialInvocation(t *testing.T) {
@@ -250,5 +251,167 @@ func TestBuildArgs_AddDirsEmitsOnePerEntry(t *testing.T) {
 	}
 	if got[flags[0]+1] != "/a" || got[flags[1]+1] != "/b/c" {
 		t.Errorf("add-dir values wrong: %v", got)
+	}
+}
+
+// pluginFlagNames are every flag the plugin half of the argv can emit.
+var pluginFlagNames = []string{"--plugin-dir", "--plugin-required", "--plugin-init-timeout-ms"}
+
+// flagValues returns the operand of each occurrence of flag, in order.
+func flagValues(args []string, flag string) []string {
+	var out []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+func requireNoPluginFlags(t *testing.T, args []string) {
+	t.Helper()
+	for _, flag := range pluginFlagNames {
+		if slices.Contains(args, flag) {
+			t.Errorf("argv carries %s with no plugin to name: %v", flag, args)
+		}
+	}
+}
+
+func TestBuildArgs_NoPluginsEmitsNoPluginFlags(t *testing.T) {
+	for name, opts := range map[string]RunOptions{
+		"one-shot":                      {Message: "m"},
+		"interactive":                   {Interactive: true},
+		"nil list with a timeout":       {Interactive: true, PluginInitTimeout: time.Minute},
+		"empty list with a timeout":     {Interactive: true, Plugins: []Plugin{}, PluginInitTimeout: time.Minute},
+		"one-shot with add-dirs":        {Message: "m", AddDirs: []string{"/a"}},
+		"interactive with a state path": {Interactive: true, Cwd: "/tmp/run"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireNoPluginFlags(t, BuildArgs(opts))
+		})
+	}
+
+	// An empty list changes nothing, byte for byte.
+	base := RunOptions{Interactive: true, Model: "m", AllowedTools: "Read", AddDirs: []string{"/a"}, SystemPrompt: "sp", MaxTurns: 3}
+	withEmpty := base
+	withEmpty.Plugins = []Plugin{}
+	if got, want := BuildArgs(withEmpty), BuildArgs(base); !slices.Equal(got, want) {
+		t.Errorf("an empty plugin list changed the argv\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestBuildArgs_PluginsEmitOneDirPerEntryInOrder(t *testing.T) {
+	got := BuildArgs(RunOptions{
+		Interactive: true,
+		Plugins: []Plugin{
+			{Path: "/p/a"},
+			{Path: "/p/b", Required: true},
+			{Path: "/p/c"},
+			{Path: "/p/d", Required: true},
+		},
+	})
+	if dirs := flagValues(got, "--plugin-dir"); !slices.Equal(dirs, []string{"/p/a", "/p/b", "/p/c", "/p/d"}) {
+		t.Errorf("--plugin-dir values = %v", dirs)
+	}
+	if req := flagValues(got, "--plugin-required"); !slices.Equal(req, []string{"/p/b", "/p/d"}) {
+		t.Errorf("--plugin-required values = %v, want only the required entries", req)
+	}
+	if slices.Contains(got, "--plugin-init-timeout-ms") {
+		t.Errorf("a timeout flag without a configured timeout: %v", got)
+	}
+}
+
+func TestBuildArgs_PluginsWithNoRequiredEntryEmitNoRequiredFlag(t *testing.T) {
+	got := BuildArgs(RunOptions{
+		Interactive:       true,
+		Plugins:           []Plugin{{Path: "/p/a"}, {Path: "/p/b"}},
+		PluginInitTimeout: time.Minute,
+	})
+	if slices.Contains(got, "--plugin-required") {
+		t.Errorf("--plugin-required with no required plugin: %v", got)
+	}
+	if slices.Contains(got, "--plugin-init-timeout-ms") {
+		t.Errorf("an init deadline for a run that waits on nothing: %v", got)
+	}
+	if dirs := flagValues(got, "--plugin-dir"); len(dirs) != 2 {
+		t.Errorf("--plugin-dir values = %v, want both", dirs)
+	}
+}
+
+func TestBuildArgs_PluginsDropEmptyPaths(t *testing.T) {
+	got := BuildArgs(RunOptions{
+		Interactive: true,
+		Cwd:         "/tmp/run",
+		Plugins:     []Plugin{{Path: ""}, {Path: "/p/a"}, {Path: "", Required: true}},
+	})
+	if dirs := flagValues(got, "--plugin-dir"); !slices.Equal(dirs, []string{"/p/a"}) {
+		t.Errorf("--plugin-dir values = %v, want [/p/a]", dirs)
+	}
+	if slices.Contains(got, "--plugin-required") {
+		t.Errorf("a required entry with an empty path was named: %v", got)
+	}
+	for i, a := range got {
+		if a == "" {
+			t.Errorf("empty argv entry at %d: %v", i, got)
+		}
+	}
+
+	onlyEmpty := BuildArgs(RunOptions{
+		Interactive:       true,
+		Plugins:           []Plugin{{Path: "", Required: true}},
+		PluginInitTimeout: time.Minute,
+	})
+	requireNoPluginFlags(t, onlyEmpty)
+}
+
+func TestBuildArgs_PluginInitTimeoutNeedsARequiredEntryAndAPositiveValue(t *testing.T) {
+	required := []Plugin{{Path: "/p/a", Required: true}}
+	cases := []struct {
+		name    string
+		plugins []Plugin
+		timeout time.Duration
+		want    string // empty means no flag
+	}{
+		{"required with 90s", required, 90 * time.Second, "90000"},
+		{"required with a fractional second", required, 1500 * time.Millisecond, "1500"},
+		{"required with zero", required, 0, ""},
+		{"required with a negative value", required, -time.Second, ""},
+		{"not required with 90s", []Plugin{{Path: "/p/a"}}, 90 * time.Second, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := BuildArgs(RunOptions{Interactive: true, Plugins: c.plugins, PluginInitTimeout: c.timeout})
+			vals := flagValues(got, "--plugin-init-timeout-ms")
+			if c.want == "" {
+				if len(vals) != 0 {
+					t.Errorf("--plugin-init-timeout-ms = %v, want none", vals)
+				}
+				return
+			}
+			if !slices.Equal(vals, []string{c.want}) {
+				t.Errorf("--plugin-init-timeout-ms = %v, want [%s]", vals, c.want)
+			}
+		})
+	}
+}
+
+// The plugin flags sit with the other per-run grants, ahead of the system
+// prompt and the turn cap, the order the wrapper's parser does not depend on
+// but a reader of a spawn's argv expects.
+func TestBuildArgs_PluginFlagsFollowAddDirs(t *testing.T) {
+	got := BuildArgs(RunOptions{
+		Interactive:       true,
+		AddDirs:           []string{"/a"},
+		Plugins:           []Plugin{{Path: "/p/a", Required: true}},
+		PluginInitTimeout: time.Minute,
+		SystemPrompt:      "sp",
+		MaxTurns:          5,
+	})
+	idx := func(flag string) int { return slices.Index(got, flag) }
+	order := []string{"--add-dir", "--plugin-dir", "--plugin-required", "--plugin-init-timeout-ms", "--append-system-prompt"}
+	for i := 1; i < len(order); i++ {
+		if idx(order[i-1]) >= idx(order[i]) {
+			t.Errorf("%s does not come before %s: %v", order[i-1], order[i], got)
+		}
 	}
 }

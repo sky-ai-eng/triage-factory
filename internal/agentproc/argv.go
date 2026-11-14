@@ -1,6 +1,9 @@
 package agentproc
 
-import "strconv"
+import (
+	"strconv"
+	"time"
+)
 
 // disallowedTools is the --disallowedTools value every SDK run carries. A
 // bare tool name here removes the tool from the model's context, which is
@@ -124,6 +127,7 @@ func BuildArgs(opts RunOptions) []string {
 		}
 		args = append(args, "--add-dir", dir)
 	}
+	args = append(args, pluginArgs(opts.Plugins, opts.PluginInitTimeout)...)
 	if opts.SystemPrompt != "" {
 		// --append-system-prompt is additive: it sits after Claude
 		// Code's default system prompt rather than replacing it. Delegate
@@ -136,4 +140,28 @@ func BuildArgs(opts RunOptions) []string {
 		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
 	}
 	return args
+}
+
+// pluginArgs is the plugin half of the wrapper's argv: one --plugin-dir per
+// plugin in the team's order, which is the order the positional inline[N]
+// tag on a load error counts, and a --plugin-required naming each required
+// one by the same string. The init deadline rides along only when a plugin is
+// required, since nothing else waits on it. An empty path is dropped, and
+// with no plugins nothing is emitted.
+func pluginArgs(plugins []Plugin, initTimeout time.Duration) []string {
+	var dirs, required []string
+	for _, p := range plugins {
+		if p.Path == "" {
+			continue
+		}
+		dirs = append(dirs, "--plugin-dir", p.Path)
+		if p.Required {
+			required = append(required, "--plugin-required", p.Path)
+		}
+	}
+	out := append(dirs, required...)
+	if len(required) > 0 && initTimeout > 0 {
+		out = append(out, "--plugin-init-timeout-ms", strconv.FormatInt(initTimeout.Milliseconds(), 10))
+	}
+	return out
 }

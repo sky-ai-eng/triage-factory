@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -278,6 +279,11 @@ type teamSettingsResponse struct {
 	// response ever carries it; the GET leaves it empty and omitempty drops it,
 	// so the read and the write answer one shape.
 	Warning string `json:"warning,omitempty"`
+	// LocalPluginCount is how many local plugins the team has. A team admin
+	// gets the list itself in team_settings; any other member gets null there
+	// and this count, because a plugin's path and env values are operator
+	// detail.
+	LocalPluginCount int `json:"local_plugin_count"`
 	// MemberCount + Role describe the caller's relationship to this team,
 	// so the frontend can collapse to the flat N=1 layout and gate the
 	// write-side fields without a second round trip. They live on the
@@ -314,6 +320,17 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Redacted here and not in readTeamSettings: the PATCH read-back shares
+	// that helper and answers a team admin, who must see what they saved. The
+	// gate is the PATCH's own, so whoever may write the list may read it.
+	isAdmin, err := s.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
+	if err != nil {
+		internalError(w, "settings/team", err)
+		return
+	}
+	if !isAdmin {
+		resp.TeamSettings.LocalPlugins = nil
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -338,6 +355,7 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 			}
 		}
 		resp.TeamSettings = settings
+		resp.LocalPluginCount = len(settings.LocalPlugins)
 
 		// Only the org's current Jira site's and Linear workspace's rules: a
 		// rule saved under another names a project or team this one does not
@@ -401,6 +419,7 @@ type teamSettingsPatch struct {
 	AIAutoDelegate                  json.RawMessage `json:"ai_auto_delegate_enabled"`
 	AutoModeEnabled                 json.RawMessage `json:"auto_mode_enabled"`
 	ClaudeAIConnectorsEnabled       json.RawMessage `json:"claude_ai_connectors_enabled"`
+	LocalPlugins                    json.RawMessage `json:"local_plugins"`
 	AIReprioritizeThreshold         json.RawMessage `json:"ai_reprioritize_threshold"`
 	AIPreferenceUpdateInterval      json.RawMessage `json:"ai_preference_update_interval"`
 	BranchTemplate                  json.RawMessage `json:"branch_template"`
@@ -584,7 +603,7 @@ func plural(n int, one, many string) string {
 func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (apply func(*domain.TeamSettings), ok bool) {
 	if !httpx.PatchNamed(
 		req.AIModel, req.EnabledModels, req.AIAutoDelegate, req.AutoModeEnabled,
-		req.ClaudeAIConnectorsEnabled, req.AIReprioritizeThreshold,
+		req.ClaudeAIConnectorsEnabled, req.LocalPlugins, req.AIReprioritizeThreshold,
 		req.AIPreferenceUpdateInterval, req.BranchTemplate, req.ReviewPosture,
 		req.BaseBranchPushPolicy, req.PermissionAbsentAutodenyEnabled,
 		req.PermissionAbsentGraceSeconds,
@@ -668,6 +687,34 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 			next = v
 		}
 		set(func(t *domain.TeamSettings) { t.ClaudeAIConnectorsEnabled = next })
+	}
+	// local_plugins is the team's whole plugin list: a list replaces it and
+	// null resets it to empty. Every entry is held to the same rules the spawn
+	// applies, and every fault is reported with its path in the list.
+	//
+	// Multi mode runs delegations on the native loop, which has no Claude Code
+	// to load a plugin into, so a non-empty list is refused there rather than
+	// stored for nothing. The paths would also name directories on the
+	// control host, not on an executor, so they are not checked.
+	if list, st := httpx.PatchJSON[domain.LocalPlugin](&shape, req.LocalPlugins, "local_plugins"); st != httpx.PatchAbsent {
+		next := defaults.LocalPlugins
+		if st == httpx.PatchSet {
+			switch {
+			case len(list) == 0:
+			case runmode.Current() == runmode.ModeMulti:
+				ranges.Add(httpx.ErrorItem{
+					Reason:  httpx.ReasonModeUnsupported,
+					Message: "local plugins apply to local mode only",
+					Field:   "local_plugins",
+				})
+			default:
+				for _, f := range agentproc.ValidateLocalPlugins(list) {
+					shape.Invalid(f.Field, f.Error())
+				}
+				next = list
+			}
+		}
+		set(func(t *domain.TeamSettings) { t.LocalPlugins = next })
 	}
 	if v, st := httpx.PatchInt(&shape, req.AIReprioritizeThreshold, "ai_reprioritize_threshold"); st != httpx.PatchAbsent {
 		next := defaults.AIReprioritizeThreshold

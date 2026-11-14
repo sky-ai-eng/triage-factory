@@ -517,10 +517,16 @@ func (s *Spawner) insertStopNote(orgID, conversationID, userID, content string) 
 // classifyFailureKind maps a runtime error from the agent process to
 // its machine-readable failure kind, via errors.Is on the chain —
 // never message text. Anything that isn't the recognized memory-limit
-// kill is a generic runtime crash.
+// kill is a generic runtime crash. A spawn refused for its team's settings (a
+// required plugin that did not load, settings that could not be read) is no
+// crash: the process did not run, or was stopped on purpose, and the error's
+// own text is the explanation, so it stays unclassified.
 func classifyFailureKind(err error) domain.ConversationFailureKind {
 	if errors.Is(err, agentproc.ErrClaimMemoryLimit) {
 		return domain.ConversationFailureMemoryLimit
+	}
+	if isSpawnRefusal(err) {
+		return domain.ConversationFailureUnclassified
 	}
 	return domain.ConversationFailureCrash
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -185,6 +186,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		"ai_auto_delegate_enabled":           false,
 		"auto_mode_enabled":                  false,
 		"claude_ai_connectors_enabled":       true,
+		"local_plugins":                      []map[string]any{pluginEntry(pluginDir(t))},
 		"ai_reprioritize_threshold":          11,
 		"ai_preference_update_interval":      33,
 		"branch_template":                    "wip/<ticket-id>",
@@ -198,7 +200,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	body := map[string]any{}
 	for _, f := range []string{
 		"ai_auto_delegate_enabled", "auto_mode_enabled", "claude_ai_connectors_enabled",
-		"ai_reprioritize_threshold",
+		"local_plugins", "ai_reprioritize_threshold",
 		"ai_preference_update_interval", "branch_template", "review_posture",
 		"base_branch_push_policy", "permission_absent_autodeny_enabled",
 		"permission_absent_grace_seconds",
@@ -214,6 +216,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	if got.AutoDelegateEnabled != defaults.AutoDelegateEnabled ||
 		got.AutoModeEnabled != defaults.AutoModeEnabled ||
 		got.ClaudeAIConnectorsEnabled != defaults.ClaudeAIConnectorsEnabled ||
+		!reflect.DeepEqual(got.LocalPlugins, defaults.LocalPlugins) ||
 		got.AIReprioritizeThreshold != defaults.AIReprioritizeThreshold ||
 		got.AIPreferenceUpdateInterval != defaults.AIPreferenceUpdateInterval ||
 		got.BranchTemplate != defaults.BranchTemplate ||

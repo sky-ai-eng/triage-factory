@@ -1,8 +1,8 @@
 # Tuning (local mode)
 
 Environment variables for run concurrency, disk use, logging, tracing, and the
-agent runtime. Except for `TF_CLAUDE_BINARY`, each also applies in a
-self-hosted deployment.
+agent runtime. Except for `TF_CLAUDE_BINARY` and the local plugin variables,
+each also applies in a self-hosted deployment.
 
 ## Run concurrency
 
@@ -101,6 +101,16 @@ export TF_CLAUDE_BINARY=/path/to/claude
 
 A path that doesn't exist or isn't executable fails the run with an error.
 Local mode only.
+
+## Local plugins
+
+A team can load Claude Code plugin directories into its runs. Two variables
+change how that works. Local mode only.
+
+| Variable                       | Default | Effect                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TF_PLUGIN_INIT_TIMEOUT`       | `60`    | Seconds a run with a required plugin waits, after its first message, for Claude Code to report its loaded plugins. A run that hears nothing in time fails with `plugin_not_loaded`. Raise it for a plugin whose start-up hooks are slow. A value that isn't a positive whole number fails the run.                    |
+| `TF_PLUGIN_ENV_ALLOW_PREFIXES` | unset   | Comma list of `CLAUDE_` prefixes a plugin's env may use, such as `CLAUDE_LOOP_HARNESS_`. Every other `CLAUDE_` key is refused, because Claude Code reads many of them. Each prefix must end in `_` and have two parts after `CLAUDE_`. A prefix is refused, with an error in the log, if the installed agent SDK reads a key under it. |
 
 ## Agent engine JIT
 

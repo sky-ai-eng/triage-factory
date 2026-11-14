@@ -1,0 +1,45 @@
+name: plugin-env-key-scan
+
+# A team's local plugin may set a CLAUDE_* env key only under a prefix the
+# operator allows (TF_PLUGIN_ENV_ALLOW_PREFIXES), and only if the pinned agent
+# SDK reads no key under it. This job installs the pinned SDK from the
+# embedded lockfile, scans its JavaScript and the platform Claude Code binary,
+# and fails when a documented allowed prefix covers a key the SDK reads. It
+# runs whenever the SDK pin, the lockfile or the prefix rules can change, and
+# on every push to main.
+
+on:
+  pull_request:
+    paths:
+      - internal/agentproc/install.go
+      - internal/agentproc/package-lock.json
+      - internal/agentproc/plugins_env.go
+      - internal/agentproc/plugins_sdkscan_test.go
+      - docs/users/local/**
+      - .github/workflows/plugin-env-key-scan.yml
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Scan the pinned SDK for keys under allowed prefixes
+        env:
+          TF_TEST_SDK_KEY_SCAN: '1'
+        run: go test ./internal/agentproc -run '^TestSDKKeyScan_AllowedPrefixesReadNoKey$' -count=1 -v

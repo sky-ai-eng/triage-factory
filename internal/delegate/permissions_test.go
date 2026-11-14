@@ -95,6 +95,114 @@ func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
 	}
 }
 
+// spawnerWithTeamSettings is a spawner whose team settings read answers with
+// settings and err, and nothing else.
+func spawnerWithTeamSettings(settings domain.TeamSettings, err error) *Spawner {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s.teams = stubTeamsSettings{settings: settings, err: err}
+	return s
+}
+
+var guardPlugins = []domain.LocalPlugin{{Path: "/opt/plugins/guard", Required: true, GrantTools: []string{"Skill"}}}
+
+// TestResolveSDKTeamOptions_ReadErrorFailsTheSpawn pins the fail-closed read:
+// a settings read that fails must not become an empty plugin list.
+func TestResolveSDKTeamOptions_ReadErrorFailsTheSpawn(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	readErr := errors.New("disk I/O error")
+	s := spawnerWithTeamSettings(domain.TeamSettings{LocalPlugins: guardPlugins}, readErr)
+
+	got, err := s.resolveSDKTeamOptions(t.Context(), "team-1")
+	if err == nil {
+		t.Fatalf("a failed settings read returned options %+v, want an error", got)
+	}
+	if !errors.Is(err, errTeamSettingsUnreadable) {
+		t.Errorf("err = %v, want errTeamSettingsUnreadable", err)
+	}
+	if !strings.HasPrefix(err.Error(), "team_settings_unreadable:") {
+		t.Errorf("err text = %q, want the team_settings_unreadable: prefix", err.Error())
+	}
+	if !errors.Is(err, readErr) {
+		t.Errorf("err = %v, want the store's error in the chain", err)
+	}
+	if len(got.localPlugins) != 0 {
+		t.Errorf("a failed read carried plugins %+v", got.localPlugins)
+	}
+	if kind := classifyFailureKind(err); kind != domain.ConversationFailureUnclassified {
+		t.Errorf("failure kind = %q, want unclassified", kind)
+	}
+}
+
+// TestResolveSDKTeamOptions_UnwiredStoreFailsTheSpawn: with no store, a team's
+// settings cannot be read, which is the same refusal.
+func TestResolveSDKTeamOptions_UnwiredStoreFailsTheSpawn(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	if _, err := s.resolveSDKTeamOptions(t.Context(), "team-1"); !errors.Is(err, errTeamSettingsUnreadable) {
+		t.Errorf("err = %v, want errTeamSettingsUnreadable", err)
+	}
+}
+
+func TestResolveSDKTeamOptions_ReturnsTheTeamsPlugins(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := spawnerWithTeamSettings(domain.TeamSettings{LocalPlugins: guardPlugins, AutoModeEnabled: true}, nil)
+
+	got, err := s.resolveSDKTeamOptions(t.Context(), "team-1")
+	if err != nil {
+		t.Fatalf("resolveSDKTeamOptions: %v", err)
+	}
+	if len(got.localPlugins) != 1 || got.localPlugins[0].Path != "/opt/plugins/guard" || !got.localPlugins[0].Required {
+		t.Errorf("localPlugins = %+v, want the team's list", got.localPlugins)
+	}
+	if got.permissionMode != "auto" {
+		t.Errorf("permission mode = %q, want auto: the plugin list must not displace the other settings", got.permissionMode)
+	}
+}
+
+// TestResolveSDKTeamOptions_AbsentRowGivesNoPlugins: a team with no settings
+// row is the one read that may default, and the default is no plugins.
+func TestResolveSDKTeamOptions_AbsentRowGivesNoPlugins(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, sqlitestore.New(database), nil, nil, "")
+
+	got, err := s.resolveSDKTeamOptions(t.Context(), "no-such-team")
+	if err != nil {
+		t.Fatalf("a team with no settings row must default, got error: %v", err)
+	}
+	if len(got.localPlugins) != 0 {
+		t.Errorf("localPlugins = %+v, want none", got.localPlugins)
+	}
+}
+
+func TestResolveSDKTeamOptions_MultiLoadsNoPlugins(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	// A store that would fail and a list that would load prove multi returns
+	// before reading either.
+	s := spawnerWithTeamSettings(domain.TeamSettings{LocalPlugins: guardPlugins}, errors.New("must not be read"))
+
+	got, err := s.resolveSDKTeamOptions(t.Context(), "team-1")
+	if err != nil {
+		t.Fatalf("multi mode must not read the settings, got error: %v", err)
+	}
+	if len(got.localPlugins) != 0 || got.permissionMode != "auto" {
+		t.Errorf("options = %+v, want auto mode and no plugins", got)
+	}
+}
+
+func TestResolveSDKTeamOptions_TeamlessTaskLoadsNoPlugins(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := spawnerWithTeamSettings(domain.TeamSettings{LocalPlugins: guardPlugins}, errors.New("must not be read"))
+
+	got, err := s.resolveSDKTeamOptions(t.Context(), "")
+	if err != nil {
+		t.Fatalf("a task with no team has no settings to read, got error: %v", err)
+	}
+	if len(got.localPlugins) != 0 {
+		t.Errorf("localPlugins = %+v, want none for a task with no team", got.localPlugins)
+	}
+}
+
 func TestResolveSDKTeamOptions(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -121,7 +229,10 @@ func TestResolveSDKTeamOptions(t *testing.T) {
 				t.Fatalf("UpdateSettings: %v", err)
 			}
 			s := NewSpawner(database, stores, nil, nil, "")
-			got := s.resolveSDKTeamOptions(t.Context(), runmode.LocalDefaultTeamID)
+			got, err := s.resolveSDKTeamOptions(t.Context(), runmode.LocalDefaultTeamID)
+			if err != nil {
+				t.Fatalf("resolveSDKTeamOptions: %v", err)
+			}
 			if got.permissionMode != tc.wantMode {
 				t.Errorf("permission mode = %q, want %q", got.permissionMode, tc.wantMode)
 			}
@@ -139,7 +250,11 @@ func TestResolveSDKTeamOptions_ConnectorsOffWithoutARow(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, sqlitestore.New(database), nil, nil, "")
-	if got := s.resolveSDKTeamOptions(t.Context(), "no-such-team"); got.claudeAIConnectors {
+	got, err := s.resolveSDKTeamOptions(t.Context(), "no-such-team")
+	if err != nil {
+		t.Fatalf("resolveSDKTeamOptions: %v", err)
+	}
+	if got.claudeAIConnectors {
 		t.Error("a team with no settings row keeps the claude.ai connectors; want them off")
 	}
 }

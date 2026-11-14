@@ -1559,7 +1559,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 	if rerr != nil {
 		mirror.settle(stepCtx)
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, resumeFailureMessage(rerr), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {

@@ -610,7 +610,24 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
-	teamOpts := s.resolveSDKTeamOptions(ctx, teamID)
+	teamOpts, err := s.resolveSDKTeamOptions(ctx, teamID)
+	if err != nil {
+		return engagementDisposition{fenced: fail(err.Error(), classifyFailureKind(err))}
+	}
+	// The run's --add-dir grants are the local sandbox plan's (nothing else sets
+	// RunOptions.AddDirs), which is what a plugin may not live inside.
+	plugins, err := s.preparePluginsForSpawn(ctx, pluginSpawn{
+		orgID:          orgID,
+		teamID:         teamID,
+		conversationID: conversationID,
+		claimID:        cfg.claimID,
+		runRoot:        claudeCwd,
+		addDirs:        specAddDirs(localSbx.runSpec()),
+		resuming:       resumeSession != "",
+	}, teamOpts.localPlugins)
+	if err != nil {
+		return engagementDisposition{fenced: fail(err.Error(), classifyFailureKind(err))}
+	}
 	baseOpts := agentproc.RunOptions{
 		Cwd:                claudeCwd,
 		Model:              model,
@@ -623,7 +640,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// not name it at all.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
 			SelfBin: selfBin,
-			Extras:  cfg.extraAllowedTools,
+			Extras:  plugins.extraAllowedTools(cfg.extraAllowedTools),
 			GH:      ghChannel != nil,
 		}),
 		ExtraEnv:       extraEnv,
@@ -657,6 +674,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		LocalSandbox: localSbx.runSpec(),
 	}
 	stampCommitIdentity(&baseOpts, commitIdentity)
+	plugins.apply(&baseOpts)
 
 	// The first user message this launch sends, composed onto the options and
 	// recorded through the sink's own insert door. Last before the launch, so
@@ -783,7 +801,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		if ctx.Err() != nil {
 			return cancelled(out.sessionID, out.costUSD)
 		}
-		return engagementDisposition{fenced: fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))}
+		return engagementDisposition{fenced: fail(sdkFailureMessage(out.err, out.stderr), classifyFailureKind(out.err))}
 	}
 
 	return engagementDisposition{fenced: fail("agent runtime exited cleanly without producing a result event", domain.ConversationFailureNoResult)}

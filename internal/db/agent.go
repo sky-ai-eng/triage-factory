@@ -908,6 +908,24 @@ type ConversationStore interface {
 	// SetExecutorSystem returns.
 	RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) (*domain.ExecutorClaim, error)
 
+	// RecordClaimPluginsLoadedSystem stamps what one engagement's wrapper
+	// reported about the team's local plugins (claims.plugins_loaded), keyed
+	// on the claim id like RecordClaimSandboxStatsSystem and for the same
+	// reason: a later report on the same engagement replaces an earlier one,
+	// and the write is valid on a released row. An unknown claim id is a
+	// no-op, (nil, nil).
+	//
+	// Returns the claim row this call wrote.
+	RecordClaimPluginsLoadedSystem(ctx context.Context, orgID, claimID string, report domain.PluginsLoaded) (*domain.Claim, error)
+
+	// ListClaimsForConversation reads every engagement of a conversation,
+	// oldest first, as domain.Claim: what the run page reads per segment
+	// (plugins_loaded, outcome, error). It is the point read the claim writes
+	// that return a domain.Claim are compared against. Empty, never nil, for a
+	// conversation with none. App pool in Postgres: claims is visible through
+	// the conversation.
+	ListClaimsForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error)
+
 	// SetWorktreePathSystem is the claimless door onto worktree_path — the
 	// same relationship SetSessionSystem has to its fenced twin. A setup or
 	// rehydrate running as an engagement names its claim
