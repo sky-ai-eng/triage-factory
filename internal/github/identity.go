@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,8 +28,9 @@ type Getter interface {
 }
 
 // IdentityReader reads what GitHub calls the objects an act names, and caches
-// every answer, so the reader an observer holds for a run reads each
-// repository, and each pull request or issue, once. A number names one object
+// every answer about a repository or an object, so the reader an observer
+// holds for a run reads each repository, and each pull request or issue, once.
+// What a branch has open is not cached (OpenPullForBranch). A number names one object
 // for the life of a repository and an id one repository for the life of its
 // name, which a run does not outlast in practice. A nil reader reads without
 // caching. Safe for concurrent use.
@@ -139,6 +141,76 @@ func (r *IdentityReader) pullIdentity(owner, repo string, number int, body []byt
 	r.remember(repoCacheKey(owner, repo), out)
 	out.NodeID, out.Kind = pr.NodeID, domain.EntityKindPullRequest
 	return out, nil
+}
+
+// BranchPull is the pull request OpenPullForBranch found open on a branch: its
+// number, and what GitHub calls it, as Object reads it. The zero value is the
+// answer for a branch with no pull request open on it, or with several.
+type BranchPull struct {
+	Number   int
+	Identity domain.GitHubIdentity
+}
+
+// branchPullsPage is how many pull requests OpenPullForBranch asks for: one
+// more than the one it can name, which is enough to tell several from one.
+const branchPullsPage = 2
+
+// OpenPullForBranch reads the pull request open on branch in owner/repo, from
+// GitHub's list of the repository's open pull requests whose head is that
+// branch of the repository itself (the head filter owner:branch, with the
+// repository's owner), so a fork's branch of the same name is not looked at.
+// It answers the one pull request open there, and the zero BranchPull when
+// none or several are. The answer is not cached, since a branch gains and
+// loses pull requests; the pull request it names, and its repository, are, as
+// Object and Repository would have read them. An answer naming another branch,
+// or a pull request with no number or node id, is an error, and so is any
+// failed request.
+func (r *IdentityReader) OpenPullForBranch(ctx context.Context, g Getter, owner, repo, branch string) (BranchPull, error) {
+	if owner == "" || repo == "" || branch == "" {
+		return BranchPull{}, fmt.Errorf("github identity: %q/%q branch %q names no branch", owner, repo, branch)
+	}
+	query := url.Values{
+		"head":     {owner + ":" + branch},
+		"state":    {"open"},
+		"per_page": {strconv.Itoa(branchPullsPage)},
+	}
+	body, err := g.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls?%s", owner, repo, query.Encode()))
+	if err != nil {
+		return BranchPull{}, fmt.Errorf("github identity: look up %s/%s branch %q: %w", owner, repo, branch, err)
+	}
+	var pulls []struct {
+		Number int    `json:"number"`
+		NodeID string `json:"node_id"`
+		Head   struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			Repo repoIdentityJSON `json:"repo"`
+		} `json:"base"`
+	}
+	if err := json.Unmarshal(body, &pulls); err != nil {
+		return BranchPull{}, fmt.Errorf("github identity: parse %s/%s branch %q: %w", owner, repo, branch, err)
+	}
+	for _, pr := range pulls {
+		if pr.Head.Ref != branch {
+			return BranchPull{}, fmt.Errorf("github identity: %s/%s branch %q answered #%d from branch %q", owner, repo, branch, pr.Number, pr.Head.Ref)
+		}
+	}
+	if len(pulls) != 1 {
+		return BranchPull{}, nil
+	}
+	pr := pulls[0]
+	if pr.Number <= 0 || pr.NodeID == "" {
+		return BranchPull{}, fmt.Errorf("github identity: %s/%s branch %q answered #%d with node id %q", owner, repo, branch, pr.Number, pr.NodeID)
+	}
+	out, err := pr.Base.Repo.identity()
+	if err != nil {
+		return BranchPull{}, fmt.Errorf("github identity: %s/%s branch %q: %w", owner, repo, branch, err)
+	}
+	r.remember(repoCacheKey(owner, repo), out)
+	out.NodeID, out.Kind = pr.NodeID, domain.EntityKindPullRequest
+	r.remember(objectCacheKey(owner, repo, pr.Number), out)
+	return BranchPull{Number: pr.Number, Identity: out}, nil
 }
 
 // Repository reads owner/repo's GitHub id and current name, from the cache

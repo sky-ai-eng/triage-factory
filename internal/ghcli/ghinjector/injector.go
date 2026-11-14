@@ -46,8 +46,8 @@
 //
 // Requests are READ in exactly one place: a POST to the GraphQL endpoint, whose
 // body is buffered under maxRequestBody and parsed for the name of the mutation
-// it performs, or, when it performs none, for the pull requests and issues its
-// query addresses (see "Read touches" below). That is a deliberate, bounded
+// it performs, or, when it performs none, for the pull requests, issues and
+// branches its query addresses (see "Read touches" below). That is a deliberate, bounded
 // exception to reading no request at all, and it is not free — this
 // is the one process that holds a run's live GitHub credential while parsing
 // hostile upstream output, and it now also parses outbound documents an agent
@@ -64,10 +64,10 @@
 // and a node id from the variables. For a mutation, no argument value and no
 // free text is interpreted (internal/ghcli/ghwrite gqldoc.go states what the reader
 // refuses to look at), and a document that does not parse is recorded as
-// unreadable rather than guessed at. For a query, three argument values are
-// read and no others: a repository's owner and name and an object's number,
-// each accepted only in the shape of what it names (internal/ghcli/ghwrite
-// read.go).
+// unreadable rather than guessed at. For a query, four argument values are
+// read and no others: a repository's owner and name, an object's number, and a
+// branch's name, each accepted only in the shape of what it names
+// (internal/ghcli/ghwrite read.go).
 //
 // Anything beyond that shape still has to re-derive the cost. REST request
 // bodies remain unread — a REST path already names its act — so the classifier
@@ -177,9 +177,21 @@
 // request addressed is touched, one returned in a set is not. A REST GET
 // addresses the pull request or issue its path numbers, and a GraphQL query
 // the ones it selects by number under a repository it names
-// (ghwrite.ClassifyRead, ghwrite.ParseGraphQLRead). A list, a search and a
-// lookup by branch name address none — which includes `gh pr view` with no
-// number, since gh finds that pull request in a list.
+// (ghwrite.ClassifyRead, ghwrite.ParseGraphQLRead). A list and a search
+// address none.
+//
+// A GraphQL lookup of a branch's pull requests addresses the branch. It is how
+// `gh pr view`, `gh pr status` and `gh pr checks` find the pull request of the
+// current branch when they are given no number. The injector looks the branch
+// up itself, asking GitHub for the open pull requests whose head is that branch
+// of the repository the query names, and touches the pull request if GitHub
+// answers exactly one; none or several touch nothing. The lookup asks for the
+// repository's own branches, so a pull request from a fork's branch is not
+// found. The request does not say whose branch gh meant, so when gh is looking
+// at a fork's branch whose name a branch of the repository shares, the pull
+// request open on the repository's branch is the one touched. The lookup is
+// made once per branch per run, whatever it answers, and the response the
+// agent receives is not read for it.
 //
 // What the request spelled is not what is reported. Once the upstream has
 // accepted the read, the injector reads what GitHub calls the object, with the
@@ -189,7 +201,8 @@
 // without reading anything, touches what a real read of it would and nothing
 // else. Each object is read and reported once per run; that one read is made
 // before the agent's response is released, and every later read of the object
-// costs nothing of the injector's own.
+// costs nothing of the injector's own. A pull request a branch lookup found is
+// reported under the same rule, once, whichever way the run reached it.
 //
 // A read is not an act and leaves no audit row.
 package ghinjector
@@ -305,9 +318,9 @@ type Config struct {
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
 	// ObserveRead, when non-nil, is called once per run for each pull request
-	// or issue a read the upstream accepted addressed, with what GitHub calls
-	// it (ObservedRead). Called inline on the response path, so the callback
-	// must not block.
+	// or issue a read the upstream accepted addressed, or found by the branch
+	// lookup it addressed, with what GitHub calls it (ObservedRead). Called
+	// inline on the response path, so the callback must not block.
 	ObserveRead func(ctx context.Context, r ObservedRead)
 
 	// AuthorizeWrite decides the gated shapes and records their refusals. See
@@ -362,9 +375,12 @@ type Server struct {
 	identities *ghclient.IdentityReader
 
 	// addressed is the objects this run's reads have already been reported
-	// for (ghwrite.ObjectRef.Key), so each is read and reported once.
+	// for (ghwrite.ObjectRef.Key), so each is read and reported once, and
+	// lookedUp the branches the injector has looked up for them
+	// (ghwrite.BranchRef.Key), so each is looked up once.
 	addressedMu sync.Mutex
 	addressed   map[string]bool
+	lookedUp    map[string]bool
 
 	listener net.Listener
 	httpSrv  *http.Server
@@ -490,7 +506,7 @@ func (s *Server) Handler() http.Handler {
 		if facts != nil {
 			ctx = context.WithValue(ctx, graphQLFactsKey{}, facts)
 		}
-		if len(addressed) > 0 {
+		if !addressed.Empty() {
 			ctx = context.WithValue(ctx, graphQLReadsKey{}, addressed)
 		}
 		r = r.WithContext(ctx)
@@ -504,15 +520,15 @@ func (s *Server) Handler() http.Handler {
 // only place its outcome is, so one write's row needs both ends of the hop.
 type graphQLFactsKey struct{}
 
-// graphQLReadsKey carries the objects a GraphQL query addressed from the
-// capture in Handler to the read touch in ModifyResponse, which reports them
-// once the upstream has accepted the request.
+// graphQLReadsKey carries the objects and branches a GraphQL query addressed
+// from the capture in Handler to the read touch in ModifyResponse, which
+// reports them once the upstream has accepted the request.
 type graphQLReadsKey struct{}
 
 // captureGraphQL buffers a GraphQL request body, re-presents it unchanged, and
-// reads it: the act out of a mutation, or the pull requests and issues a query
-// addresses. Both are nil for everything else — a different endpoint, a read
-// that addresses no object.
+// reads it: the act out of a mutation, or the pull requests, issues and
+// branches a query addresses. Both are empty for everything else — a different
+// endpoint, a read that addresses nothing.
 //
 // facts is one value rather than a (facts, ok) pair, because both the audit
 // and the refusal policy branch on "is there anything to say about this
@@ -530,9 +546,9 @@ type graphQLReadsKey struct{}
 // document with no mutation keyword in it, and ParseGraphQLRead stops at one
 // that never mentions a repository, so query traffic that addresses nothing
 // costs one copy and two JSON decodes and never reaches the document reader.
-func (s *Server) captureGraphQL(r *http.Request) (facts *ghwrite.GraphQLFacts, addressed []ghwrite.ObjectRef) {
+func (s *Server) captureGraphQL(r *http.Request) (facts *ghwrite.GraphQLFacts, addressed ghwrite.AddressedReads) {
 	if r.Method != http.MethodPost || !isGraphQLPath(r.URL.Path) {
-		return nil, nil
+		return nil, addressed
 	}
 
 	body, unread := bufferRequest(r)
@@ -543,15 +559,15 @@ func (s *Server) captureGraphQL(r *http.Request) (facts *ghwrite.GraphQLFacts, a
 		// this side chose, against a caller that stopped sending — and a
 		// refusal in this band that is not vanishingly rare means something
 		// operational rather than someone probing.
-		return &ghwrite.GraphQLFacts{Unreadable: unread}, nil
+		return &ghwrite.GraphQLFacts{Unreadable: unread}, addressed
 	}
 
 	write, isWrite := ghwrite.ParseGraphQLRequest(body)
 	if isWrite {
-		return &write, nil
+		return &write, addressed
 	}
 	if s.cfg.ObserveRead == nil {
-		return nil, nil
+		return nil, addressed
 	}
 	return nil, ghwrite.ParseGraphQLRead(body)
 }
@@ -908,30 +924,35 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 // touchReads reports the pull requests and issues a read the upstream accepted
 // addressed: the one a REST GET's path names, or the ones the capture in
-// Handler read out of a GraphQL query. A request the upstream refused
+// Handler read out of a GraphQL query, and the pull request open on each
+// branch the query looked pull requests up by. A request the upstream refused
 // addressed nothing the run was shown. GraphQL answers a query for an object
-// that does not exist with a 200, which the identity read in touchRead settles.
+// that does not exist with a 200, which the identity read in touchRead
+// settles, and the branch lookup in touchBranch settles a branch's.
 //
-// The agent's response waits on the identity reads of the objects the run has
-// not addressed before, so they share one identityReadTimeout however many
-// objects the request named.
+// The agent's response waits on the identity reads of the objects, and the
+// lookups of the branches, the run has not addressed before, so they share one
+// identityReadTimeout however many the request named.
 func (s *Server) touchReads(resp *http.Response, graphql bool) {
 	if s.cfg.ObserveRead == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return
 	}
-	var refs []ghwrite.ObjectRef
+	var reads ghwrite.AddressedReads
 	if graphql {
-		refs, _ = resp.Request.Context().Value(graphQLReadsKey{}).([]ghwrite.ObjectRef)
+		reads, _ = resp.Request.Context().Value(graphQLReadsKey{}).(ghwrite.AddressedReads)
 	} else if ref, ok := ghwrite.ClassifyRead(resp.Request.Method, resp.Request.URL.Path); ok {
-		refs = []ghwrite.ObjectRef{ref}
+		reads.Objects = []ghwrite.ObjectRef{ref}
 	}
-	if len(refs) == 0 {
+	if reads.Empty() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), identityReadTimeout)
 	defer cancel()
-	for _, ref := range refs {
+	for _, ref := range reads.Objects {
 		s.touchRead(ctx, ref)
+	}
+	for _, ref := range reads.Branches {
+		s.touchBranch(ctx, ref)
 	}
 }
 
@@ -943,9 +964,8 @@ func (s *Server) touchReads(resp *http.Response, graphql bool) {
 // read of the same object asks again. No later read of a reported object costs
 // a read of the injector's own. ctx bounds the identity read.
 func (s *Server) touchRead(ctx context.Context, ref ghwrite.ObjectRef) {
-	key := ref.Key()
 	s.addressedMu.Lock()
-	seen := s.addressed[key]
+	seen := s.addressed[ref.Key()]
 	s.addressedMu.Unlock()
 	if seen {
 		return
@@ -957,7 +977,56 @@ func (s *Server) touchRead(ctx context.Context, ref ghwrite.ObjectRef) {
 			"conversation", s.cfg.ConversationID, "repo", ref.Owner+"/"+ref.Repo, "number", ref.Number, "error", err)
 		return
 	}
-	// Two concurrent first reads of one object both reach here; one reports.
+	s.reportRead(ref, id)
+}
+
+// touchBranch reports the pull request open on a branch a read looked pull
+// requests up by, the first time the run looks the branch up. The injector
+// asks GitHub itself, with the credential the read was made under
+// (ghclient.IdentityReader.OpenPullForBranch), for the open pull requests
+// whose head is that branch of the repository, and reports the pull request
+// when there is exactly one. What the upstream answered the agent's own lookup
+// is not read: a read's response is streamed to the agent unbuffered, and its
+// shape is the agent's own selection, which can alias any field under the name
+// a reader would look for.
+//
+// An answer is remembered for the run whatever it was, so a branch is looked
+// up once: a pull request opened on it after that is not found by a later
+// lookup in the run. A failed lookup is not remembered, and a later read of the
+// branch asks again. ctx bounds the lookup.
+func (s *Server) touchBranch(ctx context.Context, ref ghwrite.BranchRef) {
+	key := ref.Key()
+	s.addressedMu.Lock()
+	seen := s.lookedUp[key]
+	s.addressedMu.Unlock()
+	if seen {
+		return
+	}
+	pull, err := s.identities.OpenPullForBranch(ctx, s.reads, ref.Owner, ref.Repo, ref.Branch)
+	if err != nil {
+		injectorLog.Debug("look up the pull request open on an addressed branch failed; not recording a touch",
+			"conversation", s.cfg.ConversationID, "repo", ref.Owner+"/"+ref.Repo, "branch", ref.Branch, "error", err)
+		return
+	}
+	// Two concurrent first lookups of one branch both reach here; one goes on.
+	s.addressedMu.Lock()
+	if s.lookedUp == nil {
+		s.lookedUp = map[string]bool{}
+	}
+	answered := s.lookedUp[key]
+	s.lookedUp[key] = true
+	s.addressedMu.Unlock()
+	if answered || pull.Number == 0 {
+		return
+	}
+	s.reportRead(ghwrite.ObjectRef{Owner: ref.Owner, Repo: ref.Repo, Number: pull.Number}, pull.Identity)
+}
+
+// reportRead reports one object, with what GitHub calls it, unless the run has
+// already reported it. Two concurrent first reads of one object both reach
+// here; one reports.
+func (s *Server) reportRead(ref ghwrite.ObjectRef, id domain.GitHubIdentity) {
+	key := ref.Key()
 	s.addressedMu.Lock()
 	if s.addressed == nil {
 		s.addressed = map[string]bool{}
