@@ -20,6 +20,10 @@ var PresentExternalIDsQueryForTest = presentExternalIDsQuery
 // statement so the query-plan test can EXPLAIN what the store runs.
 var PresentPostedCommentKeysQueryForTest = presentPostedCommentKeysQuery
 
+// PostedCommentEntityQueryForTest exposes the comment node-id lookup's
+// statement so the query-plan test can EXPLAIN what the store runs.
+var PostedCommentEntityQueryForTest = postedCommentEntityQuery
+
 // ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
 // ledger conformance suite can hold the two to each other.
 const ActionObjectIDSQLForTest = sqliteActionObjectIDSQL

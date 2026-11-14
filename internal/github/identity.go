@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,9 @@ type Getter interface {
 type IdentityReader struct {
 	mu    sync.Mutex
 	cache map[string]domain.GitHubIdentity // repoCacheKey and objectCacheKey
+	// subjects is the number of the pull request or issue each comment read
+	// is on, by commentCacheKey.
+	subjects map[string]int
 }
 
 // NewIdentityReader returns a reader with an empty cache.
@@ -168,6 +172,78 @@ func (r *IdentityReader) Repository(ctx context.Context, g Getter, owner, repo s
 	return out, nil
 }
 
+// commentSubjects is, for each of GitHub's comment numberings, the collection
+// its comments are addressed under and the member of a comment that links the
+// pull request or issue it is on: a review comment is on a pull request, and
+// a conversation comment on an issue or a pull request, which GitHub links
+// alike as an issue.
+var commentSubjects = map[domain.GitHubCommentSpace]struct{ collection, member, subject string }{
+	domain.GitHubReviewComment: {collection: "pulls", member: "pull_request_url", subject: "pulls"},
+	domain.GitHubIssueComment:  {collection: "issues", member: "issue_url", subject: "issues"},
+}
+
+// CommentSubject reads the comment numbered id in space in owner/repo and
+// answers the number of the pull request or issue it is on, from the API url
+// of that object the comment carries. The number is the whole answer: Object
+// reads what GitHub calls the object. It is cached, since a comment stays on
+// one object for the life of its repository, so a reader reads each comment
+// once. An answer for another comment than the one asked for, or one whose url
+// locates no object, is an error, and so is any failed request, neither of
+// which is cached.
+func (r *IdentityReader) CommentSubject(ctx context.Context, g Getter, owner, repo string, space domain.GitHubCommentSpace, id int64) (int, error) {
+	shape, ok := commentSubjects[space]
+	if owner == "" || repo == "" || id <= 0 || !ok {
+		return 0, fmt.Errorf("github identity: %s/%s %s comment %d names no comment", owner, repo, space, id)
+	}
+	key := commentCacheKey(owner, repo, space, id)
+	if number, ok := r.cachedSubject(key); ok {
+		return number, nil
+	}
+	path := fmt.Sprintf("/repos/%s/%s/%s/comments/%d", owner, repo, shape.collection, id)
+	body, err := g.Get(ctx, path)
+	if err != nil {
+		return 0, fmt.Errorf("github identity: read %s: %w", path, err)
+	}
+	var comment map[string]json.RawMessage
+	if err := json.Unmarshal(body, &comment); err != nil {
+		return 0, fmt.Errorf("github identity: parse %s: %w", path, err)
+	}
+	var answered int64
+	var link string
+	if err := json.Unmarshal(comment["id"], &answered); err != nil || answered != id {
+		return 0, fmt.Errorf("github identity: %s answered comment %s", path, comment["id"])
+	}
+	if err := json.Unmarshal(comment[shape.member], &link); err != nil {
+		return 0, fmt.Errorf("github identity: %s carries no %s", path, shape.member)
+	}
+	number, ok := apiObjectNumber(link, shape.subject)
+	if !ok {
+		return 0, fmt.Errorf("github identity: %s names %s %q, which locates no object", path, shape.member, link)
+	}
+	r.rememberSubject(key, number)
+	return number, nil
+}
+
+// apiObjectNumber reads the number out of the API url of a pull request or
+// issue, …/repos/{owner}/{repo}/{collection}/{number}, on any host and under
+// any prefix (a GHES host's /api/v3). The owner and repository are not read:
+// the url spells the repository's name now, which is GitHub's to change.
+func apiObjectNumber(link, collection string) (int, bool) {
+	u, err := url.Parse(link)
+	if err != nil || u.Host == "" {
+		return 0, false
+	}
+	segs := strings.Split(strings.TrimSuffix(u.Path, "/"), "/")
+	if len(segs) < 5 || segs[len(segs)-5] != "repos" || segs[len(segs)-2] != collection {
+		return 0, false
+	}
+	number, err := strconv.Atoi(segs[len(segs)-1])
+	if err != nil || number <= 0 {
+		return 0, false
+	}
+	return number, true
+}
+
 // repoIdentityJSON is the part of a repository object an identity read keeps.
 type repoIdentityJSON struct {
 	ID       int64  `json:"id"`
@@ -203,14 +279,40 @@ func (r *IdentityReader) remember(key string, id domain.GitHubIdentity) {
 	r.cache[key] = id
 }
 
-// repoCacheKey and objectCacheKey fold case: GitHub's names are
-// case-insensitive.
+func (r *IdentityReader) cachedSubject(key string) (int, bool) {
+	if r == nil {
+		return 0, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	number, ok := r.subjects[key]
+	return number, ok
+}
+
+func (r *IdentityReader) rememberSubject(key string, number int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.subjects == nil {
+		r.subjects = map[string]int{}
+	}
+	r.subjects[key] = number
+}
+
+// repoCacheKey, objectCacheKey and commentCacheKey fold case: GitHub's names
+// are case-insensitive.
 func repoCacheKey(owner, repo string) string {
 	return strings.ToLower(owner + "/" + repo)
 }
 
 func objectCacheKey(owner, repo string, number int) string {
 	return repoCacheKey(owner, repo) + "#" + strconv.Itoa(number)
+}
+
+func commentCacheKey(owner, repo string, space domain.GitHubCommentSpace, id int64) string {
+	return repoCacheKey(owner, repo) + "/comments/" + string(space) + "/" + strconv.FormatInt(id, 10)
 }
 
 // maxIdentityBody caps the body a TokenGetter reads. An object or repository

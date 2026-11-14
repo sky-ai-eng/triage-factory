@@ -1605,7 +1605,7 @@ func BenchmarkGraphQLCapturePinnedRead(b *testing.B) {
 				if got := facts != nil; got != tc.write {
 					b.Fatalf("captured write = %v, want %v", got, tc.write)
 				}
-				if len(addressed) != tc.addressed {
+				if len(addressed.Objects) != tc.addressed {
 					b.Fatalf("addressed %v, want %d object(s)", addressed, tc.addressed)
 				}
 			}

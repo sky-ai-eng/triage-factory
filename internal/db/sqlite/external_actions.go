@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -256,6 +257,37 @@ func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.
 		return nil, err
 	}
 	return scanExternalActionRows(rows)
+}
+
+// postedCommentEntityQuery is PostedCommentEntitySystem's statement, binding
+// org_id, scope, the node id, the object kind and the action in that order.
+const postedCommentEntityQuery = `
+	SELECT entity_id
+	  FROM external_actions
+	 WHERE org_id = ? AND scope = ? AND node_id = ?
+	   AND object_kind = ? AND action = ? AND entity_id IS NOT NULL
+	 ORDER BY occurred_at DESC, id DESC
+	 LIMIT 1`
+
+// PostedCommentEntitySystem is the read touch's lookup of the entity a comment
+// TF posted is on (see the interface).
+func (s *externalActionStore) PostedCommentEntitySystem(ctx context.Context, orgID, scope, nodeID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return "", err
+	}
+	if nodeID == "" {
+		return "", nil
+	}
+	var entityID string
+	err := s.q.QueryRowContext(ctx, postedCommentEntityQuery,
+		orgID, scope, nodeID, domain.ObjectKindComment, domain.ActionCommentPosted).Scan(&entityID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return entityID, err
 }
 
 // presentPostedCommentKeysQuery is PresentPostedCommentKeysSystem's statement,

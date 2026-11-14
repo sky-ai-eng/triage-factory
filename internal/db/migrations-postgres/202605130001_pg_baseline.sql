@@ -498,9 +498,11 @@ CREATE TABLE public.access_change_log (
 -- entity of that provider is scoped under (domain.ExternalObjectScope): the
 -- GitHub host, the Jira site, the Linear workspace id. target and dedup_key are
 -- only unique inside it. node_id is the GraphQL node id of the object the
--- action created, which only the create verb's pr_created row carries: the
--- reconciler's PR backstop matches the row to its deliverable by it, since a
--- rename never changes it. Written once, like the rest of the record.
+-- action created, which the create verb's pr_created row and a comment_posted
+-- row carry: the reconciler's PR backstop matches a pr_created row to its
+-- deliverable by it, since a rename never changes it, and a read that names a
+-- comment by node id finds the comment's row by it. Written once, like the
+-- rest of the record.
 -- entity_id is the entity the act was about (the pull request or issue, the
 -- Jira or Linear issue, the Slack thread), and repository_id the registry row of
 -- the repository a GitHub act with no entity was about (a branch push, a
@@ -2160,6 +2162,11 @@ CREATE INDEX idx_external_actions_repository ON public.external_actions USING bt
 -- The rows that changed one keyed object, found by its key within a scope:
 -- the tracker's read of which comments TF posted.
 CREATE INDEX idx_external_actions_object_key ON public.external_actions USING btree (org_id, scope, object_key) WHERE (object_key IS NOT NULL);
+
+
+-- The rows that created one object, found by its node id within a scope: the
+-- read touch's lookup of the comment a read named by node id.
+CREATE INDEX idx_external_actions_node_id ON public.external_actions USING btree (org_id, scope, node_id) WHERE (node_id IS NOT NULL);
 
 
 CREATE UNIQUE INDEX idx_deliverables_dedup ON public.deliverables USING btree (org_id, scope, dedup_key);

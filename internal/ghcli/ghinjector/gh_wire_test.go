@@ -580,10 +580,11 @@ func (o *readObservations) snap() []ObservedRead {
 }
 
 // fakeGHEReads answers what gh's read commands ask the conformance fixture's
-// repository for: its GraphQL finders (graphQLFixture), and the REST reads of
-// pull request 42 and issue 7 that `gh pr diff`, `gh api` and the injector's
-// own identity reads make. It returns the server and the number of times the
-// pull request's own REST object was read.
+// repository for: its GraphQL finders (graphQLFixture), the REST reads of pull
+// request 42 and issue 7 that `gh pr diff`, `gh api` and the injector's own
+// identity reads make, and a comment on each, read by its own id. It returns
+// the server and the number of times the pull request's own REST object was
+// read.
 func fakeGHEReads(t *testing.T) (*httptest.Server, func() int) {
 	t.Helper()
 	const repoJSON = `{"id":4,"full_name":"octo/repo"}`
@@ -624,6 +625,10 @@ func fakeGHEReads(t *testing.T) (*httptest.Server, func() int) {
 			_, _ = w.Write([]byte(`{"number":7,"node_id":"I_open"}`))
 		case path == "/repos/octo/repo/issues/7/comments":
 			_, _ = w.Write([]byte(`[]`))
+		case path == "/repos/octo/repo/pulls/comments/9001":
+			_, _ = w.Write([]byte(`{"id":9001,"node_id":"PRRC_open","pull_request_url":"https://ghe.test/api/v3/repos/octo/repo/pulls/42"}`))
+		case path == "/repos/octo/repo/issues/comments/7001":
+			_, _ = w.Write([]byte(`{"id":7001,"node_id":"IC_open","issue_url":"https://ghe.test/api/v3/repos/octo/repo/issues/7"}`))
 		case path == "/repos/octo/repo":
 			_, _ = w.Write([]byte(repoJSON))
 		default:
@@ -671,6 +676,14 @@ func TestGHWire_AddressedReadsAreTouched(t *testing.T) {
 		{args: []string{"api", "graphql", "-F", "owner=octo", "-F", "name=repo", "-F", "number=42", "-f",
 			`query=query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner, name:$name) { pullRequest(number:$number) { title } } }`},
 			want: []ObservedRead{pull}},
+
+		// A comment by its own id, and an object by node id.
+		{args: []string{"api", "repos/octo/repo/pulls/comments/9001"}, want: []ObservedRead{pull}},
+		{args: []string{"api", "repos/octo/repo/issues/comments/7001"}, want: []ObservedRead{issue}},
+		{args: []string{"api", "graphql", "-f", `query={ node(id: "PR_open") { ... on PullRequest { title } } }`},
+			want: []ObservedRead{ghwrite.NodeRead("PR_open")}},
+		{args: []string{"api", "graphql", "-F", "id=IC_open", "-f", `query=query($id:ID!){ node(id:$id) { id } }`},
+			want: []ObservedRead{ghwrite.NodeRead("IC_open")}},
 
 		// Sets, and a lookup by branch name.
 		{args: append([]string{"pr", "list"}, repo...)},

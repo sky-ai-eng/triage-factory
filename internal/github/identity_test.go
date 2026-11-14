@@ -190,6 +190,68 @@ func TestIdentityReader_FailedRequestIsAnError(t *testing.T) {
 	}
 }
 
+// TestIdentityReader_CommentSubject: a comment read by its own id answers the
+// number of the object it is on, from the link of that object the comment
+// carries, in either numbering and under a GHES prefix. Each comment is read
+// once per reader.
+func TestIdentityReader_CommentSubject(t *testing.T) {
+	f, c := newIdentityFixture(t, map[string]string{
+		"/repos/octo/api/pulls/comments/9001":  `{"id": 9001, "node_id": "PRRC_kw", "pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`,
+		"/repos/octo/api/issues/comments/9001": `{"id": 9001, "node_id": "IC_kw", "issue_url": "https://ghe.example.com/api/v3/repos/octo/renamed/issues/9"}`,
+	})
+	r := NewIdentityReader()
+	// The second spelling is answered from the cache: names fold case.
+	for _, owner := range []string{"octo", "OCTO"} {
+		if n, err := r.CommentSubject(context.Background(), c, owner, "api", domain.GitHubReviewComment, 9001); err != nil || n != 7 {
+			t.Errorf("review comment's subject = %d, %v; want 7", n, err)
+		}
+		if n, err := r.CommentSubject(context.Background(), c, owner, "api", domain.GitHubIssueComment, 9001); err != nil || n != 9 {
+			t.Errorf("conversation comment's subject = %d, %v; want 9", n, err)
+		}
+	}
+	if n := f.total(); n != 2 {
+		t.Errorf("reads = %d, want one per comment", n)
+	}
+}
+
+func TestIdentityReader_CommentSubjectMismatchIsAnError(t *testing.T) {
+	const path = "/repos/octo/api/pulls/comments/9001"
+	cases := map[string]string{
+		"another comment":                    `{"id": 9002, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`,
+		"no id":                              `{"pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`,
+		"no link":                            `{"id": 9001}`,
+		"the other numbering's link":         `{"id": 9001, "issue_url": "https://api.github.com/repos/octo/api/issues/7"}`,
+		"a link to another kind of object":   `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/commits/7"}`,
+		"a link with no number":              `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/x"}`,
+		"a link that is a path":              `{"id": 9001, "pull_request_url": "/repos/octo/api/pulls/7"}`,
+		"a link to a number that is no item": `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/0"}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, c := newIdentityFixture(t, map[string]string{path: body})
+			if n, err := NewIdentityReader().CommentSubject(context.Background(), c, "octo", "api", domain.GitHubReviewComment, 9001); err == nil {
+				t.Errorf("CommentSubject = %d, want an error", n)
+			}
+		})
+	}
+
+	// A failed read is not cached.
+	f, c := newIdentityFixture(t, map[string]string{})
+	r := NewIdentityReader()
+	if _, err := r.CommentSubject(context.Background(), c, "octo", "api", domain.GitHubReviewComment, 9001); err == nil {
+		t.Fatal("a missing comment answered a subject")
+	}
+	f.mu.Lock()
+	f.bodies[path] = `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`
+	f.mu.Unlock()
+	if n, err := r.CommentSubject(context.Background(), c, "octo", "api", domain.GitHubReviewComment, 9001); err != nil || n != 7 {
+		t.Errorf("CommentSubject after the comment appeared = %d, %v; want 7", n, err)
+	}
+	if _, err := r.CommentSubject(context.Background(), c, "octo", "api", "other", 9001); err == nil {
+		t.Error("a numbering outside the two answered a subject")
+	}
+}
+
 func TestTokenGetter(t *testing.T) {
 	var sawAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -889,7 +889,7 @@ func BenchmarkGraphQLCaptureAddressedRead(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		req, _ := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
-		if _, addressed := srv.captureGraphQL(req); len(addressed) != 1 {
+		if _, addressed := srv.captureGraphQL(req); len(addressed.Objects) != 1 {
 			b.Fatalf("addressed %v, want the one pull request", addressed)
 		}
 	}
@@ -1397,6 +1397,156 @@ func TestInjector_AddressedReadsAreReportedOnce(t *testing.T) {
 	}
 }
 
+// TestInjector_CommentAndNodeReads: a REST read of a comment by its own id
+// reports the pull request or issue the comment is on, which the injector
+// finds by reading the comment once and the object once; and a GraphQL read by
+// node id reports the node id as spelled, once per run, with nothing read for
+// it. A refused read reports neither.
+func TestInjector_CommentAndNodeReads(t *testing.T) {
+	var mu sync.Mutex
+	gets := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			mu.Lock()
+			gets[r.URL.Path]++
+			mu.Unlock()
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/comments/9001":
+			_, _ = w.Write([]byte(`{"id":9001,"node_id":"PRRC_kw9001","pull_request_url":"https://api.github.com/repos/acme/widgets/pulls/841"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/comments/7001":
+			_, _ = w.Write([]byte(`{"id":7001,"node_id":"IC_kw7001","issue_url":"https://api.github.com/repos/acme/widgets/issues/9"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/comments/7002":
+			_, _ = w.Write([]byte(`{"id":7002,"node_id":"IC_kw7002","issue_url":"https://api.github.com/repos/acme/widgets/issues/9"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/reactions"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/841":
+			_, _ = w.Write([]byte(`{"number":841,"node_id":"PR_kw841","base":{"repo":{"id":4242,"full_name":"acme/widgets"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/9":
+			_, _ = w.Write([]byte(`{"number":9,"node_id":"I_kw9"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
+			_, _ = w.Write([]byte(`{"id":4242,"full_name":"acme/widgets"}`))
+		case r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/graphql":
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), "PR_refused") {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"node":null}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	cert, certPEM, err := GenerateCert("127.0.0.1")
+	if err != nil {
+		t.Fatalf("GenerateCert: %v", err)
+	}
+	var reads []ObservedRead
+	srv, err := New(Config{
+		Upstream: upstream.URL,
+		Cert:     cert,
+		ObserveRead: func(_ context.Context, r ObservedRead) {
+			mu.Lock()
+			defer mu.Unlock()
+			reads = append(reads, r)
+		},
+		TokenSource: func(context.Context) (string, error) { return "ghs_realtoken", nil },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	host, err := srv.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(certPEM)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+
+	send := func(method, path, body string) []ObservedRead {
+		t.Helper()
+		mu.Lock()
+		before := len(reads)
+		mu.Unlock()
+		req, _ := http.NewRequest(method, "https://"+host+path, strings.NewReader(body))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]ObservedRead(nil), reads[before:]...)
+	}
+	query := func(document string, variables map[string]any) []ObservedRead {
+		t.Helper()
+		return send(http.MethodPost, "/api/graphql", graphQLEnvelope(t, document, variables))
+	}
+	repo := domain.GitHubIdentity{RepositoryID: "4242", Repository: "acme/widgets"}
+	observed := func(number int, nodeID, kind string) []ObservedRead {
+		id := repo
+		id.NodeID, id.Kind = nodeID, kind
+		return []ObservedRead{{ObjectRef: ghwrite.ObjectRef{Owner: "acme", Repo: "widgets", Number: number}, Identity: id}}
+	}
+	none := []ObservedRead(nil)
+
+	if got := send(http.MethodGet, "/api/v3/repos/acme/widgets/pulls/comments/9001", ""); !slices.Equal(got, observed(841, "PR_kw841", domain.EntityKindPullRequest)) {
+		t.Errorf("a read of a review comment reported %+v, want the pull request it is on", got)
+	}
+	if got := send(http.MethodGet, "/api/v3/repos/acme/widgets/pulls/comments/9001/reactions", ""); !slices.Equal(got, none) {
+		t.Errorf("a second read of the comment reported %+v, want nothing", got)
+	}
+	if got := send(http.MethodGet, "/api/v3/repos/acme/widgets/issues/comments/7001", ""); !slices.Equal(got, observed(9, "I_kw9", domain.EntityKindIssue)) {
+		t.Errorf("a read of a conversation comment reported %+v, want the issue it is on", got)
+	}
+	if got := send(http.MethodGet, "/api/v3/repos/acme/widgets/issues/comments/7002", ""); !slices.Equal(got, none) {
+		t.Errorf("a read of another comment on a reported issue reported %+v, want nothing", got)
+	}
+	if got := send(http.MethodGet, "/api/v3/repos/acme/widgets/issues/comments/7003", ""); !slices.Equal(got, none) {
+		t.Errorf("a read the upstream refused reported %+v, want nothing", got)
+	}
+
+	if got := query(`query($id:ID!){a:node(id:$id){id} b:node(id:"IC_kw1"){id}}`, map[string]any{"id": "PR_kw900"}); !slices.Equal(got, []ObservedRead{ghwrite.NodeRead("PR_kw900"), ghwrite.NodeRead("IC_kw1")}) {
+		t.Errorf("a read by node id reported %+v, want the two node ids as spelled", got)
+	}
+	if got := query(`{node(id:"PR_kw900"){id}}`, nil); !slices.Equal(got, none) {
+		t.Errorf("a second read of the node reported %+v, want nothing", got)
+	}
+	if got := query(`{node(id:"PR_refused"){id}}`, nil); !slices.Equal(got, none) {
+		t.Errorf("a read by node id the upstream refused reported %+v, want nothing", got)
+	}
+	if got := query(`{node(id:"pr_kw900"){id}}`, nil); !slices.Equal(got, []ObservedRead{ghwrite.NodeRead("pr_kw900")}) {
+		t.Errorf("a node id in another case reported %+v, want it as another node", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The agent's two reads of comment 9001 and the injector's one.
+	if n := gets["/repos/acme/widgets/pulls/comments/9001"]; n != 2 {
+		t.Errorf("reads of comment 9001 = %d, want the agent's and one of the injector's", n)
+	}
+	if n := gets["/repos/acme/widgets/issues/comments/7002"]; n != 2 {
+		t.Errorf("reads of comment 7002 = %d, want the agent's and one of the injector's", n)
+	}
+	if n := gets["/repos/acme/widgets/pulls/841"]; n != 1 {
+		t.Errorf("identity reads of the pull request = %d, want 1", n)
+	}
+	if n := gets["/repos/acme/widgets/issues/comments/7003"]; n != 1 {
+		t.Errorf("reads of the refused comment = %d, want the agent's alone", n)
+	}
+}
+
 // TestInjector_ReadsCostNothingWithoutAReadObserver: with no read touch wired,
 // a read is forwarded and nothing else is asked of the upstream.
 func TestInjector_ReadsCostNothingWithoutAReadObserver(t *testing.T) {
@@ -1416,6 +1566,7 @@ func TestInjector_ReadsCostNothingWithoutAReadObserver(t *testing.T) {
 		mustRequest(t, http.MethodGet, "https://"+host+"/api/v3/repos/acme/widgets/pulls/841", ""),
 		mustRequest(t, http.MethodPost, "https://"+host+"/api/graphql",
 			graphQLEnvelope(t, `{repository(owner:"acme",name:"widgets"){pullRequest(number:841){title}}}`, nil)),
+		mustRequest(t, http.MethodGet, "https://"+host+"/api/v3/repos/acme/widgets/pulls/comments/9001", ""),
 	} {
 		resp, err := client.Do(req)
 		if err != nil {
@@ -1426,8 +1577,8 @@ func TestInjector_ReadsCostNothingWithoutAReadObserver(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if want := []string{"GET /repos/acme/widgets/pulls/841", "POST /graphql"}; !slices.Equal(seen, want) {
-		t.Errorf("upstream saw %v, want only the two forwarded reads %v", seen, want)
+	if want := []string{"GET /repos/acme/widgets/pulls/841", "POST /graphql", "GET /repos/acme/widgets/pulls/comments/9001"}; !slices.Equal(seen, want) {
+		t.Errorf("upstream saw %v, want only the forwarded reads %v", seen, want)
 	}
 }
 

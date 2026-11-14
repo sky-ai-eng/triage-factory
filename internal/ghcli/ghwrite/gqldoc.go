@@ -511,8 +511,8 @@ func skipDirectives(sc *gqlScanner) bool {
 // collapse into one "value" class: each is one token whatever it holds, so a
 // brace inside a comment body can never be mistaken for structure. The mutation
 // reader never looks inside one. The addressed-read walk (read.go) does, for
-// three arguments only, and accepts a value only in the shape of a repository
-// owner, a repository name or an object number.
+// four arguments only, and accepts a value only in the shape of a repository
+// owner, a repository name, an object number or a node id.
 type gqlKind uint8
 
 const (
@@ -664,7 +664,8 @@ func (s *gqlScanner) skipIgnored() {
 // matters to every reader, so that punctuation inside a pull-request body
 // cannot be mistaken for document structure. A single-line string's characters
 // ride the token uninterpreted, for the one reader that compares them against
-// the shape of a repository's owner or name; a block string's are dropped.
+// the shape of a repository's owner or name or of a node id; a block string's
+// are dropped.
 func (s *gqlScanner) scanString() (gqlToken, bool) {
 	if strings.HasPrefix(s.src[s.pos:], `"""`) {
 		rest := s.src[s.pos+3:]

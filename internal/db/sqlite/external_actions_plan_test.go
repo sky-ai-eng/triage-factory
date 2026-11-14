@@ -49,6 +49,36 @@ func TestExternalActionStore_SQLite_PRCreatedWithoutDeliverablePlan(t *testing.T
 	}
 }
 
+// TestExternalActionStore_SQLite_PostedCommentEntityPlan pins that the read
+// touch's lookup of a comment by node id searches the ledger's node-id index
+// on the org, the scope and the node id rather than walking every row the org
+// holds on the host.
+func TestExternalActionStore_SQLite_PostedCommentEntityPlan(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	rows, err := conn.Query(`EXPLAIN QUERY PLAN `+sqlitestore.PostedCommentEntityQueryForTest,
+		runmode.LocalDefaultOrgID, "https://github.com", "IC_kw1", domain.ObjectKindComment, domain.ActionCommentPosted)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	joined := strings.Join(plan, "\n")
+	if want := "INDEX idx_external_actions_node_id (org_id=? AND scope=? AND node_id=?)"; !strings.Contains(joined, want) {
+		t.Errorf("query plan lacks %q:\n%s", want, joined)
+	}
+}
+
 // TestExternalActionStore_SQLite_PresentPostedCommentKeysPlan pins that the
 // poll's read of which comments TF posted searches the ledger's object-key
 // index on the org, the scope and the keys rather than walking every row the

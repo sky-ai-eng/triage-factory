@@ -1593,8 +1593,8 @@ func TestParseGraphQLRequest_AnEnvelopeReadTwoWaysIsUnreadable(t *testing.T) {
 			if !isWrite || facts.Unreadable != GraphQLMalformed {
 				t.Fatalf("ParseGraphQLRequest = %+v, write=%v; want an unreadable write", facts, isWrite)
 			}
-			if refs := ParseGraphQLRead([]byte(body)); refs != nil {
-				t.Errorf("ParseGraphQLRead = %+v, want nothing from an unreadable envelope", refs)
+			if read := ParseGraphQLRead([]byte(body)); !read.Empty() {
+				t.Errorf("ParseGraphQLRead = %+v, want nothing from an unreadable envelope", read)
 			}
 		})
 	}
