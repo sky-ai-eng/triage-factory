@@ -24,7 +24,7 @@ import (
 // review anywhere. Nothing here walks the arguments, and no text an agent or a
 // stranger wrote is ever interpreted — see gqldoc.go for what the reader
 // refuses to look at. A request that performs no mutation is read separately,
-// for the objects its query addresses (read.go).
+// for the objects and branches its query addresses (read.go).
 //
 // The mutation names below are the vocabulary GitHub's schema defines, mapped
 // onto the same domain actions the REST shapes produce. One act, one name,

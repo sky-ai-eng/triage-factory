@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -17,21 +18,24 @@ import (
 // or one the run's credential cannot read, touches nothing.
 //
 // The rule is the exec verbs': addressed, touch; returned in a set, never. A
-// list (`gh pr list`), a search, and a lookup by branch name
-// (`pullRequests(headRefName:)`, which is how `gh pr view` with no number
-// finds its pull request) return sets, and name no object here.
+// list (`gh pr list`) and a search return sets, and name no object here.
 //
-// TODO(TFAC-1415): `gh pr view` with no number reads the pull request of the
-// current branch and touches nothing, because the request names a branch.
+// A lookup by branch name (`pullRequests(headRefName:)`) returns a set too,
+// but it is how `gh pr view`, `gh pr status` and `gh pr checks` find the pull
+// request of the current branch when they are given no number, so it names the
+// branch it looks up (BranchRef). The injector resolves the branch with a
+// lookup of its own, and touches the one pull request open on it, or nothing
+// when none or several are. The rule follows the request, not the command
+// that sent it: `gh pr list --head <branch>` sends the same lookup.
 //
 // TODO(TFAC-1414): a read by node id (`node(id:)`), and a read of a comment by
 // its own id, address an object without spelling its repository and number,
 // and touch nothing.
 //
 // An agent can address an object without reading it, by sending a request
-// that only spells it. That gains nothing a real read would not: the object is
-// linked only once GitHub has answered for it under the run's own credential,
-// which is what reading it takes.
+// that only spells it or the branch it is open on. That gains nothing a real
+// read would not: the object is linked only once GitHub has answered for it
+// under the run's own credential, which is what reading it takes.
 
 // ObjectRef is the pull request or issue one read addressed, as the request
 // spelled it. GitHub numbers the two in one sequence, so the number alone does
@@ -61,7 +65,35 @@ type ReadObservation struct {
 	Identity domain.GitHubIdentity
 }
 
-// maxAddressedReads bounds how many objects one GraphQL request may address. A
+// BranchRef is the branch one read looked pull requests up by, as the request
+// spelled it: the repository by owner and name, and the head branch by name.
+// The request names no head owner, so the branch it stands for is the
+// repository's own.
+type BranchRef struct {
+	Owner  string
+	Repo   string
+	Branch string
+}
+
+// Key identifies the branch among the ones a run has looked up. The repository
+// folds case, as ObjectRef.Key does; the branch does not, since git's branch
+// names are case-sensitive.
+func (r BranchRef) Key() string {
+	return strings.ToLower(r.Owner+"/"+r.Repo) + ":" + r.Branch
+}
+
+// AddressedReads is what one GraphQL read addressed: the pull requests and
+// issues it selects by number, and the branches it looks pull requests up by.
+type AddressedReads struct {
+	Objects  []ObjectRef
+	Branches []BranchRef
+}
+
+// Empty reports whether the read addressed nothing.
+func (a AddressedReads) Empty() bool { return len(a.Objects) == 0 && len(a.Branches) == 0 }
+
+// maxAddressedReads bounds how many objects and branches, together, one
+// GraphQL request may address. Each costs the injector a read of its own. A
 // porcelain query addresses one; the bound keeps a crafted document from
 // spending the injector's reads on a list it spelled out.
 const maxAddressedReads = 16
@@ -88,13 +120,15 @@ func ClassifyRead(method, path string) (ObjectRef, bool) {
 
 // The fields a GraphQL read addresses an object through: the repository at the
 // query's top level, by owner and name, and under it the pull request or
-// issue, by number. They are the three finders `gh` sends and the shape a
-// hand-written query takes.
+// issue, by number, or the pull requests of a branch, by its name. They are the
+// finders `gh` sends and the shape a hand-written query takes.
 const (
 	readRepositoryField = "repository"
 	readOwnerArgument   = "owner"
 	readNameArgument    = "name"
 	readNumberArgument  = "number"
+	readBranchField     = "pullRequests"
+	readBranchArgument  = "headRefName"
 )
 
 var readObjectFields = map[string]bool{
@@ -103,47 +137,63 @@ var readObjectFields = map[string]bool{
 	"issueOrPullRequest": true,
 }
 
+// readTopLevelFields and readRepositoryFields are the fields whose arguments
+// the walk reads, at a query's top level and under a repository. Every other
+// field's are skipped.
+var (
+	readTopLevelFields   = map[string]bool{readRepositoryField: true}
+	readRepositoryFields = func() map[string]bool {
+		fields := map[string]bool{readBranchField: true}
+		for field := range readObjectFields {
+			fields[field] = true
+		}
+		return fields
+	}()
+)
+
 // ParseGraphQLRead names the pull requests and issues one GraphQL request
-// addresses: each `repository(owner:, name:)` at the top level of the query
-// that runs, and each `pullRequest`, `issue` or `issueOrPullRequest(number:)`
-// selected directly under it, with aliases resolved. nil for a mutation (the
-// write audit's), for a query that addresses none, and for a document the
-// reader cannot walk.
+// addresses, and the branches it looks pull requests up by: each
+// `repository(owner:, name:)` at the top level of the query that runs, and
+// each `pullRequest`, `issue` or `issueOrPullRequest(number:)`, and each
+// `pullRequests(headRefName:)`, selected directly under it, with aliases
+// resolved. Empty for a mutation (the write audit's), for a query that
+// addresses nothing, and for a document the reader cannot walk.
 //
-// It reads three argument values and no others: the repository's owner and
-// name and the object's number, each either a variable, resolved from the
-// request's variables, or a literal. A value is accepted only in the shape of
-// what it names (validRepoPart, a positive integer) and is otherwise dropped
-// with the object it would have named. Every other argument, every nested
-// selection and every fragment is skipped as balanced punctuation, exactly as
-// the mutation reader skips them (gqldoc.go).
-func ParseGraphQLRead(body []byte) []ObjectRef {
+// It reads four argument values and no others: the repository's owner and
+// name, the object's number, and the branch's name, each either a variable,
+// resolved from the request's variables, or a literal. A value is accepted only
+// in the shape of what it names (validRepoPart, a positive integer,
+// validBranchName) and is otherwise dropped with the object or branch it would
+// have named. Every other argument, every nested selection and every fragment
+// is skipped as balanced punctuation, exactly as the mutation reader skips them
+// (gqldoc.go).
+func ParseGraphQLRead(body []byte) AddressedReads {
 	envelope, ok := decodeGraphQLEnvelope(body)
 	if !ok || envelope.Query == "" {
-		return nil
+		return AddressedReads{}
 	}
 	// Most reads that address nothing never mention a repository, and stop
 	// here.
 	if !strings.Contains(envelope.Query, readRepositoryField) {
-		return nil
+		return AddressedReads{}
 	}
 	ops, walked := parseReadOperations(envelope.Query)
 	if !walked {
-		return nil
+		return AddressedReads{}
 	}
 	op, selected := selectReadOperation(ops, envelope.OperationName)
 	if !selected || op.typ != gqlOperationQuery || len(op.reads) == 0 {
-		return nil
+		return AddressedReads{}
 	}
 
 	var vars map[string]json.RawMessage
 	if len(envelope.Variables) > 0 {
 		// Variables that are not an object resolve no variable, which costs
-		// only the objects a variable named.
+		// only the objects and branches a variable named.
 		_ = json.Unmarshal(envelope.Variables, &vars)
 	}
-	var refs []ObjectRef
-	seen := map[string]bool{}
+	var out AddressedReads
+	objects, branches := map[string]bool{}, map[string]bool{}
 	for _, read := range op.reads {
 		owner, ok := read.owner.repoPart(vars)
 		if !ok {
@@ -153,18 +203,29 @@ func ParseGraphQLRead(body []byte) []ObjectRef {
 		if !ok {
 			continue
 		}
+		if read.branch != (gqlArgument{}) {
+			branch, ok := read.branch.branchName(vars)
+			if !ok {
+				continue
+			}
+			ref := BranchRef{Owner: owner, Repo: repo, Branch: branch}
+			if !branches[ref.Key()] {
+				branches[ref.Key()] = true
+				out.Branches = append(out.Branches, ref)
+			}
+			continue
+		}
 		number, ok := read.number.objectNumber(vars)
 		if !ok {
 			continue
 		}
 		ref := ObjectRef{Owner: owner, Repo: repo, Number: number}
-		if seen[ref.Key()] {
-			continue
+		if !objects[ref.Key()] {
+			objects[ref.Key()] = true
+			out.Objects = append(out.Objects, ref)
 		}
-		seen[ref.Key()] = true
-		refs = append(refs, ref)
 	}
-	return refs
+	return out
 }
 
 // gqlArgument is one argument's value as the read walk keeps it: the name of
@@ -175,23 +236,38 @@ type gqlArgument struct {
 	literal  gqlToken
 }
 
-// repoPart resolves the argument to a repository owner or name: a string
-// variable or a single-line string literal, in the shape validRepoPart admits.
-// A literal's characters are compared as written, so one spelled with an
-// escape is refused rather than decoded.
-func (a gqlArgument) repoPart(vars map[string]json.RawMessage) (string, bool) {
-	var value string
+// stringValue resolves the argument to a string: a string variable, or a
+// single-line string literal's characters as written. A literal spelled with an
+// escape keeps its backslash, so the shape its caller checks refuses it rather
+// than decoding it. A block string keeps no characters, so it resolves to the
+// empty string, which no shape admits.
+func (a gqlArgument) stringValue(vars map[string]json.RawMessage) (string, bool) {
 	switch {
 	case a.variable != "":
+		var value string
 		if err := json.Unmarshal(vars[a.variable], &value); err != nil {
 			return "", false
 		}
+		return value, true
 	case a.literal.kind == gqlKindValue && a.literal.quoted:
-		value = a.literal.text
+		return a.literal.text, true
 	default:
 		return "", false
 	}
-	return value, validRepoPart(value)
+}
+
+// repoPart resolves the argument to a repository owner or name, in the shape
+// validRepoPart admits.
+func (a gqlArgument) repoPart(vars map[string]json.RawMessage) (string, bool) {
+	value, ok := a.stringValue(vars)
+	return value, ok && validRepoPart(value)
+}
+
+// branchName resolves the argument to a branch name, in the shape
+// validBranchName admits.
+func (a gqlArgument) branchName(vars map[string]json.RawMessage) (string, bool) {
+	value, ok := a.stringValue(vars)
+	return value, ok && validBranchName(value)
 }
 
 // objectNumber resolves the argument to a pull request or issue number: an
@@ -234,15 +310,55 @@ func validRepoPart(s string) bool {
 	return true
 }
 
-// gqlAddressed is one object a query addresses, before its arguments are
-// resolved against the request's variables.
+// maxBranchNameLength bounds the branch names the reader accepts. Git sets no
+// length of its own; a longer name costs only its touch.
+const maxBranchNameLength = 255
+
+// branchNameRefused are the bytes git refuses anywhere in a ref name, besides
+// the control characters.
+const branchNameRefused = " ~^:?*[\\"
+
+// validBranchName reports whether s has the shape of a branch name, by the
+// rules git applies to one: those `git check-ref-format` applies to
+// refs/heads/<s>, which refuse a control character, space, '~', '^', ':', '?',
+// '*', '[' or '\' anywhere, "..", "@{" or "//", a leading or trailing '/', a
+// trailing '.', and a '/'-separated component starting with '.' or ending in
+// ".lock"; and those `git branch` adds, which refuse "HEAD" and a leading '-'.
+// It must also be UTF-8, which git does not require but every string GitHub's
+// API carries is. The value goes, escaped, into the query of a request the
+// injector makes with the run's credential.
+func validBranchName(s string) bool {
+	if s == "" || len(s) > maxBranchNameLength || s == "HEAD" || s[0] == '-' || !utf8.ValidString(s) {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "@{") || strings.Contains(s, "//") ||
+		strings.HasPrefix(s, "/") || strings.HasSuffix(s, "/") || strings.HasSuffix(s, ".") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f || strings.IndexByte(branchNameRefused, c) >= 0 {
+			return false
+		}
+	}
+	for _, component := range strings.Split(s, "/") {
+		if strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// gqlAddressed is one object or branch a query addresses, before its arguments
+// are resolved against the request's variables. A pull request or issue
+// carries its number, and a branch lookup its branch; the other is zero.
 type gqlAddressed struct {
-	owner, name, number gqlArgument
+	owner, name    gqlArgument
+	number, branch gqlArgument
 }
 
 // gqlReadOperation is one operation definition as the read walk sees it: which
-// kind it is, its name, and the objects its top level addresses. Only a query's
-// are collected.
+// kind it is, its name, and the objects and branches its top level addresses.
+// Only a query's are collected.
 type gqlReadOperation struct {
 	typ   string
 	name  string
@@ -266,8 +382,8 @@ func selectReadOperation(ops []gqlReadOperation, operationName string) (gqlReadO
 	return gqlReadOperation{}, false
 }
 
-// parseReadOperations walks a document's definitions for the objects each
-// query addresses. ok is false for anything it cannot walk exactly, which
+// parseReadOperations walks a document's definitions for the objects and
+// branches each query addresses. ok is false for anything it cannot walk exactly, which
 // names nothing.
 func parseReadOperations(doc string) ([]gqlReadOperation, bool) {
 	sc := &gqlScanner{src: doc}
@@ -306,8 +422,8 @@ func parseReadOperations(doc string) ([]gqlReadOperation, bool) {
 }
 
 // parseReadOperation reads one operation definition with its keyword already
-// consumed. A query's selection is walked for the objects it addresses; any
-// other operation's is skipped whole.
+// consumed. A query's selection is walked for the objects and branches it
+// addresses; any other operation's is skipped whole.
 func parseReadOperation(sc *gqlScanner, typ string) (gqlReadOperation, bool) {
 	op := gqlReadOperation{typ: typ}
 	if tok, ok := sc.peek(); ok && tok.kind == gqlKindName {
@@ -337,11 +453,11 @@ func parseReadOperation(sc *gqlScanner, typ string) (gqlReadOperation, bool) {
 
 // readQuerySelection walks a query's top-level selection set, its opening
 // brace already consumed, for each repository it selects by owner and name and
-// the objects addressed under it.
+// the objects and branches addressed under it.
 func readQuerySelection(sc *gqlScanner) ([]gqlAddressed, bool) {
 	var reads []gqlAddressed
 	for {
-		field, args, selects, done, ok := readSelectedField(sc, readRepositoryField, readOwnerArgument, readNameArgument)
+		field, args, selects, done, ok := readSelectedField(sc, readTopLevelFields, readOwnerArgument, readNameArgument)
 		if !ok {
 			return nil, false
 		}
@@ -358,34 +474,43 @@ func readQuerySelection(sc *gqlScanner) ([]gqlAddressed, bool) {
 			}
 			continue
 		}
-		numbers, walked := readRepositorySelection(sc)
+		members, walked := readRepositorySelection(sc)
 		if !walked {
 			return nil, false
 		}
-		for _, number := range numbers {
+		for _, read := range members {
 			if len(reads) >= maxAddressedReads {
 				break
 			}
-			reads = append(reads, gqlAddressed{owner: owner, name: name, number: number})
+			read.owner, read.name = owner, name
+			reads = append(reads, read)
 		}
 	}
 }
 
 // readRepositorySelection walks a repository's selection set, its opening
 // brace already consumed, for the number of each pull request or issue it
+// selects directly, and the branch of each pull request lookup by branch it
 // selects directly. Everything under those fields is skipped.
-func readRepositorySelection(sc *gqlScanner) ([]gqlArgument, bool) {
-	var numbers []gqlArgument
+func readRepositorySelection(sc *gqlScanner) ([]gqlAddressed, bool) {
+	var reads []gqlAddressed
 	for {
-		_, args, selects, done, ok := readSelectedField(sc, "", readNumberArgument)
+		field, args, selects, done, ok := readSelectedField(sc, readRepositoryFields, readNumberArgument, readBranchArgument)
 		if !ok {
 			return nil, false
 		}
 		if done {
-			return numbers, true
+			return reads, true
 		}
-		if number := args[readNumberArgument]; number != (gqlArgument{}) && len(numbers) < maxAddressedReads {
-			numbers = append(numbers, number)
+		var read gqlAddressed
+		switch {
+		case readObjectFields[field]:
+			read.number = args[readNumberArgument]
+		case field == readBranchField:
+			read.branch = args[readBranchArgument]
+		}
+		if (read.number != (gqlArgument{}) || read.branch != (gqlArgument{})) && len(reads) < maxAddressedReads {
+			reads = append(reads, read)
 		}
 		if selects && !sc.skipBalanced("{", "}") {
 			return nil, false
@@ -399,10 +524,9 @@ func readRepositorySelection(sc *gqlScanner) ([]gqlArgument, bool) {
 // selects reports that the field opens a selection set, whose opening brace is
 // consumed and whose contents are the caller's to walk or skip.
 //
-// Arguments are read only for the field the caller names (only, or, when only
-// is empty, any of readObjectFields), and only the ones named in want; every
-// other field's are skipped as balanced punctuation.
-func readSelectedField(sc *gqlScanner, only string, want ...string) (field string, args map[string]gqlArgument, selects, done, ok bool) {
+// Arguments are read only for the fields the caller names, and only the ones
+// named in want; every other field's are skipped as balanced punctuation.
+func readSelectedField(sc *gqlScanner, fields map[string]bool, want ...string) (field string, args map[string]gqlArgument, selects, done, ok bool) {
 	tok, more := sc.next()
 	if !more {
 		return "", nil, false, false, false
@@ -427,7 +551,7 @@ func readSelectedField(sc *gqlScanner, only string, want ...string) (field strin
 	}
 	if next, more := sc.peek(); more && next.punct("(") {
 		sc.next()
-		if field == only || (only == "" && readObjectFields[field]) {
+		if fields[field] {
 			if args, ok = readArguments(sc, want); !ok {
 				return "", nil, false, false, false
 			}
