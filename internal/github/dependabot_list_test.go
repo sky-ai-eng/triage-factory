@@ -57,8 +57,8 @@ func TestClient_ListOpenDependabotAlerts_OnePage(t *testing.T) {
 		Alert: domain.DependabotAlert{
 			Number: 3, GHSAID: "GHSA-0003", CVEID: "CVE-2026-0003", Summary: "advisory text", Severity: "high",
 			ManifestPath: "app/package.json", Scope: "runtime", VulnerableVersionRange: "< 2.0.0", FirstPatchedVersion: "2.0.0",
+			UpdatedAt: time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC),
 		},
-		UpdatedAt: time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC),
 	}}
 	if len(alerts) != 1 || alerts[0] != want[0] {
 		t.Errorf("alerts = %+v, want only the open alert with a package: %+v", alerts, want)

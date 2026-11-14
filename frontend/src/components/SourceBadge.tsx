@@ -1,7 +1,7 @@
 import type { Task } from '../types'
 
 /**
- * Displays a source badge ("PR", "GH", "Jira", "Linear", "Slack") with
+ * Displays a source badge ("PR", "Vuln", "GH", "Jira", "Linear", "Slack") with
  * entity_kind-aware text and consistent styling. Use size="lg" for the Cards
  * swipe card, default "sm" elsewhere.
  */
@@ -12,7 +12,9 @@ export default function SourceBadge({ task, size = 'sm' }: { task: Task; size?: 
   const label = isGitHub
     ? task.entity_kind === 'pr'
       ? 'PR'
-      : 'GH'
+      : task.entity_kind === 'vulnerable_package'
+        ? 'Vuln'
+        : 'GH'
     : isSlack
       ? 'Slack'
       : isLinear
@@ -21,7 +23,9 @@ export default function SourceBadge({ task, size = 'sm' }: { task: Task; size?: 
   const labelLg = isGitHub
     ? task.entity_kind === 'pr'
       ? 'Pull Request'
-      : 'GitHub'
+      : task.entity_kind === 'vulnerable_package'
+        ? 'Vulnerable Package'
+        : 'GitHub'
     : isSlack
       ? 'Slack'
       : isLinear

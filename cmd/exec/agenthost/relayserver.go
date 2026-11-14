@@ -205,7 +205,11 @@ func (s *RelayServer) DispatchCall(ctx context.Context, namespace, op string, ar
 	defer span.End()
 
 	res, err := s.dispatch(ctx, namespace, op, args)
-	telemetry.RecordSpanError(span, err)
+	if err != nil {
+		telemetry.RecordSpanError(span, err, "the relayed call failed")
+		agenthostLog.WarnContext(ctx, "relayed call failed",
+			"namespace", namespace, "op", op, "conversation", s.info.ConversationID, "error", err)
+	}
 	return res, err
 }
 
@@ -268,9 +272,9 @@ func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key str
 	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
-			telemetry.RecordSpanError(span, errRecordPanicked)
+			telemetry.RecordSpanError(span, errRecordPanicked, "applying the relayed record panicked")
 			recordAuditDrop(ctx, dropStageRelayDispatch, relayDropOp(namespace, op))
-			agenthostLog.Error("applying a relayed audit record panicked; record dropped",
+			agenthostLog.ErrorContext(ctx, "applying a relayed audit record panicked; record dropped",
 				"namespace", namespace, "op", op, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
 			answer = nil
 		}
@@ -292,15 +296,15 @@ func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key str
 		_, err = dispatchProviderOp(withRelayedRecord(ctx, rec), s.stores, s.info, namespace, op, args)
 	}
 	if err != nil {
-		telemetry.RecordSpanError(span, err)
+		telemetry.RecordSpanError(span, err, "applying the relayed record failed")
 		recordAuditDrop(ctx, stage, relayDropOp(namespace, op))
-		agenthostLog.Warn("relayed audit record failed; record dropped",
+		agenthostLog.WarnContext(ctx, "relayed audit record failed; record dropped",
 			"namespace", namespace, "op", op, "error", err)
 		return nil
 	}
 	if rec.deferred {
-		telemetry.RecordSpanError(span, errRecordDeferred)
-		agenthostLog.Warn("relayed audit record deferred; the sidecar will send it again",
+		telemetry.RecordSpanError(span, errRecordDeferred, "a write of the relayed record failed on a retryable error")
+		agenthostLog.WarnContext(ctx, "relayed audit record deferred; the sidecar will send it again",
 			"namespace", namespace, "op", op, "conversation", s.info.ConversationID)
 		return errRecordDeferred
 	}
@@ -952,6 +956,20 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 				NodeID:       a.ObjectNodeID,
 				Kind:         a.ObjectKind,
 			},
+		})
+
+	case agentproc.OpRecordGHRepositoryDenial:
+		var a agentproc.RecordGHRepositoryDenialArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("agenthost: decode relayed gh repository denial: %w", err)
+		}
+		// The request was already refused; the row is best-effort, and its
+		// reason is read from this side's tracking, never from the wire.
+		s.audit.RecordGHChannelRepositoryDenied(ctx, GHRepositoryDenial{
+			Repository:   a.Repository,
+			RepositoryID: a.RepositoryID,
+			Unresolved:   a.Unresolved,
+			Path:         a.Path,
 		})
 
 	case agentproc.OpRecordPush:

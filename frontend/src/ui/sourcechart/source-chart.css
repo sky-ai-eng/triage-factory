@@ -26,9 +26,13 @@
   flex: 1;
 }
 
+/* The swatch is placed from the label's baseline, at half the 0.7em cap
+   height: a 9px line box is shorter than the font's ascent plus descent, and
+   on a 1x display the engine's whole-pixel rounding puts the caps a pixel
+   above the middle of that box, where a centred swatch would sit. */
 .sc-key {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
   font-family: var(--font-mono);
   font-size: 9px;
@@ -38,6 +42,7 @@
 }
 
 .sc-key i {
+  translate: 0 calc(50% - 0.35em);
   width: 8px;
   height: 2px;
 }

@@ -275,8 +275,9 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 // two is evidence the shared helper works under RLS, which is what this
 // suite is actually checking.
 //
-// What's left — SetSession, SetWorktreePath, and the two boundary doors
-// (EndConversation, EndConversationsForTask) — are the conversations-row
+// What's left — SetSession, SetWorktreePath, the two boundary doors
+// (EndConversation, EndConversationsForTask), and the person-claim mint
+// (MintForPersonClaim) — are the conversations-row
 // methods with a plain, app-pool-doored form that touch nothing else: their
 // RETURNING has to satisfy the SELECT policy for the row it hands back, and a
 // policy that admits the write but not the read-back yields zero rows from a
@@ -299,7 +300,7 @@ type ConversationAppPoolFactory func(t *testing.T) (store db.ConversationStore, 
 // ConversationAppPoolFactory for why it covers only these two methods.
 func RunConversationAppPoolReturnedRowConformance(t *testing.T, mk ConversationAppPoolFactory) {
 	t.Helper()
-	store, orgID, _, seed := mk(t)
+	store, orgID, userID, seed := mk(t)
 	ctx := context.Background()
 	conversationID := seedConversationForTest(t, orgID, seed, "running")
 	readConv := func() (*domain.Conversation, error) { return store.Get(ctx, orgID, conversationID) }
@@ -357,6 +358,22 @@ func RunConversationAppPoolReturnedRowConformance(t *testing.T, mk ConversationA
 			return store.Get(ctx, orgID, c.ID)
 		})
 	}
+
+	// The mint a person's claim makes, on the task every conversation was
+	// just ended on. It is an INSERT under the caller's claims: the insert
+	// policy has to admit the caller as the creator on the task's team, and
+	// the row it returns has to clear the SELECT policy, or the claim's
+	// transaction would write a conversation and hand back none.
+	minted, err := store.MintForPersonClaim(ctx, orgID, taskID, userID)
+	if err != nil {
+		t.Fatalf("MintForPersonClaim: %v", err)
+	}
+	if minted == nil {
+		t.Fatal("MintForPersonClaim returned nil on a task whose conversations have all ended")
+	}
+	AssertWriteReturnedStoredRow(t, "MintForPersonClaim", *minted, func() (*domain.Conversation, error) {
+		return store.Get(ctx, orgID, minted.ID)
+	})
 }
 
 // findMessageByID is the point read SettleCompactionRequestForClaimSystem's

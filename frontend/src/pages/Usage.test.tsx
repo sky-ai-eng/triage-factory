@@ -516,7 +516,7 @@ describe('Usage page', () => {
         by_model: [
           { model: 'claude-opus-4-8', cost: 30 },
           { model: 'claude-sonnet-4-6', cost: 20 },
-          { model: 'claude-haiku-4-5', cost: 10 },
+          { model: 'claude-haiku-5-5', cost: 10 },
           { model: 'claude-opus-4-7', cost: 8 },
           { model: 'claude-opus-4-6', cost: 6 },
           { model: 'claude-fable-5', cost: 2 }, // 6th by cost → folds into "other"
@@ -524,7 +524,7 @@ describe('Usage page', () => {
         by_day_model: [
           { date: '2026-06-01', model: 'claude-opus-4-8', cost: 18 },
           { date: '2026-06-01', model: 'claude-sonnet-4-6', cost: 12 },
-          { date: '2026-06-01', model: 'claude-haiku-4-5', cost: 6 },
+          { date: '2026-06-01', model: 'claude-haiku-5-5', cost: 6 },
           { date: '2026-06-01', model: 'claude-opus-4-7', cost: 5 },
           { date: '2026-06-01', model: 'claude-opus-4-6', cost: 4 },
           { date: '2026-06-01', model: 'claude-fable-5', cost: 1 },
@@ -538,7 +538,7 @@ describe('Usage page', () => {
 
     // The key carries shortModel-trimmed labels for the top models...
     expect(await screen.findByText('opus-4-8')).toBeInTheDocument()
-    expect(await screen.findByText('haiku-4-5')).toBeInTheDocument()
+    expect(await screen.findByText('haiku-5-5')).toBeInTheDocument()
     // ...the sixth model is folded into one "other" row, never shown by name...
     expect(await screen.findByText('other')).toBeInTheDocument()
     expect(screen.queryByText('fable-5')).not.toBeInTheDocument()

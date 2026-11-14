@@ -130,7 +130,7 @@ func renderedStatusFixture(t *testing.T, status int) string {
 	srv := httptest.NewServer(&capturingHandler{t: t, status: status})
 	defer srv.Close()
 
-	const model = "claude-haiku-4-5-20251001"
+	const model = "claude-haiku-5-5"
 	pc, err := mapDirectCreds(map[string]string{"ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": srv.URL}, model)
 	if err != nil {
 		t.Fatalf("mapDirectCreds: %v", err)

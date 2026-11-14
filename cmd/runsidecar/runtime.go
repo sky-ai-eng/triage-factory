@@ -766,6 +766,19 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			op, args := agenthost.GHChannelReadRecord(read)
 			r.recordAudit(op, args)
 		},
+		// Read from the held bundle per request, so the set a `workspace add`
+		// re-seals is in force on the next one.
+		Repositories: r.ghChannelRepositories,
+		DenyRepository: func(_ context.Context, d ghinjector.DeniedRepository) {
+			// Queued, not awaited: the gate decided here, and the row is a
+			// record of that decision the orchestrator writes.
+			r.recordAudit(agentproc.OpRecordGHRepositoryDenial, agentproc.RecordGHRepositoryDenialArgs{
+				Repository:   d.Name(),
+				RepositoryID: d.Identity.RepositoryID,
+				Unresolved:   d.Unresolved,
+				Path:         d.Path,
+			})
+		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
 			// A Call, not a record: the agent's request is held until the
 			// orchestrator answers, because a refusal that raced the forward
@@ -789,6 +802,34 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			return reply.Allowed
 		},
 	}
+}
+
+// ghChannelRepositories is the gh channel's repository gate's source: the
+// held bundle's authorized set, gated only for a token org. An App org's
+// CLIToken is minted for that set, so GitHub refuses what the gate would; a
+// token reaches every repository it can. No bundle yet is an error, which
+// refuses; a bundle with no GitHub half for this run's host carries no
+// credential to gate.
+func (r *credRuntime) ghChannelRepositories(context.Context) ([]ghinjector.AuthorizedRepository, bool, error) {
+	gh, ok := r.heldGitHub()
+	if !ok {
+		return nil, false, fmt.Errorf("runsidecar: gh channel: %w", credbundle.ErrNoBundle)
+	}
+	if gh == nil || gh.Mode != credbundle.GitHubModePAT {
+		return nil, false, nil
+	}
+	repos := make([]ghinjector.AuthorizedRepository, 0, len(gh.RepoIDs)+len(gh.RepoTokens))
+	for name, id := range gh.RepoIDs {
+		repos = append(repos, ghinjector.AuthorizedRepository{Name: name, ID: id})
+	}
+	// Every repository a token was minted for is in the set, so a bundle
+	// sealed without RepoIDs still names its repositories.
+	for name := range gh.RepoTokens {
+		if _, named := gh.RepoIDs[name]; !named {
+			repos = append(repos, ghinjector.AuthorizedRepository{Name: name})
+		}
+	}
+	return repos, true, nil
 }
 
 // ghWriteFactsToWire projects the classifier's GraphQL facts onto the relay

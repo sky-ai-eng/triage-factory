@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -32,12 +33,30 @@ import (
 type alertsServer struct {
 	mu       sync.Mutex
 	requests map[string]int
+	// updateReads counts the reads of each repository's Dependabot updates,
+	// which answer every alert its listing holds as one Dependabot has not
+	// tried.
+	updateReads map[string]int
 }
 
 func newAlertsServer(t *testing.T, answer func(repo string) (int, string)) (*alertsServer, *ghclient.Client) {
 	t.Helper()
-	s := &alertsServer{requests: map[string]int{}}
+	s := &alertsServer{requests: map[string]int{}, updateReads: map[string]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			var req struct {
+				Variables struct {
+					Name string `json:"name"`
+				} `json:"variables"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			s.mu.Lock()
+			s.updateReads[req.Variables.Name]++
+			s.mu.Unlock()
+			_, body := answer(req.Variables.Name)
+			_, _ = w.Write([]byte(untriedUpdatesAnswer(t, body)))
+			return
+		}
 		_, rest, ok := strings.Cut(r.URL.Path, "/repos/")
 		repo, suffix, _ := strings.Cut(strings.TrimPrefix(rest, "octo/"), "/")
 		if !ok || suffix != "dependabot/alerts" {
@@ -68,6 +87,23 @@ func newAlertsServer(t *testing.T, answer func(repo string) (int, string)) (*ale
 	}))
 	t.Cleanup(srv.Close)
 	return s, ghclient.NewClient(srv.URL, "tok")
+}
+
+// untriedUpdatesAnswer is GitHub's answer to a read of the Dependabot updates
+// of a repository whose alert listing is listing: every alert it holds,
+// with no update, as Dependabot leaves an alert it has not tried. A listing
+// that is not a list of alerts answers with none.
+func untriedUpdatesAnswer(t *testing.T, listing string) string {
+	t.Helper()
+	var alerts []struct {
+		Number int `json:"number"`
+	}
+	_ = json.Unmarshal([]byte(listing), &alerts)
+	nodes := make([]string, 0, len(alerts))
+	for _, a := range alerts {
+		nodes = append(nodes, fmt.Sprintf(`{"number":%d,"dependabotUpdate":null}`, a.Number))
+	}
+	return `{"data":{"repository":{"vulnerabilityAlerts":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[` + strings.Join(nodes, ",") + `]}}}}`
 }
 
 func (s *alertsServer) count(repo string) int {
@@ -273,7 +309,7 @@ func listCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
 // listed at all.
 func TestDependabotListing_ListsOnlyReadableRepositories(t *testing.T) {
 	ctx := context.Background()
-	lodash := `[{"number":1,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"lodash"},"manifest_path":"package.json"},"security_advisory":{"ghsa_id":"GHSA-1","severity":"high"},"security_vulnerability":{"severity":"high"}}]`
+	lodash := `[{"number":1,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"lodash"},"manifest_path":"package.json"},"security_advisory":{"ghsa_id":"GHSA-1","severity":"high"},"security_vulnerability":{"severity":"high","first_patched_version":{"identifier":"4.17.21"}}}]`
 	gh, client := newAlertsServer(t, func(repo string) (int, string) {
 		if repo == "readable" {
 			return http.StatusOK, lodash
@@ -360,7 +396,7 @@ func TestDependabotListing_AProbeWithNoAnswerDoesNotStopTheListings(t *testing.T
 func leftPad(numbers ...int) string {
 	var objs []string
 	for _, n := range numbers {
-		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"left-pad"}},"security_advisory":{"ghsa_id":"GHSA-%d","severity":"low"}}`, n, n))
+		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"left-pad"}},"security_advisory":{"ghsa_id":"GHSA-%d","severity":"low"},"security_vulnerability":{"first_patched_version":{"identifier":"1.3.0"}}}`, n, n))
 	}
 	return "[" + strings.Join(objs, ",") + "]"
 }
@@ -370,7 +406,7 @@ func leftPad(numbers ...int) string {
 func alertsBody(alerts map[int]string) string {
 	var objs []string
 	for _, n := range slices.Sorted(maps.Keys(alerts)) {
-		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","dependency":{"package":{"ecosystem":"npm","name":%q}},"security_advisory":{"ghsa_id":"GHSA-%d","severity":"low"}}`, n, alerts[n], n))
+		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","dependency":{"package":{"ecosystem":"npm","name":%q}},"security_advisory":{"ghsa_id":"GHSA-%d","severity":"low"},"security_vulnerability":{"first_patched_version":{"identifier":"9.9.9"}}}`, n, alerts[n], n))
 	}
 	return "[" + strings.Join(objs, ",") + "]"
 }

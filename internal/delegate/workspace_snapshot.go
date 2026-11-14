@@ -61,6 +61,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
@@ -445,7 +446,13 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 
 	ctx, span := s.startSnapshotSpan(ctx, w)
 	defer func() {
-		telemetry.RecordSpanError(span, err)
+		// One line holds the whole chain, so the phases beneath log
+		// nothing of their own.
+		if err != nil {
+			telemetry.RecordSpanError(span, err, "persisting the workspace snapshot failed")
+			delegateLog.WarnContext(ctx, "workspace snapshot failed",
+				"conversation", w.conversationID, "key_id", w.keyID, "reason", w.reason, "error", err)
+		}
 		span.End()
 	}()
 
@@ -639,7 +646,7 @@ func (c *capturedSnapshot) release() {
 func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot, err error) {
 	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", w.runtime)
 	defer func() {
-		telemetry.RecordSpanError(capSpan, err)
+		telemetry.RecordSpanError(capSpan, err, "capturing the workspace failed")
 		capSpan.End()
 	}()
 	captured := &capturedSnapshot{at: time.Now()}
@@ -736,7 +743,7 @@ func (st *stagedSnapshot) discard() {
 func archiveSnapshot(ctx context.Context, w snapshotWrite, captured *capturedSnapshot) (_ *stagedSnapshot, err error) {
 	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", w.runtime)
 	defer func() {
-		telemetry.RecordSpanError(archSpan, err)
+		telemetry.RecordSpanError(archSpan, err, "archiving the workspace snapshot failed")
 		archSpan.End()
 	}()
 	man := snapshotManifest{CapturedAt: captured.at.UTC()}
@@ -791,7 +798,7 @@ func (s *Spawner) uploadSnapshot(ctx context.Context, w snapshotWrite, staged *s
 	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", w.runtime)
 	putSpan.SetAttributes(telemetry.SizeBytes(staged.compressedBytes))
 	putErr := s.Storage().Put(putCtx, snapshotKey(w.orgID, w.keyID), staged.f)
-	telemetry.RecordSpanError(putSpan, putErr)
+	telemetry.RecordSpanError(putSpan, putErr, "uploading the workspace snapshot failed")
 	putSpan.End()
 	if putErr != nil {
 		return false, fmt.Errorf("snapshot: put: %w", putErr)
@@ -1371,7 +1378,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		if prov != "" {
 			span.SetAttributes(telemetry.Workspace(string(prov)))
 		}
-		telemetry.RecordSpanError(span, err)
+		telemetry.RecordSpanError(span, err, "ensuring the workspace failed")
 		span.End()
 	}()
 
@@ -1772,7 +1779,23 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 			if gctx.Err() != nil {
 				return nil // a sibling failed; this one never started
 			}
-			c, err := s.restoreOneCheckout(gctx, root, keyID, claimID, restorer, mc, staged)
+			// Its own parent, because checkouts restore concurrently: without
+			// it every checkout's git calls and pull request read interleave
+			// under the ensure span with nothing saying which belongs to which.
+			cctx, span := tracer.Start(gctx, "engagement.workspace.restore_checkout")
+			c, err := s.restoreOneCheckout(cctx, root, keyID, claimID, restorer, mc, staged)
+			switch {
+			case err == nil:
+			case gctx.Err() != nil:
+				// Cut off by a sibling's failure or the engagement's end, so
+				// the cause is not this checkout's.
+				span.SetAttributes(telemetry.Outcome("cancelled"))
+			default:
+				// The error's text names the checkout's path, so the status
+				// message is fixed and the error is not recorded.
+				span.SetStatus(codes.Error, "restore failed")
+			}
+			span.End()
 			results[i] = result{restored: c, err: err}
 			return err
 		})
@@ -1862,7 +1885,7 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 			// read-only, the way a deleted head repository leaves a fresh one,
 			// rather than holding every other checkout's restore hostage to a
 			// PR every retry would be refused again.
-			delegateLog.Warn("restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
+			delegateLog.WarnContext(ctx, "restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
 				"checkout", mc.Path, "number", prNumber, "error", err)
 			r.PR = &worktree.PRCheckout{}
 		default:

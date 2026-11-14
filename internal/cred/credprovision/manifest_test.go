@@ -74,7 +74,7 @@ func newProvisionRig(t *testing.T, avail eventsource.Availability, linearTokens 
 
 func (r *provisionRig) provision(t *testing.T) *credbundle.Bundle {
 	t.Helper()
-	if err := r.m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); err != nil {
+	if err := r.m.ProvisionForConversation(context.Background(), "org-1", "conv-1", ReasonCredRequest); err != nil {
 		t.Fatalf("ProvisionForConversation: %v", err)
 	}
 	plaintext, err := r.kp.Open(r.claims.sealed)
@@ -275,7 +275,7 @@ func TestProvision_AvailabilityFailureWritesNothing(t *testing.T) {
 	rig := newProvisionRig(t, nil, &installTokens{})
 	boom := errors.New("org_event_sources unreachable")
 	rig.m.sources = func(context.Context, string) (eventsource.Availability, error) { return nil, boom }
-	if err := rig.m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); !errors.Is(err, boom) {
+	if err := rig.m.ProvisionForConversation(context.Background(), "org-1", "conv-1", ReasonCredRequest); !errors.Is(err, boom) {
 		t.Fatalf("ProvisionForConversation = %v, want the availability failure", err)
 	}
 	if rig.claims.puts != 0 {
@@ -293,7 +293,7 @@ func TestProvision_IdentityReadFailureWritesNothing(t *testing.T) {
 	}, &installTokens{})
 	boom := errors.New("org_github_apps unreachable")
 	rig.m.ghResolver.(*fakeScopedResolver).identityErr = boom
-	if err := rig.m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); !errors.Is(err, boom) {
+	if err := rig.m.ProvisionForConversation(context.Background(), "org-1", "conv-1", ReasonCredRequest); !errors.Is(err, boom) {
 		t.Fatalf("ProvisionForConversation = %v, want the identity read's failure", err)
 	}
 	if rig.claims.puts != 0 {

@@ -21,11 +21,13 @@ func newRepositoryDependabotAccessStore(q queryer) db.RepositoryDependabotAccess
 
 var _ db.RepositoryDependabotAccessStore = (*repositoryDependabotAccessStore)(nil)
 
-const sqliteDependabotAccessColumns = `repository_id, org_id, access, checked_at, alerts_etag`
+const sqliteDependabotAccessColumns = `repository_id, org_id, access, checked_at, alerts_etag, updates_read_at`
 
 func scanSQLiteDependabotAccess(row interface{ Scan(...any) error }) (domain.RepositoryDependabotAccess, error) {
 	var a domain.RepositoryDependabotAccess
-	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &a.AlertsETag)
+	var readAt sql.NullTime
+	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &a.AlertsETag, &readAt)
+	a.UpdatesReadAt = readAt.Time
 	return a, err
 }
 
@@ -64,6 +66,18 @@ func (s *repositoryDependabotAccessStore) RecordAlertListingSystem(ctx context.C
 		 WHERE org_id = ? AND repository_id = ?
 		RETURNING `+sqliteDependabotAccessColumns,
 		etag, orgID, repositoryID))
+}
+
+func (s *repositoryDependabotAccessStore) RecordUpdatesReadSystem(ctx context.Context, orgID, repositoryID string, readAt time.Time) (domain.RepositoryDependabotAccess, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.RepositoryDependabotAccess{}, err
+	}
+	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
+		UPDATE repository_dependabot_access
+		   SET updates_read_at = ?
+		 WHERE org_id = ? AND repository_id = ?
+		RETURNING `+sqliteDependabotAccessColumns,
+		readAt.UTC(), orgID, repositoryID))
 }
 
 func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error) {

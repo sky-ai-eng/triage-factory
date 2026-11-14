@@ -148,7 +148,7 @@ func TestInitTraces_ExportsAndFlushesOnShutdown(t *testing.T) {
 
 	t.Setenv("TF_METRICS_ADDR", "off")
 	t.Setenv("TF_TRACES_ENDPOINT", collector.URL)
-	if addr := Init("v-test"); addr != "" {
+	if addr := Init("v-test", runmode.RoleAll, "test-instance"); addr != "" {
 		t.Fatalf("Init returned metrics addr %q; want metrics disabled in this test", addr)
 	}
 
@@ -214,7 +214,7 @@ func TestInitTraces_ModeAgnostic(t *testing.T) {
 
 			t.Setenv("TF_METRICS_ADDR", "off")
 			t.Setenv("TF_TRACES_ENDPOINT", collector.URL)
-			Init("v-test")
+			Init("v-test", runmode.RoleAll, "test-instance")
 
 			startSpan(t, "mode.probe").End()
 			if err := ShutdownTraces(context.Background()); err != nil {
@@ -281,7 +281,7 @@ func TestInitTraces_Disabled(t *testing.T) {
 
 			var logs bytes.Buffer
 			restoreLog := logging.SetOutput(&logs)
-			Init("v-test")
+			Init("v-test", runmode.RoleAll, "test-instance")
 			restoreLog()
 
 			_, span := otel.Tracer("telemetry/test").Start(context.Background(), "noop")
@@ -341,7 +341,7 @@ func TestInitTraces_ExemplarsExposed(t *testing.T) {
 
 	t.Setenv("TF_METRICS_ADDR", "127.0.0.1:0")
 	t.Setenv("TF_TRACES_ENDPOINT", collector.URL)
-	if addr := Init("v-test"); addr == "" {
+	if addr := Init("v-test", runmode.RoleAll, "test-instance"); addr == "" {
 		t.Fatal("Init reported metrics disabled; want enabled")
 	}
 	t.Cleanup(func() { _ = ShutdownTraces(context.Background()) })

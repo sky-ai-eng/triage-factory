@@ -72,7 +72,8 @@ Claims                              ← one row per executor engagement with a c
 
 **Conversations · messages · claims** is the unified agent data model (it replaced
 the former `runs` fusion table): a *conversation* is the
-durable context — type (`delegation` | `interactive` reserved |
+durable context — type (`delegation` | `interactive`, minted by a person's
+claim as the conversation they work the task in |
 namespaced `subagent:<kind>` reserved), task/trigger linkage, work-lifecycle
 status (stored vocabulary `queued|running|open|terminals` — spend and KV-cache
 warmth are derived from `messages`, never stored), `runtime` ratchet
@@ -196,7 +197,7 @@ The three system jobs — scorer, repo profiler, memory provisioner — run on o
 
 `systemllm.ModelForSettings` is the rule, `systemllm.NewModelFunc` the store-backed adapter for the jobs that hold no settings row, the scorer and the memory provisioner (the profiler instead resolves from the read it already does for the clone protocol). It is resolved **once per cycle** and passed down to the batch seam, so a cycle spends on one model and `system_llm_runs` records it. Unset, not offered by this build, or served by a provider the org has not connected are all one answer — `ErrNoModel`, the cycle skips with a WARN naming the setting — because TF ships no fallback model and a substituted one would spend somebody's money on a model nobody chose.
 
-The dialect column defaults carry the §7 mode asymmetry as data rather than a branch: SQLite (local) defaults to `claude-haiku-4-5-20251001`, so a first run and an upgraded install both arrive pre-filled; Postgres (multi) defaults to empty, so a fresh org is forced through the setup pick.
+The dialect column defaults carry the §7 mode asymmetry as data rather than a branch: SQLite (local) defaults to the SDK alias `haiku`, so a first run and an upgraded install both arrive pre-filled; Postgres (multi) defaults to empty, so a fresh org is forced through the setup pick.
 
 ### AI scoring
 

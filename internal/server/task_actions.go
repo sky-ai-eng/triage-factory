@@ -116,15 +116,18 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	// stamping one would record a handoff that never happened. (A prior
 	// requeue has already ended whatever it ended, and the door's guard keeps
 	// the reason that actually applied.)
+	//
+	// The boundary itself was stamped in the claim's transaction, ahead of the
+	// mint, so what is left here is the agent's process and what follows a
+	// stamp. The person's own conversation is passed over by the stop: it is
+	// unsettled, as every conversation the stop pass enumerates is.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	stopCause := delegate.StopCauseTaskDispositioned
 	if landing == claimLandingFromAgent {
 		stopCause = delegate.StopCauseTaskTakenOver
 	}
-	s.stopTaskConversations(cleanupCtx, orgID, userID, id, stopCause)
-	if landing == claimLandingFromAgent {
-		s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedTakenOver)
-	}
+	s.stopTaskConversations(cleanupCtx, orgID, userID, id, stopCause, claim.conversationID)
+	s.afterConversationsEnded(cleanupCtx, orgID, claim.ended)
 	if claim.jira != nil {
 		s.syncJiraClaim(r, orgID, userID, id, claim.jira)
 	}
@@ -159,6 +162,60 @@ type selfClaimed struct {
 	linear  *linear.Client
 	landing claimLanding
 	version int64
+	// conversationID is the person's own conversation on the task as the
+	// claim's transaction left it: the one it minted, or the one an earlier
+	// claim minted. Empty when the task holds a conversation that is not the
+	// person's, which a boundary write that failed can leave behind.
+	conversationID string
+	// ended is the agent's conversations a takeover ended, stamped in the
+	// claim's transaction. Empty on every other landing.
+	ended []domain.Conversation
+}
+
+// personClaimCancelReason is the reason a person's claim records on the
+// task's queued firings (cancelFiringsForPersonClaim).
+const personClaimCancelReason = "claimed by a person"
+
+// errClaimRefused rolls a claim's transaction back when its claim write
+// matched no row, so the cancellation requests recorded ahead of the write do
+// not outlive a claim that did not land.
+var errClaimRefused = errors.New("claim write matched no row")
+
+// cancelFiringsForPersonClaim records a cancellation request on each of the
+// task's queued firings, in the transaction of a person's claim. The
+// conversation that claim mints keeps the task busy for as long as the person
+// holds it, so a firing queued earlier would wait behind it and fire once the
+// person delegated, for an event that delegation already covered.
+//
+// It runs ahead of the claim write: a transaction that writes pending_firings
+// and tasks writes them in that order (db.PendingFiringsStore.Enqueue). A
+// caller whose claim then matches no row rolls the transaction back.
+func cancelFiringsForPersonClaim(ctx context.Context, tx db.TxStores, orgID, taskID, userID string) (int, error) {
+	return tx.PendingFirings.RequestCancelForTask(ctx, orgID, taskID, userID, personClaimCancelReason)
+}
+
+// mintForPersonClaim mints the person's conversation on a task their claim
+// just landed on, in the claim's transaction, and answers the id of the
+// person's own conversation on the task: the minted one, or the interactive
+// conversation the task already held. A task that holds some other
+// conversation keeps it and answers "".
+func mintForPersonClaim(ctx context.Context, tx db.TxStores, orgID, taskID, userID string) (string, error) {
+	minted, err := tx.Conversations.MintForPersonClaim(ctx, orgID, taskID, userID)
+	if err != nil {
+		return "", fmt.Errorf("mint the claim's conversation: %w", err)
+	}
+	if minted != nil {
+		return minted.ID, nil
+	}
+	task, err := tx.Tasks.Get(ctx, orgID, taskID)
+	if err != nil || task == nil || task.ConversationID == "" {
+		return "", err
+	}
+	held, err := tx.Conversations.Get(ctx, orgID, task.ConversationID)
+	if err != nil || held == nil || held.Type != domain.ConversationTypeInteractive {
+		return "", err
+	}
+	return held.ID, nil
 }
 
 // selfClaim is the claim route's no-target arm: a race-safe transition to the
@@ -167,6 +224,9 @@ type selfClaimed struct {
 // version the caller read, and a different user owning it → 409). Both
 // landing paths put the task in progress in the same UPDATE that writes the
 // claim — the claim IS the stage marker, so the queue holds nobody's work.
+// Every accept path also leaves the task with the person's conversation, in
+// the claim's own transaction: a takeover ends the agent's first, and a task
+// that already holds an un-ended conversation keeps it.
 // For a Jira- or Linear-backed task it resolves the acting user's own client
 // up front so a user with no connected Jira or Linear is refused BEFORE the
 // claim lands (acting as the bot here would mis-assign the issue to the
@@ -272,17 +332,41 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			return tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID, version)
 		}
 	}
+	// One transaction: the firings' cancellation requests, the claim, the
+	// takeover's boundary, and the mint. The boundary precedes the mint so the
+	// task never holds two un-ended conversations, and both follow the claim,
+	// which is what puts the task on a team the claimant can write.
 	var claimOK bool
 	var written int64
+	var conversationID string
+	var ended []domain.Conversation
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
+		if landing != claimLandingIdempotent {
+			if _, e = cancelFiringsForPersonClaim(r.Context(), tx, orgID, id, userID); e != nil {
+				return e
+			}
+		}
 		claimOK, e = write(tx)
-		if e != nil || !claimOK {
+		if e != nil {
+			return e
+		}
+		if !claimOK {
+			return errClaimRefused
+		}
+		if landing == claimLandingFromAgent {
+			if ended, e = tx.Conversations.EndConversationsForTask(r.Context(), orgID, id, domain.EndedTakenOver); e != nil {
+				return e
+			}
+		}
+		if conversationID, e = mintForPersonClaim(r.Context(), tx, orgID, id, userID); e != nil {
 			return e
 		}
 		written, e = writtenTaskVersion(r.Context(), tx, orgID, id)
 		return e
-	}); errors.Is(err, db.ErrTaskVersion) {
+	}); errors.Is(err, errClaimRefused) {
+		claimOK = false
+	} else if errors.Is(err, db.ErrTaskVersion) {
 		writeTaskVersionConflict(w)
 		return selfClaimed{}, false
 	} else if errors.Is(err, db.ErrNoActiveClaimTeam) {
@@ -310,7 +394,10 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		})
 		s.publishTaskAssigned(orgID, id, "", userID)
 	}
-	return selfClaimed{jira: jiraUserClient, linear: linearUserClient, landing: landing, version: written}, true
+	return selfClaimed{
+		jira: jiraUserClient, linear: linearUserClient, landing: landing, version: written,
+		conversationID: conversationID, ended: ended,
+	}, true
 }
 
 // publishTaskAssigned publishes system:task:assigned for a claim write that
@@ -382,6 +469,12 @@ func linearUserCredentialMissingMessage(err error) string {
 // convention uses elsewhere, just reached from a request path instead of a
 // claims-less background goroutine.
 //
+// The conversation follows the team, not the claimant. A handoff that leaves
+// the task on its team keeps the task's conversation, which is told who it
+// works with now (delegate.TellTaskAssigned). A handoff that moves the task to
+// another team ends that conversation as `reassigned` and mints the new
+// holder's, in the claim write's transaction.
+//
 // Deliberately out of scope: no Jira-side ticket reassignment. A self-claim
 // syncs a Jira ticket's assignee to the ACTING user; a handoff moves the claim
 // to a THIRD party who may not have Jira connected at all, so syncing here
@@ -452,11 +545,49 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		return version, true
 	}
 
+	// One admin-pool transaction: the claim write, and, when it moved the task
+	// to another team, the boundary on the old team's conversation and the
+	// mint of the new holder's. The conversation stays with the team that made
+	// it: its transcript can quote that team's private knowledge, and its
+	// spend was that team's. The mint cannot run under the caller's claims,
+	// since the conversation's creator is the target and the caller is often
+	// not on the team it lands on, so it shares the claim write's authority.
 	var ok bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	var written int64
+	var ended []domain.Conversation
+	var mintedID string
+	var movedTeams bool
+	if err := s.tx.SystemWithTx(r.Context(), orgID, func(ts db.SystemTxStores) error {
 		var e error
-		ok, e = tx.Tasks.ReassignClaimToUserSystem(r.Context(), orgID, id, task.ClaimedByUserID, targetUserID, version)
-		return e
+		ok, e = ts.Tasks.ReassignClaimToUserSystem(r.Context(), orgID, id, task.ClaimedByUserID, targetUserID, version)
+		if e != nil || !ok {
+			return e
+		}
+		moved, e := ts.Tasks.GetSystem(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		if moved == nil {
+			return fmt.Errorf("task %s is not readable in the transaction that reassigned it", id)
+		}
+		written = moved.Version
+		// The write landed at the version the read above saw, so that read's
+		// team is the team the task was on before it.
+		movedTeams = teamIDString(task.TeamID) != teamIDString(moved.TeamID)
+		if !movedTeams {
+			return nil
+		}
+		if ended, e = ts.Conversations.EndConversationsForTaskSystem(r.Context(), orgID, id, domain.EndedReassigned); e != nil {
+			return e
+		}
+		minted, e := ts.Conversations.MintForPersonClaimSystem(r.Context(), orgID, id, targetUserID)
+		if e != nil {
+			return fmt.Errorf("mint the new holder's conversation: %w", e)
+		}
+		if minted != nil {
+			mintedID = minted.ID
+		}
+		return nil
 	}); errors.Is(err, db.ErrTaskVersion) {
 		writeTaskVersionConflict(w)
 		return 0, false
@@ -498,13 +629,17 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		OrgID: orgID,
 		Data:  map[string]any{},
 	})
+	// A move to another team is a boundary, and what follows it is what
+	// follows a takeover: the old team's runs stop, and the rows the
+	// transaction ended get their memory doorbell, warm-wait ring, and frames.
+	// A handoff within the team keeps the conversation and stops nothing.
+	if movedTeams {
+		cleanupCtx := context.WithoutCancel(r.Context())
+		s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskReassigned, mintedID)
+		s.afterConversationsEnded(cleanupCtx, orgID, ended)
+	}
 	s.publishTaskAssigned(orgID, id, "", targetUserID)
-	// The CAS landed at the version the caller read and moved the claim to
-	// another user, which db.TaskSetSQL counts as one change. It is reported
-	// from that rather than read back because the write ran on the admin pool:
-	// in Postgres it committed outside this request's transaction, so no read
-	// here could tell its change from a later one.
-	return version + 1, true
+	return written, true
 }
 
 // taskDelegateRequest is the body of POST /api/tasks/{id}/delegate.
@@ -573,7 +708,7 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 	// cancels the blueprint run the stop marked, which is what frees the
 	// task's one active run for the mint below.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDelegated)
+	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDelegated, "")
 	s.endTaskConversations(cleanupCtx, orgID, userID, id, domain.EndedDelegated)
 	if s.spawner != nil {
 		if err := s.spawner.SettleTaskStops(cleanupCtx, orgID, id); err != nil {
@@ -726,7 +861,11 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 // client disconnect after the response must not leave a live agent running.
 // The detach belongs to the caller because a caller with further cleanup of its
 // own needs every part of it on one context.
-func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskID string, cause delegate.StopCause) {
+//
+// keepConversationID names one conversation the pass leaves alone, "" for
+// none: the conversation a person's claim minted, which is unsettled like the
+// rest and is the one the task is about from here on.
+func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskID string, cause delegate.StopCause, keepConversationID string) {
 	if s.spawner == nil {
 		return
 	}
@@ -740,6 +879,9 @@ func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskI
 		return
 	}
 	for _, conversationID := range ids {
+		if keepConversationID != "" && conversationID == keepConversationID {
+			continue
+		}
 		if err := s.spawner.StopConversationAndCancelBlueprint(orgID, conversationID, userID, cause); err != nil {
 			taskActionLog.Warn("stop conversation failed", "conversation", conversationID, "task", taskID, "error", err)
 		}
@@ -748,9 +890,11 @@ func (s *Server) stopTaskConversations(ctx context.Context, orgID, userID, taskI
 
 // endTaskConversations stamps the task's boundary: every conversation still
 // live on the task stops being the one the task is about, with the reason it
-// stopped being it. One door for the three gestures that move a task off
-// whoever was working it (requeue, takeover, delegate), because the row
-// they each write is identical and only the reason differs.
+// stopped being it. One door for the two gestures that stamp after their
+// write commits (requeue, delegate), because the row they each write is
+// identical and only the reason differs. A takeover and a reassign across
+// teams stamp inside the transaction that mints the next conversation
+// instead, and share what follows the stamp (afterConversationsEnded).
 //
 // It runs behind stopTaskConversations, never instead of it: the stop ends the
 // PROCESS and this ends the CONVERSATION, and a stop that failed (a dead
@@ -772,6 +916,16 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 			"task", taskID, "ended_reason", string(reason), "error", err)
 		return
 	}
+	s.afterConversationsEnded(ctx, orgID, ended)
+}
+
+// afterConversationsEnded is what follows a boundary stamp, for the rows the
+// stamp returned: the memory doorbell, the warm-wait ring, and one
+// conversation_update each. Its callers are endTaskConversations, which stamps
+// after its gesture commits, and the claim and reassign routes, which stamp
+// inside the transaction that also mints the next conversation. Best-effort,
+// and a no-op for no rows.
+func (s *Server) afterConversationsEnded(ctx context.Context, orgID string, ended []domain.Conversation) {
 	// The memory doorbell, once per stamped row and before the broadcast: each
 	// of these conversations may have ended without its agent having written
 	// its memory, and the task's next delegation does not open until every one
@@ -780,9 +934,13 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 	//
 	// Only the rows this call stamped — an already-ended conversation comes
 	// back from neither door, and its debt (if it still has one) was rung for
-	// by the boundary that actually ended it.
+	// by the boundary that actually ended it. And only the ones that ran: a
+	// conversation with no turn owes no memory, so there is nothing to
+	// generate and no attempt to open for it.
 	for i := range ended {
-		s.kickMemoryOwed(orgID, ended[i].ID)
+		if ended[i].HasRun {
+			s.kickMemoryOwed(orgID, ended[i].ID)
+		}
 	}
 	// A warm claim on an ended conversation still holds the task's tree and
 	// an executor slot. Wake it so it releases them now.

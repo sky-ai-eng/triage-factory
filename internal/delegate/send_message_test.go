@@ -223,7 +223,7 @@ func TestBlueprintDrivableForClaim(t *testing.T) {
 		})
 	}
 
-	// No blueprint parent (interactive, reserved) is not this
+	// No blueprint parent (an interactive conversation) is not this
 	// gate's business — it mirrors the SQL's LEFT JOIN, not an inner one.
 	if !blueprintDrivableForClaim(nil, nil) {
 		t.Error("a nil blueprint must be drivable")

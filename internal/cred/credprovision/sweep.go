@@ -68,7 +68,7 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 		return
 	}
 	for _, p := range parked {
-		if perr := mgr.ProvisionForConversation(ctx, p.OrgID, p.ConversationID); perr != nil {
+		if perr := mgr.ProvisionForConversation(ctx, p.OrgID, p.ConversationID, ReasonAwaitingSweep); perr != nil {
 			log.Warn("backstop-sweep provision failed",
 				"conversation", p.ConversationID, "type", p.ConversationType, "error", perr)
 		}
@@ -114,7 +114,7 @@ func sweepRefresh(ctx context.Context, mgr *Manager, interval, refreshAfter time
 		return
 	}
 	for _, r := range convs {
-		if err := mgr.ProvisionForConversation(ctx, r.OrgID, r.ConversationID); err != nil {
+		if err := mgr.ProvisionForConversation(ctx, r.OrgID, r.ConversationID, ReasonRefreshSweep); err != nil {
 			log.Warn("refresh-sweep provision failed", "conversation", r.ConversationID, "error", err)
 		}
 	}

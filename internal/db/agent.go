@@ -386,9 +386,10 @@ type ConversationStore interface {
 	//
 	// A task owns its conversations, and a boundary is the moment one stops
 	// being the task's live one: the work went back to the queue, a person
-	// took it over, a fresh delegation opened, a blueprint advanced past this
-	// step, the team was archived, the engagement failed. These two doors are
-	// the only writers of ended_at / ended_reason.
+	// took it over, a fresh delegation opened, a person handed it to someone
+	// on another team, a blueprint advanced past this step, the team was
+	// archived, the engagement failed. These doors are the only writers of
+	// ended_at / ended_reason.
 	//
 	// reason is validated against domain.IsEndedReason before anything is
 	// written; ErrInvalidEndedReason otherwise, both dialects.
@@ -412,6 +413,24 @@ type ConversationStore interface {
 	// a conversation_update per row without re-reading. An empty slice means
 	// the task had nothing live, which is an answer, not an error.
 	EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+
+	// MintForPersonClaim mints the conversation a person works a task in, on
+	// the transaction of the claim that put the task on their plate. It is one
+	// INSERT … SELECT … WHERE NOT EXISTS: a task that already holds an un-ended
+	// top-level conversation keeps it, nothing is written, and the answer is
+	// nil with a nil error. So is a task id that names no row.
+	//
+	// The row is an `interactive` conversation, origin `interactive`, manual
+	// with userID as its creator, team-visible on the task's team as the claim
+	// left it, with no prompt, model, blueprint run, or agent. It is parked:
+	// status `open` and parked_at set, with no park reason and no verdict,
+	// the shape a turn that ends with no verdict leaves. So it reads as live
+	// and is not drivable, since the claim scan admits a parked row only with
+	// a person's undelivered message. The runtime is the dialect's, as every
+	// mint's is.
+	//
+	// Returns the row it persisted, projected as Get projects it.
+	MintForPersonClaim(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error)
 
 	// EndConversation stamps one conversation, under the same ended_at IS NULL
 	// guard. nil (with a nil error) when the id names no row in the org OR the
@@ -936,6 +955,18 @@ type ConversationStore interface {
 	// a background context with no JWT claims in scope, so the app-pool door
 	// would see no row to end.
 	EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
+
+	// EndConversationsForTaskSystem is EndConversationsForTask on the admin
+	// pool. A reassign that moves a task to another team is its caller: the
+	// person reassigning may not be on the team the task lands on, so the
+	// write that moved the task also moved it out of their sight.
+	EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+
+	// MintForPersonClaimSystem is MintForPersonClaim on the admin pool, with
+	// the same statement. The same reassign is its caller: the conversation's
+	// creator is the new holder, who is not the caller, so the insert policy
+	// refuses it under the caller's claims.
+	MintForPersonClaimSystem(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error)
 
 	// EndConversationsForTeamSystem is the task door's team-scoped sibling:
 	// every non-ended top-level conversation the team owns, whatever its

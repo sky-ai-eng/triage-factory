@@ -422,8 +422,11 @@ func TestRefreshMarkedGitHub_ListsTheAlertsAMarkNames(t *testing.T) {
 	r.mark("acme/one", domain.DependabotAlertsRefreshTarget())
 	r.m.RefreshMarkedGitHubOnce(context.Background(), org)
 
-	if paths := r.gh.takePaths(); len(paths) != 1 || !strings.HasPrefix(paths[0], "tok-1 GET ") || !strings.HasSuffix(paths[0], "/repos/acme/one/dependabot/alerts") {
-		t.Errorf("requests = %v, want only tok-1's listing of acme/one's alerts", paths)
+	if paths := r.gh.takePaths(); len(paths) != 2 || !strings.HasPrefix(paths[0], "tok-1 GET ") || !strings.HasSuffix(paths[0], "/repos/acme/one/dependabot/alerts") || paths[1] != "tok-1 POST /api/graphql" {
+		t.Errorf("requests = %v, want only tok-1's listing of acme/one's alerts and its read of their Dependabot updates", paths)
+	}
+	if reads := r.gh.takeUpdateReads(); !slices.Equal(reads, []string{"tok-1 acme/one"}) {
+		t.Errorf("update reads = %v, want acme/one's, for the alert that opened", reads)
 	}
 	if reads := r.gh.takeAlertReads(); !slices.Equal(reads, []string{"tok-1 acme/one"}) {
 		t.Errorf("alert listings = %v, want one unconditional listing of acme/one", reads)

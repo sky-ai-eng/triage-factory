@@ -268,6 +268,29 @@ func RunSiblingWorkConformance(t *testing.T, mk SiblingWorkFactory) {
 		if a.Assignee() != domain.UserAssignee(stores.UserID) {
 			t.Errorf("Assignee() = %q, want the claiming user", a.Assignee())
 		}
+		if a.ConversationID != "" || a.ConversationHasRun {
+			t.Errorf("AssignmentSystem of a task with no conversation names %q, has run %v", a.ConversationID, a.ConversationHasRun)
+		}
+		// The task's own conversation rides the assignment, with whether it
+		// has run: a note to it is staged only once it has.
+		_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+		if a, err = stores.Tasks.AssignmentSystem(ctx, orgID, taskID); err != nil || a == nil {
+			t.Fatalf("AssignmentSystem = %v (err %v), want the claim", a, err)
+		}
+		if a.ConversationID != convID || a.ConversationHasRun {
+			t.Errorf("AssignmentSystem names conversation %q, has run %v; want %q, not yet run", a.ConversationID, a.ConversationHasRun, convID)
+		}
+		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
+			ConversationID: convID, Role: "assistant", Content: "a turn",
+		}); err != nil {
+			t.Fatalf("seed an assistant turn: %v", err)
+		}
+		if a, err = stores.Tasks.AssignmentSystem(ctx, orgID, taskID); err != nil || a == nil {
+			t.Fatalf("AssignmentSystem = %v (err %v), want the claim", a, err)
+		}
+		if a.ConversationID != convID || !a.ConversationHasRun {
+			t.Errorf("AssignmentSystem names conversation %q, has run %v; want %q, run", a.ConversationID, a.ConversationHasRun, convID)
+		}
 		closeTask(t, stores, orgID, taskID)
 		if a, err := stores.Tasks.AssignmentSystem(ctx, orgID, taskID); err != nil || a != nil {
 			t.Errorf("AssignmentSystem of a closed task = %+v (err %v), want none", a, err)

@@ -104,16 +104,17 @@ const (
 	ResumeBlockedStepHandedOff = "step_handed_off"
 	// The boundary rungs: the task moved on and this conversation is no longer
 	// the one it is about. One per domain.EndedReason rather than a single
-	// "ended", because the six are what a person is actually told and they
-	// send them different places — a requeued task is picked up by whoever
-	// claims it next, a taken-over one by the person holding it, an archived
-	// team's work by nobody. Permanent, and asked before every rung below:
+	// "ended", because each is what a person is actually told and they send
+	// them different places — a requeued task is picked up by whoever claims
+	// it next, a taken-over or reassigned one by the person holding it, an
+	// archived team's work by nobody. Permanent, and asked before every rung below:
 	// unlike a missing workspace or a concluded blueprint, an ended
 	// conversation is refused whatever its status, so no other rung's question
 	// is worth asking first.
 	ResumeBlockedEndedRequeued     = "ended_requeued"
 	ResumeBlockedEndedDelegated    = "ended_delegated"
 	ResumeBlockedEndedTakenOver    = "ended_taken_over"
+	ResumeBlockedEndedReassigned   = "ended_reassigned"
 	ResumeBlockedEndedStepAdvanced = "ended_step_advanced"
 	ResumeBlockedEndedTeamArchived = "ended_team_archived"
 	ResumeBlockedEndedFailed       = "ended_failed"
@@ -299,7 +300,7 @@ func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *do
 // the whole SQL gate unconditionally.
 //
 // A nil blueprint is drivable: a conversation with no blueprint parent
-// (interactive, reserved) is not this gate's business, matching the SQL's
+// (the one a person's claim mints) is not this gate's business, matching the SQL's
 // LEFT JOIN.
 //
 // It mirrors the blueprint clause ONLY, and the name says which: it answers
@@ -866,6 +867,13 @@ func (s *Spawner) followUpBlock(ctx context.Context, orgID string, conv *domain.
 	if block := endedFollowUpBlock(conv); block != "" {
 		return block
 	}
+	// The dispatcher has one execution path, the blueprint step's, and fails
+	// a claimed conversation with no blueprint run. A message here would wake
+	// the conversation a person's claim minted only for that to fail it.
+	// TODO(TFAC-1421): interactive conversations take messages once the dispatcher runs them
+	if conv.Type == domain.ConversationTypeInteractive {
+		return ResumeBlockedNotSteerable
+	}
 	if !resumableState(conv.Status) {
 		if drainsUndeliveredInput(*conv) {
 			return ""
@@ -900,8 +908,9 @@ func blockedFollowUpError(block string) error {
 	case ResumeBlockedStepHandedOff:
 		return ErrStepHandedOff
 	case ResumeBlockedEndedRequeued, ResumeBlockedEndedDelegated, ResumeBlockedEndedTakenOver,
+		ResumeBlockedEndedReassigned,
 		ResumeBlockedEndedStepAdvanced, ResumeBlockedEndedTeamArchived, ResumeBlockedEndedFailed:
-		// One error for all six. The rung is what carries WHICH boundary, and
+		// One error for every boundary. The rung is what carries WHICH, and
 		// it reaches the client on the run read; the error only has to settle
 		// the status, and every boundary settles it the same way.
 		return ErrConversationEnded

@@ -85,6 +85,8 @@ func parsePRCoherenceEvent(evt *domain.Event) (prCoherenceEvent, bool) {
 }
 
 func (p prCoherenceEvent) injectionBody(eventType string) string {
+	// TODO(TFAC-1418): the check name and URL are written by the repository's
+	// workflows and render outside any untrusted-marker region.
 	target := fmt.Sprintf("PR #%d (%s)", p.prNumber, p.repo)
 	head := domain.ShortSHA(p.headSHA)
 	// On a CI or conflict note the head says where the change was observed

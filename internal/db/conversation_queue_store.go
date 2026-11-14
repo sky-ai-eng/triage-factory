@@ -327,6 +327,20 @@ func UnsettledConversationSQL(alias string) string {
 	return `(` + alias + `.status IS NULL OR NOT ` + SettledConversationSQL(alias) + `)`
 }
 
+// ConversationHasRunSQL is the one "has this conversation run" test, against
+// the conversation alias the caller names: an assistant message exists on it.
+// Every reader that asks interpolates this: the owed-memory condition, the
+// conversation read's has_run, and the assignment read behind a person's
+// reassign note.
+//
+// It tests for an assistant row and never a user row. A staged note is a user
+// row, and a conversation nobody has typed in collects them, so a user row
+// says nothing about whether an engagement produced a turn. Served by
+// idx_messages_conversation.
+func ConversationHasRunSQL(alias string) string {
+	return `EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = ` + alias + `.id AND hr.role = 'assistant')`
+}
+
 // EpisodeStartSQL renders when a conversation's current queue episode began,
 // against the conversation alias convAlias as it stood before the claim the
 // episode is being counted for. Both dialects' episode counts compare their

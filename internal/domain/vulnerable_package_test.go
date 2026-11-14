@@ -60,3 +60,35 @@ func TestVulnerablePackageSnapshot_HighestSeverityAndTerminal(t *testing.T) {
 		t.Error("Alert(9) found an alert that is not open")
 	}
 }
+
+// TestDependabotAlert_DependabotCannotFix covers why Dependabot cannot fix an
+// alert, and whether it may still act on one, for each update GitHub reports.
+func TestDependabotAlert_DependabotCannotFix(t *testing.T) {
+	update := func(state, errorType string) *DependabotUpdate {
+		return &DependabotUpdate{State: state, ErrorType: errorType}
+	}
+	for _, tc := range []struct {
+		name      string
+		alert     DependabotAlert
+		cannotFix string
+		awaits    bool
+	}{
+		{"unread", DependabotAlert{FirstPatchedVersion: "1.0"}, "", true},
+		{"untried", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdateNone, "")}, "", true},
+		{"trying", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdatePending, "")}, "", true},
+		{"a pull request", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdatePullRequest, "")}, "", false},
+		{"a failure", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdateError, "security_update_not_possible")}, DependabotCannotFixUpdateFailed, false},
+		{"a code TF does not know", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdateError, "something_new")}, DependabotCannotFixUpdateFailed, false},
+		{"a pull request already proposes it", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdateError, "pull_request_exists_for_latest_version")}, "", false},
+		{"no longer vulnerable", DependabotAlert{FirstPatchedVersion: "1.0", DependabotUpdate: update(DependabotUpdateError, "security_update_not_needed")}, "", false},
+		{"no patched version", DependabotAlert{}, DependabotCannotFixNoPatchedVersion, false},
+		{"no patched version and a failure", DependabotAlert{DependabotUpdate: update(DependabotUpdateError, "security_update_not_found")}, DependabotCannotFixNoPatchedVersion, false},
+	} {
+		if got := tc.alert.DependabotCannotFix(); got != tc.cannotFix {
+			t.Errorf("%s: DependabotCannotFix() = %q, want %q", tc.name, got, tc.cannotFix)
+		}
+		if got := tc.alert.AwaitsDependabot(); got != tc.awaits {
+			t.Errorf("%s: AwaitsDependabot() = %v, want %v", tc.name, got, tc.awaits)
+		}
+	}
+}

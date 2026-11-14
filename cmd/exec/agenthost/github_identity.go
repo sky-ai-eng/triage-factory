@@ -80,15 +80,15 @@ func (c *LocalClient) githubPullRequest(ctx context.Context, client *ghclient.Cl
 }
 
 // targetIdentity reads the identity of whatever a GitHub target names, an
-// owner/repo#N or an owner/repo, through the run's client for its repository.
-// A target that names neither, or a repository the run cannot reach, answers
-// the zero identity.
+// owner/repo#N or an owner/repo, through the run's client for its repository
+// (recordingRepoClient). A target that names neither, or a repository the run
+// cannot reach, answers the zero identity.
 func (c *LocalClient) targetIdentity(ctx context.Context, target string) domain.GitHubIdentity {
 	owner, repo, ok := targetRepository(target)
 	if !ok {
 		return domain.GitHubIdentity{}
 	}
-	client, err := c.githubClientForRepo(ctx, owner, repo)
+	client, err := c.recordingRepoClient(ctx, owner, repo)
 	if err != nil {
 		agenthostLog.Warn("no GitHub client to read the identity of a recorded object with; recording it unlinked",
 			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "error", err)

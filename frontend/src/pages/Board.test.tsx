@@ -276,6 +276,49 @@ describe('the board lanes', () => {
   })
 })
 
+describe('the lane kind filter', () => {
+  // The facet stub answers every lane with two kinds, so each lane's panel
+  // has a choice to offer.
+  function facetTwoKinds() {
+    const base = api.apiJSON.getMockImplementation()!
+    api.apiJSON.mockImplementation(async (path: string, init?: { body?: string }) => {
+      if (path === '/api/tasks/facets') {
+        facetBodies.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>)
+        return {
+          event_types: [{ value: 'github:pr:opened', count: 2 }],
+          entity_kinds: [
+            { value: 'pr', count: 1 },
+            { value: 'vulnerable_package', count: 1 },
+          ],
+        }
+      }
+      return base(path, init)
+    })
+  }
+
+  it('offers no kind choice for a lane of one kind', async () => {
+    renderBoard()
+    await screen.findByText(FREE.title)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Sort & filter' })[1])
+    expect(await screen.findAllByRole('button', { name: 'Newest' })).not.toHaveLength(0)
+    expect(screen.queryByRole('button', { name: 'Vulnerable packages' })).not.toBeInTheDocument()
+  })
+
+  it('sends a picked kind as entity_kinds on the lane and its facet', async () => {
+    facetTwoKinds()
+    renderBoard()
+    await screen.findByText(FREE.title)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Sort & filter' })[1])
+    // The panels sit in lane order, so the second pill is In Progress's.
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Vulnerable packages' }))[1])
+    const picked = (b: Record<string, unknown>) =>
+      (b.statuses as string[])[0] === 'in_progress' &&
+      JSON.stringify(b.entity_kinds) === JSON.stringify(['vulnerable_package'])
+    await waitFor(() => expect(laterBodies().some(picked)).toBe(true))
+    await waitFor(() => expect(facetBodies.some(picked)).toBe(true))
+  })
+})
+
 describe('the lane read runs on the server', () => {
   it('sends the search in the lane body, and only that lane re-reads', async () => {
     renderBoard()
@@ -311,6 +354,62 @@ describe('the lane read runs on the server', () => {
         ),
       ).toBe(true),
     )
+  })
+})
+
+/** The conversations the board's cards link to, one entry per distinct id. */
+function runLinks(): string[] {
+  const ids = Array.from(document.querySelectorAll('a[href*="/runs/"]')).map(
+    (a) => (a.getAttribute('href') ?? '').split('/runs/')[1],
+  )
+  return [...new Set(ids)]
+}
+
+describe('the conversation a card shows', () => {
+  it("keeps the run a person took over when their claim's conversation has not run", async () => {
+    // The list answers newest first, and the claim's conversation is newer
+    // than the run it took the task from.
+    const claimed = {
+      ...conversation('open'),
+      ID: 'c-claim',
+      StartedAt: '2026-09-01T13:00:00Z',
+      type: 'interactive',
+      has_run: false,
+    } as Conversation
+    api.apiJSON.mockImplementation(async (path: string) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') return { event_types: [] }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    })
+    renderBoard()
+    await screen.findByText(HELD.title)
+
+    expect(runLinks()).toEqual([held.ID])
+  })
+
+  it("shows a claim's conversation once it has run", async () => {
+    const claimed = {
+      ...conversation('open'),
+      ID: 'c-claim',
+      StartedAt: '2026-09-01T13:00:00Z',
+      type: 'interactive',
+      has_run: true,
+    } as Conversation
+    api.apiJSON.mockImplementation(async (path: string) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') return { event_types: [] }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    })
+    renderBoard()
+    await screen.findByText(HELD.title)
+
+    expect(runLinks()).toEqual(['c-claim'])
   })
 })
 

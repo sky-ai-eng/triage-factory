@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,12 +30,15 @@ import (
 
 const vulnHost = "https://github.com"
 
-// fakeAlert is one open alert the fake serves.
+// fakeAlert is one open alert the fake serves, with a patched version unless
+// unpatched is set, and an updated_at of updatedAt when it is set.
 type fakeAlert struct {
 	number    int
 	ecosystem string
 	pkg       string
 	severity  string
+	unpatched bool
+	updatedAt time.Time
 }
 
 // alertsFake is a GitHub serving each repository's open Dependabot alerts,
@@ -55,17 +59,37 @@ type alertsFake struct {
 	// hold, when set, is called with the repository before its request is
 	// served, outside mu, so a test can keep listings in flight.
 	hold func(repo string)
+
+	// updates is the dependabotUpdate GitHub's GraphQL answers for each
+	// alert, as raw JSON by repository and number; an alert with none
+	// answers null, one Dependabot has not tried. omitted is the alerts the
+	// answer leaves out, updateStatus a status a repository's read answers
+	// instead, and updateReads counts each repository's reads.
+	updates      map[string]map[int]string
+	omitted      map[string]map[int]bool
+	updateStatus map[string]int
+	updateReads  map[string]int
+	// noRepository is the repositories whose read GitHub answers with a null
+	// repository and a NOT_FOUND error, and spentAfter the repository whose
+	// read answers with the GraphQL budget spent until four minutes on.
+	noRepository map[string]bool
+	spentAfter   string
 }
 
 func newAlertsFake(t *testing.T) (*alertsFake, *ghclient.Client) {
 	t.Helper()
-	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}, malformed: map[string]bool{}, limited: map[string]bool{}}
+	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}, malformed: map[string]bool{}, limited: map[string]bool{},
+		updates: map[string]map[int]string{}, omitted: map[string]map[int]bool{}, updateStatus: map[string]int{}, updateReads: map[string]int{}, noRepository: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return f, ghclient.NewClient(srv.URL, "tok")
 }
 
 func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/graphql") {
+		f.serveUpdates(w, r)
+		return
+	}
 	_, rest, _ := strings.Cut(r.URL.Path, "/repos/octo/")
 	repo, suffix, _ := strings.Cut(rest, "/")
 	if suffix != "dependabot/alerts" {
@@ -98,11 +122,19 @@ func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	var objs []string
 	for _, a := range f.alerts[repo] {
-		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","updated_at":"2026-11-0%dT00:00:00Z",
+		updatedAt := fmt.Sprintf("2026-11-0%dT00:00:00Z", 1+a.number%9)
+		if !a.updatedAt.IsZero() {
+			updatedAt = a.updatedAt.UTC().Format(time.RFC3339)
+		}
+		patched := `{"identifier":"9.9.9"}`
+		if a.unpatched {
+			patched = "null"
+		}
+		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","updated_at":%q,
 			"dependency":{"package":{"ecosystem":%q,"name":%q},"manifest_path":"package.json","scope":"runtime"},
 			"security_advisory":{"ghsa_id":"GHSA-%d","cve_id":null,"summary":"advisory %d","severity":%q},
-			"security_vulnerability":{"package":{"ecosystem":%q,"name":%q},"severity":%q,"vulnerable_version_range":"< 9.9.9","first_patched_version":{"identifier":"9.9.9"}}}`,
-			a.number, 1+a.number%9, a.ecosystem, a.pkg, a.number, a.number, a.severity, a.ecosystem, a.pkg, a.severity))
+			"security_vulnerability":{"package":{"ecosystem":%q,"name":%q},"severity":%q,"vulnerable_version_range":"< 9.9.9","first_patched_version":%s}}`,
+			a.number, updatedAt, a.ecosystem, a.pkg, a.number, a.number, a.severity, a.ecosystem, a.pkg, a.severity, patched))
 	}
 	body := "[" + strings.Join(objs, ",") + "]"
 	sum := sha256.Sum256([]byte(body))
@@ -114,6 +146,73 @@ func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", etag)
 	_, _ = w.Write([]byte(body))
+}
+
+// serveUpdates answers a read of a repository's Dependabot updates: every
+// alert it serves, less the omitted ones, with the update set for it, on one
+// page.
+func (f *alertsFake) serveUpdates(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query     string `json:"query"`
+		Variables struct {
+			Owner string `json:"owner"`
+			Name  string `json:"name"`
+		} `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !strings.Contains(req.Query, "query DependabotUpdates") || req.Variables.Owner != "octo" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	repo := req.Variables.Name
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updateReads[repo]++
+	if status := f.updateStatus[repo]; status != 0 {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"Server Error"}`))
+		return
+	}
+	if f.noRepository[repo] {
+		_, _ = fmt.Fprintf(w, `{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository with the name 'octo/%s'."}]}`, repo)
+		return
+	}
+	if repo == f.spentAfter {
+		w.Header().Set("X-RateLimit-Resource", "graphql")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Used", "5000")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(4*time.Minute).Unix(), 10))
+	}
+	var nodes []string
+	for _, a := range f.alerts[repo] {
+		if f.omitted[repo][a.number] {
+			continue
+		}
+		update := "null"
+		if u, ok := f.updates[repo][a.number]; ok {
+			update = u
+		}
+		nodes = append(nodes, fmt.Sprintf(`{"number":%d,"dependabotUpdate":%s}`, a.number, update))
+	}
+	_, _ = fmt.Fprintf(w, `{"data":{"repository":{"vulnerabilityAlerts":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[%s]}},"rateLimit":{"cost":1}}}`, strings.Join(nodes, ","))
+}
+
+// setUpdate has GitHub's GraphQL answer update, raw JSON, as the
+// dependabotUpdate of repo's alert number.
+func (f *alertsFake) setUpdate(repo string, number int, update string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updates[repo] == nil {
+		f.updates[repo] = map[int]string{}
+	}
+	f.updates[repo][number] = update
+}
+
+// updateReadsOf is how many reads of repo's Dependabot updates arrived.
+func (f *alertsFake) updateReadsOf(repo string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.updateReads[repo]
 }
 
 func (f *alertsFake) set(repo string, alerts ...fakeAlert) {
@@ -146,6 +245,9 @@ type vulnRig struct {
 	// access, when set, is the store the tracker records listings in
 	// instead of the rig's own.
 	access db.RepositoryDependabotAccessStore
+	// now, when set, is the clock reads of Dependabot updates are scheduled
+	// on.
+	now func() time.Time
 }
 
 func newVulnRig(t *testing.T, repos ...string) *vulnRig {
@@ -182,8 +284,9 @@ func (r *vulnRig) tracker() *Tracker {
 	if r.access != nil {
 		access = r.access
 	}
-	return New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID).
+	t := New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID).
 		WithDependabotAccess(access)
+	return t.WithClock(r.now)
 }
 
 // listings is every tracked repository with its listing state as stored.
@@ -355,11 +458,11 @@ func TestRefreshVulnerablePackages_AlertsOpenOnOneEntity(t *testing.T) {
 	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
-	want := events.GitHubVulnerabilityAlertOpenedMetadata{
+	want := events.GitHubVulnerabilityAlertOpenedMetadata{GitHubVulnerabilityAlert: events.GitHubVulnerabilityAlert{
 		Repo: "octo/api", RepositoryID: e.RepositoryID, Ecosystem: "npm", Package: "lodash",
 		AlertNumber: 5, GHSAID: "GHSA-5", Summary: "advisory 5", Severity: "medium", ManifestPath: "package.json",
 		Scope: "runtime", VulnerableVersionRange: "< 9.9.9", FirstPatchedVersion: "9.9.9", HighestSeverity: "medium",
-	}
+	}}
 	if meta != want {
 		t.Errorf("metadata = %+v, want %+v", meta, want)
 	}
@@ -511,7 +614,7 @@ func TestDiffVulnerablePackage(t *testing.T) {
 	snap := func(numbers ...int) domain.VulnerablePackageSnapshot {
 		s := domain.VulnerablePackageSnapshot{Repo: "octo/api", Ecosystem: "npm", Package: "lodash", Alerts: []domain.DependabotAlert{}}
 		for _, n := range numbers {
-			s.Alerts = append(s.Alerts, domain.DependabotAlert{Number: n, Severity: "low"})
+			s.Alerts = append(s.Alerts, domain.DependabotAlert{Number: n, Severity: "low", FirstPatchedVersion: "1.0.0"})
 		}
 		return s
 	}
@@ -529,7 +632,7 @@ func TestDiffVulnerablePackage(t *testing.T) {
 		{"from no snapshot", domain.VulnerablePackageSnapshot{}, snap(4), []string{domain.EventGitHubVulnerabilityAlertOpened}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := eventTypes(DiffVulnerablePackage(tc.prev, tc.curr, "e1", "r1", nil))
+			got := eventTypes(DiffVulnerablePackage(tc.prev, tc.curr, "e1", "r1"))
 			if fmt.Sprint(got) != fmt.Sprint(append([]string{}, tc.want...)) {
 				t.Errorf("events = %v, want %v", got, tc.want)
 			}

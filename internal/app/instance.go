@@ -9,10 +9,10 @@ import (
 )
 
 // ensureIdentity resolves this process's persistent instance identity — the
-// id the fleet registry keys every instances row on. Called first thing in
-// New, before any other subsystem touches the state root:
-// the identity file's exclusive lock is the two-process guard, and it's
-// most valuable held as early in boot as possible.
+// id the fleet registry keys every instances row on. New calls it before
+// any other subsystem touches the state root: the identity file's
+// exclusive lock is the two-process guard, and it's most valuable held as
+// early in boot as possible.
 func (a *App) ensureIdentity() error {
 	root, err := paths.StateRootErr()
 	if err != nil {

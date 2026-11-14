@@ -366,6 +366,7 @@ func vulnerablePackageCloseTypesExcept(terminator string) []string {
 	var out []string
 	for _, et := range []string{
 		domain.EventGitHubVulnerabilityAlertOpened,
+		domain.EventGitHubVulnerabilityDependabotCannotFix,
 		domain.EventGitHubVulnerabilityResolved,
 		domain.EventGitHubVulnerabilityUnreachable,
 	} {

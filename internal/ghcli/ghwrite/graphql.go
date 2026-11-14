@@ -24,7 +24,7 @@ import (
 // review anywhere. Nothing here walks the arguments, and no text an agent or a
 // stranger wrote is ever interpreted — see gqldoc.go for what the reader
 // refuses to look at. A request that performs no mutation is read separately,
-// for the objects its query addresses (read.go).
+// for the objects and branches its query addresses (read.go).
 //
 // The mutation names below are the vocabulary GitHub's schema defines, mapped
 // onto the same domain actions the REST shapes produce. One act, one name,
@@ -728,23 +728,31 @@ func urlMember(raw json.RawMessage) string {
 	return value
 }
 
-// nodeIDMember reads a node id: a string of the characters GitHub's node ids
-// are made of, in either of its encodings, within the bound a request's subject
-// is held to.
+// nodeIDMember reads a node id (validNodeID) out of a response member.
 func nodeIDMember(raw json.RawMessage) string {
 	var value string
-	if err := json.Unmarshal(raw, &value); err != nil || value == "" || len(value) > maxSubjectLength {
+	if err := json.Unmarshal(raw, &value); err != nil || !validNodeID(value) {
 		return ""
 	}
-	for _, c := range value {
+	return value
+}
+
+// validNodeID reports whether s has the shape of a GitHub node id: the
+// characters GitHub's node ids are made of, in either of its encodings, within
+// the bound a request's subject is held to.
+func validNodeID(s string) bool {
+	if s == "" || len(s) > maxSubjectLength {
+		return false
+	}
+	for _, c := range s {
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
 		case strings.ContainsRune("_-=+/", c):
 		default:
-			return ""
+			return false
 		}
 	}
-	return value
+	return true
 }
 
 // databaseIDMember reads a database id: a positive integer, spelled the way

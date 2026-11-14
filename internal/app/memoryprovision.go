@@ -30,9 +30,10 @@ func (a *App) buildMemoryProvisioner() {
 		a.runSecrets,
 		llmcred.SystemEnvResolver(a.llmResolver, "tf-memory"),
 		func(orgID, _, _ string) {
-			// The task's wait just ended: the same payload-free task_updated
-			// every other producer emits, so the Board refetches the card and
-			// the composer re-enables without polling for it.
+			// What the task's read says about its memory wait just changed:
+			// an attempt opened, failed, or ended the wait. The same
+			// payload-free task_updated every other producer emits, so a
+			// screen showing the task refetches it without polling.
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "task_updated",
 				OrgID: orgID,

@@ -9,8 +9,9 @@ import (
 
 // RepositoryDependabotAccessStore owns repository_dependabot_access: per
 // repository, whether the org's GitHub credential can read its Dependabot
-// alerts, as the poll's probe last found it, and the ETag of the poll's last
-// listing of those alerts. A repository the poll has not probed has no row.
+// alerts, as the poll's probe last found it, the ETag of the poll's last
+// listing of those alerts, and when it last read what Dependabot did about
+// them. A repository the poll has not probed has no row.
 //
 // Every method is a system method on the admin pool in Postgres, org_id bound
 // by argument: the poll runs with no claims, and the one request-path reader
@@ -38,6 +39,12 @@ type RepositoryDependabotAccessStore interface {
 	// sql.ErrNoRows when the repository has no answer recorded: the poll lists
 	// only a repository whose answer is readable.
 	RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error)
+
+	// RecordUpdatesReadSystem stores readAt as when the poll last read what
+	// Dependabot did about the repository's open alerts. The answer, when it
+	// was checked and the ETag are left alone. Returns the row as stored, or
+	// sql.ErrNoRows when the repository has no answer recorded.
+	RecordUpdatesReadSystem(ctx context.Context, orgID, repositoryID string, readAt time.Time) (domain.RepositoryDependabotAccess, error)
 
 	// ClearUntrackedAlertListingsSystem clears the stored ETag of every
 	// repository of the org that the poll no longer lists: on host, the org's

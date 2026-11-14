@@ -253,7 +253,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 				sources:        coreSourcesAvailable,
 			}
 
-			if err := m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); err != nil {
+			if err := m.ProvisionForConversation(context.Background(), "org-1", "conv-1", ReasonCredRequest); err != nil {
 				t.Fatalf("ProvisionForConversation: %v", err)
 			}
 			if claims.sealed == nil {

@@ -197,6 +197,24 @@ type PendingFiringsStore interface {
 	// ordinary one again.
 	WithdrawHandedNote(ctx context.Context, orgID, noteID string) (read bool, err error)
 
+	// RequestCancelForTask records a cancellation request
+	// (workitem.RequestCancel) on each of the task's ready or leased firings,
+	// and answers how many it recorded. A row that already carries a request,
+	// or that settled between the read and the write, is passed over. A
+	// request is not a disposition: the next claim settles each row, whatever
+	// the claim filter says about the task being busy, and a leased row's
+	// holder settles its own at its next renewal.
+	//
+	// A person's claim is its caller. The conversation that claim mints keeps
+	// the task busy for as long as the person holds it, so a firing queued
+	// before the claim would otherwise wait behind it and fire once the person
+	// delegated, for an event that delegation already covered.
+	//
+	// Runs on the store's own queryer and opens no transaction, so a store
+	// bound to a transaction records the requests inside it. by and reason are
+	// both required, as workitem.RequestCancel requires them.
+	RequestCancelForTask(ctx context.Context, orgID, taskID, by, reason string) (int, error)
+
 	// TaskRerouted reports whether a firing on the task is already settled
 	// domain.PendingFiringSkipRerouted. A closed task is rerouted once, from
 	// its newest event, and that one routing decides every trigger the

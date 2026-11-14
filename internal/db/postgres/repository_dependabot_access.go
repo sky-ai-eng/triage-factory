@@ -21,11 +21,13 @@ func newRepositoryDependabotAccessStore(q queryer) db.RepositoryDependabotAccess
 
 var _ db.RepositoryDependabotAccessStore = (*repositoryDependabotAccessStore)(nil)
 
-const pgDependabotAccessColumns = `repository_id::text, org_id::text, access, checked_at, alerts_etag`
+const pgDependabotAccessColumns = `repository_id::text, org_id::text, access, checked_at, alerts_etag, updates_read_at`
 
 func scanPGDependabotAccess(row interface{ Scan(...any) error }) (domain.RepositoryDependabotAccess, error) {
 	var a domain.RepositoryDependabotAccess
-	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &a.AlertsETag)
+	var readAt sql.NullTime
+	err := row.Scan(&a.RepositoryID, &a.OrgID, &a.Access, &a.CheckedAt, &a.AlertsETag, &readAt)
+	a.UpdatesReadAt = readAt.Time
 	return a, err
 }
 
@@ -61,6 +63,15 @@ func (s *repositoryDependabotAccessStore) RecordAlertListingSystem(ctx context.C
 		 WHERE org_id = $1 AND repository_id = $2
 		RETURNING `+pgDependabotAccessColumns,
 		orgID, repositoryID, etag))
+}
+
+func (s *repositoryDependabotAccessStore) RecordUpdatesReadSystem(ctx context.Context, orgID, repositoryID string, readAt time.Time) (domain.RepositoryDependabotAccess, error) {
+	return scanWrittenDependabotAccess(s.q.QueryRowContext(ctx, `
+		UPDATE repository_dependabot_access
+		   SET updates_read_at = $3
+		 WHERE org_id = $1 AND repository_id = $2
+		RETURNING `+pgDependabotAccessColumns,
+		orgID, repositoryID, readAt))
 }
 
 func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error) {

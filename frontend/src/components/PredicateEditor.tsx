@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Tooltip } from '../ui/tooltip/Tooltip'
-import { Info } from 'lucide-react'
+import { Info, X } from 'lucide-react'
 import type { FieldSchema } from '../types'
 import IdentityListField, { type IdentityKind } from './IdentityListField'
 import SlackChannelListField from './SlackChannelListField'
@@ -131,6 +131,11 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
   // A Jira status, priority or issue type, or a Linear state, label or label
   // group, named by id and picked from what the team's tracked sources offer.
   const catalog = field.type === 'string_list' ? catalogKindFor(eventType, field.name) : null
+  // A list over a fixed vocabulary the schema names, as ecosystem_in is.
+  const enumList =
+    field.type === 'string_list' && !!field.enum_values && field.enum_values.length > 0
+  // A list of free text, as package_in is: names TF holds no catalog of.
+  const textList = field.type === 'string_list' && TEXT_LIST_FIELDS.has(field.name)
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
@@ -156,6 +161,21 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
         <StringField value={value as string | undefined} onChange={onChange} />
       )}
       {field.type === 'int' && <IntField value={value as number | undefined} onChange={onChange} />}
+      {enumList && (
+        <EnumListField
+          label={humanize(field.name)}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          options={field.enum_values!}
+          onChange={onChange}
+        />
+      )}
+      {textList && (
+        <TextListField
+          label={humanize(field.name)}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={onChange}
+        />
+      )}
       {field.type === 'string_list' && field.name === 'channel_in' && (
         <SlackChannelListField
           teamId={teamId}
@@ -207,14 +227,18 @@ function FieldRow({ field, eventType, teamId, value, onChange }: FieldRowProps) 
           IdentityListField branches on identityKind to read the right
           column (github_user_id, jira_account_id or linear_user_id)
           from /api/me and the team roster. */}
-      {field.type === 'string_list' && !REFERENCE_LIST_FIELDS.has(field.name) && !catalog && (
-        <IdentityListField
-          fieldName={field.name}
-          identityKind={identityKindFor(eventType)}
-          value={Array.isArray(value) ? (value as string[]) : undefined}
-          onChange={(v) => onChange(v)}
-        />
-      )}
+      {field.type === 'string_list' &&
+        !REFERENCE_LIST_FIELDS.has(field.name) &&
+        !catalog &&
+        !enumList &&
+        !textList && (
+          <IdentityListField
+            fieldName={field.name}
+            identityKind={identityKindFor(eventType)}
+            value={Array.isArray(value) ? (value as string[]) : undefined}
+            onChange={(v) => onChange(v)}
+          />
+        )}
     </div>
   )
 }
@@ -236,6 +260,11 @@ const REFERENCE_LIST_FIELDS = new Set([
   ...LINEAR_TEAM_FIELDS,
   ...JIRA_PROJECT_FIELDS,
 ])
+
+// TEXT_LIST_FIELDS are the string_list fields whose values are free text: a
+// package name, in its ecosystem's own spelling. The route compares them
+// ignoring case and refuses a repeat, so the field drops one too.
+const TEXT_LIST_FIELDS = new Set(['package_in'])
 
 // identityKindFor picks the identity an allowlist holds from the event's
 // source prefix: a Linear assignee is a Linear user id, never a GitHub
@@ -319,6 +348,128 @@ function EnumField({
         </option>
       ))}
     </select>
+  )
+}
+
+// --- Enum list: toggle pills, none on = no filter ----------------------------
+
+function EnumListField({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string
+  value: string[] | undefined
+  options: string[]
+  onChange: (v: unknown) => void
+}) {
+  const selected = value ?? []
+  const toggle = (opt: string) => {
+    const next = selected.includes(opt)
+      ? selected.filter((v) => v !== opt)
+      : [...selected, opt].sort((a, b) => options.indexOf(a) - options.indexOf(b))
+    onChange(next.length > 0 ? next : undefined)
+  }
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap gap-1" role="group" aria-label={label}>
+        {options.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            aria-pressed={selected.includes(opt)}
+            onClick={() => toggle(opt)}
+            className={`px-2.5 py-0.5 text-reported font-medium rounded-full border transition-colors ${
+              selected.includes(opt)
+                ? 'bg-warm/10 text-warm border-warm/25'
+                : 'text-ink-3 border-line-1 hover:text-ink-2 hover:border-line-1/80'
+            }`}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+      {selected.length === 0 && (
+        <p className="text-reported text-ink-3">None selected: no filter.</p>
+      )}
+    </div>
+  )
+}
+
+// --- Text list: chips plus an input; Enter or a comma adds -------------------
+
+function TextListField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: string[] | undefined
+  onChange: (v: unknown) => void
+}) {
+  const selected = value ?? []
+  const [draft, setDraft] = useState('')
+  // Adds every non-empty entry of parts that is not already listed, ignoring
+  // case, in one change.
+  const commit = (...parts: string[]) => {
+    const next = [...selected]
+    for (const part of parts) {
+      const entry = part.trim()
+      if (entry && !next.some((v) => v.toLowerCase() === entry.toLowerCase())) next.push(entry)
+    }
+    if (next.length > selected.length) onChange(next)
+  }
+  const remove = (entry: string) => {
+    const next = selected.filter((v) => v !== entry)
+    onChange(next.length > 0 ? next : undefined)
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 rounded-lg border border-line-1 bg-raised focus-within:border-warm/40 focus-within:ring-1 focus-within:ring-warm/20 transition-colors">
+      {selected.map((entry) => (
+        <span
+          key={entry}
+          className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-reported border bg-tint-2 text-ink-2 border-line-2"
+        >
+          {entry}
+          <button
+            type="button"
+            onClick={() => remove(entry)}
+            aria-label={`Remove ${entry}`}
+            className="hover:text-ink-1"
+          >
+            <X size={11} aria-hidden="true" />
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        aria-label={label}
+        value={draft}
+        onChange={(e) => {
+          // A comma ends an entry, so a pasted list lands whole.
+          const parts = e.target.value.split(',')
+          const rest = parts.pop() ?? ''
+          if (parts.length > 0) commit(...parts)
+          setDraft(rest)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            commit(draft)
+            setDraft('')
+          } else if (e.key === 'Backspace' && draft === '' && selected.length > 0) {
+            remove(selected[selected.length - 1])
+          }
+        }}
+        onBlur={() => {
+          commit(draft)
+          setDraft('')
+        }}
+        placeholder={selected.length === 0 ? 'any; Enter adds one' : ''}
+        className="flex-1 min-w-[120px] bg-transparent text-body text-ink-1 placeholder:text-ink-3 focus:outline-none"
+      />
+    </div>
   )
 }
 

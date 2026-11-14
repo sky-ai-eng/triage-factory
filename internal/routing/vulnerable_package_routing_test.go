@@ -143,7 +143,7 @@ func lodashSnapshot(alerts ...domain.DependabotAlert) domain.VulnerablePackageSn
 // implies, built by the tracker's own diff.
 func (f *vulnFixture) listing(t *testing.T, prev, curr domain.VulnerablePackageSnapshot) {
 	t.Helper()
-	evts := tracker.DiffVulnerablePackage(prev, curr, f.entity.ID, f.entity.RepositoryID, nil)
+	evts := tracker.DiffVulnerablePackage(prev, curr, f.entity.ID, f.entity.RepositoryID)
 	if len(evts) == 0 {
 		t.Fatal("the listing implies no event")
 	}

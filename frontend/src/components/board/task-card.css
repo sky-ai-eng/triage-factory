@@ -193,6 +193,37 @@
   color: var(--color-ink-3);
 }
 
+/* Facts about the entity its title does not carry — a vulnerable package's
+   repository, severity and alert count — as one readout line, separated by a
+   middle dot. A severity spends hue the way an event label does. */
+.tc-facts {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: color-mix(in srgb, var(--color-ink-3) 80%, transparent);
+  min-width: 0;
+}
+.tc-fact {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.tc-fact + .tc-fact::before {
+  content: '·';
+  padding: 0 6px;
+  color: var(--color-ink-4);
+}
+.tc-fact[data-tone='problem'] {
+  color: var(--color-alarm);
+}
+.tc-fact[data-tone='attention'] {
+  color: var(--color-warm);
+}
+
 /* The footer: elapsed (or age) on the left, the artifact strip on the right. */
 .tc-foot {
   display: flex;

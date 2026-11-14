@@ -52,6 +52,10 @@ func TestMemoryAttemptStore_Postgres(t *testing.T) {
 				if taskOpen {
 					status = "queued"
 				}
+				// A turn, since only a conversation that has run owes a memory.
+				pgtest.MustExec(t, h.AdminDB,
+					`INSERT INTO messages (org_id, conversation_id, role, subtype, content) VALUES ($1, $2, 'assistant', '', 'a turn')`,
+					orgID, conversationID)
 				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET ended_at = now(), ended_reason = 'failed' WHERE id = $1`, conversationID)
 				pgtest.MustExec(t, h.AdminDB,
 					`UPDATE tasks SET status = $2 WHERE id = (SELECT task_id FROM conversations WHERE id = $1)`, conversationID, status)
@@ -93,7 +97,7 @@ func seedPgSystemLLMRun(t *testing.T, h *pgtest.Harness, orgID, suffix string) s
 		ID:        id,
 		OrgID:     orgID,
 		Job:       "memory-" + suffix,
-		Model:     "claude-haiku-4-5-20251001",
+		Model:     "claude-haiku-5-5",
 		StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed system_llm_runs: %v", err)

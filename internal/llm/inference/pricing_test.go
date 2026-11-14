@@ -230,7 +230,7 @@ func TestModelWindow(t *testing.T) {
 		return int(*p.MaxInputTokens)
 	}
 
-	const base = "claude-haiku-4-5"
+	const base = "claude-haiku-5-5"
 	want := snapshotWindow(base)
 
 	// A known model returns its datasheet window.

@@ -472,7 +472,10 @@ func TestColdResume_CompactsBeforeTheFirstCall(t *testing.T) {
 	}}
 	engine := newTestEngine(tr, provider, newScriptedToolHost())
 
-	result := engine.Run(context.Background(), testParams())
+	// Both models' maximums are 128k, so the conversation's cap is set apart.
+	params := testParams()
+	params.MaxTokens = 8192
+	result := engine.Run(context.Background(), params)
 	if result.Kind != ResultConcluded {
 		t.Fatalf("result = %+v, want concluded", result)
 	}
@@ -487,8 +490,8 @@ func TestColdResume_CompactsBeforeTheFirstCall(t *testing.T) {
 	// the conversation's and not the provider layer's default: this call's
 	// entire output is the summary, and a summary cut short is the one
 	// failure this path has no fallback beneath.
-	if first.MaxTokens != 64000 {
-		t.Errorf("forced-shape call max_tokens = %d, want haiku's own maximum 64000", first.MaxTokens)
+	if first.MaxTokens != 128000 {
+		t.Errorf("forced-shape call max_tokens = %d, want haiku's own maximum 128000", first.MaxTokens)
 	}
 	resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
 	queued := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "queued overnight") })

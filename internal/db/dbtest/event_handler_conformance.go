@@ -179,6 +179,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			"system-jira-implement",
 			"system-linear-implement",
 			"system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
@@ -220,6 +221,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
@@ -702,7 +704,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		// Shipped rows have no creator; the creator filter leaves them out.
 		bps := seedBlueprints(t, "system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback")
+			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate")
 		if err := store.Seed(ctx, orgID, teamID, bps); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
@@ -1001,6 +1004,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
@@ -1058,6 +1062,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)

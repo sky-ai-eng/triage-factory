@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -278,14 +279,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		return launchFailed(fmt.Errorf("mint opening turn: %w", err))
 	}
 
-	// Resolved once, here, and handed to both the engine params and the
-	// credential whitelist below — the request and the whitelist agree by
-	// construction, not by two reads of the same constant. Today this is
-	// always the default; a provider-aware resolution (a Bedrock deployment
-	// needs a Bedrock-shaped id, not the bare Anthropic one) lands at this
-	// single seam when model configuration makes "cheapest enabled"
-	// resolvable.
-	coldModel := agentloop.DefaultColdCompactionModel
+	// The cold model is Haiku 5.5 on the engagement's own provider, because
+	// its window holds any transcript an offered model can grow. Resolved
+	// once, here, and handed to both the engine params and the credential
+	// whitelist below, so the request and the whitelist agree by construction.
+	coldModel := coldCompactionModelFor(model)
 
 	// Checkpoints, for as long as the engagement's turns and the warm waits
 	// between them run, and not a moment longer. recordNativeResult stops this
@@ -502,13 +500,15 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// The native blocks name the in-jail paths and the `tfac` applet
 		// outright, so the run context carries only what differs per run and
 		// those blocks cannot state for themselves: that the task is already
-		// closed, the work that overlaps it, the PR checkout's path, the
-		// branch convention, the sources this run cannot reach, and this
-		// run's staged knowledge.
+		// closed, the work that overlaps it, the path of the checkout its
+		// setup built, the branch convention, the sources this run cannot
+		// reach, and this run's staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
 			runContext("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID),
-				s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+				s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "",
+				agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout),
+				s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
 			cfg.sources.tools(agentprompt.RuntimeNative),
 			nonTerminal,
 		)
@@ -521,7 +521,7 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts, deliverables),
+		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
 	}
 }
 
@@ -668,6 +668,25 @@ func (s *Spawner) nativeCredentials(cfg runConfig, model, coldModel string) agen
 		// compaction request and this whitelist cannot drift apart.
 		Models: []string{model, coldModel},
 	}
+}
+
+// bedrockColdCompactionModel is Haiku 5.5 under the id a Bedrock credential
+// calls it by.
+const bedrockColdCompactionModel = "us.anthropic.claude-haiku-5-5"
+
+// coldCompactionModelFor answers the model a cold compaction of an engagement
+// on model runs on: Haiku 5.5, on the provider model is served through. A key
+// the catalog does not know answers itself, because it fits its own window by
+// definition and the credential already whitelists it.
+func coldCompactionModelFor(model string) string {
+	provider, _ := modelcatalog.ProviderFor(model)
+	switch provider {
+	case modelcatalog.ProviderAnthropic:
+		return domain.ModelHaiku
+	case modelcatalog.ProviderBedrock:
+		return bedrockColdCompactionModel
+	}
+	return model
 }
 
 // envSliceToMap turns KEY=VALUE entries into a map, last-wins. Values may

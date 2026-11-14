@@ -429,7 +429,7 @@ func TestBaseline_EnableSets_AppValidated(t *testing.T) {
 		set  sql.NullString
 	}{
 		{"null", sql.NullString{Valid: false}},
-		{"known keys", sql.NullString{String: `["claude-sonnet-5","claude-haiku-4-5-20251001"]`, Valid: true}},
+		{"known keys", sql.NullString{String: `["claude-sonnet-5","claude-haiku-5-5"]`, Valid: true}},
 		// Not a key this build offers — must still pass the DB (no CHECK).
 		{"a key the build does not offer", sql.NullString{String: `["gpt-5-future"]`, Valid: true}},
 	} {

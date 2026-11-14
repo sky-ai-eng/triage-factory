@@ -113,18 +113,29 @@ const (
 	// ConversationTypeDelegation is a task-driven conversation — every
 	// blueprint step today.
 	ConversationTypeDelegation = "delegation"
-	// ConversationTypeInteractive is reserved for a conversation a person
-	// drives, on a task or with no task. The claim predicate admits it;
-	// nothing mints one yet.
+	// ConversationTypeInteractive is the conversation a person drives on a
+	// task they hold. A person's claim mints it
+	// (ConversationStore.MintForPersonClaim), parked with no verdict, and it
+	// stays the task's conversation until a boundary ends it.
 	ConversationTypeInteractive = "interactive"
+)
+
+// The conversations.origin vocabulary — how a conversation came to exist.
+// App-validated. The column's default is 'blueprint', which the schema pairs
+// with a blueprint run, a task, and a prompt, so a mint with no blueprint run
+// names another value.
+const (
+	// ConversationOriginInteractive is a conversation minted by a person's
+	// claim, with no blueprint run behind it.
+	ConversationOriginInteractive = "interactive"
 )
 
 // EndedReason is WHY a conversation stopped being its task's live one — the
 // closed list of boundaries the task context model defines. A task owns its
 // conversations, and each of these is a moment the task moved on: the work
 // went back to the queue, a person took it over, a fresh delegation opened, a
-// blueprint advanced past this step, the owning team was archived, or the
-// engagement failed.
+// person handed it to someone on another team, a blueprint advanced past this
+// step, the owning team was archived, or the engagement failed.
 //
 // It is a fact about the conversation's place in the task, not about how the
 // transcript finished. A `completed` row ends just as a `running` one does
@@ -155,9 +166,15 @@ const (
 	// before the new conversation is minted, so a task never has two live
 	// conversations at once.
 	EndedDelegated EndedReason = "delegated"
-	// EndedTakenOver — a person claimed a task an agent held. A user-to-user
-	// handoff is not a boundary; only the agent-to-human transition is.
+	// EndedTakenOver — a person claimed a task an agent held. Stamped in the
+	// claim's transaction, before the person's own conversation is minted.
 	EndedTakenOver EndedReason = "taken_over"
+	// EndedReassigned — a person's claim was handed to someone on another
+	// team, and the task moved to that team. The conversation stays with the
+	// team that made it, and the new holder gets one of their own. A handoff
+	// that leaves the task on its team is not a boundary: the conversation
+	// stays the task's.
+	EndedReassigned EndedReason = "reassigned"
 	// EndedStepAdvanced — the blueprint moved to step N+1, so step N's
 	// conversation is superseded rather than merely finished.
 	EndedStepAdvanced EndedReason = "step_advanced"
@@ -179,6 +196,7 @@ func AllEndedReasons() []EndedReason {
 		EndedRequeued,
 		EndedDelegated,
 		EndedTakenOver,
+		EndedReassigned,
 		EndedStepAdvanced,
 		EndedTeamArchived,
 		EndedFailed,
@@ -191,7 +209,7 @@ func AllEndedReasons() []EndedReason {
 // write a word nothing can read back.
 func IsEndedReason(reason string) bool {
 	switch EndedReason(reason) {
-	case EndedRequeued, EndedDelegated, EndedTakenOver,
+	case EndedRequeued, EndedDelegated, EndedTakenOver, EndedReassigned,
 		EndedStepAdvanced, EndedTeamArchived, EndedFailed:
 		return true
 	}
@@ -352,9 +370,9 @@ const UpstreamContinuationNote = "<system-note kind=\"continuation\">\n" +
 // status/summary projection is served through a handler-side map; the
 // transcript rows cross the wire as the snake_case MessageDTO.
 type Conversation struct {
-	// Type names the owning surface: "delegation" | "interactive" (reserved)
-	// | namespaced "subagent:<kind>" (reserved). Empty on legacy hydration
-	// paths that don't select it.
+	// Type names the owning surface: "delegation" | "interactive" (minted by
+	// a person's claim) | namespaced "subagent:<kind>" (reserved). Empty on
+	// read paths with a projection of their own that doesn't select it.
 	Type string `json:"type,omitempty"`
 	// Runtime is the executing engine: ConversationRuntimeSDK |
 	// ConversationRuntimeNative — a one-way ratchet per conversation (the
@@ -501,8 +519,15 @@ type Conversation struct {
 	// concluded with nothing to say) both leave it true, because the question
 	// is about the agent and not about whether a row exists.
 	MemoryMissing bool
-	TriggerType   string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
-	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
+	// HasRun says the conversation holds an assistant message: an engagement
+	// has produced a turn on it. Derived on every read
+	// (db.ConversationHasRunSQL), never stored. A conversation a person's
+	// claim minted reads false until its first turn, however many staged
+	// notes it has collected, and a conversation that never ran owes no
+	// memory when a boundary ends it.
+	HasRun      bool   `json:"has_run"`
+	TriggerType string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
+	TriggerID   string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
 
 	// TriggeringEventID is the event instance that auto-fired this
 	// conversation. Set only on the event path; empty (→ SQL NULL) for manual

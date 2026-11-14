@@ -222,6 +222,24 @@ reaching Triage Factory, from one repository or from all of them. A
 repository whose alerts get `refused` every poll has lost access, which the
 org's GitHub access settings page shows within a day.
 
+The poll also reads what Dependabot did about each repository's open alerts:
+when an alert opens, then less often as the alerts age, at least once a day,
+and at most 25 repositories per poll for each GitHub credential.
+`tf_github_dependabot_update_reads_total` counts those reads by `outcome`:
+
+| `outcome`    | Meaning                                                                           |
+| ------------ | --------------------------------------------------------------------------------- |
+| `read`       | GitHub answered for every alert                                                   |
+| `incomplete` | GitHub answered but left out alerts the listing holds; they keep their last state |
+| `failed`     | No usable answer; the repository is read again later                              |
+| `deferred`   | Due, but the poll had already made its 25 reads; read on a later poll             |
+
+A steady rate of `failed` means "Dependabot Cannot Fix" events are not being
+emitted. A steady `incomplete` with no `read` usually means the credential
+can list the alerts but GitHub's GraphQL API hides them from it. A steady
+`deferred` means more repositories have young alerts than the poll reads in
+one pass, so failures reach Triage Factory a few polls late.
+
 ### Mergeability probes
 
 Triage Factory learns whether a pull request conflicts by asking GitHub only
@@ -372,10 +390,28 @@ TLS, but the endpoint variables don't turn tracing on (TF logs
 
 Spans are pushed, so the backend must be reachable from each pod, and an
 unreachable one loses spans silently; look for `opentelemetry sdk error` in the
-logs. Spans carry opaque ids, not repo names or message text, but are
-unauthenticated without TLS, so keep the backend internal. Log lines written
+logs. Spans carry opaque ids, not repo names, message text, or error text, but
+are unauthenticated without TLS, so keep the backend internal. Log lines written
 inside a span carry `trace_id` and `span_id`, and `/metrics` serves exemplars
 to a scraper that negotiates OpenMetrics.
+
+Each process exports its spans, and its `target_info` metric, under
+`service.name` `triagefactory-control` or `triagefactory-executor`
+(`triagefactory` in local mode), with `service.instance.id` set to the
+instance id the [fleet console](fleet-console.md) shows. To see one executor's
+spans, search `{ resource.service.instance.id = "…" }`.
+
+**Why a span failed.** A failed span's status names the step that failed, never
+the error, because an error's text can name repositories, branches, and git
+remotes. The error is logged on a line carrying the same `trace_id`. Copy the
+trace id from the span and search the logs of the service its `service.name`
+names, `control` or `executor`:
+
+```sh
+docker compose logs executor | grep <trace_id>
+```
+
+A failed run setup's whole error is on its `engagement setup failed` line.
 
 ### The bundled trace stack
 
@@ -447,6 +483,11 @@ menu.
 - **An event.** A poll cycle's trace ends when it emits events. Each event's
   routing is its own `route.event` trace, linked back to the poll. A trigger
   that delegates carries the run's `conversation.id` on `route.delegate`.
+- **A write to a run.** The server span of a message, a stop, a permission
+  answer, or a deliverable refresh
+  (`POST /api/agent/conversations/{conversationID}/…`) carries
+  `conversation.id`, so the request shows up beside the run's other traces.
+  Reads of a run carry none.
 - **A run's setup.** Each attempt is one trace rooted at `engagement.setup`,
   from claim to agent start, numbered by `claim.attempt`. Its `outcome` is
   `agent_live`, `cancelled`, `shutdown`, `fenced`, `loss_budget_spent`, or
@@ -457,7 +498,18 @@ menu.
 - **A slow resume.** `engagement.workspace.ensure` carries
   `workspace.provenance` (`warm`, `rehydrated`, `fresh`) and
   `snapshot.waited_ms`. Waiting the full `TF_SNAPSHOT_WAIT_SEC` and then
-  `fresh` means the previous executor never wrote its snapshot.
+  `fresh` means the previous executor never wrote its snapshot. A
+  `rehydrated` workspace has one `engagement.workspace.restore_checkout` span
+  per checkout, and under it a `worktree.git` span per git command, whose `op`
+  is the subcommand (`fetch`, `worktree`, `index-pack`, …). A git command that
+  fails has `outcome` `failed`, not an error status, because some are expected
+  to fail; the checkout that failed is the error.
 - **Credentials and signatures** are made on a control pod while the executor
   waits (`credentials.provision`, `commit_signing.decide`). They aren't linked
-  to the run's trace; search by `conversation.id`.
+  to the run's trace; search by `conversation.id`. A seal's `reason` says what
+  ran it: `cred_request` (a run started waiting for credentials, or a running
+  run added a repository), `awaiting_sweep` (the periodic pass over runs still
+  waiting), or `refresh_sweep` (the periodic re-seal of a running run). The
+  awaiting pass also seals a run whose first seal hasn't been picked up yet,
+  so an `awaiting_sweep` seal beside a `cred_request` one doesn't by itself
+  mean a request was lost.

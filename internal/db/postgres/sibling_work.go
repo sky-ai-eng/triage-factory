@@ -43,16 +43,20 @@ func (s *taskStore) AssignmentSystem(ctx context.Context, orgID, taskID string) 
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT x.id::text, x.entity_id::text, x.event_type, x.dedup_key, e.source_id,
 		       COALESCE(x.claimed_by_agent_id::text, ''), COALESCE(x.claimed_by_user_id::text, ''),
-		       COALESCE(u.display_name, ''), COALESCE(tm.name, '')
+		       COALESCE(u.display_name, ''), COALESCE(tm.name, ''),
+		       COALESCE(lc.id::text, ''), `+db.ConversationHasRunSQL("lc")+`
 		  FROM tasks x
 		  JOIN entities e ON e.org_id = x.org_id AND e.id = x.entity_id
 		  LEFT JOIN users u ON u.id = x.claimed_by_user_id
 		  LEFT JOIN teams tm ON tm.org_id = x.org_id AND tm.id = x.team_id
+		  LEFT JOIN conversations lc ON lc.org_id = x.org_id
+		       AND lc.id = `+taskLiveConversationSQL("x.org_id", "x.id")+`
 		 WHERE x.org_id = $1 AND x.id = $2
 		   AND x.status NOT IN ('done', 'dismissed')
 		   AND (x.claimed_by_agent_id IS NOT NULL OR x.claimed_by_user_id IS NOT NULL)
 	`, orgID, taskID).Scan(&a.TaskID, &a.EntityID, &a.EventType, &a.DedupKey, &a.EntitySourceID,
-		&a.AgentID, &a.UserID, &a.AssigneeName, &a.TeamName)
+		&a.AgentID, &a.UserID, &a.AssigneeName, &a.TeamName,
+		&a.ConversationID, &a.ConversationHasRun)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

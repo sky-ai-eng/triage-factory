@@ -71,6 +71,10 @@ type taskFixture struct {
 	priority *float64
 	// inQueue is what the queue projection must answer for this row.
 	inQueue bool
+	// vulnerable makes the row's entity a vulnerable package with this
+	// snapshot, keyed from its repo, ecosystem and package. Nil seeds a pull
+	// request.
+	vulnerable *domain.VulnerablePackageSnapshot
 }
 
 // seedTaskFixture inserts an entity, event and task for one fixture and returns
@@ -83,7 +87,21 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
 	sourceID := fmt.Sprintf("octo/list#%s-%d", f.name, now.UnixNano())
+	kind, snapshot := domain.EntityKindPullRequest, "{}"
 	eventType := f.eventType
+	if f.vulnerable != nil {
+		v := f.vulnerable
+		sourceID = domain.VulnerablePackageSourceID(v.Repo, v.Ecosystem, v.Package)
+		kind = domain.EntityKindVulnerablePackage
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot = string(raw)
+		if eventType == "" {
+			eventType = domain.EventGitHubVulnerabilityAlertOpened
+		}
+	}
 	if eventType == "" {
 		eventType = domain.EventGitHubPRCICheckFailed
 	}
@@ -91,8 +109,8 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	repoID := dbseed.GitHubEntityRepository(t, database, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 	execSQL(t, database, `
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope, repository_id)
-		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com', ?)`,
-		entityID, sourceID, "List fixture "+f.name, "https://example/"+sourceID, now, repoID)
+		VALUES (?, 'github', ?, ?, ?, ?, ?, ?, 'https://github.com', ?)`,
+		entityID, sourceID, kind, "List fixture "+f.name, "https://example/"+sourceID, snapshot, now, repoID)
 	execSQL(t, database, `
 		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
 		VALUES (?, ?, ?, '', '{}', ?)`,
@@ -429,6 +447,12 @@ func TestTaskList_StrictBody(t *testing.T) {
 			body:       map[string]any{"team_ids": []string{"junk"}},
 			wantReason: "INVALID_FIELD",
 			wantField:  "team_ids",
+		},
+		{
+			name:       "unknown entity kind",
+			body:       map[string]any{"entity_kinds": []string{"vulnerable_package", "advisory"}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "entity_kinds",
 		},
 		{
 			name:       "malformed task id",

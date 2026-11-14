@@ -20,7 +20,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // agentHandler serves the agent-conversation endpoints (status / messages / cancel /
@@ -39,6 +41,15 @@ type agentHandler struct {
 // is a uuid column on Postgres. See uuidPathOr404.
 func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return uuidPathOr404(w, r, "conversationID", "conversation")
+}
+
+// traceConversation puts conversationID on the request's server span, so a
+// search on the id finds the request beside the engagement traces of the
+// conversation it changed. Only the write routes call it: a client watching a
+// conversation polls the reads, and those traces would crowd out the ones a
+// search on the id is for.
+func traceConversation(r *http.Request, conversationID string) {
+	trace.SpanFromContext(r.Context()).SetAttributes(telemetry.ConversationID(conversationID))
 }
 
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +220,7 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 
 	rc := ag.reconciler()
 	if rc == nil {
@@ -633,11 +645,15 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// with the legacy set they belong to; empty string when the conversation holds
 		// none (still executing, an infra failure, or an outcome gate that
 		// exhausted its retries).
-		"Outcome":              conv.Outcome,
-		"OutcomeReason":        conv.OutcomeReason,
-		"FailureKind":          string(conv.FailureKind),
-		"SessionID":            conv.SessionID,
-		"MemoryMissing":        conv.MemoryMissing,
+		"Outcome":       conv.Outcome,
+		"OutcomeReason": conv.OutcomeReason,
+		"FailureKind":   string(conv.FailureKind),
+		"SessionID":     conv.SessionID,
+		"MemoryMissing": conv.MemoryMissing,
+		// Whether the conversation holds an assistant message. A conversation a
+		// person's claim minted reads false until its first turn.
+		"has_run":              conv.HasRun,
+		"type":                 conv.Type,
 		"TriggerType":          conv.TriggerType,
 		"TriggerID":            conv.TriggerID,
 		"actor_agent_id":       conv.ActorAgentID,
@@ -905,6 +921,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 	spawner := ag.spawner()
 	if spawner == nil {
 		httpx.WriteDelegationUnavailable(w)
@@ -1010,6 +1027,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 
 	var body struct {
 		Text string `json:"text"`
@@ -1137,6 +1155,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 	toolCallID := r.PathValue("toolCallID")
 
 	var body struct {

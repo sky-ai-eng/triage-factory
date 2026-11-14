@@ -67,6 +67,10 @@ type reachGitHub struct {
 	alerts      map[string]string
 	alertStatus map[string]int
 	alertReads  []string
+	// updateReads records each read of a repository's Dependabot updates as
+	// "token full_name". Every alert the repository's listing holds is
+	// answered as one Dependabot has not tried.
+	updateReads []string
 }
 
 func newReachGitHub(t *testing.T, repos []reachRepo, grants, readable map[string][]string) *reachGitHub {
@@ -133,10 +137,22 @@ func (f *reachGitHub) serveGraphQL(w http.ResponseWriter, r *http.Request, token
 	var req struct {
 		Query     string `json:"query"`
 		Variables struct {
-			IDs []string `json:"ids"`
+			IDs   []string `json:"ids"`
+			Owner string   `json:"owner"`
+			Name  string   `json:"name"`
 		} `json:"variables"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !strings.Contains(req.Query, "nodes(ids: $ids)") {
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err == nil && strings.Contains(req.Query, "query DependabotUpdates") {
+		name := req.Variables.Owner + "/" + req.Variables.Name
+		f.mu.Lock()
+		f.updateReads = append(f.updateReads, token+" "+name)
+		body := f.alerts[name]
+		f.mu.Unlock()
+		_, _ = w.Write([]byte(untriedUpdatesAnswer(f.t, body)))
+		return
+	}
+	if err != nil || !strings.Contains(req.Query, "nodes(ids: $ids)") {
 		f.t.Errorf("unexpected GraphQL request under %s: %v %.80q", token, err, req.Query)
 		http.Error(w, "unexpected", http.StatusBadRequest)
 		return
@@ -189,6 +205,16 @@ func (f *reachGitHub) failAlerts(repo string, status int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.alertStatus[repo] = status
+}
+
+// takeUpdateReads returns the reads of Dependabot updates since the last
+// call.
+func (f *reachGitHub) takeUpdateReads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.updateReads
+	f.updateReads = nil
+	return out
 }
 
 // takeAlertReads returns the alert listings since the last call.

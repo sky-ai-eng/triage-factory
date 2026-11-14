@@ -1169,3 +1169,73 @@ describe('PredicateEditor jira_project_id_in', () => {
     )
   })
 })
+
+describe('PredicateEditor on a vulnerability alert', () => {
+  function stubFields(fields: object[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, ...jsonBody({ fields }) }),
+    )
+  }
+
+  it('offers an enum list as toggles, in the schema’s order, and writes the chosen values', async () => {
+    stubFields([{ name: 'ecosystem_in', type: 'string_list', enum_values: ['go', 'npm', 'pip'] }])
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <PredicateEditor
+        eventType="github:vulnerability:alert_opened"
+        value={{}}
+        onChange={onChange}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'pip' }))
+    expect(onChange).toHaveBeenLastCalledWith({ ecosystem_in: ['pip'] })
+    // No team roster is read for it: it is not an identity list.
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+
+    rerender(
+      <PredicateEditor
+        eventType="github:vulnerability:alert_opened"
+        value={{ ecosystem_in: ['pip'] }}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'go' }))
+    expect(onChange).toHaveBeenLastCalledWith({ ecosystem_in: ['go', 'pip'] })
+    fireEvent.click(screen.getByRole('button', { name: 'pip', pressed: true }))
+    expect(onChange).toHaveBeenLastCalledWith({})
+  })
+
+  it('takes package names as free text, a comma or Enter ending each, without repeats', async () => {
+    stubFields([{ name: 'package_in', type: 'string_list' }])
+    function Harness() {
+      const [value, setValue] = useState<Record<string, unknown>>({})
+      return (
+        <>
+          <PredicateEditor
+            eventType="github:vulnerability:alert_opened"
+            value={value}
+            onChange={setValue}
+          />
+          <output data-testid="value">{JSON.stringify(value)}</output>
+        </>
+      )
+    }
+    render(<Harness />)
+
+    const input = await screen.findByRole('textbox', { name: 'Package In' })
+    fireEvent.change(input, { target: { value: 'lodash, minimist,Lodash,' } })
+    fireEvent.change(input, { target: { value: 'org.apache.logging.log4j:log4j-core' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(screen.getByTestId('value')).toHaveTextContent(
+      JSON.stringify({ package_in: ['lodash', 'minimist', 'org.apache.logging.log4j:log4j-core'] }),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove minimist' }))
+    expect(screen.getByTestId('value')).toHaveTextContent(
+      JSON.stringify({ package_in: ['lodash', 'org.apache.logging.log4j:log4j-core'] }),
+    )
+  })
+})

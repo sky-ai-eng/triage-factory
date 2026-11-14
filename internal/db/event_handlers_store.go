@@ -511,4 +511,17 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},
+	{
+		// Match-all: a package none of whose alerts has a patched version
+		// still delegates, and the prompt tells the run to stop with no pull
+		// request, so the task stays open for a person. A later alert on a
+		// package with a run working on it folds into that run.
+		ID:                     "system-trigger-vulnerability-remediate",
+		Kind:                   domain.EventHandlerKindTrigger,
+		BlueprintID:            "system-vulnerability-remediate",
+		EventType:              domain.EventGitHubVulnerabilityAlertOpened,
+		Predicate:              "",
+		BreakerThreshold:       2,
+		MinAutonomySuitability: 0.0,
+	},
 }

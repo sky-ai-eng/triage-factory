@@ -290,7 +290,7 @@ describe('setup — credentials before the model picks, and both picks mandatory
     expect(
       stepFor('org-background-jobs-model').isComplete({
         ...base,
-        org: { ...base.org, background_jobs_model: 'claude-haiku-4-5-20251001' },
+        org: { ...base.org, background_jobs_model: 'claude-haiku-5-5' },
       }),
     ).toBe(true)
   })

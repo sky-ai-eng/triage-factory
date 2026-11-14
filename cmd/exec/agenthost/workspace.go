@@ -199,10 +199,7 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 	// detection. CreateForCheckoutInRoot guards the interpolation, so an
 	// unusable stored value fails there rather than being silently reshaped.
 	if prNumber == 0 && ref == "" {
-		ref = profile.BaseBranch
-		if ref == "" {
-			ref = profile.DefaultBranch
-		}
+		ref = profile.EffectiveBaseBranch()
 	}
 
 	if prNumber > 0 {

@@ -12,13 +12,11 @@ import (
 // reaches the provider on that path, so nothing downstream translates a stored
 // value.
 //
-// Haiku is the dated spelling, which is what the vendor publishes it under and
-// what the pricing datasheet carries; Sonnet and Opus are the undated current
-// ids. A test in internal/llm/modelcatalog pins all three to native registry keys,
-// which is what keeps a value the settings UI offers from being one the ledger
-// cannot price.
+// All three are the vendor's undated current ids. A test in
+// internal/llm/modelcatalog pins them to native registry keys, which is what
+// keeps a value the settings UI offers from being one the ledger cannot price.
 const (
-	ModelHaiku  = "claude-haiku-4-5-20251001"
+	ModelHaiku  = "claude-haiku-5-5"
 	ModelSonnet = "claude-sonnet-5"
 	ModelOpus   = "claude-opus-5"
 )

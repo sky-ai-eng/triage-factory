@@ -26,6 +26,8 @@ func AdditiveEventInjection(eventType, metadataJSON string) string {
 			eventType,
 		)
 	}
+	// TODO(TFAC-1418): the metadata is externally written and renders outside
+	// any untrusted-marker region, inside the <system-note> delivery wraps it in.
 	return fmt.Sprintf(
 		"A new %s event occurred on this entity while this run is active. Event metadata:\n%s\n"+
 			"Fold it into your current work if relevant; it will not spawn a separate run.",
@@ -132,6 +134,7 @@ func TaskClosedNote(c TaskClose) string {
 		guidance = taskDismissedGuidance
 	}
 	if c.MetadataJSON != "" && (c.Kind == TaskClosedByEvent || c.Kind == TaskClosedReassigned) {
+		// TODO(TFAC-1418): the metadata renders outside any untrusted-marker region.
 		return fmt.Sprintf("%s Event metadata:\n%s\n%s", taskCloseCause(c), c.MetadataJSON, guidance)
 	}
 	return taskCloseCause(c) + " " + guidance
@@ -153,6 +156,7 @@ func TaskCloseHeldNote(eventType, metadataJSON string) string {
 	if metadataJSON == "" {
 		return cause + " " + held
 	}
+	// TODO(TFAC-1418): the metadata renders outside any untrusted-marker region.
 	return fmt.Sprintf("%s Event metadata:\n%s\n%s", cause, metadataJSON, held)
 }
 
@@ -212,6 +216,14 @@ type TaskAssignment struct {
 	// type and dedup key. At most one active task carries a given three, so
 	// the recipient's is closed and this one is the event happening again.
 	Recurrence bool
+	// ConversationID is the task's own conversation, its newest un-ended
+	// top-level one, "" when it has none. ConversationHasRun says that
+	// conversation holds an assistant message.
+	ConversationID     string
+	ConversationHasRun bool
+	// Own says the recipient is the task's own conversation, told that the
+	// person it works with changed. Set by the teller, never by the read.
+	Own bool
 }
 
 // Assignee spells the assignment's holder as a note's provenance records it
@@ -235,9 +247,17 @@ const fetchFirstGuidance = "fetch before you push, and expect commits you did no
 // TaskAssignedNote is the agent-facing copy telling a conversation that
 // someone took on another task its work overlaps: which task, on what, and
 // who. A recurrence has its own wording, because the task named is the
-// recipient's own situation come back. Bare, like TaskClosedNote.
+// recipient's own situation come back. So has the task's own conversation
+// (Own), which is told who it works with from here on rather than about
+// overlapping work. Bare, like TaskClosedNote.
 func TaskAssignedNote(a TaskAssignment) string {
 	who := noteLine(a.AssigneeName)
+	if a.Own {
+		if who == "" {
+			who = "a teammate"
+		}
+		return fmt.Sprintf("This conversation's task is now assigned to %s. The messages you receive from here on are theirs.", who)
+	}
 	switch {
 	case a.AgentID != "" && noteLine(a.TeamName) != "":
 		who = "the agent for team " + noteLine(a.TeamName)

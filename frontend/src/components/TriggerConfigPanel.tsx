@@ -140,7 +140,9 @@ export default function TriggerConfigPanel({
         scope_predicate: Object.keys(predicate).length > 0 ? predicate : null,
         breaker_threshold: breakerThreshold,
         min_autonomy_suitability: minAutonomy,
-        applies_to_unowned: appliesToUnowned,
+        // Only where the control is shown: the route refuses true on an
+        // event type the flag cannot widen.
+        ...(eventWatchInert ? {} : { applies_to_unowned: appliesToUnowned }),
       }
       await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
         method: 'PATCH',

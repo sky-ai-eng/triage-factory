@@ -662,7 +662,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		gateOpen = false
 		gateSpan.SetAttributes(telemetry.Outcome(outcome))
-		telemetry.RecordSpanError(gateSpan, err)
+		telemetry.RecordSpanError(gateSpan, err, "a claim gate's read failed")
 		gateSpan.End()
 	}
 	// Backstop only: every exit below closes the gate span with its own answer,
@@ -1100,7 +1100,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	slug := skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
 	_, skillSpan := tracer.Start(ctx, "engagement.stage_skill")
 	skillErr := s.materializeStepSkill(&cfg, conv.ID, slug, stepPrompt, step.Brief)
-	telemetry.RecordSpanError(skillSpan, skillErr)
+	telemetry.RecordSpanError(skillSpan, skillErr, "staging the step's skill failed")
 	skillSpan.End()
 	if skillErr != nil {
 		s.failEngagement(conv.ID, skillErr)
@@ -2052,8 +2052,16 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// repoRow is a GitHub task's repository, read once: its names configure the
 	// run and its id keys the PR checkout's ledger row below.
 	var repoRow *domain.Repository
-	switch task.EntitySource {
-	case "github":
+	switch {
+	case isVulnerablePackageTask(task):
+		var err error
+		if repoRow, err = s.taskRepository(ctx, orgID, task); err != nil {
+			return runConfig{}, err
+		}
+		cfg.owner, cfg.repo = repoRow.Owner, repoRow.Repo
+		cfg.scope = vulnerablePackageScope(repoRow.Owner, repoRow.Repo)
+		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
+	case task.EntitySource == "github":
 		var err error
 		if repoRow, err = s.taskRepository(ctx, orgID, task); err != nil {
 			return runConfig{}, err
@@ -2066,14 +2074,14 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// PR's history includes whatever the earlier steps pushed, which is
 		// exactly what this step needs to see.
 		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(orgID, gh, sidecar), owner, repo, prNumber)
-	case "jira":
+	case task.EntitySource == "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
 		cfg.jiraProject = s.taskJiraProject(ctx, orgID, task)
-	case "linear":
+	case task.EntitySource == "linear":
 		cfg.scope = fmt.Sprintf("Linear issue: %s", task.EntitySourceID)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindLinear)
-	case "slack":
+	case task.EntitySource == "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
 	default:
@@ -2109,6 +2117,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			dispatchLog.Warn("record the task's checkouts in conversation_worktrees failed; fetches and pushes to their repos will be denied for this conversation",
 				"root", root, "conversation", conv.ID, "error", err)
 		}
+	}
+	if repoRow != nil && isVulnerablePackageTask(task) {
+		cfg.baseCheckout = s.taskBaseCheckout(ctx, orgID, task.ID, root, *repoRow)
 	}
 	if repoRow != nil && cfg.prNumber > 0 {
 		// Found rather than built from the repository's name: a tree made

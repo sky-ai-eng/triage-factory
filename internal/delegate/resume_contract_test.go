@@ -54,15 +54,20 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		sourceID, entityKind, eventType = "SKY-7", "issue", domain.EventJiraIssueAssigned
 	case "slack":
 		sourceID, entityKind, eventType = "C1/1700000000.000100", "message", domain.EventSlackMessage
+	case domain.EntityKindVulnerablePackage:
+		sourceID, eventType = "owner/repo#npm:lodash", domain.EventGitHubVulnerabilityAlertOpened
 	default:
 		t.Fatalf("unknown task source %q", source)
 	}
 
 	var entity *domain.Entity
 	var err error
-	if source == "jira" {
+	switch source {
+	case "jira":
 		entity, _, err = stores.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), "T", "https://example.com/"+suffix)
-	} else {
+	case domain.EntityKindVulnerablePackage:
+		entity, _, err = stores.Entities.FindOrCreateVulnerablePackageSystem(ctx, org, testScope("github"), sourceID, "T", "https://example.com/"+suffix)
+	default:
 		entity, _, err = stores.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", entityKind, "T", "https://example.com/"+suffix)
 	}
 	if err != nil {
