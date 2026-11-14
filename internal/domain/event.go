@@ -345,7 +345,7 @@ func AllEventTypes() []EventType {
 		// --- GitHub vulnerable packages (Dependabot alerts) ---
 		{ID: EventGitHubVulnerabilityAlertOpened, Source: "github", Category: "vulnerability", Label: "Vulnerability Alert Opened", Description: "A Dependabot alert opened on a package in a tracked repository: created, reopened, or reintroduced. Alerts already open when Triage Factory first lists the repository emit too, one event each"},
 		{ID: EventGitHubVulnerabilityResolved, Source: "github", Category: "vulnerability", Label: "Vulnerability Resolved", Description: "A package in a tracked repository has no open Dependabot alert left: each was fixed or dismissed"},
-		{ID: EventGitHubVulnerabilityUnreachable, Source: "github", Category: "vulnerability", Label: "Vulnerability Unreachable", Description: "Triage Factory no longer follows a vulnerable package — the org's GitHub base URL now names another host, which cannot vouch for the old host's repositories. Says nothing about the package's alerts. Never asked of GitHub"},
+		{ID: EventGitHubVulnerabilityUnreachable, Source: "github", Category: "vulnerability", Label: "Vulnerability Unreachable", Description: "Triage Factory no longer follows a vulnerable package: the org's GitHub base URL now names another host, or the org's credential can no longer read the repository's Dependabot alerts, or they were turned off. Says nothing about whether the alerts were fixed"},
 
 		// --- Jira ---
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you"},

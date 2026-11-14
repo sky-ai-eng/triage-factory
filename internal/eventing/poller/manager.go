@@ -1097,6 +1097,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			// does every installation on a cycle whose read failed.
 			if heldRows, _ := held(); len(heldRows) > 0 && reach.HoldsAny(heldRows) {
 				m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
+				probe.add(client, nil, reach)
 			}
 			continue
 		}
@@ -1127,7 +1128,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			rateLimitResumeFrom, rateLimitErr = resumeFrom, rl
 			break
 		}
-		probe.add(client, scoped)
+		probe.add(client, scoped, reach)
 	}
 	if rateLimitErr == nil {
 		probe.run(ctx)
@@ -1300,7 +1301,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	var rl *ghclient.ErrRateLimited
 	if !errors.As(rerr, &rl) {
 		probe := m.newDependabotProbe(orgID, scope)
-		probe.add(client, repos)
+		probe.add(client, repos, tracker.ReachAll())
 		probe.run(ctx)
 		probe.listAlerts(ctx)
 	}
@@ -1317,6 +1318,10 @@ func (m *Manager) refreshHeldGitHubPAT(ctx context.Context, conn *cycleConnectio
 		return
 	}
 	m.refreshHeldGitHub(ctx, orgID, scope, client, self, tracker.ReachAll(), resolver)
+	probe := m.newDependabotProbe(orgID, scope)
+	probe.add(client, nil, tracker.ReachAll())
+	probe.run(ctx)
+	probe.listAlerts(ctx)
 }
 
 // patPass resolves what a pass on the PAT path runs with: the org's PAT

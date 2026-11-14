@@ -23,6 +23,11 @@ import (
 type AlertListing struct {
 	Repository domain.Repository
 	Access     domain.RepositoryDependabotAccess
+	// Untracked is a repository no team tracks, listed only for the packages
+	// TF already holds in it: the listing updates and resolves those, and a
+	// package it holds no entity for gets none, as a pull request opened in
+	// an untracked repository is not discovered.
+	Untracked bool
 }
 
 // WithDependabotAccess hands the tracker the store each alert listing is
@@ -57,6 +62,9 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 // stores its own only once every write landed, so a listing interrupted
 // between the two leaves the next cycle to list again in full. A listing that
 // fails changes nothing: no package is resolved because a request failed.
+//
+// A listing with Untracked set is of a repository no team tracks, listed only
+// for the packages TF holds in it (AlertListing.Untracked).
 //
 // A repository GitHub refuses (a 403 or 404: the credential lost the
 // permission, or alerts were turned off) is skipped and the pass goes on; the
@@ -101,6 +109,60 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 		return emitted, fmt.Errorf("list dependabot alerts of %s: %w", l.Repository.Slug(), err)
 	}
 	return emitted, nil
+}
+
+// RetireUnreadableVulnerablePackages retires the packages TF holds in each of
+// repos whose stored answer says their alerts can no longer be read:
+// github:vulnerability:unreachable for each, with the answer as its reason,
+// whose terminating close closes the entity and its tasks. Nothing fixed the
+// alerts, but TF can no longer tell when anything does. The repository's ETag
+// is cleared, so once its alerts are readable again the next listing is
+// answered in full and every alert open then is announced on a new entity. A
+// repository whose answer is readable is left alone. Like the retirement on a
+// host change, it publishes again on a later call while a close has not
+// landed. Returns how many packages it retired.
+func (t *Tracker) RetireUnreadableVulnerablePackages(ctx context.Context, scope string, repos []AlertListing) int {
+	var unreadable []AlertListing
+	for _, l := range repos {
+		if unreadableReason(l.Access.Access) != "" {
+			unreadable = append(unreadable, l)
+		}
+	}
+	if len(unreadable) == 0 {
+		return 0
+	}
+	held, err := t.heldVulnerablePackages(ctx, scope, unreadable)
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "read the vulnerable packages of repositories whose alerts became unreadable failed", "org", t.orgID, "error", err)
+		return 0
+	}
+	retired := 0
+	for _, l := range unreadable {
+		repo := l.Repository
+		packages := held[repo.ID]
+		for _, key := range slices.Sorted(maps.Keys(packages)) {
+			t.emitVulnerablePackageUnreachable(ctx, packages[key], &repo, unreadableReason(l.Access.Access))
+			retired++
+		}
+		if l.Access.AlertsETag != "" && t.dependabotAccess != nil {
+			if _, err := t.dependabotAccess.RecordAlertListingSystem(ctx, t.orgID, repo.ID, ""); err != nil {
+				trackerLog.ErrorContext(ctx, "clear the ETag of a repository whose alerts became unreadable failed", "org", t.orgID, "repo", repo.Slug(), "error", err)
+			}
+		}
+	}
+	return retired
+}
+
+// unreadableReason is the unreachable reason an access answer gives, "" for
+// a readable one.
+func unreadableReason(access domain.DependabotAlertsAccess) string {
+	switch access {
+	case domain.DependabotAlertsNoPermission:
+		return events.GitHubUnreachableNoPermission
+	case domain.DependabotAlertsDisabled:
+		return events.GitHubUnreachableAlertsDisabled
+	}
+	return ""
 }
 
 // alertsRefused reports whether a listing failed because GitHub answered for
@@ -178,6 +240,12 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 	for _, key := range slices.Sorted(maps.Keys(packages)) {
 		snap := packages[key]
 		e, ok := held[key]
+		if !ok && l.Untracked {
+			// Left out, and the listing's ETag with it, so a team tracking
+			// the repository again gets the package from a full listing.
+			complete = false
+			continue
+		}
 		if !ok {
 			created, _, err := t.entities.FindOrCreateVulnerablePackageSystem(ctx, t.orgID, scope, key,
 				domain.VulnerablePackageTitle(snap.Ecosystem, snap.Package),

@@ -580,3 +580,46 @@ func TestRefreshVulnerablePackages_ALostETagWriteLeavesNoStaleCondition(t *testi
 		t.Errorf("the alert closing emitted %v, want the package resolved", eventTypes(evts))
 	}
 }
+
+// TestRetireUnreadableVulnerablePackages: a repository whose answer says its
+// alerts are turned off has its packages retired with that reason and loses
+// its ETag; one whose alerts are readable is left alone.
+func TestRetireUnreadableVulnerablePackages(t *testing.T) {
+	r := newVulnRig(t, "api", "web")
+	ctx := context.Background()
+	r.gh.set("api", lodash(1, "high"))
+	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"})
+	r.mustCycle()
+	api := r.pkg("api", "npm", "lodash")
+	if _, err := r.stores.DependabotAccess.RecordSystem(ctx, runmode.LocalDefaultOrgID, api.RepositoryID, domain.DependabotAlertsDisabled); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	var listings []AlertListing
+	for _, row := range r.rows() {
+		a, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
+		if err != nil || a == nil {
+			t.Fatalf("read %s: %+v %v", row.Slug(), a, err)
+		}
+		listings = append(listings, AlertListing{Repository: row, Access: *a})
+	}
+
+	before := r.pub.count()
+	if n := r.tracker().RetireUnreadableVulnerablePackages(ctx, vulnHost, listings); n != 1 {
+		t.Fatalf("retired %d packages, want api's one", n)
+	}
+	r.pub.mu.Lock()
+	evts := append([]domain.Event(nil), r.pub.events[before:]...)
+	r.pub.mu.Unlock()
+	var meta events.GitHubVulnerabilityUnreachableMetadata
+	if len(evts) != 1 || *evts[0].EntityID != api.ID || json.Unmarshal([]byte(evts[0].MetadataJSON), &meta) != nil || meta.Reason != events.GitHubUnreachableAlertsDisabled || fmt.Sprint(meta.AlertNumbers) != "[1]" {
+		t.Errorf("emitted %v (%+v), want one unreachable on api's package with reason %s", eventTypes(evts), meta, events.GitHubUnreachableAlertsDisabled)
+	}
+	a, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, api.RepositoryID)
+	if err != nil || a == nil || a.AlertsETag != "" {
+		t.Errorf("api's answer = %+v, %v; want its ETag cleared", a, err)
+	}
+	web := r.pkg("web", "npm", "react")
+	if w, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, web.RepositoryID); err != nil || w == nil || w.AlertsETag == "" {
+		t.Errorf("web's answer = %+v, %v; want it untouched", w, err)
+	}
+}

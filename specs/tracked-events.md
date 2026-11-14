@@ -378,7 +378,7 @@ by number against its stored snapshot.
 |-------|----|---------|-------------|
 | **Vulnerability Alert Opened** | `github:vulnerability:alert_opened` | An alert is open that was not open on the previous listing: created, reopened, or reintroduced. One event per alert | — |
 | **Vulnerability Resolved** | `github:vulnerability:resolved` | The package has no open alert left. Terminating: it closes the entity and its tasks, and a later alert on the package creates a new entity | — |
-| **Vulnerability Unreachable** | `github:vulnerability:unreachable` | TF no longer follows the package: the org's GitHub base URL now names another host. Terminating, like `resolved`, but says nothing about the alerts. Never asked of GitHub | — |
+| **Vulnerability Unreachable** | `github:vulnerability:unreachable` | TF no longer follows the package: the org's GitHub base URL now names another host (`scope_changed`), or the repository's recorded access answer says its alerts can no longer be read (`no_permission`, `alerts_disabled`). Terminating, like `resolved`, but says nothing about the alerts | — |
 
 An alert closing while another stays open on the package emits nothing; the
 snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
@@ -387,8 +387,9 @@ snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
 (`repo`, `repository_id`), and `highest_severity`, the highest severity among
 the package's open alerts. `resolved` names the package, the repository, and
 the `alert_numbers` that were last open; `unreachable` names the same plus the
-`host` the package was listed from and the `reason` (`scope_changed`, as for
-[PR Unreachable](#pr-unreachable)).
+`host` the package was listed from and the `reason`: `scope_changed`, as for
+[PR Unreachable](#pr-unreachable), or `no_permission` or `alerts_disabled`,
+the access probe's answer.
 
 A package TF holds no active entity for gets a new one, whose snapshot starts
 empty, so every alert open on the package emits `alert_opened`, however long
@@ -401,20 +402,30 @@ Each package on a host the org has left is retired with `unreachable` at the
 start of the next GitHub cycle, as its pull requests are, and closes with its
 tasks. Nothing fixed its alerts, so pointing the org back at the old host
 announces them again: each package with open alerts gets a new entity, which
-emits `alert_opened` for every open alert.
+emits `alert_opened` for every open alert. A repository whose access probe
+answers that its alerts can no longer be read (the credential lost the
+permission, or alerts were turned off) has its packages retired the same way,
+and loses its ETag, so once the alerts are readable again every one still
+open is announced on a new entity.
+
+A repository every team untracked is still listed while TF holds a package in
+it, under a credential that reads it, as its pull requests are still
+refreshed. The listing updates and resolves the packages TF holds, so their
+tasks close when the alerts are fixed, and creates no entity for any other
+package; such a listing stores no ETag, so a team tracking the repository
+again gets those packages from a full listing.
 
 A listing is conditional on the previous one's ETag when that listing fit on
 one page and every write it made landed, so an unchanged repository costs a
 request GitHub does not count against the rate limit. A listing that changed
-clears the stored ETag before its first write. A repository no team
-tracks on the org's host loses its ETag, so the listing after a team tracks it
-again is answered in full and diffed against the packages TF holds: those of a
-repository every team untracked stay active, and only the alerts that opened
-meanwhile are announced. A listing that fails changes nothing. A repository
-GitHub refuses is skipped until the access probe rechecks it, and one whose
-listing cannot be read in full (more than 5,000 open alerts, a page that does
-not parse, or a next-page link with no cursor) is skipped every cycle while
-that lasts; any other failure ends the cycle's listings.
+clears the stored ETag before its first write. A repository no team tracks on
+the org's host that holds no package loses its ETag, so the listing after a
+team tracks it again is answered in full. A listing that fails changes
+nothing. A repository GitHub refuses is skipped until the access probe
+rechecks it, and one whose listing cannot be read in full (more than 5,000
+open alerts, a page that does not parse, or a next-page link with no cursor)
+is skipped every cycle while that lasts; any other failure ends the cycle's
+listings.
 
 ## Jira Events
 

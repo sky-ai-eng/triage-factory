@@ -40,13 +40,14 @@ type RepositoryDependabotAccessStore interface {
 	RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error)
 
 	// ClearUntrackedAlertListingsSystem clears the stored ETag of every
-	// repository of the org that no team tracks on host, the org's GitHub
-	// host, retired ones included, so the listing that follows a team
-	// tracking it again is answered in full and diffed against the packages
-	// TF holds. A 304 would say nothing changed since a listing whose packages
-	// TF may since have closed without listing it: the poll retires the
-	// packages on another host when the org moves, and a retired repository's
-	// entities close. Returns how many rows it changed. Exempt from the
+	// repository of the org that the poll no longer lists: on host, the org's
+	// GitHub host, one that no team tracks and that holds no active
+	// vulnerable package, and every one on another host or retired. The
+	// listing that follows a team tracking it again is then answered in full
+	// and diffed against the packages TF holds. A 304 would say nothing
+	// changed since a listing whose packages TF may since have closed without
+	// listing it: the poll retires the packages on another host when the org
+	// moves, and a retired repository's entities close. Returns how many rows it changed. Exempt from the
 	// returned-row rule: a bulk write the poll makes every cycle, whose count
 	// is for its log line.
 	ClearUntrackedAlertListingsSystem(ctx context.Context, orgID, host string) (int, error)

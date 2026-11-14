@@ -6,8 +6,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/tracker"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -121,10 +124,10 @@ func TestDependabotProbe_RecordsEachAnswer(t *testing.T) {
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/readable", "octo/disabled", "octo/refused"})
-	m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
+	m := &Manager{repos: stores.Repos, entities: stores.Entities, DependabotAccess: stores.DependabotAccess}
 	names := []string{"octo/readable", "octo/disabled", "octo/refused", "octo/untracked"}
 
-	probeCycle(ctx, m, dependabotPass{client, names})
+	probeCycle(ctx, m, dependabotPass{client, names, tracker.ReachAll()})
 
 	want := map[string]domain.DependabotAlertsAccess{
 		"readable": domain.DependabotAlertsReadable,
@@ -145,7 +148,7 @@ func TestDependabotProbe_RecordsEachAnswer(t *testing.T) {
 	}
 
 	// The next cycle finds every answer fresh.
-	probeCycle(ctx, m, dependabotPass{client, names})
+	probeCycle(ctx, m, dependabotPass{client, names, tracker.ReachAll()})
 	if n := gh.total(); n != 3 {
 		t.Errorf("requests after a second cycle = %d, want the first cycle's 3", n)
 	}
@@ -155,7 +158,7 @@ func TestDependabotProbe_RecordsEachAnswer(t *testing.T) {
 	if _, err := database.Exec(`UPDATE repository_dependabot_access SET checked_at = ?`, stale); err != nil {
 		t.Fatalf("age answers: %v", err)
 	}
-	probeCycle(ctx, m, dependabotPass{client, names})
+	probeCycle(ctx, m, dependabotPass{client, names, tracker.ReachAll()})
 	for repo := range want {
 		if n := gh.count(repo); n != 2 {
 			t.Errorf("%s asked %d times, want 2 once its answer aged out", repo, n)
@@ -180,9 +183,9 @@ func TestDependabotProbe_NoAnswerEndsTheCycle(t *testing.T) {
 			gh, client := newAlertsServer(t, func(string) (int, string) { return tc.status, tc.body })
 			stores := sqlitestore.New(newMigratedSQLiteForPoller(t))
 			trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a", "octo/b", "octo/c"})
-			m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
+			m := &Manager{repos: stores.Repos, entities: stores.Entities, DependabotAccess: stores.DependabotAccess}
 
-			probeCycle(ctx, m, dependabotPass{client, []string{"octo/a", "octo/b"}}, dependabotPass{client, []string{"octo/c"}})
+			probeCycle(ctx, m, dependabotPass{client, []string{"octo/a", "octo/b"}, tracker.ReachAll()}, dependabotPass{client, []string{"octo/c"}, tracker.ReachAll()})
 
 			if n := gh.total(); n != 1 {
 				t.Errorf("requests = %d, want the one that got no answer", n)
@@ -207,9 +210,9 @@ func TestDependabotProbe_CapsEachCycle(t *testing.T) {
 		names = append(names, fmt.Sprintf("octo/r%02d", i))
 	}
 	trackRepos(t, stores, runmode.LocalDefaultOrgID, names)
-	m := &Manager{repos: stores.Repos, DependabotAccess: stores.DependabotAccess}
+	m := &Manager{repos: stores.Repos, entities: stores.Entities, DependabotAccess: stores.DependabotAccess}
 	half := len(names) / 2
-	passes := []dependabotPass{{client, names[:half]}, {client, names[half:]}}
+	passes := []dependabotPass{{client, names[:half], tracker.ReachAll()}, {client, names[half:], tracker.ReachAll()}}
 
 	probeCycle(ctx, m, passes...)
 	if n := gh.total(); n != dependabotProbesPerCycle {
@@ -228,7 +231,7 @@ func TestDependabotProbe_CapsEachCycle(t *testing.T) {
 // makes no request.
 func TestDependabotProbe_NoStoreProbesNothing(t *testing.T) {
 	gh, client := newAlertsServer(t, func(string) (int, string) { return http.StatusOK, `[]` })
-	probeCycle(context.Background(), &Manager{}, dependabotPass{client, []string{"octo/a"}})
+	probeCycle(context.Background(), &Manager{}, dependabotPass{client, []string{"octo/a"}, tracker.ReachAll()})
 	if n := gh.total(); n != 0 {
 		t.Errorf("requests = %d, want none", n)
 	}
@@ -238,7 +241,7 @@ func TestDependabotProbe_NoStoreProbesNothing(t *testing.T) {
 func probeCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
 	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
 	for _, pass := range passes {
-		p.add(pass.client, pass.repos)
+		p.add(pass.client, pass.repos, pass.reach)
 	}
 	p.run(ctx)
 }
@@ -258,7 +261,7 @@ func listCycle(ctx context.Context, m *Manager, passes ...dependabotPass) {
 	m.forgetUntrackedAlertListings(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
 	p := m.newDependabotProbe(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
 	for _, pass := range passes {
-		p.add(pass.client, pass.repos)
+		p.add(pass.client, pass.repos, pass.reach)
 	}
 	p.run(ctx)
 	p.listAlerts(ctx)
@@ -283,7 +286,7 @@ func TestDependabotListing_ListsOnlyReadableRepositories(t *testing.T) {
 	rec := &eventRecorder{}
 	m := listingManager(database, stores, rec)
 
-	listCycle(ctx, m, dependabotPass{client, []string{"octo/readable", "octo/refused"}})
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/readable", "octo/refused"}, tracker.ReachAll()})
 
 	if n := gh.count("readable"); n != 2 {
 		t.Errorf("readable: %d requests, want the probe and the listing", n)
@@ -339,7 +342,7 @@ func TestDependabotListing_AProbeWithNoAnswerDoesNotStopTheListings(t *testing.T
 	}
 	rec := &eventRecorder{}
 
-	listCycle(ctx, listingManager(database, stores, rec), dependabotPass{client, []string{"octo/a", "octo/stuck"}})
+	listCycle(ctx, listingManager(database, stores, rec), dependabotPass{client, []string{"octo/a", "octo/stuck"}, tracker.ReachAll()})
 
 	if n := gh.count("stuck"); n != 1 {
 		t.Errorf("stuck: %d requests, want its probe", n)
@@ -362,75 +365,189 @@ func leftPad(numbers ...int) string {
 	return "[" + strings.Join(objs, ",") + "]"
 }
 
-// TestDependabotListing_AnUntrackedRepositoryLosesItsETag: a repository no
-// team tracks any more has its ETag forgotten, and once a team tracks it
-// again its listing is diffed against the package TF holds, announcing only
-// the alert that opened meanwhile.
-func TestDependabotListing_AnUntrackedRepositoryLosesItsETag(t *testing.T) {
+// alertsBody is a Dependabot alerts list body of open alerts, each on the
+// named npm package.
+func alertsBody(alerts map[int]string) string {
+	var objs []string
+	for _, n := range slices.Sorted(maps.Keys(alerts)) {
+		objs = append(objs, fmt.Sprintf(`{"number":%d,"state":"open","dependency":{"package":{"ecosystem":"npm","name":%q}},"security_advisory":{"ghsa_id":"GHSA-%d","severity":"low"}}`, n, alerts[n], n))
+	}
+	return "[" + strings.Join(objs, ",") + "]"
+}
+
+// TestDependabotListing_AnUntrackedRepositoryIsListedForItsPackages: a
+// repository every team untracked is still listed while TF holds a package in
+// it. An alert opening on that package is announced, a package TF holds no
+// entity for gets none, and the package resolves when its alerts close. Once
+// it holds nothing the repository is no longer listed and loses its ETag, so
+// a team tracking it again gets the package it skipped from a full listing.
+func TestDependabotListing_AnUntrackedRepositoryIsListedForItsPackages(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex
-	bodyB := leftPad(1)
+	open := map[int]string{1: "left-pad"}
 	gh, client := newAlertsServer(t, func(repo string) (int, string) {
 		mu.Lock()
 		defer mu.Unlock()
 		if repo == "b" {
-			return http.StatusOK, bodyB
+			return http.StatusOK, alertsBody(open)
 		}
 		return http.StatusOK, `[]`
 	})
+	setOpen := func(alerts map[int]string) {
+		mu.Lock()
+		defer mu.Unlock()
+		open = alerts
+	}
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	both := []string{"octo/a", "octo/b"}
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, both)
+	rec := &eventRecorder{}
+	m := listingManager(database, stores, rec)
+	pass := func(names ...string) dependabotPass { return dependabotPass{client, names, tracker.ReachAll()} }
+	listCycle(ctx, m, pass(both...))
+	pkg := func(name string) *domain.Entity {
+		t.Helper()
+		e, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/b#npm:"+name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return e
+	}
+	leftPad := pkg("left-pad")
+	if leftPad == nil {
+		t.Fatal("left-pad has no entity after the first listing")
+	}
+	etag := func() string {
+		t.Helper()
+		a, err := stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, leftPad.RepositoryID)
+		if err != nil || a == nil {
+			t.Fatalf("read b's answer: %+v %v", a, err)
+		}
+		return a.AlertsETag
+	}
+	newEvents := func(before int) []string {
+		t.Helper()
+		return recordedTypes(rec)[before:]
+	}
+
+	// Every team untracks b. A second alert on left-pad, and an alert on a
+	// package TF holds nothing for.
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
+	setOpen(map[int]string{1: "left-pad", 2: "left-pad", 3: "react"})
+	before := len(recordedTypes(rec))
+	listCycle(ctx, m, pass("octo/a"))
+	if got := newEvents(before); fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityAlertOpened+"]" {
+		t.Errorf("the untracked listing emitted %v, want left-pad's new alert", got)
+	}
+	if pkg("react") != nil {
+		t.Error("the untracked listing created an entity for react")
+	}
+	if etag() != "" {
+		t.Error("the listing that left react out stored its ETag")
+	}
+
+	// Its alerts close: the package resolves, and the router closes it.
+	setOpen(map[int]string{3: "react"})
+	before = len(recordedTypes(rec))
+	listCycle(ctx, m, pass("octo/a"))
+	if got := newEvents(before); fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityResolved+"]" {
+		t.Fatalf("the untracked listing after the alerts closed emitted %v, want left-pad resolved", got)
+	}
+	if res, err := stores.Entities.CloseTerminalSystem(ctx, runmode.LocalDefaultOrgID, leftPad.ID, nil,
+		[]string{domain.EventGitHubVulnerabilityAlertOpened}, "entity_closed", domain.EventGitHubVulnerabilityResolved, ""); err != nil || !res.Closed {
+		t.Fatalf("close left-pad: %+v %v", res, err)
+	}
+
+	// b holds nothing now, so it is no longer listed.
+	requests := gh.count("b")
+	listCycle(ctx, m, pass("octo/a"))
+	if gh.count("b") != requests {
+		t.Error("b was listed though it holds nothing and no team tracks it")
+	}
+
+	// Tracked again: react, which the untracked listings left out, is
+	// announced.
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, both)
+	before = len(recordedTypes(rec))
+	listCycle(ctx, m, pass(both...))
+	if got := newEvents(before); fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityAlertOpened+"]" || pkg("react") == nil {
+		t.Errorf("tracking b again emitted %v with react %+v, want react announced", got, pkg("react"))
+	}
+}
+
+// TestDependabotListing_AnUntrackedRepositoryOutsideEveryReachIsNotListed: a
+// held repository no pass's credential can read is neither probed nor listed.
+func TestDependabotListing_AnUntrackedRepositoryOutsideEveryReachIsNotListed(t *testing.T) {
+	ctx := context.Background()
+	gh, client := newAlertsServer(t, func(string) (int, string) { return http.StatusOK, leftPad(1) })
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a", "octo/b"})
+	m := listingManager(database, stores, &eventRecorder{})
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a", "octo/b"}, tracker.ReachAll()})
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
+
+	before := gh.count("b")
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}, tracker.ReachOfGrant([]ghclient.UserRepo{{FullName: "octo/a"}})})
+	if gh.count("b") != before {
+		t.Error("b was listed under a credential whose grant does not hold it")
+	}
+}
+
+// TestDependabotListing_UnreadableAlertsRetireThePackages: once the probe
+// records that a repository's alerts can no longer be read, its packages are
+// retired with unreachable, naming the answer, and the repository loses its
+// ETag. When its alerts are readable again, the listing is answered in full
+// and the alert is announced on a new entity.
+func TestDependabotListing_UnreadableAlertsRetireThePackages(t *testing.T) {
+	ctx := context.Background()
+	_, client := newAlertsServer(t, func(string) (int, string) { return http.StatusOK, leftPad(1) })
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
 	rec := &eventRecorder{}
 	m := listingManager(database, stores, rec)
-	names := []string{"octo/a", "octo/b"}
-	listCycle(ctx, m, dependabotPass{client, names})
-	if got := recordedTypes(rec); len(got) != 1 {
-		t.Fatalf("the first listing emitted %v, want b's alert", got)
+	pass := dependabotPass{client, []string{"octo/a"}, tracker.ReachAll()}
+	listCycle(ctx, m, pass)
+	first, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/a#npm:left-pad")
+	if err != nil || first == nil {
+		t.Fatalf("the package after the first listing = %+v, %v", first, err)
 	}
 
-	listing := func(name string) *domain.RepositoryDependabotAccess {
-		t.Helper()
-		row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: dbtest.TestGitHubHost, Owner: "octo", Repo: name})
-		if err != nil || row == nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		a, err := stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
-		if err != nil || a == nil {
-			t.Fatalf("read %s's answer: %v", name, err)
-		}
-		return a
+	// The probe's next answer: the credential lost the permission.
+	if _, err := stores.DependabotAccess.RecordSystem(ctx, runmode.LocalDefaultOrgID, first.RepositoryID, domain.DependabotAlertsNoPermission); err != nil {
+		t.Fatalf("record: %v", err)
 	}
-	if listing("b").AlertsETag == "" {
-		t.Fatal("b has no ETag after its first listing")
-	}
-
-	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
-	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
-	if listing("b").AlertsETag != "" {
-		t.Error("b kept its ETag after no team tracked it")
-	}
-	if listing("a").AlertsETag == "" {
-		t.Error("a lost its ETag though it is still tracked")
-	}
-
-	// Tracked again with a second alert open: only that one is announced.
-	mu.Lock()
-	bodyB = leftPad(1, 2)
-	mu.Unlock()
-	before := gh.count("b")
-	trackRepos(t, stores, runmode.LocalDefaultOrgID, names)
-	listCycle(ctx, m, dependabotPass{client, names})
-	if gh.count("b") == before {
-		t.Error("b was not listed after it was tracked again")
-	}
+	before := len(recordedTypes(rec))
+	listCycle(ctx, m, pass)
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if len(rec.events) != 2 || rec.events[1].EventType != domain.EventGitHubVulnerabilityAlertOpened {
-		t.Fatalf("tracking b again emitted %d more events, want alert 2's alert_opened", len(rec.events)-1)
+	got := append([]domain.Event(nil), rec.events[before:]...)
+	rec.mu.Unlock()
+	if len(got) != 1 || got[0].EventType != domain.EventGitHubVulnerabilityUnreachable || !strings.Contains(got[0].MetadataJSON, `"reason":"no_permission"`) {
+		t.Fatalf("the cycle after access was lost emitted %v, want unreachable with reason no_permission", got)
 	}
-	if !strings.Contains(rec.events[1].MetadataJSON, `"alert_number":2`) {
-		t.Errorf("tracking b again announced %s, want alert 2", rec.events[1].MetadataJSON)
+	a, err := stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, first.RepositoryID)
+	if err != nil || a == nil || a.AlertsETag != "" {
+		t.Errorf("the answer after the retirement = %+v, %v; want its ETag cleared", a, err)
+	}
+	if res, err := stores.Entities.CloseTerminalSystem(ctx, runmode.LocalDefaultOrgID, first.ID, nil,
+		[]string{domain.EventGitHubVulnerabilityAlertOpened}, "entity_closed", domain.EventGitHubVulnerabilityUnreachable, ""); err != nil || !res.Closed {
+		t.Fatalf("close the retired package: %+v %v", res, err)
+	}
+
+	// Readable again, with nothing changed at GitHub.
+	if _, err := stores.DependabotAccess.RecordSystem(ctx, runmode.LocalDefaultOrgID, first.RepositoryID, domain.DependabotAlertsReadable); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	before = len(recordedTypes(rec))
+	listCycle(ctx, m, pass)
+	if got := recordedTypes(rec)[before:]; fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityAlertOpened+"]" {
+		t.Errorf("the cycle after access returned emitted %v, want the alert announced again", got)
+	}
+	next, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/a#npm:left-pad")
+	if err != nil || next == nil || next.ID == first.ID || next.State != "active" {
+		t.Errorf("the package after access returned = %+v, %v; want a new active entity", next, err)
 	}
 }
 
@@ -447,7 +564,7 @@ func TestDependabotListing_AHostRoundTripAnnouncesTheRetiredAlerts(t *testing.T)
 	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
 	rec := &eventRecorder{}
 	m := listingManager(database, stores, rec)
-	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}, tracker.ReachAll()})
 	first, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", dbtest.TestGitHubHost, "octo/a#npm:left-pad")
 	if err != nil || first == nil {
 		t.Fatalf("the package after the first listing = %+v, %v", first, err)
@@ -465,7 +582,7 @@ func TestDependabotListing_AHostRoundTripAnnouncesTheRetiredAlerts(t *testing.T)
 	m.forgetUntrackedAlertListings(ctx, runmode.LocalDefaultOrgID, dbtest.TestOtherGitHubHost)
 	before := len(recordedTypes(rec))
 
-	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}})
+	listCycle(ctx, m, dependabotPass{client, []string{"octo/a"}, tracker.ReachAll()})
 	if got := recordedTypes(rec)[before:]; fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityAlertOpened+"]" {
 		t.Errorf("returning to the host emitted %v, want the retired alert announced again", got)
 	}

@@ -80,7 +80,8 @@ func (s *repositoryDependabotAccessStore) ClearUntrackedAlertListingsSystem(ctx 
 		 WHERE repositories.id = repository_dependabot_access.repository_id
 		   AND repository_dependabot_access.org_id = ?
 		   AND repository_dependabot_access.alerts_etag <> ''
-		   AND NOT (repositories.host = ? AND repositories.retired_at IS NULL AND `+repoTrackedByATeam+`)
+		   AND NOT (repositories.host = ? AND repositories.retired_at IS NULL
+		            AND (`+repoTrackedByATeam+` OR `+repoHoldsVulnerablePackage+`))
 	`, orgID, host)
 	if err != nil {
 		return 0, fmt.Errorf("clear untracked dependabot alert listings: %w", err)

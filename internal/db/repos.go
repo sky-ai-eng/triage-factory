@@ -381,20 +381,20 @@ type RepositoryStore interface {
 	ListTrackedSystem(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
 	// ListHeldUntrackedSystem returns every repository row on host that no
-	// team tracks and that an active GitHub pull request entity on host
-	// references, ordered like List: the untracked repositories TF still holds
-	// open work in. "Tracks" is ListTrackedSystem's reading, so a repository
-	// only an archived team tracks is listed. Retired rows are left out, as
-	// from every list. An issue entity holds nothing here, because the poller
-	// refreshes pull requests only.
+	// team tracks and that an active GitHub pull request or vulnerable
+	// package entity on host references, ordered like List: the untracked
+	// repositories TF still holds open work in. "Tracks" is
+	// ListTrackedSystem's reading, so a repository only an archived team
+	// tracks is listed. Retired rows are left out, as from every list. An
+	// issue entity holds nothing here, because the poller refreshes no issue.
 	//
 	// It is an org-wide read for a system job, the GitHub poll, which decides
-	// from it whether a credential no tracked-set pass runs under has pull
-	// requests to refresh: rows outside every team's tracked set, which no
-	// team-scoped read would return. Admin pool in Postgres, and no request
-	// handler returns these rows. Unpaged: the rows are bounded by the org's
-	// active pull requests, and every one is matched against each credential's
-	// reach.
+	// from it whether a credential no tracked-set pass runs under has work to
+	// refresh: rows outside every team's tracked set, which no team-scoped
+	// read would return. Admin pool in Postgres, and no request handler
+	// returns these rows. Unpaged: the rows are bounded by the org's active
+	// pull requests and vulnerable packages, and every one is matched against
+	// each credential's reach.
 	ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error)
 
 	// ListTrackedByTeamSystem returns one page of the repository rows on host

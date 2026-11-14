@@ -514,8 +514,9 @@ func (s *repoStore) ListTrackedSystem(ctx context.Context, orgID, host string, o
 }
 
 // repoHeldUntracked scopes a repositories row (alias rp) to the rows no team
-// tracks that an active GitHub pull request on the row's own host references.
-// The entity probe is an index lookup on idx_entities_repository.
+// tracks that an active GitHub pull request or vulnerable package on the
+// row's own host references. The entity probe is an index lookup on
+// idx_entities_repository.
 const repoHeldUntracked = `NOT ` + repoTrackedByATeam + `
 	  AND EXISTS (
 	SELECT 1 FROM entities e
@@ -524,7 +525,19 @@ const repoHeldUntracked = `NOT ` + repoTrackedByATeam + `
 	  AND e.source = 'github'
 	  AND e.scope = rp.host
 	  AND e.state = 'active'
-	  AND e.kind NOT IN ('issue', 'vulnerable_package')
+	  AND e.kind <> 'issue'
+)`
+
+// repoHoldsVulnerablePackage scopes a repositories row (alias rp) to the rows
+// an active vulnerable package on the row's own host references.
+const repoHoldsVulnerablePackage = `EXISTS (
+	SELECT 1 FROM entities e
+	WHERE e.repository_id = rp.id
+	  AND e.org_id = rp.org_id
+	  AND e.source = 'github'
+	  AND e.scope = rp.host
+	  AND e.state = 'active'
+	  AND e.kind = 'vulnerable_package'
 )`
 
 func (s *repoStore) ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {

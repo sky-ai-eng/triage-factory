@@ -203,11 +203,16 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 	})
 
-	t.Run("Clear_untracked_listings_clears_every_untracked_ETag", func(t *testing.T) {
+	t.Run("Clear_untracked_listings_clears_every_unlisted_ETag", func(t *testing.T) {
 		f := mk(t)
 		tracked := repo(t, f, TestGitHubHost, "tracked")
 		untracked := repo(t, f, TestGitHubHost, "untracked")
+		holding := repo(t, f, TestGitHubHost, "holding")
 		elsewhere := repo(t, f, TestOtherGitHubHost, "elsewhere")
+		// Untracked, but the poll still lists it for its package.
+		if _, _, err := f.Stores.Entities.FindOrCreateVulnerablePackageSystem(ctx, f.OrgID, TestGitHubHost, "octo/holding#npm:lodash", "lodash (npm)", ""); err != nil {
+			t.Fatalf("create the held package: %v", err)
+		}
 		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestGitHubHost, []string{tracked}); err != nil {
 			t.Fatalf("track on %s: %v", TestGitHubHost, err)
 		}
@@ -215,7 +220,7 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestOtherGitHubHost, []string{elsewhere}); err != nil {
 			t.Fatalf("track on %s: %v", TestOtherGitHubHost, err)
 		}
-		for _, id := range []string{tracked, untracked, elsewhere} {
+		for _, id := range []string{tracked, untracked, holding, elsewhere} {
 			record(t, f, id, domain.DependabotAlertsReadable)
 			if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, id, `W/"abc"`); err != nil {
 				t.Fatalf("RecordAlertListingSystem: %v", err)
@@ -229,10 +234,12 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		if n != 2 {
 			t.Errorf("changed %d listings, want the untracked one and the other host's", n)
 		}
-		// Only the repository a team tracks on the host keeps its ETag.
+		// Only the repositories the poll lists on the host keep their ETags:
+		// the tracked one, and the untracked one holding a package.
 		for id, wantETag := range map[string]bool{
 			tracked:   true,
 			untracked: false,
+			holding:   true,
 			elsewhere: false,
 		} {
 			a, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, id)
