@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // VulnerablePackageSourceID is the key of a vulnerable package's entity:
@@ -132,12 +133,105 @@ type DependabotAlert struct {
 	// FirstPatchedVersion is the first version that fixes the vulnerability,
 	// empty when none has been released.
 	FirstPatchedVersion string `json:"first_patched_version,omitempty"`
+	// UpdatedAt is when GitHub last changed the alert: when it was created,
+	// reopened or reintroduced, for an open alert, unless something since
+	// (an assignee) changed it again. Zero when GitHub sent none.
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	// DependabotUpdate is what Dependabot did about the alert as TF last read
+	// it, nil when TF has not read it.
+	DependabotUpdate *DependabotUpdate `json:"dependabot_update,omitempty"`
+}
+
+// The states of a DependabotUpdate.
+const (
+	// DependabotUpdateNone: GitHub reports no update for the alert. Dependabot
+	// has not tried: security updates are off on the repository, or its
+	// attempt has not started.
+	DependabotUpdateNone = "none"
+	// DependabotUpdatePending: an attempt has started and produced neither a
+	// pull request nor an error yet.
+	DependabotUpdatePending = "pending"
+	// DependabotUpdatePullRequest: Dependabot opened a pull request for the
+	// alert. GitHub goes on naming it once it is closed or merged.
+	DependabotUpdatePullRequest = "pull_request"
+	// DependabotUpdateError: Dependabot tried and reported an error instead
+	// of a pull request.
+	DependabotUpdateError = "error"
+)
+
+// DependabotUpdate is what Dependabot did about one alert, as GitHub's
+// GraphQL alert object reports it (dependabotUpdate). The REST alert object
+// does not carry it.
+type DependabotUpdate struct {
+	// State is one of the DependabotUpdate values.
+	State string `json:"state"`
+	// PullRequestNumber and PullRequestURL are the pull request Dependabot
+	// opened, set when State is DependabotUpdatePullRequest.
+	PullRequestNumber int    `json:"pull_request_number,omitempty"`
+	PullRequestURL    string `json:"pull_request_url,omitempty"`
+	// ErrorType is Dependabot's code for the error, as
+	// "security_update_not_possible", and ErrorTitle its one-line description
+	// of it, set when State is DependabotUpdateError. The title names
+	// dependencies and versions read from the repository and its registries.
+	ErrorType  string `json:"error_type,omitempty"`
+	ErrorTitle string `json:"error_title,omitempty"`
+}
+
+// The reasons Dependabot cannot fix an alert, which DependabotCannotFix
+// returns.
+const (
+	// DependabotCannotFixNoPatchedVersion: no version that fixes the
+	// vulnerability has been released, so there is nothing to upgrade to.
+	DependabotCannotFixNoPatchedVersion = "no_patched_version"
+	// DependabotCannotFixUpdateFailed: Dependabot tried to open a pull request
+	// for the alert and reported an error instead.
+	DependabotCannotFixUpdateFailed = "update_failed"
+)
+
+// dependabotErrorsNotFailures are the update errors that say Dependabot had
+// nothing to fix, or that a pull request it opened already proposes the fix:
+// the dependency is no longer vulnerable, or an open pull request upgrades it
+// to the latest version or already carries the security update. The codes
+// are Dependabot's.
+var dependabotErrorsNotFailures = map[string]bool{
+	"security_update_not_needed":              true,
+	"pull_request_exists_for_latest_version":  true,
+	"pull_request_exists_for_security_update": true,
+}
+
+// DependabotCannotFix is why Dependabot cannot fix the alert, one of the
+// DependabotCannotFix values, or "" when it has fixed it or may still: it
+// opened a pull request, has not tried, is trying, or reported an error that
+// is not a failure to fix (dependabotErrorsNotFailures). An alert with no
+// patched version cannot be fixed whatever Dependabot reports. Any other
+// error is a failure, a code TF does not know included.
+func (a DependabotAlert) DependabotCannotFix() string {
+	if a.FirstPatchedVersion == "" {
+		return DependabotCannotFixNoPatchedVersion
+	}
+	if u := a.DependabotUpdate; u != nil && u.State == DependabotUpdateError && !dependabotErrorsNotFailures[u.ErrorType] {
+		return DependabotCannotFixUpdateFailed
+	}
+	return ""
+}
+
+// AwaitsDependabot reports whether Dependabot may still act on the alert
+// without anyone asking it to: the alert has a patched version, and GitHub
+// reported neither a pull request nor an error for it when TF last read it,
+// or TF has not read it.
+func (a DependabotAlert) AwaitsDependabot() bool {
+	if a.FirstPatchedVersion == "" {
+		return false
+	}
+	u := a.DependabotUpdate
+	return u == nil || u.State == DependabotUpdateNone || u.State == DependabotUpdatePending
 }
 
 // VulnerablePackageSnapshot is the stored state of a vulnerable package: its
-// open Dependabot alerts, ordered by number. The diff reads nothing else, so
-// an alert that closes or opens is the only change that emits. An empty
-// Alerts is the terminal snapshot: the package has no open alert left.
+// open Dependabot alerts, ordered by number. An alert that closes or opens,
+// and an alert becoming one Dependabot cannot fix, are the only changes that
+// emit. An empty Alerts is the terminal snapshot: the package has no open
+// alert left.
 type VulnerablePackageSnapshot struct {
 	// Repo is the repository's owner/repo as the listing named it, for
 	// display; the entity's repository_id is what identifies it.

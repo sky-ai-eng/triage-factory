@@ -343,7 +343,7 @@ func Run(cfg RunConfig) (*Result, error) {
 	// interval past the last poll while one runs, standing for a change that
 	// lands mid-interval and the hint's pass seconds after it.
 	var hintAt time.Duration
-	mgr.ChangeClock = func() time.Time { return changeEpoch.Add(polledCycles*pollInterval + hintAt) }
+	mgr.Clock = func() time.Time { return changeEpoch.Add(polledCycles*pollInterval + hintAt) }
 	mgr.RefreshMarks = stores.GitHubRefreshMarks
 
 	// Poll-cycle errors surfaced via OnError are classified at capture: an

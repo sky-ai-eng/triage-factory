@@ -17,9 +17,13 @@ import (
 // beside the login, which is what the id predicates match and routing resolves
 // by. A literal that leaves one out still compiles, so the package source is
 // checked directly: every events.GitHub…Metadata composite literal outside
-// tests sets RepositoryID, and the id of each actor it sets.
+// tests sets RepositoryID, and the id of each actor it sets. A metadata type
+// that embeds fields shared with another (embedded) carries them through the
+// embedded struct instead: a literal of that struct is checked the same way,
+// and a metadata literal that sets it has set what it holds.
 func TestGitHubMetadataLiteralsSetIDs(t *testing.T) {
 	actorIDs := map[string]string{"Author": "AuthorID", "Reviewer": "ReviewerID", "Commenter": "CommenterID"}
+	embedded := map[string]bool{"GitHubVulnerabilityAlert": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +44,7 @@ func TestGitHubMetadataLiteralsSetIDs(t *testing.T) {
 				return true
 			}
 			sel, ok := lit.Type.(*ast.SelectorExpr)
-			if !ok || !strings.HasPrefix(sel.Sel.Name, "GitHub") || !strings.HasSuffix(sel.Sel.Name, "Metadata") {
+			if !ok || !strings.HasPrefix(sel.Sel.Name, "GitHub") || (!strings.HasSuffix(sel.Sel.Name, "Metadata") && !embedded[sel.Sel.Name]) {
 				return true
 			}
 			checked++
@@ -50,6 +54,11 @@ func TestGitHubMetadataLiteralsSetIDs(t *testing.T) {
 					if key, ok := kv.Key.(*ast.Ident); ok {
 						keys[key.Name] = true
 					}
+				}
+			}
+			for name := range embedded {
+				if keys[name] {
+					keys["RepositoryID"] = true
 				}
 			}
 			if !keys["RepositoryID"] {

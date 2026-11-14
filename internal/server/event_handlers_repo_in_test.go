@@ -236,10 +236,10 @@ func TestRepoInFaults_RegisteredForEveryGitHubRepoInType(t *testing.T) {
 			n++
 		}
 	}
-	if n != 22 {
-		t.Errorf("registered checks for %d github event types, want the 22 with a repo_in field", n)
+	if n != 23 {
+		t.Errorf("registered checks for %d github event types, want the 23 with a repo_in field", n)
 	}
-	for _, eventType := range []string{domain.EventGitHubPRCICheckFailed, domain.EventGitHubVulnerabilityAlertOpened} {
+	for _, eventType := range []string{domain.EventGitHubPRCICheckFailed, domain.EventGitHubVulnerabilityAlertOpened, domain.EventGitHubVulnerabilityDependabotCannotFix} {
 		if _, ok := predicateReferenceChecks[eventType]; !ok {
 			t.Errorf("no check registered for %s", eventType)
 		}

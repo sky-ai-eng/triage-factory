@@ -63,6 +63,11 @@ type RepositoryDependabotAccess struct {
 	// (GitHub orders the open alerts newest first, so an alert closing past
 	// the first page leaves the first page, and its ETag, unchanged).
 	AlertsETag string
+
+	// UpdatesReadAt is when the poll last read what Dependabot did about the
+	// repository's open alerts and stored what that read changed, zero when
+	// it has not. The listing does not carry it, so its schedule is its own.
+	UpdatesReadAt time.Time
 }
 
 // Listed reports whether the poll lists the repository's open alerts, which

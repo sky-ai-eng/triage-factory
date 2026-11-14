@@ -54,6 +54,7 @@ const (
 	pathFetchesMetric        = "mergeability.path_fetches"
 	missedHintsMetric        = "github.missed_hints"
 	dependabotListingsMetric = "github.dependabot_listings"
+	dependabotUpdatesMetric  = "github.dependabot_update_reads"
 )
 
 // The outcomes of listing one repository's open Dependabot alerts: the
@@ -64,6 +65,26 @@ const (
 	dependabotListingNotModified = "not_modified"
 	dependabotListingRefused     = "refused"
 	dependabotListingFailed      = "failed"
+)
+
+// The outcomes of reading what Dependabot did about one repository's open
+// alerts: the github.dependabot_update_reads label vocabulary.
+const (
+	// dependabotUpdateReadRead: GitHub answered for every alert of the
+	// packages the read applies to.
+	dependabotUpdateReadRead = "read"
+	// dependabotUpdateReadIncomplete: GitHub answered, and left out an alert
+	// the listing holds, which keeps the update TF last read for it.
+	dependabotUpdateReadIncomplete = "incomplete"
+	// dependabotUpdateReadFailed: no answer TF could use. A failure that
+	// says nothing about the repository has it read again on the next poll;
+	// an answer about the repository TF cannot read is taken as one naming
+	// no alert.
+	dependabotUpdateReadFailed = "failed"
+	// dependabotUpdateReadDeferred: due, and not read because the pass had
+	// made as many reads as it may (dependabotUpdateReadsPerPass). It is read
+	// on a later poll.
+	dependabotUpdateReadDeferred = "deferred"
 )
 
 // missedHintDependabotListing is the missed-hint rule of a scheduled listing
@@ -87,6 +108,7 @@ type instruments struct {
 	pathFetches        metric.Int64Counter
 	missedHints        metric.Int64Counter
 	dependabotListings metric.Int64Counter
+	dependabotUpdates  metric.Int64Counter
 }
 
 // newInstruments builds the instruments against mp; production passes the
@@ -122,6 +144,10 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 		metric.WithDescription("Listings of a repository's open Dependabot alerts, by outcome: listed (GitHub answered with the alerts), not_modified (unchanged since the previous listing, answered 304), refused (GitHub refused the repository, which is skipped), or failed (any other failure, which ends the cycle's listings).")); err != nil {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", dependabotListingsMetric, "error", err)
 	}
+	if in.dependabotUpdates, err = m.Int64Counter(dependabotUpdatesMetric,
+		metric.WithDescription("Reads of what Dependabot did about a repository's open alerts, by outcome: read (GitHub answered for every alert), incomplete (GitHub answered and left out an alert the listing holds), failed (no answer TF could use), or deferred (due, and left for a later poll because the pass had made as many reads as it may).")); err != nil {
+		trackerLog.Warn("tracker instrument setup failed", "instrument", dependabotUpdatesMetric, "error", err)
+	}
 	return in
 }
 
@@ -129,6 +155,14 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 func recordDependabotListing(outcome string) {
 	if s := stats.Load(); s != nil {
 		s.dependabotListings.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+	}
+}
+
+// recordDependabotUpdateRead counts one read of a repository's Dependabot
+// updates by outcome.
+func recordDependabotUpdateRead(outcome string) {
+	if s := stats.Load(); s != nil {
+		s.dependabotUpdates.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 	}
 }
 

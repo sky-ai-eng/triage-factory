@@ -214,7 +214,7 @@ func newMarksRig(t *testing.T, repos []string, prs ...*marksPR) *marksRig {
 func (r *marksRig) tracker(marks ...domain.GitHubRefreshMark) *Tracker {
 	s := r.stores
 	return New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID).
-		WithChangeClock(func() time.Time { return r.now }).
+		WithClock(func() time.Time { return r.now }).
 		WithRefreshMarks(marks)
 }
 
