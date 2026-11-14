@@ -95,6 +95,42 @@ func TestTracedTransportTracesInsideATrace(t *testing.T) {
 	}
 }
 
+// TestTracedTransportRecordsGitHubURLTemplate covers the attribute that tells
+// one github.http span from another under the same parent: the request's path
+// as a template, on the client span itself and not on the caller's.
+func TestTracedTransportRecordsGitHubURLTemplate(t *testing.T) {
+	recorder, srv, seen := tracedTransportFixture(t)
+
+	ctx, parent := otel.Tracer("telemetry/test").Start(context.Background(), "caller")
+	client := &http.Client{Transport: TracedTransport(srv.Client().Transport, "github")}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/repos/acme/widgets/pulls/7/reviews?per_page=100", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	<-seen
+	parent.End()
+
+	templates := map[string]string{}
+	for _, s := range recorder.Ended() {
+		for _, kv := range s.Attributes() {
+			if kv.Key == keyURLTemplate {
+				templates[s.Name()] = kv.Value.AsString()
+			}
+		}
+	}
+	if got, want := templates["github.http"], "/repos/{owner}/{repo}/pulls/{}/reviews"; got != want {
+		t.Errorf("github.http url.template = %q, want %q", got, want)
+	}
+	if got, ok := templates["caller"]; ok {
+		t.Errorf("the caller's span carries url.template %q; it belongs on the client span only", got)
+	}
+}
+
 // tracedTransportFixture installs a recording provider and the W3C
 // propagator explicitly rather than through InitTraces, and returns a
 // server that reports each request's traceparent header.
