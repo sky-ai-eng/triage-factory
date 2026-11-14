@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 )
 
@@ -210,7 +211,7 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
 				defer cancel()
-				if err := a.credProvisioner.ProvisionForConversation(ctx, msg.OrgID, msg.ConversationID); err != nil {
+				if err := a.credProvisioner.ProvisionForConversation(ctx, msg.OrgID, msg.ConversationID, credprovision.ReasonCredRequest); err != nil {
 					appLog.Warn("tf_ctl: cred_request provision failed", "conversation", msg.ConversationID, "error", err)
 				}
 			}()

@@ -478,4 +478,6 @@ menu.
   `fresh` means the previous executor never wrote its snapshot.
 - **Credentials and signatures** are made on a control pod while the executor
   waits (`credentials.provision`, `commit_signing.decide`). They aren't linked
-  to the run's trace; search by `conversation.id`.
+  to the run's trace; search by `conversation.id`. A seal's `reason` says what
+  ran it: `cred_request` (the executor asked), `awaiting_sweep` (the request
+  was missed), or `refresh_sweep` (a running run's credentials were renewed).

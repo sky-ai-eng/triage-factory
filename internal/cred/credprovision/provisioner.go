@@ -124,11 +124,27 @@ func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolve
 	}
 }
 
+// Reason names what ran a seal. A cold resume can be sealed by more than one
+// of them within seconds, and the span is how a trace tells them apart.
+type Reason string
+
+const (
+	// ReasonCredRequest is the executor's cred_request notification.
+	ReasonCredRequest Reason = "cred_request"
+	// ReasonAwaitingSweep is the backstop sweep over claims parked in
+	// awaiting_credentials.
+	ReasonAwaitingSweep Reason = "awaiting_sweep"
+	// ReasonRefreshSweep is the sweep that re-seals an active claim's aging
+	// or unresolved bundle.
+	ReasonRefreshSweep Reason = "refresh_sweep"
+)
+
 // ProvisionForConversation resolves conversationID's credentials and seals them to its
 // current claimant's published pubkey, writing claim_credentials. Called
 // synchronously off the executor's cred_request notification (the fast
-// path) and by both sweeps (the backstop / refresh paths) — idempotent and
-// safe to call repeatedly for the same conversation.
+// path) and by both sweeps (the backstop / refresh paths), each naming
+// itself as reason — idempotent and safe to call repeatedly for the same
+// conversation.
 //
 // A no-op (nil error, no write) when the conversation isn't currently claimed by
 // anyone, or the claiming instance hasn't published a pubkey — there is
@@ -136,7 +152,7 @@ func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolve
 // (reaped, requeued) between the notification firing and this handler
 // running; the executor's own timeout/requeue path is what recovers that
 // window, not this function surfacing an error.
-func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversationID string) (err error) {
+func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversationID string, reason Reason) (err error) {
 	// The brain's half of the credential handshake, as its OWN root. It is
 	// deliberately not joined to the executor's awaiting-credentials span:
 	// the tf_ctl doorbell that usually triggers this is lossy by design (the
@@ -145,7 +161,7 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	// with no requester at all. conversation.id is the join; put the same id
 	// in a Tempo query and both sides come back.
 	ctx, span := tracer.Start(ctx, "credentials.provision", trace.WithNewRoot(),
-		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
+		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID), telemetry.Reason(string(reason))))
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
