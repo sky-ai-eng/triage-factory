@@ -118,12 +118,8 @@ var readObjectFields = map[string]bool{
 // selection and every fragment is skipped as balanced punctuation, exactly as
 // the mutation reader skips them (gqldoc.go).
 func ParseGraphQLRead(body []byte) []ObjectRef {
-	var envelope struct {
-		Query         string          `json:"query"`
-		OperationName string          `json:"operationName"`
-		Variables     json.RawMessage `json:"variables"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Query == "" {
+	envelope, ok := decodeGraphQLEnvelope(body)
+	if !ok || envelope.Query == "" {
 		return nil
 	}
 	// Most reads that address nothing never mention a repository, and stop

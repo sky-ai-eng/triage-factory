@@ -1565,3 +1565,59 @@ func TestComment_NamesTheNumberingOfEveryCommentAct(t *testing.T) {
 		}
 	}
 }
+
+// TestParseGraphQLRequest_AnEnvelopeReadTwoWaysIsUnreadable: a body that
+// spells one of the envelope's members twice, or under another casing, gives
+// this reader and the server different documents to pick from. Read as the
+// harmless one it would pass as a read, with no refusal check and no audit
+// row, so it is unreadable, and unreadable is a write.
+func TestParseGraphQLRequest_AnEnvelopeReadTwoWaysIsUnreadable(t *testing.T) {
+	const merge = `mutation { mergePullRequest(input:{pullRequestId:\"PR_x\"}) { clientMutationId } }`
+	const harmless = `{ viewer { login } }`
+	cases := map[string]string{
+		"query shadowed by another casing":     `{"query":"` + merge + `","Query":"` + harmless + `"}`,
+		"another casing first":                 `{"QUERY":"` + harmless + `","query":"` + merge + `"}`,
+		"query given twice":                    `{"query":"` + merge + `","query":"` + harmless + `"}`,
+		"only another casing":                  `{"Query":"` + merge + `"}`,
+		"operationName shadowed":               `{"query":"mutation M { mergePullRequest(input:{pullRequestId:\"PR_x\"}) { clientMutationId } } query Q { viewer { login } }","operationName":"M","OperationName":"Q"}`,
+		"operationName given twice":            `{"query":"mutation M { mergePullRequest(input:{pullRequestId:\"PR_x\"}) { clientMutationId } } query Q { viewer { login } }","operationName":"M","operationName":"Q"}`,
+		"variables shadowed":                   `{"query":"` + merge + `","variables":{},"Variables":{"input":{"pullRequestId":"PR_y"}}}`,
+		"a second document after the envelope": `{"query":"` + harmless + `"} {"query":"` + merge + `"}`,
+		"operationName that is not a string":   `{"query":"` + merge + `","operationName":7}`,
+		"query that is not a string":           `{"query":["` + merge + `"]}`,
+		"not an object":                        `["` + merge + `"]`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			facts, isWrite := ParseGraphQLRequest([]byte(body))
+			if !isWrite || facts.Unreadable != GraphQLMalformed {
+				t.Fatalf("ParseGraphQLRequest = %+v, write=%v; want an unreadable write", facts, isWrite)
+			}
+			if refs := ParseGraphQLRead([]byte(body)); refs != nil {
+				t.Errorf("ParseGraphQLRead = %+v, want nothing from an unreadable envelope", refs)
+			}
+		})
+	}
+}
+
+// TestParseGraphQLRequest_ReadsTheEnvelopeGHSends: the strict envelope read
+// still takes what a client sends: members in any order, members this package
+// does not read, a null operationName, and surrounding whitespace.
+func TestParseGraphQLRequest_ReadsTheEnvelopeGHSends(t *testing.T) {
+	const merge = `mutation M { mergePullRequest(input:{pullRequestId:\"PR_x\"}) { clientMutationId } }`
+	for name, body := range map[string]string{
+		"query only":             `{"query":"` + merge + `"}`,
+		"variables first":        `{"variables":{"a":1},"query":"` + merge + `"}`,
+		"null operationName":     `{"query":"` + merge + `","operationName":null,"variables":null}`,
+		"named operation":        `{"operationName":"M","query":"` + merge + `"}`,
+		"a member not read":      `{"query":"` + merge + `","extensions":{"query":"x","Query":"y"}}`,
+		"surrounding whitespace": " \n{\"query\":\"" + merge + "\"}\n ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			facts, isWrite := ParseGraphQLRequest([]byte(body))
+			if !isWrite || facts.Unreadable != "" || len(facts.Fields) != 1 || facts.Fields[0] != "mergePullRequest" {
+				t.Fatalf("ParseGraphQLRequest = %+v, write=%v; want the merge read", facts, isWrite)
+			}
+		})
+	}
+}

@@ -1,7 +1,9 @@
 package ghwrite
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -299,6 +301,76 @@ type graphQLShape struct {
 	subject string
 }
 
+// graphQLEnvelope is a GraphQL request body's three members this package
+// reads: the document, the name of the operation to run, and the variables.
+type graphQLEnvelope struct {
+	Query         string
+	OperationName string
+	Variables     json.RawMessage
+}
+
+// The envelope's member names, as the server spells them.
+const (
+	envelopeQuery         = "query"
+	envelopeOperationName = "operationName"
+	envelopeVariables     = "variables"
+)
+
+// decodeGraphQLEnvelope reads a request body's envelope so that what this
+// package reads is what the server runs. Each member is taken only under its
+// exact name, once. ok is false for a body in which a member's name appears
+// twice, or under another casing: such a body gives two readers two documents,
+// and a struct decode would take the last of them under any casing while the
+// server takes its own pick. Nobody can say which one runs, so the body is
+// unreadable, as it is when it is not a JSON object, carries anything after
+// it, or gives a member the wrong type.
+//
+// A member this package does not read is skipped, whatever it holds.
+func decodeGraphQLEnvelope(body []byte) (graphQLEnvelope, bool) {
+	var env graphQLEnvelope
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if open, err := dec.Token(); err != nil || open != json.Delim('{') {
+		return graphQLEnvelope{}, false
+	}
+	var seenQuery, seenOperationName, seenVariables bool
+	for dec.More() {
+		keyTok, err := dec.Token()
+		key, isString := keyTok.(string)
+		if err != nil || !isString {
+			return graphQLEnvelope{}, false
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return graphQLEnvelope{}, false
+		}
+		switch {
+		case strings.EqualFold(key, envelopeQuery):
+			if key != envelopeQuery || seenQuery || json.Unmarshal(value, &env.Query) != nil {
+				return graphQLEnvelope{}, false
+			}
+			seenQuery = true
+		case strings.EqualFold(key, envelopeOperationName):
+			if key != envelopeOperationName || seenOperationName || json.Unmarshal(value, &env.OperationName) != nil {
+				return graphQLEnvelope{}, false
+			}
+			seenOperationName = true
+		case strings.EqualFold(key, envelopeVariables):
+			if key != envelopeVariables || seenVariables {
+				return graphQLEnvelope{}, false
+			}
+			seenVariables = true
+			env.Variables = value
+		}
+	}
+	if closing, err := dec.Token(); err != nil || closing != json.Delim('}') {
+		return graphQLEnvelope{}, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return graphQLEnvelope{}, false
+	}
+	return env, true
+}
+
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
 // row can be built from. ok is false when the request provably performs no
 // write — its document carries no mutation keyword, or the operation it selects
@@ -318,12 +390,8 @@ type graphQLShape struct {
 // envelope at all is unreadable rather than silent, for the same reason: nobody
 // can show it is a read.
 func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
-	var envelope struct {
-		Query         string          `json:"query"`
-		OperationName string          `json:"operationName"`
-		Variables     json.RawMessage `json:"variables"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Query == "" {
+	envelope, ok := decodeGraphQLEnvelope(body)
+	if !ok || envelope.Query == "" {
 		return GraphQLFacts{Unreadable: GraphQLMalformed}, true
 	}
 	if !strings.Contains(envelope.Query, mutationKeyword) {
