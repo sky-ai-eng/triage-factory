@@ -18,8 +18,9 @@ import (
 // whatever their team, and a conversation's frames carry its transcript.
 //
 // Allowed places: the notifier itself; pkg/websocket, which defines the
-// type; the backplane envelope, which rebuilds an event another pod already
-// scoped; and _test.go files, which build frames to assert behavior.
+// type; the backplane envelope, which rebuilds an event another pod sent,
+// with its recipients or with the conversation whose readers this pod
+// resolves; and _test.go files, which build frames to assert behavior.
 func TestConversationFramesGoThroughTheNotifier(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {

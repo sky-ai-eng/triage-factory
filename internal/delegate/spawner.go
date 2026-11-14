@@ -267,9 +267,13 @@ type Spawner struct {
 	// frames), and so whose tabs may count as present for its permission
 	// prompts (see presentFor). Nil, the default and always the case in
 	// local mode, sends those frames to the whole org and counts any tab in
-	// it; multi mode wires the per-frame resolution through
-	// SetConversationFrameAudience.
+	// it; a multi-mode pod that serves HTTP wires the per-frame resolution
+	// through SetConversationFrameAudience.
 	frameAudience conversationframe.AudienceFunc
+	// framesDeferred leaves each frame's audience to the control pods that
+	// deliver it (DeferConversationFrameAudience): an executor's database
+	// role cannot read the memberships the audience is resolved from.
+	framesDeferred bool
 	// presence is the optional multi-mode presence checker (TFAC-584),
 	// wired via SetPresenceChecker. When set, presentFor consults it
 	// (local Hub state OR the fleet-wide ws_presence table) instead of
@@ -857,11 +861,25 @@ func (s *Spawner) SetConversationFrameAudience(audience conversationframe.Audien
 	s.frameAudience = audience
 }
 
+// DeferConversationFrameAudience sends the spawner's conversation frames
+// without an audience, each naming its conversation for the control pods
+// that deliver it to resolve (conversationframe.NewDeferredNotifier). For a
+// multi-mode process that serves no HTTP: its database role cannot read
+// memberships, and its hub holds no sockets. Its permission prompts then
+// count nobody present (see presentFor). Multi-mode wiring only, once at
+// boot before any run starts, in place of SetConversationFrameAudience.
+func (s *Spawner) DeferConversationFrameAudience() {
+	s.framesDeferred = true
+}
+
 // frames is the notifier every websocket frame about one conversation goes
 // through (message, conversation_update, the permission frames). It is
 // built over the spawner's current hub, so a hub replaced after
 // construction is the one the frame reaches.
 func (s *Spawner) frames() *conversationframe.Notifier {
+	if s.framesDeferred {
+		return conversationframe.NewDeferredNotifier(s.wsHub)
+	}
 	return conversationframe.NewNotifier(s.wsHub, s.frameAudience)
 }
 

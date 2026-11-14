@@ -59,3 +59,42 @@ func TestWireEvent_MalformedDataDegradesGracefully(t *testing.T) {
 		t.Fatalf("Data should degrade to nil on unmarshal failure, got %v", got.Data)
 	}
 }
+
+// TestEnvelope_ReadersOfConversationUnderKeysOfItsOwn pins that an event
+// marked for its conversation's readers sets neither key a pod without the
+// marker reads, inline or by outbox reference, so such a pod drops it
+// rather than delivering it to the whole org. An unmarked event still uses
+// those keys.
+func TestEnvelope_ReadersOfConversationUnderKeysOfItsOwn(t *testing.T) {
+	// The tf_ws envelope as a pod without the marker decodes it.
+	type markerlessEnvelope struct {
+		Event    *json.RawMessage `json:"event"`
+		OutboxID int64            `json:"outbox_id"`
+	}
+	decode := func(t *testing.T, env wsEnvelope) markerlessEnvelope {
+		t.Helper()
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal envelope: %v", err)
+		}
+		var got markerlessEnvelope
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		return got
+	}
+	we := &wireEvent{Type: "message", OrgID: "org-1", ConversationID: "conv-1", Data: json.RawMessage(`{}`)}
+
+	if got := decode(t, inlineEnvelope("executor-pod", we, true)); got.Event != nil || got.OutboxID != 0 {
+		t.Errorf("marked inline envelope = %+v; want neither event nor outbox_id", got)
+	}
+	if got := decode(t, outboxEnvelope("executor-pod", 7, true)); got.Event != nil || got.OutboxID != 0 {
+		t.Errorf("marked outbox envelope = %+v; want neither event nor outbox_id", got)
+	}
+	if got := decode(t, inlineEnvelope("control-pod", we, false)); got.Event == nil {
+		t.Error("unmarked inline envelope has no event")
+	}
+	if got := decode(t, outboxEnvelope("control-pod", 7, false)); got.OutboxID != 7 {
+		t.Errorf("unmarked outbox envelope outbox_id = %d, want 7", got.OutboxID)
+	}
+}

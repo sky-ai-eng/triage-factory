@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -74,6 +75,23 @@ func TestPublish_OrgWideAnswer_OrgScopedBroadcast(t *testing.T) {
 	}
 	if evt := hub.events[0]; evt.OrgID != "org-1" || evt.UserIDs != nil {
 		t.Errorf("event = %+v; want org-scoped with no recipient set", evt)
+	}
+}
+
+// TestPublish_DeferredShape_NamesTheReaders pins the executor's shape: one
+// envelope marked for the conversation's readers, with no recipient set,
+// and no audience read on the emitting pod.
+func TestPublish_DeferredShape_NamesTheReaders(t *testing.T) {
+	hub := &recordingHub{}
+	NewDeferredNotifier(hub).Message(context.Background(), "org-1", "conv-1", domain.MessageDTO{})
+
+	if len(hub.events) != 1 {
+		t.Fatalf("got %d events, want 1", len(hub.events))
+	}
+	evt := hub.events[0]
+	if evt.Type != "message" || evt.OrgID != "org-1" || evt.ConversationID != "conv-1" || !evt.ReadersOfConversation ||
+		evt.UserID != "" || evt.UserIDs != nil {
+		t.Errorf("event = %+v; want a message for conv-1 in org-1 marked for its readers, with no recipients", evt)
 	}
 }
 

@@ -22,7 +22,9 @@ const publishTimeout = 3 * time.Second
 // pod's own local sockets — Publish never touches this pod's Hub, only
 // Postgres, which is what keeps the origin pod from ever double-delivering
 // to its own clients (see DeliverRemote's doc comment for the other half
-// of that invariant).
+// of that invariant). An event marked ReadersOfConversation is the one
+// Broadcast delivers nowhere first: it goes out under the envelope's
+// readers keys, for each receiving pod to resolve.
 //
 // Failures are logged and swallowed: a lost tf_ws NOTIFY is the
 // documented lossy contract (a UI blip other pods' clients absorb via
@@ -44,14 +46,14 @@ func (b *Backplane) Publish(evt websocket.Event) {
 	defer cancel()
 
 	if len(raw) <= b.inlineMaxBytes {
-		env := wsEnvelope{OriginInstanceID: b.originID, Event: &we}
+		env := inlineEnvelope(b.originID, &we, evt.ReadersOfConversation)
 		if b.notify(ctx, b.db, ChannelWS, env) {
 			return
 		}
 		// notify already logged the failure; nothing left to try inline.
 		return
 	}
-	b.publishViaOutbox(ctx, evt.Type, raw)
+	b.publishViaOutbox(ctx, evt.Type, evt.ReadersOfConversation, raw)
 }
 
 // publishViaOutbox inserts payload into ws_outbox and NOTIFYs a row
@@ -59,7 +61,7 @@ func (b *Backplane) Publish(evt websocket.Event) {
 // ref whose row isn't visible yet, and a rolled-back tx can never emit a
 // NOTIFY for a row that doesn't exist (spec §5's "NOTIFY inside the same
 // tx as the underlying write" rule).
-func (b *Backplane) publishViaOutbox(ctx context.Context, evtType string, payload []byte) {
+func (b *Backplane) publishViaOutbox(ctx context.Context, evtType string, forReaders bool, payload []byte) {
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		backplaneLog.Warn("tf_ws: begin outbox tx failed; event stays local-only on this pod", "type", evtType, "error", err)
@@ -84,7 +86,7 @@ func (b *Backplane) publishViaOutbox(ctx context.Context, evtType string, payloa
 		return
 	}
 
-	env := wsEnvelope{OriginInstanceID: b.originID, OutboxID: outboxID}
+	env := outboxEnvelope(b.originID, outboxID, forReaders)
 	if !b.notify(ctx, tx, ChannelWS, env) {
 		return
 	}
@@ -122,7 +124,8 @@ func (b *Backplane) notify(ctx context.Context, q execer, channel string, env an
 // inline event or fetches its ws_outbox row, then delivers it to this
 // pod's local sockets via DeliverRemote — never Broadcast, which would
 // re-publish it (no echo loops, by construction; see DeliverRemote's doc
-// comment).
+// comment). An event marked ReadersOfConversation has its audience
+// resolved first (resolveConversationReaders).
 func (b *Backplane) handleWSNotification(payload string) {
 	var env wsEnvelope
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
@@ -136,20 +139,74 @@ func (b *Backplane) handleWSNotification(payload string) {
 		return
 	}
 
+	// The readers keys are checked first so that an envelope carrying
+	// both kinds takes the narrower path.
 	var evt websocket.Event
-	if env.Event != nil {
+	switch {
+	case env.ReadersEvent != nil:
+		evt = env.ReadersEvent.toEvent()
+		evt.ReadersOfConversation = true
+	case env.ReadersOutboxID != 0:
+		fetched, ok := b.fetchOutbox(env.ReadersOutboxID)
+		if !ok {
+			return
+		}
+		evt = fetched
+		evt.ReadersOfConversation = true
+	case env.Event != nil:
 		evt = env.Event.toEvent()
-	} else if env.OutboxID != 0 {
+	case env.OutboxID != 0:
 		fetched, ok := b.fetchOutbox(env.OutboxID)
 		if !ok {
 			return
 		}
 		evt = fetched
-	} else {
+	default:
 		backplaneLog.Warn("tf_ws: envelope carries neither an inline event nor an outbox ref; dropping")
 		return
 	}
+	if evt.ReadersOfConversation {
+		var ok bool
+		if evt, ok = b.resolveConversationReaders(evt); !ok {
+			return
+		}
+	}
 	b.hub.DeliverRemote(evt)
+}
+
+// resolveConversationReaders turns an event marked ReadersOfConversation
+// into one this pod can deliver: addressed to the conversation's readers as
+// a recipient set, or to the whole org when every member may read it, with
+// the marker cleared. ok is false when the event is to be dropped, and every
+// doubt drops it, since the hub's own scope would otherwise deliver it to
+// every team in the org. A failed read is logged; an audience of nobody is
+// an answer, not a fault, and is not.
+//
+// A pod with no socket in the org has nobody to deliver to and reads
+// nothing: every pod that holds sockets receives every tf_ws event, and
+// reading for an org it holds no connection in would multiply each frame's
+// read by the fleet's size for nothing.
+func (b *Backplane) resolveConversationReaders(evt websocket.Event) (websocket.Event, bool) {
+	if b.conversationReaders == nil {
+		backplaneLog.Warn("tf_ws: event for a conversation's readers on a pod that cannot resolve them; dropping",
+			"type", evt.Type, "org", evt.OrgID, "conversation", evt.ConversationID)
+		return evt, false
+	}
+	if !b.hub.HasConnectionsInOrg(evt.OrgID) {
+		return evt, false
+	}
+	userIDs, ok, err := b.conversationReaders.Readers(context.Background(), evt.OrgID, evt.ConversationID)
+	if err != nil {
+		backplaneLog.Error("tf_ws: resolve a conversation's readers failed; dropping event",
+			"type", evt.Type, "org", evt.OrgID, "conversation", evt.ConversationID, "error", err)
+		return evt, false
+	}
+	if !ok {
+		return evt, false
+	}
+	evt.UserIDs = userIDs
+	evt.ReadersOfConversation = false
+	return evt, true
 }
 
 // fetchOutbox reads a ws_outbox row by id. A missing row (TTL-reaped, or
