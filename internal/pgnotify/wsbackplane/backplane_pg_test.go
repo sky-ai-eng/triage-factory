@@ -11,12 +11,15 @@ import (
 	"time"
 
 	ws "github.com/coder/websocket"
+	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -45,6 +48,9 @@ func TestBackplane_Postgres(t *testing.T) {
 	})
 	t.Run("WSFanout_OutboxRefForLargePayload", func(t *testing.T) {
 		testWSFanoutOutboxRef(t, adminDB, dsn)
+	})
+	t.Run("ConversationFrame_DeliveringPodResolvesReaders", func(t *testing.T) {
+		testConversationFrameReadersCrossPod(t, adminDB, dsn)
 	})
 	t.Run("OutboxReaper_RemovesStaleRows", func(t *testing.T) {
 		testOutboxReaper(t, adminDB)
@@ -276,6 +282,108 @@ func testWSFanoutOutboxRef(t *testing.T, adminDB *sql.DB, dsn string) {
 	}
 	if n == 0 {
 		t.Fatal("expected at least one ws_outbox row for the oversized payload")
+	}
+}
+
+// testConversationFrameReadersCrossPod is an executor's frame path end to
+// end. The executor's deferred notifier reads no audience and its hub holds
+// no sockets, so the frame crosses tf_ws naming its conversation, and the
+// control pod that holds the sockets reads the conversation's readers from
+// the registry: a member of the conversation's team receives it, and a
+// member of the org on another team does not.
+func testConversationFrameReadersCrossPod(t *testing.T, adminDB *sql.DB, dsn string) {
+	seedUser := func(name string) string {
+		t.Helper()
+		var id string
+		if err := adminDB.QueryRow(`SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
+			t.Fatalf("gen uuid: %v", err)
+		}
+		pgtest.MustExec(t, adminDB, `
+			INSERT INTO auth.users (id, email, instance_id, aud, role, created_at, updated_at)
+			VALUES ($1, $2, '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', now(), now())
+		`, id, name+"@test")
+		pgtest.MustExec(t, adminDB, `INSERT INTO users (id, display_name) VALUES ($1, $2)`, id, name)
+		return id
+	}
+	seedTeam := func(orgID, slug string) string {
+		t.Helper()
+		var id string
+		if err := adminDB.QueryRow(`INSERT INTO teams (org_id, slug, name) VALUES ($1, $2, $2) RETURNING id`, orgID, slug).Scan(&id); err != nil {
+			t.Fatalf("seed team: %v", err)
+		}
+		return id
+	}
+	enroll := func(userID, orgID, teamID string) {
+		t.Helper()
+		pgtest.MustExec(t, adminDB, `INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, userID, orgID)
+		pgtest.MustExec(t, adminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, userID, teamID)
+	}
+
+	reader := seedUser("convframe-reader")
+	outsider := seedUser("convframe-outsider")
+	var org string
+	if err := adminDB.QueryRow(`INSERT INTO orgs (slug, name, owner_user_id) VALUES ('convframe-org', 'convframe-org', $1) RETURNING id`, reader).Scan(&org); err != nil {
+		t.Fatalf("seed org: %v", err)
+	}
+	team := seedTeam(org, "convframe-team")
+	otherTeam := seedTeam(org, "convframe-other-team")
+	enroll(reader, org, team)
+	enroll(outsider, org, otherTeam)
+	conv := uuid.NewString()
+	pgtest.MustExec(t, adminDB, `
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, status, visibility)
+		VALUES ($1, $2, $3, $4, 'manual', 'interactive', 'running', 'team')
+	`, conv, org, team, reader)
+
+	executorHub := websocket.NewHub()
+	executor := wsbackplane.New(adminDB, dsn, "executor-convframe", executorHub)
+	executorHub.SetBackplane(executor)
+
+	controlHub := websocket.NewHub()
+	control := wsbackplane.New(adminDB, dsn, "control-convframe", controlHub)
+	controlHub.SetBackplane(control)
+	control.SetConversationReaders(pgstore.New(adminDB, adminDB, pgtest.SecretKey).Conversations.ConversationFrameRecipientsSystem)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go control.RunPublicListener(ctx)
+
+	readerConn := dialTestClient(t, controlHub, reader, org, "sid-reader")
+	outsiderConn := dialTestClient(t, controlHub, outsider, org, "sid-outsider")
+	waitClientCount(t, controlHub, 2)
+	readerMsgs := newMsgReader(readerConn)
+	outsiderMsgs := newMsgReader(outsiderConn)
+
+	// Warm-up: an org-scoped event from the executor, until the control
+	// pod's listener is up. It reaches both connections, so both drain.
+	retryPublish(t, 10*time.Second, func() {
+		executorHub.Broadcast(websocket.Event{Type: "warmup", OrgID: org})
+	}, func() bool {
+		_, ok := readerMsgs.next(150 * time.Millisecond)
+		return ok
+	})
+	readerMsgs.drainUntilQuiet(300 * time.Millisecond)
+	outsiderMsgs.drainUntilQuiet(300 * time.Millisecond)
+
+	conversationframe.NewDeferredNotifier(executorHub).Message(context.Background(), org, conv, domain.MessageDTO{ID: 1, ConversationID: conv, Role: "assistant", Content: "hello"})
+
+	raw, ok := readerMsgs.next(3 * time.Second)
+	if !ok {
+		t.Fatal("the conversation's reader never received the executor's frame")
+	}
+	var got struct {
+		Type           string            `json:"type"`
+		ConversationID string            `json:"conversation_id"`
+		Data           domain.MessageDTO `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode delivered frame: %v", err)
+	}
+	if got.Type != "message" || got.ConversationID != conv || got.Data.Content != "hello" {
+		t.Fatalf("delivered frame = %+v; want the message for %s", got, conv)
+	}
+	if _, ok := outsiderMsgs.next(500 * time.Millisecond); ok {
+		t.Fatal("an org member outside the conversation's team received its frame")
 	}
 }
 

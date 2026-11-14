@@ -22,7 +22,9 @@ const publishTimeout = 3 * time.Second
 // pod's own local sockets — Publish never touches this pod's Hub, only
 // Postgres, which is what keeps the origin pod from ever double-delivering
 // to its own clients (see DeliverRemote's doc comment for the other half
-// of that invariant).
+// of that invariant). An event marked ReadersOfConversation is the one
+// Broadcast delivers nowhere first: it goes out with the marker, for each
+// receiving pod to resolve.
 //
 // Failures are logged and swallowed: a lost tf_ws NOTIFY is the
 // documented lossy contract (a UI blip other pods' clients absorb via
@@ -122,7 +124,8 @@ func (b *Backplane) notify(ctx context.Context, q execer, channel string, env an
 // inline event or fetches its ws_outbox row, then delivers it to this
 // pod's local sockets via DeliverRemote — never Broadcast, which would
 // re-publish it (no echo loops, by construction; see DeliverRemote's doc
-// comment).
+// comment). An event marked ReadersOfConversation has its audience
+// resolved first (resolveConversationReaders).
 func (b *Backplane) handleWSNotification(payload string) {
 	var env wsEnvelope
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
@@ -149,7 +152,48 @@ func (b *Backplane) handleWSNotification(payload string) {
 		backplaneLog.Warn("tf_ws: envelope carries neither an inline event nor an outbox ref; dropping")
 		return
 	}
+	if evt.ReadersOfConversation {
+		var ok bool
+		if evt, ok = b.resolveConversationReaders(evt); !ok {
+			return
+		}
+	}
 	b.hub.DeliverRemote(evt)
+}
+
+// resolveConversationReaders turns an event marked ReadersOfConversation
+// into one this pod can deliver: addressed to the conversation's readers as
+// a recipient set, or to the whole org when every member may read it, with
+// the marker cleared. ok is false when the event is to be dropped, and every
+// doubt drops it, since the hub's own scope would otherwise deliver it to
+// every team in the org. The emitting pod logged nothing about the audience,
+// so a failed read is logged here.
+//
+// A pod with no socket in the org has nobody to deliver to and reads
+// nothing: every pod that holds sockets receives every tf_ws event, and
+// reading for an org it holds no connection in would multiply each frame's
+// read by the fleet's size for nothing.
+func (b *Backplane) resolveConversationReaders(evt websocket.Event) (websocket.Event, bool) {
+	if b.conversationReaders == nil {
+		backplaneLog.Warn("tf_ws: event for a conversation's readers on a pod that cannot resolve them; dropping",
+			"type", evt.Type, "org", evt.OrgID, "conversation", evt.ConversationID)
+		return evt, false
+	}
+	if !b.hub.HasConnectionsInOrg(evt.OrgID) {
+		return evt, false
+	}
+	userIDs, ok, err := b.conversationReaders.Readers(context.Background(), evt.OrgID, evt.ConversationID)
+	if err != nil {
+		backplaneLog.Error("tf_ws: resolve a conversation's readers failed; dropping event",
+			"type", evt.Type, "org", evt.OrgID, "conversation", evt.ConversationID, "error", err)
+		return evt, false
+	}
+	if !ok {
+		return evt, false
+	}
+	evt.UserIDs = userIDs
+	evt.ReadersOfConversation = false
+	return evt, true
 }
 
 // fetchOutbox reads a ws_outbox row by id. A missing row (TTL-reaped, or

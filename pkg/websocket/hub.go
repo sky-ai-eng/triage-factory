@@ -18,11 +18,11 @@ import (
 // conversation_update). Events that broadcast to the whole UI
 // (tasks_updated, scoring_*) leave it empty.
 //
-// OrgID, UserID and UserIDs are server-side routing fields used by the
-// hub's per-connection scoping. They are intentionally NOT serialised on
-// the wire (json:"-"): the frontend filters by ConversationID, and
-// coupling it to server-side identity would leak who-owns-what to
-// other tabs/extensions parsing the WS stream. Empty OrgID means
+// OrgID, UserID, UserIDs and ReadersOfConversation are server-side routing
+// fields used by the hub's per-connection scoping. They are intentionally
+// NOT serialised on the wire (json:"-"): the frontend filters by
+// ConversationID, and coupling it to server-side identity would leak
+// who-owns-what to other tabs/extensions parsing the WS stream. Empty OrgID means
 // "system event, deliver to every connection"; empty UserID means
 // "not user-specific". The OrgID and UserID filters only kick in when
 // both event-side and client-side values are set — see Broadcast.
@@ -33,13 +33,22 @@ import (
 // so a high-rate frame costs one publish rather than one per recipient.
 // A nil set is no set; an empty non-nil set, or a set alongside UserID,
 // is a caller fault that Broadcast drops.
+//
+// ReadersOfConversation names the audience instead of carrying it: the
+// recipients are whoever may read ConversationID in OrgID, resolved by the
+// pod that delivers the event. It is for a process that cannot read
+// memberships and holds no sockets of its own, so Broadcast hands a marked
+// event only to the backplane, and DeliverRemote drops one whose audience
+// was never resolved. The marker without an OrgID or a ConversationID, or
+// alongside UserID or UserIDs, is a caller fault that Broadcast drops.
 type Event struct {
-	Type           string   `json:"type"`
-	ConversationID string   `json:"conversation_id,omitempty"`
-	OrgID          string   `json:"-"`
-	UserID         string   `json:"-"`
-	UserIDs        []string `json:"-"`
-	Data           any      `json:"data"`
+	Type                  string   `json:"type"`
+	ConversationID        string   `json:"conversation_id,omitempty"`
+	OrgID                 string   `json:"-"`
+	UserID                string   `json:"-"`
+	UserIDs               []string `json:"-"`
+	ReadersOfConversation bool     `json:"-"`
+	Data                  any      `json:"data"`
 }
 
 // Close codes the hub sends when it actively kicks a connection
@@ -261,6 +270,13 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) 
 // set together with UserID (two audiences, neither of which is clearly
 // meant). Each is logged at Error and dropped.
 //
+// An event marked ReadersOfConversation has no audience on this pod yet,
+// so Broadcast delivers it to no local socket and only hands it to the
+// backplane, whose delivering pods resolve it; with no backplane it is
+// dropped. The marker without an OrgID or a ConversationID (nothing to
+// resolve against) or together with UserID or UserIDs (two audiences) is
+// logged at Error and dropped, like the malformed sets above.
+//
 // Nil-receiver-safe: a nil *Hub silently drops the event so callers
 // that conditionally have a hub (tests, pre-wired packages) don't
 // have to guard every call site.
@@ -272,6 +288,10 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) 
 // no-op — Broadcast is then exactly the local-only fan-out it always was.
 func (h *Hub) Broadcast(evt Event) {
 	if h == nil {
+		return
+	}
+	if evt.ReadersOfConversation {
+		h.publishForReaders(evt)
 		return
 	}
 	if evt.UserIDs != nil && len(evt.UserIDs) == 0 {
@@ -288,6 +308,28 @@ func (h *Hub) Broadcast(evt Event) {
 	}
 }
 
+// publishForReaders is Broadcast for an event marked ReadersOfConversation.
+func (h *Hub) publishForReaders(evt Event) {
+	switch {
+	case evt.OrgID == "":
+		wsLog.Error("dropping event for a conversation's readers with no org", "type", evt.Type)
+		return
+	case evt.ConversationID == "":
+		wsLog.Error("dropping event for a conversation's readers with no conversation", "type", evt.Type)
+		return
+	case evt.UserID != "" || evt.UserIDs != nil:
+		wsLog.Error("dropping event for a conversation's readers that also names its recipients", "type", evt.Type)
+		return
+	}
+	if h.backplane == nil {
+		// Debug: a multi-mode process left without a backplane says so once
+		// at boot, and a log line per frame would only repeat it.
+		wsLog.Debug("dropping event for a conversation's readers: no backplane to resolve them", "type", evt.Type)
+		return
+	}
+	h.backplane.Publish(evt)
+}
+
 // DeliverRemote fans evt to this pod's locally-connected sockets only,
 // applying the same per-connection scope as Broadcast (orgID, userID, and
 // the recipient set) — see Broadcast's doc comment for the filter
@@ -299,8 +341,17 @@ func (h *Hub) Broadcast(evt Event) {
 // echo loops, by construction" — a backplane must call this, never
 // Broadcast, when relaying a received envelope, or the republish would
 // bounce the event right back onto the wire).
+//
+// An event still marked ReadersOfConversation is dropped: its audience was
+// never resolved, and the hub's own scope would deliver it to the whole
+// org. The backplane resolves the readers and clears the marker before it
+// calls here.
 func (h *Hub) DeliverRemote(evt Event) {
 	if h == nil {
+		return
+	}
+	if evt.ReadersOfConversation {
+		wsLog.Error("dropping event whose conversation's readers were never resolved", "type", evt.Type)
 		return
 	}
 	data, err := json.Marshal(evt)
@@ -544,6 +595,26 @@ func (h *Hub) ClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// HasConnectionsInOrg reports whether any registered connection is scoped to
+// orgID. An unscoped connection (no org) does not count, and an empty orgID
+// matches nothing. A pod uses it to skip resolving an audience that none of
+// its sockets could be in.
+//
+// Nil-receiver-safe (returns false), matching the rest of this type.
+func (h *Hub) HasConnectionsInOrg(orgID string) bool {
+	if h == nil || orgID == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		if c.orgID == orgID {
+			return true
+		}
+	}
+	return false
 }
 
 // ConnSnapshot is one connection's presence-relevant state, returned by

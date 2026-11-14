@@ -106,6 +106,78 @@ func TestDeliverRemote_AppliesSameScopeFilterAsBroadcast(t *testing.T) {
 	}
 }
 
+// TestBroadcast_ReadersOfConversationOnlyReachesTheBackplane pins that an
+// event naming its conversation's readers reaches no socket on the pod that
+// broadcasts it, the unscoped one included, and goes to the backplane with
+// the marker intact for the delivering pods to resolve.
+func TestBroadcast_ReadersOfConversationOnlyReachesTheBackplane(t *testing.T) {
+	h := NewHub()
+	bp := &fakeBackplane{}
+	h.SetBackplane(bp)
+	scoped := addBareClient(h, "user-1", "org-1")
+	unscoped := addBareClient(h, "", "")
+
+	h.Broadcast(Event{Type: "message", OrgID: "org-1", ConversationID: "conv-1", ReadersOfConversation: true})
+
+	for label, c := range map[string]*client{"user-1": scoped, "unscoped": unscoped} {
+		if got := drain(t, c, 50*time.Millisecond); len(got) != 0 {
+			t.Errorf("%s received %d events before the audience was resolved", label, len(got))
+		}
+	}
+	if got := bp.count(); got != 1 {
+		t.Fatalf("backplane saw %d published events, want 1", got)
+	}
+	if evt := bp.published[0]; !evt.ReadersOfConversation || evt.OrgID != "org-1" || evt.ConversationID != "conv-1" || evt.UserIDs != nil {
+		t.Errorf("published %+v; want the marked event for conv-1 in org-1 with no recipient set", evt)
+	}
+}
+
+// TestBroadcast_MalformedReadersOfConversationPublishesNothing pins the
+// shapes Broadcast refuses for a marked event: nothing to resolve against,
+// and a second audience beside the marker.
+func TestBroadcast_MalformedReadersOfConversationPublishesNothing(t *testing.T) {
+	cases := map[string]Event{
+		"no org":          {Type: "message", ConversationID: "conv-1", ReadersOfConversation: true},
+		"no conversation": {Type: "message", OrgID: "org-1", ReadersOfConversation: true},
+		"and a user":      {Type: "message", OrgID: "org-1", ConversationID: "conv-1", UserID: "user-1", ReadersOfConversation: true},
+		"and a set":       {Type: "message", OrgID: "org-1", ConversationID: "conv-1", UserIDs: []string{"user-1"}, ReadersOfConversation: true},
+	}
+	for name, evt := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := NewHub()
+			bp := &fakeBackplane{}
+			h.SetBackplane(bp)
+			c := addBareClient(h, "user-1", "org-1")
+
+			h.Broadcast(evt)
+
+			if got := drain(t, c, 50*time.Millisecond); len(got) != 0 {
+				t.Errorf("client received %d events", len(got))
+			}
+			if got := bp.count(); got != 0 {
+				t.Errorf("backplane saw %d published events, want 0", got)
+			}
+		})
+	}
+}
+
+// TestDeliverRemote_DropsAnUnresolvedAudience pins the last stop for a
+// marked event: the hub's own scope would hand it to the whole org, so
+// DeliverRemote delivers it to nobody.
+func TestDeliverRemote_DropsAnUnresolvedAudience(t *testing.T) {
+	h := NewHub()
+	scoped := addBareClient(h, "user-1", "org-1")
+	unscoped := addBareClient(h, "", "")
+
+	h.DeliverRemote(Event{Type: "message", OrgID: "org-1", ConversationID: "conv-1", ReadersOfConversation: true})
+
+	for label, c := range map[string]*client{"user-1": scoped, "unscoped": unscoped} {
+		if got := drain(t, c, 50*time.Millisecond); len(got) != 0 {
+			t.Errorf("%s received %d events whose audience was never resolved", label, len(got))
+		}
+	}
+}
+
 // TestSnapshot_SkipsUnscopedClientsAndReturnsIdentifiedOnes pins the
 // presence-heartbeat data source: only identified (non-empty userID)
 // clients are worth a ws_presence row.

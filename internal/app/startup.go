@@ -232,7 +232,13 @@ func (a *App) startWorkers(ctx context.Context) {
 		// admin connection). The tf_ctl session kick no longer rides this
 		// connection — it arrives via the shared tf_ctl listener started
 		// above, routed to the backplane's HandleCtlKick.
+		//
+		// An executor's conversation frames reach tf_ws naming their
+		// conversation rather than their recipients, since its database role
+		// cannot read memberships; this pod's role can, so it resolves them
+		// for its own sockets before the listener delivers any.
 		if a.plan.serveHTTP {
+			a.wsBackplane.SetConversationReaders(a.stores.Conversations.ConversationFrameRecipientsSystem)
 			go a.wsBackplane.RunPublicListener(ctx)
 			go a.wsBackplane.RunPresenceHeartbeat(ctx, wsbackplane.PresenceHeartbeatIntervalFromEnv())
 			go a.srv.RunSessionRevalidation(ctx, wsbackplane.RevalidateIntervalFromEnv())
