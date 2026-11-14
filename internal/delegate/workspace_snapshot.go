@@ -1513,6 +1513,9 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 // A caller with no builder gets the refusal whatever the runtime; the SDK
 // resume dispatch is the one such caller, and it could not use this arm anyway.
 func (s *Spawner) workspaceFromNothing(ctx context.Context, orgID string, conv *domain.Conversation, keyID string, fresh freshWorkspaceBuilder) (string, domain.WorkspaceProvenance, error) {
+	// TODO(TFAC-1438): an SDK conversation is refused here because its
+	// session file's only durable copy is the snapshot; with a session blob of
+	// its own it resumes onto a fresh tree, as a native one does.
 	if resumeSourceFor(conv.Runtime) != resumeSourceMessages || fresh == nil {
 		return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from: %w", conv.WorktreePath, keyID, ErrWorkspaceExpired)
 	}

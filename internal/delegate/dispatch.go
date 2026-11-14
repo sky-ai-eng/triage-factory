@@ -1517,12 +1517,10 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 	defer func() { _ = localGit.Close() }()
 
-	// The SDK path's resume carries its context in the session file rather than
-	// in rows, so it has no claim-time notice to make honest — the provenance
-	// is dropped here rather than threaded on to nothing. No fresh-workspace
-	// builder either, for the same reason: that session file lived in the
-	// snapshot, so a tree built without one has nothing to reconnect to.
-	resumeCwd, _, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit), nil)
+	// No fresh-workspace builder: the session file this resume reconnects to
+	// lives in the snapshot, so a tree built without one has nothing to
+	// reconnect to. The provenance is kept for the turn's workspace note.
+	resumeCwd, prov, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit), nil)
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -1580,16 +1578,28 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// the queued rows become this turn's message.
 	flushPendingInput()
 
+	// A tree restored or rebuilt under the session is one the model remembers
+	// differently from how it is, so the turn opens with what it lost. A fence
+	// refusal leaves it out with its row, and the resume meets the same fence
+	// at its first write.
+	note := workspaceNote(resumeCwd, prov)
+	if note != "" && s.insertClaimNote(stepCtx, orgID, conv.ClaimID, &domain.Message{
+		ConversationID: conv.ID,
+		UserID:         userID,
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeInjectionExecutorChanged,
+		Content:        note,
+	}) {
+		note = ""
+	}
+
 	// Prepend the out-of-band <system-note> blocks that accumulated while
 	// the run wasn't running — deferred to here (claim time), not the
 	// enqueue step, so injections staged AFTER the enqueue are still
 	// picked up (the flush is destructive, so composing it early would
 	// risk losing anything staged in the gap).
 	prepends, prependsUnsent := s.stagedInjectionsForEngagement(stepCtx, orgID, conv.ID)
-	message := agentMessage
-	if prepends != "" {
-		message = prepends + "\n\n" + agentMessage
-	}
+	message := joinTurnText(note, prepends, agentMessage)
 
 	// The resume path's agent-live: every hand-back is behind us and the
 	// runtime is about to come up. It clears the phase rather than only ending

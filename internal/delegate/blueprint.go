@@ -312,6 +312,9 @@ func (s *Spawner) runBlueprintWorktreeCleanup(orgID, blueprintRunID, wsKey strin
 	// file stays for a follow-up that rehydrates an earlier step's blob.
 	// BEFORE removing the root — RemoveClaudeProjectDir resolves the cwd via
 	// EvalSymlinks and silently no-ops once the dir is gone.
+	// TODO(TFAC-1438): a file kept here on a task with no snapshot at all is
+	// never resumed and never removed; with a session blob of its own, this
+	// removes the entry whatever the snapshot did.
 	if s.latestSnapshotStored(orgID, wsKey) {
 		worktree.RemoveClaudeProjectDir(root)
 	}

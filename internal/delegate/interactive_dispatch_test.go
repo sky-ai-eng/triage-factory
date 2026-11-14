@@ -399,6 +399,12 @@ func TestDispatch_InteractiveSDKTurnKeepsItsSession(t *testing.T) {
 	if conv.Status != domain.StatusOpen || conv.EndedAt != nil {
 		t.Fatalf("after the turn: (status %q, ended %v), want open and un-ended", conv.Status, conv.EndedAt)
 	}
+	// With no verdict the row is one the restart sweep keeps the tree of
+	// (ListResumableWorktreePathsSystem), so the session survives a restart
+	// as well as the turn.
+	if conv.Concluded() {
+		t.Errorf("the turn recorded a verdict (outcome %q); a chat between turns waits on its next message", conv.Outcome)
+	}
 	if !sessionTranscriptExists(launched.park.claudeCwd, "sess-1421-keep") {
 		t.Error("the turn's end removed the session file the next message resumes from")
 	}

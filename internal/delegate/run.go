@@ -21,6 +21,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
@@ -626,7 +627,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// recorded through the sink's own insert door. Last before the launch, so
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
 	// that really was about to speak.
-	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, cfg.interactive, taskMemories, taskContext); err != nil {
+	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, workspaceNote(cfg.runRoot, cfg.workspace), cfg.interactive, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the
 			// conversation, and every row this engagement still wrote would
@@ -758,8 +759,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // opening over the top of that would read as a second briefing and restart the
 // mission — so it gets the continuation note instead, which says the one thing
 // the session cannot: why it paused. lastHandBackOutcome picks the note (see
-// continuationNote). A launch with no session to resume has a model that knows
-// nothing, and gets the opening.
+// continuationNote). workspaceNote, set when the tree was rebuilt under the
+// session, comes first, since what the tree lost is what the rest of the turn
+// is read against. A launch with no session to resume has a model that knows
+// nothing, gets the opening, and is told nothing about a tree it has no
+// memory of.
 //
 // Either one carries the notes staged for the conversation, so a launch reads
 // what landed before it as every other engagement does. The continuation note
@@ -784,23 +788,25 @@ func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
 	sink *conversationSink,
-	orgID, conversationID, creatorUserID, lastHandBackOutcome string,
+	orgID, conversationID, creatorUserID, lastHandBackOutcome, workspaceNote string,
 	interactive bool,
 	memories []domain.TaskMemory,
 	taskContext string,
 ) error {
 	if opts.SessionID != "" {
+		if workspaceNote != "" {
+			if err := s.recordLaunchNote(sink, conversationID, creatorUserID, domain.MessageSubtypeInjectionExecutorChanged, workspaceNote); err != nil {
+				return err
+			}
+		}
 		note := continuationNote(lastHandBackOutcome)
-		if err := s.recordContinuationNote(sink, conversationID, creatorUserID, note); err != nil {
+		if err := s.recordLaunchNote(sink, conversationID, creatorUserID, domain.MessageSubtypeInjectionNudge, note); err != nil {
 			return err
 		}
-		opts.OpeningBlocks = nil
-		opts.Message = note
 		notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
 		opts.OnOpeningUnsent = unsent
-		if notes != "" {
-			opts.Message = notes + "\n\n" + note
-		}
+		opts.OpeningBlocks = nil
+		opts.Message = joinTurnText(workspaceNote, notes, note)
 		return nil
 	}
 	blocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, memories, taskContext)
@@ -876,23 +882,43 @@ func continuationNote(lastHandBackOutcome string) string {
 	return domain.SessionContinuationNote
 }
 
-// recordContinuationNote writes the note a resuming launch sends, through the
-// same door the rest of the engagement's rows go through.
+// recordLaunchNote writes a note a resuming launch sends, under subtype,
+// through the same door the rest of the engagement's rows go through.
 //
 // Delivered, not pending: an undelivered user row is the SDK's resume queue,
 // so a note left there would come back at the next claim as a follow-up
 // nobody typed. The row exists so the transcript shows what was actually sent
 // — the session file is the model's copy, and nothing else here reads it.
-func (s *Spawner) recordContinuationNote(sink *conversationSink, conversationID, creatorUserID, note string) error {
+func (s *Spawner) recordLaunchNote(sink *conversationSink, conversationID, creatorUserID, subtype, note string) error {
 	delivered := true
 	return sink.OnMessage(&domain.Message{
 		ConversationID: conversationID,
 		UserID:         creatorUserID,
 		Role:           "user",
-		Subtype:        domain.MessageSubtypeInjectionNudge,
+		Subtype:        subtype,
 		Content:        note,
 		Delivered:      &delivered,
 	})
+}
+
+// workspaceNote is the note an SDK conversation resuming its session opens
+// with when its tree at root was rebuilt (prov), and "" when it was not. The
+// session file carries the conversation and not the tree, so a resume into a
+// restored or rebuilt tree is told what the tree lost, as a native resume is.
+func workspaceNote(root string, prov domain.WorkspaceProvenance) string {
+	return agentloop.WorkspaceRebuiltNote(agentloop.WorkspaceLayout{Root: root}, prov)
+}
+
+// joinTurnText joins the non-empty parts of a turn's text in order, a blank
+// line between each.
+func joinTurnText(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "\n\n")
 }
 
 // openingTurnBlocks mints the SDK conversation's opening rows and assembles
