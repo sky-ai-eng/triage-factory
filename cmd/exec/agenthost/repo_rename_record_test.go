@@ -35,6 +35,22 @@ func registerRepo(t *testing.T, stores db.Stores, owner, repo, externalID string
 	return row.ID
 }
 
+// checkOutRepoForTest makes the registry row repositoryID one the run works
+// in: tracked by its team, with a checkout of its own in the ledger, which is
+// what the exec-gh repository gate admits.
+func checkOutRepoForTest(t *testing.T, stores db.Stores, info ConversationInfo, repositoryID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, info.OrgID, info.TeamID, testScope("github"), []string{repositoryID}); err != nil {
+		t.Fatalf("track %s: %v", repositoryID, err)
+	}
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, info.OrgID, domain.ConversationWorktree{
+		ConversationID: info.ConversationID, RepositoryID: repositoryID, Ref: "default", Path: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("record a checkout of %s: %v", repositoryID, err)
+	}
+}
+
 // renameRepo applies the rename of octo/old-name to octo/new-name the way the
 // poller does when GitHub reports the repository's id under its new name.
 func renameRepo(t *testing.T, stores db.Stores) {

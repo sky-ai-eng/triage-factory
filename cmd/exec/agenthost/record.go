@@ -591,12 +591,10 @@ func githubRepositoryRow(ctx context.Context, stores db.Stores, info Conversatio
 // works in (runMayRecordAgainst), the set its writes are authorized over. A
 // read is admitted there and in every other repository the run's credential
 // reads (runMayReadRepository), so a read the credential allowed is not
-// dropped here, and one it could not have made is.
-//
-// TODO(TFAC-1416): an org on a token rather than an App holds one credential
-// for every repository the token reads, so a run there that works in one
-// repository can read others this gate does not admit, and those reads are
-// not linked.
+// dropped here, and one it could not have made is. A token org's credential
+// reads further than that set; the gh channel's repository gate refuses a read
+// beyond it, except of a public repository, which an App's token reads as
+// well, and whose reads are not linked.
 func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string, read bool) (bool, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return true, nil
@@ -620,21 +618,14 @@ func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info Conve
 // tokens over, computed by the same function, so the gate admits what the
 // credential reads and no more.
 //
-// The task is resolved from the conversation here, as IsTaskOwnRepository
-// resolves it, rather than taken from a field a caller stamped. A
-// conversation that cannot be read admits nothing.
+// The task is resolved from the conversation
+// (ConversationAuthorizedRepositories). A conversation that cannot be read
+// admits nothing.
 func runMayReadRepository(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string) (bool, error) {
-	if stores.Conversations == nil || info.ConversationID == "" || repositoryID == "" {
+	if repositoryID == "" {
 		return false, nil
 	}
-	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
-	if err != nil {
-		return false, err
-	}
-	if conv == nil {
-		return false, nil
-	}
-	repos, err := AuthorizedRepositories(ctx, stores, info.OrgID, info.TeamID, conv.TaskID, info.ConversationID)
+	repos, err := ConversationAuthorizedRepositories(ctx, stores, info)
 	if err != nil {
 		return false, err
 	}

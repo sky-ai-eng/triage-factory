@@ -132,16 +132,25 @@ type GitHubCreds struct {
 
 	RepoTokens map[string]RepoToken `json:"repo_tokens,omitempty"`
 
+	// RepoIDs is the run's authorized repository set: GitHub's id for each
+	// repository, keyed like RepoTokens by its current "owner/repo", the id ""
+	// for a registry row that does not know it yet. It names every repository
+	// the set holds, a token minted for it or not. The real-gh channel's
+	// repository gate reads it, with every RepoTokens key besides it, which
+	// are in the set by construction.
+	RepoIDs map[string]string `json:"repo_ids,omitempty"`
+
 	// CLIToken is the single credential the real-gh channel's injector proxy
 	// injects upstream on every request. For an App org it is one installation
 	// token scoped to the run's authorized repos under the primary owner (minted
-	// with nil permissions = the App's full grant on those repos); for a PAT org
-	// it is the org PAT. The injector injects it on every request it forwards —
-	// the token's own repo scope is what bounds WHICH repositories are
-	// reachable, and there is no path allowlist on top of it. What the injector
-	// does apply is a refusal policy on three families of write (see
-	// internal/ghcli/ghinjector); that is about the act, not the repository, so the
-	// two bounds compose rather than overlap. Distinct from RepoTokens, which the
+	// with nil permissions = the App's full grant on those repos), and the
+	// token's own repo scope is what bounds WHICH repositories are reachable.
+	// For a PAT org it is the org PAT, which reaches every repository the token
+	// can, so the injector's repository gate refuses a request naming one
+	// outside RepoIDs; that gate is courtesy isolation, not a boundary (see
+	// internal/ghcli/ghinjector). The injector applies a refusal policy on three
+	// families of write in both; that is about the act, not the repository, so
+	// the bounds compose rather than overlap. Distinct from RepoTokens, which the
 	// per-repo exec-verb/SDK channel and git proxy consume until their P4
 	// retirement. Nil when the org has no GitHub credential.
 	CLIToken *RepoToken `json:"cli_token,omitempty"`

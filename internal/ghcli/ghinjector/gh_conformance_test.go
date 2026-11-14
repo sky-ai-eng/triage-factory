@@ -66,6 +66,8 @@ const (
 	// The repository the archive fixture reports as already archived, so
 	// `repo archive` and `repo unarchive` can both reach their mutation.
 	confArchivedRepo = "archived"
+	// The repository `issue transfer` moves an issue to.
+	confTransferRepo = "other"
 )
 
 // fixtureObject is one pull request or issue the fake serves, in the state its
@@ -663,6 +665,14 @@ func (r *wireRecords) authorize(_ context.Context, req ghwrite.Request, ref ghwr
 	return false
 }
 
+// denyRepository records a refusal of the repository gate, which no command
+// in the battery expects.
+func (r *wireRecords) denyRepository(_ context.Context, d DeniedRepository) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rows = append(r.rows, "refused(repository) "+d.Method+" "+d.Path+" "+d.Name())
+}
+
 func (r *wireRecords) snapshot() ([]string, []string, []ghwrite.GraphQLFacts) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -894,7 +904,7 @@ func porcelainWriteCases() []wireCase {
 		},
 		{
 			name: "issue transfer",
-			args: ghArgs("issue", "transfer", "7", confOwner+"/other"),
+			args: ghArgs("issue", "transfer", "7", confOwner+"/"+confTransferRepo),
 			want: []wireExpect{{mutation: "transferIssue", action: domain.ActionIssueTransferred}},
 		},
 		{
@@ -1176,9 +1186,28 @@ func handWrittenWriteCases() []wireCase {
 // fixture, with both record sinks wired, and returns what gh printed and how it
 // exited. Exit status is part of the evidence: a refusal the agent's tool
 // reports as success is a gate the run has no reason to believe.
+//
+// The repository gate is wired too, over the fixture's repositories named
+// without their ids, so a command that named any other repository would reach
+// the gate's lookup, which the fixture cannot answer, and leave a refusal row:
+// every command here is one a run makes against the repositories it works in,
+// and none of them may be refused for it. Those are the fixture's own, the one
+// the archive commands act on, and the one `issue transfer` moves an issue to,
+// which the command names too.
 func driveGH(t *testing.T, upstream *fakeUpstream, records *wireRecords, args []string) ([]byte, error) {
 	t.Helper()
-	env := ghEnvWithGate(t, upstream.server.URL, records.audit, records.authorize)
+	env := ghEnvWithConfig(t, upstream.server.URL, Config{
+		ObserveWrite:   records.audit,
+		AuthorizeWrite: records.authorize,
+		Repositories: func(context.Context) ([]AuthorizedRepository, bool, error) {
+			return []AuthorizedRepository{
+				{Name: confOwner + "/" + confRepo},
+				{Name: confOwner + "/" + confArchivedRepo},
+				{Name: confOwner + "/" + confTransferRepo},
+			}, true, nil
+		},
+		DenyRepository: records.denyRepository,
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ghBinary(t), args...)

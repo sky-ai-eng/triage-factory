@@ -356,6 +356,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 					info.UserID = runmode.LocalDefaultUserID
 					client = NewLocal(stores, info)
 					client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
+					ungateRecordingClient(client)
 				}
 
 				if err := client.GithubUpdateComment(context.Background(), "octo", "repo", 999, "edit a review comment"); err != nil {
@@ -384,6 +385,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 					info.UserID = runmode.LocalDefaultUserID
 					client = NewLocal(stores, info)
 					client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
+					ungateRecordingClient(client)
 				}
 
 				if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 999); err != nil {

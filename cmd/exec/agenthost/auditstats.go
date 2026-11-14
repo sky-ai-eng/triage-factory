@@ -132,13 +132,14 @@ func recordDropOp(a *domain.Deliverable, act *domain.ExternalAction) string {
 // label verbatim. Every value is a Go constant from dispatchCoreRecord's
 // switch, so the set is the switch.
 var coreRecordOps = map[string]struct{}{
-	agentproc.OpRecordDenial:       {},
-	agentproc.OpRecordEgressDenial: {},
-	agentproc.OpRecordGHWrite:      {},
-	agentproc.OpRecordPush:         {},
-	opRecordExternalWrite:          {},
-	opRecordBranchPush:             {},
-	opRecordReadTouch:              {},
+	agentproc.OpRecordDenial:             {},
+	agentproc.OpRecordEgressDenial:       {},
+	agentproc.OpRecordGHWrite:            {},
+	agentproc.OpRecordGHRepositoryDenial: {},
+	agentproc.OpRecordPush:               {},
+	opRecordExternalWrite:                {},
+	opRecordBranchPush:                   {},
+	opRecordReadTouch:                    {},
 }
 
 // relayDropOp names a relay-stage drop, in the "<namespace>.<op>" form the
