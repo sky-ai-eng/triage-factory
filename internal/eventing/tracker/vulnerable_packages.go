@@ -121,7 +121,7 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 	}
 	var events atomic.Int64
 	var stopped atomic.Bool
-	reads := &updateReads{}
+	reads := newUpdateReads()
 	// done is written by each listing's goroutine at its own index, and read
 	// once Wait has returned.
 	done := make([]bool, len(repos))
@@ -302,8 +302,8 @@ func (t *Tracker) heldVulnerablePackages(ctx context.Context, scope string, repo
 // A listing answered 304 opened and closed nothing, but Dependabot may have
 // acted on an alert since: the listing does not carry what it did, and GitHub
 // sends no webhook when an update fails. So a 304 still reads the updates of
-// the packages TF holds when they are due, and commits only what that read
-// changed.
+// the packages TF holds when they are due, and writes only the packages that
+// read changed.
 func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, client *ghclient.Client, l AlertListing, held map[string]domain.Entity, reads *updateReads) (emitted, announced int, err error) {
 	repo := l.Repository
 	condition := l.Access.AlertsETag
@@ -319,23 +319,34 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 		var refreshes []packageRefresh
 		for _, key := range slices.Sorted(maps.Keys(held)) {
 			e := held[key]
-			if awaitingClose(e) {
+			prev, ok := storedVulnerablePackageSnapshot(e)
+			if !ok {
+				continue
+			}
+			if prev.Terminal() {
 				// Its resolution was emitted and its close has not landed,
 				// so it is still owed one.
 				n, _ := t.oweVulnerablePackageClose(ctx, e)
 				emitted += n
 				continue
 			}
-			if prev, ok := storedVulnerablePackageSnapshot(e); ok {
-				refreshes = append(refreshes, packageRefresh{entity: e, prev: prev, hasPrev: true, curr: prev})
-			}
+			refreshes = append(refreshes, packageRefresh{entity: e, prev: prev, hasPrev: true, curr: prev})
 		}
-		if !t.readDependabotUpdates(ctx, client, repo, refreshes, reads) {
+		readAt, read := t.readDependabotUpdates(ctx, client, l, refreshes, reads)
+		if !read {
 			return emitted, 0, nil
 		}
+		landed := true
 		for _, p := range refreshes {
-			n, _, _ := t.applyVulnerablePackage(ctx, p, repo)
+			if mustJSON(p.curr) == mustJSON(p.prev) {
+				continue
+			}
+			n, _, ok := t.applyVulnerablePackage(ctx, p, repo)
 			emitted += n
+			landed = landed && ok
+		}
+		if landed {
+			t.recordUpdatesRead(ctx, repo, readAt)
 		}
 		return emitted, 0, nil
 	}
@@ -386,12 +397,17 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 		prev, hasPrev := storedVulnerablePackageSnapshot(e)
 		refreshes = append(refreshes, packageRefresh{entity: e, prev: prev, hasPrev: hasPrev, curr: carryDependabotUpdates(prev, snap)})
 	}
-	t.readDependabotUpdates(ctx, client, repo, refreshes, reads)
+	readAt, read := t.readDependabotUpdates(ctx, client, l, refreshes, reads)
+	updatesLanded := true
 	for _, p := range refreshes {
 		n, a, landed := t.applyVulnerablePackage(ctx, p, repo)
 		emitted += n
 		announced += a
 		complete = complete && landed
+		updatesLanded = updatesLanded && landed
+	}
+	if read && updatesLanded {
+		t.recordUpdatesRead(ctx, repo, readAt)
 	}
 	for _, key := range slices.Sorted(maps.Keys(held)) {
 		if _, open := packages[key]; open {
@@ -430,22 +446,45 @@ type packageRefresh struct {
 	curr    domain.VulnerablePackageSnapshot
 }
 
+// dependabotUpdateReadsPerPass caps the reads of Dependabot updates one
+// credential pass makes, so that a burst of young alerts across a large
+// tracked set (one advisory reaching hundreds of repositories at once) spreads
+// its reads over several polls rather than spending the GraphQL budget the
+// pull request refresh draws on too. A repository past the cap stays due and
+// is read on a later poll.
+const dependabotUpdateReadsPerPass = 25
+
+// dependabotUpdateReadTimeout bounds one repository's read. A read is never
+// worth waiting for, since a repository it misses is read on the next poll,
+// and the deadline is what has the client refuse a request it would otherwise
+// hold until a spent GraphQL budget resets, with the repository's listing
+// waiting behind it.
+const dependabotUpdateReadTimeout = 30 * time.Second
+
 // updateReads is one pass's reads of what Dependabot did about its
-// repositories' alerts. A read that fails for a reason that would meet every
-// other repository too (a rate limit, a refused credential, GitHub failing)
-// stops the pass's later reads; the listings go on without them, and the next
-// poll reads again.
+// repositories' alerts: how many it may still make
+// (dependabotUpdateReadsPerPass), and whether a read failed for a reason that
+// would meet every other repository too (a rate limit, a refused credential,
+// GitHub failing), which stops the pass's later reads. The listings go on
+// without them, and the next poll reads again.
 type updateReads struct {
+	left    atomic.Int64
 	stopped atomic.Bool
 }
 
-// maxDependabotUpdateRecheck is the longest a package's Dependabot updates go
-// unread while it has open alerts, however settled they are: Dependabot tries
-// again when someone asks it to on the alert or turns security updates on, and
-// neither sends TF anything.
+func newUpdateReads() *updateReads {
+	r := &updateReads{}
+	r.left.Store(dependabotUpdateReadsPerPass)
+	return r
+}
+
+// maxDependabotUpdateRecheck is the longest a repository's Dependabot updates
+// go unread while it has open alerts, however settled they are: Dependabot
+// tries again when someone asks it to on the alert or turns security updates
+// on, and neither sends TF anything.
 const maxDependabotUpdateRecheck = 24 * time.Hour
 
-// dependabotUpdateRecheck is how long after its last read a package's
+// dependabotUpdateRecheck is how long after the last read a package's
 // Dependabot updates are read again: a quarter of the age of its youngest
 // alert Dependabot may still act on (DependabotAlert.AwaitsDependabot), the
 // age being since GitHub last changed the alert, and at most
@@ -465,99 +504,121 @@ func dependabotUpdateRecheck(s domain.VulnerablePackageSnapshot, now time.Time) 
 }
 
 // updatesDue reports whether the Dependabot updates of the packages in
-// refreshes are due a read at now: an alert is open in a package's curr that
-// its prev did not hold, so the events announcing it carry what Dependabot
-// has done about it, or a package's last read is older than its recheck
-// interval (dependabotUpdateRecheck).
-func updatesDue(refreshes []packageRefresh, now time.Time) bool {
+// refreshes, one repository's, are due a read at now, the last read being at
+// readAt: an alert has none recorded, because it is new, a read failed after
+// it opened, or a patch was released since its update was read, or the last
+// read is older than the shortest of the packages' recheck intervals
+// (dependabotUpdateRecheck).
+func updatesDue(refreshes []packageRefresh, readAt, now time.Time) bool {
+	if len(refreshes) == 0 {
+		return false
+	}
+	interval := maxDependabotUpdateRecheck
 	for _, p := range refreshes {
 		for _, a := range p.curr.Alerts {
-			if _, held := p.prev.Alert(a.Number); !held {
+			if a.DependabotUpdate == nil {
 				return true
 			}
 		}
-		if now.Sub(p.curr.UpdatesReadAt) >= dependabotUpdateRecheck(p.curr, now) {
-			return true
-		}
+		interval = min(interval, dependabotUpdateRecheck(p.curr, now))
 	}
-	return false
+	return now.Sub(readAt) >= interval
 }
 
-// readDependabotUpdates reads what Dependabot did about the alerts of repo
-// when the packages in refreshes are due it (updatesDue), and moves each
-// package's curr to what the read says: an alert the answer names gets the
-// update it reports, one it does not name keeps the update curr has, and the
-// read's time is recorded. Reports whether it read; a failed read changes
-// nothing, so the packages are due again on the next poll. A failure that
-// says nothing about this repository alone stops the pass's later reads
-// (updateReads).
-func (t *Tracker) readDependabotUpdates(ctx context.Context, client *ghclient.Client, repo domain.Repository, refreshes []packageRefresh, reads *updateReads) bool {
-	now := t.updatesNow().UTC()
-	if len(refreshes) == 0 || reads.stopped.Load() || !updatesDue(refreshes, now) {
-		return false
+// readDependabotUpdates reads what Dependabot did about the alerts of l's
+// repository when the packages in refreshes are due it (updatesDue) and the
+// pass may still read (updateReads), and moves each package's curr to what
+// the read says (withDependabotUpdates). read reports whether it read, and
+// readAt is when, which the caller records once the packages the read
+// changed are written (recordUpdatesRead).
+//
+// A read GitHub answered with something TF cannot use for the repository
+// (ghclient.ErrDependabotListingUnusable) is taken as an answer that names no
+// alert, as GitHub answers a credential that may not read the repository's
+// alerts, so the repository's next read keeps to its schedule. Any other
+// failure changes nothing, and stops the pass's later reads.
+func (t *Tracker) readDependabotUpdates(ctx context.Context, client *ghclient.Client, l AlertListing, refreshes []packageRefresh, reads *updateReads) (readAt time.Time, read bool) {
+	repo := l.Repository
+	now := t.now().UTC()
+	if reads.stopped.Load() || !updatesDue(refreshes, l.Access.UpdatesReadAt, now) {
+		return time.Time{}, false
 	}
-	updates, err := client.ListDependabotUpdates(ctx, repo.Owner, repo.Repo)
-	if err != nil {
+	if reads.left.Add(-1) < 0 {
+		recordDependabotUpdateRead(dependabotUpdateReadDeferred)
+		return time.Time{}, false
+	}
+	readCtx, cancel := context.WithTimeout(ctx, dependabotUpdateReadTimeout)
+	updates, err := client.ListDependabotUpdates(readCtx, repo.Owner, repo.Repo)
+	cancel()
+	outcome := dependabotUpdateReadRead
+	switch {
+	case errors.Is(err, ghclient.ErrDependabotListingUnusable):
+		trackerLog.WarnContext(ctx, "dependabot updates unusable; reading the repository's alerts as unanswered", "org", t.orgID, "repo", repo.Slug(), "error", err)
+		updates, outcome = nil, dependabotUpdateReadFailed
+	case err != nil:
 		recordDependabotUpdateRead(dependabotUpdateReadFailed)
-		if errors.Is(err, ghclient.ErrDependabotListingUnusable) {
-			trackerLog.WarnContext(ctx, "dependabot updates unreadable; the repository's are read again next cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
-			return false
-		}
 		reads.stopped.Store(true)
 		var rl *ghclient.ErrRateLimited
 		if !errors.As(err, &rl) {
 			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "read dependabot updates failed; the pass's other repositories are read next cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
 		}
-		return false
+		return time.Time{}, false
 	}
-	outcome := dependabotUpdateReadRead
 	for i := range refreshes {
-		if !withDependabotUpdates(&refreshes[i].curr, updates, now) {
+		if !withDependabotUpdates(&refreshes[i].curr, updates) && outcome == dependabotUpdateReadRead {
 			outcome = dependabotUpdateReadIncomplete
 		}
 	}
 	recordDependabotUpdateRead(outcome)
-	return true
+	return now, true
 }
 
-// updatesNow is the clock reads of Dependabot updates are scheduled on.
-func (t *Tracker) updatesNow() time.Time {
-	if t.updatesClock != nil {
-		return t.updatesClock()
+// recordUpdatesRead stores readAt as when repo's Dependabot updates were last
+// read. A write that fails leaves the earlier time, so the repository is read
+// again sooner than its schedule says, and nothing is lost.
+func (t *Tracker) recordUpdatesRead(ctx context.Context, repo domain.Repository, readAt time.Time) {
+	if _, err := t.dependabotAccess.RecordUpdatesReadSystem(ctx, t.orgID, repo.ID, readAt); err != nil {
+		trackerLog.ErrorContext(ctx, "record dependabot updates read failed", "org", t.orgID, "repo", repo.Slug(), "error", err)
 	}
-	return time.Now()
 }
 
 // withDependabotUpdates sets each of s's alerts that updates names to the
-// update it names, and the read time to readAt. complete reports whether
-// updates named every alert. s's alerts are copied first, so a snapshot that
-// shares them with a stored one leaves the stored one as it was.
-func withDependabotUpdates(s *domain.VulnerablePackageSnapshot, updates map[int]domain.DependabotUpdate, readAt time.Time) (complete bool) {
+// update it names. An alert it does not name keeps the update s has, or, with
+// none, gets DependabotUpdateNone: GitHub reported nothing for it, which is
+// what GitHub reports for an alert Dependabot has not tried. complete reports
+// whether updates named every alert. s's alerts are copied first, so a
+// snapshot that shares them with a stored one leaves the stored one as it
+// was.
+func withDependabotUpdates(s *domain.VulnerablePackageSnapshot, updates map[int]domain.DependabotUpdate) (complete bool) {
 	complete = true
 	s.Alerts = slices.Clone(s.Alerts)
 	for i, a := range s.Alerts {
 		u, ok := updates[a.Number]
 		if !ok {
 			complete = false
-			continue
+			if a.DependabotUpdate != nil {
+				continue
+			}
+			u = domain.DependabotUpdate{State: domain.DependabotUpdateNone}
 		}
 		s.Alerts[i].DependabotUpdate = &u
 	}
-	s.UpdatesReadAt = readAt
 	return complete
 }
 
 // carryDependabotUpdates is curr, a package as the listing gives it, with
 // what TF last read of Dependabot's updates carried over from prev, its
-// stored snapshot: each alert prev holds keeps its update, and the package
-// its read time. The listing does not carry them.
+// stored snapshot: each alert prev holds keeps its update, unless the alert's
+// patched version has changed since, as when a fix is released for an alert
+// that had none. Dependabot's answer then predates the version it would
+// upgrade to, so the alert is left with none and read again. The listing does
+// not carry updates.
 func carryDependabotUpdates(prev, curr domain.VulnerablePackageSnapshot) domain.VulnerablePackageSnapshot {
 	for i, a := range curr.Alerts {
-		if p, ok := prev.Alert(a.Number); ok {
+		if p, ok := prev.Alert(a.Number); ok && p.FirstPatchedVersion == a.FirstPatchedVersion {
 			curr.Alerts[i].DependabotUpdate = p.DependabotUpdate
 		}
 	}
-	curr.UpdatesReadAt = prev.UpdatesReadAt
 	return curr
 }
 
@@ -675,8 +736,11 @@ func (t *Tracker) oweVulnerablePackageClose(ctx context.Context, e domain.Entity
 //     UpdatedAt, naming the pull request Dependabot opened for it when curr
 //     records one;
 //   - a dependabot_cannot_fix when Dependabot cannot fix it
-//     (DependabotAlert.DependabotCannotFix) and could fix it, or might yet, in
-//     prev, which is every such alert prev did not hold.
+//     (DependabotAlert.DependabotCannotFix) for a reason it did not have in
+//     prev: every such alert prev did not hold, one Dependabot could fix or
+//     might yet in prev, and one whose reason moved (no patched version, then
+//     a patch released and Dependabot's update for it failed), so a handler on
+//     one reason sees every alert that comes to have it.
 //
 // Then a resolved when prev held open alerts and curr holds none. An alert
 // closing while another stays open emits nothing, and neither does any other
@@ -687,40 +751,7 @@ func DiffVulnerablePackage(prev, curr domain.VulnerablePackageSnapshot, entityID
 	highest := curr.HighestSeverity()
 	for _, a := range curr.Alerts {
 		was, wasOpen := prev.Alert(a.Number)
-		if !wasOpen {
-			m := events.GitHubVulnerabilityAlertOpenedMetadata{
-				Repo:                   curr.Repo,
-				RepositoryID:           repositoryID,
-				Ecosystem:              curr.Ecosystem,
-				Package:                curr.Package,
-				AlertNumber:            a.Number,
-				GHSAID:                 a.GHSAID,
-				CVEID:                  a.CVEID,
-				Summary:                a.Summary,
-				Severity:               a.Severity,
-				ManifestPath:           a.ManifestPath,
-				Scope:                  a.Scope,
-				VulnerableVersionRange: a.VulnerableVersionRange,
-				FirstPatchedVersion:    a.FirstPatchedVersion,
-				HighestSeverity:        highest,
-			}
-			if u := a.DependabotUpdate; u != nil && u.State == domain.DependabotUpdatePullRequest {
-				m.DependabotPullRequestNumber = u.PullRequestNumber
-				m.DependabotPullRequestURL = u.PullRequestURL
-			}
-			evts = append(evts, domain.Event{
-				EventType:    domain.EventGitHubVulnerabilityAlertOpened,
-				EntityID:     &entityID,
-				MetadataJSON: mustJSON(m),
-				OccurredAt:   a.UpdatedAt,
-				CreatedAt:    now,
-			})
-		}
-		reason := a.DependabotCannotFix()
-		if reason == "" || (wasOpen && was.DependabotCannotFix() != "") {
-			continue
-		}
-		m := events.GitHubVulnerabilityDependabotCannotFixMetadata{
+		alert := events.GitHubVulnerabilityAlert{
 			Repo:                   curr.Repo,
 			RepositoryID:           repositoryID,
 			Ecosystem:              curr.Ecosystem,
@@ -735,9 +766,28 @@ func DiffVulnerablePackage(prev, curr domain.VulnerablePackageSnapshot, entityID
 			VulnerableVersionRange: a.VulnerableVersionRange,
 			FirstPatchedVersion:    a.FirstPatchedVersion,
 			HighestSeverity:        highest,
-			Reason:                 reason,
 		}
-		if u := a.DependabotUpdate; u != nil && u.State == domain.DependabotUpdateError {
+		u := a.DependabotUpdate
+		if !wasOpen {
+			m := events.GitHubVulnerabilityAlertOpenedMetadata{GitHubVulnerabilityAlert: alert}
+			if u != nil && u.State == domain.DependabotUpdatePullRequest {
+				m.DependabotPullRequestNumber = u.PullRequestNumber
+				m.DependabotPullRequestURL = u.PullRequestURL
+			}
+			evts = append(evts, domain.Event{
+				EventType:    domain.EventGitHubVulnerabilityAlertOpened,
+				EntityID:     &entityID,
+				MetadataJSON: mustJSON(m),
+				OccurredAt:   a.UpdatedAt,
+				CreatedAt:    now,
+			})
+		}
+		reason := a.DependabotCannotFix()
+		if reason == "" || (wasOpen && was.DependabotCannotFix() == reason) {
+			continue
+		}
+		m := events.GitHubVulnerabilityDependabotCannotFixMetadata{GitHubVulnerabilityAlert: alert, Reason: reason}
+		if u != nil && u.State == domain.DependabotUpdateError {
 			m.ErrorType = u.ErrorType
 			m.ErrorTitle = u.ErrorTitle
 		}

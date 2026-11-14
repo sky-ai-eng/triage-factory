@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -68,12 +69,17 @@ type alertsFake struct {
 	omitted      map[string]map[int]bool
 	updateStatus map[string]int
 	updateReads  map[string]int
+	// noRepository is the repositories whose read GitHub answers with a null
+	// repository and a NOT_FOUND error, and spentAfter the repository whose
+	// read answers with the GraphQL budget spent until four minutes on.
+	noRepository map[string]bool
+	spentAfter   string
 }
 
 func newAlertsFake(t *testing.T) (*alertsFake, *ghclient.Client) {
 	t.Helper()
 	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}, malformed: map[string]bool{}, limited: map[string]bool{},
-		updates: map[string]map[int]string{}, omitted: map[string]map[int]bool{}, updateStatus: map[string]int{}, updateReads: map[string]int{}}
+		updates: map[string]map[int]string{}, omitted: map[string]map[int]bool{}, updateStatus: map[string]int{}, updateReads: map[string]int{}, noRepository: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return f, ghclient.NewClient(srv.URL, "tok")
@@ -165,6 +171,17 @@ func (f *alertsFake) serveUpdates(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"message":"Server Error"}`))
 		return
+	}
+	if f.noRepository[repo] {
+		_, _ = fmt.Fprintf(w, `{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository with the name 'octo/%s'."}]}`, repo)
+		return
+	}
+	if repo == f.spentAfter {
+		w.Header().Set("X-RateLimit-Resource", "graphql")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Used", "5000")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(4*time.Minute).Unix(), 10))
 	}
 	var nodes []string
 	for _, a := range f.alerts[repo] {
@@ -269,8 +286,7 @@ func (r *vulnRig) tracker() *Tracker {
 	}
 	t := New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID).
 		WithDependabotAccess(access)
-	t.updatesClock = r.now
-	return t
+	return t.WithClock(r.now)
 }
 
 // listings is every tracked repository with its listing state as stored.
@@ -442,11 +458,11 @@ func TestRefreshVulnerablePackages_AlertsOpenOnOneEntity(t *testing.T) {
 	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
-	want := events.GitHubVulnerabilityAlertOpenedMetadata{
+	want := events.GitHubVulnerabilityAlertOpenedMetadata{GitHubVulnerabilityAlert: events.GitHubVulnerabilityAlert{
 		Repo: "octo/api", RepositoryID: e.RepositoryID, Ecosystem: "npm", Package: "lodash",
 		AlertNumber: 5, GHSAID: "GHSA-5", Summary: "advisory 5", Severity: "medium", ManifestPath: "package.json",
 		Scope: "runtime", VulnerableVersionRange: "< 9.9.9", FirstPatchedVersion: "9.9.9", HighestSeverity: "medium",
-	}
+	}}
 	if meta != want {
 		t.Errorf("metadata = %+v, want %+v", meta, want)
 	}

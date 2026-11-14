@@ -277,12 +277,16 @@ const dependabotUpdatesQuery = `
 // An alert the answer does not name is absent from the map, which says
 // nothing about it: GitHub's GraphQL can answer a credential that may not read
 // a repository's alerts with no alerts rather than an error, and can lag the
-// REST listing by an alert just opened.
+// REST listing by an alert just opened. So is an alert GitHub answered
+// beside an error on one of its fields (a 200 carrying data and errors, which
+// PostGraphQL passes through): the field the error nulled would otherwise
+// read as an update Dependabot has not made.
 //
-// Any failure fails the whole read. GitHub answering with no repository (it
-// does not exist, or the credential may not see it), a page that does not
-// parse, a next page with no cursor, and more pages than the cap fail with
-// ErrDependabotListingUnusable, which says nothing about any other repository.
+// Any other failure fails the whole read. GitHub answering with no
+// repository (it does not exist, or the credential may not see it) or no
+// alerts connection, a page that does not parse, a next page with no cursor,
+// and more pages than the cap fail with ErrDependabotListingUnusable, which
+// says nothing about any other repository.
 func (c *Client) ListDependabotUpdates(ctx context.Context, owner, repo string) (map[int]domain.DependabotUpdate, error) {
 	updates := map[int]domain.DependabotUpdate{}
 	vars := map[string]any{"owner": owner, "name": repo}
@@ -294,7 +298,7 @@ func (c *Client) ListDependabotUpdates(ctx context.Context, owner, repo string) 
 		var resp struct {
 			Data struct {
 				Repository *struct {
-					VulnerabilityAlerts struct {
+					VulnerabilityAlerts *struct {
 						PageInfo struct {
 							HasNextPage bool   `json:"hasNextPage"`
 							EndCursor   string `json:"endCursor"`
@@ -303,16 +307,18 @@ func (c *Client) ListDependabotUpdates(ctx context.Context, owner, repo string) 
 					} `json:"vulnerabilityAlerts"`
 				} `json:"repository"`
 			} `json:"data"`
+			Errors gqlErrors `json:"errors"`
 		}
 		if err := json.Unmarshal(data, &resp); err != nil {
 			return nil, fmt.Errorf("parse dependabot updates of %s/%s: %w: %w", owner, repo, ErrDependabotListingUnusable, err)
 		}
 		r := resp.Data.Repository
-		if r == nil {
-			return nil, fmt.Errorf("read dependabot updates of %s/%s: %w: GitHub answered with no repository", owner, repo, ErrDependabotListingUnusable)
+		if r == nil || r.VulnerabilityAlerts == nil {
+			return nil, fmt.Errorf("read dependabot updates of %s/%s: %w: GitHub answered with no repository or no alerts", owner, repo, ErrDependabotListingUnusable)
 		}
-		for _, n := range r.VulnerabilityAlerts.Nodes {
-			if n != nil && n.Number != 0 {
+		errored := erroredAlertNodes(resp.Errors)
+		for i, n := range r.VulnerabilityAlerts.Nodes {
+			if n != nil && n.Number != 0 && !errored[i] {
 				updates[n.Number] = n.update()
 			}
 		}
@@ -328,6 +334,23 @@ func (c *Client) ListDependabotUpdates(ctx context.Context, owner, repo string) 
 		}
 		vars["after"] = page.EndCursor
 	}
+}
+
+// erroredAlertNodes is the indexes of the page's alert nodes an error entry
+// names: one whose path runs repository → vulnerabilityAlerts → nodes → the
+// node's index, and on into the field it nulled. JSON decodes the index as a
+// float64.
+func erroredAlertNodes(errs gqlErrors) map[int]bool {
+	out := map[int]bool{}
+	for _, e := range errs {
+		if len(e.Path) < 4 || e.Path[0] != "repository" || e.Path[1] != "vulnerabilityAlerts" || e.Path[2] != "nodes" {
+			continue
+		}
+		if i, ok := e.Path[3].(float64); ok {
+			out[int(i)] = true
+		}
+	}
+	return out
 }
 
 // gqlDependabotAlert is the part of GitHub's GraphQL alert object

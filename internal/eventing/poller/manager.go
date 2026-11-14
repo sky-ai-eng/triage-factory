@@ -132,9 +132,10 @@ type Manager struct {
 	// tests observe cycle failures through it.
 	OnError func(source, orgID string, err error)
 
-	// ChangeClock, when set, keeps every tracker's refresh change window on
-	// it (tracker.Tracker.WithChangeClock); nil keeps it on time.Now.
-	ChangeClock func() time.Time
+	// Clock, when set, keeps every tracker's refresh change window and
+	// Dependabot update schedule on it (tracker.Tracker.WithClock); nil keeps
+	// them on time.Now.
+	Clock func() time.Time
 
 	// TaskClosed, when set, tells the conversations working on a task a
 	// tracker dismissed as a duplicate that it closed
@@ -285,7 +286,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, m.mergeability, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery).
-		WithChangeClock(m.ChangeClock).
+		WithClock(m.Clock).
 		WithTaskClosedTeller(m.TaskClosed).
 		WithDependabotAccess(m.DependabotAccess)
 }

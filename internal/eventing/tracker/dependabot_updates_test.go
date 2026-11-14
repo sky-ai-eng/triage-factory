@@ -14,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // The dependabotUpdate values GitHub answered on the probe repositories: an
@@ -36,6 +37,22 @@ func clockRig(t *testing.T, start time.Time, repos ...string) (*vulnRig, *time.T
 }
 
 var rigStart = time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
+
+// updatesReadAt is when repo's Dependabot updates were last read, as stored.
+func (r *vulnRig) updatesReadAt(repo string) time.Time {
+	r.t.Helper()
+	for _, row := range r.rows() {
+		if row.Repo == repo {
+			a, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID)
+			if err != nil || a == nil {
+				r.t.Fatalf("read access of %s: %+v %v", repo, a, err)
+			}
+			return a.UpdatesReadAt
+		}
+	}
+	r.t.Fatalf("no tracked repository %s", repo)
+	return time.Time{}
+}
 
 // snapshotOf parses e's stored snapshot.
 func (r *vulnRig) snapshotOf(e *domain.Entity) domain.VulnerablePackageSnapshot {
@@ -66,8 +83,8 @@ func cannotFix(t *testing.T, evts []domain.Event) []events.GitHubVulnerabilityDe
 
 // TestRefreshVulnerablePackages_AFailedUpdateIsAnnouncedOnce: an alert whose
 // Dependabot update reported an error, already so when TF first lists it,
-// emits alert_opened and then dependabot_cannot_fix naming the error, and the
-// snapshot records the update and the read. Nothing later announces it again:
+// emits alert_opened and then dependabot_cannot_fix naming the error, the
+// snapshot records the update, and the repository the read. Nothing later announces it again:
 // the next poll, answered 304, does not read the updates of a package whose
 // alerts Dependabot has settled, and a read a day later finds the same error.
 func TestRefreshVulnerablePackages_AFailedUpdateIsAnnouncedOnce(t *testing.T) {
@@ -82,9 +99,11 @@ func TestRefreshVulnerablePackages_AFailedUpdateIsAnnouncedOnce(t *testing.T) {
 	e := r.pkg("api", "pip", "urllib3")
 	got := cannotFix(t, evts)[0]
 	want := events.GitHubVulnerabilityDependabotCannotFixMetadata{
-		Repo: "octo/api", RepositoryID: e.RepositoryID, Ecosystem: "pip", Package: "urllib3",
-		AlertNumber: 1, GHSAID: "GHSA-1", Summary: "advisory 1", Severity: "high", ManifestPath: "package.json", Scope: "runtime",
-		VulnerableVersionRange: "< 9.9.9", FirstPatchedVersion: "9.9.9", HighestSeverity: "high",
+		GitHubVulnerabilityAlert: events.GitHubVulnerabilityAlert{
+			Repo: "octo/api", RepositoryID: e.RepositoryID, Ecosystem: "pip", Package: "urllib3",
+			AlertNumber: 1, GHSAID: "GHSA-1", Summary: "advisory 1", Severity: "high", ManifestPath: "package.json", Scope: "runtime",
+			VulnerableVersionRange: "< 9.9.9", FirstPatchedVersion: "9.9.9", HighestSeverity: "high",
+		},
 		Reason: domain.DependabotCannotFixUpdateFailed, ErrorType: "dependency_file_not_resolvable", ErrorTitle: "Dependabot can't resolve your Python dependency files",
 	}
 	if got != want {
@@ -97,8 +116,8 @@ func TestRefreshVulnerablePackages_AFailedUpdateIsAnnouncedOnce(t *testing.T) {
 	if u := snap.Alerts[0].DependabotUpdate; u == nil || u.State != domain.DependabotUpdateError || u.ErrorType != "dependency_file_not_resolvable" {
 		t.Errorf("stored update = %+v, want the error", u)
 	}
-	if !snap.UpdatesReadAt.Equal(rigStart) {
-		t.Errorf("updates read at %v, want %v", snap.UpdatesReadAt, rigStart)
+	if got := r.updatesReadAt("api"); !got.Equal(rigStart) {
+		t.Errorf("updates read at %v, want %v", got, rigStart)
 	}
 
 	*now = now.Add(5 * time.Minute)
@@ -263,9 +282,8 @@ func TestRefreshVulnerablePackages_AFailedUpdateReadLeavesTheListing(t *testing.
 	if r.etag("a") == "" || r.etag("b") == "" {
 		t.Errorf("ETags a=%q b=%q, want both listings stored", r.etag("a"), r.etag("b"))
 	}
-	snap := r.snapshotOf(r.pkg("a", "npm", "lodash"))
-	if !snap.UpdatesReadAt.IsZero() || snap.Alerts[0].DependabotUpdate != nil {
-		t.Errorf("a's snapshot = %+v, want no read recorded", snap)
+	if snap := r.snapshotOf(r.pkg("a", "npm", "lodash")); snap.Alerts[0].DependabotUpdate != nil || !r.updatesReadAt("a").IsZero() {
+		t.Errorf("a's snapshot = %+v, read at %v; want no read recorded", snap, r.updatesReadAt("a"))
 	}
 
 	r.gh.mu.Lock()
@@ -373,8 +391,9 @@ func TestDependabotUpdateRecheck(t *testing.T) {
 }
 
 // TestDiffVulnerablePackage_DependabotCannotFix covers the new event in the
-// diff alone: it fires on the move to an alert Dependabot cannot fix, and not
-// again while the alert stays one, nor for an alert that closes.
+// diff alone: it fires on the move to an alert Dependabot cannot fix and on a
+// change of reason, and not again while the alert stays one for the same
+// reason, nor for an alert that closes.
 func TestDiffVulnerablePackage_DependabotCannotFix(t *testing.T) {
 	failed := &domain.DependabotUpdate{State: domain.DependabotUpdateError, ErrorType: "security_update_not_possible"}
 	pr := &domain.DependabotUpdate{State: domain.DependabotUpdatePullRequest, PullRequestNumber: 3}
@@ -396,6 +415,8 @@ func TestDiffVulnerablePackage_DependabotCannotFix(t *testing.T) {
 		{"a pull request to failed", snap(a(1, "1.0", pr)), snap(a(1, "1.0", failed)), []string{cannot}},
 		{"opened failed", snap(), snap(a(1, "1.0", failed)), []string{opened, cannot}},
 		{"opened unpatched, then failed", snap(a(1, "", nil)), snap(a(1, "", failed)), nil},
+		{"unpatched, then a patch and a failed update", snap(a(1, "", nil)), snap(a(1, "1.0", failed)), []string{cannot}},
+		{"failed, then the patch withdrawn", snap(a(1, "1.0", failed)), snap(a(1, "", failed)), []string{cannot}},
 		{"a patch released", snap(a(1, "", nil)), snap(a(1, "1.0", nil)), nil},
 		{"the failed one closes", snap(a(1, "1.0", failed), a(2, "1.0", nil)), snap(a(2, "1.0", nil)), nil},
 	} {
@@ -405,5 +426,166 @@ func TestDiffVulnerablePackage_DependabotCannotFix(t *testing.T) {
 				t.Errorf("events = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRefreshVulnerablePackages_AReadOnA304WritesOnlyWhatItChanged: a read a
+// poll answered 304 makes is recorded on the repository, and writes only the
+// packages whose alerts it changed: nothing when Dependabot did nothing, and
+// the one package whose update failed when one did.
+func TestRefreshVulnerablePackages_AReadOnA304WritesOnlyWhatItChanged(t *testing.T) {
+	r, now := clockRig(t, rigStart, "api")
+	r.gh.set("api",
+		fakeAlert{number: 1, ecosystem: "npm", pkg: "lodash", severity: "high", updatedAt: rigStart},
+		fakeAlert{number: 2, ecosystem: "npm", pkg: "react", severity: "low", updatedAt: rigStart})
+	r.gh.setUpdate("api", 2, updatePR)
+	r.mustCycle()
+	seq := func(name string) int64 { return r.pkg("api", "npm", name).PollSeq }
+	lodashSeq, reactSeq := seq("lodash"), seq("react")
+
+	// lodash's alert is untried and 10 minutes old, so a read is due and
+	// changes nothing.
+	*now = rigStart.Add(10 * time.Minute)
+	if evts := r.mustCycle(); len(evts) != 0 {
+		t.Fatalf("a read that changed nothing emitted %v", eventTypes(evts))
+	}
+	if n := r.gh.updateReadsOf("api"); n != 2 {
+		t.Fatalf("update reads = %d, want the due one", n)
+	}
+	if seq("lodash") != lodashSeq || seq("react") != reactSeq {
+		t.Errorf("a read that changed nothing wrote the packages: lodash %d→%d, react %d→%d", lodashSeq, seq("lodash"), reactSeq, seq("react"))
+	}
+	if got := r.updatesReadAt("api"); !got.Equal(*now) {
+		t.Errorf("updates read at %v, want %v", got, *now)
+	}
+
+	r.gh.setUpdate("api", 1, updateFailed)
+	*now = rigStart.Add(15 * time.Minute)
+	if got := cannotFix(t, r.mustCycle()); len(got) != 1 || got[0].Package != "lodash" {
+		t.Fatalf("the read that found the failure announced %+v, want lodash's", got)
+	}
+	if seq("lodash") == lodashSeq || seq("react") != reactSeq {
+		t.Errorf("after the failure: lodash %d→%d, react %d→%d; want lodash alone written", lodashSeq, seq("lodash"), reactSeq, seq("react"))
+	}
+}
+
+// TestRefreshVulnerablePackages_ThePassReadsAtMostItsShare: a pass reads the
+// updates of at most dependabotUpdateReadsPerPass repositories, and a
+// repository it left is due on the next poll, where it is read.
+func TestRefreshVulnerablePackages_ThePassReadsAtMostItsShare(t *testing.T) {
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
+	reader := sdkmetric.NewManualReader()
+	prev := stats.Load()
+	stats.Store(newInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { stats.Store(prev) })
+
+	names := make([]string, dependabotUpdateReadsPerPass+2)
+	for i := range names {
+		names[i] = fmt.Sprintf("r%02d", i)
+	}
+	r, _ := clockRig(t, rigStart, names...)
+	for _, name := range names {
+		r.gh.set(name, lodash(1, "high"))
+		r.gh.setUpdate(name, 1, updateFailed)
+	}
+
+	if got := cannotFix(t, r.mustCycle()); len(got) != dependabotUpdateReadsPerPass {
+		t.Errorf("the first pass announced %d failures, want one per repository it read, %d", len(got), dependabotUpdateReadsPerPass)
+	}
+	unread := 0
+	for _, name := range names {
+		if r.gh.updateReadsOf(name) == 0 {
+			unread++
+		}
+	}
+	if unread != 2 {
+		t.Errorf("%d repositories unread after the first pass, want 2", unread)
+	}
+	if got := updateReadsByOutcome(t, reader); got[dependabotUpdateReadDeferred] != 2 {
+		t.Errorf("update reads by outcome = %v, want 2 deferred", got)
+	}
+
+	if got := cannotFix(t, r.mustCycle()); len(got) != 2 {
+		t.Errorf("the next pass announced %d failures, want the 2 it left", len(got))
+	}
+}
+
+// TestRefreshVulnerablePackages_ASpentBudgetIsNotWaitedFor: once the GraphQL
+// budget is spent, a read refuses at once rather than holding the listing
+// until the budget resets, and stops the pass's later reads; the listings
+// land.
+func TestRefreshVulnerablePackages_ASpentBudgetIsNotWaitedFor(t *testing.T) {
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
+	r, _ := clockRig(t, rigStart, "a", "b", "c")
+	for _, name := range []string{"a", "b", "c"} {
+		r.gh.set(name, lodash(1, "high"))
+	}
+	// a's answer says the budget is spent until four minutes from now, within
+	// the client's longest wait.
+	r.gh.mu.Lock()
+	r.gh.spentAfter = "a"
+	r.gh.mu.Unlock()
+
+	start := time.Now()
+	evts := r.mustCycle()
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Errorf("the pass took %v, want it not to wait for the budget", elapsed)
+	}
+	if got := eventTypes(evts); len(got) != 3 {
+		t.Errorf("emitted %v, want each repository's alert_opened", got)
+	}
+	if a, b, c := r.gh.updateReadsOf("a"), r.gh.updateReadsOf("b"), r.gh.updateReadsOf("c"); a != 1 || b != 0 || c != 0 {
+		t.Errorf("update reads a=%d b=%d c=%d, want a's alone", a, b, c)
+	}
+}
+
+// TestRefreshVulnerablePackages_APatchReleasedIsReadAgain: an alert with no
+// patched version is announced for that reason. When a patch is released,
+// the update Dependabot reported before it is set aside and read again, and a
+// failed update to the patch is announced for its own reason.
+func TestRefreshVulnerablePackages_APatchReleasedIsReadAgain(t *testing.T) {
+	r, now := clockRig(t, rigStart, "api")
+	r.gh.set("api", fakeAlert{number: 1, ecosystem: "npm", pkg: "request", severity: "medium", unpatched: true, updatedAt: rigStart.Add(-30 * 24 * time.Hour)})
+	r.gh.setUpdate("api", 1, `{"pullRequest":null,"error":{"errorType":"security_update_not_found","title":"Dependabot can't find a non-vulnerable version"}}`)
+	if got := cannotFix(t, r.mustCycle()); len(got) != 1 || got[0].Reason != domain.DependabotCannotFixNoPatchedVersion {
+		t.Fatalf("the first listing announced %+v, want no_patched_version", got)
+	}
+
+	// The patch lands an hour later, well inside the day the old alert's
+	// schedule would wait.
+	r.gh.set("api", fakeAlert{number: 1, ecosystem: "npm", pkg: "request", severity: "medium", updatedAt: rigStart.Add(-30 * 24 * time.Hour)})
+	r.gh.setUpdate("api", 1, updateFailed)
+	*now = rigStart.Add(time.Hour)
+	got := cannotFix(t, r.mustCycle())
+	if len(got) != 1 || got[0].Reason != domain.DependabotCannotFixUpdateFailed || got[0].ErrorType != "dependency_file_not_resolvable" {
+		t.Errorf("the listing with the patch announced %+v, want update_failed with the new error", got)
+	}
+	if n := r.gh.updateReadsOf("api"); n != 2 {
+		t.Errorf("update reads = %d, want a second for the patch", n)
+	}
+}
+
+// TestRefreshVulnerablePackages_AnUnusableAnswerKeepsTheSchedule: GitHub
+// answering a read with no repository is taken as an answer naming no alert:
+// the alert is recorded as untried and the read time stored, so the next
+// read waits for the alert's schedule rather than coming on every poll.
+func TestRefreshVulnerablePackages_AnUnusableAnswerKeepsTheSchedule(t *testing.T) {
+	r, now := clockRig(t, rigStart, "api")
+	r.gh.set("api", fakeAlert{number: 1, ecosystem: "npm", pkg: "lodash", severity: "high", updatedAt: rigStart.Add(-time.Hour)})
+	r.gh.mu.Lock()
+	r.gh.noRepository["api"] = true
+	r.gh.mu.Unlock()
+
+	r.mustCycle()
+	if u := r.snapshotOf(r.pkg("api", "npm", "lodash")).Alerts[0].DependabotUpdate; u == nil || u.State != domain.DependabotUpdateNone {
+		t.Errorf("stored update = %+v, want none", u)
+	}
+	if got := r.updatesReadAt("api"); !got.Equal(rigStart) {
+		t.Errorf("updates read at %v, want %v", got, rigStart)
+	}
+	*now = rigStart.Add(5 * time.Minute)
+	r.mustCycle()
+	if n := r.gh.updateReadsOf("api"); n != 1 {
+		t.Errorf("update reads = %d, want none before the alert's schedule", n)
 	}
 }

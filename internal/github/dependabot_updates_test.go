@@ -118,11 +118,12 @@ func TestClient_ListDependabotUpdates_FollowsTheCursor(t *testing.T) {
 
 // TestClient_ListDependabotUpdates_AnUnusableAnswerFails: GitHub answering
 // with no repository (it answers a repository it cannot resolve with null
-// beside a NOT_FOUND error), a next page with no cursor, and pages past the
-// cap each fail the whole read as unusable.
+// beside a NOT_FOUND error) or no alerts connection, a next page with no
+// cursor, and pages past the cap each fail the whole read as unusable.
 func TestClient_ListDependabotUpdates_AnUnusableAnswerFails(t *testing.T) {
 	for name, pages := range map[string][]string{
 		"no repository": {`{"data":{"repository":null,"rateLimit":{"cost":1}},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository with the name 'octo/api'."}]}`},
+		"no alerts":     {`{"data":{"repository":{"vulnerabilityAlerts":null}},"errors":[{"type":"FORBIDDEN","path":["repository","vulnerabilityAlerts"],"message":"Resource not accessible by integration"}]}`},
 		"no cursor":     {updatesPage(true, "", `{"number":1,"dependabotUpdate":null}`)},
 		"no last page":  {updatesPage(true, "c", `{"number":1,"dependabotUpdate":null}`)},
 	} {
@@ -152,5 +153,27 @@ func TestClient_ListDependabotUpdates_AFailureIsNotUnusable(t *testing.T) {
 	var he *HTTPError
 	if err == nil || errors.Is(err, ErrDependabotListingUnusable) || !errors.As(err, &he) || he.StatusCode != http.StatusUnauthorized {
 		t.Errorf("err = %v, want the 401", err)
+	}
+}
+
+// TestClient_ListDependabotUpdates_AnErroredAlertIsNoAnswer: GitHub can answer
+// with data beside an error on one alert's field, which it nulls. That alert
+// is left out rather than read as an update Dependabot has not made; the
+// others on the page are kept.
+func TestClient_ListDependabotUpdates_AnErroredAlertIsNoAnswer(t *testing.T) {
+	_, client := updatesServer(t, `{"data":{"repository":{"vulnerabilityAlerts":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+		{"number":1,"dependabotUpdate":null},
+		{"number":2,"dependabotUpdate":{"pullRequest":null,"error":null}},
+		{"number":3,"dependabotUpdate":null}
+	]}}},"errors":[
+		{"type":"FORBIDDEN","path":["repository","vulnerabilityAlerts","nodes",1,"dependabotUpdate","pullRequest"],"message":"Resource not accessible by integration"},
+		{"type":"FORBIDDEN","path":["repository","vulnerabilityAlerts","nodes",2,"dependabotUpdate"],"message":"Resource not accessible by integration"}
+	]}`)
+	got, err := client.ListDependabotUpdates(context.Background(), "octo", "api")
+	if err != nil {
+		t.Fatalf("ListDependabotUpdates: %v", err)
+	}
+	if want := map[int]domain.DependabotUpdate{1: {State: domain.DependabotUpdateNone}}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("updates = %+v, want only the alert no error names", got)
 	}
 }

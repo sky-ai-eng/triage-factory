@@ -406,19 +406,34 @@ handler that matches them makes one task per package.
 What Dependabot did about an alert is in GitHub's GraphQL alert object
 (`dependabotUpdate`: the pull request it opened, or the error it reported),
 not in the REST listing, and no ETag or webhook reports a change to it. The
-poll reads it per repository when a listing finds an alert opening, and
-otherwise when it is due, whether or not the listing was answered 304: a
-quarter of the age of the package's youngest alert Dependabot has neither
-fixed nor failed on, and at most once a day. An alert with no patched version
-emits `dependabot_cannot_fix` whatever Dependabot reports. An error that says a
-pull request already proposes the fix (`pull_request_exists_for_latest_version`,
+poll reads it per repository, whether or not the listing was answered 304,
+when an alert has no update recorded (it is new, a read failed since it
+opened, or a patch was released since its update was read), and otherwise a
+quarter of the age of the youngest alert Dependabot has neither fixed nor
+failed on after the last read, and at most a day after it. The read time is
+the repository's, and a read writes only the packages it changed. A pass reads
+at most 25 repositories and leaves the rest due for a later poll, and a read
+never waits for a spent GraphQL budget. An alert whose fields GitHub answered
+with an error is no answer; an alert the answer leaves out keeps the update it
+had, or is recorded as untried, and so is every alert of a repository GitHub
+answered without its alerts.
+
+An alert with no patched version emits `dependabot_cannot_fix` whatever
+Dependabot reports. An error that says a pull request already proposes the
+fix (`pull_request_exists_for_latest_version`,
 `pull_request_exists_for_security_update`) or that the dependency is no longer
 vulnerable (`security_update_not_needed`) is not a failure; any other code is.
-An alert emits again only after it stops being one Dependabot cannot fix (its
-update later opened a pull request). A Dependabot pull request a person closes
-leaves the alert with that pull request, not an error. `dependabot_cannot_fix`
-has its own task beside the `alert_opened` one, so a trigger on it delegates
-only what Dependabot leaves undone; `resolved` and `unreachable` close both.
+An alert emits again when its reason changes (a patch is released, and
+Dependabot's update to it fails) or after it stopped being one Dependabot
+cannot fix (its update later opened a pull request). A Dependabot pull request
+a person closes leaves the alert with that pull request, not an error.
+`dependabot_cannot_fix` has its own task beside the `alert_opened` one, so a
+trigger on it delegates only what Dependabot leaves undone; `resolved` and
+`unreachable` close both, and nothing else does: like `alert_opened`'s, the
+task stays open while the package has open alerts, even when the alert it was
+made for has closed or later gets a Dependabot pull request. A repository with
+security updates turned off has no failures to report, so on it only alerts
+with no patched version emit.
 
 A vulnerable package has no author, so its events route by tracked set, not
 by owner: an event reaches every team that tracks the repository and has a
@@ -1222,7 +1237,6 @@ alert list filtered to the package's open alerts. The snapshot holds:
 
 - `repo`, `ecosystem`, `package`
 - `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `summary` (the advisory's one-line summary, written outside the org; its Markdown description is not kept), `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `vulnerable_version_range` (as `< 4.17.21`), `first_patched_version` (empty when none is released), `updated_at` (when GitHub last changed the alert), and `dependabot_update`, absent until TF has read it: `state` (`none`, Dependabot has not tried; `pending`; `pull_request`, with `pull_request_number` and `pull_request_url`; or `error`, with `error_type` and `error_title`, Dependabot's text naming what it read from the repository and its registries). The set of numbers is diffed, and so is each alert's move to one Dependabot cannot fix; a change to another field rewrites the snapshot and emits nothing
-- `updates_read_at` — when TF last read the alerts' `dependabot_update`
 
 An empty `alerts` is the terminal snapshot.
 

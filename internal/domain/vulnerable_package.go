@@ -226,9 +226,6 @@ type VulnerablePackageSnapshot struct {
 	Ecosystem string            `json:"ecosystem"`
 	Package   string            `json:"package"`
 	Alerts    []DependabotAlert `json:"alerts"`
-	// UpdatesReadAt is when TF last read what Dependabot did about the
-	// package's alerts, zero when it has not.
-	UpdatesReadAt time.Time `json:"updates_read_at,omitzero"`
 }
 
 // Terminal reports whether the package has no open alert left.

@@ -76,9 +76,15 @@ const (
 	// dependabotUpdateReadIncomplete: GitHub answered, and left out an alert
 	// the listing holds, which keeps the update TF last read for it.
 	dependabotUpdateReadIncomplete = "incomplete"
-	// dependabotUpdateReadFailed: no answer. The packages are read again on
-	// the next poll.
+	// dependabotUpdateReadFailed: no answer TF could use. A failure that
+	// says nothing about the repository has it read again on the next poll;
+	// an answer about the repository TF cannot read is taken as one naming
+	// no alert.
 	dependabotUpdateReadFailed = "failed"
+	// dependabotUpdateReadDeferred: due, and not read because the pass had
+	// made as many reads as it may (dependabotUpdateReadsPerPass). It is read
+	// on a later poll.
+	dependabotUpdateReadDeferred = "deferred"
 )
 
 // missedHintDependabotListing is the missed-hint rule of a scheduled listing
@@ -139,7 +145,7 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", dependabotListingsMetric, "error", err)
 	}
 	if in.dependabotUpdates, err = m.Int64Counter(dependabotUpdatesMetric,
-		metric.WithDescription("Reads of what Dependabot did about a repository's open alerts, by outcome: read (GitHub answered for every alert), incomplete (GitHub answered and left out an alert the listing holds), or failed (no answer; the repository is read again on the next poll).")); err != nil {
+		metric.WithDescription("Reads of what Dependabot did about a repository's open alerts, by outcome: read (GitHub answered for every alert), incomplete (GitHub answered and left out an alert the listing holds), failed (no answer TF could use), or deferred (due, and left for a later poll because the pass had made as many reads as it may).")); err != nil {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", dependabotUpdatesMetric, "error", err)
 	}
 	return in
