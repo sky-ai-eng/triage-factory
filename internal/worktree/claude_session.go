@@ -101,9 +101,10 @@ func ResolveClaudeProjectCwd(cwd string) string {
 }
 
 // RemoveClaudeProjectDir deletes the ~/.claude/projects/<encoded-cwd> entry that
-// Claude Code auto-creates whenever it's invoked in a new cwd. Called after
-// each delegated run to prevent a ghost project dir from accumulating for every
-// ephemeral worktree path.
+// Claude Code auto-creates whenever it's invoked in a new cwd, so the entry for
+// an ephemeral run root does not outlive the root. The entry holds the session
+// transcripts `claude --resume` reads, so a caller removes it only for a cwd
+// whose sessions are held elsewhere or no longer wanted.
 //
 // Safety rail: only touches entries whose cwd resolves under $TMPDIR, so a
 // misuse can never nuke a real project's interactive session history.

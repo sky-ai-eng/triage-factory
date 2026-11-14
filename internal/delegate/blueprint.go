@@ -305,10 +305,16 @@ func (s *Spawner) runBlueprintWorktreeCleanup(orgID, blueprintRunID, wsKey strin
 			}
 		}
 	}
-	// Clean the agent's ghost ~/.claude/projects entry (keyed on the session cwd,
-	// the run root) BEFORE removing the root — RemoveClaudeProjectDir resolves
-	// the cwd via EvalSymlinks and silently no-ops once the dir is gone.
-	worktree.RemoveClaudeProjectDir(root)
+	// The agent's ~/.claude/projects entry, keyed on the session cwd (the run
+	// root), holds the session file an SDK follow-up resumes, and the
+	// workspace snapshot holds the only other copy. So it goes only when the
+	// store holds the key's latest persist; when that persist failed, the
+	// file stays for a follow-up that rehydrates an earlier step's blob.
+	// BEFORE removing the root — RemoveClaudeProjectDir resolves the cwd via
+	// EvalSymlinks and silently no-ops once the dir is gone.
+	if s.latestSnapshotStored(orgID, wsKey) {
+		worktree.RemoveClaudeProjectDir(root)
+	}
 	// RemoveAt prunes every bare once the tree is gone, so the PR branches below
 	// are no longer checked out anywhere when they are deleted.
 	if err := worktree.RemoveAt(root, wsKey); err != nil {
@@ -318,6 +324,25 @@ func (s *Spawner) runBlueprintWorktreeCleanup(orgID, blueprintRunID, wsKey strin
 	for _, r := range reclaims {
 		r.run()
 	}
+}
+
+// latestSnapshotStored reports whether the store holds the key's latest
+// persist: its lifecycle row says written, and the blob is present. An
+// answer that cannot be read is false, because a wrong false keeps a small
+// directory and a wrong true deletes a session nothing else holds.
+func (s *Spawner) latestSnapshotStored(orgID, keyID string) bool {
+	blobs := s.Storage()
+	if blobs == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ledgerWriteTimeout)
+	defer cancel()
+	st, err := s.snapshotStateFor(ctx, orgID, keyID)
+	if err != nil || st == nil || st.State != domain.WorkspaceSnapshotWritten {
+		return false
+	}
+	present, err := blobs.Exists(ctx, snapshotKey(orgID, keyID))
+	return err == nil && present
 }
 
 // prConfigReclaim is the per-run PR push config one checkout row may have left

@@ -1130,7 +1130,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	cfg.surface = surfaceFor(conv.Type)
 	cfg.interactive = interactive
 	if !interactive {
-		cfg.isBlueprintStep = true
 		cfg.blueprintRunID = br.ID
 		cfg.blueprintStep = stepIdx
 	}
@@ -1653,7 +1652,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
-	_, fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, userID)
+	fenced := s.processCompletion(stepCtx, orgID, conv.ID, blueprintRunID, conv.ClaimID, *task, outcome.Completion, resumeCwd, mirror, conv.SessionID, userID)
 	if fenced {
 		// A successor owns the conversation. Finalizing the blueprint off
 		// this turn's result would terminate a run someone else is driving,

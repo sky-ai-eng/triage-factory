@@ -160,11 +160,9 @@ func TestProcessCompletion_AnUnfinishedTurnParksOpenWithANote(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", "")
-
-	if !parked || fenced {
-		t.Errorf("processCompletion(refusal) = (parked %v, fenced %v), want (true, false): open, not terminal", parked, fenced)
+	if fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
+		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", ""); fenced {
+		t.Error("processCompletion(refusal) reported fenced, want a park this engagement recorded")
 	}
 	conv := loadConversation(t, s, conversationID)
 	if conv.Status != domain.StatusOpen || conv.Concluded() || conv.Outcome != "" {

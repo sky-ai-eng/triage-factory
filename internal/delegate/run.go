@@ -238,15 +238,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// claim, so a crash that never reaches this defer costs nothing.
 	defer s.ExpirePermissionsForClaim(orgID, cfg.claimID)
 
-	// parked is set true when this run ends dormant rather than terminating:
-	// a park flips it to `open` (runAgent, below). The ghost-projects cleanup
-	// defer below reads it to KEEP the session JSONL on disk as the warm
-	// resume cache — the same thing the isBlueprintStep skip beside it does.
-	// Captured by reference by the deferred closures, so they observe its
-	// final value at return. A completed run does not park: a queued deliverable
-	// is a sidecar, not a reason to hold the run open.
-	var parked bool
-
 	// The mirror this engagement files its memory file through, built below
 	// once the inherited fingerprint it judges the file against exists. The
 	// exits declared here capture it by reference; every one of them is
@@ -256,8 +247,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// fail records this run's infra-failure terminal and folds a fence trip
 	// into the same disposition every other fenced exit takes: nothing
 	// written, and the workspace left on disk for whoever owns the
-	// conversation now (see the mid-stream trip below for why deleting it is
-	// the worse mistake). Returns what runAgent returns.
+	// conversation now. Returns what runAgent returns.
 	fail := func(msg string, kind domain.ConversationFailureKind) bool {
 		// A failure observed as the lease fenced (a read cut short by the
 		// cancelled context, a process killed before it produced a result)
@@ -265,7 +255,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// accepts a terminal until the lease actually lapses.
 		if leaseFenced(ctx) {
 			s.releaseActivity(conversationID, cfg.claimID)
-			parked = true
 			return true
 		}
 		// The last moment this engagement holds its tree. Whatever the agent
@@ -274,30 +263,21 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// from.
 		mirror.settle(ctx)
 		s.releaseActivity(conversationID, cfg.claimID)
-		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, msg, kind) {
-			return false
-		}
-		parked = true
-		return true
+		return s.failConversation(orgID, conversationID, task.ID, cfg.claimID, msg, kind)
 	}
 
-	// cancelled parks this run and folds a fence trip the same way. parked is
-	// set unconditionally, not just on a fence trip: a cancel is a park, so
-	// the worktree stays as the warm resume cache exactly like a turn-end
-	// park's does. A stall is a cancel too, and stopParkReason names it. The
-	// dispatcher shutting down is not: the conversation is handed back rather
-	// than parked, and the next claim resumes the session in the same tree.
+	// cancelled parks this run and folds a fence trip the same way. A stall is
+	// a cancel too, and stopParkReason names it. The dispatcher shutting down
+	// is not: the conversation is handed back rather than parked, and the next
+	// claim resumes the session in the same tree.
 	//
 	// sessionID and costUSD ride in from the caller because they are only
 	// known once the agent has actually started — the pre-launch cancel below
 	// passes "" and 0 and snapshots a workspace with no transcript to carry.
 	//
 	// A LEASE fence arrives as a cancelled ctx too, and is not a cancel: this
-	// engagement has lost the conversation, so it records nothing. parked
-	// stays true either way — the worktree is the successor's warm cache as
-	// much as a stopped run's.
+	// engagement has lost the conversation, so it records nothing.
 	cancelled := func(sessionID string, costUSD float64) engagementDisposition {
-		parked = true
 		if leaseFenced(ctx) {
 			s.releaseActivity(conversationID, cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -322,21 +302,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// Initial cwd for the child claude: the run root, for every run. The agent
 	// cd's into a checkout beneath it — the PR's, or one `workspace add` made.
 	claudeCwd := cfg.runRoot
-	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
-	// for this cwd. Safety-railed to only touch entries under $TMPDIR. A
-	// conversation a person works in keeps it as a blueprint step does: its
-	// next message resumes this session, whatever this turn ended on.
-	defer func() {
-		if cfg.isBlueprintStep || cfg.interactive {
-			return
-		}
-		if parked {
-			// Keep the session JSONL: it's the conversation state the resumed
-			// `claude --resume` reads (and what the cold-path snapshot carries).
-			return
-		}
-		worktree.RemoveClaudeProjectDir(claudeCwd)
-	}()
 
 	// The workspace key groups this run with every other conversation on its
 	// task — the run tree and the workspace snapshot. Exported below so the
@@ -492,7 +457,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		if ctx.Err() != nil {
 			return cancelled("", 0)
 		}
-		parked = true
 		return engagementDisposition{launchErr: err}
 	}
 
@@ -514,13 +478,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// refusal here means a successor owns the conversation, which is not what a
 	// user cancel is, and only one of the two parks with a cancel recorded.
 	if s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, systemBlock) {
-		parked = true
 		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
 		// Fenced out before the runtime came up: nothing to write, no process
 		// to kill. The workspace stays for whoever owns the conversation now.
-		parked = true
 		return engagementDisposition{fenced: true}
 	}
 
@@ -670,7 +632,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			// conversation, and every row this engagement still wrote would
 			// interleave with its. Nothing to record, nothing to kill.
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
-			parked = true
 			return engagementDisposition{fenced: true}
 		}
 		return engagementDisposition{fenced: fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)}
@@ -728,13 +689,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// write (the sink) or a refused park (the driver). They are separate
 	// signals because they come from different writes — a run whose turn ended
 	// quietly may never attempt another insert.
-	//
-	// parked=true is what keeps the workspace on disk. Ownership is gone, so
-	// whether the successor is rehydrating into this very worktree is no
-	// longer knowable from here; a leaked directory is reclaimed by the next
-	// startup sweep, a deleted one that turned out to be in use is not.
 	if sink.fenceTripped() || out.fenced {
-		parked = true
 		return engagementDisposition{fenced: true}
 	}
 
@@ -753,16 +708,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 
 	// The driver parked the run itself (status `open`, snapshot written) after
-	// a paused turn — a dormant disposition, so keep the warm worktree as the
-	// fast resume path.
+	// a paused turn.
 	if out.hibernated {
-		parked = true
 		return engagementDisposition{}
 	}
 
 	// The provider was unavailable through the SDK's own retries: handed back
-	// rather than recorded. parked, so the session file stays on disk as the
-	// resume's warm cache.
+	// rather than recorded.
 	if disp, ok := s.leaveSDKOnUpstream(ctx, liveParkContext{
 		orgID:          orgID,
 		conversationID: conversationID,
@@ -772,13 +724,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		runtime:        domain.ConversationRuntimeSDK,
 		mirror:         mirror,
 	}, out.result, out.sessionID, cfg.upstreamHandBacks, creatorUserID); ok {
-		parked = true
 		return disp
 	}
 
 	if out.result != nil {
-		var fenced bool
-		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, creatorUserID)
+		fenced := s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, creatorUserID)
 		return engagementDisposition{fenced: fenced}
 	}
 
@@ -1049,21 +999,13 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // the file after its last tool call, and it carries the inherited fingerprint
 // that keeps content the agent never wrote from being ingested as its work.
 //
-// Returns parked: true when the turn ended dormant (open, no verdict, nothing
-// for the blueprint to act on), which is what keeps the session JSONL on disk
-// as the warm resume cache. A verdict or a failure (including a verdict that
-// produced a draft PR / pending review) returns false — the step has given the
-// only answer it is going to, the blueprint acts on it, and the deliverable is
-// a resolvable sidecar, not a reason to keep the tree warm.
-//
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in
 // scope, which keeps the unfenced write.
 //
 // Returns fenced: true when that terminal was refused because the claim is
 // released. Nothing was recorded, and the caller must not react to the run's
-// state either — a successor owns its disposition. parked comes back true
-// alongside it so the workspace survives (see runAgent).
+// state either — a successor owns its disposition.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	orgID, conversationID, blueprintRunID, claimID string,
@@ -1072,7 +1014,7 @@ func (s *Spawner) processCompletion(
 	claudeCwd string,
 	mirror *memoryMirror,
 	sessionID, creatorUserID string,
-) (parked, fenced bool) {
+) (fenced bool) {
 	// The engagement's terminal, as a punctual span linked back to the setup
 	// that started it. This is where a run's own accounting already exists —
 	// cost, wall time, turn count — so it is the one place those figures can
@@ -1116,13 +1058,13 @@ func (s *Spawner) processCompletion(
 	// terminal, snapshot and broadcast for an engagement that has already
 	// decided it cannot prove it holds the claim.
 	//
-	// So the result is dropped. Its session and worktree survive (parked), the
+	// So the result is dropped. Its session and worktree stay on disk, the
 	// lease lapses, and whoever picks the conversation up re-concludes it —
 	// one re-drive, against a write this engagement could not stand behind.
 	if leaseFenced(ctx) {
 		delegateLog.Warn("dropping a completion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
-		return true, true
+		return true
 	}
 
 	// The key of the workspace (tree + snapshot) this run shares with every
@@ -1141,12 +1083,11 @@ func (s *Spawner) processCompletion(
 	// A refused note or park is reported as fenced, not swallowed: the row
 	// belongs to a successor, so nothing here — not the terminal, not the
 	// blueprint advance the caller would run on a plain park — is this
-	// engagement's to decide. parked stays true either way, because that is
-	// what keeps the workspace on disk for whoever holds the conversation now.
+	// engagement's to decide.
 	class, verdict := classifyTurn(completion)
 	if !completion.IsError && class == turnParked {
 		if s.insertClaimStopNote(ctx, orgID, conversationID, claimID, creatorUserID, stopReasonParkNotice(completion.StopReason)) {
-			return true, true
+			return true
 		}
 		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
@@ -1159,7 +1100,7 @@ func (s *Spawner) processCompletion(
 			costUSD:        completion.CostUSD,
 			mirror:         mirror,
 		}, sessionID)
-		return true, fencedOut
+		return fencedOut
 	}
 
 	// The agent's own memory file, one last time — the mirror has been filing
@@ -1240,11 +1181,10 @@ func (s *Spawner) processCompletion(
 	// finish terminates) per blueprintDecisionForStepConversation, and the approval state is
 	// derived downstream from the unresolved-deliverable set (has_unresolved_deliverables).
 
-	// Every verdict snapshots its workspace — while the worktree and session
-	// transcript are still on disk — then lets the cleanup defers tear the
-	// worktree down (parked stays false: keeping a concluded step's worktree
-	// warm is not acceptable, so cold rehydrate from this blob is the resume
-	// path). Whatever the outcome: an abort is picked back up by a human, and a
+	// Every verdict snapshots its workspace while the worktree and session
+	// transcript are still on disk. The tree does not outlive its blueprint's
+	// end or the idle evictor, so a cold rehydrate from this blob is how a
+	// later follow-up resumes. Whatever the outcome: an abort is picked back up by a human, and a
 	// finish is the case a follow-up on concluded work needs — a workspace that
 	// only exists for the runs that went badly is a workspace nobody can follow
 	// up on. A failed run is excluded: the infrastructure under it died, so
@@ -1289,7 +1229,7 @@ func (s *Spawner) processCompletion(
 		// resume from the blob before its own conclusion overwrites it.
 		delegateLog.Error("claim fence refused the completion terminal — a successor owns this conversation; recording nothing",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", completeErr)
-		return true, true
+		return true
 	}
 	if completeErr != nil {
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", completeErr)
@@ -1327,7 +1267,7 @@ func (s *Spawner) processCompletion(
 	// task (the shared workspace's key) — there is no conversation-id-keyed
 	// snapshot to drop here. A parked run keeps its snapshot for the eventual
 	// resume.
-	return parked, false
+	return false
 }
 
 // toastRunCompleted tells the run's creator that it completed. row is what
