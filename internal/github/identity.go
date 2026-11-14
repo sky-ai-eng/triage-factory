@@ -28,8 +28,9 @@ type Getter interface {
 }
 
 // IdentityReader reads what GitHub calls the objects an act names, and caches
-// every answer, so the reader an observer holds for a run reads each
-// repository, and each pull request or issue, once. A number names one object
+// every answer about a repository or an object, so the reader an observer
+// holds for a run reads each repository, and each pull request or issue, once.
+// What a branch has open is not cached (OpenPullForBranch). A number names one object
 // for the life of a repository and an id one repository for the life of its
 // name, which a run does not outlast in practice. A nil reader reads without
 // caching. Safe for concurrent use.

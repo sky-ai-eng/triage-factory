@@ -37,9 +37,10 @@ import (
 // read would not: the object is linked only once GitHub has answered for it
 // under the run's own credential, which is what reading it takes.
 
-// ObjectRef is the pull request or issue one read addressed, as the request
-// spelled it. GitHub numbers the two in one sequence, so the number alone does
-// not say which it is.
+// ObjectRef is the pull request or issue one read addressed: its repository as
+// the request spelled it, and its number as the request spelled it or, for the
+// pull request a branch lookup found, as GitHub answered it. GitHub numbers the
+// two in one sequence, so the number alone does not say which it is.
 type ObjectRef struct {
 	Owner  string
 	Repo   string
@@ -53,7 +54,7 @@ func (r ObjectRef) Key() string {
 }
 
 // ReadObservation is one addressed read as the injector saw it: the object the
-// request spelled, and what GitHub answered the injector for it, its node id,
+// request addressed, and what GitHub answered the injector for it, its node id,
 // which of the two it is, and its repository's id and current name
 // (domain.GitHubIdentity). The run's touched entity is resolved from the
 // identity alone; the spelling is a display key.
@@ -67,8 +68,9 @@ type ReadObservation struct {
 
 // BranchRef is the branch one read looked pull requests up by, as the request
 // spelled it: the repository by owner and name, and the head branch by name.
-// The request names no head owner, so the branch it stands for is the
-// repository's own.
+// The request names no head owner, and the injector looks the branch up among
+// the repository's own. That is not always the branch the client meant: gh
+// sends the name alone for a fork's branch too.
 type BranchRef struct {
 	Owner  string
 	Repo   string

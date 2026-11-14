@@ -46,8 +46,8 @@
 //
 // Requests are READ in exactly one place: a POST to the GraphQL endpoint, whose
 // body is buffered under maxRequestBody and parsed for the name of the mutation
-// it performs, or, when it performs none, for the pull requests and issues its
-// query addresses (see "Read touches" below). That is a deliberate, bounded
+// it performs, or, when it performs none, for the pull requests, issues and
+// branches its query addresses (see "Read touches" below). That is a deliberate, bounded
 // exception to reading no request at all, and it is not free — this
 // is the one process that holds a run's live GitHub credential while parsing
 // hostile upstream output, and it now also parses outbound documents an agent
@@ -187,8 +187,11 @@
 // of the repository the query names, and touches the pull request if GitHub
 // answers exactly one; none or several touch nothing. The lookup asks for the
 // repository's own branches, so a pull request from a fork's branch is not
-// found. It is made once per branch per run, whatever it answers, and the
-// response the agent receives is not read for it.
+// found. The request does not say whose branch gh meant, so when gh is looking
+// at a fork's branch whose name a branch of the repository shares, the pull
+// request open on the repository's branch is the one touched. The lookup is
+// made once per branch per run, whatever it answers, and the response the
+// agent receives is not read for it.
 //
 // What the request spelled is not what is reported. Once the upstream has
 // accepted the read, the injector reads what GitHub calls the object, with the
