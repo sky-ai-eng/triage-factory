@@ -395,6 +395,12 @@ unauthenticated without TLS, so keep the backend internal. Log lines written
 inside a span carry `trace_id` and `span_id`, and `/metrics` serves exemplars
 to a scraper that negotiates OpenMetrics.
 
+Each process exports its spans, and its `target_info` metric, under
+`service.name` `triagefactory-control` or `triagefactory-executor`
+(`triagefactory` in local mode), with `service.instance.id` set to the
+instance id the [fleet console](fleet-console.md) shows. To see one executor's
+spans, search `{ resource.service.instance.id = "…" }`.
+
 ### The bundled trace stack
 
 | Service      | Role                                                                  | Published        |

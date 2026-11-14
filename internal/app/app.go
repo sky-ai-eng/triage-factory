@@ -388,12 +388,6 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored on TF_ROLE=executor: an executor never holds a signing key, so forward the deployment signer to the control pods only")
 	}
 
-	// Install the OTel meter provider before anything downstream constructs
-	// instruments, so every subsystem records against the real SDK from its
-	// first sample (disabled → the global stays a no-op and instruments cost
-	// nothing). The listener itself starts in Run, once workers are up.
-	a.metricsAddr = telemetry.Init(cfg.Version)
-
 	// Resolve this process's persistent instance identity before anything
 	// else touches the state root: the identity file's exclusive
 	// lock is the two-process-on-one-state-root guard, so it's most
@@ -409,6 +403,14 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 			}
 		}
 	}()
+
+	// Install the OTel providers before anything downstream constructs
+	// instruments, so every subsystem records against the real SDK from its
+	// first sample (disabled → the globals stay no-ops and instruments cost
+	// nothing). After ensureIdentity, because the instance id is part of the
+	// resource every span and metric exports under. The listener itself
+	// starts in Run, once workers are up.
+	a.metricsAddr = telemetry.Init(cfg.Version, a.plan.role, a.identity.ID)
 
 	if a.local() {
 		// Local-mode public-exposure guardrail (TFAC-409 item 1): local mode
