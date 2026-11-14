@@ -20,7 +20,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // agentHandler serves the agent-conversation endpoints (status / messages / cancel /
@@ -37,8 +39,16 @@ type agentHandler struct {
 
 // conversationIDOr404 guards the {conversationID} path value — conversations.id
 // is a uuid column on Postgres. See uuidPathOr404.
+//
+// It also puts the id on the request's server span. An engagement a request
+// causes (a follow-up's resume, a stop) is its own trace root, so the shared
+// attribute is the only thing that finds the request beside it.
 func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return uuidPathOr404(w, r, "conversationID", "conversation")
+	id, ok := uuidPathOr404(w, r, "conversationID", "conversation")
+	if ok {
+		trace.SpanFromContext(r.Context()).SetAttributes(telemetry.ConversationID(id))
+	}
+	return id, ok
 }
 
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {

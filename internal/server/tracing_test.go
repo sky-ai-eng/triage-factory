@@ -6,9 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -107,6 +109,53 @@ func TestTracedHandlerDropsConcretePathFromServerSpans(t *testing.T) {
 		}
 		if strings.Contains(kv.Value.AsString(), "secret-project") {
 			t.Errorf("attribute %s carries the repo name (%q); TF has repo-keyed routes, so the concrete path is tenant data", kv.Key, kv.Value.AsString())
+		}
+	}
+}
+
+// TestConversationRoutesPutConversationIDOnServerSpan: every route addressed
+// at one conversation records its id on the request's server span, which is
+// how a search on the id finds the request beside the engagement it caused.
+// The routes are read from the mux, so a new one is covered when it mounts.
+func TestConversationRoutesPutConversationIDOnServerSpan(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
+
+	s := newTestServer(t)
+	const prefix = "/api/agent/conversations/{conversationID}"
+	want := map[string]string{} // route pattern -> the conversation id its request named
+	for _, m := range s.mux.mounts {
+		method, path, _ := strings.Cut(m.pattern, " ")
+		if path != prefix && !strings.HasPrefix(path, prefix+"/") {
+			continue
+		}
+		id := uuid.NewString()
+		concrete := strings.Replace(path, "{conversationID}", id, 1)
+		concrete = strings.Replace(concrete, "{toolCallID}", "toolu_fixture", 1)
+		req := httptest.NewRequest(method, concrete, strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		s.tracedHandler().ServeHTTP(httptest.NewRecorder(), req)
+		want[m.pattern] = id
+	}
+	if len(want) == 0 {
+		t.Fatalf("no route mounted under %s", prefix)
+	}
+
+	got := map[string]string{}
+	for _, span := range recorder.Ended() {
+		if span.SpanKind() != trace.SpanKindServer {
+			continue
+		}
+		for _, kv := range span.Attributes() {
+			if kv.Key == "conversation.id" {
+				got[span.Name()] = kv.Value.AsString()
+			}
+		}
+	}
+	for pattern, id := range want {
+		if got[pattern] != id {
+			t.Errorf("%s: server span conversation.id = %q, want %q", pattern, got[pattern], id)
 		}
 	}
 }
