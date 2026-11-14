@@ -1,6 +1,7 @@
 package runsidecar
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credseal"
@@ -546,6 +548,119 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRuntime_GHInjectorRelaysAddressedRead is the read half of the same
+// wiring: a read through the injector built from the production config relays
+// one record_gh_read for the pull request it addressed, carrying the spelling
+// the request used and the ids GitHub answered this process for it. The
+// orchestrator resolves the run's touched entity from those ids, and nothing
+// but this process ever reads them, so a config with no ObserveRead fails here.
+func TestRuntime_GHInjectorRelaysAddressedRead(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/841":
+			_, _ = io.WriteString(w, `{"number":841,"node_id":"PR_kwSidecar","base":{"repo":{"id":4242,"full_name":"acme/widgets"}}}`)
+		default:
+			_, _ = io.WriteString(w, `[]`)
+		}
+	}))
+	defer upstream.Close()
+
+	records := make(chan sidecarproto.RelayRecordBody, 4)
+	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+		if kind != sidecarproto.KindRelayRecord {
+			return nil, nil
+		}
+		var rc sidecarproto.RelayRecordBody
+		if err := json.Unmarshal(body, &rc); err != nil {
+			return nil, err
+		}
+		records <- rc
+		return nil, nil
+	})
+	orch, rt := dialRuntimeWithHandler(t, handler)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bundle := &credbundle.Bundle{
+		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
+		GitHub: &credbundle.GitHubCreds{
+			Mode:     "app",
+			BaseURL:  "https://github.com",
+			CLIToken: &credbundle.RepoToken{Token: "ghs_REALCLITOKEN"},
+		},
+	}
+	if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
+		sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+		t.Fatalf("relay bundle: %v", err)
+	}
+	rt.mu.Lock()
+	rt.githubBase = "https://github.com"
+	rt.mu.Unlock()
+
+	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	if err != nil {
+		t.Fatalf("GenerateCert: %v", err)
+	}
+	const placeholder = "per-run-placeholder"
+	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, "run-under-test", nil))
+	if err != nil {
+		t.Fatalf("construct injector: %v", err)
+	}
+	host, err := srv.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start injector: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("append injector cert to pool failed")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/api/v3/repos/acme/widgets/pulls/841/files", nil)
+	req.Header.Set("Authorization", "token "+placeholder)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("read through injector: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("caller saw %d, want the upstream's 200 (a 502 means the bundle token never resolved)", resp.StatusCode)
+	}
+
+	wantOp, want := agenthost.GHChannelReadRecord(ghinjector.ObservedRead{
+		ObjectRef: ghwrite.ObjectRef{Owner: "acme", Repo: "widgets", Number: 841},
+		Identity: domain.GitHubIdentity{
+			RepositoryID: "4242", Repository: "acme/widgets",
+			NodeID: "PR_kwSidecar", Kind: domain.EntityKindPullRequest,
+		},
+	})
+	wantArgs, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal the expected record: %v", err)
+	}
+	deadline := time.After(4 * time.Second)
+	for {
+		select {
+		case got := <-records:
+			if got.Op != wantOp {
+				continue
+			}
+			if !bytes.Equal(got.Args, wantArgs) {
+				t.Fatalf("relayed read = %s, want %s", got.Args, wantArgs)
+			}
+			return
+		case <-deadline:
+			t.Fatal("a gh-channel read never reached the orchestrator")
+		}
 	}
 }
 

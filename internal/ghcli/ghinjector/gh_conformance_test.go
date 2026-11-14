@@ -1575,27 +1575,38 @@ func TestGHConformance_BinaryMatchesPin(t *testing.T) {
 // document of the right shape; this one screens the real thing, and the real
 // thing is several times larger — a finder query drags a comments connection
 // and a reviewer list behind it. Reads are what this number is for: every
-// porcelain command runs one or more before it writes, and they never reach the
-// parser, so the cost is a copy and a scan.
+// porcelain command runs one or more before it writes. With only the write
+// audit wired they never reach a parser, so the cost is a copy and a scan;
+// with the read touch wired the document is walked once for the object it
+// addresses, which is the "addressed read" case.
 func BenchmarkGraphQLCapturePinnedRead(b *testing.B) {
 	read, mutation := capturePinnedDocuments(b)
-	srv := &Server{cfg: Config{ObserveWrite: func(context.Context, ObservedWrite) {}}}
+	writes := Config{ObserveWrite: func(context.Context, ObservedWrite) {}}
+	touches := Config{ObserveRead: func(context.Context, ObservedRead) {}}
 	for _, tc := range []struct {
-		name  string
-		body  []byte
-		write bool
+		name      string
+		cfg       Config
+		body      []byte
+		write     bool
+		addressed int
 	}{
-		{name: "read", body: read},
-		{name: "mutation", body: mutation, write: true},
+		{name: "read", cfg: writes, body: read},
+		{name: "addressed read", cfg: touches, body: read, addressed: 1},
+		{name: "mutation", cfg: writes, body: mutation, write: true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
+			srv := &Server{cfg: tc.cfg}
 			b.SetBytes(int64(len(tc.body)))
 			b.ReportAllocs()
 			for b.Loop() {
 				req, _ := http.NewRequest(http.MethodPost, "https://example.test"+graphqlPath,
 					bytes.NewReader(tc.body))
-				if got := srv.captureGraphQLWrite(req) != nil; got != tc.write {
+				facts, addressed := srv.captureGraphQL(req)
+				if got := facts != nil; got != tc.write {
 					b.Fatalf("captured write = %v, want %v", got, tc.write)
+				}
+				if len(addressed) != tc.addressed {
+					b.Fatalf("addressed %v, want %d object(s)", addressed, tc.addressed)
 				}
 			}
 		})

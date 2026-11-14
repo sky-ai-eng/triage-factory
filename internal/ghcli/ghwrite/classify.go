@@ -17,6 +17,11 @@
 // this package for the same reason: an act named one thing by the log and
 // another by the gate is the failure both are meant to prevent.
 //
+// Reads are named here too (read.go), for one purpose: the pull request or
+// issue a read addressed is one of the run's touched entities. That shares
+// this package's path and document readers and nothing else — a read is no
+// act, is never gated, and leaves no audit row.
+//
 // # What is classified, and what is not
 //
 // Only shapes an agent actually reaches for. Everything else — an endpoint
