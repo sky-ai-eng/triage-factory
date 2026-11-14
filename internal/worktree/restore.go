@@ -511,7 +511,7 @@ func importBundle(ctx context.Context, bareDir, bundlePath string) error {
 func indexBundlePack(ctx context.Context, bareDir string, pack io.Reader) (err error) {
 	args := []string{"index-pack", "--stdin", "--fix-thin", "--fsck-objects"}
 	ctx, span := startGitSpan(ctx, args)
-	defer func() { endGitSpan(span, err) }()
+	defer func() { endGitSpan(ctx, span, err) }()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = bareDir
 	cmd.Env = gitBaseEnv()

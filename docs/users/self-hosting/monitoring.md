@@ -475,7 +475,12 @@ menu.
 - **A slow resume.** `engagement.workspace.ensure` carries
   `workspace.provenance` (`warm`, `rehydrated`, `fresh`) and
   `snapshot.waited_ms`. Waiting the full `TF_SNAPSHOT_WAIT_SEC` and then
-  `fresh` means the previous executor never wrote its snapshot.
+  `fresh` means the previous executor never wrote its snapshot. A
+  `rehydrated` workspace has one `engagement.workspace.restore_checkout` span
+  per checkout, and under it a `worktree.git` span per git command, whose `op`
+  is the subcommand (`fetch`, `worktree`, `index-pack`, …). A git command that
+  fails has `outcome` `failed`, not an error status, because some are expected
+  to fail; the checkout that failed is the error.
 - **Credentials and signatures** are made on a control pod while the executor
   waits (`credentials.provision`, `commit_signing.decide`). They aren't linked
   to the run's trace; search by `conversation.id`.

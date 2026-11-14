@@ -21,8 +21,8 @@ var (
 
 // TestGitHelpersTraceOnlyInsideATrace checks that a git call under a span
 // records a worktree.git span naming its subcommand and nothing else of its
-// arguments, that a failure's status carries no error text, and that a call
-// with no span on ctx records nothing.
+// arguments, that a failure is an outcome carrying no error text rather than
+// an error status, and that a call with no span on ctx records nothing.
 func TestGitHelpersTraceOnlyInsideATrace(t *testing.T) {
 	gitTraceOnce.Do(func() {
 		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(gitTraceRecorder)))
@@ -69,8 +69,8 @@ func TestGitHelpersTraceOnlyInsideATrace(t *testing.T) {
 			status: sdktrace.Status{Code: codes.Unset},
 		},
 		{
-			attrs:  []attribute.KeyValue{attribute.String("op", "other"), attribute.Int("attempt", 1)},
-			status: sdktrace.Status{Code: codes.Error, Description: "git failed"},
+			attrs:  []attribute.KeyValue{attribute.String("op", "other"), attribute.Int("attempt", 1), attribute.String("outcome", "failed")},
+			status: sdktrace.Status{Code: codes.Unset},
 		},
 	}
 	for i, s := range spans {

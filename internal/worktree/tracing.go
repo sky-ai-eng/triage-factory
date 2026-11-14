@@ -5,7 +5,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -16,9 +15,8 @@ var tracer = otel.Tracer("internal/worktree")
 // gitOtherOp is the op a span records for a subcommand outside gitOps.
 const gitOtherOp = "other"
 
-// gitOps is the closed set of subcommands a worktree.git span names: the ones
-// this package's git calls run. args[0] is a constant at every call site, but
-// the span leaves the process, so the set is checked rather than trusted.
+// gitOps is the closed set of subcommands a worktree.git span names. The span
+// leaves the process, so a subcommand is recorded only when the set holds it.
 var gitOps = map[string]struct{}{
 	"apply":            {},
 	"branch":           {},
@@ -52,8 +50,8 @@ func gitOp(args []string) string {
 }
 
 // startGitSpan opens a worktree.git span for one git invocation. A ctx with no
-// valid span gets a no-op span back, the rule telemetry.TracedTransport
-// follows, so a git call outside a trace never becomes a trace of its own.
+// valid span gets a no-op span back, so a git call outside a trace never
+// becomes a trace of its own.
 func startGitSpan(ctx context.Context, args []string) (context.Context, trace.Span) {
 	if !trace.SpanContextFromContext(ctx).IsValid() {
 		return ctx, noop.Span{}
@@ -61,12 +59,19 @@ func startGitSpan(ctx context.Context, args []string) (context.Context, trace.Sp
 	return tracer.Start(ctx, "worktree.git", trace.WithAttributes(telemetry.Op(gitOp(args))))
 }
 
-// endGitSpan ends a span from startGitSpan. The status message is fixed and
-// the error is not recorded, because a git error's text carries the
-// invocation's arguments and git's output.
-func endGitSpan(span trace.Span, err error) {
-	if err != nil {
-		span.SetStatus(codes.Error, "git failed")
+// endGitSpan ends a span from startGitSpan. A failed git command is an
+// outcome, not an error status: a probe or a best-effort cleanup is expected
+// to fail, so only the caller knows whether a failure is wrong, and the stage
+// span that fails with it carries the error status. The error itself is not
+// recorded, because its text carries the invocation's arguments and git's
+// output.
+func endGitSpan(ctx context.Context, span trace.Span, err error) {
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		span.SetAttributes(telemetry.Outcome("cancelled"))
+	default:
+		span.SetAttributes(telemetry.Outcome("failed"))
 	}
 	span.End()
 }

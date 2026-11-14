@@ -1778,7 +1778,13 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 			// under the ensure span with nothing saying which belongs to which.
 			cctx, span := tracer.Start(gctx, "engagement.workspace.restore_checkout")
 			c, err := s.restoreOneCheckout(cctx, root, keyID, claimID, restorer, mc, staged)
-			if err != nil {
+			switch {
+			case err == nil:
+			case gctx.Err() != nil:
+				// Cut off by a sibling's failure or the engagement's end, so
+				// the cause is not this checkout's.
+				span.SetAttributes(telemetry.Outcome("cancelled"))
+			default:
 				// The error's text names the checkout's path, so the status
 				// message is fixed and the error is not recorded.
 				span.SetStatus(codes.Error, "restore failed")
@@ -1873,7 +1879,7 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 			// read-only, the way a deleted head repository leaves a fresh one,
 			// rather than holding every other checkout's restore hostage to a
 			// PR every retry would be refused again.
-			delegateLog.Warn("restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
+			delegateLog.WarnContext(ctx, "restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
 				"checkout", mc.Path, "number", prNumber, "error", err)
 			r.PR = &worktree.PRCheckout{}
 		default:
