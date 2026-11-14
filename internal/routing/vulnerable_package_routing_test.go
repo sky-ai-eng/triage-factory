@@ -25,11 +25,11 @@ import (
 // which the router reads as an org-visible handler's team and maps to the
 // task's owner, and their ids sort A, B, C, D.
 type vulnFixture struct {
-	db                      *sql.DB
-	router                  *Router
-	stub                    *stubDelegator
-	entity                  *domain.Entity
-	teamA, teamB, teamC, tD string
+	db                         *sql.DB
+	router                     *Router
+	stub                       *stubDelegator
+	entity                     *domain.Entity
+	teamA, teamB, teamC, teamD string
 }
 
 func newVulnFixture(t *testing.T) *vulnFixture {
@@ -49,7 +49,7 @@ func newVulnFixture(t *testing.T) *vulnFixture {
 		teamA: team("00000000-0000-0000-0000-0000000000a1", "team-a"),
 		teamB: team("00000000-0000-0000-0000-0000000000b1", "team-b"),
 		teamC: team("00000000-0000-0000-0000-0000000000c1", "team-c"),
-		tD:    team("00000000-0000-0000-0000-0000000000d1", "team-d"),
+		teamD: team("00000000-0000-0000-0000-0000000000d1", "team-d"),
 	}
 	track := func(team string, repos ...domain.TeamGitHubRepo) {
 		t.Helper()
@@ -119,6 +119,8 @@ func seedVulnHandler(t *testing.T, database *sql.DB, kind, teamID, predicate str
 			VALUES (?, ?, ?, ?, 'notify', ?, ?, 1, 'user', ?, ?, ?, ?)
 		`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubVulnerabilityAlertOpened,
 			pred, "vuln notify "+id[:8], domain.NotifyAudienceTeam, now, now)
+	default:
+		t.Fatalf("seedVulnHandler: unknown kind %q", kind)
 	}
 	if err != nil {
 		t.Fatalf("seed %s for %s: %v", kind, teamID, err)
@@ -182,7 +184,7 @@ func TestVulnerablePackage_RoutesToEveryTrackingTeam(t *testing.T) {
 	seedVulnHandler(t, f.db, domain.EventHandlerKindRule, f.teamA, "", 0.6, false)
 	seedVulnHandler(t, f.db, domain.EventHandlerKindRule, f.teamB, "", 0.6, false)
 	seedVulnHandler(t, f.db, domain.EventHandlerKindRule, f.teamC, "", 0.6, false)
-	seedVulnHandler(t, f.db, domain.EventHandlerKindRule, f.tD, "", 0.6, true)
+	seedVulnHandler(t, f.db, domain.EventHandlerKindRule, f.teamD, "", 0.6, true)
 	notifyB := seedVulnHandler(t, f.db, domain.EventHandlerKindNotify, f.teamB, "", 0, false)
 	seedVulnHandler(t, f.db, domain.EventHandlerKindNotify, f.teamC, "", 0, false)
 
