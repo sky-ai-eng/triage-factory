@@ -231,6 +231,31 @@ func TestDelegatorNotices_APassThatReadRowsAnotherPassToldSendsNothing(t *testin
 	rec.Inactive(t, org, kinds.ConversationPaused)
 }
 
+// awaitingNone answers ListAwaitingPersonSystem with nothing, the read of a
+// resolve step that ran before a conversation parked.
+type awaitingNone struct{ db.ConversationStore }
+
+func (awaitingNone) ListAwaitingPersonSystem(context.Context, string) ([]domain.ConversationAwaitingPerson, error) {
+	return nil, nil
+}
+
+// A park that lands after the resolve step's read is opened by the open step
+// that follows it in the same pass, and stays open: the resolve step's sync,
+// which keeps only what its read saw, has already run.
+func TestDelegatorNotices_AParkTheResolveStepDidNotSeeStaysOpen(t *testing.T) {
+	f := newStallFixture(t, "r-unseen", activityTimings{idle: time.Hour})
+	rec := notifytest.Record(t)
+	notifytest.GuardsIn(t, f.s.tx)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	if ok, err := f.s.conversations.ParkOpenForClaimSystem(ctx, org, f.conversationID, f.claimID, db.ParkStopped(domain.ParkReasonStalled, "")); err != nil || !ok {
+		t.Fatalf("park: ok=%v err=%v", ok, err)
+	}
+	NewDelegatorNotices(awaitingNone{f.s.conversations}, time.Hour).pass(ctx)
+	rec.Active(t, org, kinds.ConversationPaused, f.conversationID)
+}
+
 // refusingNotifications fails every notification write.
 type refusingNotifications struct{ db.NotificationStore }
 

@@ -47,9 +47,10 @@ func (s *Spawner) announcePark(park liveParkContext) {
 	}
 }
 
-// waitsOnDelegator is ListPauseNoticesDueSystem's test on a row already read,
-// so a park rings the doorbell only when the sweep it wakes has a notice to
-// open. An idle park, the end of every turn, rings nothing.
+// waitsOnDelegator is ListAwaitingPersonSystem's test on a row already read,
+// so a park rings the doorbell only when it waits on the person who delegated
+// it, which is when the sweep it wakes may have a notice to open. An idle
+// park, the end of every turn, rings nothing.
 func waitsOnDelegator(conv *domain.Conversation) bool {
 	return conv.CreatorUserID != "" && conv.Status == domain.StatusOpen && conv.EndedAt == nil &&
 		conv.ArchivedAt == nil && conv.ParkReason.AwaitsPerson()

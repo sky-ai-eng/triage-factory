@@ -116,6 +116,9 @@ func Record(t testing.TB) *Recorder {
 // notification. The verb is recorded only when its guard reports true and the
 // transaction commits. Without it, a guarded verb fails the test of every
 // installed recorder and records nothing.
+//
+// There is one tx for the whole process, so a test that calls it must not run
+// in parallel with another test that does.
 func GuardsIn(t testing.TB, tx db.TxRunner) {
 	t.Helper()
 	installed.mu.Lock()
