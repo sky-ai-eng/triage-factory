@@ -42,6 +42,13 @@ func (p *recordingPublisher) count() int {
 	return len(p.events)
 }
 
+// since is the events recorded after the first n.
+func (p *recordingPublisher) since(n int) []domain.Event {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]domain.Event(nil), p.events[n:]...)
+}
+
 // TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents is the TFAC-396
 // multi-mode backfill acceptance: a merged PR returned by the per-login search
 // becomes a closed entity carrying its snapshot, the entity does NOT sit in the

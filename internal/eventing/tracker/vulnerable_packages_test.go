@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -41,11 +43,19 @@ type alertsFake struct {
 	requests    map[string]int
 	notModified map[string]int
 	malformed   map[string]bool
+	// limited is the repositories whose listing GitHub refuses for a
+	// secondary rate limit, with a Retry-After the client does not wait out.
+	// The answer carries no budget reading, so the client sends the next
+	// request rather than refusing it itself.
+	limited map[string]bool
+	// hold, when set, is called with the repository before its request is
+	// served, outside mu, so a test can keep listings in flight.
+	hold func(repo string)
 }
 
 func newAlertsFake(t *testing.T) (*alertsFake, *ghclient.Client) {
 	t.Helper()
-	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}, malformed: map[string]bool{}}
+	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}, malformed: map[string]bool{}, limited: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return f, ghclient.NewClient(srv.URL, "tok")
@@ -59,8 +69,20 @@ func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
+	hold := f.hold
+	f.mu.Unlock()
+	if hold != nil {
+		hold(repo)
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests[repo]++
+	if f.limited[repo] {
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit."}`))
+		return
+	}
 	if f.malformed[repo] {
 		_, _ = w.Write([]byte(`{"message":"not a list"}`))
 		return
@@ -160,24 +182,45 @@ func (r *vulnRig) tracker() *Tracker {
 		WithDependabotAccess(access)
 }
 
-// cycle lists every tracked repository's alerts with the listing state as
-// stored, and returns the events the cycle enqueued and the pass's error.
-func (r *vulnRig) cycle() ([]domain.Event, error) {
+// listings is every tracked repository with its listing state as stored.
+func (r *vulnRig) listings() []AlertListing {
 	r.t.Helper()
-	ctx := context.Background()
 	var listings []AlertListing
 	for _, row := range r.rows() {
-		a, err := r.stores.DependabotAccess.GetSystem(ctx, runmode.LocalDefaultOrgID, row.ID)
+		a, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID)
 		if err != nil || a == nil {
 			r.t.Fatalf("read access of %s: %+v %v", row.Slug(), a, err)
 		}
 		listings = append(listings, AlertListing{Repository: row, Access: *a})
 	}
+	return listings
+}
+
+// cycle lists every tracked repository's alerts with the listing state as
+// stored, and returns the events the cycle enqueued and the pass's error.
+func (r *vulnRig) cycle() ([]domain.Event, error) {
+	r.t.Helper()
+	listings := r.listings()
 	before := r.pub.count()
-	_, err := r.tracker().RefreshVulnerablePackages(ctx, vulnHost, r.client, listings)
-	r.pub.mu.Lock()
-	defer r.pub.mu.Unlock()
-	return append([]domain.Event(nil), r.pub.events[before:]...), err
+	_, err := r.tracker().RefreshVulnerablePackages(context.Background(), vulnHost, r.client, listings)
+	return r.pub.since(before), err
+}
+
+// etag is the ETag stored for repo's alert listing.
+func (r *vulnRig) etag(repo string) string {
+	r.t.Helper()
+	for _, row := range r.rows() {
+		if row.Repo != repo {
+			continue
+		}
+		a, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID)
+		if err != nil || a == nil {
+			r.t.Fatalf("read access of %s: %+v %v", row.Slug(), a, err)
+		}
+		return a.AlertsETag
+	}
+	r.t.Fatalf("no tracked repository %s", repo)
+	return ""
 }
 
 // mustCycle is cycle for a pass that must succeed.
@@ -537,6 +580,122 @@ func TestRefreshVulnerablePackages_AnUnusableListingSkipsOnlyItsRepository(t *te
 	}
 }
 
+// TestRefreshVulnerablePackages_ListsRepositoriesConcurrently: a pass has as
+// many listings in flight at once as the bound allows, and no more, and each
+// repository's alerts land once its listing answers.
+func TestRefreshVulnerablePackages_ListsRepositoriesConcurrently(t *testing.T) {
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "4")
+	names := []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"}
+	r := newVulnRig(t, names...)
+	for _, name := range names {
+		r.gh.set(name, lodash(1, "high"))
+	}
+
+	// Every listing is held until four are in flight together, which a pass
+	// listing one repository after another never reaches.
+	var mu sync.Mutex
+	inFlight, most := 0, 0
+	arrived := make(chan struct{}, len(names))
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	r.gh.mu.Lock()
+	r.gh.hold = func(string) {
+		mu.Lock()
+		inFlight++
+		most = max(most, inFlight)
+		mu.Unlock()
+		arrived <- struct{}{}
+		<-release
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}
+	r.gh.mu.Unlock()
+
+	listings := r.listings()
+	tr := r.tracker()
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.RefreshVulnerablePackages(context.Background(), vulnHost, r.client, listings)
+		done <- err
+	}()
+	for i := range 4 {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d listings in flight together, want 4", i)
+		}
+	}
+	unblock()
+	if err := <-done; err != nil {
+		t.Fatalf("RefreshVulnerablePackages: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if most != 4 {
+		t.Errorf("at most %d listings in flight, want 4", most)
+	}
+	for _, name := range names {
+		if e := r.pkg(name, "npm", "lodash"); e == nil || fmt.Sprint(r.alertNumbers(e)) != "[1]" {
+			t.Errorf("%s's package = %+v, want one holding alert 1", name, e)
+		}
+		if r.etag(name) == "" {
+			t.Errorf("%s's listing stored no ETag", name)
+		}
+	}
+	if evts := r.pub.since(0); len(evts) != len(names) {
+		t.Errorf("emitted %v, want one alert_opened per repository", eventTypes(evts))
+	}
+}
+
+// TestRefreshVulnerablePackages_ARateLimitStopsTheListingsNotStarted: once a
+// listing meets a rate limit no listing starts, the listings already made keep
+// their writes, and the pass returns the rate limit.
+func TestRefreshVulnerablePackages_ARateLimitStopsTheListingsNotStarted(t *testing.T) {
+	// Two at once: r0 and r1 start before r2 and r3, and r4 can start only
+	// once three listings have finished, at least one of them r2 or r3, so
+	// the rate limit is met before r4 or r5 could start whatever order the
+	// listings finish in.
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "2")
+	names := []string{"r0", "r1", "r2", "r3", "r4", "r5"}
+	r := newVulnRig(t, names...)
+	for _, name := range names {
+		r.gh.set(name, lodash(1, "high"))
+	}
+	r.gh.mu.Lock()
+	r.gh.limited["r2"] = true
+	r.gh.limited["r3"] = true
+	r.gh.mu.Unlock()
+
+	evts, err := r.cycle()
+	var rl *ghclient.ErrRateLimited
+	if !errors.As(err, &rl) {
+		t.Fatalf("the pass returned %v, want the rate limit", err)
+	}
+	for _, name := range []string{"r4", "r5"} {
+		if n, _ := r.gh.counts(name); n != 0 {
+			t.Errorf("%s was listed %d times after the rate limit, want never", name, n)
+		}
+		if e := r.pkg(name, "npm", "lodash"); e != nil {
+			t.Errorf("%s's package = %+v, want none", name, e)
+		}
+	}
+	for _, name := range []string{"r0", "r1"} {
+		if e := r.pkg(name, "npm", "lodash"); e == nil || fmt.Sprint(r.alertNumbers(e)) != "[1]" {
+			t.Errorf("%s's package = %+v, want one holding alert 1", name, e)
+		}
+		if r.etag(name) == "" {
+			t.Errorf("%s's listing stored no ETag", name)
+		}
+	}
+	if len(evts) != 2 {
+		t.Errorf("emitted %v, want r0's and r1's alert_opened", eventTypes(evts))
+	}
+}
+
 // etagWriteFailing is an access store whose writes of a non-empty ETag fail.
 type etagWriteFailing struct {
 	db.RepositoryDependabotAccessStore
@@ -607,9 +766,7 @@ func TestRetireUnreadableVulnerablePackages(t *testing.T) {
 	if n := r.tracker().RetireUnreadableVulnerablePackages(ctx, vulnHost, listings); n != 1 {
 		t.Fatalf("retired %d packages, want api's one", n)
 	}
-	r.pub.mu.Lock()
-	evts := append([]domain.Event(nil), r.pub.events[before:]...)
-	r.pub.mu.Unlock()
+	evts := r.pub.since(before)
 	var meta events.GitHubVulnerabilityUnreachableMetadata
 	if len(evts) != 1 || *evts[0].EntityID != api.ID || json.Unmarshal([]byte(evts[0].MetadataJSON), &meta) != nil || meta.Reason != events.GitHubUnreachableAlertsDisabled || fmt.Sprint(meta.AlertNumbers) != "[1]" {
 		t.Errorf("emitted %v (%+v), want one unreachable on api's package with reason %s", eventTypes(evts), meta, events.GitHubUnreachableAlertsDisabled)
