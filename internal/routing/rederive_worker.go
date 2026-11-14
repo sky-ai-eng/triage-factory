@@ -221,7 +221,8 @@ func (r *Router) processReDerive(ctx context.Context, item dbpkg.ClaimedReDerive
 			span.SetAttributes(telemetry.Outcome("cancelled"))
 			routerLog.InfoContext(termCtx, "rederive-queue: row settled cancelled at "+verb, "rederive_id", receipt.ItemID, "task_id", item.TaskID)
 		default:
-			span.SetStatus(codes.Error, verb)
+			span.SetStatus(codes.Error, "writing the row's terminal failed")
+			span.SetAttributes(telemetry.Op(verb))
 			routerLog.ErrorContext(termCtx, "rederive-queue: "+verb+" failed; the row is reclaimed after its lease expires", "rederive_id", receipt.ItemID, "task_id", item.TaskID, "error", err)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -93,6 +94,42 @@ func TestTracedTransportTracesInsideATrace(t *testing.T) {
 	if got := <-seen; got == "" {
 		t.Error("upstream saw no traceparent on a request made inside a trace")
 	}
+}
+
+// TestTracedTransportDropsATransportErrorsText covers otelhttp's client
+// transport, which describes a failed round trip with err.Error(): a net
+// error naming the host and its address. The span keeps its error status.
+func TestTracedTransportDropsATransportErrorsText(t *testing.T) {
+	recorder, srv, _ := tracedTransportFixture(t)
+	transport := srv.Client().Transport
+	url := srv.URL
+	srv.Close()
+
+	ctx, parent := otel.Tracer("telemetry/test").Start(context.Background(), "caller")
+	client := &http.Client{Transport: TracedTransport(transport, "test")}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if resp, err := client.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatal("a request to a closed server succeeded")
+	}
+	parent.End()
+
+	for _, s := range recorder.Ended() {
+		if s.Name() != "test.http" {
+			continue
+		}
+		if s.Status().Code != codes.Error {
+			t.Errorf("status code = %v, want Error", s.Status().Code)
+		}
+		if s.Status().Description != "" {
+			t.Errorf("status description = %q, want empty; a transport error names the host and its address", s.Status().Description)
+		}
+		return
+	}
+	t.Fatal("no test.http span recorded")
 }
 
 // tracedTransportFixture installs a recording provider and the W3C

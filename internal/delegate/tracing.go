@@ -9,7 +9,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -72,9 +71,10 @@ const (
 // before the end, because a SpanContext is immutable identity (trace + span
 // id + flags) rather than a handle into the ended span.
 type engagement struct {
-	span trace.Span
-	sc   trace.SpanContext
-	once sync.Once
+	span           trace.Span
+	sc             trace.SpanContext
+	conversationID string
+	once           sync.Once
 }
 
 // finish ends the root exactly once. Every caller races every other — the
@@ -88,8 +88,12 @@ func (e *engagement) finish(outcome string, err error) {
 	e.once.Do(func() {
 		e.span.SetAttributes(telemetry.Outcome(outcome))
 		if err != nil {
-			e.span.RecordError(err)
-			e.span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(e.span, err, "the engagement's setup failed")
+			// The text the span may not carry, logged with the root's span so
+			// the trace's id finds it. One line holds the whole chain, so a
+			// setup step whose error ends here logs nothing of its own.
+			dispatchLog.WarnContext(trace.ContextWithSpan(context.Background(), e.span), "engagement setup failed",
+				"conversation", e.conversationID, "error", err)
 		}
 		e.span.End()
 	})
@@ -125,7 +129,7 @@ func (s *Spawner) beginEngagement(ctx context.Context, conv *domain.Conversation
 	ctx, span := tracer.Start(ctx, "engagement.setup",
 		trace.WithNewRoot(), trace.WithAttributes(attrs...))
 
-	e := &engagement{span: span, sc: span.SpanContext()}
+	e := &engagement{span: span, sc: span.SpanContext(), conversationID: conv.ID}
 	s.mu.Lock()
 	s.engagements[conv.ID] = e
 	s.mu.Unlock()

@@ -17,7 +17,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -96,8 +95,8 @@ func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result
 		trace.WithAttributes(telemetry.Op(method)))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "the cap-broker call failed")
+			brokerLog.WarnContext(ctx, "cap-broker call failed", "method", method, "error", err)
 		}
 		span.End()
 	}()

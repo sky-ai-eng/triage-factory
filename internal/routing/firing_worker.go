@@ -259,7 +259,8 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 			span.SetAttributes(telemetry.Outcome("cancelled"))
 			routerLog.InfoContext(termCtx, "firing-queue: row settled cancelled at "+verb, "firing_id", f.ID, "task_id", f.TaskID)
 		default:
-			span.SetStatus(codes.Error, verb)
+			span.SetStatus(codes.Error, "writing the row's terminal failed")
+			span.SetAttributes(telemetry.Op(verb))
 			routerLog.ErrorContext(termCtx, "firing-queue: "+verb+" failed; the row is reclaimed after its lease expires", "firing_id", f.ID, "task_id", f.TaskID, "error", err)
 		}
 	}

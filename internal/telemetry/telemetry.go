@@ -54,6 +54,15 @@
 //     outcome attribute, not a span error status. Reserve the error status
 //     for things that are actually wrong, so "traces with errors" stays a
 //     usable filter.
+//   - An error's text never goes on a span. A status message is a constant
+//     naming the stage that failed (RecordSpanError takes it), and TF's code
+//     records no exception events. The text is tenant data: git output names
+//     remotes and refs, and a wrapped restore error names the repository. It
+//     is exported exactly as an attribute is, so it belongs in the log, once,
+//     with a ctx that carries the span, where the span's trace_id finds it.
+//     Library spans get the same treatment from ScrubbedTracerProvider.
+//     span_callsite_test.go fails on a non-constant message or a RecordError
+//     outside this package.
 //   - Log correlation is automatic but not free: internal/logging stamps
 //     trace_id/span_id from the record's context, which slog only carries
 //     on the *Context call variants. Under a span, prefer

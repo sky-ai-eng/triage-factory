@@ -306,7 +306,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		},
 	})
 	if err != nil {
-		telemetry.RecordSpanError(bringUpSpan, err)
+		telemetry.RecordSpanError(bringUpSpan, err, "provisioning the cell failed")
 		return nil, err
 	}
 
@@ -384,7 +384,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID), params)
 	endBringUp()
 	if err != nil {
-		telemetry.RecordSpanError(bringUpSpan, err)
+		telemetry.RecordSpanError(bringUpSpan, err, "bringing up the credential sidecar failed")
 		_ = c.Close()
 		return nil, fmt.Errorf("bring up credential sidecar: %w", err)
 	}
@@ -584,8 +584,11 @@ func (s *Spawner) managedGitGate(info agenthost.ConversationInfo, stores db.Stor
 			ctx, span := startPunctualLinked(ctx, engagement, info.ConversationID, "git.authorize", telemetry.OrgID(info.OrgID))
 			defer span.End()
 			dec, err := gitAuthorizeDecision(ctx, stores, info, owner, repo)
-			telemetry.RecordSpanError(span, err)
-			if err == nil {
+			if err != nil {
+				telemetry.RecordSpanError(span, err, "deciding the push failed")
+				delegateLog.WarnContext(ctx, "deciding a git push failed",
+					"conversation", info.ConversationID, "error", err)
+			} else {
 				span.SetAttributes(telemetry.Outcome(gitAuthorizeOutcome(dec)))
 			}
 			return dec, err
@@ -653,7 +656,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 		// old pre-sandbox gate used, now carrying the recipient key so the
 		// brain seals to it (credprovision reads claim.CredPubKey).
 		if _, err := s.conversationQueue.MarkAwaitingCredentials(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
-			telemetry.RecordSpanError(span, err)
+			telemetry.RecordSpanError(span, err, "publishing the sidecar's key failed")
 			return nil, 0, fmt.Errorf("mark awaiting-credentials for conversation %s: %w", conversationID, err)
 		}
 
@@ -688,13 +691,13 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 			}
 			select {
 			case <-provCtx.Done():
-				telemetry.RecordSpanError(span, provCtx.Err())
+				telemetry.RecordSpanError(span, provCtx.Err(), "the credentials wait was cancelled")
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
 					err := fmt.Errorf("%w: conversation %s after %s (brain not provisioning)", errAwaitingCredentialsTimeout, conversationID, timeout)
 					span.SetAttributes(telemetry.Count(polls))
-					telemetry.RecordSpanError(span, err)
+					telemetry.RecordSpanError(span, err, "no credentials arrived within the timeout")
 					return nil, 0, err
 				}
 			}

@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -193,8 +192,9 @@ func (m *Manager) Fulfil(ctx context.Context, orgID, conversationID string) (err
 		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "settling the conversation's memory failed")
+			log.WarnContext(ctx, "settling the conversation's memory failed",
+				"conversation", conversationID, "org", orgID, "error", err)
 		}
 		span.End()
 	}()

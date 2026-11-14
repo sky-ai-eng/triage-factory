@@ -254,7 +254,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	case <-helloCtx.Done():
 		helloErr = helloCtx.Err()
 	}
-	telemetry.RecordSpanError(helloSpan, helloErr)
+	telemetry.RecordSpanError(helloSpan, helloErr, "the sidecar did not announce its key")
 	helloSpan.End()
 	if helloErr != nil {
 		_ = conn.Close()
@@ -266,7 +266,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	// the one that measures somebody else's latency rather than this pod's.
 	provCtx, provSpan := tracer.Start(ctx, "sidecar.provision")
 	sealed, bootEpoch, err := provision(provCtx, pubKey)
-	telemetry.RecordSpanError(provSpan, err)
+	telemetry.RecordSpanError(provSpan, err, "provisioning the sidecar's credentials failed")
 	provSpan.End()
 	if err != nil {
 		_ = conn.Close()
@@ -288,7 +288,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	var res sidecarproto.StartProxiesResult
 	proxyCtx, proxySpan := tracer.Start(ctx, "sidecar.start_proxies")
 	err = conn.Call(proxyCtx, sidecarproto.KindStartProxies, req, &res)
-	telemetry.RecordSpanError(proxySpan, err)
+	telemetry.RecordSpanError(proxySpan, err, "starting the sidecar's proxies failed")
 	proxySpan.End()
 	if err != nil {
 		_ = conn.Close()

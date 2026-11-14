@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/embedded"
 )
@@ -37,11 +38,13 @@ var scrubbedAttrs = map[attribute.Key]struct{}{
 }
 
 // ScrubbedTracerProvider delegates to the process global but drops the
-// keys above. It exists for instrumentation TF does not write and cannot
-// configure — otelhttp offers no hook for filtering the attributes it sets,
-// on either the server handler or the client transport, so both are built
-// against this. TF's own spans don't need it: they go through attrs.go,
-// which can only express keys that were argued for.
+// keys above, and every error's text. It exists for instrumentation TF does
+// not write and cannot configure — otelhttp offers no hook for filtering the
+// attributes it sets, on either the server handler or the client transport,
+// and otelsql none for recording an error's status without its text — so
+// all three are built against this. TF's own spans don't need it: they go
+// through attrs.go, which can only express keys that were argued for, and
+// RecordSpanError, which takes a constant message.
 //
 // The global is resolved per Tracer call rather than captured, so a client
 // constructed before Init still records once Init installs the real one.
@@ -108,6 +111,22 @@ type scrubbedSpan struct{ trace.Span }
 func (s scrubbedSpan) SetAttributes(kv ...attribute.KeyValue) {
 	s.Span.SetAttributes(scrubAttrs(kv)...)
 }
+
+// SetStatus keeps the code and drops the description. otelhttp's client
+// transport describes a failed request with err.Error(): for a dial or TLS
+// failure that names the host and its address, which server.address already
+// carries as the host alone, and for a failed body read it can be anything
+// the upstream sent. The code is what makes the span read as failed.
+func (s scrubbedSpan) SetStatus(code codes.Code, _ string) {
+	s.Span.SetStatus(code, "")
+}
+
+// RecordError records nothing, because the exception event it would add
+// holds the error's text. otelsql records a failed statement's driver error
+// this way, and a Postgres message can repeat an input value. otelsql sets
+// the error status beside it, through SetStatus above, so the span still
+// reads as failed.
+func (scrubbedSpan) RecordError(error, ...trace.EventOption) {}
 
 // scrubAttrs removes the scrubbed keys, allocating only when there is
 // something to remove.

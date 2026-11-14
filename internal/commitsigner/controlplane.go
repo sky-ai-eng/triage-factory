@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
@@ -230,8 +229,7 @@ func (c *ControlPlane) Handle(ctx context.Context, orgID, id string) bool {
 	ctx, cancelWrite := context.WithTimeout(context.WithoutCancel(decideCtx), writeTimeout)
 	defer cancelWrite()
 	if err := c.store(ctx, *row, d); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		telemetry.RecordSpanError(span, err, "storing the signature decision failed")
 		signerLog.ErrorContext(ctx, "storing a signature decision failed; the run will stop waiting at its deadline",
 			"org", row.OrgID, "signature", row.ID, "error", err)
 		return true
