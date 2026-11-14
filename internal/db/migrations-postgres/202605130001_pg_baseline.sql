@@ -1367,7 +1367,7 @@ CREATE TABLE public.conversation_worktrees (
 CREATE TABLE public.conversations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    -- 'delegation' | 'interactive' (reserved) | namespaced 'subagent:<kind>'
+    -- 'delegation' | 'interactive' | namespaced 'subagent:<kind>'
     -- (never the bare word). App-validated, no CHECK.
     type text DEFAULT 'delegation'::text NOT NULL,
     creator_user_id uuid,
@@ -7266,8 +7266,12 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.notification_marks TO tf_app;
 
 
 -- Unified spend view: one row-per-spend shape UNION-ing the messages ledger
--- (delegated conversations) and headless system jobs onto a single category
--- axis. Delegations split manual (per-user) from autonomous; system jobs are
+-- (delegated and interactive conversations) and headless system jobs onto a
+-- single category axis. Delegations split manual (per-user) from autonomous; an
+-- interactive conversation is a person's spend, so it is manual whatever its
+-- trigger_type, attributed to the person whose message started the turn
+-- (messages.user_id stamps a turn's rows) so a reassign that keeps the
+-- conversation moves each later turn to its new holder. System jobs are
 -- 'system_overhead' with the job as subtype. source_id is cast to text so the
 -- UNION's column type is uniform. security_invoker (PG 15+) is required so the
 -- base tables' RLS applies under the querying app-pool identity.
@@ -7277,11 +7281,14 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.org_id,
     c.team_id,
         CASE
-            WHEN (c.trigger_type = 'manual'::text) THEN 'manual'::text
+            WHEN ((c.type = 'interactive'::text) OR (c.trigger_type = 'manual'::text)) THEN 'manual'::text
             ELSE 'autonomous'::text
         END AS category,
     NULL::text AS subtype,
-    c.creator_user_id,
+        CASE
+            WHEN (c.type = 'interactive'::text) THEN COALESCE(m.user_id, c.creator_user_id)
+            ELSE c.creator_user_id
+        END AS creator_user_id,
     c.actor_agent_id,
     c.trigger_id,
     m.model,
@@ -7293,7 +7300,7 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.created_at AS occurred_at
    FROM (public.messages m
      JOIN public.conversations c ON (((c.id = m.conversation_id) AND (c.org_id = m.org_id))))
-  WHERE ((c.type = 'delegation'::text)
+  WHERE ((c.type = ANY (ARRAY['delegation'::text, 'interactive'::text]))
      AND ((m.role = 'assistant'::text) OR (m.cost_usd IS NOT NULL)))
 UNION ALL
 

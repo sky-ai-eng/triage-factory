@@ -148,13 +148,19 @@ type liveRunSpec struct {
 	// turn concludes on its own: a non-empty note is sent into the process
 	// and the run goes on. Nil asks nothing.
 	nudge func(context.Context) string
+	// hasBlueprint is whether the conversation belongs to a blueprint run,
+	// which decides the TF tools its process is offered (sdkTFTools).
+	hasBlueprint bool
 }
 
-// sdkTFTools are the TF tools an SDK delegation is offered. Every SDK
-// conversation the spawner drives is a delegation, which executes a
-// blueprint, as a native one does.
-func sdkTFTools() []tooldefs.Tool {
-	return tooldefs.TFTools(tooldefs.Facts{HasBlueprint: true})
+// sdkTFTools are the TF tools an SDK conversation is offered. hasBlueprint is
+// whether it belongs to a blueprint run: a delegation executes one and is
+// offered the flow-control tool, as a native one is, and a conversation a
+// person works in has no blueprint to stop and is offered none. It must agree
+// with the framework prompt the conversation runs under, whose completion
+// contract is the only text that describes that tool.
+func sdkTFTools(hasBlueprint bool) []tooldefs.Tool {
+	return tooldefs.TFTools(tooldefs.Facts{HasBlueprint: hasBlueprint})
 }
 
 // resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
@@ -198,10 +204,18 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	spec.opts.OnToolBatch = func() agentproc.ToolBatchNotes {
 		return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 	}
-	spec.opts.TFTools = sdkTFTools()
+	spec.opts.TFTools = sdkTFTools(spec.hasBlueprint)
 	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
 
-	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
+	var (
+		lr  *agentproc.LiveRun
+		err error
+	)
+	if s.startLiveRun != nil {
+		lr, err = s.startLiveRun(ctx, spec)
+	} else {
+		lr, err = agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
+	}
 	if err != nil {
 		return liveOutcome{err: err}
 	}

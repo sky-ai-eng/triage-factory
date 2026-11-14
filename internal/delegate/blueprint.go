@@ -583,6 +583,15 @@ func finalBlueprintStep(br *domain.BlueprintRun, stepIdx *int) bool {
 	return *stepIdx >= len(br.StepPlan)-1
 }
 
+// finalBlueprintStepOf is whether the run cfg configures is the last step of
+// its blueprint, which is when the artifact-contract nudge asks after a turn
+// that produced nothing. appendSysPrompt is set exactly when a later step
+// follows this one. A conversation with no blueprint run is no step at all: a
+// person's turn that produces nothing is ordinary, and nothing is owed for it.
+func finalBlueprintStepOf(cfg runConfig) bool {
+	return cfg.blueprintRunID != "" && cfg.appendSysPrompt == ""
+}
+
 // resumedStepIsFinal is finalBlueprintStep for a conversation a resume is
 // about to drive, read from its blueprint run: the resume path holds no plan
 // of its own. True when there is no blueprint run to read, or the read fails,

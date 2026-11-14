@@ -30,18 +30,21 @@ func TestSpendStore_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, teamID, agentID, triggerID := seedPgSpendOrg(t, h)
+		otherUserID := pgtest.SeedUser(t, h, "spend-other-"+uuid.NewString()[:8])
+		pgtest.AddOrgMember(t, h, otherUserID, orgID, teamID, "member", "member")
 		// admin-on-both: bypass RLS for SQL-shape coverage (the FK + NOT NULL
 		// + CHECK constraints still apply, so it's the same SQL the app pool
 		// runs). RLS is exercised separately in TestSpendStore_Postgres_RLS_*.
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SpendStoreFixture{
-			Store:     stores.Spend,
-			OrgID:     orgID,
-			TeamID:    teamID,
-			UserID:    userID,
-			AgentID:   agentID,
-			TriggerID: triggerID,
-			Seeder:    newPgSpendSeeder(h.AdminDB, orgID),
+			Store:       stores.Spend,
+			OrgID:       orgID,
+			TeamID:      teamID,
+			UserID:      userID,
+			AgentID:     agentID,
+			TriggerID:   triggerID,
+			OtherUserID: otherUserID,
+			Seeder:      newPgSpendSeeder(h.AdminDB, orgID),
 		}
 	})
 }
@@ -267,18 +270,18 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 // blueprint graph; empty CreatorUserID/ActorAgentID and a nil Cost map to SQL
 // NULL (uuid columns reject empty strings; the in-flight run carries NULL cost).
 func newPgSpendSeeder(conn *sql.DB, orgID string) dbtest.SpendSeeder {
-	seedLedgerRow := func(t *testing.T, convID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
+	seedLedgerRow := func(t *testing.T, convID, userID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
 		t.Helper()
 		var id int64
 		if err := conn.QueryRow(`
 			INSERT INTO messages
-				(org_id, conversation_id, role, subtype, content, model,
+				(org_id, conversation_id, user_id, role, subtype, content, model,
 				 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 				 cost_usd, created_at)
-			VALUES ($1, $2, 'assistant', '', 'work', NULLIF($3, ''),
-			        $4, $5, $6, $7, $8, $9)
+			VALUES ($1, $2, $3, 'assistant', '', 'work', NULLIF($4, ''),
+			        $5, $6, $7, $8, $9, $10)
 			RETURNING id
-		`, orgID, convID, model,
+		`, orgID, convID, pgUUIDArg(userID), model,
 			tok.Input, tok.Output, tok.CacheRead, tok.CacheCreation, cost, at).Scan(&id); err != nil {
 			t.Fatalf("seed ledger row: %v", err)
 		}
@@ -293,17 +296,21 @@ func newPgSpendSeeder(conn *sql.DB, orgID string) dbtest.SpendSeeder {
 			if concluded {
 				completedAt = f.StartedAt
 			}
+			convType := f.Type
+			if convType == "" {
+				convType = domain.ConversationTypeDelegation
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO conversations
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at, completed_at)
-				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11)
+					(id, org_id, type, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at, completed_at)
+				VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12)
 			`,
-				id, orgID, f.TeamID, pgUUIDArg(f.CreatorUserID), f.TriggerType,
+				id, orgID, convType, f.TeamID, pgUUIDArg(f.CreatorUserID), f.TriggerType,
 				pgUUIDArg(f.ActorAgentID), pgUUIDArg(f.TriggerID), f.Model, status, f.StartedAt, completedAt,
 			); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}
-			return seedLedgerRow(t, id, f.Model, pgCostArg(f.Cost), f.Tokens, f.StartedAt)
+			return seedLedgerRow(t, id, f.MessageUserID, f.Model, pgCostArg(f.Cost), f.Tokens, f.StartedAt)
 		},
 		System: func(t *testing.T, f dbtest.SystemSpendFixture) string {
 			t.Helper()

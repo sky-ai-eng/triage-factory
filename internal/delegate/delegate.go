@@ -111,6 +111,16 @@ type runConfig struct {
 	isBlueprintStep bool
 	appendSysPrompt string
 
+	// surface is the framework prompt the conversation runs under, from its
+	// stored type (surfaceFor): the machinist for a blueprint step, the
+	// workbench for a conversation a person works in.
+	surface agentprompt.Surface
+	// interactive is whether the conversation is one a person works in
+	// (domain.ConversationTypeInteractive). Its turns start from the person's
+	// messages, so an SDK launch with no session to resume sends them as the
+	// end of its first turn (composeLaunchTurn).
+	interactive bool
+
 	// skillsSourcePath is the orchestrator-owned staging dir holding this step's
 	// SKILL.md, bind-mounted read-only into the jail (agentproc's
 	// SkillsSourcePath). Set only for a sandboxed blueprint step; empty in local

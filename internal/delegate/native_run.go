@@ -166,7 +166,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
 	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay.block)
-	systemPrompt := nativeSystemPrompt()
+	systemPrompt := nativeSystemPrompt(cfg.surface)
 
 	// The task context's retention. Nothing is pinned through a compaction, so
 	// the row carrying these bytes is summarized like any other, and this file is
@@ -304,7 +304,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// Every tool call is a chance the agent just wrote its memory
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
-			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg.appendSysPrompt == ""),
+			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg)),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -322,7 +322,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		Model:          model,
 		SystemPrompt:   systemPrompt,
 		SystemAddendum: launchText.systemBlock,
-		HasBlueprint:   true,
+		HasBlueprint:   cfg.blueprintRunID != "",
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
 		BashMemBudgetMB: nativeBashMemBudgetMB(memoryLimitMB),
@@ -445,8 +445,8 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 // own block instead. What is left is identical for every native run against the
 // same spec, which is what lets it be block 1, the one the cache breakpoint is
 // stamped on and every conversation in the org reads.
-func nativeSystemPrompt() string {
-	return agentprompt.Build(nativeSpec())
+func nativeSystemPrompt(surface agentprompt.Surface) string {
+	return agentprompt.Build(nativeSpec(surface))
 }
 
 // nativeLaunchText is the two pieces of composed text one native engagement
@@ -591,9 +591,9 @@ func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID s
 // mode is a wiring bug. Passing the ambient mode would compose a local-mode
 // prompt for it and let it proceed on paths that do not exist; pinning makes
 // agentprompt refuse, which is the same answer the launch gives moments later.
-func nativeSpec() agentprompt.Spec {
+func nativeSpec(surface agentprompt.Surface) agentprompt.Spec {
 	return agentprompt.Spec{
-		Surface: agentprompt.SurfaceMachinist,
+		Surface: surface,
 		Runtime: agentprompt.RuntimeNative,
 		Family:  agentprompt.FamilyClaude,
 		Mode:    agentprompt.ModeMulti,

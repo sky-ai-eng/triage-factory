@@ -867,13 +867,6 @@ func (s *Spawner) followUpBlock(ctx context.Context, orgID string, conv *domain.
 	if block := endedFollowUpBlock(conv); block != "" {
 		return block
 	}
-	// The dispatcher has one execution path, the blueprint step's, and fails
-	// a claimed conversation with no blueprint run. A message here would wake
-	// the conversation a person's claim minted only for that to fail it.
-	// TODO(TFAC-1421): interactive conversations take messages once the dispatcher runs them
-	if conv.Type == domain.ConversationTypeInteractive {
-		return ResumeBlockedNotSteerable
-	}
 	if !resumableState(conv.Status) {
 		if drainsUndeliveredInput(*conv) {
 			return ""
@@ -952,14 +945,20 @@ func (s *Spawner) ResumabilityFor(ctx context.Context, orgID string, conv *domai
 // One ladder for both runtimes, so a given row gets the same answer for the
 // same reason whatever drives it. The SDK-only rungs at the top are the sole
 // exception, and they are named rather than implied.
+//
+// A conversation a person works in that has never run skips the rungs about
+// what a resume continues from: the session, the tree, the model and the
+// workspace. It has none of them to have lost, and its wake launches its
+// first turn rather than resuming one (startsFresh).
 func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) string {
+	fresh := startsFresh(conv)
 	// The SDK's resume re-invokes a Claude session BY ID, in the tree it ran in,
 	// on the model it started with — a config change between the original
 	// invocation and this wake must not switch models underneath one logical
 	// conversation — so all three have to be on the row before a wake means
 	// anything. A native conversation needs none of them: its message rows ARE
 	// the resume state, replayed into a fresh invocation by the loop itself.
-	if resumeSourceFor(conv.Runtime) == resumeSourceSession {
+	if resumeSourceFor(conv.Runtime) == resumeSourceSession && !fresh {
 		if conv.SessionID == "" {
 			return ResumeBlockedSessionMissing
 		}
@@ -978,7 +977,7 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 	// run. Every run stopped by an older build lands here too: the old cancel
 	// path discarded the snapshot on its way out, so a migrated row has no
 	// workspace by construction and inherits exactly this answer.
-	if !s.workspaceRecoverable(ctx, orgID, conv) {
+	if !fresh && !s.workspaceRecoverable(ctx, orgID, conv) {
 		return ResumeBlockedWorkspaceExpired
 	}
 	// The workspace survives but the blueprint says otherwise: nothing would ever
@@ -994,6 +993,20 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 	// continue on. Bottom of the ladder because it is the one rung that a person
 	// clears by changing a setting rather than by giving up on this run.
 	return s.modelFollowUpBlock(ctx, orgID, conv, br)
+}
+
+// startsFresh reports whether waking conv launches its first turn rather than
+// resuming one: a conversation a person works in that has never run (the
+// conversation has no assistant message, db.ConversationHasRunSQL). The
+// dispatcher launches such a conversation with the person's message as its
+// first turn, building or restoring the task's workspace as a delegation's
+// first step does, so nothing it would resume from has to exist yet.
+//
+// Only that type qualifies. A delegation that never ran and came to rest has
+// a blueprint step behind it, which the dispatcher resumes rather than
+// launches, so its rungs still apply.
+func startsFresh(conv *domain.Conversation) bool {
+	return conv.Type == domain.ConversationTypeInteractive && !conv.HasRun
 }
 
 // errWakeRefused rolls back a follow-up whose wake was refused, message and

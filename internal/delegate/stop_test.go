@@ -642,7 +642,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	}
 	var content string
 	if err := database.QueryRow(
-		`SELECT content FROM messages WHERE conversation_id = ? AND is_error = 1`, conversationID,
+		`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ?`, conversationID, domain.MessageSubtypeStopNote,
 	).Scan(&content); err != nil {
 		t.Fatalf("read the failure row: %v", err)
 	}

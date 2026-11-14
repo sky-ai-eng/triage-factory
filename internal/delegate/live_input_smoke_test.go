@@ -87,7 +87,7 @@ func startSDKLiveCheck(t *testing.T, convID, message string) *sdkLiveCheck {
 			}
 			return n
 		},
-		TFTools: sdkTFTools(),
+		TFTools: sdkTFTools(true),
 	}
 	inner := newConversationSink(s, org, convID, claimID, "manual", runmode.LocalDefaultUserID)
 	sink := &toolStartSink{

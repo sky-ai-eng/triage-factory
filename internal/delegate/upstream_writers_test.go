@@ -187,7 +187,7 @@ func TestSDKUpstream_An529HandsBackAndTheNextClaimSaysWhy(t *testing.T) {
 	sink := newConversationSink(f.s, runmode.LocalDefaultOrgID, f.conv.ID, next.ClaimID, "manual", runmode.LocalDefaultUserID)
 	resumed := agentproc.RunOptions{SessionID: "sess-529"}
 	if err := f.s.composeLaunchTurn(context.Background(), &resumed, sink, runmode.LocalDefaultOrgID, f.conv.ID,
-		runmode.LocalDefaultUserID, next.LastHandBackOutcome, nil, ""); err != nil {
+		runmode.LocalDefaultUserID, next.LastHandBackOutcome, false, nil, ""); err != nil {
 		t.Fatalf("composeLaunchTurn: %v", err)
 	}
 	if resumed.Message != domain.UpstreamContinuationNote {

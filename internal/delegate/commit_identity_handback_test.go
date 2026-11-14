@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -34,7 +35,7 @@ func TestRunAgent_FailedCommitIdentityReadHandsBack(t *testing.T) {
 			conv := f.conv
 
 			disp := f.s.runAgent(context.Background(), conv.ID, loadTask(t, f.s, conv.TaskID), "mission",
-				runConfig{orgID: org, claimID: conv.ClaimID, teamID: conv.TeamID, runRoot: f.worktree},
+				runConfig{orgID: org, claimID: conv.ClaimID, teamID: conv.TeamID, runRoot: f.worktree, surface: agentprompt.SurfaceMachinist},
 				time.Now(), conv.Model, conv.TriggerType, conv.CreatorUserID, "")
 
 			if !errors.Is(disp.launchErr, tc.readErr) {

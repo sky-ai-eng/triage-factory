@@ -548,11 +548,16 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 
 	bgCtx := context.Background()
 
+	// A stop note, not an assistant row: TF writes it, not the model. An
+	// assistant row is what makes a conversation one that has run
+	// (db.ConversationHasRunSQL), so writing the failure as one would make a
+	// conversation that failed before its model spoke owe a memory of work
+	// nobody did.
 	failMsg := &domain.Message{
 		ConversationID: conversationID,
-		Role:           "assistant",
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeStopNote,
 		Content:        "Error: " + errMsg,
-		IsError:        true,
 	}
 	// The failure row goes in BEFORE the status flip, because the flip
 	// releases the claim: on the fenced path an insert afterwards would name
@@ -606,6 +611,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 		// file", and only the transcript says which. Rung for the row this
 		// call stamped.
 		s.kickMemoryOwed(orgID, ended.ID)
+		s.replaceFailedInteractive(orgID, ended)
 	}
 
 	s.broadcastConversationFailed(orgID, conversationID, kind)

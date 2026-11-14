@@ -188,7 +188,7 @@ func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) 
 	// before it died.
 	opening := agentproc.RunOptions{}
 	if err := s.composeLaunchTurn(ctx, &opening, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
-		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
 	if _, err := s.conversations.InsertMessageForClaimSystem(ctx, runmode.LocalDefaultOrgID, claimID, &domain.Message{
@@ -208,7 +208,7 @@ func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) 
 		OpeningBlocks: opening.OpeningBlocks,
 	}
 	if err := s.composeLaunchTurn(ctx, &resumed, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
-		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the resuming launch: %v", err)
 	}
 
@@ -251,7 +251,7 @@ func TestComposeLaunchTurn_StagedNotesRideTheLaunchTurn(t *testing.T) {
 
 	stageOne(t, s, org, convID, domain.StagedInjectionProducerTaskClosing, "the task is resolved")
 	opening := agentproc.RunOptions{}
-	if err := s.composeLaunchTurn(ctx, &opening, sink, org, convID, runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+	if err := s.composeLaunchTurn(ctx, &opening, sink, org, convID, runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
 	if n := len(opening.OpeningBlocks); n < 2 || !strings.Contains(opening.OpeningBlocks[n-1].Text, "the task is resolved") ||
@@ -261,7 +261,7 @@ func TestComposeLaunchTurn_StagedNotesRideTheLaunchTurn(t *testing.T) {
 
 	stageOne(t, s, org, convID, domain.StagedInjectionProducerTaskClosing, "a later note")
 	resumed := agentproc.RunOptions{SessionID: "sess-survived"}
-	if err := s.composeLaunchTurn(ctx, &resumed, sink, org, convID, runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+	if err := s.composeLaunchTurn(ctx, &resumed, sink, org, convID, runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the resuming launch: %v", err)
 	}
 	if !strings.HasPrefix(resumed.Message, "<system-note>") || !strings.Contains(resumed.Message, "a later note") || !strings.HasSuffix(resumed.Message, domain.SessionContinuationNote) {
@@ -287,7 +287,7 @@ func TestComposeLaunchTurn_AnOpeningThatNeverReachedTheAgentReturnsItsNotes(t *t
 
 	stageOne(t, s, org, convID, domain.StagedInjectionProducerTaskClosing, "the task is resolved")
 	opening := agentproc.RunOptions{}
-	if err := s.composeLaunchTurn(ctx, &opening, sink, org, convID, runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+	if err := s.composeLaunchTurn(ctx, &opening, sink, org, convID, runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
 	if opening.OnOpeningUnsent == nil {
@@ -314,7 +314,7 @@ func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
 
 	first := agentproc.RunOptions{}
 	if err := s.composeLaunchTurn(ctx, &first, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
-		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
 
@@ -335,7 +335,7 @@ func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
 	// the arm that sends the opening owns this field too.
 	second := agentproc.RunOptions{Message: domain.SessionContinuationNote}
 	if err := s.composeLaunchTurn(ctx, &second, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
-		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", false, openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the re-claiming launch: %v", err)
 	}
 
