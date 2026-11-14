@@ -278,8 +278,8 @@ func launchToolHost(ctx context.Context, rn *sandbox.RunNetwork, conversationID 
 	ctx, span := tracer.Start(ctx, "agent.jail.launch", trace.WithAttributes(telemetry.Runtime("native")))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "launching the tool host's jail failed")
+			gvisorLog.WarnContext(ctx, "launching the tool host's jail failed", "conversation", conversationID, "error", err)
 		}
 		span.End()
 	}()

@@ -270,9 +270,9 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	defer span.End()
 	if a != nil {
 		if kerr := keyFunnelDeliverable(a); kerr != nil {
-			telemetry.RecordSpanError(span, kerr)
+			telemetry.RecordSpanError(span, kerr, "the deliverable is not a pull request create's")
 			recordWriteDrop(ctx, recordDropOp(a, nil), kerr)
-			agenthostLog.Warn("refusing a deliverable that is not a pull request create's; recording the action without it",
+			agenthostLog.WarnContext(ctx, "refusing a deliverable that is not a pull request create's; recording the action without it",
 				"conversation", info.ConversationID, "kind", a.Kind, "state", a.State, "target", a.Target)
 			if act == nil {
 				return
@@ -328,9 +328,9 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			)
 		})
 		if deliverableErr != nil && act != nil {
-			telemetry.RecordSpanError(span, deliverableErr)
+			telemetry.RecordSpanError(span, deliverableErr, "recording the deliverable failed")
 			recordWriteDrop(ctx, recordDropOp(a, nil), deliverableErr)
-			agenthostLog.Warn("deliverable recording failed; recording the action without it",
+			agenthostLog.WarnContext(ctx, "deliverable recording failed; recording the action without it",
 				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", deliverableErr)
 			err = recordActionAlone(ctx, stores, info, act)
 			lost = nil
@@ -344,9 +344,9 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		} else if act != nil {
 			target = act.Target
 		}
-		telemetry.RecordSpanError(span, err)
+		telemetry.RecordSpanError(span, err, "recording the external write failed")
 		recordWriteDrop(ctx, recordDropOp(lost, act), err)
-		agenthostLog.Warn("external write recording failed (action already applied)",
+		agenthostLog.WarnContext(ctx, "external write recording failed (action already applied)",
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	} else {
 		countUnnamedComment(ctx, act)

@@ -210,10 +210,17 @@ func (a *App) buildExecution() error {
 	// Multi only: scope the transcript, status, and permission frames to each
 	// conversation's REST audience, resolved per frame — the hub has no team
 	// axis, so an org-scoped broadcast would stream every team's transcripts
-	// to the whole org. Local keeps the org-wide broadcast: N=1, no team
-	// boundary.
+	// to the whole org. A pod that serves HTTP reads the audience at emit. An
+	// executor's database role cannot read memberships, so its frames name
+	// their conversation and the control pods that deliver them read it
+	// (startWorkers wires their backplane). Local keeps the org-wide
+	// broadcast: N=1, no team boundary.
 	if !a.local() {
-		a.spawner.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+		if a.plan.serveHTTP {
+			a.spawner.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+		} else {
+			a.spawner.DeferConversationFrameAudience()
+		}
 	}
 	a.hookReconcilerToSpawner()
 	// Mirror run status/activity onto the bus (TFAC-592) so an EE

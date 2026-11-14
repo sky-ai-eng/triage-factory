@@ -8,6 +8,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -120,6 +121,39 @@ func TestOpenTracedRecordsEveryStatementInsideATrace(t *testing.T) {
 		if !parented[want] {
 			t.Errorf("no %s span parented to the caller's span", want)
 		}
+	}
+}
+
+// TestOpenTracedKeepsAFailedStatementsStatusWithoutItsText covers the
+// scrubbed provider the driver is built against: a failing statement's span
+// still reads as an error, and carries neither the driver's message, which
+// can repeat an input value, nor an exception event holding it.
+func TestOpenTracedKeepsAFailedStatementsStatusWithoutItsText(t *testing.T) {
+	recorder, handle := openTracedForTest(t)
+
+	ctx, parent := otel.Tracer("db/test").Start(context.Background(), "caller")
+	if _, err := handle.ExecContext(ctx, `INSERT INTO missing_table (secret) VALUES ('acme/secret-project')`); err == nil {
+		t.Fatal("exec against a missing table succeeded")
+	}
+	parent.End()
+
+	var stmt sdktrace.ReadOnlySpan
+	for _, s := range recorder.Ended() {
+		if s.Name() == "sql.conn.exec" && s.Parent().SpanID() == parent.SpanContext().SpanID() {
+			stmt = s
+		}
+	}
+	if stmt == nil {
+		t.Fatal("no sql.conn.exec span parented to the caller's span")
+	}
+	if stmt.Status().Code != codes.Error {
+		t.Errorf("status code = %v, want Error; a failed statement must still read as failed", stmt.Status().Code)
+	}
+	if stmt.Status().Description != "" {
+		t.Errorf("status description = %q, want empty; the driver's error text is not exported", stmt.Status().Description)
+	}
+	if events := stmt.Events(); len(events) != 0 {
+		t.Errorf("recorded %d span events, want 0; an exception event holds the driver's error text", len(events))
 	}
 }
 

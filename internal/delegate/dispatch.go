@@ -669,7 +669,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		gateOpen = false
 		gateSpan.SetAttributes(telemetry.Outcome(outcome))
-		telemetry.RecordSpanError(gateSpan, err)
+		telemetry.RecordSpanError(gateSpan, err, "a claim gate's read failed")
 		gateSpan.End()
 	}
 	// Backstop only: every exit below closes the gate span with its own answer,
@@ -1171,7 +1171,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		slug = skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
 		_, skillSpan := tracer.Start(ctx, "engagement.stage_skill")
 		skillErr := s.materializeStepSkill(&cfg, conv.ID, slug, stepPrompt, step.Brief)
-		telemetry.RecordSpanError(skillSpan, skillErr)
+		telemetry.RecordSpanError(skillSpan, skillErr, "staging the step's skill failed")
 		skillSpan.End()
 		if skillErr != nil {
 			s.failEngagement(conv.ID, skillErr)
@@ -1591,10 +1591,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		message = prepends + "\n\n" + agentMessage
 	}
 
-	// The resume path's agent-live. It runs no phase ladder — a resume has no
-	// fetch or clone to report — so this is where its setup ends and its turn
-	// begins: every hand-back is behind us and the runtime is about to come up.
-	s.endEngagement(conv.ID, engagementLive)
+	// The resume path's agent-live: every hand-back is behind us and the
+	// runtime is about to come up. It clears the phase rather than only ending
+	// the engagement, because a cold rehydrate above left the claim at
+	// cloning. The fence result is not acted on, as on the step path: the
+	// resume's first claim-fenced write meets the same fence.
+	s.updatePhase(stepCtx, orgID, conv.ID, conv.ClaimID, "")
 
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,

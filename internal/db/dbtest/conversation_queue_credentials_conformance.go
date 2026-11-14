@@ -99,7 +99,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 	t.Run("Mark_parks_claim_records_pubkey_and_reads_return_it", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.StageStep(t)
-		claim(t, store, conversationID)
+		claimed := claim(t, store, conversationID)
 
 		matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey)
 		if err != nil || !matched {
@@ -122,6 +122,11 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if got.ExecutorID != executorID || got.BootEpoch != bootEpoch {
 			t.Errorf("GetClaim ownership = (%q, %d), want (%q, %d)", got.ExecutorID, got.BootEpoch, executorID, bootEpoch)
 		}
+		// The provisioner writes the bundle by this id, so a wrong one is a
+		// seal that lands nowhere.
+		if got.ClaimID != claimed.ClaimID {
+			t.Errorf("GetClaim ClaimID = %q, want the active claim %q", got.ClaimID, claimed.ClaimID)
+		}
 
 		// The backstop-sweep read must carry the key too — the brain seals
 		// off whichever read reached the run first.
@@ -135,6 +140,9 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 				found = true
 				if r.CredPubKey != pubKey {
 					t.Errorf("ListAwaitingCredentials CredPubKey = %q, want %q", r.CredPubKey, pubKey)
+				}
+				if r.ClaimID != claimed.ClaimID {
+					t.Errorf("ListAwaitingCredentials ClaimID = %q, want the active claim %q", r.ClaimID, claimed.ClaimID)
 				}
 			}
 		}
@@ -210,8 +218,8 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if got.CredPubKey != "" {
 			t.Errorf("CredPubKey = %q after RequeueConversation, want empty", got.CredPubKey)
 		}
-		if got.ExecutorID != "" || got.BootEpoch != 0 {
-			t.Errorf("ownership = (%q, %d) after RequeueConversation, want cleared", got.ExecutorID, got.BootEpoch)
+		if got.ClaimID != "" || got.ExecutorID != "" || got.BootEpoch != 0 {
+			t.Errorf("ownership = (%q, %q, %d) after RequeueConversation, want cleared", got.ClaimID, got.ExecutorID, got.BootEpoch)
 		}
 	})
 
@@ -240,8 +248,8 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if got.CredPubKey != "" {
 			t.Errorf("CredPubKey = %q after RequeueConversation, want empty", got.CredPubKey)
 		}
-		if got.ExecutorID != "" || got.BootEpoch != 0 {
-			t.Errorf("ownership = (%q, %d) after RequeueConversation, want cleared", got.ExecutorID, got.BootEpoch)
+		if got.ClaimID != "" || got.ExecutorID != "" || got.BootEpoch != 0 {
+			t.Errorf("ownership = (%q, %q, %d) after RequeueConversation, want cleared", got.ClaimID, got.ExecutorID, got.BootEpoch)
 		}
 		// The run is genuinely back on the queue: it re-claims. A no-op
 		// requeue would have left it claimed-and-parked, and this would fail.
@@ -272,8 +280,8 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if got.CredPubKey != "" {
 			t.Errorf("CredPubKey = %q after reset, want empty", got.CredPubKey)
 		}
-		if got.ExecutorID != "" || got.BootEpoch != 0 {
-			t.Errorf("ownership = (%q, %d) after reset, want cleared", got.ExecutorID, got.BootEpoch)
+		if got.ClaimID != "" || got.ExecutorID != "" || got.BootEpoch != 0 {
+			t.Errorf("ownership = (%q, %q, %d) after reset, want cleared", got.ClaimID, got.ExecutorID, got.BootEpoch)
 		}
 	})
 }

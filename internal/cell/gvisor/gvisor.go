@@ -13,8 +13,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 )
 
 var tracer = otel.Tracer("internal/cell/gvisor")
@@ -89,10 +89,7 @@ func traced(ctx context.Context, name string, end func(), fn func(context.Contex
 	ctx, span := tracer.Start(ctx, name)
 	err := fn(ctx)
 	end()
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-	}
+	telemetry.RecordSpanError(span, err, "the cell's bring-up step failed")
 	span.End()
 	return err
 }

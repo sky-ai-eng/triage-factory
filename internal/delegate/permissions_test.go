@@ -719,6 +719,37 @@ func TestPresentFor_HandsTheAudienceToTheFleetCheck(t *testing.T) {
 	})
 }
 
+// TestPresentFor_DeferredFramesCountNobody pins that a spawner whose frames
+// are deferred answers absent with a focused tab in the org open: it cannot
+// read who may read the conversation, and an audience it never read must not
+// stand for the whole org, on the hub path or through the fleet check.
+func TestPresentFor_DeferredFramesCountNobody(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClientAs(t, hub, "reader", presenceTestOrg)
+	defer cleanup()
+	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", true, true)
+
+	t.Run("hub", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+		s.DeferConversationFrameAudience()
+		if present, err := s.presentFor(presenceTestOrg, "run-1"); present || err != nil {
+			t.Errorf("presentFor = (%v, %v), want (false, nil)", present, err)
+		}
+	})
+	t.Run("fleet check", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+		pc := &recordingPresence{}
+		s.SetPresenceChecker(pc)
+		s.DeferConversationFrameAudience()
+		if present, err := s.presentFor(presenceTestOrg, "run-1"); present || err != nil {
+			t.Errorf("presentFor = (%v, %v), want (false, nil)", present, err)
+		}
+		if pc.calls != 0 {
+			t.Errorf("checker called %d times, want none", pc.calls)
+		}
+	})
+}
+
 // TestBrowserPermissionHandler_OutsiderTabDeniesAfterGrace: a focused board
 // tab belonging to someone who cannot read the conversation does not keep its
 // prompt waiting; it denies on the grace clock as unattended.

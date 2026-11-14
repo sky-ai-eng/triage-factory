@@ -390,8 +390,8 @@ TLS, but the endpoint variables don't turn tracing on (TF logs
 
 Spans are pushed, so the backend must be reachable from each pod, and an
 unreachable one loses spans silently; look for `opentelemetry sdk error` in the
-logs. Spans carry opaque ids, not repo names or message text, but are
-unauthenticated without TLS, so keep the backend internal. Log lines written
+logs. Spans carry opaque ids, not repo names, message text, or error text, but
+are unauthenticated without TLS, so keep the backend internal. Log lines written
 inside a span carry `trace_id` and `span_id`, and `/metrics` serves exemplars
 to a scraper that negotiates OpenMetrics.
 
@@ -400,6 +400,18 @@ Each process exports its spans, and its `target_info` metric, under
 (`triagefactory` in local mode), with `service.instance.id` set to the
 instance id the [fleet console](fleet-console.md) shows. To see one executor's
 spans, search `{ resource.service.instance.id = "…" }`.
+
+**Why a span failed.** A failed span's status names the step that failed, never
+the error, because an error's text can name repositories, branches, and git
+remotes. The error is logged on a line carrying the same `trace_id`. Copy the
+trace id from the span and search the logs of the service its `service.name`
+names, `control` or `executor`:
+
+```sh
+docker compose logs executor | grep <trace_id>
+```
+
+A failed run setup's whole error is on its `engagement setup failed` line.
 
 ### The bundled trace stack
 

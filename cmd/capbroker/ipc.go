@@ -17,7 +17,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -96,12 +95,16 @@ func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result
 		trace.WithAttributes(telemetry.Op(method)))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "the cap-broker call failed")
+			brokerLog.WarnContext(ctx, "cap-broker call failed", "method", method, "error", err)
 		}
 		span.End()
 	}()
+	return c.roundTrip(ctx, method, args, result, budget)
+}
 
+// roundTrip is one request and its response, untraced.
+func (c *IPCClient) roundTrip(ctx context.Context, method string, args, result any, budget time.Duration) error {
 	if c.closed.Load() {
 		return errors.New("capbroker: client closed")
 	}
@@ -162,8 +165,13 @@ func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result
 // speaking the current protocol version — the orchestrator's readiness
 // check after spawning the broker subprocess (see Start in
 // orchestrator.go). Not part of sandbox.PrivilegedOps.
+//
+// Untraced, unlike every other method: the readiness poll expects most pings
+// to fail while the broker boots, and the check for an existing broker
+// expects one to fail when there is none, so a span and a warning per miss
+// would report a normal start as a run of failures.
 func (c *IPCClient) Ping(ctx context.Context) error {
-	return c.call(ctx, methodPing, emptyArgs{}, nil)
+	return c.roundTrip(ctx, methodPing, emptyArgs{}, nil, callTimeout)
 }
 
 // --- sandbox.PrivilegedOps implementation ---

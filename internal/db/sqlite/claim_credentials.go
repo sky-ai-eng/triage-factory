@@ -22,7 +22,7 @@ func newClaimCredentialsStore(_ queryer) db.ClaimCredentialsStore {
 
 var _ db.ClaimCredentialsStore = claimCredentialsStore{}
 
-func (claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error {
+func (claimCredentialsStore) Put(ctx context.Context, orgID, claimID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error {
 	return db.ErrNotApplicableInLocal
 }
 

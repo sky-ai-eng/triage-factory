@@ -3,6 +3,7 @@ package wsbackplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	ws "github.com/coder/websocket"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -263,5 +265,112 @@ func TestHandleBusNotification_RepublishesNonSelfOrigin(t *testing.T) {
 	}
 	if got.EventType != want.EventType || got.OrgID != want.OrgID || got.MetadataJSON != want.MetadataJSON {
 		t.Fatalf("republished event = %+v, want %+v", got, want)
+	}
+}
+
+// readersEnvelope is a remote pod's tf_ws payload for an event marked for
+// conversationID's readers in orgID, the shape a deferred notifier on an
+// executor publishes.
+func readersEnvelope(t *testing.T, orgID, conversationID string) string {
+	t.Helper()
+	we, err := newWireEvent(websocket.Event{Type: "message", OrgID: orgID, ConversationID: conversationID, ReadersOfConversation: true})
+	if err != nil {
+		t.Fatalf("newWireEvent: %v", err)
+	}
+	payload, err := json.Marshal(inlineEnvelope("executor-pod", &we, true))
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	return string(payload)
+}
+
+// TestHandleWSNotification_ReadersOfConversationDecideDelivery pins how the
+// delivering pod applies the answer it reads for a marked event: the readers
+// alone for a narrower audience, every member for an org-visible
+// conversation, and nobody when it cannot resolve the readers, the read
+// fails, or it names nobody.
+func TestHandleWSNotification_ReadersOfConversationDecideDelivery(t *testing.T) {
+	cases := []struct {
+		name          string
+		readers       conversationframe.AudienceFunc
+		wantReader    bool
+		wantOutsider  bool
+		wantReadCount int
+	}{
+		{"readers", func(context.Context, string, string) (bool, []string, error) {
+			return false, []string{"reader"}, nil
+		}, true, false, 1},
+		{"org-wide", func(context.Context, string, string) (bool, []string, error) {
+			return true, nil, nil
+		}, true, true, 1},
+		{"nobody", func(context.Context, string, string) (bool, []string, error) {
+			return false, []string{}, nil
+		}, false, false, 1},
+		{"read failed", func(context.Context, string, string) (bool, []string, error) {
+			return false, nil, errors.New("db down")
+		}, false, false, 1},
+		{"no resolver", nil, false, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := websocket.NewHub()
+			reader := dialTestClient(t, hub, "reader", "org-1", "sid-1")
+			outsider := dialTestClient(t, hub, "outsider", "org-1", "sid-2")
+			waitClientCount(t, hub, 2)
+
+			b := &Backplane{originID: "control-pod", hub: hub}
+			reads := 0
+			if tc.readers != nil {
+				b.SetConversationReaders(func(ctx context.Context, orgID, conversationID string) (bool, []string, error) {
+					reads++
+					if orgID != "org-1" || conversationID != "conv-1" {
+						t.Errorf("readers asked about (%q, %q), want (org-1, conv-1)", orgID, conversationID)
+					}
+					return tc.readers(ctx, orgID, conversationID)
+				})
+			}
+
+			b.handleWSNotification(readersEnvelope(t, "org-1", "conv-1"))
+
+			if reads != tc.wantReadCount {
+				t.Errorf("read the readers %d times, want %d", reads, tc.wantReadCount)
+			}
+			if _, got := readOrTimeout(t, reader, 300*time.Millisecond); got != tc.wantReader {
+				t.Errorf("reader received the frame = %v, want %v", got, tc.wantReader)
+			}
+			if _, got := readOrTimeout(t, outsider, 200*time.Millisecond); got != tc.wantOutsider {
+				t.Errorf("outsider received the frame = %v, want %v", got, tc.wantOutsider)
+			}
+		})
+	}
+}
+
+// TestHandleWSNotification_ReadersOfConversationNoConnectionInOrgReadsNothing
+// pins that a pod with no socket in the frame's org drops it without reading
+// the audience: every pod that holds sockets receives every tf_ws event, so a
+// read on each would multiply every frame's cost by the fleet's size. Once a
+// connection in the org exists, the same frame is read for.
+func TestHandleWSNotification_ReadersOfConversationNoConnectionInOrgReadsNothing(t *testing.T) {
+	hub := websocket.NewHub()
+	dialTestClient(t, hub, "member", "org-other", "sid-1")
+	waitClientCount(t, hub, 1)
+
+	b := &Backplane{originID: "control-pod", hub: hub}
+	reads := 0
+	b.SetConversationReaders(func(context.Context, string, string) (bool, []string, error) {
+		reads++
+		return true, nil, nil
+	})
+
+	b.handleWSNotification(readersEnvelope(t, "org-1", "conv-1"))
+	if reads != 0 {
+		t.Fatalf("read the readers %d times with no connection in the org, want 0", reads)
+	}
+
+	dialTestClient(t, hub, "member", "org-1", "sid-2")
+	waitClientCount(t, hub, 2)
+	b.handleWSNotification(readersEnvelope(t, "org-1", "conv-1"))
+	if reads != 1 {
+		t.Fatalf("read the readers %d times with a connection in the org, want 1", reads)
 	}
 }

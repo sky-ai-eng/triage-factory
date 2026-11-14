@@ -219,6 +219,69 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	assertFileContains(t, filepath.Join(co, "committed.txt"), "unpushed commit")
 }
 
+// TestEnsureWorkspace_ColdRehydrate_MovesThePhaseToCloning: a rebuild from the
+// store is the setup step under way, so the claim names it until the agent
+// starts.
+func TestEnsureWorkspace_ColdRehydrate_MovesThePhaseToCloning(t *testing.T) {
+	f := newSnapshotFixture(t, "task-cloning-phase")
+	f.addCheckout(t, "acme/widgets", "default")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+	phases := &claimPhaseLog{}
+	f.s.conversations = phases
+
+	conv := f.conv("")
+	_, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), nil)
+	if err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceRehydrated {
+		t.Fatalf("provenance = %q, want %q", prov, domain.WorkspaceProvenanceRehydrated)
+	}
+	if got := phases.byClaim[conv.ClaimID]; got != domain.ClaimPhaseCloning {
+		t.Errorf("claim phase after a cold rehydrate = %q, want %q", got, domain.ClaimPhaseCloning)
+	}
+}
+
+// TestEnsureWorkspace_NoSnapshot_LeavesThePhaseToTheFreshBuilder: with nothing
+// to restore, no cloning is under way, so the rebuild writes no phase and the
+// fresh builder's source setup names its own steps.
+func TestEnsureWorkspace_NoSnapshot_LeavesThePhaseToTheFreshBuilder(t *testing.T) {
+	f := newSnapshotFixture(t, "task-no-snapshot-phase")
+	f.loseRoot(t)
+	phases := &claimPhaseLog{}
+	f.s.conversations = phases
+
+	conv := f.conv("")
+	conv.Runtime = domain.ConversationRuntimeNative
+	fresh := func(context.Context) (string, error) { return worktree.MakeRunRoot(f.key) }
+	_, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), fresh)
+	if err != nil {
+		t.Fatalf("ensureWorkspace (no snapshot): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceFresh {
+		t.Fatalf("provenance = %q, want %q", prov, domain.WorkspaceProvenanceFresh)
+	}
+	if got, ok := phases.byClaim[conv.ClaimID]; ok {
+		t.Errorf("a rebuild with no snapshot wrote phase %q; the fresh builder names its own steps", got)
+	}
+}
+
+// claimPhaseLog holds the last phase written for each claim, through the
+// claim-fenced door, and answers no other conversation write.
+type claimPhaseLog struct {
+	db.ConversationStore
+	byClaim map[string]string
+}
+
+func (l *claimPhaseLog) SetClaimPhaseSystem(_ context.Context, _, _, claimID, phase string) (*domain.ExecutorClaim, error) {
+	if l.byClaim == nil {
+		l.byClaim = map[string]string{}
+	}
+	l.byClaim[claimID] = phase
+	return &domain.ExecutorClaim{}, nil
+}
+
 // gitOriginURL reads a bare's origin remote — the upstream a fresh executor
 // would have to re-clone from.
 func gitOriginURL(t *testing.T, bareDir string) string {

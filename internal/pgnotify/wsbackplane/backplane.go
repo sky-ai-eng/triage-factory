@@ -22,6 +22,7 @@ package wsbackplane
 import (
 	"database/sql"
 
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationframe"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -33,6 +34,12 @@ type Backplane struct {
 	directDSN string  // session-mode DSN for the dedicated LISTEN connections
 	originID  string  // this process's instance registry id (TFAC-577)
 	hub       *websocket.Hub
+
+	// conversationReaders resolves the audience of an event marked
+	// websocket.Event.ReadersOfConversation before this pod delivers it.
+	// Wired only on pods that hold sockets (SetConversationReaders); nil
+	// everywhere else, where a marked event is dropped.
+	conversationReaders conversationframe.AudienceFunc
 
 	inlineMaxBytes int
 }
@@ -57,6 +64,16 @@ func New(db *sql.DB, directDSN, originID string, hub *websocket.Hub) *Backplane 
 		hub:            hub,
 		inlineMaxBytes: InlineMaxBytesFromEnv(),
 	}
+}
+
+// SetConversationReaders wires who may read a conversation, which this pod
+// reads to deliver an event another pod marked ReadersOfConversation: an
+// executor emits its conversation frames that way because its database
+// role cannot read memberships. Wire it on every pod that runs
+// RunPublicListener, before it starts; db.ConversationStore's
+// ConversationFrameRecipientsSystem is the production implementation.
+func (b *Backplane) SetConversationReaders(readers conversationframe.AudienceFunc) {
+	b.conversationReaders = readers
 }
 
 var _ websocket.Backplane = (*Backplane)(nil)

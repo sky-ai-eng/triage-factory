@@ -584,7 +584,7 @@ func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, or
 // them in COALESCE strips the declared column type the driver needs to
 // hand back a time.Time, so the scan would see a raw string.
 const awaitingCredentialsCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.team_id, ''), COALESCE(r.task_id, ''),
-	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
+	COALESCE(cl.id, ''), COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
 	COALESCE(cl.cred_pubkey, '')`
 
 func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversationID string) (db.AwaitingCredentialsConversation, bool, error) {
@@ -601,7 +601,7 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = ? AND r.id = ?
-	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
+	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
 	if err == sql.ErrNoRows {
 		return db.AwaitingCredentialsConversation{}, false, nil
 	}
@@ -689,7 +689,7 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 			claimedAt sql.NullTime
 			startedAt time.Time
 		)
-		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		r.ClaimedAt = startedAt
