@@ -5,6 +5,7 @@ package capbroker
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -202,6 +203,22 @@ func TestTeardownSurvivesACancelledRunContext(t *testing.T) {
 	if got.Status().Code == codes.Error {
 		t.Fatalf("the teardown RPC was aborted by the run's own cancellation (%q); "+
 			"the broker's child would leak", got.Status().Description)
+	}
+}
+
+// TestPingIsUntraced covers the one method kept out of the choke point. The
+// readiness poll and the existing-broker check both expect pings to fail, so
+// a span per miss would make every executor start read as a run of failures.
+func TestPingIsUntraced(t *testing.T) {
+	read := recordSpans(t)
+	parentCtx, parent := otel.Tracer("test").Start(context.Background(), "engagement.setup")
+	if err := Dial(filepath.Join(t.TempDir(), "no-broker.sock")).Ping(parentCtx); err == nil {
+		t.Fatal("a ping with no broker listening succeeded")
+	}
+	parent.End()
+
+	if got := brokerSpans(read()); len(got) != 0 {
+		t.Fatalf("capbroker.call spans = %d, want 0 for a ping", len(got))
 	}
 }
 

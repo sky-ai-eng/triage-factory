@@ -62,7 +62,7 @@
 //     with a ctx that carries the span, where the span's trace_id finds it.
 //     Library spans get the same treatment from ScrubbedTracerProvider.
 //     span_callsite_test.go fails on a non-constant message or a RecordError
-//     outside this package.
+//     anywhere but span.go and scrub.go.
 //   - Log correlation is automatic but not free: internal/logging stamps
 //     trace_id/span_id from the record's context, which slog only carries
 //     on the *Context call variants. Under a span, prefer

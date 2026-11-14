@@ -91,7 +91,7 @@ func (e *engagement) finish(outcome string, err error) {
 			telemetry.RecordSpanError(e.span, err, "the engagement's setup failed")
 			// The text the span may not carry, logged with the root's span so
 			// the trace's id finds it. One line holds the whole chain, so a
-			// setup step whose error ends here logs nothing of its own.
+			// setup step that returns its error here need not log it.
 			dispatchLog.WarnContext(trace.ContextWithSpan(context.Background(), e.span), "engagement setup failed",
 				"conversation", e.conversationID, "error", err)
 		}

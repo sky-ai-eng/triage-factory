@@ -15,7 +15,7 @@ import (
 // TestNoSpanCarriesAnErrorsText keeps an error's text off every span TF's
 // code writes. An error's text is tenant data (git output, repository names,
 // paths, a provider's response), and a span is exported to a backend the
-// operator may not run, so outside this package:
+// operator may not run, so in every file but the two exempt below:
 //
 //   - no span.RecordError, whose exception event holds err.Error();
 //   - no SetStatus(codes.Error, msg) with a message that is not a constant;
@@ -23,15 +23,18 @@ import (
 //     constant.
 //
 // A constant is a string literal, a concatenation of constants, or a const
-// declared in the same package. This package is exempt because it defines
-// the helper and the scrubbed span, and _test.go files because they build
-// spans to assert behavior.
+// declared in the same package. span.go and scrub.go are exempt because they
+// define the helper and the scrubbed span, and _test.go files because they
+// build spans to assert behavior.
 func TestNoSpanCarriesAnErrorsText(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}
-	exempt := filepath.Join(repoRoot, "internal", "telemetry")
+	exempt := map[string]bool{
+		filepath.Join(repoRoot, "internal", "telemetry", "span.go"):  true,
+		filepath.Join(repoRoot, "internal", "telemetry", "scrub.go"): true,
+	}
 
 	files := map[string][]string{}
 	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
@@ -43,12 +46,9 @@ func TestNoSpanCarriesAnErrorsText(t *testing.T) {
 			case "node_modules", "frontend", ".git", "testdata":
 				return filepath.SkipDir
 			}
-			if path == exempt {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") && !exempt[path] {
 			dir := filepath.Dir(path)
 			files[dir] = append(files[dir], path)
 		}
