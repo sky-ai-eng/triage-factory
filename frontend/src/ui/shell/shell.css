@@ -394,12 +394,21 @@
   display: flex;
   gap: 8px;
 }
+/* The dot is placed from the digit's baseline, not centred in the line box.
+   DM Mono's ascent plus descent is 1.3em, so a 9.5px line box is shorter than
+   the glyph's content area, and engines that round font metrics to whole
+   pixels (Chromium on Linux) put the baseline a pixel above where the
+   fractional metrics do. A dot centred in the box then sits below the figure
+   it marks; a dot measured from the baseline moves with it. */
 .sh-tail.sh-two span {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
 }
 .sh-tail.sh-two i {
+  position: relative;
+  /* half the 0.7em cap height, less the dot's own radius */
+  bottom: calc(0.35em - 2.5px);
   width: 5px;
   height: 5px;
   border-radius: 999px;
