@@ -189,6 +189,7 @@ func TestTaskFacets_ValidatesTheLaneLikeTheList(t *testing.T) {
 		"statuses":     []string{"bogus"},
 		"team_ids":     []string{"junk"},
 		"sources":      []string{"carrier-pigeon"},
+		"entity_kinds": []string{"advisory"},
 		"closed_since": "yesterday",
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -207,7 +208,7 @@ func TestTaskFacets_ValidatesTheLaneLikeTheList(t *testing.T) {
 	for _, e := range body.Errors {
 		seen[e.Field] = e.Reason
 	}
-	for _, field := range []string{"statuses", "team_ids", "sources", "closed_since"} {
+	for _, field := range []string{"statuses", "team_ids", "sources", "entity_kinds", "closed_since"} {
 		if seen[field] != "INVALID_FIELD" {
 			t.Errorf("field %q reported as %q, want INVALID_FIELD (every failing field, not the first)", field, seen[field])
 		}

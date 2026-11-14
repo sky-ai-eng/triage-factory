@@ -33,3 +33,19 @@ describe('SourceBadge', () => {
     expect(screen.getByText('Jira')).toBeInTheDocument()
   })
 })
+
+describe('SourceBadge on a vulnerable package', () => {
+  it('names the kind at both sizes', () => {
+    const { rerender } = render(
+      <SourceBadge task={task({ source: 'github', entity_kind: 'vulnerable_package' })} />,
+    )
+    expect(screen.getByText('Vuln')).toBeInTheDocument()
+    rerender(
+      <SourceBadge
+        task={task({ source: 'github', entity_kind: 'vulnerable_package' })}
+        size="lg"
+      />,
+    )
+    expect(screen.getByText('Vulnerable Package')).toBeInTheDocument()
+  })
+})

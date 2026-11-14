@@ -94,6 +94,10 @@ type Task struct {
 	// task's dedup_key is what identifies the reviewer, by GitHub's id when
 	// the request carried one, and an id says nothing a person can read.
 	RequestedReviewer string `json:"requested_reviewer,omitempty"`
+	// VulnerablePackage is, on a task whose entity is a vulnerable package
+	// (EntityKindVulnerablePackage), the entity's host and stored snapshot,
+	// read in the same join; nil on every other task.
+	VulnerablePackage *TaskVulnerablePackage `json:"vulnerable_package,omitempty"`
 
 	// MemoryPending says a conversation on this task ended without leaving a
 	// memory behind, and nothing has filed one for it yet. Derived on every

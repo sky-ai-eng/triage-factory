@@ -498,6 +498,13 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 			args = append(args, src)
 		}
 	}
+	if len(f.EntityKinds) > 0 {
+		ph := strings.TrimRight(strings.Repeat("?, ", len(f.EntityKinds)), ", ")
+		clauses = append(clauses, fmt.Sprintf("e.kind IN (%s)", ph))
+		for _, kind := range f.EntityKinds {
+			args = append(args, kind)
+		}
+	}
 	teamClause, args := sqliteTaskTeamFilter(f.TeamIDs, args)
 	// sqliteTaskTeamFilter renders as " AND (...)" for direct concatenation
 	// onto a WHERE body; it is always last, so its args stay in placeholder
@@ -570,17 +577,28 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 // count query leaves them out: nothing here orders by a rule's sort_order or
 // a claimant's name, and neither join can change which rows are counted.
 func (s *taskStore) FacetEventTypes(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	return s.facet(ctx, orgID, f, "t.event_type")
+}
+
+// FacetEntityKinds is FacetEventTypes grouped by the entity's kind.
+func (s *taskStore) FacetEntityKinds(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	return s.facet(ctx, orgID, f, "e.kind")
+}
+
+// facet counts List's rows under f by one column. column is a constant of
+// this file, never caller input.
+func (s *taskStore) facet(ctx context.Context, orgID string, f db.TaskListFilter, column string) ([]db.Facet, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	where, args := sqliteTaskListWhere(f)
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT t.event_type, COUNT(*)
+		SELECT `+column+`, COUNT(*)
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
 		WHERE `+where+`
-		GROUP BY t.event_type
-		ORDER BY t.event_type ASC`, args...)
+		GROUP BY `+column+`
+		ORDER BY `+column+` ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2100,6 +2118,11 @@ var sqliteTaskColumnsWithEntity = `
 		), '')
 		ELSE ''
 	END,
+	-- A vulnerable package's host and stored snapshot
+	-- (domain.Task.VulnerablePackage). NULL for every other kind, so no other
+	-- task carries its entity's snapshot.
+	CASE WHEN e.kind = 'vulnerable_package' THEN e.scope END,
+	CASE WHEN e.kind = 'vulnerable_package' THEN e.snapshot_json END,
 	-- The memory the task is still waiting on, and the newest try at
 	-- producing it. The attempt columns are NULL whenever memory_pending is
 	-- false, by construction rather than by a guard: they read the same owing
@@ -2158,6 +2181,10 @@ type taskScanState struct {
 	snoozeUntil, closedAt              sql.NullTime
 	claimedByAgentID, claimedByUserID  sql.NullString
 
+	// A vulnerable package's host and snapshot, both NULL on every other
+	// kind.
+	vulnerablePackageHost, vulnerablePackageSnapshot sql.NullString
+
 	// The memory-pending tail. memoryAttemptStartedAt is the one nullable of
 	// the four: its validity IS "an attempt exists", which is why the three
 	// text columns can be COALESCEd to empty in SQL without losing the
@@ -2190,6 +2217,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount, &t.RequestedReviewer,
+		&s.vulnerablePackageHost, &s.vulnerablePackageSnapshot,
 		&t.MemoryPending,
 		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
 		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,
@@ -2234,6 +2262,10 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	}
 	t.ClaimedByAgentID = s.claimedByAgentID.String
 	t.ClaimedByUserID = s.claimedByUserID.String
+	if s.vulnerablePackageHost.Valid {
+		snap, _ := domain.ParseVulnerablePackageSnapshot(s.vulnerablePackageSnapshot.String)
+		t.VulnerablePackage = &domain.TaskVulnerablePackage{Host: s.vulnerablePackageHost.String, Snapshot: snap}
+	}
 	if s.memoryAttemptStartedAt.Valid {
 		t.MemoryAttempt = &domain.MemoryAttemptSummary{
 			Outcome:      domain.MemoryAttemptOutcome(s.memoryAttemptOutcome),

@@ -1,5 +1,5 @@
 import type { TaskListFilters, TaskSortDir, TaskSortKey } from '../../lib/taskList'
-import type { TaskSource } from '../../types'
+import type { EntityKind, TaskSource } from '../../types'
 
 // The per-lane filter state the board's masthead controls read and write —
 // the search field and the sort-and-filter panel. It is the reader's own
@@ -13,6 +13,7 @@ import type { TaskSource } from '../../types'
 // a component file exports only components.
 
 export type SourceFilter = 'all' | TaskSource
+export type KindFilter = 'all' | EntityKind
 // 'default' is the server's own order — attention first for the run lanes,
 // priority for the queue — which is what you get by sending no sort_key at
 // all. Naming it here is what makes picking a sort an explicit override, never
@@ -22,6 +23,9 @@ export type SortKey = 'default' | TaskSortKey
 export type LaneFilter = {
   search: string
   source: SourceFilter
+  // The entity kind, as a lane of vulnerable packages narrows to one. The
+  // choices are the lane's entity_kinds facet.
+  kind: KindFilter
   // Selected event types; empty = all.
   eventTypes: string[]
   // Created-date window, as the popover's datetime-local strings
@@ -37,6 +41,7 @@ export type LaneFilter = {
 export const emptyLaneFilter: LaneFilter = {
   search: '',
   source: 'all',
+  kind: 'all',
   eventTypes: [],
   after: '',
   before: '',
@@ -51,6 +56,7 @@ export const emptyLaneFilter: LaneFilter = {
 export function filterIsActive(f: LaneFilter): boolean {
   return (
     f.source !== 'all' ||
+    f.kind !== 'all' ||
     f.eventTypes.length > 0 ||
     f.after !== '' ||
     f.before !== '' ||
@@ -80,6 +86,21 @@ export const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
   { value: 'slack', label: 'Slack' },
 ]
 
+// KIND_LABEL names each entity kind the Kind group offers. The group offers
+// only the kinds the lane's facet holds; a kind this build has no name for
+// shows its stored value.
+const KIND_LABEL: Record<EntityKind, string> = {
+  pr: 'Pull requests',
+  issue: 'Issues',
+  vulnerable_package: 'Vulnerable packages',
+  thread: 'Slack threads',
+  message: 'Slack messages',
+}
+
+export function kindLabel(kind: string): string {
+  return KIND_LABEL[kind as EntityKind] ?? kind
+}
+
 // The server's cap on `search`. The field stops the reader there so a long
 // paste is cut where the server would refuse it, rather than answered with a
 // 400 after the fact.
@@ -94,6 +115,7 @@ export function laneFilterFields(f: LaneFilter): TaskListFilters {
   const search = f.search.trim()
   if (search) out.search = search
   if (f.source !== 'all') out.sources = [f.source]
+  if (f.kind !== 'all') out.entity_kinds = [f.kind]
   if (f.eventTypes.length > 0) out.event_types = f.eventTypes
   const since = instantOf(f.after)
   if (since) out.created_since = since

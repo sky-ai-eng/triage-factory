@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -554,12 +553,5 @@ func canonicalVulnerablePackageJSON(snap domain.VulnerablePackageSnapshot, ok bo
 // storedVulnerablePackageSnapshot parses a vulnerable package's stored
 // snapshot. ok=false when it has none, or one that does not parse.
 func storedVulnerablePackageSnapshot(e domain.Entity) (domain.VulnerablePackageSnapshot, bool) {
-	if e.SnapshotJSON == "" {
-		return domain.VulnerablePackageSnapshot{}, false
-	}
-	var snap domain.VulnerablePackageSnapshot
-	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil || snap.Package == "" {
-		return domain.VulnerablePackageSnapshot{}, false
-	}
-	return snap, true
+	return domain.ParseVulnerablePackageSnapshot(e.SnapshotJSON)
 }

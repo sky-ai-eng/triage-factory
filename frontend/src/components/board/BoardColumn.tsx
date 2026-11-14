@@ -25,9 +25,11 @@ import './board.css'
 import {
   emptyLaneFilter,
   filterIsActive,
+  kindLabel,
   SEARCH_MAX_CHARS,
   SORT_LABEL,
   SOURCE_OPTIONS,
+  type KindFilter,
   type LaneFilter,
   type SortKey,
 } from './laneFilter'
@@ -133,6 +135,9 @@ interface Props {
   // read, not the page — so the chips show what exists, including the types
   // the reader filtered out and the ones on pages the list has not fetched.
   eventTypes: string[]
+  // The entity kinds present in the lane, counted without the lane's own kind
+  // choice, so picking one still offers the rest.
+  kinds: string[]
   paging: LanePaging
   // Optional header slot for a column-specific note (e.g. Done's "last 7
   // days"). Renders to the right of the title, inside the bracket.
@@ -154,6 +159,7 @@ export default function BoardColumn({
   filter,
   onFilterChange,
   eventTypes,
+  kinds,
   paging,
   headerExtra,
   snooze,
@@ -330,6 +336,7 @@ export default function BoardColumn({
                 filter={filter}
                 onChange={onFilterChange}
                 eventTypes={eventTypes}
+                kinds={kinds}
                 snooze={snooze}
               />
             </div>
@@ -546,13 +553,21 @@ function FilterControls({
   filter,
   onChange,
   eventTypes,
+  kinds,
   snooze,
 }: {
   filter: LaneFilter
   onChange: (next: LaneFilter) => void
   eventTypes: string[]
+  kinds: string[]
   snooze?: { shown: boolean; onToggle: () => void }
 }) {
+  // A lane of one kind has nothing to choose between, so the group shows
+  // only when the lane holds two or more — or when a choice is in force,
+  // which stays offered even once the lane holds none of it, so it can be
+  // undone.
+  const kindChoices =
+    filter.kind !== 'all' && !kinds.includes(filter.kind) ? [...kinds, filter.kind] : kinds
   // Empty eventTypes = "all on". The first click off the all-on state switches
   // to an explicit set of everything-but-this; re-selecting every type collapses
   // back to the empty (all) sentinel.
@@ -625,6 +640,28 @@ function FilterControls({
           </button>
         ))}
       </Group>
+
+      {(kindChoices.length > 1 || filter.kind !== 'all') && (
+        <Group label="Kind">
+          <button
+            type="button"
+            onClick={() => onChange({ ...filter, kind: 'all' })}
+            className={pill(filter.kind === 'all')}
+          >
+            All
+          </button>
+          {kindChoices.map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => onChange({ ...filter, kind: k as KindFilter })}
+              className={pill(filter.kind === k)}
+            >
+              {kindLabel(k)}
+            </button>
+          ))}
+        </Group>
+      )}
 
       {eventTypes.length > 0 && (
         <Group label="Event type">

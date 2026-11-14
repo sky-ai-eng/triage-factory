@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -245,6 +246,114 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			if _, _, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, bad, "t", ""); err == nil {
 				t.Errorf("FindOrCreateVulnerablePackageSystem(%q) created a row; want it refused", bad)
 			}
+		}
+	})
+
+	t.Run("a_vulnerable_package_task_reads_its_host_and_snapshot", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		pkg, _, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, "acme/api#npm:lodash", "lodash (npm)", "")
+		if err != nil {
+			t.Fatalf("create package: %v", err)
+		}
+		snap := domain.VulnerablePackageSnapshot{Repo: "acme/api", Ecosystem: "npm", Package: "lodash", Alerts: []domain.DependabotAlert{
+			{Number: 3, GHSAID: "GHSA-aaaa-bbbb-cccc", CVEID: "CVE-2026-1", Summary: "Prototype pollution", Severity: "high", ManifestPath: "package-lock.json", Scope: "runtime", VulnerableVersionRange: "< 4.17.21", FirstPatchedVersion: "4.17.21"},
+			{Number: 9, GHSAID: "GHSA-dddd-eeee-ffff", Severity: "low", ManifestPath: "web/package.json", Scope: "development"},
+		}}
+		raw, err := json.Marshal(snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, pkg.ID, string(raw), pkg.PollSeq); err != nil || !ok {
+			t.Fatalf("write snapshot: ok=%v err=%v", ok, err)
+		}
+		bare, _, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, "acme/api#npm:minimist", "minimist (npm)", "")
+		if err != nil {
+			t.Fatalf("create package with no snapshot: %v", err)
+		}
+		pr, _, err := s.Entities.FindOrCreate(ctx, orgID, "github", scope, "acme/api#7", "uuid-pr-7", domain.EntityKindPullRequest, "a pull request", "")
+		if err != nil {
+			t.Fatalf("create pull request: %v", err)
+		}
+		pkgTask := seed.Task(t, pkg.ID, "vp-snap")
+		bareTask := seed.Task(t, bare.ID, "vp-bare")
+		prTask := seed.Task(t, pr.ID, "vp-pr")
+
+		want := map[string]*domain.TaskVulnerablePackage{
+			pkgTask:  {Host: scope, Snapshot: snap},
+			bareTask: {Host: scope},
+			prTask:   nil,
+		}
+		listed, _, err := s.Tasks.List(ctx, orgID, db.TaskListFilter{IDs: []string{pkgTask, bareTask, prTask}, IncludeSnoozed: true}, db.ListOpts{Limit: 10})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(listed) != len(want) {
+			t.Fatalf("List returned %d tasks, want %d", len(listed), len(want))
+		}
+		for _, task := range listed {
+			if !reflect.DeepEqual(task.VulnerablePackage, want[task.ID]) {
+				t.Errorf("List: task on %s carries %+v, want %+v", task.EntitySourceID, task.VulnerablePackage, want[task.ID])
+			}
+			got, err := s.Tasks.Get(ctx, orgID, task.ID)
+			if err != nil || got == nil {
+				t.Fatalf("Get(%s) = (%v, %v)", task.ID, got, err)
+			}
+			if !reflect.DeepEqual(got.VulnerablePackage, want[task.ID]) {
+				t.Errorf("Get: task on %s carries %+v, want %+v", got.EntitySourceID, got.VulnerablePackage, want[task.ID])
+			}
+		}
+	})
+
+	t.Run("tasks_narrow_and_facet_by_entity_kind", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		var pkgTasks []string
+		for _, name := range []string{"lodash", "minimist"} {
+			pkg, _, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, "acme/api#npm:"+name, name+" (npm)", "")
+			if err != nil {
+				t.Fatalf("create package %s: %v", name, err)
+			}
+			pkgTasks = append(pkgTasks, seed.Task(t, pkg.ID, "kind-"+name))
+		}
+		pr, _, err := s.Entities.FindOrCreate(ctx, orgID, "github", scope, "acme/api#8", "uuid-pr-8", domain.EntityKindPullRequest, "a pull request", "")
+		if err != nil {
+			t.Fatalf("create pull request: %v", err)
+		}
+		prTask := seed.Task(t, pr.ID, "kind-pr")
+
+		lane := db.TaskListFilter{IncludeSnoozed: true}
+		narrowed := lane
+		narrowed.EntityKinds = []string{domain.EntityKindVulnerablePackage}
+		listed, total, err := s.Tasks.List(ctx, orgID, narrowed, db.ListOpts{Limit: 10})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		got := idsOf(listed)
+		slices.Sort(got)
+		want := slices.Sorted(slices.Values(pkgTasks))
+		if !slices.Equal(got, want) || total != len(want) {
+			t.Errorf("vulnerable_package lane = %v (total %d), want %v", got, total, want)
+		}
+
+		facets, err := s.Tasks.FacetEntityKinds(ctx, orgID, lane)
+		if err != nil {
+			t.Fatalf("FacetEntityKinds: %v", err)
+		}
+		wantFacets := []db.Facet{{Value: domain.EntityKindPullRequest, Count: 1}, {Value: domain.EntityKindVulnerablePackage, Count: 2}}
+		if !slices.Equal(facets, wantFacets) {
+			t.Errorf("FacetEntityKinds = %v, want %v", facets, wantFacets)
+		}
+		// The kind cut renders the filter it is handed, its own included, as
+		// FacetEventTypes does.
+		facets, err = s.Tasks.FacetEntityKinds(ctx, orgID, narrowed)
+		if err != nil {
+			t.Fatalf("FacetEntityKinds narrowed: %v", err)
+		}
+		if want := []db.Facet{{Value: domain.EntityKindVulnerablePackage, Count: 2}}; !slices.Equal(facets, want) {
+			t.Errorf("FacetEntityKinds under its own filter = %v, want %v", facets, want)
+		}
+		empty, err := s.Tasks.FacetEntityKinds(ctx, orgID, db.TaskListFilter{IDs: []string{prTask}, EntityKinds: []string{domain.EntityKindIssue}})
+		if err != nil || empty == nil || len(empty) != 0 {
+			t.Errorf("FacetEntityKinds on an empty lane = (%v, %v), want an empty non-nil slice", empty, err)
 		}
 	})
 

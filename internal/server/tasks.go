@@ -84,6 +84,10 @@ type taskJSON struct {
 	// one, and pins it, so every event that bumps the task names the same one.
 	// Omitted on every other task.
 	RequestedReviewer string `json:"requested_reviewer,omitempty"`
+	// VulnerablePackage is, on a task whose entity_kind is
+	// "vulnerable_package", the package and the Dependabot alerts open on it.
+	// Omitted on every other task.
+	VulnerablePackage *vulnerablePackageJSON `json:"vulnerable_package,omitempty"`
 	// MemoryPending says a conversation on this task ended without leaving
 	// the memory its successor is owed, and the dispatcher will not claim the
 	// task's next delegation until one exists. Not omitempty: false is a real
@@ -117,6 +121,84 @@ type memoryAttemptJSON struct {
 	ErrorKind    string `json:"error_kind,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
 	StartedAt    string `json:"started_at"`
+}
+
+// vulnerablePackageJSON is what a vulnerable-package task shows of its
+// package: the repository, ecosystem and name, and the alerts open on it when
+// TF last listed the repository. The three names are read from the entity's
+// key, which a repository rename rewrites, rather than from its snapshot,
+// which the next listing does.
+type vulnerablePackageJSON struct {
+	Repo      string `json:"repo"` // owner/name
+	Ecosystem string `json:"ecosystem"`
+	Package   string `json:"package"`
+	// HighestSeverity is the highest severity among the open alerts, one of
+	// low, medium, high and critical. Absent when no open alert carries one of
+	// those four, which includes a package whose last alert closed.
+	HighestSeverity string `json:"highest_severity,omitempty"`
+	OpenAlertCount  int    `json:"open_alert_count"`
+	// Alerts are the open alerts, highest severity first and by number within
+	// a severity. Never null.
+	Alerts []dependabotAlertJSON `json:"alerts"`
+}
+
+// dependabotAlertJSON is one open Dependabot alert. summary is the advisory's,
+// written outside the org, so a client renders it as plain text.
+type dependabotAlertJSON struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"` // the alert's page on GitHub
+	GHSAID string `json:"ghsa_id"`
+	CVEID  string `json:"cve_id,omitempty"`
+	// Summary is absent when the advisory has none.
+	Summary      string `json:"summary,omitempty"`
+	Severity     string `json:"severity"`
+	ManifestPath string `json:"manifest_path"`
+	// Scope is runtime or development, absent when GitHub does not know.
+	Scope                  string `json:"scope,omitempty"`
+	VulnerableVersionRange string `json:"vulnerable_version_range,omitempty"`
+	// FirstPatchedVersion is absent when no fixed version has been released.
+	FirstPatchedVersion string `json:"first_patched_version,omitempty"`
+}
+
+func vulnerablePackageToJSON(sourceID string, p *domain.TaskVulnerablePackage) *vulnerablePackageJSON {
+	if p == nil {
+		return nil
+	}
+	snap := p.Snapshot
+	repo, ecosystem, name, ok := domain.SplitVulnerablePackageSourceID(sourceID)
+	if !ok {
+		repo, ecosystem, name = snap.Repo, snap.Ecosystem, snap.Package
+	}
+	alerts := slices.Clone(snap.Alerts)
+	slices.SortStableFunc(alerts, func(a, b domain.DependabotAlert) int {
+		if d := domain.DependabotSeverityRank(b.Severity) - domain.DependabotSeverityRank(a.Severity); d != 0 {
+			return d
+		}
+		return a.Number - b.Number
+	})
+	out := &vulnerablePackageJSON{
+		Repo:            repo,
+		Ecosystem:       ecosystem,
+		Package:         name,
+		HighestSeverity: snap.HighestSeverity(),
+		OpenAlertCount:  len(alerts),
+		Alerts:          make([]dependabotAlertJSON, len(alerts)),
+	}
+	for i, a := range alerts {
+		out.Alerts[i] = dependabotAlertJSON{
+			Number:                 a.Number,
+			URL:                    domain.DependabotAlertURL(p.Host, repo, a.Number),
+			GHSAID:                 a.GHSAID,
+			CVEID:                  a.CVEID,
+			Summary:                a.Summary,
+			Severity:               a.Severity,
+			ManifestPath:           a.ManifestPath,
+			Scope:                  a.Scope,
+			VulnerableVersionRange: a.VulnerableVersionRange,
+			FirstPatchedVersion:    a.FirstPatchedVersion,
+		}
+	}
+	return out
 }
 
 func memoryAttemptToJSON(a *domain.MemoryAttemptSummary) *memoryAttemptJSON {
@@ -159,6 +241,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		SnoozeUntil:         snoozeUntil,
 		OpenSubtaskCount:    t.OpenSubtaskCount,
 		RequestedReviewer:   t.RequestedReviewer,
+		VulnerablePackage:   vulnerablePackageToJSON(t.EntitySourceID, t.VulnerablePackage),
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
 		TeamID:              teamIDString(t.TeamID),
@@ -232,6 +315,10 @@ type taskLaneRequest struct {
 	// (domain.EventSources); an unknown value is a client fault, not an
 	// empty page. Empty = all sources.
 	Sources []string `json:"sources"`
+	// EntityKinds narrows to tasks whose entity is of these kinds, as a
+	// lane of vulnerable packages is. Validated against domain.EntityKinds
+	// on the same terms as Sources. Empty = every kind.
+	EntityKinds []string `json:"entity_kinds"`
 }
 
 // taskListRequest is the body of POST /api/tasks/list: the lane, the reader's
@@ -291,6 +378,7 @@ func resolveTaskLane(v *httpx.Validation, req taskLaneRequest) (db.TaskListFilte
 		OnlyUnclaimed:  req.OnlyUnclaimed,
 		IncludeSnoozed: req.IncludeSnoozed,
 		Sources:        httpx.CanonicalStrings(req.Sources),
+		EntityKinds:    httpx.CanonicalStrings(req.EntityKinds),
 	}
 	for _, st := range f.Statuses {
 		if !slices.Contains(db.TaskListStatuses, st) {
@@ -308,6 +396,13 @@ func resolveTaskLane(v *httpx.Validation, req taskLaneRequest) (db.TaskListFilte
 		if !slices.Contains(validSources, src) {
 			v.Invalid("sources", fmt.Sprintf("unknown source %q; must be one of: %s",
 				src, strings.Join(validSources, ", ")))
+		}
+	}
+	validKinds := domain.EntityKinds()
+	for _, kind := range f.EntityKinds {
+		if !slices.Contains(validKinds, kind) {
+			v.Invalid("entity_kinds", fmt.Sprintf("unknown entity kind %q; must be one of: %s",
+				kind, strings.Join(validKinds, ", ")))
 		}
 	}
 	var keys taskLaneKeys
@@ -370,6 +465,7 @@ type taskListFilterKey struct {
 	CreatedSince   string   `json:"created_since"`
 	CreatedBefore  string   `json:"created_before"`
 	Sources        []string `json:"sources"`
+	EntityKinds    []string `json:"entity_kinds"`
 	EventTypes     []string `json:"event_types"`
 	Search         string   `json:"search"`
 	// The sort is part of the key for the same reason the filters are: an
@@ -728,6 +824,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		CreatedSince:   laneKeys.CreatedSince,
 		CreatedBefore:  createdBeforeKey,
 		Sources:        filter.Sources,
+		EntityKinds:    filter.EntityKinds,
 		EventTypes:     filter.EventTypes,
 		Search:         httpx.SearchKey(filter.Search),
 		SortKey:        filter.SortKey,
@@ -834,26 +931,22 @@ type taskFacetsRequest struct {
 	PageToken     json.RawMessage `json:"page_token"`
 }
 
-// taskFacet is one event type present in a lane and how many of its tasks sit
-// there. `value` rather than `event_type` because the shape is the resource's
-// facet shape: a second cut (sources) is a sibling key of the response, not a
-// second shape.
-type taskFacet struct {
-	Value string `json:"value"`
-	Count int    `json:"count"`
-}
-
 // taskFacetsResponse is the fixed schema of named cuts a synthetic read
-// answers with. One cut today; a `sources` cut lands beside this key without
-// a wire change, and never as a `group_by=` parameter that would reshape the
-// response.
+// answers with. A further cut lands beside these keys without a wire change,
+// and never as a `group_by=` parameter that would reshape the response.
+//
+// Each cut is computed under every lane filter but its own: entity_kinds
+// counts the lane with the request's entity_kinds left out, so the kind
+// choices show the kinds a reader just narrowed away, while event_types
+// counts the lane as narrowed, kind included.
 type taskFacetsResponse struct {
-	EventTypes []taskFacet `json:"event_types"`
+	EventTypes  []httpx.FacetJSON `json:"event_types"`
+	EntityKinds []httpx.FacetJSON `json:"entity_kinds"`
 }
 
-// handleTaskFacets is the tasks list's synthetic sibling: the event types
-// present in a lane and how many rows carry each — the set a lane's filter
-// chips are drawn from.
+// handleTaskFacets is the tasks list's synthetic sibling: the event types and
+// the entity kinds present in a lane and how many rows carry each — the sets
+// a lane's filter chips are drawn from.
 //
 // It is a node beside the list rather than a field on it because the answer
 // is numbers about rows rather than rows, and it takes the lane's filters
@@ -864,8 +957,8 @@ type taskFacetsResponse struct {
 // whose first page is all one type would offer no chip for the twenty rows of
 // another sitting on page two.
 //
-// No paging and no total_count: the grouping is over a closed vocabulary, so
-// the answer is bounded by the catalog rather than by a window. Authorization
+// No paging and no total_count: each grouping is over a closed vocabulary, so
+// the answer is bounded by it rather than by a window. Authorization
 // is the list's — RLS scopes the rows and team_ids narrows within that — and
 // it registers through apiMutating for the same reason the list does: it is a
 // POST, and CSRF follows the method rather than the intent.
@@ -885,7 +978,7 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 
 	var v httpx.Validation
 	const narrows = "%s narrows a lane; the facet answers for the whole lane, including the values a reader filtered out"
-	const pages = "%s is not accepted: the facet is one bounded answer over the event-type catalog, not a page"
+	const pages = "%s is not accepted: the facets are one bounded answer over closed vocabularies, not a page"
 	for _, refused := range []struct {
 		field  string
 		sent   json.RawMessage
@@ -909,20 +1002,24 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var facets []db.Facet
+	kindsLane := filter
+	kindsLane.EntityKinds = nil
+	var eventTypes, kinds []db.Facet
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		facets, e = tx.Tasks.FacetEventTypes(r.Context(), orgID, filter)
+		if eventTypes, e = tx.Tasks.FacetEventTypes(r.Context(), orgID, filter); e != nil {
+			return e
+		}
+		kinds, e = tx.Tasks.FacetEntityKinds(r.Context(), orgID, kindsLane)
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
 		return
 	}
-	out := taskFacetsResponse{EventTypes: make([]taskFacet, len(facets))}
-	for i, f := range facets {
-		out.EventTypes[i] = taskFacet{Value: f.Value, Count: f.Count}
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, taskFacetsResponse{
+		EventTypes:  httpx.Facets(eventTypes),
+		EntityKinds: httpx.Facets(kinds),
+	})
 }
 
 func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {

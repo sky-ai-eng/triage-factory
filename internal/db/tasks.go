@@ -233,10 +233,13 @@ type TaskListFilter struct {
 	CreatedSince   *time.Time
 	CreatedBefore  *time.Time
 	Sources        []string
-	EventTypes     []string
-	Search         string
-	SortKey        string
-	SortDir        string
+	// EntityKinds keeps the tasks whose entity is of these kinds
+	// (domain.EntityKinds). Empty = every kind.
+	EntityKinds []string
+	EventTypes  []string
+	Search      string
+	SortKey     string
+	SortDir     string
 }
 
 // OrdersByAttention reports whether List's order leads with the attention tier
@@ -482,6 +485,13 @@ type TaskStore interface {
 	// whatever filter it is given through the same WHERE List does, which is
 	// what keeps a count from ever disagreeing with the rows beneath it.
 	FacetEventTypes(ctx context.Context, orgID string, filter TaskListFilter) ([]Facet, error)
+
+	// FacetEntityKinds is FacetEventTypes over the entity's kind: how many of
+	// the rows the filters match sit at each kind present, ordered by the
+	// kind ascending, over the vocabulary domain.EntityKinds. It renders the
+	// filter it is given through List's WHERE, as FacetEventTypes does, so a
+	// caller drawing the kind choices leaves EntityKinds unset.
+	FacetEntityKinds(ctx context.Context, orgID string, filter TaskListFilter) ([]Facet, error)
 
 	// FindActiveByEntityAndType returns non-terminal tasks for an
 	// entity matching the given event type. Used by inline close

@@ -1,5 +1,6 @@
 import type { Conversation, Task } from '../../types'
 import { eventDisplay, eventTone, type EventTone } from '../../lib/eventDisplay'
+import { packageFacts } from '../../lib/vulnerablePackage'
 import {
   activeProse,
   completionKind,
@@ -40,6 +41,10 @@ export function pendingCount(pending?: PendingTotals): number {
 
 export type { EventTone }
 
+/** One fact about the entity that its title does not carry, stated on the
+ *  card's readout line. A tone spends hue as the event label does. */
+export type CardFact = { text: string; tone?: EventTone; title?: string }
+
 /** Where the run is, as the status mark encodes it. */
 export type Lifecycle = 'queued' | 'working' | 'idle' | 'done' | 'failed' | 'canceled'
 
@@ -60,6 +65,10 @@ export interface CardModel {
    *  rather than in the card so the lookup happens once beside every other
    *  thing a card shows, and so the card stays free of `lib/`. */
   event?: { label: string; description: string; tone: EventTone }
+  /** What the title cannot say about the entity: a vulnerable package's
+   *  repository, highest open severity and open alert count. Absent for an
+   *  entity whose title says it all. */
+  facts?: CardFact[]
   /** The agent's live line while working: its current action, or the setup
    *  phase or the queue wait that stands in for one. */
   command?: string
@@ -154,6 +163,7 @@ export function deriveCard(
     // requeue and it is on a done card too: a settled lane is read to find
     // what got handled, and "what happened" is half of that.
     event: eventOf(task),
+    facts: task.vulnerable_package ? packageFacts(task.vulnerable_package) : undefined,
     command,
     artifacts: artifactTotals(conversation),
     pending: pendingTotals(conversation),

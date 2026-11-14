@@ -401,7 +401,9 @@ handler that matches them makes one task per package.
 A vulnerable package has no author, so its events route by tracked set, not
 by owner: an event reaches every team that tracks the repository and has a
 matching handler, and its task is visible to each of them. `applies_to_unowned`
-has no effect on these events, and the catalog shows no toggle for it. When
+has no effect on these events: the catalog shows no toggle for it, and the
+create and PATCH routes refuse `true` with `422 INVALID_FIELD`, as they do on
+every event type whose `supports_watch` is false. When
 several teams' triggers match, they fire in order of the team's highest
 matched-rule `default_priority` (0.5 for a team that matched only by a
 trigger), then the lowest team id, and the first to fire claims the task.
@@ -1210,6 +1212,13 @@ alert list filtered to the package's open alerts. The snapshot holds:
 - `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `summary` (the advisory's one-line summary, written outside the org; its Markdown description is not kept), `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `vulnerable_version_range` (as `< 4.17.21`), and `first_patched_version` (empty when none is released). Only the set of numbers is diffed: a change to another field rewrites the snapshot and emits nothing
 
 An empty `alerts` is the terminal snapshot.
+
+A task on a vulnerable package carries `vulnerable_package` on
+`POST /api/tasks/list` and `GET /api/tasks/{id}`: `repo`, `ecosystem` and
+`package` read from the key, `highest_severity`, `open_alert_count`, and the
+open `alerts`, highest severity first, each with its `url` on GitHub. The list
+and `POST /api/tasks/facets` take `entity_kinds` (`vulnerable_package` among
+them), and the facets answer an `entity_kinds` cut beside `event_types`.
 
 ### Jira Issue Snapshot
 

@@ -1,8 +1,10 @@
 package domain
 
 import (
+	"encoding/json"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -50,6 +52,17 @@ func VulnerablePackageURL(host, repoSlug, ecosystem, name string) string {
 	}
 	q := url.Values{"q": {"is:open ecosystem:" + ecosystem + " package:" + name}}
 	return host + "/" + repoSlug + "/security/dependabot?" + q.Encode()
+}
+
+// DependabotAlertURL is GitHub's page for one Dependabot alert, the html_url
+// GitHub answers with it: alert number in the repository on host (a
+// GitHubHost value). "" when host names no GitHub.
+func DependabotAlertURL(host, repoSlug string, number int) string {
+	host = strings.TrimRight(host, "/")
+	if host == "" {
+		return ""
+	}
+	return host + "/" + repoSlug + "/security/dependabot/" + strconv.Itoa(number)
 }
 
 // VulnerablePackageTitle is a vulnerable package's entity title: the package
@@ -132,6 +145,29 @@ type VulnerablePackageSnapshot struct {
 	Ecosystem string            `json:"ecosystem"`
 	Package   string            `json:"package"`
 	Alerts    []DependabotAlert `json:"alerts"`
+}
+
+// ParseVulnerablePackageSnapshot parses a vulnerable package's stored
+// snapshot. ok=false when there is none, or one that does not parse.
+func ParseVulnerablePackageSnapshot(raw string) (VulnerablePackageSnapshot, bool) {
+	if raw == "" {
+		return VulnerablePackageSnapshot{}, false
+	}
+	var snap VulnerablePackageSnapshot
+	if err := json.Unmarshal([]byte(raw), &snap); err != nil || snap.Package == "" {
+		return VulnerablePackageSnapshot{}, false
+	}
+	return snap, true
+}
+
+// TaskVulnerablePackage is what a task read carries of its vulnerable
+// package's entity: the GitHub host the entity is keyed under, which every
+// alert link is on, and the stored snapshot, whose alerts are the ones open
+// when TF last listed the repository. Snapshot is the zero value when the
+// entity has no readable snapshot.
+type TaskVulnerablePackage struct {
+	Host     string                    `json:"host"`
+	Snapshot VulnerablePackageSnapshot `json:"snapshot"`
 }
 
 // Terminal reports whether the package has no open alert left.

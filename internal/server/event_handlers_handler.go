@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
@@ -262,6 +263,20 @@ func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *
 // stays the canonical JSON text the matcher reads, which is why the read row
 // spells it scope_predicate_json — that field is a string, this one is not.
 const fieldScopePredicate = "scope_predicate"
+
+// appliesToUnownedField refuses applies_to_unowned: true on an event type
+// the flag cannot widen: a pool event already reaches every team whose
+// tracked set and handler match, and a requested-party or unrouted event
+// reaches whom it names. routing.EventSupportsWatch is the rule, and the
+// event-type catalog's supports_watch is the same call, which is what the
+// editors hide the control on. false is accepted on every event type, so a
+// stored flag can always be cleared.
+func appliesToUnownedField(v *httpx.Validation, eventType string, set *bool) {
+	if set != nil && *set && !routing.EventSupportsWatch(eventType) {
+		v.Invalid("applies_to_unowned", fmt.Sprintf(
+			"applies_to_unowned has no effect on %s: its events reach every team whose handler matches, owner or not (supports_watch is false in GET /api/event-types)", eventType))
+	}
+}
 
 // scopePredicateField reads the scope_predicate body field and canonicalises
 // it against the event type's registered predicate schema. It reports whether
@@ -559,6 +574,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	var predicate *string
 	if eventTypeOK {
 		predicate, _ = scopePredicateField(&bad, &unproc, req.ScopePredicate, req.EventType, nil)
+		appliesToUnownedField(&unproc, req.EventType, req.AppliesToUnowned)
 	}
 	priority := 0.5
 	if req.DefaultPriority != nil {
@@ -646,6 +662,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	var predicate *string
 	if eventTypeOK {
 		predicate, _ = scopePredicateField(&bad, &unproc, req.ScopePredicate, req.EventType, nil)
+		appliesToUnownedField(&unproc, req.EventType, req.AppliesToUnowned)
 	}
 	threshold, minAutonomy := triggerTuningFields(&unproc, req.BreakerThreshold, req.MinAutonomySuitability)
 	if bad.Flush(w, http.StatusBadRequest) {
@@ -857,6 +874,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		if c.Enabled != nil {
 			updated.Enabled = *c.Enabled
 		}
+		appliesToUnownedField(&unproc, existing.EventType, c.AppliesToUnowned)
 		if c.AppliesToUnowned != nil {
 			updated.AppliesToUnowned = *c.AppliesToUnowned
 		}

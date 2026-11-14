@@ -132,6 +132,10 @@ function filterStorageKey(userID: string): string {
 
 type FilterMap = Record<ColumnId, LaneFilter>
 
+// A lane's facet values: the event types and the entity kinds it holds.
+type LaneFacets = { eventTypes: string[]; kinds: string[] }
+const NO_FACETS: LaneFacets = { eventTypes: [], kinds: [] }
+
 function loadFilters(userID: string): FilterMap {
   try {
     const raw = localStorage.getItem(filterStorageKey(userID))
@@ -354,13 +358,14 @@ export default function Board() {
   const [showSnoozed, setShowSnoozed] = useState(false)
   const showSnoozedRef = useRef(showSnoozed)
 
-  // The event types each lane holds under its current query, from the facet
-  // read beside each lane read. The chips are drawn from this rather than
-  // from the page, so a type on an unfetched page still gets its chip.
-  const [facets, setFacets] = useState<Record<ColumnId, string[]>>({
-    queued: [],
-    in_progress: [],
-    done: [],
+  // The event types and entity kinds each lane holds under its current
+  // query, from the facet read beside each lane read. The chips are drawn
+  // from this rather than from the page, so a type on an unfetched page still
+  // gets its chip.
+  const [facets, setFacets] = useState<Record<ColumnId, LaneFacets>>({
+    queued: NO_FACETS,
+    in_progress: NO_FACETS,
+    done: NO_FACETS,
   })
 
   // Drag state. The "over column" highlight is owned by BoardColumn
@@ -570,8 +575,12 @@ export default function Board() {
           body: JSON.stringify(facetsBody(body)),
         })
           .then((res) => {
-            const values = (res.event_types ?? []).map((f) => f.value).sort()
-            setFacets((prev) => ({ ...prev, [col]: values }))
+            const values = (cut: { value: string }[] | undefined) =>
+              (cut ?? []).map((f) => f.value).sort()
+            setFacets((prev) => ({
+              ...prev,
+              [col]: { eventTypes: values(res.event_types), kinds: values(res.entity_kinds) },
+            }))
           })
           .catch(() => {}),
       ])
@@ -1438,7 +1447,8 @@ export default function Board() {
                     title={COLUMN_TITLES[colId]}
                     filter={filters[colId]}
                     onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
-                    eventTypes={facets[colId]}
+                    eventTypes={facets[colId].eventTypes}
+                    kinds={facets[colId].kinds}
                     paging={paging[colId]}
                     onCollapse={() => toggleCollapse(colId)}
                     headerExtra={colId === 'done' ? doneHeader : undefined}
