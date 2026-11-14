@@ -1561,10 +1561,10 @@ func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, or
 
 // awaitingCredentialsCols is the shared claim-identity projection: the
 // conversation joined to its active (unreleased) claim, with the claim's
-// executor/boot/pubkey and claimed_at falling back to started_at for a
+// id/executor/boot/pubkey and claimed_at falling back to started_at for a
 // never-claimed row.
 const awaitingCredentialsCols = `r.id::text, r.org_id::text, COALESCE(r.type, ''), COALESCE(r.team_id::text, ''), COALESCE(r.task_id::text, ''),
-	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
+	COALESCE(cl.id::text, ''), COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
 
 func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversationID string) (db.AwaitingCredentialsConversation, bool, error) {
 	var r db.AwaitingCredentialsConversation
@@ -1573,7 +1573,7 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = $1 AND r.id = $2
-	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
+	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.AwaitingCredentialsConversation{}, false, nil
 	}
@@ -1627,10 +1627,10 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	// returns.
 	//
 	// A parked claim that already holds a bundle is left out. A claim
-	// publishes its sidecar key once and the bundle row is keyed by the
-	// claim, so that bundle is sealed to the key the claim is waiting on;
-	// sealing again would overwrite it and mint installation tokens nothing
-	// revokes. The executor's next poll takes the claim out of this phase,
+	// publishes its sidecar key once, and Put writes a claim's row only with
+	// a seal made to that claim's key, so the bundle is the one the claim is
+	// waiting on; sealing again would overwrite it and mint installation
+	// tokens nothing revokes. The executor's next poll takes the claim out of this phase,
 	// and until then this keeps the sweep off it.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
@@ -1682,7 +1682,7 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 	var out []db.AwaitingCredentialsConversation
 	for rows.Next() {
 		var r db.AwaitingCredentialsConversation
-		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

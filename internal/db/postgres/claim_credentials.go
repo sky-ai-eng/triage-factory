@@ -13,9 +13,9 @@ import (
 // sealed per-claim credential bundle channel. Admin-pool only:
 // claim_credentials carries no app-pool grant at all (see the table's RLS
 // comment in the baseline migration), so both the brain's write and the
-// executor's read route through the superuser pool. Rows key on the
-// conversation's ACTIVE claim, resolved here from the conversation id the
-// caller holds.
+// executor's read route through the superuser pool. Rows key on a claim: the
+// write names the claim it sealed for, and the read resolves the
+// conversation's active one.
 type claimCredentialsStore struct{ admin queryer }
 
 func newClaimCredentialsStore(admin queryer) db.ClaimCredentialsStore {
@@ -24,22 +24,18 @@ func newClaimCredentialsStore(admin queryer) db.ClaimCredentialsStore {
 
 var _ db.ClaimCredentialsStore = (*claimCredentialsStore)(nil)
 
-// Put is guarded on boot_epoch so a slow provision can never clobber a fresher
-// one: if conversation X times out under executor A (boot_epoch 1) and is
-// reclaimed by executor B (boot_epoch 2) before A's in-flight resolve finishes,
-// A's write must not overwrite B's once it lands. The WHERE clause makes the
-// UPDATE a no-op whenever the row already carries a STRICTLY NEWER boot_epoch
-// than this write's — <=, not <, so a same-epoch refresh (the brain's periodic
-// GitHub-token re-mint for the SAME still-live claim) still applies. The
-// active-claim resolution adds a second layer: a reclaimed conversation has a
-// NEW active claim, so the stale write keys a different row entirely and the
-// fresh claim's bundle is untouched either way. A conversation with no active
-// claim inserts nothing (silent no-op).
+// Put addresses the claim the caller read, never the conversation's active
+// claim at write time. The caller sealed to the key that claim published, so
+// the bundle is that claim's or nobody's: resolving the active claim here
+// would let a seal for a claim released mid-provision land under the next
+// claim, sealed to a key its sidecar never minted. The guard is the claim's
+// row as the caller read it: unreleased, with the executor and boot epoch the
+// seal was made for. Any arm that fails inserts nothing.
 //
 // The source manifest lands on the claims row in the same statement, joined to
-// what the upsert RETURNED: a write the epoch guard declined returns no row, so
-// the manifest is replaced exactly when the ciphertext it describes is.
-func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error {
+// what the upsert RETURNED: a write the guard declined returns no row, so the
+// manifest is replaced exactly when the ciphertext it describes is.
+func (s *claimCredentialsStore) Put(ctx context.Context, orgID, claimID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error {
 	manifest, err := db.EncodeSourceManifest(sources)
 	if err != nil {
 		return err
@@ -47,22 +43,21 @@ func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, 
 	_, err = s.admin.ExecContext(ctx, `
 		WITH put AS (
 			INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, created_at)
-			SELECT cl.id, $2::uuid, $3, $4, $5, now()
+			SELECT cl.id, cl.org_id, $3, $4, $5, now()
 			FROM claims cl
-			WHERE cl.org_id = $2::uuid AND cl.conversation_id = $1::uuid AND cl.released_at IS NULL
+			WHERE cl.org_id = $1::uuid AND cl.id = $2::uuid AND cl.released_at IS NULL
+			  AND cl.executor_id = $3 AND cl.boot_epoch = $4
 			ON CONFLICT (claim_id) DO UPDATE SET
-				org_id      = EXCLUDED.org_id,
 				executor_id = EXCLUDED.executor_id,
 				boot_epoch  = EXCLUDED.boot_epoch,
 				sealed      = EXCLUDED.sealed,
 				created_at  = EXCLUDED.created_at
-			WHERE claim_credentials.boot_epoch <= EXCLUDED.boot_epoch
 			RETURNING claim_id
 		)
 		UPDATE claims SET source_manifest = $6::jsonb
 		FROM put
 		WHERE claims.id = put.claim_id
-	`, conversationID, orgID, executorID, bootEpoch, sealed, manifest)
+	`, orgID, claimID, executorID, bootEpoch, sealed, manifest)
 	return err
 }
 

@@ -681,11 +681,11 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID, claimID string) age
 			} else if ok && b.ExecutorID == myID && b.BootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
 				// never opens it (only the sidecar's private key can). Gate on the
-				// bundle's stamped (executor, boot_epoch) matching ours: a row left
-				// by a prior claimant — a dead executor's, or an earlier boot's —
-				// is sealed to a sidecar key this run never minted, so relaying it
-				// would just fail the unseal. Skip and keep polling until the brain
-				// re-seals for THIS claim.
+				// bundle's stamped (executor, boot_epoch) matching ours, as Get's
+				// contract requires: a bundle stamped for another executor or an
+				// earlier boot is sealed to a sidecar key this run never minted, so
+				// relaying it would only fail the unseal. Skip and keep polling
+				// until the brain seals for THIS claim.
 				//
 				// The poll count separates "the brain answered the doorbell"
 				// from "the sweep eventually got to it" — the same elapsed time

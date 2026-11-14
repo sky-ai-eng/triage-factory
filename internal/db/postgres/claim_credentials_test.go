@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -26,8 +28,9 @@ func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, conversationID, e
 	return id
 }
 
-// TestClaimCredentialsStore_Postgres_PutGet pins the basic round trip through
-// the conversation's active claim, plus the no-active-claim no-op.
+// TestClaimCredentialsStore_Postgres_PutGet pins the basic round trip: Put
+// names the claim, Get reads the conversation's active one. A claim id no row
+// carries is a no-op.
 // Skips cleanly when Docker isn't available (pgtest.Shared).
 func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -37,22 +40,21 @@ func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	// No active claim yet: Put is a silent no-op and Get finds nothing —
-	// there is no engagement to seal for.
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-0", 1, []byte("orphan"), nil); err != nil {
-		t.Fatalf("Put with no active claim: %v", err)
+	// No such claim: Put is a silent no-op and Get finds nothing — there is
+	// no engagement to seal for.
+	if err := stores.ClaimCredentials.Put(ctx, orgID, uuid.New().String(), "executor-0", 1, []byte("orphan"), nil); err != nil {
+		t.Fatalf("Put with no such claim: %v", err)
 	}
 	if _, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID); err != nil || ok {
 		t.Fatalf("Get with no active claim: ok=%v err=%v, want ok=false", ok, err)
 	}
 
-	seedPgActiveClaim(t, h, orgID, conversationID, "executor-1", 1)
+	claimID := seedPgActiveClaim(t, h, orgID, conversationID, "executor-1", 1)
 	manifest := domain.SourceManifest{
 		"github": {State: domain.SourceSealed},
 		"linear": {State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable},
 	}
-	claimID := seedPgClaimID(t, h, conversationID)
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-1", 1, []byte("sealed-v1"), manifest); err != nil {
+	if err := stores.ClaimCredentials.Put(ctx, orgID, claimID, "executor-1", 1, []byte("sealed-v1"), manifest); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID)
@@ -94,73 +96,86 @@ func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	}
 }
 
-// seedPgClaimID is the id of the conversation's active claim.
-func seedPgClaimID(t *testing.T, h *pgtest.Harness, conversationID string) string {
-	t.Helper()
-	var id string
-	if err := h.AdminDB.QueryRow(`
-		SELECT id::text FROM claims WHERE conversation_id = $1 AND released_at IS NULL
-	`, conversationID).Scan(&id); err != nil {
-		t.Fatalf("read active claim: %v", err)
-	}
-	return id
-}
-
-// TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch pins the CAS
-// guard: a write for an OLDER boot_epoch arriving after a NEWER one (the
-// slow-provision-races-a-reclaim window) must be a silent no-op, never an
-// overwrite. A same-epoch write (a refresh for the SAME still-live claim)
-// must still apply normally.
-func TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
+// TestClaimCredentialsStore_Postgres_PutLandsOnlyOnTheClaimItNames pins what
+// keying the write by claim closes: a seal made for a claim released while the
+// brain was sealing must not land under the conversation's next claim, whose
+// sidecar published a different key, however the two executors' boot epochs
+// compare. A seal naming the right claim with an identity it does not carry
+// lands nowhere either. A re-seal of the same claim replaces its bundle and
+// its manifest.
+func TestClaimCredentialsStore_Postgres_PutLandsOnlyOnTheClaimItNames(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
-	seedPgActiveClaim(t, h, orgID, conversationID, "executor-b", 2)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	// Executor B (boot_epoch 2) reclaims and provisions first.
-	forB := domain.SourceManifest{"github": {State: domain.SourceSealed}}
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-b", 2, []byte("sealed-for-b"), forB); err != nil {
-		t.Fatalf("Put (epoch 2): %v", err)
+	// Executor A's claim is handed back mid-provision and executor B claims
+	// the conversation. A's epoch is the larger: the two are separate
+	// executors' counters, and neither says anything about the other's claim.
+	claimA := seedPgActiveClaim(t, h, orgID, conversationID, "executor-a", 7)
+	if _, err := h.AdminDB.Exec(`UPDATE claims SET released_at = now(), outcome = 'requeued' WHERE id = $1`, claimA); err != nil {
+		t.Fatalf("release claim A: %v", err)
 	}
+	claimB := seedPgActiveClaim(t, h, orgID, conversationID, "executor-b", 2)
 
-	// Executor A's stale, slower provision (boot_epoch 1) lands after. Its
-	// manifest must not land either: the claim's manifest describes the
-	// bundle the row still holds.
 	forA := domain.SourceManifest{"github": {State: domain.SourceUnconfigured}}
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-a", 1, []byte("sealed-for-a"), forA); err != nil {
-		t.Fatalf("Put (epoch 1, stale): %v", err)
+	if err := stores.ClaimCredentials.Put(ctx, orgID, claimA, "executor-a", 7, []byte("sealed-for-a"), forA); err != nil {
+		t.Fatalf("Put (claim A, released): %v", err)
+	}
+	if err := stores.ClaimCredentials.Put(ctx, orgID, claimB, "executor-a", 7, []byte("sealed-for-a"), forA); err != nil {
+		t.Fatalf("Put (claim B, A's identity): %v", err)
+	}
+	var bundles int
+	if err := h.AdminDB.QueryRow(`
+		SELECT count(*) FROM claim_credentials WHERE claim_id IN ($1::uuid, $2::uuid)
+	`, claimA, claimB).Scan(&bundles); err != nil {
+		t.Fatalf("count bundles: %v", err)
+	}
+	if bundles != 0 {
+		t.Fatalf("%d bundles landed from seals made for claim A; want none, on either claim", bundles)
+	}
+	var manifests int
+	if err := h.AdminDB.QueryRow(`
+		SELECT count(*) FROM claims WHERE id IN ($1::uuid, $2::uuid) AND source_manifest IS NOT NULL
+	`, claimA, claimB).Scan(&manifests); err != nil {
+		t.Fatalf("count manifests: %v", err)
+	}
+	if manifests != 0 {
+		t.Fatalf("%d claims carry a manifest from a seal that landed nowhere", manifests)
 	}
 
+	forB := domain.SourceManifest{"github": {State: domain.SourceSealed}}
+	if err := stores.ClaimCredentials.Put(ctx, orgID, claimB, "executor-b", 2, []byte("sealed-for-b"), forB); err != nil {
+		t.Fatalf("Put (claim B): %v", err)
+	}
 	got, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID)
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
 	if got.ExecutorID != "executor-b" || got.BootEpoch != 2 || string(got.Sealed) != "sealed-for-b" {
-		t.Fatalf("stale write clobbered the fresher one: got (%q, %d, %q), want (executor-b, 2, sealed-for-b)",
-			got.ExecutorID, got.BootEpoch, got.Sealed)
+		t.Fatalf("Get = (%q, %d, %q), want (executor-b, 2, sealed-for-b)", got.ExecutorID, got.BootEpoch, got.Sealed)
 	}
 	if !reflect.DeepEqual(got.Sources, forB) {
-		t.Fatalf("stale write replaced the manifest: got %+v, want %+v", got.Sources, forB)
+		t.Fatalf("Sources = %+v, want %+v", got.Sources, forB)
 	}
 
-	// A same-epoch refresh (re-minted tokens for the same still-live claim)
-	// must still apply, manifest included.
+	// A re-seal of the same claim (re-minted tokens for a long-lived one)
+	// replaces the bundle and the manifest.
 	refreshedManifest := domain.SourceManifest{
 		"github": {State: domain.SourceSealed},
 		"linear": {State: domain.SourceSealed},
 	}
-	if err := stores.ClaimCredentials.Put(ctx, orgID, conversationID, "executor-b", 2, []byte("sealed-for-b-refreshed"), refreshedManifest); err != nil {
-		t.Fatalf("Put (epoch 2, refresh): %v", err)
+	if err := stores.ClaimCredentials.Put(ctx, orgID, claimB, "executor-b", 2, []byte("sealed-for-b-refreshed"), refreshedManifest); err != nil {
+		t.Fatalf("Put (claim B, refresh): %v", err)
 	}
 	refreshed, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID)
 	if err != nil || !ok {
 		t.Fatalf("Get after refresh: ok=%v err=%v", ok, err)
 	}
 	if string(refreshed.Sealed) != "sealed-for-b-refreshed" {
-		t.Fatalf("same-epoch refresh did not apply: got %q, want sealed-for-b-refreshed", refreshed.Sealed)
+		t.Fatalf("same-claim refresh did not apply: got %q, want sealed-for-b-refreshed", refreshed.Sealed)
 	}
 	if !reflect.DeepEqual(refreshed.Sources, refreshedManifest) {
 		t.Errorf("Sources after refresh = %+v, want %+v", refreshed.Sources, refreshedManifest)
@@ -190,8 +205,8 @@ func TestListActiveNeedingCredentialRefresh_Postgres(t *testing.T) {
 	seal := func(m domain.SourceManifest) string {
 		t.Helper()
 		convID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
-		seedPgActiveClaim(t, h, orgID, convID, "executor-1", 1)
-		if err := stores.ClaimCredentials.Put(ctx, orgID, convID, "executor-1", 1, []byte("sealed"), m); err != nil {
+		claimID := seedPgActiveClaim(t, h, orgID, convID, "executor-1", 1)
+		if err := stores.ClaimCredentials.Put(ctx, orgID, claimID, "executor-1", 1, []byte("sealed"), m); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
 		return convID
@@ -253,18 +268,18 @@ func TestListAwaitingCredentials_Postgres_SkipsAParkedClaimThatHoldsABundle(t *t
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	park := func() string {
+	park := func() (convID, claimID string) {
 		t.Helper()
-		convID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
-		seedPgActiveClaim(t, h, orgID, convID, "executor-1", 1)
+		convID = seedPgDeliverableConversation(t, h, orgID, teamID, userID)
+		claimID = seedPgActiveClaim(t, h, orgID, convID, "executor-1", 1)
 		if matched, err := stores.ConversationQueue.MarkAwaitingCredentials(ctx, orgID, convID, "pubkey"); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
-		return convID
+		return convID, claimID
 	}
-	waiting := park()
-	sealed := park()
-	if err := stores.ClaimCredentials.Put(ctx, orgID, sealed, "executor-1", 1, []byte("sealed"), domain.SourceManifest{"github": {State: domain.SourceSealed}}); err != nil {
+	waiting, _ := park()
+	sealed, sealedClaim := park()
+	if err := stores.ClaimCredentials.Put(ctx, orgID, sealedClaim, "executor-1", 1, []byte("sealed"), domain.SourceManifest{"github": {State: domain.SourceSealed}}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 

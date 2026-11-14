@@ -1109,9 +1109,14 @@ type AwaitingCredentialsConversation struct {
 	ConversationType string
 	TeamID           string
 	TaskID           string
-	ExecutorID       string
-	BootEpoch        int64
-	ClaimedAt        time.Time
+	// ClaimID is the active claim's id, empty when the conversation has none.
+	// A seal is written to this claim and no other (ClaimCredentialsStore.Put),
+	// so it is the key the claim published, not whichever claim is active by
+	// the time the seal lands, that the bundle answers.
+	ClaimID    string
+	ExecutorID string
+	BootEpoch  int64
+	ClaimedAt  time.Time
 	// CredPubKey is the per-run sidecar public key recorded by
 	// MarkAwaitingCredentials; empty when the claim was parked without one.
 	CredPubKey string

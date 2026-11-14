@@ -56,10 +56,11 @@ type SealedBundle struct {
 // row beside it. An executor parks a claimed conversation's active claim in
 // phase='awaiting_credentials'; the brain resolves that conversation's
 // LLM/GitHub/Jira/Linear credentials, seals them to the claimant's published
-// pubkey, and writes exactly one row keyed by the conversation's ACTIVE claim
-// id, recording the source manifest on that claim in the same statement. Method signatures still take
-// conversationID (the conversation id) — the impl resolves the active claim
-// internally, so callers never handle claim ids. Admin-pool-only in Postgres,
+// pubkey, and writes exactly one row keyed by the id of the claim that
+// published that pubkey, recording the source manifest on that claim in the
+// same statement. Put names the claim, so a seal lands only on the claim whose
+// key it used; Get names the conversation and reads its active claim's row.
+// Admin-pool-only in Postgres,
 // same posture as InstanceStore/ConversationSignalStore: this table never
 // serves a request handler, and unlike ConversationPendingInputStore its
 // payload is credential-bearing ciphertext, so there is no app-pool grant at
@@ -74,54 +75,47 @@ type SealedBundle struct {
 // directly, so the SQLite schema has no claim_credentials table and the
 // SQLite impl refuses with ErrNotApplicableInLocal.
 type ClaimCredentialsStore interface {
-	// Put seals sealed (already-encrypted by the caller via credseal) into
-	// claim_credentials for conversationID's active claim, replacing any existing
-	// row wholesale. A conversation with no active claim is a silent no-op —
-	// there is no engagement to seal for. executorID/bootEpoch identify the
-	// claiming executor this bundle was sealed for — the boot_epoch travels
-	// in cleartext specifically so a reader can compare it against its own
-	// current epoch BEFORE calling credseal.Open (see Get's doc).
+	// Put writes sealed (already-encrypted by the caller via credseal) into
+	// claim_credentials for claimID, replacing any existing row wholesale.
+	// executorID/bootEpoch are the claim's identity as the caller read it
+	// beside the key it sealed to. They travel in cleartext so a reader can
+	// compare them against its own identity BEFORE calling credseal.Open (see
+	// Get's doc).
 	//
-	// Guarded on boot_epoch (never regresses it): if an existing row
-	// already carries a STRICTLY NEWER boot_epoch than this write's, the
-	// write is a silent no-op rather than an overwrite. This closes the
-	// window where a slow provision for an older claim (timed out and
-	// reclaimed by a different executor/boot while still in flight) would
-	// otherwise land after, and clobber, the fresher claim's bundle —
-	// self-healing either way via Get's epoch check and the backstop
-	// sweep, but the guard means it never happens at all. <=, not <, so a
-	// same-epoch refresh (re-minted tokens for the SAME still-live claim)
-	// still applies normally.
+	// The write lands only while claimID is still active and still carries
+	// executorID/bootEpoch. A claim released while the caller was sealing
+	// takes the seal with it: nothing lands under the conversation's next
+	// claim, whose sidecar published a different key and which the backstop
+	// sweep stops sealing once it holds a bundle. A re-seal of the same claim
+	// (re-minted tokens for a long-lived one) replaces the row.
 	//
-	// A nil error does NOT mean the bundle landed: with no active claim on
-	// the conversation (released between the caller's read and this write),
-	// Put inserts zero rows and returns nil. Callers must treat delivery as
-	// confirmed only by the executor's own Get poll, never by Put's return.
+	// A nil error does NOT mean the bundle landed: with the claim released
+	// between the caller's read and this write, Put writes nothing and returns
+	// nil. Callers must treat delivery as confirmed only by the executor's own
+	// Get poll, never by Put's return.
 	//
 	// Exempt from the returned-row rule, by decision rather than by shape:
-	// the write is an upsert with two distinct silent-no-op arms (no active
-	// claim to attach to; an existing row already carrying a strictly newer
-	// boot_epoch), so a RETURNING clause reports zero rows on either —
-	// exactly the ON-CONFLICT-DO-NOTHING shape the standard calls out as
-	// non-mechanical — and the store's own contract above already tells
-	// callers not to read landedness off Put's return in the first place.
-	// What a returned row could add beyond that is either metadata the
-	// caller already supplied (conversationID, executorID, bootEpoch — the
-	// only value this write resolves server-side is the claim id, which no
-	// caller consumes) or the sealed ciphertext itself, and handing the
+	// the write is an upsert with a silent-no-op arm (the claim is no longer
+	// active, or no longer carries that identity), so a RETURNING clause
+	// reports zero rows on it — exactly the ON-CONFLICT-DO-NOTHING shape the
+	// standard calls out as non-mechanical — and the store's own contract
+	// above already tells callers not to read landedness off Put's return in
+	// the first place. What a returned row could add beyond that is either
+	// metadata the caller already supplied (claimID, executorID, bootEpoch)
+	// or the sealed ciphertext itself, and handing the
 	// latter back to satisfy a shape rule is worse than the rule: this
 	// store's whole purpose is that sealed material flows into it and out
 	// of it only through Get, gated on the reader's own boot_epoch. Same
 	// answer as SecretStore's analogous write methods, for the same reason
 	// — a credential surface with nothing non-secret worth echoing back.
 	//
-	// sources is the engagement's source manifest, written onto the active
-	// claim's row (claims.source_manifest) in the same statement, and only
-	// when the ciphertext write itself applies: an epoch-guarded no-op leaves
-	// the claim's manifest describing the bundle the row still holds. The
-	// claims row outlives claim_credentials, which teardown deletes, so the
-	// manifest keeps describing the engagement after it ends.
-	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error
+	// sources is the engagement's source manifest, written onto the claim's
+	// row (claims.source_manifest) in the same statement, and only when the
+	// ciphertext write itself applies, so the manifest always describes the
+	// bundle the row holds. The claims row outlives claim_credentials, which
+	// teardown deletes, so the manifest keeps describing the engagement after
+	// it ends.
+	Put(ctx context.Context, orgID, claimID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error
 
 	// Get returns the sealed bundle for conversationID's active claim, or ok=false
 	// when none has been provisioned yet (or the conversation has no active claim).
