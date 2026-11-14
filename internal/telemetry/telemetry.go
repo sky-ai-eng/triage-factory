@@ -22,8 +22,8 @@
 //   - Create instruments from the global provider (otel.Meter) or accept a
 //     metric.MeterProvider for testability. Init installs the real provider
 //     before any subsystem constructs its instruments (app.New calls it
-//     first), so no delegation subtleties apply — but the OTel global is
-//     delegation-safe regardless.
+//     before building any), so no delegation subtleties apply — but the
+//     OTel global is delegation-safe regardless.
 //   - Name instruments in OTel dot form WITHOUT a vendor prefix
 //     ("slack.ingest.events"); the exporter's namespace option prefixes
 //     every metric with "tf_" uniformly (→ tf_slack_ingest_events_total).
@@ -126,20 +126,25 @@ var handler http.Handler
 // A setup failure is logged and reported as disabled rather than failing
 // boot: telemetry is diagnostics, never a boot dependency.
 //
+// role and instanceID name the process in everything it exports: role
+// picks the service name (serviceName), and instanceID, the persistent id
+// the fleet registry keys this process on, is its service.instance.id.
+//
 // The caller owns one obligation in return: call ShutdownTraces during
 // shutdown, or the final batch of spans is dropped.
-func Init(version string) (addr string) {
-	res := buildResource(version)
+func Init(version string, role runmode.DeployRole, instanceID string) (addr string) {
+	res := buildResource(version, role, instanceID)
 	initTraces(res)
 	return initMetrics(res)
 }
 
 // buildResource assembles the service identity both providers export
 // under.
-func buildResource(version string) *resource.Resource {
+func buildResource(version string, role runmode.DeployRole, instanceID string) *resource.Resource {
 	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
-		semconv.ServiceName("triagefactory"),
+		semconv.ServiceName(serviceName(role)),
 		semconv.ServiceVersion(version),
+		semconv.ServiceInstanceID(instanceID),
 	))
 	if err != nil {
 		// Merge only errors on schema-URL conflicts, which NewSchemaless
@@ -149,6 +154,21 @@ func buildResource(version string) *resource.Resource {
 		return resource.Default()
 	}
 	return res
+}
+
+// serviceName is the service.name a process of the given role exports
+// under. The two halves of a multi deployment get a name each, so a trace
+// backend can tell a control pod's spans from an executor's without
+// reading span names; local mode's single process keeps the plain name.
+func serviceName(role runmode.DeployRole) string {
+	switch role {
+	case runmode.RoleControl:
+		return "triagefactory-control"
+	case runmode.RoleExecutor:
+		return "triagefactory-executor"
+	default:
+		return "triagefactory"
+	}
 }
 
 // initMetrics installs the meter provider and builds the /metrics handler

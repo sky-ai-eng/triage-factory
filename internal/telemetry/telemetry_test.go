@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -46,6 +47,31 @@ func TestResolveAddr(t *testing.T) {
 	}
 }
 
+// TestBuildResource_ServiceIdentity checks that each role exports under its
+// own service.name, and every role under the instance id it was given.
+func TestBuildResource_ServiceIdentity(t *testing.T) {
+	cases := []struct {
+		role runmode.DeployRole
+		want string
+	}{
+		{runmode.RoleControl, "triagefactory-control"},
+		{runmode.RoleExecutor, "triagefactory-executor"},
+		{runmode.RoleAll, "triagefactory"},
+	}
+	const instanceID = "6f1c2a4e-8d3b-4f7a-9c21-0e5b7d9a3f10"
+	for _, tc := range cases {
+		t.Run(string(tc.role), func(t *testing.T) {
+			set := buildResource("v-test", tc.role, instanceID).Set()
+			if got, _ := set.Value(semconv.ServiceNameKey); got.AsString() != tc.want {
+				t.Errorf("service.name = %q; want %q", got.AsString(), tc.want)
+			}
+			if got, _ := set.Value(semconv.ServiceInstanceIDKey); got.AsString() != instanceID {
+				t.Errorf("service.instance.id = %q; want %q", got.AsString(), instanceID)
+			}
+		})
+	}
+}
+
 // TestInitAndServe_EndToEnd covers the whole enabled path: Init installs
 // the SDK provider, an instrument recorded through the OTel global comes
 // out of GET /metrics under the tf_ namespace alongside the Go runtime
@@ -63,7 +89,7 @@ func TestInitAndServe_EndToEnd(t *testing.T) {
 	})
 
 	t.Setenv("TF_METRICS_ADDR", "127.0.0.1:0")
-	if addr := Init("v-test"); addr != "127.0.0.1:0" {
+	if addr := Init("v-test", runmode.RoleAll, "test-instance"); addr != "127.0.0.1:0" {
 		t.Fatalf("Init returned %q; want the configured addr", addr)
 	}
 
@@ -137,7 +163,7 @@ func TestServe_WithoutInit(t *testing.T) {
 // disabled and leaves the global provider alone.
 func TestInit_Disabled(t *testing.T) {
 	t.Setenv("TF_METRICS_ADDR", "off")
-	if addr := Init("v-test"); addr != "" {
+	if addr := Init("v-test", runmode.RoleAll, "test-instance"); addr != "" {
 		t.Fatalf("Init = %q; want disabled", addr)
 	}
 }
