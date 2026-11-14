@@ -222,6 +222,20 @@ reaching Triage Factory, from one repository or from all of them. A
 repository whose alerts get `refused` every poll has lost access, which the
 org's GitHub access settings page shows within a day.
 
+The poll also reads what Dependabot did about each repository's open alerts:
+when an alert opens, then less often as the alerts age, at least once a day.
+`tf_github_dependabot_update_reads_total` counts those reads by `outcome`:
+
+| `outcome`    | Meaning                                                                       |
+| ------------ | ----------------------------------------------------------------------------- |
+| `read`       | GitHub answered for every alert                                               |
+| `incomplete` | GitHub answered but left out alerts the listing holds; they keep their last state |
+| `failed`     | No answer; the repository is read again on the next poll                      |
+
+A steady rate of `failed` means "Dependabot Cannot Fix" events are not being
+emitted. A steady `incomplete` with no `read` usually means the credential
+can list the alerts but GitHub's GraphQL API hides them from it.
+
 ### Mergeability probes
 
 Triage Factory learns whether a pull request conflicts by asking GitHub only

@@ -112,6 +112,9 @@ type Tracker struct {
 	// changeClock is the clock the refresh gate's change window is kept on
 	// (changeNow); nil is time.Now.
 	changeClock func() time.Time
+	// updatesClock is the clock reads of Dependabot updates are scheduled on
+	// (updatesNow); nil is time.Now.
+	updatesClock func() time.Time
 	// marks is the org's pending refresh marks the GitHub passes honor
 	// (WithRefreshMarks).
 	marks refreshMarks

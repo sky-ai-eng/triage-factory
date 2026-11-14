@@ -95,22 +95,21 @@ func dependabotAlertsTurnedOff(body string) bool {
 // listing would resolve packages that still have open alerts.
 const maxDependabotAlertPages = 50
 
-// ErrDependabotListingUnusable is a listing of one repository's alerts that
-// GitHub answered with something TF cannot read as the whole listing: more
-// than maxDependabotAlertPages pages, a page whose body does not parse, or a
-// next-page link with no cursor. It says nothing about any other repository.
+// ErrDependabotListingUnusable is a listing of one repository's alerts, or a
+// read of their Dependabot updates, that GitHub answered with something TF
+// cannot read as the whole answer: more than maxDependabotAlertPages pages, a
+// page whose body does not parse, a next page with no cursor, or (for the
+// updates) no repository. It says nothing about any other repository.
 var ErrDependabotListingUnusable = errors.New("dependabot alert listing unusable")
 
 // OpenDependabotAlert is one open alert as ListOpenDependabotAlerts returns it:
 // the package it is on, and the alert as a vulnerable package's snapshot
-// records it.
+// records it, with no DependabotUpdate, which the listing does not carry
+// (ListDependabotUpdates reads it).
 type OpenDependabotAlert struct {
 	Ecosystem string
 	Package   string
 	Alert     domain.DependabotAlert
-	// UpdatedAt is when the alert's state last changed: when it was created,
-	// reopened or reintroduced, for an open alert. Zero when GitHub sent none.
-	UpdatedAt time.Time
 }
 
 // ListOpenDependabotAlerts lists owner/repo's open Dependabot alerts with
@@ -227,6 +226,7 @@ func appendOpenDependabotAlerts(alerts []OpenDependabotAlert, owner, repo string
 			Severity:               severity,
 			ManifestPath:           a.Dependency.ManifestPath,
 			VulnerableVersionRange: a.SecurityVulnerability.VulnerableVersionRange,
+			UpdatedAt:              a.UpdatedAt,
 		}
 		if a.SecurityAdvisory.CVEID != nil {
 			alert.CVEID = *a.SecurityAdvisory.CVEID
@@ -237,9 +237,126 @@ func appendOpenDependabotAlerts(alerts []OpenDependabotAlert, owner, repo string
 		if fp := a.SecurityVulnerability.FirstPatchedVersion; fp != nil {
 			alert.FirstPatchedVersion = fp.Identifier
 		}
-		alerts = append(alerts, OpenDependabotAlert{Ecosystem: pkg.Ecosystem, Package: pkg.Name, Alert: alert, UpdatedAt: a.UpdatedAt})
+		alerts = append(alerts, OpenDependabotAlert{Ecosystem: pkg.Ecosystem, Package: pkg.Name, Alert: alert})
 	}
 	return alerts, nil
+}
+
+// dependabotUpdatesQuery reads, for one page of a repository's open alerts,
+// what Dependabot did about each: the pull request it opened or the error it
+// reported. The REST alert object carries neither. The error's Markdown body
+// is not asked for: it has no length limit, and its title says what failed.
+const dependabotUpdatesQuery = `
+	query DependabotUpdates($owner: String!, $name: String!, $after: String) {
+		repository(owner: $owner, name: $name) {
+			vulnerabilityAlerts(states: [OPEN], first: 100, after: $after) {
+				pageInfo { hasNextPage endCursor }
+				nodes {
+					number
+					dependabotUpdate {
+						pullRequest { number url }
+						error { errorType title }
+					}
+				}
+			}
+		}
+		rateLimit { cost }
+	}
+`
+
+// ListDependabotUpdates reads what Dependabot did about each of owner/repo's
+// open Dependabot alerts, by alert number, following the connection's cursor
+// from page to page (at most maxDependabotAlertPages of 100). GitHub's
+// dependabotUpdate maps to a domain.DependabotUpdate:
+//
+//   - null: DependabotUpdateNone, Dependabot has not tried;
+//   - a pull request: DependabotUpdatePullRequest, whatever else it holds;
+//   - an error and no pull request: DependabotUpdateError;
+//   - neither: DependabotUpdatePending, an attempt has started.
+//
+// An alert the answer does not name is absent from the map, which says
+// nothing about it: GitHub's GraphQL can answer a credential that may not read
+// a repository's alerts with no alerts rather than an error, and can lag the
+// REST listing by an alert just opened.
+//
+// Any failure fails the whole read. GitHub answering with no repository (it
+// does not exist, or the credential may not see it), a page that does not
+// parse, a next page with no cursor, and more pages than the cap fail with
+// ErrDependabotListingUnusable, which says nothing about any other repository.
+func (c *Client) ListDependabotUpdates(ctx context.Context, owner, repo string) (map[int]domain.DependabotUpdate, error) {
+	updates := map[int]domain.DependabotUpdate{}
+	vars := map[string]any{"owner": owner, "name": repo}
+	for pages := 1; ; pages++ {
+		data, err := c.PostGraphQL(ctx, dependabotUpdatesQuery, vars)
+		if err != nil {
+			return nil, fmt.Errorf("read dependabot updates of %s/%s: %w", owner, repo, err)
+		}
+		var resp struct {
+			Data struct {
+				Repository *struct {
+					VulnerabilityAlerts struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []*gqlDependabotAlert `json:"nodes"`
+					} `json:"vulnerabilityAlerts"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("parse dependabot updates of %s/%s: %w: %w", owner, repo, ErrDependabotListingUnusable, err)
+		}
+		r := resp.Data.Repository
+		if r == nil {
+			return nil, fmt.Errorf("read dependabot updates of %s/%s: %w: GitHub answered with no repository", owner, repo, ErrDependabotListingUnusable)
+		}
+		for _, n := range r.VulnerabilityAlerts.Nodes {
+			if n != nil && n.Number != 0 {
+				updates[n.Number] = n.update()
+			}
+		}
+		page := r.VulnerabilityAlerts.PageInfo
+		if !page.HasNextPage {
+			return updates, nil
+		}
+		if page.EndCursor == "" {
+			return nil, fmt.Errorf("read dependabot updates of %s/%s: %w: a next page with no cursor", owner, repo, ErrDependabotListingUnusable)
+		}
+		if pages == maxDependabotAlertPages {
+			return nil, fmt.Errorf("read dependabot updates of %s/%s: %w: more than %d pages", owner, repo, ErrDependabotListingUnusable, maxDependabotAlertPages)
+		}
+		vars["after"] = page.EndCursor
+	}
+}
+
+// gqlDependabotAlert is the part of GitHub's GraphQL alert object
+// ListDependabotUpdates reads.
+type gqlDependabotAlert struct {
+	Number           int `json:"number"`
+	DependabotUpdate *struct {
+		PullRequest *struct {
+			Number int    `json:"number"`
+			URL    string `json:"url"`
+		} `json:"pullRequest"`
+		Error *struct {
+			ErrorType string `json:"errorType"`
+			Title     string `json:"title"`
+		} `json:"error"`
+	} `json:"dependabotUpdate"`
+}
+
+func (a gqlDependabotAlert) update() domain.DependabotUpdate {
+	u := a.DependabotUpdate
+	switch {
+	case u == nil:
+		return domain.DependabotUpdate{State: domain.DependabotUpdateNone}
+	case u.PullRequest != nil:
+		return domain.DependabotUpdate{State: domain.DependabotUpdatePullRequest, PullRequestNumber: u.PullRequest.Number, PullRequestURL: u.PullRequest.URL}
+	case u.Error != nil:
+		return domain.DependabotUpdate{State: domain.DependabotUpdateError, ErrorType: u.Error.ErrorType, ErrorTitle: u.Error.Title}
+	}
+	return domain.DependabotUpdate{State: domain.DependabotUpdatePending}
 }
 
 // nextPageCursor is the after cursor of the rel="next" link in a Link header,

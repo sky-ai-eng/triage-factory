@@ -106,14 +106,21 @@ const (
 // GitHub vulnerable-package events: a package in a repository with open
 // Dependabot alerts (domain.EntityKindVulnerablePackage). Split on whether the
 // package needs attention: an alert opening says it does, the last alert
-// closing says it no longer does. An alert closing while another stays open
-// changes nothing that needs attention and emits nothing; severity, scope and
-// the rest stay metadata.
+// closing says it no longer does, and Dependabot being unable to fix an alert
+// says it needs someone other than Dependabot. An alert closing while another
+// stays open changes nothing that needs attention and emits nothing; severity,
+// scope and the rest stay metadata.
 const (
 	// One per alert that is open now and was not open on the previous
 	// listing: created, reopened, or reintroduced. The dedup key is empty, so
 	// a second alert on a package folds into the task the first one made.
 	EventGitHubVulnerabilityAlertOpened = "github:vulnerability:alert_opened"
+	// One per open alert that became one Dependabot cannot fix: it has no
+	// patched version, or Dependabot's update for it reported an error
+	// (DependabotAlert.DependabotCannotFix). A task of its own beside the
+	// alert_opened one, so a trigger on it delegates only what Dependabot
+	// leaves undone. The dedup key is empty, as alert_opened's is.
+	EventGitHubVulnerabilityDependabotCannotFix = "github:vulnerability:dependabot_cannot_fix"
 	// The package has no open alert left. Terminating: it closes the entity
 	// and its tasks, and a later alert on the package creates a new entity.
 	EventGitHubVulnerabilityResolved = "github:vulnerability:resolved"
@@ -344,6 +351,7 @@ func AllEventTypes() []EventType {
 
 		// --- GitHub vulnerable packages (Dependabot alerts) ---
 		{ID: EventGitHubVulnerabilityAlertOpened, Source: "github", Category: "vulnerability", Label: "Vulnerability Alert Opened", Description: "A Dependabot alert opened on a package in a tracked repository: created, reopened, or reintroduced. Alerts already open when Triage Factory first lists the repository emit too, one event each"},
+		{ID: EventGitHubVulnerabilityDependabotCannotFix, Source: "github", Category: "vulnerability", Label: "Dependabot Cannot Fix", Description: "Dependabot cannot fix an open alert on a package in a tracked repository: no patched version has been released, or Dependabot tried to open a pull request for it and reported an error. Each alert emits once, including alerts already in that state when Triage Factory first lists the repository"},
 		{ID: EventGitHubVulnerabilityResolved, Source: "github", Category: "vulnerability", Label: "Vulnerability Resolved", Description: "A package in a tracked repository has no open Dependabot alert left: each was fixed or dismissed"},
 		{ID: EventGitHubVulnerabilityUnreachable, Source: "github", Category: "vulnerability", Label: "Vulnerability Unreachable", Description: "Triage Factory no longer follows a vulnerable package: the org's GitHub base URL now names another host, or the org's credential can no longer read the repository's Dependabot alerts, or they were turned off. Says nothing about whether the alerts were fixed"},
 

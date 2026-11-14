@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
@@ -55,13 +56,23 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 //   - a package with open alerts and no active entity gets one;
 //   - each alert open now that the package's stored snapshot did not hold
 //     emits github:vulnerability:alert_opened;
+//   - each open alert that becomes one Dependabot cannot fix emits
+//     github:vulnerability:dependabot_cannot_fix;
 //   - a package TF holds that has no open alert left emits
 //     github:vulnerability:resolved, whose terminating close closes the
 //     entity. A later alert on the package creates a new entity.
 //
+// What Dependabot did about each alert comes from a second read, of GitHub's
+// GraphQL alert objects (ghclient.ListDependabotUpdates), which the REST
+// listing does not carry and whose change no ETag or webhook reports. It is
+// made when the listing finds an alert opening and otherwise on a schedule
+// that thins out as the alerts age (dependabotUpdateRecheck), whether or not
+// the listing was answered 304.
+//
 // A new entity's snapshot starts empty, so the listing that creates it emits
-// alert_opened for every alert open on the package, including alerts that
-// opened before TF first listed the repository: an open alert needs attention
+// alert_opened for every alert open on the package, and dependabot_cannot_fix
+// for every one of them Dependabot cannot fix, including alerts that opened
+// before TF first listed the repository: an open alert needs attention
 // however long it has been open, as a check already failing on a pull request
 // TF has just found does. A repository's first listing therefore announces
 // every open alert, and so does the first listing after the org returns to a
@@ -110,6 +121,7 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 	}
 	var events atomic.Int64
 	var stopped atomic.Bool
+	reads := &updateReads{}
 	// done is written by each listing's goroutine at its own index, and read
 	// once Wait has returned.
 	done := make([]bool, len(repos))
@@ -129,7 +141,7 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 				stopped.Store(true)
 				return err
 			}
-			n, announced, err := t.refreshRepositoryAlerts(ctx, scope, client, l, held[l.Repository.ID])
+			n, announced, err := t.refreshRepositoryAlerts(ctx, scope, client, l, held[l.Repository.ID], reads)
 			events.Add(int64(n))
 			if err == nil && announced > 0 && missedAlertHint(l, held[l.Repository.ID]) {
 				recordMissedHint(t.orgID, missedHintDependabotListing)
@@ -279,11 +291,20 @@ func (t *Tracker) heldVulnerablePackages(ctx context.Context, scope string, repo
 }
 
 // refreshRepositoryAlerts lists one repository's open alerts and applies
-// them to its packages. held is the repository's active packages by key.
-// emitted counts every event that landed on the queue, and announced the ones
-// the listing's diff produced (alert_opened and resolved), which leaves out
-// the closes owed to packages whose resolution landed on an earlier listing.
-func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, client *ghclient.Client, l AlertListing, held map[string]domain.Entity) (emitted, announced int, err error) {
+// them to its packages, reading what Dependabot did about them when that is
+// due (readDependabotUpdates). held is the repository's active packages by
+// key. emitted counts every event that landed on the queue, and announced the
+// alert_opened and resolved events the listing's diff produced, which leaves
+// out the closes owed to packages whose resolution landed on an earlier
+// listing and every dependabot_cannot_fix, which no webhook delivery
+// announces.
+//
+// A listing answered 304 opened and closed nothing, but Dependabot may have
+// acted on an alert since: the listing does not carry what it did, and GitHub
+// sends no webhook when an update fails. So a 304 still reads the updates of
+// the packages TF holds when they are due, and commits only what that read
+// changed.
+func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, client *ghclient.Client, l AlertListing, held map[string]domain.Entity, reads *updateReads) (emitted, announced int, err error) {
 	repo := l.Repository
 	condition := l.Access.AlertsETag
 	if l.Marked {
@@ -295,13 +316,26 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 	}
 	if notModified {
 		recordDependabotListing(dependabotListingNotModified)
-		// Nothing opened or closed. A package whose resolution was emitted
-		// and whose close has not landed is still owed one.
+		var refreshes []packageRefresh
 		for _, key := range slices.Sorted(maps.Keys(held)) {
-			if awaitingClose(held[key]) {
-				n, _ := t.oweVulnerablePackageClose(ctx, held[key])
+			e := held[key]
+			if awaitingClose(e) {
+				// Its resolution was emitted and its close has not landed,
+				// so it is still owed one.
+				n, _ := t.oweVulnerablePackageClose(ctx, e)
 				emitted += n
+				continue
 			}
+			if prev, ok := storedVulnerablePackageSnapshot(e); ok {
+				refreshes = append(refreshes, packageRefresh{entity: e, prev: prev, hasPrev: true, curr: prev})
+			}
+		}
+		if !t.readDependabotUpdates(ctx, client, repo, refreshes, reads) {
+			return emitted, 0, nil
+		}
+		for _, p := range refreshes {
+			n, _, _ := t.applyVulnerablePackage(ctx, p, repo)
+			emitted += n
 		}
 		return emitted, 0, nil
 	}
@@ -316,8 +350,9 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 		}
 	}
 
-	packages, updatedAt := groupDependabotAlerts(repo.Slug(), alerts)
+	packages := groupDependabotAlerts(repo.Slug(), alerts)
 	complete := true
+	var refreshes []packageRefresh
 	for _, key := range slices.Sorted(maps.Keys(packages)) {
 		snap := packages[key]
 		e, ok := held[key]
@@ -348,9 +383,14 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 			complete = false
 			continue
 		}
-		n, landed := t.applyVulnerablePackage(ctx, e, repo, snap, updatedAt)
+		prev, hasPrev := storedVulnerablePackageSnapshot(e)
+		refreshes = append(refreshes, packageRefresh{entity: e, prev: prev, hasPrev: hasPrev, curr: carryDependabotUpdates(prev, snap)})
+	}
+	t.readDependabotUpdates(ctx, client, repo, refreshes, reads)
+	for _, p := range refreshes {
+		n, a, landed := t.applyVulnerablePackage(ctx, p, repo)
 		emitted += n
-		announced += n
+		announced += a
 		complete = complete && landed
 	}
 	for _, key := range slices.Sorted(maps.Keys(held)) {
@@ -380,6 +420,147 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 	return emitted, announced, nil
 }
 
+// packageRefresh is one package a listing applies: its entity, the snapshot
+// stored on it (hasPrev false when there is none), and the snapshot it moves
+// to.
+type packageRefresh struct {
+	entity  domain.Entity
+	prev    domain.VulnerablePackageSnapshot
+	hasPrev bool
+	curr    domain.VulnerablePackageSnapshot
+}
+
+// updateReads is one pass's reads of what Dependabot did about its
+// repositories' alerts. A read that fails for a reason that would meet every
+// other repository too (a rate limit, a refused credential, GitHub failing)
+// stops the pass's later reads; the listings go on without them, and the next
+// poll reads again.
+type updateReads struct {
+	stopped atomic.Bool
+}
+
+// maxDependabotUpdateRecheck is the longest a package's Dependabot updates go
+// unread while it has open alerts, however settled they are: Dependabot tries
+// again when someone asks it to on the alert or turns security updates on, and
+// neither sends TF anything.
+const maxDependabotUpdateRecheck = 24 * time.Hour
+
+// dependabotUpdateRecheck is how long after its last read a package's
+// Dependabot updates are read again: a quarter of the age of its youngest
+// alert Dependabot may still act on (DependabotAlert.AwaitsDependabot), the
+// age being since GitHub last changed the alert, and at most
+// maxDependabotUpdateRecheck, which is also the interval for a package with no
+// such alert. Dependabot tries an alert soon after it opens, so a young alert
+// is read on nearly every poll, and the reads thin out as it ages: an alert
+// Dependabot never tries, on a repository with security updates off, costs
+// about one read a day once it is a few days old.
+func dependabotUpdateRecheck(s domain.VulnerablePackageSnapshot, now time.Time) time.Duration {
+	interval := maxDependabotUpdateRecheck
+	for _, a := range s.Alerts {
+		if a.AwaitsDependabot() && !a.UpdatedAt.IsZero() {
+			interval = min(interval, max(now.Sub(a.UpdatedAt)/4, 0))
+		}
+	}
+	return interval
+}
+
+// updatesDue reports whether the Dependabot updates of the packages in
+// refreshes are due a read at now: an alert is open in a package's curr that
+// its prev did not hold, so the events announcing it carry what Dependabot
+// has done about it, or a package's last read is older than its recheck
+// interval (dependabotUpdateRecheck).
+func updatesDue(refreshes []packageRefresh, now time.Time) bool {
+	for _, p := range refreshes {
+		for _, a := range p.curr.Alerts {
+			if _, held := p.prev.Alert(a.Number); !held {
+				return true
+			}
+		}
+		if now.Sub(p.curr.UpdatesReadAt) >= dependabotUpdateRecheck(p.curr, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// readDependabotUpdates reads what Dependabot did about the alerts of repo
+// when the packages in refreshes are due it (updatesDue), and moves each
+// package's curr to what the read says: an alert the answer names gets the
+// update it reports, one it does not name keeps the update curr has, and the
+// read's time is recorded. Reports whether it read; a failed read changes
+// nothing, so the packages are due again on the next poll. A failure that
+// says nothing about this repository alone stops the pass's later reads
+// (updateReads).
+func (t *Tracker) readDependabotUpdates(ctx context.Context, client *ghclient.Client, repo domain.Repository, refreshes []packageRefresh, reads *updateReads) bool {
+	now := t.updatesNow().UTC()
+	if len(refreshes) == 0 || reads.stopped.Load() || !updatesDue(refreshes, now) {
+		return false
+	}
+	updates, err := client.ListDependabotUpdates(ctx, repo.Owner, repo.Repo)
+	if err != nil {
+		recordDependabotUpdateRead(dependabotUpdateReadFailed)
+		if errors.Is(err, ghclient.ErrDependabotListingUnusable) {
+			trackerLog.WarnContext(ctx, "dependabot updates unreadable; the repository's are read again next cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
+			return false
+		}
+		reads.stopped.Store(true)
+		var rl *ghclient.ErrRateLimited
+		if !errors.As(err, &rl) {
+			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "read dependabot updates failed; the pass's other repositories are read next cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
+		}
+		return false
+	}
+	outcome := dependabotUpdateReadRead
+	for i := range refreshes {
+		if !withDependabotUpdates(&refreshes[i].curr, updates, now) {
+			outcome = dependabotUpdateReadIncomplete
+		}
+	}
+	recordDependabotUpdateRead(outcome)
+	return true
+}
+
+// updatesNow is the clock reads of Dependabot updates are scheduled on.
+func (t *Tracker) updatesNow() time.Time {
+	if t.updatesClock != nil {
+		return t.updatesClock()
+	}
+	return time.Now()
+}
+
+// withDependabotUpdates sets each of s's alerts that updates names to the
+// update it names, and the read time to readAt. complete reports whether
+// updates named every alert. s's alerts are copied first, so a snapshot that
+// shares them with a stored one leaves the stored one as it was.
+func withDependabotUpdates(s *domain.VulnerablePackageSnapshot, updates map[int]domain.DependabotUpdate, readAt time.Time) (complete bool) {
+	complete = true
+	s.Alerts = slices.Clone(s.Alerts)
+	for i, a := range s.Alerts {
+		u, ok := updates[a.Number]
+		if !ok {
+			complete = false
+			continue
+		}
+		s.Alerts[i].DependabotUpdate = &u
+	}
+	s.UpdatesReadAt = readAt
+	return complete
+}
+
+// carryDependabotUpdates is curr, a package as the listing gives it, with
+// what TF last read of Dependabot's updates carried over from prev, its
+// stored snapshot: each alert prev holds keeps its update, and the package
+// its read time. The listing does not carry them.
+func carryDependabotUpdates(prev, curr domain.VulnerablePackageSnapshot) domain.VulnerablePackageSnapshot {
+	for i, a := range curr.Alerts {
+		if p, ok := prev.Alert(a.Number); ok {
+			curr.Alerts[i].DependabotUpdate = p.DependabotUpdate
+		}
+	}
+	curr.UpdatesReadAt = prev.UpdatesReadAt
+	return curr
+}
+
 // awaitingClose reports whether e's stored snapshot already says the package
 // resolved: its resolution was emitted, and its close has not landed.
 func awaitingClose(e domain.Entity) bool {
@@ -389,10 +570,9 @@ func awaitingClose(e domain.Entity) bool {
 
 // groupDependabotAlerts groups a repository's open alerts into one snapshot per
 // package, keyed as the package's entity is, with each package's alerts
-// ordered by number. updatedAt is each alert's state-change time, by number.
-func groupDependabotAlerts(repoSlug string, alerts []ghclient.OpenDependabotAlert) (map[string]domain.VulnerablePackageSnapshot, map[int]time.Time) {
+// ordered by number.
+func groupDependabotAlerts(repoSlug string, alerts []ghclient.OpenDependabotAlert) map[string]domain.VulnerablePackageSnapshot {
 	packages := map[string]domain.VulnerablePackageSnapshot{}
-	updatedAt := make(map[int]time.Time, len(alerts))
 	for _, a := range alerts {
 		key := domain.VulnerablePackageSourceID(repoSlug, a.Ecosystem, a.Package)
 		snap, ok := packages[key]
@@ -401,33 +581,38 @@ func groupDependabotAlerts(repoSlug string, alerts []ghclient.OpenDependabotAler
 		}
 		snap.Alerts = append(snap.Alerts, a.Alert)
 		packages[key] = snap
-		updatedAt[a.Alert.Number] = a.UpdatedAt
 	}
 	for key, snap := range packages {
 		domain.SortDependabotAlerts(snap.Alerts)
 		packages[key] = snap
 	}
-	return packages, updatedAt
+	return packages
 }
 
-// applyVulnerablePackage commits curr, a package's open alerts, as entity e's
-// snapshot, with an alert_opened for each alert e's stored snapshot did not
-// hold, which is every alert when e has none stored. landed reports whether
-// the write went through. e's stored snapshot is not terminal
-// (awaitingClose).
-func (t *Tracker) applyVulnerablePackage(ctx context.Context, e domain.Entity, repo domain.Repository, curr domain.VulnerablePackageSnapshot, updatedAt map[int]time.Time) (emitted int, landed bool) {
-	prev, hasPrev := storedVulnerablePackageSnapshot(e)
-	evts := DiffVulnerablePackage(prev, curr, e.ID, repo.ID, updatedAt)
-	ok, enqueued, err := t.commitRefresh(ctx, t.orgID, e.ID, canonicalVulnerablePackageJSON(prev, hasPrev), mustJSON(curr), e.PollSeq, evts)
+// applyVulnerablePackage commits p.curr, a package's open alerts, as the
+// snapshot of p.entity, with the events DiffVulnerablePackage finds against
+// p.prev, which hold every alert when the entity has no snapshot stored.
+// announced counts the alert_opened events among those that landed, and
+// landed reports whether the write went through. The entity's stored
+// snapshot is not terminal (awaitingClose).
+func (t *Tracker) applyVulnerablePackage(ctx context.Context, p packageRefresh, repo domain.Repository) (emitted, announced int, landed bool) {
+	e := p.entity
+	evts := DiffVulnerablePackage(p.prev, p.curr, e.ID, repo.ID)
+	ok, enqueued, err := t.commitRefresh(ctx, t.orgID, e.ID, canonicalVulnerablePackageJSON(p.prev, p.hasPrev), mustJSON(p.curr), e.PollSeq, evts)
 	if err != nil {
 		trackerLog.ErrorContext(ctx, "commit vulnerable package snapshot failed", "org", t.orgID, "source_id", e.SourceID, "error", err)
-		return 0, false
+		return 0, 0, false
 	}
 	if !ok {
 		trackerLog.WarnContext(ctx, "vulnerable package snapshot CAS lost race, skipping", "org", t.orgID, "source_id", e.SourceID)
-		return 0, false
+		return 0, 0, false
 	}
-	return enqueued, true
+	for _, evt := range evts {
+		if evt.EventType == domain.EventGitHubVulnerabilityAlertOpened {
+			announced++
+		}
+	}
+	return enqueued, announced, true
 }
 
 // resolveVulnerablePackage applies a listing that holds no open alert of the
@@ -450,7 +635,7 @@ func (t *Tracker) resolveVulnerablePackage(ctx context.Context, e domain.Entity,
 	curr := prev
 	curr.Repo = repo.Slug()
 	curr.Alerts = []domain.DependabotAlert{}
-	evts := DiffVulnerablePackage(prev, curr, e.ID, repo.ID, nil)
+	evts := DiffVulnerablePackage(prev, curr, e.ID, repo.ID)
 	ok, enqueued, err := t.commitRefresh(ctx, t.orgID, e.ID, mustJSON(prev), mustJSON(curr), e.PollSeq, evts)
 	if err != nil {
 		trackerLog.ErrorContext(ctx, "commit vulnerable package resolution failed", "org", t.orgID, "source_id", e.SourceID, "error", err)
@@ -484,23 +669,26 @@ func (t *Tracker) oweVulnerablePackageClose(ctx context.Context, e domain.Entity
 }
 
 // DiffVulnerablePackage is the events a package's snapshot moving from prev to
-// curr implies: an alert_opened for each alert open in curr whose number prev
-// did not hold, and a resolved when prev held open alerts and curr holds none.
-// An alert closing while another stays open emits nothing. updatedAt is each
-// alert's state-change time by number, which an alert_opened takes as when it
-// occurred; nil leaves it unknown.
-func DiffVulnerablePackage(prev, curr domain.VulnerablePackageSnapshot, entityID, repositoryID string, updatedAt map[int]time.Time) []domain.Event {
+// curr implies, in this order for each alert open in curr:
+//
+//   - an alert_opened when prev did not hold its number, at the alert's
+//     UpdatedAt, naming the pull request Dependabot opened for it when curr
+//     records one;
+//   - a dependabot_cannot_fix when Dependabot cannot fix it
+//     (DependabotAlert.DependabotCannotFix) and could fix it, or might yet, in
+//     prev, which is every such alert prev did not hold.
+//
+// Then a resolved when prev held open alerts and curr holds none. An alert
+// closing while another stays open emits nothing, and neither does any other
+// change to an alert: its update, its severity, its patched version.
+func DiffVulnerablePackage(prev, curr domain.VulnerablePackageSnapshot, entityID, repositoryID string) []domain.Event {
 	var evts []domain.Event
 	now := time.Now()
 	highest := curr.HighestSeverity()
 	for _, a := range curr.Alerts {
-		if _, wasOpen := prev.Alert(a.Number); wasOpen {
-			continue
-		}
-		evts = append(evts, domain.Event{
-			EventType: domain.EventGitHubVulnerabilityAlertOpened,
-			EntityID:  &entityID,
-			MetadataJSON: mustJSON(events.GitHubVulnerabilityAlertOpenedMetadata{
+		was, wasOpen := prev.Alert(a.Number)
+		if !wasOpen {
+			m := events.GitHubVulnerabilityAlertOpenedMetadata{
 				Repo:                   curr.Repo,
 				RepositoryID:           repositoryID,
 				Ecosystem:              curr.Ecosystem,
@@ -515,9 +703,49 @@ func DiffVulnerablePackage(prev, curr domain.VulnerablePackageSnapshot, entityID
 				VulnerableVersionRange: a.VulnerableVersionRange,
 				FirstPatchedVersion:    a.FirstPatchedVersion,
 				HighestSeverity:        highest,
-			}),
-			OccurredAt: updatedAt[a.Number],
-			CreatedAt:  now,
+			}
+			if u := a.DependabotUpdate; u != nil && u.State == domain.DependabotUpdatePullRequest {
+				m.DependabotPullRequestNumber = u.PullRequestNumber
+				m.DependabotPullRequestURL = u.PullRequestURL
+			}
+			evts = append(evts, domain.Event{
+				EventType:    domain.EventGitHubVulnerabilityAlertOpened,
+				EntityID:     &entityID,
+				MetadataJSON: mustJSON(m),
+				OccurredAt:   a.UpdatedAt,
+				CreatedAt:    now,
+			})
+		}
+		reason := a.DependabotCannotFix()
+		if reason == "" || (wasOpen && was.DependabotCannotFix() != "") {
+			continue
+		}
+		m := events.GitHubVulnerabilityDependabotCannotFixMetadata{
+			Repo:                   curr.Repo,
+			RepositoryID:           repositoryID,
+			Ecosystem:              curr.Ecosystem,
+			Package:                curr.Package,
+			AlertNumber:            a.Number,
+			GHSAID:                 a.GHSAID,
+			CVEID:                  a.CVEID,
+			Summary:                a.Summary,
+			Severity:               a.Severity,
+			ManifestPath:           a.ManifestPath,
+			Scope:                  a.Scope,
+			VulnerableVersionRange: a.VulnerableVersionRange,
+			FirstPatchedVersion:    a.FirstPatchedVersion,
+			HighestSeverity:        highest,
+			Reason:                 reason,
+		}
+		if u := a.DependabotUpdate; u != nil && u.State == domain.DependabotUpdateError {
+			m.ErrorType = u.ErrorType
+			m.ErrorTitle = u.ErrorTitle
+		}
+		evts = append(evts, domain.Event{
+			EventType:    domain.EventGitHubVulnerabilityDependabotCannotFix,
+			EntityID:     &entityID,
+			MetadataJSON: mustJSON(m),
+			CreatedAt:    now,
 		})
 	}
 	if !prev.Terminal() && curr.Terminal() {
