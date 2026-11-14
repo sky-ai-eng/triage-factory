@@ -607,10 +607,21 @@ func fakeGHEReads(t *testing.T) (srv *httptest.Server, pullReads func() int, bra
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
 			var envelope struct {
-				Query string `json:"query"`
+				Query     string         `json:"query"`
+				Variables map[string]any `json:"variables"`
 			}
 			_ = json.Unmarshal(body, &envelope)
 			switch {
+			case strings.Contains(envelope.Query, "query NodeSubject("):
+				// The injector's own lookup of a node id the agent read.
+				switch envelope.Variables["id"] {
+				case "PR_open":
+					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":42,"repository":{"nameWithOwner":"octo/repo"}}}}`))
+				case "IC_open":
+					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":{"number":7},"repository":{"nameWithOwner":"octo/repo"}}}}`))
+				default:
+					_, _ = w.Write([]byte(`{"data":{"node":null}}`))
+				}
 			case strings.Contains(envelope.Query, "PullRequestForBranch"), strings.Contains(envelope.Query, "PullRequestList"):
 				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequests":{"totalCount":0,"nodes":[],` +
 					`"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}`))
@@ -656,6 +667,10 @@ func fakeGHEReads(t *testing.T) (srv *httptest.Server, pullReads func() int, bra
 			_, _ = w.Write([]byte(`{"number":7,"node_id":"I_open"}`))
 		case path == "/repos/octo/repo/issues/7/comments":
 			_, _ = w.Write([]byte(`[]`))
+		case path == "/repos/octo/repo/pulls/comments/9001":
+			_, _ = w.Write([]byte(`{"id":9001,"node_id":"PRRC_open","pull_request_url":"https://ghe.test/api/v3/repos/octo/repo/pulls/42"}`))
+		case path == "/repos/octo/repo/issues/comments/7001":
+			_, _ = w.Write([]byte(`{"id":7001,"node_id":"IC_open","issue_url":"https://ghe.test/api/v3/repos/octo/repo/issues/7"}`))
 		case path == "/repos/octo/repo":
 			_, _ = w.Write([]byte(repoJSON))
 		default:
@@ -709,6 +724,15 @@ func TestGHWire_AddressedReadsAreTouched(t *testing.T) {
 		{args: []string{"api", "graphql", "-F", "owner=octo", "-F", "name=repo", "-F", "number=42", "-f",
 			`query=query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner, name:$name) { pullRequest(number:$number) { title } } }`},
 			want: []ObservedRead{pull}},
+
+		// A comment by its own id, and an object or a comment by node id. The
+		// fixture answers the agent's own node query with a repository, so
+		// what is touched can only come from the injector's lookup.
+		{args: []string{"api", "repos/octo/repo/pulls/comments/9001"}, want: []ObservedRead{pull}},
+		{args: []string{"api", "repos/octo/repo/issues/comments/7001"}, want: []ObservedRead{issue}},
+		{args: []string{"api", "graphql", "-f", `query={ node(id: "PR_open") { ... on PullRequest { title } } }`}, want: []ObservedRead{pull}},
+		{args: []string{"api", "graphql", "-F", "id=IC_open", "-f", `query=query($id:ID!){ node(id:$id) { id } }`}, want: []ObservedRead{issue}},
+		{args: []string{"api", "graphql", "-f", `query={ node(id: "PR_unknown") { id } }`}},
 
 		// A lookup by branch name, the one gh makes for a command given a
 		// branch or no number at all. The rule follows the request, so a list

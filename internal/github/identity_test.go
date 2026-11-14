@@ -2,7 +2,10 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -310,6 +313,211 @@ func TestIdentityReader_OpenPullForBranchMismatchIsAnError(t *testing.T) {
 	f.status = http.StatusNotFound
 	if got, err := NewIdentityReader().OpenPullForBranch(context.Background(), c, "octo", "api", "feature"); err == nil {
 		t.Errorf("OpenPullForBranch on a refused lookup = %+v, want an error", got)
+	}
+}
+
+// TestIdentityReader_CommentSubject: a comment read by its own id answers the
+// number of the object it is on, from the link of that object the comment
+// carries, in either numbering and under a GHES prefix. Each comment is read
+// once per reader.
+func TestIdentityReader_CommentSubject(t *testing.T) {
+	f, c := newIdentityFixture(t, map[string]string{
+		"/repos/octo/api/pulls/comments/9001":  `{"id": 9001, "node_id": "PRRC_kw", "pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`,
+		"/repos/octo/api/issues/comments/9001": `{"id": 9001, "node_id": "IC_kw", "issue_url": "https://ghe.example.com/api/v3/repos/octo/renamed/issues/9"}`,
+	})
+	r := NewIdentityReader()
+	// The second spelling is answered from the cache: names fold case.
+	for _, owner := range []string{"octo", "OCTO"} {
+		if n, err := r.CommentSubject(context.Background(), c, owner, "api", domain.GitHubReviewComment, 9001); err != nil || n != 7 {
+			t.Errorf("review comment's subject = %d, %v; want 7", n, err)
+		}
+		if n, err := r.CommentSubject(context.Background(), c, owner, "api", domain.GitHubIssueComment, 9001); err != nil || n != 9 {
+			t.Errorf("conversation comment's subject = %d, %v; want 9", n, err)
+		}
+	}
+	if n := f.total(); n != 2 {
+		t.Errorf("reads = %d, want one per comment", n)
+	}
+}
+
+func TestIdentityReader_CommentSubjectMismatchIsAnError(t *testing.T) {
+	const path = "/repos/octo/api/pulls/comments/9001"
+	cases := map[string]string{
+		"another comment":                    `{"id": 9002, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`,
+		"no id":                              `{"pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`,
+		"no link":                            `{"id": 9001}`,
+		"the other numbering's link":         `{"id": 9001, "issue_url": "https://api.github.com/repos/octo/api/issues/7"}`,
+		"a link to another kind of object":   `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/commits/7"}`,
+		"a link with no number":              `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/x"}`,
+		"a link that is a path":              `{"id": 9001, "pull_request_url": "/repos/octo/api/pulls/7"}`,
+		"a link to a number that is no item": `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/0"}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, c := newIdentityFixture(t, map[string]string{path: body})
+			if n, err := NewIdentityReader().CommentSubject(context.Background(), c, "octo", "api", domain.GitHubReviewComment, 9001); err == nil {
+				t.Errorf("CommentSubject = %d, want an error", n)
+			}
+		})
+	}
+
+	// A failed read is not cached.
+	f, c := newIdentityFixture(t, map[string]string{})
+	r := NewIdentityReader()
+	if _, err := r.CommentSubject(context.Background(), c, "octo", "api", domain.GitHubReviewComment, 9001); err == nil {
+		t.Fatal("a missing comment answered a subject")
+	}
+	f.mu.Lock()
+	f.bodies[path] = `{"id": 9001, "pull_request_url": "https://api.github.com/repos/octo/api/pulls/7"}`
+	f.mu.Unlock()
+	if n, err := r.CommentSubject(context.Background(), c, "octo", "api", domain.GitHubReviewComment, 9001); err != nil || n != 7 {
+		t.Errorf("CommentSubject after the comment appeared = %d, %v; want 7", n, err)
+	}
+	if _, err := r.CommentSubject(context.Background(), c, "octo", "api", "other", 9001); err == nil {
+		t.Error("a numbering outside the two answered a subject")
+	}
+}
+
+// nodeAnswers is a Querier that answers NodeSubject's query from a node id →
+// response table, counting the queries, and fails for an id it does not hold.
+type nodeAnswers struct {
+	mu      sync.Mutex
+	answers map[string]string
+	queries int
+}
+
+func (q *nodeAnswers) PostGraphQL(_ context.Context, query string, variables map[string]any) ([]byte, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.queries++
+	if !strings.Contains(query, "query NodeSubject(") {
+		return nil, errors.New("not the node query")
+	}
+	id, _ := variables["id"].(string)
+	body, ok := q.answers[id]
+	if !ok {
+		return nil, errors.New("no answer")
+	}
+	return []byte(body), nil
+}
+
+// TestIdentityReader_NodeSubject: a node id answers the pull request or issue
+// it names, or the one the comment, review or review thread it names is on, in
+// the repository GitHub names now; any other kind of node answers nothing.
+// Every answer is read once per reader.
+func TestIdentityReader_NodeSubject(t *testing.T) {
+	q := &nodeAnswers{answers: map[string]string{
+		"PR_kw7":   `{"data":{"node":{"__typename":"PullRequest","number":7,"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"I_kw9":    `{"data":{"node":{"__typename":"Issue","number":9,"repository":{"nameWithOwner":"octo/renamed"}}}}`,
+		"IC_onPR":  `{"data":{"node":{"__typename":"IssueComment","commentPullRequest":{"number":7},"issue":{"number":7},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"IC_onI":   `{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":{"number":9},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRRC_kw":  `{"data":{"node":{"__typename":"PullRequestReviewComment","pullRequest":{"number":7},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRR_kw":   `{"data":{"node":{"__typename":"PullRequestReview","pullRequest":{"number":8},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRRT_kw":  `{"data":{"node":{"__typename":"PullRequestReviewThread","pullRequest":{"number":8},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"U_kwUser": `{"data":{"node":{"__typename":"User"}}}`,
+	}}
+	r := NewIdentityReader()
+	want := map[string]NodeSubject{
+		"PR_kw7":   {Owner: "octo", Repo: "api", Number: 7},
+		"I_kw9":    {Owner: "octo", Repo: "renamed", Number: 9},
+		"IC_onPR":  {Owner: "octo", Repo: "api", Number: 7},
+		"IC_onI":   {Owner: "octo", Repo: "api", Number: 9},
+		"PRRC_kw":  {Owner: "octo", Repo: "api", Number: 7},
+		"PRR_kw":   {Owner: "octo", Repo: "api", Number: 8},
+		"PRRT_kw":  {Owner: "octo", Repo: "api", Number: 8},
+		"U_kwUser": {},
+	}
+	for range 2 {
+		for id, w := range want {
+			if got, err := r.NodeSubject(context.Background(), q, id); err != nil || got != w {
+				t.Errorf("NodeSubject(%s) = %+v, %v; want %+v", id, got, err, w)
+			}
+		}
+	}
+	if q.queries != len(want) {
+		t.Errorf("queries = %d, want one per node id", q.queries)
+	}
+}
+
+func TestIdentityReader_NodeSubjectFailuresAreNotCached(t *testing.T) {
+	q := &nodeAnswers{answers: map[string]string{
+		"PR_null":     `{"data":{"node":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a node"}]}`,
+		"PR_noRepo":   `{"data":{"node":{"__typename":"PullRequest","number":7}}}`,
+		"PR_noNum":    `{"data":{"node":{"__typename":"PullRequest","repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PR_badRepo":  `{"data":{"node":{"__typename":"PullRequest","number":7,"repository":{"nameWithOwner":"octo"}}}}`,
+		"IC_noParent": `{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":null,"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRRT_noPull": `{"data":{"node":{"__typename":"PullRequestReviewThread","repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PR_garbled":  `not json`,
+	}}
+	r := NewIdentityReader()
+	for id := range q.answers {
+		if got, err := r.NodeSubject(context.Background(), q, id); err == nil {
+			t.Errorf("NodeSubject(%s) = %+v, want an error", id, got)
+		}
+	}
+	if _, err := r.NodeSubject(context.Background(), q, "PR_unanswered"); err == nil {
+		t.Error("a failed query answered a subject")
+	}
+	if _, err := r.NodeSubject(context.Background(), q, ""); err == nil {
+		t.Error("an empty node id answered a subject")
+	}
+	before := q.queries
+	for id := range q.answers {
+		_, _ = r.NodeSubject(context.Background(), q, id)
+	}
+	if q.queries != before+len(q.answers) {
+		t.Errorf("queries after the failures = %d, want each asked again", q.queries-before)
+	}
+}
+
+// TestTokenQuerier: the querier posts the document and its variables with the
+// credential, answers the body of a response with data, errors beside it
+// included, and fails a non-2xx or a response with no data.
+func TestTokenQuerier(t *testing.T) {
+	var sawAuth, sawBody string
+	status, answer := http.StatusOK, `{"data":{"node":{"__typename":"User"}},"errors":[{"type":"FORBIDDEN","message":"x"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		sawBody = string(body)
+		if r.Method != http.MethodPost || r.URL.Path != "/api/graphql" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, answer)
+	}))
+	defer srv.Close()
+	q := NewTokenQuerier(srv.URL+"/api/graphql", func(context.Context) (string, error) { return "ghs_real", nil }, nil)
+
+	body, err := q.PostGraphQL(context.Background(), "query Q($id: ID!) { node(id: $id) { id } }", map[string]any{"id": "PR_x"})
+	if err != nil || string(body) != answer {
+		t.Fatalf("PostGraphQL = %q, %v; want the body with data", body, err)
+	}
+	if sawAuth != "token ghs_real" {
+		t.Errorf("authorization = %q, want the credential", sawAuth)
+	}
+	var sent struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}
+	if err := json.Unmarshal([]byte(sawBody), &sent); err != nil || !strings.HasPrefix(sent.Query, "query Q(") || sent.Variables["id"] != "PR_x" {
+		t.Errorf("sent %q, want the document and its variables", sawBody)
+	}
+
+	for name, c := range map[string]struct {
+		status int
+		answer string
+	}{
+		"no data":   {http.StatusOK, `{"errors":[{"type":"RATE_LIMITED","message":"spent"}]}`},
+		"null data": {http.StatusOK, `{"data":null}`},
+		"not json":  {http.StatusOK, `<html>`},
+		"a non-2xx": {http.StatusBadGateway, `{"message":"bad gateway"}`},
+	} {
+		status, answer = c.status, c.answer
+		if body, err := q.PostGraphQL(context.Background(), "query Q { viewer { login } }", nil); err == nil {
+			t.Errorf("%s: PostGraphQL = %q, want an error", name, body)
+		}
 	}
 }
 

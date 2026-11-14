@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func TestClassifyRead(t *testing.T) {
@@ -51,6 +53,53 @@ func TestClassifyRead(t *testing.T) {
 	for _, tc := range none {
 		if got, ok := ClassifyRead(tc.method, tc.path); ok {
 			t.Errorf("ClassifyRead(%s %s) = %+v, want nothing addressed", tc.method, tc.path, got)
+		}
+	}
+}
+
+func TestClassifyCommentRead(t *testing.T) {
+	issueComment := CommentRef{Owner: "octo", Repo: "repo", Space: domain.GitHubIssueComment, ID: 9001}
+	reviewComment := CommentRef{Owner: "octo", Repo: "repo", Space: domain.GitHubReviewComment, ID: 9001}
+	addressed := map[string]CommentRef{
+		"/repos/octo/repo/issues/comments/9001":           issueComment,
+		"/repos/octo/repo/issues/comments/9001/reactions": issueComment,
+		"/repos/octo/repo/pulls/comments/9001":            reviewComment,
+		"/repos/octo/repo/pulls/comments/9001/reactions":  reviewComment,
+		"/api/v3/repos/octo/repo/pulls/comments/9001":     reviewComment,
+	}
+	for path, want := range addressed {
+		if got, ok := ClassifyCommentRead("GET", path); !ok || got != want {
+			t.Errorf("ClassifyCommentRead(GET %s) = %+v, %v; want %+v", path, got, ok, want)
+		}
+	}
+
+	none := []struct{ method, path string }{
+		// A repository's comments are a set, and a comment under a numbered
+		// object is that object's read (ClassifyRead).
+		{"GET", "/repos/octo/repo/issues/comments"},
+		{"GET", "/repos/octo/repo/pulls/comments"},
+		{"GET", "/repos/octo/repo/issues/42/comments"},
+		{"GET", "/repos/octo/repo/pulls/42/comments"},
+		{"GET", "/repos/octo/repo/commits/abc/comments"},
+		{"GET", "/repos/octo/repo/comments/9001"},
+		{"GET", "/repos/octo/repo/issues/events/9001"},
+		{"GET", "/repos/octo/repo/issues/comments/0"},
+		{"GET", "/repos/octo/repo/issues/comments/-4"},
+		{"GET", "/repos/octo/repo/issues/comments/x"},
+		{"GET", "/repos/../repo/issues/comments/9001"},
+		// A write is the write audit's.
+		{"PATCH", "/repos/octo/repo/issues/comments/9001"},
+		{"DELETE", "/repos/octo/repo/pulls/comments/9001"},
+	}
+	for _, tc := range none {
+		if got, ok := ClassifyCommentRead(tc.method, tc.path); ok {
+			t.Errorf("ClassifyCommentRead(%s %s) = %+v, want nothing addressed", tc.method, tc.path, got)
+		}
+	}
+	// The two readers never both claim one path.
+	for path := range addressed {
+		if ref, ok := ClassifyRead("GET", path); ok {
+			t.Errorf("ClassifyRead(GET %s) = %+v; a comment's path names no pull request or issue", path, ref)
 		}
 	}
 }
@@ -152,7 +201,7 @@ func TestParseGraphQLRead_PorcelainDocuments(t *testing.T) {
 // assertAddressed compares what a request addressed with what it should have.
 func assertAddressed(t *testing.T, got, want AddressedReads) {
 	t.Helper()
-	if !slices.Equal(got.Objects, want.Objects) || !slices.Equal(got.Branches, want.Branches) {
+	if !slices.Equal(got.Objects, want.Objects) || !slices.Equal(got.Branches, want.Branches) || !slices.Equal(got.Nodes, want.Nodes) {
 		t.Errorf("addressed %+v, want %+v", got, want)
 	}
 }
@@ -217,10 +266,6 @@ func TestParseGraphQLRead_HandWritten(t *testing.T) {
 		{
 			name:  "a search",
 			query: `{ search(query: "repo:octo/repo is:pr", type: ISSUE, first: 10) { nodes { ... on PullRequest { number } } } }`,
-		},
-		{
-			name:  "a node lookup",
-			query: `{ node(id: "PR_kwX") { ... on PullRequest { number } } }`,
 		},
 		{
 			name:  "a repository with no object",
@@ -396,6 +441,66 @@ func TestParseGraphQLRead_Branches(t *testing.T) {
 	}
 }
 
+// A node selected by id at the query's top level addresses the node id, as a
+// literal or a variable, beside whatever else the query addresses; a node id
+// anywhere else, or in a shape no node id has, addresses nothing.
+func TestParseGraphQLRead_Nodes(t *testing.T) {
+	cases := []struct {
+		name      string
+		query     string
+		variables map[string]any
+		want      AddressedReads
+	}{
+		{
+			name:  "a literal",
+			query: `{ node(id: "PR_kwX") { ... on PullRequest { number } } }`,
+			want:  AddressedReads{Nodes: []string{"PR_kwX"}},
+		},
+		{
+			name:      "variables, aliased, beside a repository",
+			query:     `query($a: ID!, $b: ID!) { x: node(id: $a) { id } y: node(id: $b) { ... on Issue { title } } repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } } }`,
+			variables: map[string]any{"a": "PR_kwDOA", "b": "MDU6SXNzdWUxMjM0NTY3ODk="},
+			want: AddressedReads{
+				Objects: []ObjectRef{{Owner: "octo", Repo: "repo", Number: 42}},
+				Nodes:   []string{"PR_kwDOA", "MDU6SXNzdWUxMjM0NTY3ODk="},
+			},
+		},
+		{
+			name:  "the same node twice is one, and another casing is another",
+			query: `{ a: node(id: "IC_kwDOA") { id } b: node(id: "IC_kwDOA") { id } c: node(id: "ic_kwdoa") { id } }`,
+			want:  AddressedReads{Nodes: []string{"IC_kwDOA", "ic_kwdoa"}},
+		},
+
+		// What addresses nothing.
+		{
+			name:  "a node below the top level",
+			query: `{ viewer { node(id: "PR_kwX") { id } } repository(owner:"octo", name:"repo") { node(id: "PR_kwY") { id } } }`,
+		},
+		{
+			name:  "nodes, a set",
+			query: `{ nodes(ids: ["PR_kwX", "PR_kwY"]) { id } }`,
+		},
+		{
+			name:  "a node reached through a fragment",
+			query: `query { ...F } fragment F on Query { node(id: "PR_kwX") { id } }`,
+		},
+		{
+			name:      "a node id that is not one",
+			query:     `query($a: ID!, $b: ID!, $c: ID) { a: node(id: $a) { id } b: node(id: $b) { id } c: node(id: $c) { id } d: node(id: "PR_\u0041") { id } e: node(id: 7) { id } f: node(id: """PR_kwX""") { id } g: node(id: "") { id } h: node(id: "PR kwX") { id } i: node(id: null) { id } }`,
+			variables: map[string]any{"a": 7, "b": strings.Repeat("A", maxSubjectLength+1), "c": nil},
+		},
+		{
+			name:  "a node in a mutation is the write audit's",
+			query: `mutation { addComment(input: {subjectId: "PR_x", body: "hi"}) { subject { id } } node(id: "PR_x") { id } }`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertAddressed(t, ParseGraphQLRead(readEnvelope(t, tc.query, "", tc.variables)), tc.want)
+		})
+	}
+}
+
 // The shape a branch name is accepted in is git's own: each name here is one
 // `git branch` creates, or refuses, except that a name that is not UTF-8 is
 // refused here and not by git.
@@ -448,6 +553,18 @@ func TestParseGraphQLRead_Bounded(t *testing.T) {
 	if len(got.Objects) == 0 || len(got.Branches) == 0 {
 		t.Errorf("addressed %+v, want the bound filled in document order, with both", got)
 	}
+
+	// Node ids share the one bound.
+	doc.Reset()
+	doc.WriteString(`{`)
+	for i := 1; i <= maxAddressedReads; i++ {
+		doc.WriteString(` n` + strconv.Itoa(i) + `: node(id: "PR_` + strconv.Itoa(i) + `") { id }`)
+	}
+	doc.WriteString(` repository(owner:"octo", name:"repo") { pullRequest(number: 1) { id } } }`)
+	got = ParseGraphQLRead(readEnvelope(t, doc.String(), "", nil))
+	if len(got.Nodes) != maxAddressedReads || len(got.Objects) != 0 {
+		t.Errorf("addressed %d nodes and %d objects, want the bound %d in all", len(got.Nodes), len(got.Objects), maxAddressedReads)
+	}
 }
 
 // The read walk and the mutation reader agree on which a request is: nothing
@@ -457,6 +574,7 @@ func TestParseGraphQLRead_NeverNamesAWrite(t *testing.T) {
 		`mutation { repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } } }`,
 		`mutation { repository(owner:"octo", name:"repo") { pullRequests(headRefName: "feature") { totalCount } } }`,
 		`query A { repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } pullRequests(headRefName: "feature") { totalCount } } } mutation B { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }`,
+		`query A { node(id: "PR_x") { id } } mutation B { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }`,
 	} {
 		for _, operationName := range []string{"", "B"} {
 			body := readEnvelope(t, query, operationName, nil)
@@ -481,11 +599,17 @@ func FuzzParseGraphQLRead(f *testing.F) {
 	f.Add([]byte(`{"query":"query($h:String!){repository(owner:\"octo\",name:\"repo\"){pullRequests(headRefName:$h,first:30){nodes{number}}}}","variables":{"h":"feat/x"}}`))
 	f.Add([]byte(`{"query":"{repository(owner:\"octo\",name:\"repo\"){pullRequests(headRefName:\"a..b\"){totalCount}}}"}`))
 	f.Add([]byte(`repository`))
+	f.Add([]byte(`{"query":"query($id:ID!){a:node(id:$id){id} b:node(id:\"IC_kw\"){id}}","variables":{"id":"PR_kw"}}`))
 
 	f.Fuzz(func(t *testing.T, body []byte) {
 		got := ParseGraphQLRead(body)
-		if n := len(got.Objects) + len(got.Branches); n > maxAddressedReads {
-			t.Fatalf("addressed %d objects and branches, past the %d bound", n, maxAddressedReads)
+		if n := len(got.Objects) + len(got.Branches) + len(got.Nodes); n > maxAddressedReads {
+			t.Fatalf("addressed %d objects, branches and nodes, past the %d bound", n, maxAddressedReads)
+		}
+		for _, id := range got.Nodes {
+			if !validNodeID(id) {
+				t.Fatalf("addressed node %q, which is not a node id", id)
+			}
 		}
 		for _, ref := range got.Objects {
 			if !validRepoPart(ref.Owner) || !validRepoPart(ref.Repo) || ref.Number <= 0 {
