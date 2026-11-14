@@ -106,9 +106,10 @@ type CommentRef struct {
 // owner and name, whatever it selects under each, deduplicated and not
 // bounded by maxAddressedReads: it is what the injector's repository gate
 // checks, and a bound would leave the repositories past it unchecked.
-// UnreadRepository reports a top-level repository whose owner or name could
-// not be read in the shape of one, which therefore names a repository nobody
-// can check.
+// UnreadRepository reports a repository the read may name that nobody can
+// check: a top-level repository whose owner or name could not be read in the
+// shape of one, or a document that mentions a repository and that the reader
+// cannot walk.
 type AddressedReads struct {
 	Objects  []ObjectRef
 	Branches []BranchRef
@@ -228,8 +229,9 @@ var (
 // selected directly under it, and each `node(id:)` at that top level, with
 // aliases resolved. It names each such repository too, whatever is selected
 // under it (AddressedReads.Repositories). Empty for a mutation (the write
-// audit's), for a query that addresses nothing, and for a document the reader
-// cannot walk.
+// audit's) and for a query that addresses nothing. A document the reader
+// cannot walk addresses nothing, and is UnreadRepository when it mentions a
+// repository, since the gate cannot tell which one it names.
 //
 // It reads five argument values and no others: the repository's owner and
 // name, the object's number, the branch's name, and the node's id, each either
@@ -251,7 +253,9 @@ func ParseGraphQLRead(body []byte) AddressedReads {
 	}
 	ops, walked := parseReadOperations(envelope.Query)
 	if !walked {
-		return AddressedReads{}
+		// A document the walk cannot read may name any repository, and the
+		// repository gate refuses what it cannot settle.
+		return AddressedReads{UnreadRepository: strings.Contains(envelope.Query, readRepositoryField)}
 	}
 	op, selected := selectReadOperation(ops, envelope.OperationName)
 	if !selected || op.typ != gqlOperationQuery || (len(op.reads) == 0 && len(op.repositories) == 0) {

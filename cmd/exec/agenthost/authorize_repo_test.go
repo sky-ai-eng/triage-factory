@@ -226,9 +226,8 @@ func TestReviewDraft_ReadsThePullRequestThroughTheGate(t *testing.T) {
 }
 
 // TestLocalClient_GithubVerbsAreGatedInLocalMode: in local mode the exec-gh
-// verbs pass the repository gate they pass in multi mode, so an agent the
-// real-gh channel refuses a repository finds it refused here too. Untracked
-// and unchecked-out repositories are refused before any GitHub call, with a
+// verbs pass the repository gate they pass in multi mode. Untracked and
+// unchecked-out repositories are refused before any GitHub call, with a
 // denial row each, and a repository the run checked out is read.
 func TestLocalClient_GithubVerbsAreGatedInLocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)

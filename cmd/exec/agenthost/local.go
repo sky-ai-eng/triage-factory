@@ -1558,11 +1558,10 @@ func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo strin
 // through. In both modes it enforces the per-run repo gate (the run may only
 // touch a repo its team tracks AND that it has materialized — its eagerly-
 // cloned task repo, recorded in conversation_worktrees, or a workspace-add'd
-// one), the gate the real-`gh` channel's repository gate mirrors, so an agent
-// refused one has no way around it through the other. In MULTI mode it then
-// resolves a per-repo DOWN-SCOPED client (the injected token is narrowed to
-// owner/repo), memoized per repo so several calls in one subcommand mint once.
-// In LOCAL mode the client is the org's credential, unscoped.
+// one). In MULTI mode it then resolves a per-repo DOWN-SCOPED client (the
+// injected token is narrowed to owner/repo), memoized per repo so several
+// calls in one subcommand mint once. In LOCAL mode the client is the org's
+// credential, unscoped.
 func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if err := c.authorizeRepo(ctx, owner, repo); err != nil {
 		return nil, ghclient.IdentityUnknown, err

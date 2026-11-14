@@ -30,8 +30,9 @@ import (
 // answers 404 for is forwarded, so the agent gets GitHub's own not-found.
 //
 // Anything the gate cannot settle refuses: a set that cannot be read, an
-// answer from GitHub that cannot be read, and a name in a shape no repository
-// has. A wrong refusal costs a retry.
+// answer from GitHub that cannot be read, a name in a shape no repository
+// has, and a query that mentions a repository but cannot be read. A wrong
+// refusal costs a retry.
 //
 // It is courtesy isolation, not a boundary. A request can reach a repository
 // it does not name: a GraphQL lookup by node id, a search, a link followed out

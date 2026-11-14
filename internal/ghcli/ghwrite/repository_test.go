@@ -146,6 +146,12 @@ func TestParseGraphQLRead_Repositories(t *testing.T) {
 			query:  `{ repository(owner: OCTO, name:"repo") { id } }`,
 			unread: true,
 		},
+		{
+			// It may name any repository, so the gate cannot pass it.
+			name:   "a document the reader cannot walk",
+			query:  `{ repository(owner:"acme", name:"payments") { id }`,
+			unread: true,
+		},
 
 		// What names no repository here.
 		{name: "a repository below the top level", query: `{ organization(login: "acme") { repository(name: "payments") { id } } }`},
@@ -153,7 +159,7 @@ func TestParseGraphQLRead_Repositories(t *testing.T) {
 		{name: "a fragment at the top level", query: `query { ...F } fragment F on Query { repository(owner:"acme", name:"payments") { id } }`},
 		{name: "a mutation", query: `mutation { repository(owner:"acme", name:"payments") { id } }`},
 		{name: "a node lookup", query: `{ node(id: "R_x") { id } }`},
-		{name: "a document the reader cannot walk", query: `{ repository(owner:"acme", name:"payments") { id }`},
+		{name: "a document the reader cannot walk, naming none", query: `{ node(id: "R_x") { id }`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
