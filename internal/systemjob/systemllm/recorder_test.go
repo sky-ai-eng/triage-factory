@@ -133,7 +133,7 @@ func TestRecorder_RecordDirect_BuildsRow(t *testing.T) {
 	r.RecordDirect(context.Background(), Call{
 		OrgID:     "org-1",
 		Job:       JobRepoProfiler,
-		Model:     "claude-haiku-4-5-20251001",
+		Model:     "claude-haiku-5-5",
 		StartedAt: started,
 		Metadata:  map[string]any{"repo_count": 3},
 	}, "msg_abc123", DirectUsage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 3, CacheCreationTokens: 2}, 0.05, 250, false)
@@ -142,7 +142,7 @@ func TestRecorder_RecordDirect_BuildsRow(t *testing.T) {
 		t.Fatalf("recorded %d rows, want 1", len(fs.rows))
 	}
 	got := fs.rows[0]
-	if got.OrgID != "org-1" || got.Job != JobRepoProfiler || got.Model != "claude-haiku-4-5-20251001" {
+	if got.OrgID != "org-1" || got.Job != JobRepoProfiler || got.Model != "claude-haiku-5-5" {
 		t.Errorf("context fields wrong: %+v", got)
 	}
 	if got.TraceID != "msg_abc123" {

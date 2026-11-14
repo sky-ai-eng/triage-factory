@@ -97,7 +97,7 @@ func seedSQLiteSystemLLMRun(t *testing.T, conn *sql.DB, suffix string) string {
 		ID:        id,
 		OrgID:     runmode.LocalDefaultOrgID,
 		Job:       "memory-" + suffix,
-		Model:     "claude-haiku-4-5-20251001",
+		Model:     "claude-haiku-5-5",
 		StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed system_llm_runs: %v", err)

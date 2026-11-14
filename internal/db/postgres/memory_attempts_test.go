@@ -93,7 +93,7 @@ func seedPgSystemLLMRun(t *testing.T, h *pgtest.Harness, orgID, suffix string) s
 		ID:        id,
 		OrgID:     orgID,
 		Job:       "memory-" + suffix,
-		Model:     "claude-haiku-4-5-20251001",
+		Model:     "claude-haiku-5-5",
 		StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed system_llm_runs: %v", err)

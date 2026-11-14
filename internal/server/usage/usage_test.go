@@ -470,17 +470,17 @@ func seedUsageLocal(t *testing.T, s *localRig) (triggerID, blueprintName string)
 	// Autonomous run fired by the trigger (NULL creator, team-scoped).
 	exec(`INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at)
-		 VALUES ('r-auto', ?, ?, NULL, 'event', 'manual', ?, 'claude-haiku-4-5', 'open', ?)`,
+		 VALUES ('r-auto', ?, ?, NULL, 'event', 'manual', ?, 'claude-haiku-5-5', 'open', ?)`,
 		org, team, triggerID, t2)
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, model, cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'r-auto', 'assistant', '', 'work', 'claude-haiku-4-5', 0.25, 20, 2, 0, 0, ?)`,
+		 VALUES (?, 'r-auto', 'assistant', '', 'work', 'claude-haiku-5-5', 0.25, 20, 2, 0, 0, ?)`,
 		org, t2)
 	// System job (org-level, NULL team).
 	exec(`INSERT INTO system_llm_runs
 			(id, org_id, job, model, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
-		 VALUES ('sys-1', ?, 'scorer', 'claude-haiku-4-5', 0.05, 2, 1, 0, 0, ?)`,
+		 VALUES ('sys-1', ?, 'scorer', 'claude-haiku-5-5', 0.05, 2, 1, 0, 0, ?)`,
 		org, t2)
 	return triggerID, blueprintName
 }

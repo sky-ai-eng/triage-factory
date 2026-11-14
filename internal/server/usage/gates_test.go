@@ -101,15 +101,15 @@ func (r *usageRig) seedSpend(t *testing.T) {
 	}
 	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'open', $5)`,
 		[]any{r.orgID, r.teamA, r.member, when}, "claude-opus-4-8", 1.00)
-	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-4-5', 'open', $5)`,
-		[]any{r.orgID, r.teamA, triggerID, when}, "claude-haiku-4-5", 0.25)
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-5-5', 'open', $5)`,
+		[]any{r.orgID, r.teamA, triggerID, when}, "claude-haiku-5-5", 0.25)
 
 	// teamB: manual run by orgAdmin ($2.00).
 	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'open', $5)`,
 		[]any{r.orgID, r.teamB, r.orgAdmin, when}, "claude-opus-4-8", 2.00)
 
 	// System job ($0.05, org-level).
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO system_llm_runs (id, org_id, job, model, total_cost_usd, started_at) VALUES ($1, $2, 'scorer', 'claude-haiku-4-5', 0.05, $3)`,
+	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO system_llm_runs (id, org_id, job, model, total_cost_usd, started_at) VALUES ($1, $2, 'scorer', 'claude-haiku-5-5', 0.05, $3)`,
 		uuid.New().String(), r.orgID, when)
 }
 

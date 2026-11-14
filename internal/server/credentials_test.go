@@ -230,7 +230,7 @@ func TestSetupModelPicks(t *testing.T) {
 		return orgPick, teamPick
 	}
 
-	setBackgroundJobsModel(t, s, "claude-haiku-4-5-20251001")
+	setBackgroundJobsModel(t, s, "claude-haiku-5-5")
 	setTeamDefaultModel(t, s, "claude-sonnet-5")
 	if org, team := picks(); !org || !team {
 		t.Fatalf("picks = (org %v, team %v) with both stored; want both true", org, team)
@@ -243,7 +243,7 @@ func TestSetupModelPicks(t *testing.T) {
 		t.Errorf("picks = (org %v, team %v) with no background-jobs model; want (false, true)", org, team)
 	}
 
-	setBackgroundJobsModel(t, s, "claude-haiku-4-5-20251001")
+	setBackgroundJobsModel(t, s, "claude-haiku-5-5")
 	setTeamDefaultModel(t, s, "")
 	if org, team := picks(); !org || team {
 		t.Errorf("picks = (org %v, team %v) with no team default model; want (true, false)", org, team)

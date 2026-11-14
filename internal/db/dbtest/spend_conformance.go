@@ -113,11 +113,11 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		})
 		eventID := fx.Seeder.Conversation(t, ConversationSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event",
-			ActorAgentID: fx.AgentID, Model: "claude-haiku-4-5", Cost: spendCostPtr(0.25),
+			ActorAgentID: fx.AgentID, Model: "claude-haiku-5-5", Cost: spendCostPtr(0.25),
 			Tokens: SpendTokens{10, 20, 30, 40}, Status: SeedConcluded, StartedAt: t2,
 		})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{
-			Job: "scorer", Model: "claude-haiku-4-5", Cost: 0.05,
+			Job: "scorer", Model: "claude-haiku-5-5", Cost: 0.05,
 			Tokens: SpendTokens{1, 2, 3, 4}, StartedAt: t4,
 		})
 
@@ -163,7 +163,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertNilStr(t, "system.team_id", sr.TeamID)
 		assertNilStr(t, "system.creator_user_id", sr.CreatorUserID)
 		assertNilStr(t, "system.actor_agent_id", sr.ActorAgentID)
-		assertPtrEq(t, "system.model", sr.Model, "claude-haiku-4-5")
+		assertPtrEq(t, "system.model", sr.Model, "claude-haiku-5-5")
 		assertCost(t, "system.cost", sr.TotalCostUSD, 0.05)
 		assertTokens(t, "system", sr, SpendTokens{1, 2, 3, 4})
 	})

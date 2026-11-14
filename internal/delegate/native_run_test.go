@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -425,6 +426,24 @@ func TestNativeBashMemBudgetMB_StaysUnderTheCeiling(t *testing.T) {
 		budget := nativeBashMemBudgetMB(ceiling)
 		if budget >= ceiling {
 			t.Fatalf("ceiling %d MB yields a budget of %d MB, which leaves the jail no headroom", ceiling, budget)
+		}
+	}
+}
+
+// TestColdCompactionModelFor: Haiku 5.5 on the engagement's provider, offered
+// by the native universe so the whitelist and the price lookup hold; a key the
+// catalog does not know answers itself.
+func TestColdCompactionModelFor(t *testing.T) {
+	u := modelcatalog.UniverseFor(true)
+	for _, c := range []struct{ model, want string }{
+		{domain.ModelOpus, "claude-haiku-5-5"},
+		{"us.anthropic.claude-opus-5-5", "us.anthropic.claude-haiku-5-5"},
+		{"claude-nobody-ships", "claude-nobody-ships"},
+	} {
+		if got := coldCompactionModelFor(c.model); got != c.want {
+			t.Errorf("coldCompactionModelFor(%q) = %q, want %q", c.model, got, c.want)
+		} else if got != c.model && !u.Offers(got) {
+			t.Errorf("cold model %q is not offered by the native universe", got)
 		}
 	}
 }

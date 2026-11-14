@@ -87,6 +87,10 @@ type modelPrice struct {
 	// priced by the cache rates it publishes, not by this flag.
 	SupportsPromptCaching bool `json:"supports_prompt_caching"`
 
+	// A pointer, because most rows don't carry it and a silent row must not
+	// read as a refusal.
+	SupportsSamplingParams *bool `json:"supports_sampling_params"`
+
 	// MaxOutputTokens is the model's maximum completion length, read by
 	// ModelMaxOutput for the same reason MaxInputTokens is read by
 	// ModelWindow: the datasheet is already the vendored source of per-model
@@ -226,6 +230,17 @@ func ModelWindow(model string) (int, bool) {
 		return 0, false
 	}
 	return int(*price.MaxInputTokens), true
+}
+
+// acceptsSampling is false only for a model whose row says it refuses sampling
+// parameters; an unknown model or a silent row keeps the caller's temperature.
+func acceptsSampling(model string) bool {
+	table, err := loadPricing()
+	if err != nil || table == nil {
+		return true
+	}
+	p, ok := lookupPrice(table, model)
+	return !ok || p.SupportsSamplingParams == nil || *p.SupportsSamplingParams
 }
 
 // isPriceableMode reports whether a model's modality is one the text-cost path

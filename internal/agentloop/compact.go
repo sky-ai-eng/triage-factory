@@ -41,10 +41,10 @@ const (
 	// still fits comfortably under the hard limit.
 	DefaultCompactionThreshold = 0.80
 
-	// DefaultColdCompactionModel is the forced-shape call's model — the
-	// cheapest enabled model, which today is always haiku, so it ships as a
-	// constant until model configuration makes "cheapest enabled" resolvable.
-	DefaultColdCompactionModel = "claude-haiku-4-5"
+	// DefaultColdCompactionModel is the forced-shape call's model for a
+	// caller that sets none. The delegate sets one: it resolves the model per
+	// provider, because the id a credential can call differs between them.
+	DefaultColdCompactionModel = domain.ModelHaiku
 
 	// providerCacheTTL mirrors the stamping policy's unset default (the
 	// provider's 5-minute ephemeral TTL — see inference/cachecontrol.go).
@@ -282,8 +282,9 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 }
 
 // compactCold is the forced-shape call: nothing inherited, nothing that can
-// fail on format. A dedicated system prompt, the cheapest enabled model, and
-// exactly one tool the call is forced to use — the schema is the parse.
+// fail on format. A dedicated system prompt, the caller's cold-compaction
+// model, and exactly one tool the call is forced to use — the schema is the
+// parse.
 func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {

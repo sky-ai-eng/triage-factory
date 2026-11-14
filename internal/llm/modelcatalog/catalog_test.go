@@ -216,12 +216,17 @@ func TestLoad_ReportsEveryUnusableEntry(t *testing.T) {
 // stopped offering would leave existing configuration pointing at a model the
 // picker cannot show and the ledger cannot price. The registry is free to grow;
 // it may not drop one of these without the settings that reference them moving
-// in the same change.
+// in the same change. No Haiku 4.5 key is offered beside Haiku 5.5.
 func TestCatalog_OffersEveryTierID(t *testing.T) {
 	u := UniverseFor(true)
-	for _, id := range []string{domain.ModelHaiku, domain.ModelSonnet, domain.ModelOpus, domain.DefaultModel} {
+	for _, id := range []string{domain.ModelHaiku, domain.ModelSonnet, domain.ModelOpus, domain.DefaultModel, "us.anthropic.claude-haiku-5-5"} {
 		if !u.Offers(id) {
 			t.Errorf("the native universe does not offer %q", id)
+		}
+	}
+	for _, id := range []string{"claude-haiku-4-5-20251001", "us.anthropic.claude-haiku-4-5-20251001-v1:0"} {
+		if u.Offers(id) {
+			t.Errorf("the native universe still offers %q", id)
 		}
 	}
 }

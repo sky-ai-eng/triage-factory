@@ -2354,7 +2354,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		queuedA := insert(domain.Message{ConversationID: conversationID, Role: "user", Content: "queued first", Delivered: &pending})
 		queuedB := insert(domain.Message{ConversationID: conversationID, Role: "user", Content: "queued second", Delivered: &pending})
 
-		replyRow := &domain.Message{Role: "assistant", Content: "<analysis>a</analysis>\n\n<summary>s</summary>", Model: "claude-haiku-4-5"}
+		replyRow := &domain.Message{Role: "assistant", Content: "<analysis>a</analysis>\n\n<summary>s</summary>", Model: "claude-haiku-5-5"}
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
 		span := []int{assistantID, toolID, requestID}
@@ -2414,7 +2414,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				if m.WindowState != domain.MessageWindowInactive {
 					t.Errorf("reply row window_state = %q, want inactive", m.WindowState)
 				}
-				if m.Model != "claude-haiku-4-5" {
+				if m.Model != "claude-haiku-5-5" {
 					t.Errorf("reply row model = %q, want the cheap model attribution", m.Model)
 				}
 			}
