@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -85,4 +87,182 @@ func dependabotAlertsTurnedOff(body string) bool {
 	m := strings.ToLower(e.Message)
 	return strings.Contains(m, "dependabot alerts are disabled") ||
 		strings.Contains(m, "not available for archived repositories")
+}
+
+// maxDependabotAlertPages bounds one repository's listing at 100 alerts a
+// page. A listing that reaches it fails rather than returning what it read:
+// the caller resolves every package the listing leaves out, so a truncated
+// listing would resolve packages that still have open alerts.
+const maxDependabotAlertPages = 50
+
+// ErrDependabotListingUnusable is a listing of one repository's alerts that
+// GitHub answered with something TF cannot read as the whole listing: more
+// than maxDependabotAlertPages pages, a page whose body does not parse, or a
+// next-page link with no cursor. It says nothing about any other repository.
+var ErrDependabotListingUnusable = errors.New("dependabot alert listing unusable")
+
+// OpenDependabotAlert is one open alert as ListOpenDependabotAlerts returns it:
+// the package it is on, and the alert as a vulnerable package's snapshot
+// records it.
+type OpenDependabotAlert struct {
+	Ecosystem string
+	Package   string
+	Alert     domain.DependabotAlert
+	// UpdatedAt is when the alert's state last changed: when it was created,
+	// reopened or reintroduced, for an open alert. Zero when GitHub sent none.
+	UpdatedAt time.Time
+}
+
+// ListOpenDependabotAlerts lists owner/repo's open Dependabot alerts with
+// GET /repos/{owner}/{repo}/dependabot/alerts?state=open, 100 to a page,
+// following the Link header's after cursor from page to page.
+//
+// etag is the ETag of the repository's previous listing, sent as the first
+// page's If-None-Match; "" sends none.
+//   - 304 → (nil, "", true, nil): the open alerts are unchanged, at no cost to
+//     the rate limit.
+//   - 200 → (alerts, newETag, false, nil). newETag is the first page's ETag
+//     when the listing fit on that page, and "" when it took more: GitHub
+//     orders open alerts newest first, so an alert closing past the first
+//     page leaves the first page and its ETag unchanged, and a 304 would hide
+//     it.
+//
+// Any failure fails the whole listing, a later page's included: the caller
+// treats a package missing from the listing as resolved, so a partial listing
+// is never returned. A listing GitHub answered that TF cannot read in full
+// fails with ErrDependabotListingUnusable. As with DependabotAlertsAccess,
+// GitHub's 403 is counted as an answered request rather than a refused
+// credential.
+func (c *Client) ListOpenDependabotAlerts(ctx context.Context, owner, repo, etag string) (alerts []OpenDependabotAlert, newETag string, notModified bool, err error) {
+	ctx = withForbiddenAsAnswer(ctx)
+	path := fmt.Sprintf("/repos/%s/%s/dependabot/alerts?state=open&per_page=100", owner, repo)
+	body, header, notModified, err := c.getConditional(ctx, path, etag)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if notModified {
+		return nil, "", true, nil
+	}
+	if alerts, err = appendOpenDependabotAlerts(alerts, owner, repo, body); err != nil {
+		return nil, "", false, err
+	}
+	newETag = header.Get("ETag")
+	for pages := 1; ; pages++ {
+		after, err := nextPageCursor(header.Get("Link"))
+		if err != nil {
+			return nil, "", false, fmt.Errorf("list dependabot alerts of %s/%s: %w: %w", owner, repo, ErrDependabotListingUnusable, err)
+		}
+		if after == "" {
+			break
+		}
+		newETag = ""
+		if pages == maxDependabotAlertPages {
+			return nil, "", false, fmt.Errorf("list dependabot alerts of %s/%s: %w: more than %d pages", owner, repo, ErrDependabotListingUnusable, maxDependabotAlertPages)
+		}
+		if body, header, _, err = c.getConditional(ctx, path+"&after="+url.QueryEscape(after), ""); err != nil {
+			return nil, "", false, err
+		}
+		if alerts, err = appendOpenDependabotAlerts(alerts, owner, repo, body); err != nil {
+			return nil, "", false, err
+		}
+	}
+	return alerts, newETag, false, nil
+}
+
+// restDependabotAlert is the part of GitHub's Dependabot alert object TF reads.
+type restDependabotAlert struct {
+	Number     int       `json:"number"`
+	State      string    `json:"state"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	Dependency struct {
+		Package      restDependabotPackage `json:"package"`
+		ManifestPath string                `json:"manifest_path"`
+		Scope        *string               `json:"scope"`
+	} `json:"dependency"`
+	SecurityAdvisory struct {
+		GHSAID   string  `json:"ghsa_id"`
+		CVEID    *string `json:"cve_id"`
+		Summary  string  `json:"summary"`
+		Severity string  `json:"severity"`
+	} `json:"security_advisory"`
+	SecurityVulnerability struct {
+		Package                restDependabotPackage `json:"package"`
+		Severity               string                `json:"severity"`
+		VulnerableVersionRange string                `json:"vulnerable_version_range"`
+		FirstPatchedVersion    *struct {
+			Identifier string `json:"identifier"`
+		} `json:"first_patched_version"`
+	} `json:"security_vulnerability"`
+}
+
+type restDependabotPackage struct {
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+}
+
+// appendOpenDependabotAlerts decodes one page of the listing onto alerts. An
+// alert with no number or no package names nothing TF can key, and one not
+// open is not what the listing asked for; both are skipped.
+func appendOpenDependabotAlerts(alerts []OpenDependabotAlert, owner, repo string, body []byte) ([]OpenDependabotAlert, error) {
+	var page []restDependabotAlert
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse dependabot alerts of %s/%s: %w: %w", owner, repo, ErrDependabotListingUnusable, err)
+	}
+	for _, a := range page {
+		pkg := a.Dependency.Package
+		if pkg.Ecosystem == "" || pkg.Name == "" {
+			pkg = a.SecurityVulnerability.Package
+		}
+		if a.Number == 0 || a.State != "open" || pkg.Ecosystem == "" || pkg.Name == "" {
+			continue
+		}
+		severity := a.SecurityVulnerability.Severity
+		if severity == "" {
+			severity = a.SecurityAdvisory.Severity
+		}
+		alert := domain.DependabotAlert{
+			Number:                 a.Number,
+			GHSAID:                 a.SecurityAdvisory.GHSAID,
+			Summary:                a.SecurityAdvisory.Summary,
+			Severity:               severity,
+			ManifestPath:           a.Dependency.ManifestPath,
+			VulnerableVersionRange: a.SecurityVulnerability.VulnerableVersionRange,
+		}
+		if a.SecurityAdvisory.CVEID != nil {
+			alert.CVEID = *a.SecurityAdvisory.CVEID
+		}
+		if a.Dependency.Scope != nil {
+			alert.Scope = *a.Dependency.Scope
+		}
+		if fp := a.SecurityVulnerability.FirstPatchedVersion; fp != nil {
+			alert.FirstPatchedVersion = fp.Identifier
+		}
+		alerts = append(alerts, OpenDependabotAlert{Ecosystem: pkg.Ecosystem, Package: pkg.Name, Alert: alert, UpdatedAt: a.UpdatedAt})
+	}
+	return alerts, nil
+}
+
+// nextPageCursor is the after cursor of the rel="next" link in a Link header,
+// "" when there is none. Only the cursor is taken from the link: the next
+// request is built on the client's own base URL, so a link naming another
+// host or path is never followed. A next link that does not parse or carries
+// no after cursor is an error rather than the last page, since stopping
+// there would return a partial listing as complete.
+func nextPageCursor(link string) (string, error) {
+	for part := range strings.SplitSeq(link, ",") {
+		target, params, ok := strings.Cut(strings.TrimSpace(part), ";")
+		if !ok || !strings.Contains(params, `rel="next"`) {
+			continue
+		}
+		u, err := url.Parse(strings.Trim(strings.TrimSpace(target), "<>"))
+		if err != nil {
+			return "", fmt.Errorf("parse next page link: %w", err)
+		}
+		after := u.Query().Get("after")
+		if after == "" {
+			return "", fmt.Errorf("next page link %q has no after cursor", target)
+		}
+		return after, nil
+	}
+	return "", nil
 }

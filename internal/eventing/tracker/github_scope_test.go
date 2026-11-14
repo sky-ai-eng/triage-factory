@@ -537,3 +537,61 @@ func TestRefreshGitHub_SwitchingBackTracksTheOldHostAgain(t *testing.T) {
 		t.Errorf("304s on the cycle after the return = %d, want 1", n)
 	}
 }
+
+// TestRetireGitHubOutOfScope_RetiresVulnerablePackages: a vulnerable package on
+// a host the org has left is retired with github:vulnerability:unreachable,
+// naming the package and the alerts last open on it, never with resolved; one
+// on the current host is left alone.
+func TestRetireGitHubOutOfScope_RetiresVulnerablePackages(t *testing.T) {
+	fx := newGitHubScopeFixture(t)
+	ctx := context.Background()
+	seed := func(host, key, snapshot string) *domain.Entity {
+		t.Helper()
+		e, _, err := fx.stores.Entities.FindOrCreateVulnerablePackageSystem(ctx, runmode.LocalDefaultOrgID, host, key, "seeded", "")
+		if err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		if snapshot != "" {
+			if ok, err := fx.stores.Entities.UpdateSnapshotCASSystem(ctx, runmode.LocalDefaultOrgID, e.ID, snapshot, e.PollSeq); err != nil || !ok {
+				t.Fatalf("snapshot %s: ok=%v err=%v", key, ok, err)
+			}
+		}
+		return e
+	}
+	old := seed(ghOldHost, "octo/repo#npm:lodash", `{"repo":"octo/repo","ecosystem":"npm","package":"lodash","alerts":[{"number":3,"ghsa_id":"GHSA-3","severity":"high","manifest_path":"package.json"},{"number":8,"ghsa_id":"GHSA-8","severity":"low","manifest_path":"package.json"}]}`)
+	unseeded := seed(ghOldHost, "octo/tools#maven:org.example:lib", "")
+	current := seed(ghNewHost, "octo/repo#npm:lodash", `{"repo":"octo/repo","ecosystem":"npm","package":"lodash","alerts":[{"number":1,"ghsa_id":"GHSA-1","severity":"high","manifest_path":"package.json"}]}`)
+
+	if n := fx.tr.RetireGitHubOutOfScope(ctx, ghNewHost); n != 2 {
+		t.Errorf("retired = %d, want the two packages on %s", n, ghOldHost)
+	}
+	got := map[string]events.GitHubVulnerabilityUnreachableMetadata{}
+	for _, evt := range fx.pub.nonSystemEvents() {
+		if evt.EventType != domain.EventGitHubVulnerabilityUnreachable {
+			t.Errorf("emitted %s, want only %s", evt.EventType, domain.EventGitHubVulnerabilityUnreachable)
+			continue
+		}
+		var m events.GitHubVulnerabilityUnreachableMetadata
+		if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
+			t.Fatalf("metadata: %v", err)
+		}
+		got[*evt.EntityID] = m
+	}
+	if _, ok := got[current.ID]; ok {
+		t.Error("the current host's package was retired")
+	}
+	want := events.GitHubVulnerabilityUnreachableMetadata{
+		Repo: "octo/repo", RepositoryID: old.RepositoryID, Ecosystem: "npm", Package: "lodash",
+		AlertNumbers: []int{3, 8}, Host: ghOldHost, Reason: events.GitHubUnreachableScopeChanged,
+	}
+	if m := got[old.ID]; fmt.Sprint(m) != fmt.Sprint(want) {
+		t.Errorf("metadata from the snapshot = %+v, want %+v", m, want)
+	}
+	wantUnseeded := events.GitHubVulnerabilityUnreachableMetadata{
+		Repo: "octo/tools", RepositoryID: unseeded.RepositoryID, Ecosystem: "maven", Package: "org.example:lib",
+		AlertNumbers: []int{}, Host: ghOldHost, Reason: events.GitHubUnreachableScopeChanged,
+	}
+	if m := got[unseeded.ID]; fmt.Sprint(m) != fmt.Sprint(wantUnseeded) {
+		t.Errorf("metadata from the key = %+v, want %+v", m, wantUnseeded)
+	}
+}
