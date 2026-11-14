@@ -86,14 +86,38 @@ var (
 	traceRecorder = tracetest.NewSpanRecorder()
 )
 
-// TestToolHostJail_ConnectIsTraced pins the span over the wait for the tool
-// host to dial back. Without it a cold resume's trace shows that wait only as
-// a gap before the agent goes live.
-func TestToolHostJail_ConnectIsTraced(t *testing.T) {
+// recordConnectSpans arms tracing (once) and returns a reader for the
+// agent.tool_host.connect spans that end after this call.
+func recordConnectSpans() func() []sdktrace.ReadOnlySpan {
 	traceOnce.Do(func() {
 		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(traceRecorder)))
 	})
 	start := len(traceRecorder.Ended())
+	return func() []sdktrace.ReadOnlySpan {
+		var out []sdktrace.ReadOnlySpan
+		for _, s := range traceRecorder.Ended()[start:] {
+			if s.Name() == "agent.tool_host.connect" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+}
+
+func outcomeOf(s sdktrace.ReadOnlySpan) (string, bool) {
+	for _, kv := range s.Attributes() {
+		if kv.Key == "outcome" {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
+}
+
+// TestToolHostJail_ConnectIsTraced pins the span over the wait for the tool
+// host to dial back. Without it a cold resume's trace shows that wait only as
+// a gap before the agent goes live.
+func TestToolHostJail_ConnectIsTraced(t *testing.T) {
+	connects := recordConnectSpans()
 
 	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "tools.sock"))
 	if err != nil {
@@ -122,21 +146,60 @@ func TestToolHostJail_ConnectIsTraced(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
-	var connects []sdktrace.ReadOnlySpan
-	for _, s := range traceRecorder.Ended()[start:] {
-		if s.Name() == "agent.tool_host.connect" {
-			connects = append(connects, s)
-		}
+	spans := connects()
+	if len(spans) != 1 {
+		t.Fatalf("recorded %d agent.tool_host.connect spans, want 1", len(spans))
 	}
-	if len(connects) != 1 {
-		t.Fatalf("recorded %d agent.tool_host.connect spans, want 1", len(connects))
-	}
-	got := connects[0]
+	got := spans[0]
 	if got.Parent().TraceID() != parent.SpanContext().TraceID() || got.Parent().SpanID() != parent.SpanContext().SpanID() {
 		t.Errorf("agent.tool_host.connect parent = %v, want the caller's span %v", got.Parent(), parent.SpanContext())
 	}
-	if got.Status().Code == codes.Error {
-		t.Errorf("a connect that succeeded has status %v (%q)", got.Status().Code, got.Status().Description)
+	if got.Status().Code != codes.Unset {
+		t.Errorf("a connect that succeeded has status %v (%q), want unset", got.Status().Code, got.Status().Description)
+	}
+	if outcome, ok := outcomeOf(got); ok {
+		t.Errorf("a connect that succeeded has outcome %q, want none", outcome)
+	}
+}
+
+// TestToolHostJail_CancelledConnectIsNoError pins a stop as an outcome rather
+// than a fault, including when the stop has already killed the jail. Both of
+// Connect's arms are then ready and select picks one at random, so the case
+// runs enough times that a regression fails rather than flakes.
+func TestToolHostJail_CancelledConnectIsNoError(t *testing.T) {
+	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "tools.sock"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, jailExited := range map[string]bool{"jail running": false, "jail killed by the stop": true} {
+		t.Run(name, func(t *testing.T) {
+			for range 32 {
+				connects := recordConnectSpans()
+				waitDone := make(chan struct{})
+				if jailExited {
+					close(waitDone)
+				}
+				jail := &toolHostJail{listener: ln, run: deadRun{stderr: "killed"}, waitDone: waitDone, waitErr: errors.New("signal: killed")}
+
+				if _, err := jail.Connect(ctx, 5*time.Second); !errors.Is(err, context.Canceled) {
+					t.Fatalf("Connect = %v, want the ctx's cancellation", err)
+				}
+				spans := connects()
+				if len(spans) != 1 {
+					t.Fatalf("recorded %d agent.tool_host.connect spans, want 1", len(spans))
+				}
+				if code := spans[0].Status().Code; code != codes.Unset {
+					t.Fatalf("a cancelled connect has status %v (%q), want unset", code, spans[0].Status().Description)
+				}
+				if outcome, _ := outcomeOf(spans[0]); outcome != "cancelled" {
+					t.Fatalf("a cancelled connect has outcome %q, want cancelled", outcome)
+				}
+			}
+		})
 	}
 }
 
