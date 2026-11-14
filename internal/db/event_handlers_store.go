@@ -270,8 +270,8 @@ type EventHandlerStore interface {
 	//     or is itself soft-deleted) — never wire a trigger to a blueprint
 	//     that isn't there.
 	//   - Insert if the team has no row for the shipped system_slug, honoring
-	//     the shipped convention (rules enabled=true, triggers enabled=false)
-	//     and initial sort_order — matching Seed.
+	//     the shipped convention (rules enabled=true unless marked Disabled,
+	//     triggers enabled=false) and initial sort_order — matching Seed.
 	//   - No-op if already equal to shipped content (no updated_at churn).
 	//   - Otherwise update only the content fields (scope_predicate_json,
 	//     name, default_priority for rules; blueprint_id, breaker_threshold,
@@ -318,10 +318,12 @@ type ShippedEventHandler struct {
 	EventType string
 	Predicate string // "" → NULL (match-all)
 
-	// Rule-only.
+	// Rule-only. Disabled ships the team's copy disabled; every other rule
+	// ships enabled.
 	Name            string
 	DefaultPriority float64
 	SortOrder       int
+	Disabled        bool
 
 	// Trigger-only. BlueprintID is the referenced blueprint's system_slug
 	// (which reuses the wrapped prompt's slug).
@@ -332,7 +334,8 @@ type ShippedEventHandler struct {
 
 // ShippedEventHandlers is the v1 default set of task rules and prompt
 // triggers. Rules ship with Enabled=true (the post-Seed default in the
-// Create path); triggers ship with Enabled=false per project convention.
+// Create path) unless marked Disabled; triggers ship with Enabled=false per
+// project convention.
 //
 // BlueprintID values on trigger entries reference shipped blueprints seeded
 // by ShippedDefaultsStore.SeedShippedIntoTeam. Its phase order is prompts →
@@ -427,6 +430,20 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Name:            "Linear issue decomposition resolved (now actionable)",
 		DefaultPriority: 0.60,
 		SortOrder:       7,
+	},
+	{
+		// Disabled: granting Dependabot access to an org with a backlog
+		// announces every open alert in one cycle, and an enabled rule would
+		// turn that into one task per vulnerable package on every team
+		// tracking a repository.
+		ID:              "system-rule-vulnerability-alert-opened",
+		Kind:            domain.EventHandlerKindRule,
+		EventType:       domain.EventGitHubVulnerabilityAlertOpened,
+		Predicate:       "",
+		Name:            "Vulnerable package in a tracked repository",
+		DefaultPriority: 0.60,
+		SortOrder:       8,
+		Disabled:        true,
 	},
 
 	// ----- triggers ---------------------------------------------------------

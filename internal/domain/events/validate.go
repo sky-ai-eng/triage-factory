@@ -40,10 +40,11 @@ type PredicateError struct {
 	EventType string
 	Faults    []PredicateFault
 	// Remainder is the canonical predicate with what its value faults refuse
-	// taken out: an enum miss dropped, a list's empty and repeated entries
-	// removed. It is nil when a schema fault left no predicate to read, or
-	// when nothing is left. A caller checks the rest of the predicate against
-	// it, so a write reports every fault at once. It is never stored.
+	// taken out: a string outside its enum dropped, a list's empty, repeated
+	// and outside-the-enum entries removed. It is nil when a schema fault left
+	// no predicate to read, or when nothing is left. A caller checks the rest
+	// of the predicate against it, so a write reports every fault at once. It
+	// is never stored.
 	Remainder *string
 }
 
@@ -170,13 +171,16 @@ func kindNoun(kind string) string {
 }
 
 // refuseValues checks a decoded field for values its type admits and the
-// field does not, and takes each one out of the field: a string outside its
-// `enum` tag's list, the closed set the predicate editor offers for it, and an
-// empty or repeated entry in a list that differs from stored, the same field
-// of the predicate the row stores now.
+// field does not, and takes each one out of the field: a string, or a list
+// entry, outside its `enum` tag's list, the closed set the predicate editor
+// offers for it, and an empty or repeated entry in a list that differs from
+// stored, the same field of the predicate the row stores now.
 func refuseValues(key string, sf reflect.StructField, f, stored reflect.Value) []PredicateFault {
-	if enumTag := sf.Tag.Get("enum"); enumTag != "" && f.Kind() == reflect.Pointer && !f.IsNil() && f.Elem().Kind() == reflect.String {
-		allowed := strings.Split(enumTag, ",")
+	var allowed []string
+	if enumTag := sf.Tag.Get("enum"); enumTag != "" {
+		allowed = strings.Split(enumTag, ",")
+	}
+	if allowed != nil && f.Kind() == reflect.Pointer && !f.IsNil() && f.Elem().Kind() == reflect.String {
 		if v := f.Elem().String(); !slices.Contains(allowed, v) {
 			f.SetZero()
 			return []PredicateFault{{
@@ -188,7 +192,7 @@ func refuseValues(key string, sf reflect.StructField, f, stored reflect.Value) [
 		if prior := stored.Interface().([]string); prior != nil && slices.Equal(list, prior) {
 			return nil
 		}
-		kept, faults := listFaults(key, list)
+		kept, faults := listFaults(key, list, allowed)
 		f.Set(reflect.ValueOf(kept))
 		return faults
 	}
@@ -196,18 +200,26 @@ func refuseValues(key string, sf reflect.StructField, f, stored reflect.Value) [
 }
 
 // listFaults refuses an empty entry, which matches only events that lack the
-// value, and a repeated one: a list is a set, and its stored text is the one
-// form of what it means, which the rule editor compares to tell whether a
-// predicate changed. Two entries repeat when they are equal ignoring case.
-// That is how the identity lists match, and every other list holds ids, each
-// a number or a UUID, which letter case does not distinguish, so one
-// comparison holds for every list. kept is list without the refused entries.
-func listFaults(key string, list []string) (kept []string, faults []PredicateFault) {
+// value, an entry outside allowed when allowed is set, and a repeated entry: a
+// list is a set, and its stored text is the one form of what it means, which
+// the rule editor compares to tell whether a predicate changed. Two entries
+// repeat when they are equal ignoring case. That is how the identity lists and
+// package_in match, an enum's values differ ignoring case, and every other
+// list holds ids, each a number or a UUID, which letter case does not
+// distinguish, so one comparison holds for every list. kept is list without
+// the refused entries.
+func listFaults(key string, list, allowed []string) (kept []string, faults []PredicateFault) {
 	first := make(map[string]int, len(list))
 	for i, entry := range list {
 		if entry == "" {
 			faults = append(faults, PredicateFault{
 				Kind: FaultInvalidValue, Key: key, Message: fmt.Sprintf("%s[%d] is empty", key, i),
+			})
+			continue
+		}
+		if allowed != nil && !slices.Contains(allowed, entry) {
+			faults = append(faults, PredicateFault{
+				Kind: FaultInvalidValue, Key: key, Message: fmt.Sprintf("%s[%d] must be one of %s, not %q", key, i, strings.Join(allowed, ", "), entry),
 			})
 			continue
 		}

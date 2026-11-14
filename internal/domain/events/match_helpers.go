@@ -65,10 +65,11 @@ func stringInSliceFold(pred []string, meta string) bool {
 }
 
 // idIn is the matcher primitive for `_in` lists of ids, such as `repo_in`'s
-// registry ids and `author_id_in`'s GitHub account ids: an empty list means no
-// filter, and a non-empty one requires meta to be one of its entries exactly.
-// Ids are not names, so nothing is folded. An empty meta (an event recorded
-// without the id) matches only an empty list.
+// registry ids and `author_id_in`'s GitHub account ids, and of enum values,
+// such as `ecosystem_in`: an empty list means no filter, and a non-empty one
+// requires meta to be one of its entries exactly. Ids are not names, and an
+// enum's values are written one way, so nothing is folded. An empty meta (an
+// event recorded without the id) matches only an empty list.
 func idIn(pred []string, meta string) bool {
 	if len(pred) == 0 {
 		return true
