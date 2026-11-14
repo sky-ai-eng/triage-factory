@@ -4,8 +4,11 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +41,11 @@ func TestIntegration_RootfsBuilds(t *testing.T) {
 	dir, err := ensureRootfs(ctx)
 	if err != nil {
 		t.Fatalf("ensureRootfs: %v", err)
+	}
+	// The cache is shared by every jail on the host and must hold no device
+	// node the build made for itself.
+	if _, err := os.Lstat(filepath.Join(dir, "dev", "null")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the built rootfs still holds dev/null (lstat: %v)", err)
 	}
 
 	out, err := exec.CommandContext(ctx, "chroot", dir, "/usr/bin/git-lfs", "version").CombinedOutput()

@@ -217,8 +217,8 @@ func createChrootDevNull(rootfsDir string) (string, error) {
 	if err := unix.Mknod(devNull, unix.S_IFCHR|0o666, int(unix.Mkdev(1, 3))); err != nil {
 		return "", fmt.Errorf("create /dev/null in the chroot (the cap broker needs CAP_MKNOD): %w", err)
 	}
-	// The umask narrows the mode mknod is given, and every package script
-	// that writes to /dev/null needs it world-writable.
+	// The umask narrows the mode mknod is given, and a process that is not
+	// root can write to /dev/null only at 0666.
 	if err := os.Chmod(devNull, 0o666); err != nil {
 		_ = os.Remove(devNull)
 		return "", fmt.Errorf("chmod /dev/null in the chroot: %w", err)

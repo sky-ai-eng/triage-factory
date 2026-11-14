@@ -24,8 +24,9 @@ default) the entrypoint skips it: no uid switch, no capability drop, no
 The broker also keeps Docker's default capabilities, and it needs two of them,
 `CAP_MKNOD` and `CAP_SYS_CHROOT`, to build the sandbox root filesystem on an
 executor's first launch. A deployment that drops Docker's defaults must keep
-both, or every launch fails with
-`create /dev/null in the chroot (the cap broker needs CAP_MKNOD)`.
+both, or every launch fails. Without `CAP_MKNOD` the error contains
+`create /dev/null in the chroot (the cap broker needs CAP_MKNOD)`, and without
+`CAP_SYS_CHROOT` it contains `chroot: cannot change root directory`.
 
 The broker starts a run's sidecar at a uid derived from the run's subnet index,
 and the sandbox at a uid derived from the same index. Two runs never share
