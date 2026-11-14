@@ -277,7 +277,7 @@ func readersEnvelope(t *testing.T, orgID, conversationID string) string {
 	if err != nil {
 		t.Fatalf("newWireEvent: %v", err)
 	}
-	payload, err := json.Marshal(wsEnvelope{OriginInstanceID: "executor-pod", Event: &we})
+	payload, err := json.Marshal(inlineEnvelope("executor-pod", &we, true))
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}

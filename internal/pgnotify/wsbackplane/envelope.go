@@ -8,25 +8,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// wireEvent mirrors websocket.Event but ALSO serializes OrgID, UserID,
-// UserIDs and ReadersOfConversation. Event deliberately hides those from
-// the browser-facing wire JSON (see Event's doc comment in pkg/websocket) —
-// but the backplane needs them on the wire between pods so the receiving
-// pod's DeliverRemote can reapply the same per-connection scope filter
-// Broadcast would have applied locally, and so the receiving pod knows to
-// resolve a conversation's readers before it does.
+// wireEvent mirrors websocket.Event but ALSO serializes OrgID, UserID and
+// UserIDs. Event deliberately hides those from the browser-facing wire
+// JSON (see Event's doc comment in pkg/websocket) — but the backplane
+// needs them on the wire between pods so the receiving pod's
+// DeliverRemote can reapply the same per-connection scope filter
+// Broadcast would have applied locally. ReadersOfConversation is not a
+// field here: the envelope key an event travels under carries it (see
+// wsEnvelope).
 //
 // omitempty on UserIDs loses nothing: Broadcast drops an event with an
 // empty non-nil set before it reaches Publish, so an absent user_ids is
 // always an event that had no set.
 type wireEvent struct {
-	Type                  string          `json:"type"`
-	ConversationID        string          `json:"conversation_id,omitempty"`
-	OrgID                 string          `json:"org_id,omitempty"`
-	UserID                string          `json:"user_id,omitempty"`
-	UserIDs               []string        `json:"user_ids,omitempty"`
-	ReadersOfConversation bool            `json:"readers_of_conversation,omitempty"`
-	Data                  json.RawMessage `json:"data"`
+	Type           string          `json:"type"`
+	ConversationID string          `json:"conversation_id,omitempty"`
+	OrgID          string          `json:"org_id,omitempty"`
+	UserID         string          `json:"user_id,omitempty"`
+	UserIDs        []string        `json:"user_ids,omitempty"`
+	Data           json.RawMessage `json:"data"`
 }
 
 func newWireEvent(evt websocket.Event) (wireEvent, error) {
@@ -35,13 +35,12 @@ func newWireEvent(evt websocket.Event) (wireEvent, error) {
 		return wireEvent{}, fmt.Errorf("marshal event data: %w", err)
 	}
 	return wireEvent{
-		Type:                  evt.Type,
-		ConversationID:        evt.ConversationID,
-		OrgID:                 evt.OrgID,
-		UserID:                evt.UserID,
-		UserIDs:               evt.UserIDs,
-		ReadersOfConversation: evt.ReadersOfConversation,
-		Data:                  data,
+		Type:           evt.Type,
+		ConversationID: evt.ConversationID,
+		OrgID:          evt.OrgID,
+		UserID:         evt.UserID,
+		UserIDs:        evt.UserIDs,
+		Data:           data,
 	}, nil
 }
 
@@ -52,24 +51,50 @@ func (w wireEvent) toEvent() websocket.Event {
 	// correctly, only the event-specific payload is empty.
 	_ = json.Unmarshal(w.Data, &data)
 	return websocket.Event{
-		Type:                  w.Type,
-		ConversationID:        w.ConversationID,
-		OrgID:                 w.OrgID,
-		UserID:                w.UserID,
-		UserIDs:               w.UserIDs,
-		ReadersOfConversation: w.ReadersOfConversation,
-		Data:                  data,
+		Type:           w.Type,
+		ConversationID: w.ConversationID,
+		OrgID:          w.OrgID,
+		UserID:         w.UserID,
+		UserIDs:        w.UserIDs,
+		Data:           data,
 	}
 }
 
 // wsEnvelope is the tf_ws NOTIFY payload shape (spec §5: "{origin_pod,
 // event}"). Event carries the inline payload when it fits under the
 // configured threshold; OutboxID carries a ws_outbox row reference
-// otherwise. Exactly one of the two is set.
+// otherwise.
+//
+// An event marked ReadersOfConversation travels under keys of its own,
+// ReadersEvent and ReadersOutboxID, never Event or OutboxID. Pods on a
+// build without the marker read only event and outbox_id, so they find
+// neither and drop the envelope; under the shared keys they would deliver
+// the event by its org alone, to every team in it. Exactly one of the four
+// is set.
 type wsEnvelope struct {
 	OriginInstanceID string     `json:"origin_instance_id"`
 	Event            *wireEvent `json:"event,omitempty"`
 	OutboxID         int64      `json:"outbox_id,omitempty"`
+	ReadersEvent     *wireEvent `json:"readers_event,omitempty"`
+	ReadersOutboxID  int64      `json:"readers_outbox_id,omitempty"`
+}
+
+// inlineEnvelope is the envelope carrying we inline, under the readers key
+// when its event is marked ReadersOfConversation.
+func inlineEnvelope(originID string, we *wireEvent, forReaders bool) wsEnvelope {
+	if forReaders {
+		return wsEnvelope{OriginInstanceID: originID, ReadersEvent: we}
+	}
+	return wsEnvelope{OriginInstanceID: originID, Event: we}
+}
+
+// outboxEnvelope is the envelope referencing ws_outbox row outboxID, under
+// the readers key when its event is marked ReadersOfConversation.
+func outboxEnvelope(originID string, outboxID int64, forReaders bool) wsEnvelope {
+	if forReaders {
+		return wsEnvelope{OriginInstanceID: originID, ReadersOutboxID: outboxID}
+	}
+	return wsEnvelope{OriginInstanceID: originID, OutboxID: outboxID}
 }
 
 // kickEnvelope is the tf_ctl NOTIFY payload shape for the cross-pod

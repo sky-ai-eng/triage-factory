@@ -290,7 +290,8 @@ func testWSFanoutOutboxRef(t *testing.T, adminDB *sql.DB, dsn string) {
 // no sockets, so the frame crosses tf_ws naming its conversation, and the
 // control pod that holds the sockets reads the conversation's readers from
 // the registry: a member of the conversation's team receives it, and a
-// member of the org on another team does not.
+// member of the org on another team does not. A frame too large to go
+// inline takes the outbox and is scoped the same way.
 func testConversationFrameReadersCrossPod(t *testing.T, adminDB *sql.DB, dsn string) {
 	seedUser := func(name string) string {
 		t.Helper()
@@ -365,25 +366,35 @@ func testConversationFrameReadersCrossPod(t *testing.T, adminDB *sql.DB, dsn str
 	readerMsgs.drainUntilQuiet(300 * time.Millisecond)
 	outsiderMsgs.drainUntilQuiet(300 * time.Millisecond)
 
-	conversationframe.NewDeferredNotifier(executorHub).Message(context.Background(), org, conv, domain.MessageDTO{ID: 1, ConversationID: conv, Role: "assistant", Content: "hello"})
+	frames := conversationframe.NewDeferredNotifier(executorHub)
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"inline", "hello"},
+		// Comfortably over the default 6KB inline threshold.
+		{"outbox", strings.Repeat("x", 8*1024)},
+	} {
+		frames.Message(context.Background(), org, conv, domain.MessageDTO{ID: 1, ConversationID: conv, Role: "assistant", Content: tc.content})
 
-	raw, ok := readerMsgs.next(3 * time.Second)
-	if !ok {
-		t.Fatal("the conversation's reader never received the executor's frame")
-	}
-	var got struct {
-		Type           string            `json:"type"`
-		ConversationID string            `json:"conversation_id"`
-		Data           domain.MessageDTO `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("decode delivered frame: %v", err)
-	}
-	if got.Type != "message" || got.ConversationID != conv || got.Data.Content != "hello" {
-		t.Fatalf("delivered frame = %+v; want the message for %s", got, conv)
-	}
-	if _, ok := outsiderMsgs.next(500 * time.Millisecond); ok {
-		t.Fatal("an org member outside the conversation's team received its frame")
+		raw, ok := readerMsgs.next(3 * time.Second)
+		if !ok {
+			t.Fatalf("%s: the conversation's reader never received the executor's frame", tc.name)
+		}
+		var got struct {
+			Type           string            `json:"type"`
+			ConversationID string            `json:"conversation_id"`
+			Data           domain.MessageDTO `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("%s: decode delivered frame: %v", tc.name, err)
+		}
+		if got.Type != "message" || got.ConversationID != conv || got.Data.Content != tc.content {
+			t.Fatalf("%s: delivered frame for %q, type %q; want the message for %s", tc.name, got.ConversationID, got.Type, conv)
+		}
+		if _, ok := outsiderMsgs.next(500 * time.Millisecond); ok {
+			t.Fatalf("%s: an org member outside the conversation's team received its frame", tc.name)
+		}
 	}
 }
 

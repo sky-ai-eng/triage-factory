@@ -322,8 +322,8 @@ func (h *Hub) publishForReaders(evt Event) {
 		return
 	}
 	if h.backplane == nil {
-		// Debug: a multi-mode process left without a backplane says so once
-		// at boot, and a log line per frame would only repeat it.
+		// Debug: a missing backplane is the deployment's state, not this
+		// caller's fault, and logging it louder would repeat it per frame.
 		wsLog.Debug("dropping event for a conversation's readers: no backplane to resolve them", "type", evt.Type)
 		return
 	}
