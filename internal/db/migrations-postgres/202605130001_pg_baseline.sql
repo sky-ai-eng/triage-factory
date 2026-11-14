@@ -2242,6 +2242,10 @@ CREATE INDEX idx_conversations_trigger ON public.conversations USING btree (trig
 -- owed a notice are all it reads.
 CREATE INDEX idx_conversations_failure_notice_due ON public.conversations USING btree (completed_at, id) WHERE ((status = 'failed'::text) AND (failure_noticed_at IS NULL) AND (creator_user_id IS NOT NULL));
 
+-- The brain's paused-notice read: stored 'open' covers every concluded step,
+-- and only the live parks not yet told are what it reads.
+CREATE INDEX idx_conversations_pause_notice_due ON public.conversations USING btree (parked_at, id) WHERE ((status = 'open'::text) AND (park_reason IS NOT NULL) AND (parked_at IS NOT NULL) AND (creator_user_id IS NOT NULL) AND (ended_at IS NULL) AND (archived_at IS NULL) AND (pause_noticed_parked_at IS DISTINCT FROM parked_at));
+
 
 CREATE INDEX idx_swipe_events_action_created ON public.swipe_events USING btree (action, created_at);
 

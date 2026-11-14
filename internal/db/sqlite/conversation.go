@@ -1746,17 +1746,7 @@ func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit
 	if limit <= 0 {
 		return nil, nil
 	}
-	// The Postgres twin carries the reasoning. The marker is a copy of
-	// parked_at's own text (MarkPauseNoticedSystem), so IS NOT compares one
-	// layout against itself.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT c.org_id, c.parked_at, c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
-		`+parkedForPersonSQL+`
-		  AND c.parked_at IS NOT NULL
-		  AND c.pause_noticed_parked_at IS NOT c.parked_at
-		ORDER BY c.parked_at, c.id
-		LIMIT ?
-	`, append(parkedForPersonReasons(), limit)...)
+	rows, err := s.q.QueryContext(ctx, pauseNoticesDueQuery, append(parkedForPersonReasons(), limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1774,37 +1764,31 @@ func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit
 	return out, rows.Err()
 }
 
-func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) error {
+func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
 	// parked_at is written in more than one layout (a bound time, SQLite's
 	// own CURRENT_TIMESTAMP), so the match normalizes both sides; the marker
 	// takes the column's own text, which is what the list compares it with.
-	_, err := s.q.ExecContext(ctx, `
+	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET pause_noticed_parked_at = parked_at
 		WHERE id = ?
 		  AND strftime('%Y-%m-%d %H:%M:%f', parked_at) = strftime('%Y-%m-%d %H:%M:%f', ?)
+		  AND pause_noticed_parked_at IS NOT parked_at
 	`, conversationID, parkedAt.UTC())
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT c.org_id, c.id, c.creator_user_id,
-		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
-		FROM conversations c
-		LEFT JOIN tasks t ON t.id = c.task_id
-		LEFT JOIN entities e ON e.id = t.entity_id
-		WHERE c.status = 'failed'
-		  AND c.failure_noticed_at IS NULL
-		  AND c.creator_user_id IS NOT NULL
-		ORDER BY c.completed_at, c.id
-		LIMIT ?
-	`, limit)
+	rows, err := s.q.QueryContext(ctx, failureNoticesDueQuery, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1822,16 +1806,44 @@ func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, lim
 	return out, rows.Err()
 }
 
-func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) error {
+func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET failure_noticed_at = ?
 		WHERE id = ? AND failure_noticed_at IS NULL
 	`, time.Now().UTC(), conversationID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
+
+// pauseNoticesDueQuery is ListPauseNoticesDueSystem's statement; the Postgres
+// twin carries the reasoning. The marker is a copy of parked_at's own text
+// (MarkPauseNoticedSystem), so IS NOT compares one layout against itself.
+var pauseNoticesDueQuery = `
+		SELECT c.org_id, c.parked_at, c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
+		` + parkedForPersonSQL + `
+		  AND c.parked_at IS NOT NULL
+		  AND c.pause_noticed_parked_at IS NOT c.parked_at
+		ORDER BY c.parked_at, c.id
+		LIMIT ?`
+
+// failureNoticesDueQuery is ListFailureNoticesDueSystem's statement.
+const failureNoticesDueQuery = `
+		SELECT c.org_id, c.id, c.creator_user_id,
+		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
+		FROM conversations c
+		LEFT JOIN tasks t ON t.id = c.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE c.status = 'failed'
+		  AND c.failure_noticed_at IS NULL
+		  AND c.creator_user_id IS NOT NULL
+		ORDER BY c.completed_at, c.id
+		LIMIT ?`
 
 // parkedForPersonSQL is the Postgres twin's parkedForPersonSQL, with the reasons
 // as the leading placeholders parkedForPersonReasons binds.

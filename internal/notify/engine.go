@@ -36,11 +36,11 @@ type engine struct{ b Backend }
 
 var _ sink.Sink = (*engine)(nil)
 
-func (e *engine) Set(ctx context.Context, sk sink.Kind, orgID string, p any, active bool) {
+func (e *engine) Set(ctx context.Context, sk sink.Kind, orgID string, p any, active bool, guard sink.Guard) {
 	k := sk.(*kind)
 	defer e.recoverPanic(k.name, orgID)
 	if !active {
-		e.commit(ctx, k.name, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
+		e.commitGuarded(ctx, k.name, orgID, guard, func(tx db.NotificationStore) ([]domain.Notification, error) {
 			return tx.ResolveSystem(ctx, orgID, origin, k.name, k.key(p))
 		})
 		return
@@ -50,7 +50,7 @@ func (e *engine) Set(ctx context.Context, sk sink.Kind, orgID string, p any, act
 		e.fail(k.name, orgID, err)
 		return
 	}
-	e.commit(ctx, k.name, orgID, occ.writeCondition(ctx, orgID))
+	e.commitGuarded(ctx, k.name, orgID, guard, occ.writeCondition(ctx, orgID))
 }
 
 func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active, keep []any) {
@@ -104,7 +104,7 @@ func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active, k
 	})
 }
 
-func (e *engine) Post(ctx context.Context, sk sink.Kind, orgID string, p any) {
+func (e *engine) Post(ctx context.Context, sk sink.Kind, orgID string, p any, guard sink.Guard) {
 	k := sk.(*kind)
 	defer e.recoverPanic(k.name, orgID)
 	expires := time.Now().Add(k.ttl)
@@ -113,7 +113,7 @@ func (e *engine) Post(ctx context.Context, sk sink.Kind, orgID string, p any) {
 		e.fail(k.name, orgID, err)
 		return
 	}
-	e.commit(ctx, k.name, orgID, occ.upsert(ctx))
+	e.commitGuarded(ctx, k.name, orgID, guard, occ.upsert(ctx))
 }
 
 func (e *engine) ClearSource(ctx context.Context, orgID, source string) {
@@ -239,14 +239,34 @@ func (o occurrence) writeCondition(ctx context.Context, orgID string) func(db.No
 // why each row they resolved did, and pings what they changed once it
 // commits.
 func (e *engine) commit(ctx context.Context, label, orgID string, write func(db.NotificationStore) ([]domain.Notification, error)) {
-	e.commitClosedBy(ctx, label, orgID, "", write)
+	e.commitTx(ctx, label, orgID, "", nil, write)
+}
+
+// commitGuarded is commit with the producer's guard run first in the same
+// transaction: a guard that reports false writes nothing, and one that fails
+// fails the call.
+func (e *engine) commitGuarded(ctx context.Context, label, orgID string, guard sink.Guard, write func(db.NotificationStore) ([]domain.Notification, error)) {
+	e.commitTx(ctx, label, orgID, "", guard, write)
 }
 
 // commitClosedBy is commit for writes that resolve event rows on the routing
 // of an event of type closedBy.
 func (e *engine) commitClosedBy(ctx context.Context, label, orgID, closedBy string, write func(db.NotificationStore) ([]domain.Notification, error)) {
+	e.commitTx(ctx, label, orgID, closedBy, nil, write)
+}
+
+func (e *engine) commitTx(ctx context.Context, label, orgID, closedBy string, guard sink.Guard, write func(db.NotificationStore) ([]domain.Notification, error)) {
 	var changed []domain.Notification
 	err := e.b.Tx.SystemWithTx(ctx, orgID, func(tx db.SystemTxStores) error {
+		if guard != nil {
+			ok, err := guard(ctx, tx)
+			if err != nil {
+				return fmt.Errorf("guard: %w", err)
+			}
+			if !ok {
+				return nil
+			}
+		}
 		var err error
 		if changed, err = write(tx.Notifications); err != nil {
 			return err

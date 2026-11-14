@@ -23,3 +23,11 @@ var PresentPostedCommentKeysQueryForTest = presentPostedCommentKeysQuery
 // ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
 // ledger conformance suite can hold the two to each other.
 const ActionObjectIDSQLForTest = sqliteActionObjectIDSQL
+
+// PauseNoticesDueQueryForTest and FailureNoticesDueQueryForTest expose the
+// delegator-notice reads' statements so the query-plan test can EXPLAIN what
+// the store runs.
+var (
+	PauseNoticesDueQueryForTest   = pauseNoticesDueQuery
+	FailureNoticesDueQueryForTest = failureNoticesDueQuery
+)

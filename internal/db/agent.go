@@ -1503,13 +1503,16 @@ type ConversationStore interface {
 	ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error)
 
 	// MarkPauseNoticedSystem records that the notice for the park at parkedAt
-	// was opened, and only while the conversation is still on that park: a
-	// park that ended, with a new one begun since the read, stays due.
+	// was opened, and only while the conversation is still on that park and
+	// not yet marked for it: a park that ended, with a new one begun since the
+	// read, stays due. It reports whether it marked the row.
 	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), so the mark commits only with the notice, and of two
+	// passes that read the same park only the one whose mark lands opens it.
 	// A bookkeeping write that returns no row: its only reader is
-	// ListPauseNoticesDueSystem, and its caller acts on nothing it would
-	// return. Only the brain writes it.
-	MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) error
+	// ListPauseNoticesDueSystem, and its caller needs only whether it marked.
+	MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error)
 
 	// ListFailureNoticesDueSystem returns, across orgs, the failed
 	// conversations a person delegated whose kinds.ConversationFailed notice
@@ -1527,12 +1530,13 @@ type ConversationStore interface {
 	ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error)
 
 	// MarkFailureNoticedSystem records that the conversation's failure notice
-	// was posted, unless it already was.
+	// was posted, unless it already was, and reports whether it marked the
+	// row.
 	//
-	// A bookkeeping write that returns no row: its only reader is
-	// ListFailureNoticesDueSystem, and its caller acts on nothing it would
-	// return. Only the brain writes it.
-	MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) error
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), for the reasons MarkPauseNoticedSystem gives. A
+	// bookkeeping write that returns no row, for the same reasons.
+	MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// HasActiveClaimForTaskSystem reports whether any conversation
 	// on taskID has a live claim — i.e. whether an executor is

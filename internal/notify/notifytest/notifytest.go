@@ -9,6 +9,10 @@
 // Every recorder sees every call made while it is installed, and its
 // assertions read only the org they are given, so parallel tests that each use
 // their own org do not see each other.
+//
+// A guarded verb (SetGuarded, PostGuarded) needs a database to run its guard
+// in, which GuardsIn gives the test. The guard runs once per call, whichever
+// recorders are installed.
 package notifytest
 
 import (
@@ -18,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/internal/sink"
@@ -55,6 +60,9 @@ type ResolvedEvent struct {
 
 // Recorder holds the occurrences the verbs left open.
 type Recorder struct {
+	// t is the test the recorder was made for, which a guarded verb with no
+	// GuardsIn fails.
+	t  testing.TB
 	mu sync.Mutex
 	// open is org → kind name → key.
 	open  map[string]map[string]map[string]Occurrence
@@ -71,6 +79,8 @@ var installed = struct {
 	mu        sync.Mutex
 	recorders map[*Recorder]struct{}
 	prev      sink.Sink
+	// guards is where a guarded verb's guard runs: GuardsIn's.
+	guards db.TxRunner
 }{recorders: map[*Recorder]struct{}{}}
 
 // Record installs a recorder for the rest of the test. The verbs reach it in
@@ -79,6 +89,7 @@ var installed = struct {
 func Record(t testing.TB) *Recorder {
 	t.Helper()
 	r := &Recorder{
+		t:    t,
 		open: map[string]map[string]map[string]Occurrence{}, kinds: map[string]sink.Kind{},
 		events: map[string]map[sink.EventKey]EventOccurrence{}, resolved: map[string][]ResolvedEvent{}, closedSweeps: map[string]int{},
 	}
@@ -98,6 +109,48 @@ func Record(t testing.TB) *Recorder {
 		}
 	})
 	return r
+}
+
+// GuardsIn runs every guarded verb's guard in a transaction on tx for the
+// rest of the test, as the engine runs it in the transaction that writes the
+// notification. The verb is recorded only when its guard reports true and the
+// transaction commits. Without it, a guarded verb fails the test of every
+// installed recorder and records nothing.
+func GuardsIn(t testing.TB, tx db.TxRunner) {
+	t.Helper()
+	installed.mu.Lock()
+	prev := installed.guards
+	installed.guards = tx
+	installed.mu.Unlock()
+	t.Cleanup(func() {
+		installed.mu.Lock()
+		defer installed.mu.Unlock()
+		installed.guards = prev
+	})
+}
+
+// guarded reports whether a call with guard is to be recorded: true for no
+// guard, and otherwise the guard's answer in a transaction that committed.
+func guarded(ctx context.Context, k sink.Kind, orgID string, guard sink.Guard) bool {
+	if guard == nil {
+		return true
+	}
+	installed.mu.Lock()
+	tx := installed.guards
+	installed.mu.Unlock()
+	if tx == nil {
+		for _, r := range recorders() {
+			r.t.Errorf("notifytest: %s was called with a guard, and nothing runs it; call notifytest.GuardsIn", k.Name())
+		}
+		return false
+	}
+	var ok bool
+	err := tx.SystemWithTx(ctx, orgID, func(stores db.SystemTxStores) error {
+		var err error
+		ok, err = guard(ctx, stores)
+		return err
+	})
+	return err == nil && ok
 }
 
 // Isolate puts back, when the test ends, whatever notify had installed when
@@ -331,7 +384,10 @@ func recorders() []*Recorder {
 	return out
 }
 
-func (fanout) Set(_ context.Context, k sink.Kind, orgID string, p any, active bool) {
+func (fanout) Set(ctx context.Context, k sink.Kind, orgID string, p any, active bool, guard sink.Guard) {
+	if !guarded(ctx, k, orgID, guard) {
+		return
+	}
 	for _, r := range recorders() {
 		r.set(k, orgID, p, active)
 	}
@@ -343,7 +399,10 @@ func (fanout) Sync(_ context.Context, k sink.Kind, orgID string, active, keep []
 	}
 }
 
-func (fanout) Post(_ context.Context, k sink.Kind, orgID string, p any) {
+func (fanout) Post(ctx context.Context, k sink.Kind, orgID string, p any, guard sink.Guard) {
+	if !guarded(ctx, k, orgID, guard) {
+		return
+	}
 	for _, r := range recorders() {
 		r.post(k, orgID, p)
 	}

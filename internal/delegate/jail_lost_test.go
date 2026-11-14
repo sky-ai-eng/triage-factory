@@ -179,7 +179,7 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	if got := captured.toasts(); len(got) != 0 {
 		t.Errorf("toasts = %q, want none: the delegator is told by a notification", got)
 	}
-	passOnce(f.s)
+	passOnce(t, f.s)
 	paused := rec.Open(runmode.LocalDefaultOrgID, kinds.ConversationPaused)
 	if len(paused) != 1 || paused[0].Key != f.conversationID {
 		t.Fatalf("paused notifications = %+v, want one for %s", paused, f.conversationID)
@@ -236,6 +236,6 @@ func TestJailLost_AParkThatLandsNothingIsNotCountedOrAnnounced(t *testing.T) {
 	if got := captured.toasts(); len(got) != 0 {
 		t.Errorf("toasts = %q, want none for a run that is not paused", got)
 	}
-	passOnce(f.s)
+	passOnce(t, f.s)
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
 }

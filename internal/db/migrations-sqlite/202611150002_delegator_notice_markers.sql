@@ -10,9 +10,14 @@ ALTER TABLE conversations ADD COLUMN failure_noticed_at DATETIME;
 ALTER TABLE conversations ADD COLUMN pause_noticed_parked_at DATETIME;
 
 -- Failed rows accumulate, and the few still owed a notice are all the read
--- takes.
-CREATE INDEX IF NOT EXISTS idx_conversations_failure_notice_due ON conversations (completed_at, id)
+-- takes. Likewise for parks: stored 'open' covers every concluded step, and
+-- only the live parks not yet told are read.
+CREATE INDEX IF NOT EXISTS idx_conversations_failure_notice_due ON conversations (status, completed_at, id)
     WHERE status = 'failed' AND failure_noticed_at IS NULL AND creator_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_pause_notice_due ON conversations (status, parked_at, id)
+    WHERE status = 'open' AND park_reason IS NOT NULL AND parked_at IS NOT NULL
+      AND creator_user_id IS NOT NULL AND ended_at IS NULL AND archived_at IS NULL
+      AND pause_noticed_parked_at IS NOT parked_at;
 
 -- Every failure and park already on disk was told, or lost, by the build that
 -- recorded it. Marking them keeps the upgrade from telling them again.

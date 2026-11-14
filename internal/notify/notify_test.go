@@ -427,6 +427,50 @@ func TestLocal_PostAndClearSource(t *testing.T) {
 	}
 }
 
+// A guarded verb writes only when its guard reports true. A guard that
+// fails writes nothing and is counted like any other failed write.
+func TestLocal_GuardedVerbsWriteOnlyWhenTheGuardPasses(t *testing.T) {
+	stores, _, _ := localBackend(t)
+	count := failureCounter(t)
+	ctx := context.Background()
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	var ran int
+	answer := func(ok bool, err error) Guard {
+		return func(_ context.Context, tx db.SystemTxStores) (bool, error) {
+			if tx.Notifications == nil {
+				t.Error("the guard ran with no transaction stores")
+			}
+			ran++
+			return ok, err
+		}
+	}
+
+	testNotice.PostGuarded(ctx, org, testParams{ID: "refused"}, answer(false, nil))
+	membersCondition.SetGuarded(ctx, org, testParams{ID: "refused"}, true, answer(false, nil))
+	testNotice.PostGuarded(ctx, org, testParams{ID: "failed"}, answer(true, errors.New("guard write failed")))
+	if got := rows(t, stores, org, user, testNotice); len(got) != 0 {
+		t.Errorf("notices after guards that refused or failed: %+v; want none", got)
+	}
+	if got := rows(t, stores, org, user, membersCondition); len(got) != 0 {
+		t.Errorf("conditions after a guard that refused: %+v; want none", got)
+	}
+	if n := count()[testNotice.Name()]; n != 1 {
+		t.Errorf("failures counted = %d; want 1, for the guard that failed", n)
+	}
+
+	testNotice.PostGuarded(ctx, org, testParams{ID: "n"}, answer(true, nil))
+	membersCondition.SetGuarded(ctx, org, testParams{ID: "c"}, true, answer(true, nil))
+	if got := rows(t, stores, org, user, testNotice); len(got) != 1 || got[0].Key != "n" {
+		t.Errorf("notices after a guard that passed: %+v; want n", got)
+	}
+	if got := open(rows(t, stores, org, user, membersCondition)); len(got) != 1 || got[0].Key != "c" {
+		t.Errorf("conditions after a guard that passed: %+v; want c open", got)
+	}
+	if ran != 5 {
+		t.Errorf("guards ran %d times; want once per call", ran)
+	}
+}
+
 // A Resolved that fails is counted and leaves the row without a sentence:
 // the resolution itself stands.
 func TestLocal_FailingResolvedLeavesTheResolution(t *testing.T) {

@@ -5458,11 +5458,16 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("due row = %+v, want %+v with the seeded entity's key", due[0], want)
 		}
 
-		if err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil {
-			t.Fatalf("MarkFailureNoticedSystem: %v", err)
+		if marked, err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil || !marked {
+			t.Fatalf("MarkFailureNoticedSystem = (%v, %v), want it marked", marked, err)
 		}
 		if due, err := store.ListFailureNoticesDueSystem(ctx, 100); err != nil || len(due) != 0 {
 			t.Errorf("due after the mark = %+v (err %v), want none", due, err)
+		}
+		// A second pass that read the row before the mark finds nothing to
+		// mark, which is what keeps it from posting the notice again.
+		if marked, err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil || marked {
+			t.Errorf("a second MarkFailureNoticedSystem = (%v, %v), want nothing marked", marked, err)
 		}
 	})
 
@@ -5504,11 +5509,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			!strings.Contains(got.EntitySourceID, "pause-notice") {
 			t.Errorf("due row = %+v, want the stalled park in org %s by %s, with its parked_at and entity key", got, orgID, userID)
 		}
-		if err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil {
-			t.Fatalf("MarkPauseNoticedSystem: %v", err)
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || !marked {
+			t.Fatalf("MarkPauseNoticedSystem = (%v, %v), want it marked", marked, err)
 		}
 		if got := due(); len(got) != 0 {
 			t.Fatalf("due after the mark = %+v, want none", got)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || marked {
+			t.Errorf("a second MarkPauseNoticedSystem = (%v, %v), want nothing marked", marked, err)
 		}
 
 		// Woken and parked again: a new park, owed its own notice.
@@ -5521,14 +5529,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("due after parking anew = %+v, want %s at a parked_at other than %v", again, conversationID, first[0].ParkedAt)
 		}
 		// A mark naming the park that ended marks nothing.
-		if err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil {
-			t.Fatalf("MarkPauseNoticedSystem(stale): %v", err)
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || marked {
+			t.Fatalf("MarkPauseNoticedSystem(stale) = (%v, %v), want nothing marked", marked, err)
 		}
 		if got := due(); len(got) != 1 {
 			t.Fatalf("due after a stale mark = %+v, want the new park still due", got)
 		}
-		if err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, again[0].ParkedAt); err != nil {
-			t.Fatalf("MarkPauseNoticedSystem: %v", err)
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, again[0].ParkedAt); err != nil || !marked {
+			t.Fatalf("MarkPauseNoticedSystem = (%v, %v), want it marked", marked, err)
 		}
 		if got := due(); len(got) != 0 {
 			t.Errorf("due after marking the new park = %+v, want none", got)

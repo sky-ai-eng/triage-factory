@@ -2,12 +2,15 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -61,12 +64,15 @@ func (d *noticeDoorbell) rang() []string {
 	return append([]string(nil), d.rings...)
 }
 
-// passOnce runs one DelegatorNotices pass over s's conversations.
-func passOnce(s *Spawner) {
+// passOnce runs one DelegatorNotices pass over s's conversations, with the
+// guards that mark each row running in s's database.
+func passOnce(t *testing.T, s *Spawner) {
+	t.Helper()
+	notifytest.GuardsIn(t, s.tx)
 	NewDelegatorNotices(s.conversations, time.Hour).pass(context.Background())
 }
 
-// A failure rings the noticeDoorbell only when this engagement recorded it, and the
+// A failure rings the doorbell only when this engagement recorded it, and the
 // sweep tells the delegator only of a recorded failure, in the words the
 // failure stored. A verdict that settled the row first is the conversation's
 // answer, and a lasting notice saying otherwise would be false.
@@ -82,18 +88,18 @@ func TestFailConversation_TellsTheDelegatorOnlyOfAFailureItRecorded(t *testing.T
 	}
 	settled.s.failConversation(org, settled.conversationID, settled.task.ID, settled.claimID, "late", domain.ConversationFailureCrash)
 	if got := settledRings.rang(); len(got) != 0 {
-		t.Errorf("noticeDoorbell rang %v for a failure a verdict overtook, want no ring", got)
+		t.Errorf("doorbell rang %v for a failure a verdict overtook, want no ring", got)
 	}
-	passOnce(settled.s)
+	passOnce(t, settled.s)
 	rec.Inactive(t, org, kinds.ConversationFailed)
 
 	f := newStallFixture(t, "r-fail-recorded", activityTimings{idle: time.Hour})
 	rings := ringOn(f.s)
 	f.s.failConversation(org, f.conversationID, f.task.ID, f.claimID, "exit 1", domain.ConversationFailureCrash)
 	if got := rings.rang(); len(got) != 1 || got[0] != org {
-		t.Errorf("noticeDoorbell rang %v, want once for %s", got, org)
+		t.Errorf("doorbell rang %v, want once for %s", got, org)
 	}
-	passOnce(f.s)
+	passOnce(t, f.s)
 	open := rec.Open(org, kinds.ConversationFailed)
 	if len(open) != 1 {
 		t.Fatalf("failed notices = %+v, want one", open)
@@ -125,6 +131,7 @@ func TestDelegatorNotices_PassTellsEachDueRowOnce(t *testing.T) {
 		t.Fatalf("park: ok=%v err=%v", ok, err)
 	}
 
+	notifytest.GuardsIn(t, f.s.tx)
 	sweep := NewDelegatorNotices(f.s.conversations, time.Hour)
 	sweep.pass(ctx)
 
@@ -167,7 +174,127 @@ func TestDelegatorNotices_PassTellsEachDueRowOnce(t *testing.T) {
 	}
 }
 
-// A park that waits on the delegator rings the noticeDoorbell; the sweep opens its
+// staleDueLists answers both due lists with what they held at the first
+// read, the view of a second pass that read the rows before the first pass
+// marked them.
+type staleDueLists struct {
+	db.ConversationStore
+	failures []domain.FailureNoticeDue
+	pauses   []domain.PauseNoticeDue
+}
+
+func (s *staleDueLists) ListFailureNoticesDueSystem(context.Context, int) ([]domain.FailureNoticeDue, error) {
+	return s.failures, nil
+}
+
+func (s *staleDueLists) ListPauseNoticesDueSystem(context.Context, int) ([]domain.PauseNoticeDue, error) {
+	return s.pauses, nil
+}
+
+// Two passes that read the same due rows, as two brains across a lease
+// handover can, tell each row once: the second pass's mark finds the row
+// marked, and its notice is not written.
+func TestDelegatorNotices_APassThatReadRowsAnotherPassToldSendsNothing(t *testing.T) {
+	f := newStallFixture(t, "r-overlap-failed", activityTimings{idle: time.Hour})
+	rec := notifytest.Record(t)
+	notifytest.GuardsIn(t, f.s.tx)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	f.s.failConversation(org, f.conversationID, f.task.ID, f.claimID, "exit 1", domain.ConversationFailureCrash)
+	seedConversation(t, f.database, "r-overlap-paused", "", "")
+	pausedClaim := markEngaged(t, f.database, "r-overlap-paused")
+	if ok, err := f.s.conversations.ParkOpenForClaimSystem(ctx, org, "r-overlap-paused", pausedClaim, db.ParkStopped(domain.ParkReasonStalled, "")); err != nil || !ok {
+		t.Fatalf("park: ok=%v err=%v", ok, err)
+	}
+	failures, err := f.s.conversations.ListFailureNoticesDueSystem(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListFailureNoticesDueSystem: %v", err)
+	}
+	pauses, err := f.s.conversations.ListPauseNoticesDueSystem(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListPauseNoticesDueSystem: %v", err)
+	}
+	if len(failures) != 1 || len(pauses) != 1 {
+		t.Fatalf("due before either pass: failures %+v, pauses %+v, want one of each", failures, pauses)
+	}
+
+	NewDelegatorNotices(f.s.conversations, time.Hour).pass(ctx)
+	// Resolve the paused notice, so a second open would show as an open
+	// occurrence again rather than as the one already there.
+	kinds.ConversationPaused.Set(ctx, org, kinds.PausedFor(pauses[0].ConversationAwaitingPerson), false)
+	NewDelegatorNotices(&staleDueLists{ConversationStore: f.s.conversations, failures: failures, pauses: pauses}, time.Hour).pass(ctx)
+
+	if failed := rec.Open(org, kinds.ConversationFailed); len(failed) != 1 || failed[0].Seen != 1 {
+		t.Errorf("failed notices after both passes = %+v, want one, posted once", failed)
+	}
+	rec.Inactive(t, org, kinds.ConversationPaused)
+}
+
+// refusingNotifications fails every notification write.
+type refusingNotifications struct{ db.NotificationStore }
+
+func (refusingNotifications) UpsertOpenSystem(context.Context, db.NotificationOccurrence) (db.NotificationUpsert, error) {
+	return db.NotificationUpsert{}, errors.New("notification write refused")
+}
+
+// refusingTx is a TxRunner whose system transactions refuse every
+// notification write, as a database that fails the write would.
+type refusingTx struct{ db.TxRunner }
+
+func (r refusingTx) SystemWithTx(ctx context.Context, orgID string, fn func(db.SystemTxStores) error) error {
+	return r.TxRunner.SystemWithTx(ctx, orgID, func(tx db.SystemTxStores) error {
+		tx.Notifications = refusingNotifications{tx.Notifications}
+		return fn(tx)
+	})
+}
+
+// A notice whose write fails leaves its row unmarked, so the next pass sends
+// it. This runs the notify engine itself, over the fixture's database.
+func TestDelegatorNotices_AFailedNoticeWriteLeavesTheRowDue(t *testing.T) {
+	f := newStallFixture(t, "r-refused", activityTimings{idle: time.Hour})
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	stores := sqlitestore.New(f.database)
+	notifytest.Isolate(t)
+	install := func(tx db.TxRunner) {
+		notify.Install(notify.Backend{
+			Tx: tx, Notifications: stores.Notifications, Orgs: stores.Orgs,
+			LinearTeamRules: stores.LinearTeamRules, Local: true,
+		})
+	}
+	posted := func() int {
+		t.Helper()
+		var n int
+		if err := f.database.QueryRow(`SELECT COUNT(*) FROM notifications WHERE kind = ?`, kinds.ConversationFailed.Name()).Scan(&n); err != nil {
+			t.Fatalf("count notices: %v", err)
+		}
+		return n
+	}
+	due := func() int {
+		t.Helper()
+		got, err := f.s.conversations.ListFailureNoticesDueSystem(ctx, 100)
+		if err != nil {
+			t.Fatalf("ListFailureNoticesDueSystem: %v", err)
+		}
+		return len(got)
+	}
+	f.s.failConversation(org, f.conversationID, f.task.ID, f.claimID, "exit 1", domain.ConversationFailureCrash)
+
+	install(refusingTx{stores.Tx})
+	NewDelegatorNotices(f.s.conversations, time.Hour).pass(ctx)
+	if n, d := posted(), due(); n != 0 || d != 1 {
+		t.Fatalf("after a refused write: %d notices and %d due, want none posted and the failure still due", n, d)
+	}
+
+	install(stores.Tx)
+	NewDelegatorNotices(f.s.conversations, time.Hour).pass(ctx)
+	if n, d := posted(), due(); n != 1 || d != 0 {
+		t.Errorf("after the write succeeds: %d notices and %d due, want one posted and nothing due", n, d)
+	}
+}
+
+// A park that waits on the delegator rings the doorbell; the sweep opens its
 // notice, keeps it while the row waits, and resolves it once a message wakes
 // the conversation.
 func TestPausedConversation_OpensFromTheRowsAndResolvesWhenWoken(t *testing.T) {
@@ -185,19 +312,19 @@ func TestPausedConversation_OpensFromTheRowsAndResolvesWhenWoken(t *testing.T) {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
 	if got := rings.rang(); len(got) != 1 || got[0] != org {
-		t.Errorf("noticeDoorbell rang %v, want once for %s", got, org)
+		t.Errorf("doorbell rang %v, want once for %s", got, org)
 	}
 	rec.Inactive(t, org, kinds.ConversationPaused)
 
-	passOnce(f.s)
+	passOnce(t, f.s)
 	rec.Active(t, org, kinds.ConversationPaused, f.conversationID)
-	passOnce(f.s)
+	passOnce(t, f.s)
 	rec.Active(t, org, kinds.ConversationPaused, f.conversationID)
 
 	if ok, err := f.s.conversations.MarkQueuedForResume(ctx, org, f.conversationID); err != nil || !ok {
 		t.Fatalf("resume: ok=%v err=%v", ok, err)
 	}
-	passOnce(f.s)
+	passOnce(t, f.s)
 	rec.Inactive(t, org, kinds.ConversationPaused)
 }
 
@@ -215,9 +342,9 @@ func TestPausedConversation_AnIdleParkOpensNothing(t *testing.T) {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
 	if got := rings.rang(); len(got) != 0 {
-		t.Errorf("noticeDoorbell rang %v for an idle park, want no ring", got)
+		t.Errorf("doorbell rang %v for an idle park, want no ring", got)
 	}
-	passOnce(f.s)
+	passOnce(t, f.s)
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
 }
 
@@ -239,8 +366,8 @@ func TestPausedConversation_AnIdleParkThatLandsAStallOpensIt(t *testing.T) {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
 	if got := rings.rang(); len(got) != 1 {
-		t.Errorf("noticeDoorbell rang %v, want once", got)
+		t.Errorf("doorbell rang %v, want once", got)
 	}
-	passOnce(f.s)
+	passOnce(t, f.s)
 	rec.Active(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused, f.conversationID)
 }

@@ -77,9 +77,11 @@ func (d *DelegatorNotices) Nudge() {
 // conversation that parks between the resolve step's read and its sync, which
 // has no notice yet, is opened by the step that follows.
 //
-// Each notice is sent before its row is marked, so a crash between the two
-// repeats a notice rather than losing one: a second Set of an open notice
-// changes nothing, and a second failure Post raises the notice's seen count.
+// Each notice is written in one transaction with the mark that records it,
+// the mark first (notify.Guard). A notice whose write fails leaves its row
+// unmarked, so the next pass sends it, and two passes that read the same row,
+// on one brain or on two across a lease handover, send it once: the second
+// mark finds the row already marked, and its notice is not written.
 func (d *DelegatorNotices) pass(ctx context.Context) {
 	d.resolvePaused(ctx)
 	d.openPaused(ctx)
@@ -111,7 +113,8 @@ func (d *DelegatorNotices) resolvePaused(ctx context.Context) {
 }
 
 // openPaused opens kinds.ConversationPaused for each park that waits on its
-// delegator and has not been told, and marks the park told.
+// delegator and has not been told, with the mark that records it. A park
+// that ended since the read matches no mark, so its notice is not opened.
 func (d *DelegatorNotices) openPaused(ctx context.Context) {
 	due, err := d.conversations.ListPauseNoticesDueSystem(ctx, delegatorNoticePage)
 	if err != nil {
@@ -122,16 +125,15 @@ func (d *DelegatorNotices) openPaused(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		kinds.ConversationPaused.Set(ctx, p.OrgID, kinds.PausedFor(p.ConversationAwaitingPerson), true)
-		if err := d.conversations.MarkPauseNoticedSystem(ctx, p.OrgID, p.ConversationID, p.ParkedAt); err != nil {
-			delegateLog.Warn("mark the paused run told failed; the next pass opens its notification again",
-				"conversation", p.ConversationID, "org_id", p.OrgID, "error", err)
-		}
+		kinds.ConversationPaused.SetGuarded(ctx, p.OrgID, kinds.PausedFor(p.ConversationAwaitingPerson), true,
+			func(ctx context.Context, tx db.SystemTxStores) (bool, error) {
+				return tx.Conversations.MarkPauseNoticedSystem(ctx, p.OrgID, p.ConversationID, p.ParkedAt)
+			})
 	}
 }
 
 // postFailed posts kinds.ConversationFailed for each failure a person
-// delegated that has not been told, and marks the failure told.
+// delegated that has not been told, with the mark that records it.
 func (d *DelegatorNotices) postFailed(ctx context.Context) {
 	due, err := d.conversations.ListFailureNoticesDueSystem(ctx, delegatorNoticePage)
 	if err != nil {
@@ -142,16 +144,14 @@ func (d *DelegatorNotices) postFailed(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		kinds.ConversationFailed.Post(ctx, f.OrgID, kinds.FailedConversation{
+		kinds.ConversationFailed.PostGuarded(ctx, f.OrgID, kinds.FailedConversation{
 			ConversationID: f.ConversationID,
 			UserID:         f.CreatorUserID,
 			Subject:        f.EntitySourceID,
 			FailureKind:    f.FailureKind,
 			Summary:        f.ResultSummary,
+		}, func(ctx context.Context, tx db.SystemTxStores) (bool, error) {
+			return tx.Conversations.MarkFailureNoticedSystem(ctx, f.OrgID, f.ConversationID)
 		})
-		if err := d.conversations.MarkFailureNoticedSystem(ctx, f.OrgID, f.ConversationID); err != nil {
-			delegateLog.Warn("mark the failed run told failed; the next pass posts its notification again",
-				"conversation", f.ConversationID, "org_id", f.OrgID, "error", err)
-		}
 	}
 }

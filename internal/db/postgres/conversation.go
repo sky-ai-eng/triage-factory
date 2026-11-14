@@ -845,16 +845,7 @@ func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit
 	if limit <= 0 {
 		return nil, nil
 	}
-	// A park keeps its parked_at until a claim or a resume takes the row off
-	// it, so a marker that differs from it names an earlier park, or none.
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT c.org_id::text, c.parked_at, c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
-		`+parkedForPersonSQL("$1")+`
-		  AND c.parked_at IS NOT NULL
-		  AND c.pause_noticed_parked_at IS DISTINCT FROM c.parked_at
-		ORDER BY c.parked_at, c.id
-		LIMIT $2
-	`, parkedForPersonReasons(), limit)
+	rows, err := s.admin.QueryContext(ctx, pauseNoticesDueQuery, parkedForPersonReasons(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -872,33 +863,27 @@ func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit
 	return out, rows.Err()
 }
 
-func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) error {
-	_, err := s.admin.ExecContext(ctx, `
+func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error) {
+	// The IS DISTINCT FROM is what a concurrent pass's mark meets: the row
+	// lock makes it wait for the first, and once that commits the row no
+	// longer matches.
+	res, err := s.admin.ExecContext(ctx, `
 		UPDATE conversations SET pause_noticed_parked_at = parked_at
 		WHERE org_id = $1 AND id = $2 AND parked_at = $3
+		  AND pause_noticed_parked_at IS DISTINCT FROM parked_at
 	`, orgID, conversationID, parkedAt)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	// The predicate and order are idx_conversations_failure_notice_due's, so
-	// the read can walk the few rows still due rather than every failure ever
-	// recorded.
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT c.org_id::text, c.id::text, c.creator_user_id::text,
-		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
-		FROM conversations c
-		LEFT JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
-		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
-		WHERE c.status = 'failed'
-		  AND c.failure_noticed_at IS NULL
-		  AND c.creator_user_id IS NOT NULL
-		ORDER BY c.completed_at, c.id
-		LIMIT $1
-	`, limit)
+	rows, err := s.admin.QueryContext(ctx, failureNoticesDueQuery, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -916,13 +901,48 @@ func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, lim
 	return out, rows.Err()
 }
 
-func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) error {
-	_, err := s.admin.ExecContext(ctx, `
+func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
 		UPDATE conversations SET failure_noticed_at = now()
 		WHERE org_id = $1 AND id = $2 AND failure_noticed_at IS NULL
 	`, orgID, conversationID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
+
+// pauseNoticesDueQuery is ListPauseNoticesDueSystem's statement. A park keeps
+// its parked_at until a claim or a resume takes the row off it, so a marker
+// that differs from it names an earlier park, or none.
+//
+// Its predicate and order are idx_conversations_pause_notice_due's, so the
+// read walks the parks still owed a notice rather than every open
+// conversation, concluded steps included.
+var pauseNoticesDueQuery = `
+		SELECT c.org_id::text, c.parked_at, c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
+		` + parkedForPersonSQL("$1") + `
+		  AND c.parked_at IS NOT NULL
+		  AND c.pause_noticed_parked_at IS DISTINCT FROM c.parked_at
+		ORDER BY c.parked_at, c.id
+		LIMIT $2`
+
+// failureNoticesDueQuery is ListFailureNoticesDueSystem's statement. Its
+// predicate and order are idx_conversations_failure_notice_due's, so the read
+// walks the few failures still owed a notice rather than every failure ever
+// recorded.
+const failureNoticesDueQuery = `
+		SELECT c.org_id::text, c.id::text, c.creator_user_id::text,
+		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
+		FROM conversations c
+		LEFT JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
+		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
+		WHERE c.status = 'failed'
+		  AND c.failure_noticed_at IS NULL
+		  AND c.creator_user_id IS NOT NULL
+		ORDER BY c.completed_at, c.id
+		LIMIT $1`
 
 // parkedForPersonSQL is the FROM and WHERE of a conversation that waits on the
 // person who delegated it (domain.ParkReason.AwaitsPerson), with reasons the
