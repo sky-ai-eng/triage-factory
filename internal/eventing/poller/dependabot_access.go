@@ -183,7 +183,7 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 			continue
 		}
 		_, finished, err := tr.RefreshVulnerablePackages(ctx, p.host, pass.client, listings)
-		p.marks.honorAlerts(listings[:finished])
+		p.marks.honorAlerts(finished)
 		if err != nil {
 			var rl *ghclient.ErrRateLimited
 			if !errors.As(err, &rl) {

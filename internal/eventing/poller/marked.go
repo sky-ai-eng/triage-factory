@@ -367,7 +367,7 @@ func (m *Manager) runNarrowed(ctx context.Context, orgID, scope string, client *
 // A rate limit holds the org's GitHub polls, as in runNarrowed.
 func (m *Manager) runNarrowedAlerts(ctx context.Context, orgID, scope string, client *ghclient.Client, listings []tracker.AlertListing, ledger *markLedger) (int, error) {
 	n, finished, err := m.trackerForOrg(orgID).RefreshVulnerablePackages(ctx, scope, client, listings)
-	ledger.honorAlerts(listings[:finished])
+	ledger.honorAlerts(finished)
 	if err != nil {
 		var rl *ghclient.ErrRateLimited
 		if errors.As(err, &rl) {

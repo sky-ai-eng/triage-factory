@@ -95,7 +95,9 @@ func TestValidatePredicateJSON_RefusesANonObject(t *testing.T) {
 }
 
 // The list check is generic: every string_list field of every registered
-// schema refuses an empty entry and a repeated one.
+// schema refuses an empty entry and a repeated one. A list with an enum
+// repeats one of its values, since any other entry is refused for being
+// outside it.
 func TestValidatePredicateJSON_EveryListRefusesEmptyAndRepeatedEntries(t *testing.T) {
 	checked := 0
 	for eventType, s := range All() {
@@ -104,7 +106,11 @@ func TestValidatePredicateJSON_EveryListRefusesEmptyAndRepeatedEntries(t *testin
 				continue
 			}
 			checked++
-			for _, list := range []string{`[""]`, `["x","X"]`} {
+			repeated := `["x","X"]`
+			if len(f.EnumValues) > 0 {
+				repeated = fmt.Sprintf(`[%q,%q]`, f.EnumValues[0], f.EnumValues[0])
+			}
+			for _, list := range []string{`[""]`, repeated} {
 				faults := predicateFaults(t, eventType, fmt.Sprintf(`{%q:%s}`, f.Name, list))
 				if len(faults) != 1 || faults[0].Kind != FaultInvalidValue || faults[0].Key != f.Name {
 					t.Errorf("%s %s=%s: faults = %+v, want one value fault", eventType, f.Name, list, faults)

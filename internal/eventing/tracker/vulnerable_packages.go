@@ -8,7 +8,10 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -79,56 +82,73 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 // alert opening or a package resolving against an earlier listing of the
 // repository, counts a missed hint: a change no webhook delivery announced.
 //
+// The repositories are listed concurrently, as many at once as the pull
+// request listing (repoConcurrency). Each repository's listing and writes
+// touch only its own packages, and held is read once before any of them.
+//
 // A repository GitHub refuses (a 403 or 404: the credential lost the
 // permission, or alerts were turned off) is skipped and the pass goes on; the
 // access probe records the new answer at its next recheck. So is one whose
 // listing GitHub answered in a form TF cannot read in full
 // (ghclient.ErrDependabotListingUnusable), which would fail the same way on
-// every cycle. Any other failure ends the pass and is returned, since it would
-// meet every remaining repository too: a rate limit, a refused credential,
-// GitHub failing.
+// every cycle. Any other failure ends the pass, since it would meet every
+// remaining repository too: a rate limit, a refused credential, GitHub
+// failing. No listing starts after it, the listings already in flight finish
+// with their writes, and the first such failure is returned.
 //
-// Returns how many events landed on the queue, and finished: how many of
-// repos, from the first, the pass is done with, each listed or skipped. It is
-// len(repos) unless the pass ended early, at repos[finished], which it did
-// not list. A tracker without the store lists nothing and finishes none.
-func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, client *ghclient.Client, repos []AlertListing) (emitted, finished int, err error) {
+// Returns how many events landed on the queue, and finished: the listings of
+// repos the pass is done with, each listed or skipped, in the order of repos.
+// A listing that ended the pass, and one the pass never started, is left
+// out. A tracker without the store lists nothing and finishes none.
+func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, client *ghclient.Client, repos []AlertListing) (emitted int, finished []AlertListing, err error) {
 	if t.dependabotAccess == nil || len(repos) == 0 {
-		return 0, 0, nil
+		return 0, nil, nil
 	}
 	held, err := t.heldVulnerablePackages(ctx, scope, repos)
 	if err != nil {
-		return 0, 0, err
+		return 0, nil, err
 	}
+	var events atomic.Int64
+	var stopped atomic.Bool
+	// done is written by each listing's goroutine at its own index, and read
+	// once Wait has returned.
+	done := make([]bool, len(repos))
+	g := new(errgroup.Group) // no WithContext: a failure ends the pass by stopping new listings, not by cancelling the ones in flight
+	g.SetLimit(repoConcurrency())
 	for i, l := range repos {
-		if ctx.Err() != nil {
-			return emitted, i, ctx.Err()
+		if stopped.Load() {
+			break
 		}
-		n, announced, err := t.refreshRepositoryAlerts(ctx, scope, client, l, held[l.Repository.ID])
-		emitted += n
-		if err == nil {
-			if announced > 0 && missedAlertHint(l, held[l.Repository.ID]) {
+		g.Go(func() error {
+			// Asked again here: Go waits for a free slot, and the listing
+			// that freed it can be the one that ended the pass.
+			if stopped.Load() {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				stopped.Store(true)
+				return err
+			}
+			n, announced, err := t.refreshRepositoryAlerts(ctx, scope, client, l, held[l.Repository.ID])
+			events.Add(int64(n))
+			if err == nil && announced > 0 && missedAlertHint(l, held[l.Repository.ID]) {
 				recordMissedHint(t.orgID, missedHintDependabotListing)
 			}
-			continue
-		}
-		if alertsRefused(err) {
-			recordDependabotListing(dependabotListingRefused)
-			trackerLog.InfoContext(ctx, "dependabot alerts not readable; skipping the repository this cycle", "org", t.orgID, "repo", l.Repository.Slug(), "error", err)
-			continue
-		}
-		if errors.Is(err, ghclient.ErrDependabotListingUnusable) {
-			recordDependabotListing(dependabotListingFailed)
-			trackerLog.WarnContext(ctx, "dependabot alert listing unusable; skipping the repository this cycle", "org", t.orgID, "repo", l.Repository.Slug(), "error", err)
-			continue
-		}
-		var rl *ghclient.ErrRateLimited
-		if !errors.As(err, &rl) {
-			recordDependabotListing(dependabotListingFailed)
-		}
-		return emitted, i, fmt.Errorf("list dependabot alerts of %s: %w", l.Repository.Slug(), err)
+			if err = t.alertListingFailure(ctx, l.Repository, err); err != nil {
+				stopped.Store(true)
+				return err
+			}
+			done[i] = true
+			return nil
+		})
 	}
-	return emitted, len(repos), nil
+	err = g.Wait()
+	for i, l := range repos {
+		if done[i] {
+			finished = append(finished, l)
+		}
+	}
+	return int(events.Load()), finished, err
 }
 
 // missedAlertHint reports whether a listing that announced a change is a
@@ -140,6 +160,30 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 // listing would count every change.
 func missedAlertHint(l AlertListing, held map[string]domain.Entity) bool {
 	return !l.Marked && !l.Untracked && (l.Access.AlertsETag != "" || len(held) > 0)
+}
+
+// alertListingFailure is what a repository's listing error does to its pass:
+// nil when there is none or the pass skips the repository, which is counted
+// and logged here, and otherwise the failure that ends the pass.
+func (t *Tracker) alertListingFailure(ctx context.Context, repo domain.Repository, err error) error {
+	if err == nil {
+		return nil
+	}
+	if alertsRefused(err) {
+		recordDependabotListing(dependabotListingRefused)
+		trackerLog.InfoContext(ctx, "dependabot alerts not readable; skipping the repository this cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
+		return nil
+	}
+	if errors.Is(err, ghclient.ErrDependabotListingUnusable) {
+		recordDependabotListing(dependabotListingFailed)
+		trackerLog.WarnContext(ctx, "dependabot alert listing unusable; skipping the repository this cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
+		return nil
+	}
+	var rl *ghclient.ErrRateLimited
+	if !errors.As(err, &rl) {
+		recordDependabotListing(dependabotListingFailed)
+	}
+	return fmt.Errorf("list dependabot alerts of %s: %w", repo.Slug(), err)
 }
 
 // RetireUnreadableVulnerablePackages retires the packages TF holds in each of
