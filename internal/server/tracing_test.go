@@ -113,49 +113,69 @@ func TestTracedHandlerDropsConcretePathFromServerSpans(t *testing.T) {
 	}
 }
 
-// TestConversationRoutesPutConversationIDOnServerSpan: every route addressed
-// at one conversation records its id on the request's server span, which is
-// how a search on the id finds the request beside the engagement it caused.
-// The routes are read from the mux, so a new one is covered when it mounts.
-func TestConversationRoutesPutConversationIDOnServerSpan(t *testing.T) {
+// TestConversationWriteRoutesPutConversationIDOnServerSpan: a request to a
+// route that changes a conversation records the conversation's id on its
+// server span, which is how a search on the id finds the request beside the
+// engagement it affected. A read route records none, and neither does a path
+// value that is not a UUID, which would otherwise export client-supplied text.
+func TestConversationWriteRoutesPutConversationIDOnServerSpan(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
 	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
 
 	s := newTestServer(t)
-	const prefix = "/api/agent/conversations/{conversationID}"
-	want := map[string]string{} // route pattern -> the conversation id its request named
-	for _, m := range s.mux.mounts {
-		method, path, _ := strings.Cut(m.pattern, " ")
-		if path != prefix && !strings.HasPrefix(path, prefix+"/") {
-			continue
-		}
-		id := uuid.NewString()
-		concrete := strings.Replace(path, "{conversationID}", id, 1)
-		concrete = strings.Replace(concrete, "{toolCallID}", "toolu_fixture", 1)
-		req := httptest.NewRequest(method, concrete, strings.NewReader("{}"))
-		req.Header.Set("Content-Type", "application/json")
-		s.tracedHandler().ServeHTTP(httptest.NewRecorder(), req)
-		want[m.pattern] = id
+	handler := s.tracedHandler()
+	cases := []struct {
+		name    string
+		pattern string
+		id      string
+		want    bool
+	}{
+		{"message", "POST /api/agent/conversations/{conversationID}/message", uuid.NewString(), true},
+		{"stop", "POST /api/agent/conversations/{conversationID}/stop", uuid.NewString(), true},
+		{"permission answer", "POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", uuid.NewString(), true},
+		{"deliverables refresh", "POST /api/agent/conversations/{conversationID}/deliverables/refresh", uuid.NewString(), true},
+		{"polled read", "GET /api/agent/conversations/{conversationID}", uuid.NewString(), false},
+		{"id not a uuid", "POST /api/agent/conversations/{conversationID}/message", "acme-secret-project", false},
 	}
-	if len(want) == 0 {
-		t.Fatalf("no route mounted under %s", prefix)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start := len(recorder.Ended())
+			method, path, _ := strings.Cut(tc.pattern, " ")
+			path = strings.Replace(path, "{conversationID}", tc.id, 1)
+			path = strings.Replace(path, "{toolCallID}", "toolu_fixture", 1)
+			req := httptest.NewRequest(method, path, strings.NewReader("{}"))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	got := map[string]string{}
-	for _, span := range recorder.Ended() {
-		if span.SpanKind() != trace.SpanKindServer {
-			continue
-		}
-		for _, kv := range span.Attributes() {
-			if kv.Key == "conversation.id" {
-				got[span.Name()] = kv.Value.AsString()
+			var server []sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended()[start:] {
+				if span.SpanKind() == trace.SpanKindServer {
+					server = append(server, span)
+				}
 			}
-		}
+			if len(server) != 1 || server[0].Name() != tc.pattern {
+				t.Fatalf("server spans = %d (first %q), want one named %q", len(server), spanName(server), tc.pattern)
+			}
+			got, found := "", false
+			for _, kv := range server[0].Attributes() {
+				if kv.Key == "conversation.id" {
+					got, found = kv.Value.AsString(), true
+				}
+			}
+			switch {
+			case tc.want && got != tc.id:
+				t.Errorf("conversation.id = %q, want %q", got, tc.id)
+			case !tc.want && found:
+				t.Errorf("conversation.id = %q, want none", got)
+			}
+		})
 	}
-	for pattern, id := range want {
-		if got[pattern] != id {
-			t.Errorf("%s: server span conversation.id = %q, want %q", pattern, got[pattern], id)
-		}
+}
+
+func spanName(spans []sdktrace.ReadOnlySpan) string {
+	if len(spans) == 0 {
+		return ""
 	}
+	return spans[0].Name()
 }

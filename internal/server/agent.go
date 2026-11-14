@@ -39,16 +39,17 @@ type agentHandler struct {
 
 // conversationIDOr404 guards the {conversationID} path value — conversations.id
 // is a uuid column on Postgres. See uuidPathOr404.
-//
-// It also puts the id on the request's server span. An engagement a request
-// causes (a follow-up's resume, a stop) is its own trace root, so the shared
-// attribute is the only thing that finds the request beside it.
 func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
-	id, ok := uuidPathOr404(w, r, "conversationID", "conversation")
-	if ok {
-		trace.SpanFromContext(r.Context()).SetAttributes(telemetry.ConversationID(id))
-	}
-	return id, ok
+	return uuidPathOr404(w, r, "conversationID", "conversation")
+}
+
+// traceConversation puts conversationID on the request's server span, so a
+// search on the id finds the request beside the engagement traces of the
+// conversation it changed. Only the write routes call it: a client watching a
+// conversation polls the reads, and those traces would crowd out the ones a
+// search on the id is for.
+func traceConversation(r *http.Request, conversationID string) {
+	trace.SpanFromContext(r.Context()).SetAttributes(telemetry.ConversationID(conversationID))
 }
 
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +220,7 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 
 	rc := ag.reconciler()
 	if rc == nil {
@@ -915,6 +917,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 	spawner := ag.spawner()
 	if spawner == nil {
 		httpx.WriteDelegationUnavailable(w)
@@ -1020,6 +1023,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 
 	var body struct {
 		Text string `json:"text"`
@@ -1147,6 +1151,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
+	traceConversation(r, conversationID)
 	toolCallID := r.PathValue("toolCallID")
 
 	var body struct {
