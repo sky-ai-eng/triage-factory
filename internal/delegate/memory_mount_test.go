@@ -266,6 +266,75 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	}
 }
 
+// TestRehydrate_RestoredScratchKeepsItsCapturedModes pins the modes a rebuilt
+// _tfac comes back with. The claim that hands the tree to the jail keeps them,
+// and the orchestrator reads a jail-owned tree through its group bits, so a
+// directory or memory file restored narrower than a fresh tree's leaves the
+// memory mirror reading nothing for the rest of the tree's life. A file keeps
+// its own bits less group and other write; a directory, which the tar carries
+// no mode for, gets a fresh _tfac's 0755.
+func TestRehydrate_RestoredScratchKeepsItsCapturedModes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("a jail-owned run tree, which these modes are for, is Linux-only")
+	}
+	isolateRunNamespace(t)
+	setupGitTestEnv(t)
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newStorageSpawner(t)
+
+	const conversationID = "wt-scratch-modes"
+	wtPath, err := worktree.MakeRunRoot(conversationID)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
+	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
+
+	captured := map[string]os.FileMode{
+		agentMemoryFileName:            0o644,
+		filepath.Join("bin", "run.sh"): 0o755,
+		"notes.txt":                    0o666,
+	}
+	for rel, mode := range captured {
+		path := filepath.Join(wtPath, "_tfac", rel)
+		writeFile(t, path, rel)
+		// Set after the write, which the umask narrows.
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("chmod %s: %v", path, err)
+		}
+	}
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("rm run root: %v", err)
+	}
+
+	runmode.SetForTest(t, runmode.ModeMulti)
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: worktree.RunRoot(conversationID), TaskID: conversationID}
+	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, nil)
+	if err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+
+	want := map[string]os.FileMode{
+		"_tfac":                       0o755,
+		filepath.Join("_tfac", "bin"): 0o755,
+		filepath.Join("_tfac", agentMemoryFileName): 0o644,
+		filepath.Join("_tfac", "bin", "run.sh"):     0o755,
+		filepath.Join("_tfac", "notes.txt"):         0o644,
+	}
+	for rel, mode := range want {
+		path := filepath.Join(got, rel)
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("lstat %s: %v", path, err)
+		}
+		if fi.Mode().Perm() != mode {
+			t.Errorf("%s restored at %v, want %v", rel, fi.Mode().Perm(), mode)
+		}
+	}
+}
+
 // TestMemoryFingerprint_IdentifiesByContent pins what "the agent never wrote"
 // means, and pins it against the case file metadata gets wrong: a rewrite to the
 // SAME LENGTH with the SAME modification time. Size and mtime cannot tell that
