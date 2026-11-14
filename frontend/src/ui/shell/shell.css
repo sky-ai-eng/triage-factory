@@ -1171,7 +1171,6 @@
 }
 .sh-offtail {
   color: var(--color-ink-4);
-  font: 400 9.5px/1 var(--font-mono);
 }
 @keyframes sh-retry {
   0%,
