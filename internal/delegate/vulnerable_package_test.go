@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -71,12 +72,28 @@ func untrustedRegion(t *testing.T, block string) string {
 	return block[begin:end]
 }
 
+// linesWith is every line of region that holds all of values.
+func linesWith(region string, values ...string) []string {
+	var out []string
+	for _, line := range strings.Split(region, "\n") {
+		holds := true
+		for _, v := range values {
+			holds = holds && strings.Contains(line, v)
+		}
+		if holds {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // TestBuildTaskContext_VulnerablePackageCarriesItsAlerts: a vulnerable
 // package's task context names the repository, the ecosystem and the package,
-// lists every open alert with its advisory ids, severity, manifest, scope,
-// vulnerable range and first patched version, and each advisory's summary once,
-// all inside the untrusted region. It names no pull request, and the newest
-// alert's advisory summary is not offered as the task's own.
+// gives every open alert one line holding its advisory ids, severity,
+// manifest, scope, vulnerable range and first patched version, and gives each
+// advisory's summary once, on a line with its id, all inside the untrusted
+// region. It names no pull request, and the newest alert's advisory summary is
+// not offered as the task's own.
 func TestBuildTaskContext_VulnerablePackageCarriesItsAlerts(t *testing.T) {
 	meta, _ := json.Marshal(map[string]any{
 		"repo": "octo/api", "ecosystem": "npm", "package": "lodash",
@@ -84,24 +101,39 @@ func TestBuildTaskContext_VulnerablePackageCarriesItsAlerts(t *testing.T) {
 	})
 	pkg := lodashSnapshot()
 	got := BuildTaskContext(vulnerablePackageTask(), "octo/api", string(meta), "", &pkg, nil, nil)
-	region := untrustedRegion(t, got)
+	// The raw metadata fence repeats the newest alert's fields, so the alert
+	// lines are read off a context built without it.
+	region := untrustedRegion(t, BuildTaskContext(vulnerablePackageTask(), "octo/api", "", "", &pkg, nil, nil))
 
-	for _, want := range []string{
-		"- Repository: octo/api",
-		"- Ecosystem: npm",
-		"- Package: lodash",
-		"Open Dependabot alerts on this package:",
-		"- Alert #3: GHSA-35jh-r3h4-6jhm CVE-2021-23337; severity high; manifest package-lock.json (runtime dependency); vulnerable versions < 4.17.21; first patched version 4.17.21",
-		"- Alert #5: GHSA-35jh-r3h4-6jhm CVE-2021-23337; severity high; manifest web/package-lock.json (development dependency); vulnerable versions < 4.17.21; first patched version 4.17.21",
-		"- Alert #9: GHSA-p6mc-m468-83gw; severity critical; manifest package-lock.json; no patched version released",
-		"Advisories:\n- GHSA-35jh-r3h4-6jhm: Command Injection in lodash\n- GHSA-p6mc-m468-83gw: Prototype Pollution in lodash",
-	} {
+	for _, want := range []string{"- Repository: octo/api", "- Ecosystem: npm", "- Package: lodash"} {
 		if !strings.Contains(region, want) {
 			t.Errorf("the untrusted region is missing %q;\n%s", want, got)
 		}
 	}
-	if n := strings.Count(region, "Command Injection in lodash"); n != 1 {
-		t.Errorf("an advisory shared by two alerts is summarized %d times, want once;\n%s", n, got)
+	for _, a := range pkg.Alerts {
+		values := []string{"#" + strconv.Itoa(a.Number) + ":", a.GHSAID, a.Severity, a.ManifestPath}
+		for _, v := range []string{a.CVEID, a.Scope, a.VulnerableVersionRange, a.FirstPatchedVersion} {
+			if v != "" {
+				values = append(values, v)
+			}
+		}
+		if lines := linesWith(region, values...); len(lines) != 1 {
+			t.Errorf("alert #%d: %d lines hold %q, want one;\n%s", a.Number, len(lines), values, got)
+		}
+	}
+	if lines := linesWith(region, "#9:", "4.17.21"); len(lines) != 0 {
+		t.Errorf("the alert with no released fix names a patched version: %q", lines)
+	}
+	for ghsa, summary := range map[string]string{
+		"GHSA-35jh-r3h4-6jhm": "Command Injection in lodash",
+		"GHSA-p6mc-m468-83gw": "Prototype Pollution in lodash",
+	} {
+		if n := strings.Count(region, summary); n != 1 {
+			t.Errorf("summary %q appears %d times, want once;\n%s", summary, n, got)
+		}
+		if lines := linesWith(region, ghsa, summary); len(lines) != 1 {
+			t.Errorf("summary %q is not on a line of its own with %s;\n%s", summary, ghsa, got)
+		}
 	}
 	for _, unwanted := range []string{"- Pull request:", "- Summary:"} {
 		if strings.Contains(got, unwanted) {
@@ -132,23 +164,26 @@ func TestBuildTaskContext_VulnerablePackageValuesStayOnTheirLine(t *testing.T) {
 
 // TestBuildTaskContext_VulnerablePackageWithoutItsSnapshot: a run whose
 // snapshot read failed still has the package named from its key, and no
-// alert list; one launched after the package resolved is told no alert is
-// open.
+// alerts; one launched after the package resolved gets a context that says
+// something about its alerts, and names none.
 func TestBuildTaskContext_VulnerablePackageWithoutItsSnapshot(t *testing.T) {
-	got := BuildTaskContext(vulnerablePackageTask(), "octo/api", "", "", nil, nil, nil)
+	unread := BuildTaskContext(vulnerablePackageTask(), "octo/api", "", "", nil, nil, nil)
 	for _, want := range []string{"- Ecosystem: npm", "- Package: lodash"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q;\n%s", want, got)
+		if !strings.Contains(unread, want) {
+			t.Errorf("missing %q;\n%s", want, unread)
 		}
 	}
-	if strings.Contains(got, "Open Dependabot alerts") {
-		t.Errorf("a missing snapshot rendered an alert list;\n%s", got)
+	if strings.Contains(unread, "GHSA-") {
+		t.Errorf("a missing snapshot rendered alerts;\n%s", unread)
 	}
 
 	resolved := domain.VulnerablePackageSnapshot{Repo: "octo/api", Ecosystem: "npm", Package: "lodash", Alerts: []domain.DependabotAlert{}}
-	got = BuildTaskContext(vulnerablePackageTask(), "octo/api", "", "", &resolved, nil, nil)
-	if !strings.Contains(untrustedRegion(t, got), "Open Dependabot alerts on this package: none.") {
-		t.Errorf("a resolved package's context does not say no alert is open;\n%s", got)
+	got := BuildTaskContext(vulnerablePackageTask(), "octo/api", "", "", &resolved, nil, nil)
+	if got == unread {
+		t.Errorf("a resolved package's context says nothing an unread snapshot's does not;\n%s", got)
+	}
+	if strings.Contains(got, "GHSA-") {
+		t.Errorf("a resolved package's context names an alert;\n%s", got)
 	}
 }
 
@@ -197,14 +232,16 @@ func TestTaskVulnerablePackage_ReadsTheEntitysSnapshot(t *testing.T) {
 }
 
 // TestRunContext_NamesTheBaseCheckout: the run context names the base-branch
-// checkout a vulnerable package's run starts with.
+// checkout a vulnerable package's run starts with, on a line of its own that
+// is not the PR checkout's.
 func TestRunContext_NamesTheBaseCheckout(t *testing.T) {
-	got := runContext("", "", "", "/work", "", "/work/octo/api/ref-main", "", "", "", "")
-	if !strings.Contains(got, "Base-branch checkout: /work/octo/api/ref-main") {
+	const path = "/work/octo/api/ref-main"
+	got := runContext("", "", "", "/work", "", path, "", "", "", "")
+	if !strings.Contains(got, path) {
 		t.Errorf("the run context does not name the base checkout;\n%s", got)
 	}
-	if strings.Contains(got, "PR checkout:") {
-		t.Errorf("the run context names a PR checkout;\n%s", got)
+	if asPR := runContext("", "", "", "/work", path, "", "", "", "", ""); asPR == got {
+		t.Errorf("the base checkout renders as the PR checkout does;\n%s", got)
 	}
 }
 
@@ -396,7 +433,16 @@ func TestBuildStepConfig_VulnerablePackageStepFindsItsBaseCheckout(t *testing.T)
 	if cfg.prNumber != 0 || cfg.prCheckout != "" || cfg.prSkeleton != "" {
 		t.Errorf("config names a pull request: number %d, checkout %q, skeleton %q", cfg.prNumber, cfg.prCheckout, cfg.prSkeleton)
 	}
-	if !strings.Contains(cfg.scope, "Vulnerable package") || strings.Contains(cfg.scope, "PR:") {
-		t.Errorf("scope = %q, want a vulnerable package's", cfg.scope)
+	if want := vulnerablePackageScope("owner", "repo"); cfg.scope != want {
+		t.Errorf("scope = %q, want %q", cfg.scope, want)
+	}
+	// Step 1's own row is what lets it fetch and push in the checkout.
+	var recorded int
+	if err := f.database.QueryRow(`SELECT COUNT(*) FROM conversation_worktrees WHERE conversation_id = ? AND repository_id = ? AND ref = ? AND path = ?`,
+		f.conversationIDs[1], entity.RepositoryID, worktree.CheckoutRefSlug(""), checkout).Scan(&recorded); err != nil {
+		t.Fatalf("read step 1's checkout rows: %v", err)
+	}
+	if recorded != 1 {
+		t.Errorf("step 1 has %d rows for the base checkout, want one", recorded)
 	}
 }

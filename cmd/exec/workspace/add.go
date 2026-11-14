@@ -245,21 +245,16 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 
 	// A bare add (no --ref/--pr) resolves HERE — before the ref/path
 	// derivation — to the branch the repository row names: the
-	// admin-configured base branch, else the profiled default. It is the same
-	// BaseBranch || DefaultBranch resolution every surface that materializes
-	// "the repo's branch" uses, so each one answers from the one stored
-	// source, and the reservation, the directory name,
+	// admin-configured base branch, else the profiled default
+	// (Repository.EffectiveBaseBranch, which every surface that materializes
+	// "the repo's branch" resolves through), so the reservation, the directory name,
 	// and the fetch all carry the real branch (slug "ref-<branch>") instead
 	// of a placeholder. It also makes a bare add and an explicit `--ref` of
 	// the same branch converge on one checkout. A row naming no branch at all
 	// falls through with spec.ref empty: the create then detects origin/HEAD
 	// and the reservation keeps the fallback slug "default".
 	if spec.pr == 0 && spec.ref == "" {
-		resolved := profile.BaseBranch
-		if resolved == "" {
-			resolved = profile.DefaultBranch
-		}
-		if resolved != "" {
+		if resolved := profile.EffectiveBaseBranch(); resolved != "" {
 			// The stored value is operator input (the repos PATCH accepts any
 			// string), and it is about to become a path segment and a fetch
 			// refspec — so it passes the same interpolation guard as an

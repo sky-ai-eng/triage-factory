@@ -418,8 +418,8 @@ predicates](#handler-predicates) describes. `resolved` and `unreachable` have
 no predicate fields. One rule ships for `alert_opened`, matching every alert
 and disabled, and one trigger, matching every alert and disabled like every
 shipped trigger, on the "Remediate Vulnerable Package" blueprint: upgrade the
-package past every open alert, or stop with no pull request when an alert has
-no patched version.
+package past every open alert a released version fixes, or stop with no pull
+request when no alert has a patched version.
 
 A run on a vulnerable package starts with a detached checkout of the
 repository's base branch, the one a bare `workspace add` makes, and its

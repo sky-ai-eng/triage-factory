@@ -146,6 +146,18 @@ type Repository struct {
 // second copy to fall out of step with the columns it is built from.
 func (r Repository) Slug() string { return r.Owner + "/" + r.Repo }
 
+// EffectiveBaseBranch is the branch feature work starts from: the
+// admin-configured base branch, else the profiled default, "" when the row
+// names neither. Every checkout of "the repository's branch" resolves through
+// it (a bare `workspace add`, a vulnerable package's run), so they land on the
+// same checkout. The value is operator input, unvalidated here.
+func (r Repository) EffectiveBaseBranch() string {
+	if r.BaseBranch != "" {
+		return r.BaseBranch
+	}
+	return r.DefaultBranch
+}
+
 // Ref is the repository's provider identity as a RepoRef — what to hand a
 // *ByRef* store lookup when all you have is a row you already read.
 func (r Repository) Ref() RepoRef {

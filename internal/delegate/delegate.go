@@ -918,10 +918,7 @@ func vulnerablePackageScope(owner, repo string) string {
 // about to become a path segment and a fetch refspec, so it passes the
 // checkout ref guard.
 func baseCheckoutRef(repoRow domain.Repository) (ref, slug string, err error) {
-	ref = repoRow.BaseBranch
-	if ref == "" {
-		ref = repoRow.DefaultBranch
-	}
+	ref = repoRow.EffectiveBaseBranch()
 	if ref != "" {
 		if err := worktree.ValidateCheckoutRef(ref); err != nil {
 			return "", "", fmt.Errorf("the base branch configured for %s: %w", repoRow.Slug(), err)

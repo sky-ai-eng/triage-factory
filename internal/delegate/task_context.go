@@ -156,17 +156,20 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 // each in the order the snapshot stores them (by number), then each advisory
 // they name with its summary, once, in the order the alerts first name it. A
 // package with no open alert left says so, which is what a run launched after
-// its resolution reads.
+// its resolution reads. The list is the last listing's, and a package TF
+// stopped following (github:vulnerability:unreachable) keeps the alerts it
+// last saw, so the heading says the list is as listed rather than current.
 //
 // Every value is flattened onto its line, as the field lines' are: a summary
 // and a manifest path are written outside TF. A segment with no value is
 // left out, except the first patched version, whose absence is what tells the
 // run no fix has been released.
 func vulnerablePackageBlock(pkg domain.VulnerablePackageSnapshot) string {
+	const heading = "Open Dependabot alerts on this package, as Triage Factory last listed them:"
 	if len(pkg.Alerts) == 0 {
-		return "Open Dependabot alerts on this package: none. Every alert on it has closed."
+		return heading + " none."
 	}
-	lines := []string{"Open Dependabot alerts on this package:"}
+	lines := []string{heading}
 	var advisories []string
 	summaries := map[string]string{}
 	for _, a := range pkg.Alerts {
