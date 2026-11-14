@@ -379,8 +379,7 @@ type entityCoordinate struct {
 	container domain.EntityContainer
 	// github is what GitHub answered for a GitHub coordinate's object and
 	// repository (domain.GitHubIdentity), the only thing a GitHub entity is
-	// resolved from, or, for a read that named its object by node id alone,
-	// that node id and nothing else. externalID is unused for GitHub.
+	// resolved from. externalID is unused for GitHub.
 	github domain.GitHubIdentity
 	// read marks the coordinate of an addressed read rather than of a write.
 	// It decides which repositories a relayed GitHub identity is admitted
@@ -480,17 +479,9 @@ func followsProviderKey(info ConversationInfo) bool {
 // admitted under (relayedRepositoryAdmitted): the node id was relayed too. No GitHub entity is found
 // or created from a key alone: a key's owner/repo is a spelling, which GitHub
 // may since have given to another repository.
-//
-// A read's identity that is a node id and nothing else, from a read that
-// named its object by node id alone, is looked up and never created
-// (findGitHubNode).
 func resolveGitHubEntity(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (*domain.Entity, error) {
 	id := c.github
-	if id.NodeID == "" {
-		return nil, nil
-	}
-	nodeOnly := c.read && id.Kind == "" && id.RepositoryID == ""
-	if !nodeOnly && !domain.IsGitHubObjectKind(id.Kind) {
+	if id.NodeID == "" || !domain.IsGitHubObjectKind(id.Kind) {
 		return nil, nil
 	}
 	scope, err := entityscope.Of(ctx, stores, info.OrgID, domain.ProviderGitHub)
@@ -499,9 +490,6 @@ func resolveGitHubEntity(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	if scope == "" || (c.scope != "" && c.scope != scope) {
 		return nil, nil
-	}
-	if nodeOnly {
-		return findGitHubNode(ctx, stores, info, scope, id.NodeID)
 	}
 	entity, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderGitHub, scope, id.NodeID)
 	if err != nil {
@@ -534,39 +522,6 @@ func resolveGitHubEntity(ctx context.Context, stores db.Stores, info Conversatio
 		if adopted != nil {
 			entity = adopted
 		}
-	}
-	return entity, nil
-}
-
-// findGitHubNode finds the entity a read that named its object by node id
-// alone touched, on scope, the org's GitHub host: the pull request or issue
-// TF holds under that node id, or else the one a comment TF posted under it is
-// on (db.ExternalActionStore.PostedCommentEntitySystem). Nothing is created:
-// the node id was not read from GitHub, so it says neither which object it
-// names nor which repository it is in, and an id TF holds nothing for is
-// answered nil. In multi mode the node id was relayed, so the entity found
-// must be in a repository the read is admitted under
-// (relayedRepositoryAdmitted), the gate a read by number passes.
-func findGitHubNode(ctx context.Context, stores db.Stores, info ConversationInfo, scope, nodeID string) (*domain.Entity, error) {
-	entity, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderGitHub, scope, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	if entity == nil && stores.ExternalActions != nil {
-		entityID, err := stores.ExternalActions.PostedCommentEntitySystem(ctx, info.OrgID, scope, nodeID)
-		if err != nil || entityID == "" {
-			return nil, err
-		}
-		if entity, err = stores.Entities.GetSystem(ctx, info.OrgID, entityID); err != nil {
-			return nil, err
-		}
-	}
-	// A vulnerable package is a GitHub entity too, and no read names one.
-	if entity == nil || entity.Source != domain.ProviderGitHub || entity.Scope != scope || !domain.IsGitHubObjectKind(entity.Kind) {
-		return nil, nil
-	}
-	if ok, err := relayedRepositoryAdmitted(ctx, stores, info, entity.RepositoryID, true); err != nil || !ok {
-		return nil, err
 	}
 	return entity, nil
 }

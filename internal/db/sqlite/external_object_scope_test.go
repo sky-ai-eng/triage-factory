@@ -84,13 +84,6 @@ func TestExternalActionCommentKeys_SQLite(t *testing.T) {
 	dbtest.RunExternalActionCommentKeysConformance(t, sqliteExternalActionFixture)
 }
 
-// TestExternalActionPostedComment_SQLite runs the shared conformance suite
-// for the read touch's lookup of a comment TF posted against the SQLite
-// backend, on the node-id suite's fixture.
-func TestExternalActionPostedComment_SQLite(t *testing.T) {
-	dbtest.RunExternalActionPostedCommentConformance(t, sqliteExternalActionFixture)
-}
-
 // sqliteExternalActionFixture is a fresh in-memory DB with the local org's
 // team and a conversation in it.
 func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixture {

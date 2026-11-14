@@ -267,9 +267,7 @@ type GitHubIdentity struct {
 	Repository   string `json:"repository,omitempty"`
 	// NodeID is the node id of the pull request or issue the act names by
 	// number, and Kind which of the two it is (EntityKindPullRequest or
-	// EntityKindIssue). Both empty for an act that names neither. A read
-	// that named its object by node id alone, which nothing read from GitHub,
-	// carries that node id with no Kind and no repository.
+	// EntityKindIssue). Both empty for an act that names neither.
 	NodeID string `json:"node_id,omitempty"`
 	Kind   string `json:"kind,omitempty"`
 }

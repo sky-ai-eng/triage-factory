@@ -123,17 +123,13 @@ type ExternalAction struct {
 	// DetailJSON carries the action-specific payload (e.g. {"sha":...,"new":true}
 	// for a branch push, {"status":...} for a transition). Empty → SQL NULL.
 	DetailJSON string `json:"detail_json,omitempty"`
-	// NodeID is the GraphQL node id of the object the action created, carried
-	// by two kinds of row. A pr_created row from the create verb carries the
-	// pull request's: it is how the reconciler's backstop matches the row to
-	// the pull request's deliverable, since a node id survives a repository
-	// rename and the target does not. A comment_posted row carries the
-	// comment's, where the post's response named it: it is how a read that
-	// names the comment by node id finds the pull request or issue the
-	// comment is on (ExternalActionStore.PostedCommentEntitySystem). Part of
-	// the record of the act, so written once. It is a column rather than a
-	// detail_json key because the Actions feed renders every detail key to
-	// people. Empty → SQL NULL.
+	// NodeID is the GraphQL node id of the object the action created. Only a
+	// pr_created row from the create verb carries one: it is how the
+	// reconciler's backstop matches the row to the pull request's deliverable,
+	// since a node id survives a repository rename and the target does not.
+	// Part of the record of the act, so written once. It is a column rather
+	// than a detail_json key because the Actions feed renders every detail key
+	// to people. Empty → SQL NULL.
 	NodeID string `json:"node_id,omitempty"`
 	// ObjectKind and ObjectKey name the object the action changed, set by the
 	// writer exactly when the action landed a change, and read together with

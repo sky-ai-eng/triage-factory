@@ -2470,19 +2470,17 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 // channel, or the reverse, is one object.
 
 // recordGithubComment records the comment_posted row for a comment this run
-// just posted, with every coordinate the post knows, its node id included, by
-// which a later read of the comment by node id finds the row. inReplyTo is the
-// review comment a thread reply answers, 0 for a conversation comment, and
-// github the identity of the pull request or issue the comment is on. A zero
-// id (a 2xx whose body didn't parse) names no comment, so the row records the
-// post naming no object.
+// just posted, with every coordinate the post knows. inReplyTo is the review
+// comment a thread reply answers, 0 for a conversation comment, and github the
+// identity of the pull request or issue the comment is on. A zero id (a 2xx
+// whose body didn't parse) names no comment, so the row records the post
+// naming no object.
 func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number int, posted ghclient.CommentRef, inReplyTo int, github domain.GitHubIdentity) {
 	act := &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionCommentPosted,
 		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		URL:        posted.HTMLURL,
-		NodeID:     posted.NodeID,
 		Credential: c.githubCredential(),
 	}
 	if posted.ID > 0 {
@@ -2762,12 +2760,6 @@ func graphQLFallbackWriteAction(obs ghwrite.Observation, credential string) *dom
 // external_id, which holds the object's own number whatever the transport: a
 // GraphQL edit or delete names a comment only by node id, and a row keyed on it
 // would not line up with the same comment's other rows.
-//
-// A comment the act posted also has its node id in the node_id column, the
-// way the exec verbs' comment_posted row carries it, so a later read of the
-// comment by node id finds the row (db.ExternalActionStore.PostedCommentEntitySystem).
-// No other act's node id goes there: the column is the PR backstop's match on
-// a pr_created row, and an act that only names an object did not create it.
 func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	act := &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
@@ -2776,9 +2768,6 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credent
 		ExternalID: shape.ExternalID,
 		URL:        obs.URL,
 		Credential: credential,
-	}
-	if shape.CreatesObject && shape.Comment != "" {
-		act.NodeID = shape.NodeID
 	}
 	act.SetObject(ghShapeObject(shape, obs.GraphQL != nil))
 	detail := map[string]any{}
@@ -2914,9 +2903,7 @@ func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Obse
 // like one read with `exec gh pr view`. The entity is resolved from
 // obs.Identity, what GitHub answered the injector for the object, never from
 // the spelling the request used; an observation with no node id touches
-// nothing. A read by node id alone (ghwrite.NodeRead) touches the pull
-// request or issue TF holds under that id, or the one a comment TF posted
-// under it is on, and creates nothing (findGitHubNode).
+// nothing.
 //
 // Exported for local mode, which records it with stores and a
 // ConversationInfo in hand; a sandboxed run's sidecar queues the same touch as
@@ -2945,12 +2932,8 @@ func GHChannelReadRecord(obs ghwrite.ReadObservation) (op string, args any) {
 
 // ghChannelReadTarget is the display key of the object a gh-channel read
 // spelled. Only its number is read when the entity is resolved; the
-// repository comes from the identity. A read by node id spelled no object,
-// and has none.
+// repository comes from the identity.
 func ghChannelReadTarget(obs ghwrite.ReadObservation) string {
-	if obs.Number <= 0 {
-		return ""
-	}
 	return domain.PullRequestTarget(obs.Owner+"/"+obs.Repo, obs.Number)
 }
 

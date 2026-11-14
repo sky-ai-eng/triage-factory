@@ -173,19 +173,6 @@ type ExternalActionStore interface {
 	// whichever team's run posted the comment.
 	PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error)
 
-	// PostedCommentEntitySystem returns the entity a GitHub comment TF posted
-	// is on, found by the comment's GraphQL node id: the entity_id of the
-	// newest comment_posted row on scope whose node_id is nodeID and that
-	// names an entity. "" when no row answers, which is so for every comment
-	// TF did not post, and for one posted before its row recorded a node id.
-	// It is the read touch's lookup for a read that names a comment by node
-	// id, which says nothing else about it. The (org_id, scope, node_id)
-	// index serves it. An empty nodeID answers "" without a query, and an
-	// empty scope is refused with ErrExternalObjectScopeRequired. Admin pool
-	// (BYPASSRLS): the read touch holds no claims, and the row belongs to
-	// whichever team's run posted the comment.
-	PostedCommentEntitySystem(ctx context.Context, orgID, scope, nodeID string) (string, error)
-
 	// CountByConversations returns, for each of conversationIDs that has any
 	// row, its number of rows, whoever performed them and whatever their
 	// action. The ledger is append-only, so the number moves with every act

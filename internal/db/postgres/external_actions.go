@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -279,31 +278,6 @@ func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context
 		present[key] = true
 	}
 	return present, rows.Err()
-}
-
-// PostedCommentEntitySystem is the read touch's lookup of the entity a comment
-// TF posted is on (see the interface), on the admin pool. org_id stays in the
-// WHERE clause as defense in depth.
-func (s *externalActionStore) PostedCommentEntitySystem(ctx context.Context, orgID, scope, nodeID string) (string, error) {
-	if err := db.RequireExternalObjectScope(scope); err != nil {
-		return "", err
-	}
-	if nodeID == "" {
-		return "", nil
-	}
-	var entityID string
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT entity_id::text
-		  FROM external_actions
-		 WHERE org_id = $1 AND scope = $2 AND node_id = $3
-		   AND object_kind = $4 AND action = $5 AND entity_id IS NOT NULL
-		 ORDER BY occurred_at DESC, id DESC
-		 LIMIT 1
-	`, orgID, scope, nodeID, domain.ObjectKindComment, domain.ActionCommentPosted).Scan(&entityID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return entityID, err
 }
 
 // CountByConversations counts each conversation's rows (see the interface)
