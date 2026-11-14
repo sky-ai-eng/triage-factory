@@ -439,6 +439,8 @@ func TestRefreshVulnerablePackages_ALostCloseIsOwed(t *testing.T) {
 // GitHub refuses is skipped and the next one is listed; any other failure
 // ends the pass. Neither resolves a package.
 func TestRefreshVulnerablePackages_AFailedListingChangesNothing(t *testing.T) {
+	// One at a time, so web starts only after api's refusal is handled.
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
 	r := newVulnRig(t, "api", "web")
 	r.gh.set("api", lodash(1, "high"))
 	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"})
@@ -560,6 +562,9 @@ func TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed(t *testin
 // repository whose listing TF cannot read is skipped every cycle, its packages
 // untouched, and the repositories after it are still listed.
 func TestRefreshVulnerablePackages_AnUnusableListingSkipsOnlyItsRepository(t *testing.T) {
+	// One at a time, so web starts only after api's unusable listing is
+	// handled.
+	t.Setenv("TF_POLL_REPO_CONCURRENCY", "1")
 	r := newVulnRig(t, "api", "web")
 	r.gh.set("api", lodash(1, "high"))
 	r.mustCycle()
@@ -599,7 +604,6 @@ func TestRefreshVulnerablePackages_ListsRepositoriesConcurrently(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
-	t.Cleanup(unblock)
 	r.gh.mu.Lock()
 	r.gh.hold = func(string) {
 		mu.Lock()
@@ -616,11 +620,18 @@ func TestRefreshVulnerablePackages_ListsRepositoriesConcurrently(t *testing.T) {
 
 	listings := r.listings()
 	tr := r.tracker()
-	done := make(chan error, 1)
+	var passErr error
+	finished := make(chan struct{})
 	go func() {
-		_, err := tr.RefreshVulnerablePackages(context.Background(), vulnHost, r.client, listings)
-		done <- err
+		defer close(finished)
+		_, passErr = tr.RefreshVulnerablePackages(context.Background(), vulnHost, r.client, listings)
 	}()
+	// Runs before the rig's cleanups, so a failed wait below does not close
+	// the database under a pass still writing to it.
+	t.Cleanup(func() {
+		unblock()
+		<-finished
+	})
 	for i := range 4 {
 		select {
 		case <-arrived:
@@ -629,8 +640,9 @@ func TestRefreshVulnerablePackages_ListsRepositoriesConcurrently(t *testing.T) {
 		}
 	}
 	unblock()
-	if err := <-done; err != nil {
-		t.Fatalf("RefreshVulnerablePackages: %v", err)
+	<-finished
+	if passErr != nil {
+		t.Fatalf("RefreshVulnerablePackages: %v", passErr)
 	}
 
 	mu.Lock()
