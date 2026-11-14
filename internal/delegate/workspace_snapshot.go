@@ -61,6 +61,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
@@ -1772,7 +1773,17 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 			if gctx.Err() != nil {
 				return nil // a sibling failed; this one never started
 			}
-			c, err := s.restoreOneCheckout(gctx, root, keyID, claimID, restorer, mc, staged)
+			// Its own parent, because checkouts restore concurrently: without
+			// it every checkout's git calls and pull request read interleave
+			// under the ensure span with nothing saying which belongs to which.
+			cctx, span := tracer.Start(gctx, "engagement.workspace.restore_checkout")
+			c, err := s.restoreOneCheckout(cctx, root, keyID, claimID, restorer, mc, staged)
+			if err != nil {
+				// The error's text names the checkout's path, so the status
+				// message is fixed and the error is not recorded.
+				span.SetStatus(codes.Error, "restore failed")
+			}
+			span.End()
 			results[i] = result{restored: c, err: err}
 			return err
 		})

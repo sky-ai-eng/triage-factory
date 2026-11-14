@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // claudeProjectsDir and claudeHome live in claude_session.go alongside the
@@ -678,7 +679,9 @@ func gitBaseEnv() []string {
 	return append(out, "GIT_TERMINAL_PROMPT=0", githooks.LFSSkipSmudgeEnvVar+"=1")
 }
 
-func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
+func gitOutputCtx(ctx context.Context, dir string, args ...string) (_ string, err error) {
+	ctx, span := startGitSpan(ctx, args)
+	defer func() { endGitSpan(span, err) }()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -718,8 +721,17 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 //
 // A failure is a *GitError, so a caller that wraps it with %w leaves git's
 // output readable to IsTransientGitError.
-func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
-	for attempt := 1; ; attempt++ {
+//
+// One span covers every attempt, so a retried call reads as one slow call
+// with its attempt count rather than as separate calls.
+func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) (err error) {
+	ctx, span := startGitSpan(ctx, args)
+	attempt := 0
+	defer func() {
+		span.SetAttributes(telemetry.Attempt(attempt))
+		endGitSpan(span, err)
+	}()
+	for attempt = 1; ; attempt++ {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		if dir != "" {
 			cmd.Dir = dir
