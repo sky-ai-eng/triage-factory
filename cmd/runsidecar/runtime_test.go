@@ -1,6 +1,7 @@
 package runsidecar
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credseal"
@@ -634,24 +636,26 @@ func TestRuntime_GHInjectorRelaysAddressedRead(t *testing.T) {
 		t.Fatalf("caller saw %d, want the upstream's 200 (a 502 means the bundle token never resolved)", resp.StatusCode)
 	}
 
+	wantOp, want := agenthost.GHChannelReadRecord(ghinjector.ObservedRead{
+		ObjectRef: ghwrite.ObjectRef{Owner: "acme", Repo: "widgets", Number: 841},
+		Identity: domain.GitHubIdentity{
+			RepositoryID: "4242", Repository: "acme/widgets",
+			NodeID: "PR_kwSidecar", Kind: domain.EntityKindPullRequest,
+		},
+	})
+	wantArgs, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal the expected record: %v", err)
+	}
 	deadline := time.After(4 * time.Second)
 	for {
 		select {
 		case got := <-records:
-			if got.Op != agentproc.OpRecordGHRead {
+			if got.Op != wantOp {
 				continue
 			}
-			var a agentproc.RecordGHReadArgs
-			if err := json.Unmarshal(got.Args, &a); err != nil {
-				t.Fatalf("unmarshal relayed gh read: %v", err)
-			}
-			want := agentproc.RecordGHReadArgs{
-				Owner: "acme", Repo: "widgets", Number: 841,
-				RepositoryID: "4242", RepositoryName: "acme/widgets",
-				ObjectNodeID: "PR_kwSidecar", ObjectKind: domain.EntityKindPullRequest,
-			}
-			if a != want {
-				t.Fatalf("relayed read = %+v, want %+v", a, want)
+			if !bytes.Equal(got.Args, wantArgs) {
+				t.Fatalf("relayed read = %s, want %s", got.Args, wantArgs)
 			}
 			return
 		case <-deadline:

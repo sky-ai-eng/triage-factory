@@ -48,7 +48,7 @@
 // body is buffered under maxRequestBody and parsed for the name of the mutation
 // it performs, or, when it performs none, for the pull requests and issues its
 // query addresses (see "Read touches" below). That is a deliberate, bounded
-// exception to what used to be a blanket invariant, and it is not free — this
+// exception to reading no request at all, and it is not free — this
 // is the one process that holds a run's live GitHub credential while parsing
 // hostile upstream output, and it now also parses outbound documents an agent
 // composed from that same text.

@@ -135,7 +135,6 @@ var coreRecordOps = map[string]struct{}{
 	agentproc.OpRecordDenial:       {},
 	agentproc.OpRecordEgressDenial: {},
 	agentproc.OpRecordGHWrite:      {},
-	agentproc.OpRecordGHRead:       {},
 	agentproc.OpRecordPush:         {},
 	opRecordExternalWrite:          {},
 	opRecordBranchPush:             {},

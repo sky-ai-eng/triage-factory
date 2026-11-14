@@ -2905,16 +2905,36 @@ func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Obse
 // the spelling the request used; an observation with no node id touches
 // nothing.
 //
-// Exported for the reason RecordGHChannelWrite is: local mode records it with
-// stores and a ConversationInfo in hand, and the relay server applies the
-// sandbox path's record through the same function. A read is no act, so it
-// leaves no audit row. Best-effort.
+// Exported for local mode, which records it with stores and a
+// ConversationInfo in hand; a sandboxed run's sidecar queues the same touch as
+// a relay record (GHChannelReadRecord). A read is no act, so it leaves no
+// audit row. Best-effort.
 func RecordGHChannelRead(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.ReadObservation) {
 	recordEntityTouch(ctx, stores, info, entityCoordinate{
 		provider: domain.ProviderGitHub,
-		target:   domain.PullRequestTarget(obs.Owner+"/"+obs.Repo, obs.Number),
+		target:   ghChannelReadTarget(obs),
 		github:   obs.Identity,
 	})
+}
+
+// GHChannelReadRecord is the relay record a sidecar queues for one read
+// through the real-`gh` channel: the record an addressed exec read queues
+// (record_read_touch), carrying what GitHub answered the injector for the
+// object. One op for both, so the orchestrator applies a touch one way
+// whichever channel the read took.
+func GHChannelReadRecord(obs ghwrite.ReadObservation) (op string, args any) {
+	return opRecordReadTouch, recordReadTouchArgs{
+		Provider: domain.ProviderGitHub,
+		Target:   ghChannelReadTarget(obs),
+		GitHub:   obs.Identity,
+	}
+}
+
+// ghChannelReadTarget is the display key of the object a gh-channel read
+// spelled. Only its number is read when the entity is resolved; the
+// repository comes from the identity.
+func ghChannelReadTarget(obs ghwrite.ReadObservation) string {
+	return domain.PullRequestTarget(obs.Owner+"/"+obs.Repo, obs.Number)
 }
 
 // GHWriteDeniedAction builds the audit row for one gh-channel request the

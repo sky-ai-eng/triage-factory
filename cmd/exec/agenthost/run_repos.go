@@ -65,24 +65,33 @@ func AuthorizedRepositories(ctx context.Context, stores db.Stores, orgID, teamID
 	// anchoredElsewhere records an anchor this bundle cannot reach: a row on
 	// another host, a retired row, or a row that cannot be read.
 	anchoredElsewhere := false
-	add := func(row *domain.Repository) {
+	// A tracking read that fails is an error, never "untracked": read as
+	// untracked it would leave the set empty and hand an anchored run the
+	// team's whole tracked set below.
+	add := func(row *domain.Repository) error {
 		if row == nil || row.Host != host || row.RetiredAt != nil {
 			anchoredElsewhere = true
-			return
+			return nil
 		}
 		if seen[row.ID] {
-			return
+			return nil
 		}
 		tracks, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, row.ID)
-		if err != nil || !tracks {
-			return
+		if err != nil {
+			return fmt.Errorf("check team tracking of repository %s: %w", row.ID, err)
+		}
+		if !tracks {
+			return nil
 		}
 		seen[row.ID] = true
 		out = append(out, *row)
+		return nil
 	}
 
 	if row := TaskGitHubRepository(ctx, stores, orgID, taskID); row != nil {
-		add(row)
+		if err := add(row); err != nil {
+			return nil, err
+		}
 	}
 	if stores.ConversationWorktrees != nil {
 		rows, err := stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
@@ -101,7 +110,9 @@ func AuthorizedRepositories(ctx context.Context, stores db.Stores, orgID, teamID
 			rows = append(rows, taskRows...)
 		}
 		for _, w := range rows {
-			add(repositoryRow(ctx, stores, orgID, w.RepositoryID))
+			if err := add(repositoryRow(ctx, stores, orgID, w.RepositoryID)); err != nil {
+				return nil, err
+			}
 		}
 	}
 

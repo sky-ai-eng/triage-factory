@@ -763,15 +763,8 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 		ObserveRead: func(_ context.Context, read ghinjector.ObservedRead) {
 			// Queued like a write's record: the read already returned, and the
 			// orchestrator holds the DB the run's touched entities live in.
-			r.recordAudit(agentproc.OpRecordGHRead, agentproc.RecordGHReadArgs{
-				Owner:          read.Owner,
-				Repo:           read.Repo,
-				Number:         read.Number,
-				RepositoryID:   read.Identity.RepositoryID,
-				RepositoryName: read.Identity.Repository,
-				ObjectNodeID:   read.Identity.NodeID,
-				ObjectKind:     read.Identity.Kind,
-			})
+			op, args := agenthost.GHChannelReadRecord(read)
+			r.recordAudit(op, args)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
 			// A Call, not a record: the agent's request is held until the

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -25,6 +26,12 @@ import (
 type noopChannelCloser struct{}
 
 func (noopChannelCloser) Close() error { return nil }
+
+// localReadTouchBudget bounds recording one read's touch. The injector calls
+// the recorder before it releases the agent's response, and local mode's
+// database serves one connection at a time, so an unbounded write would hold
+// the read behind whatever else is writing.
+const localReadTouchBudget = 5 * time.Second
 
 // startLocalGHChannel provisions the real-`gh` credential channel for a
 // local-mode run: the TF-owned pinned binary, a loopback injector holding the
@@ -116,7 +123,11 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 				return
 			}
 			// The recorder the relayed (multi) path applies, so an object read
-			// here is the touched entity it is from a sandbox.
+			// here is the touched entity it is from a sandbox. The agent's
+			// response waits on it, so it is bounded: past the budget the
+			// touch is dropped rather than the read held.
+			ctx, cancel := context.WithTimeout(ctx, localReadTouchBudget)
+			defer cancel()
 			agenthost.RecordGHChannelRead(ctx, stores, info, read)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {

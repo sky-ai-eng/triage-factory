@@ -21,6 +21,13 @@ import (
 // (`pullRequests(headRefName:)`, which is how `gh pr view` with no number
 // finds its pull request) return sets, and name no object here.
 //
+// TODO(TFAC-1415): `gh pr view` with no number reads the pull request of the
+// current branch and touches nothing, because the request names a branch.
+//
+// TODO(TFAC-1414): a read by node id (`node(id:)`), and a read of a comment by
+// its own id, address an object without spelling its repository and number,
+// and touch nothing.
+//
 // An agent can address an object without reading it, by sending a request
 // that only spells it. That gains nothing a real read would not: the object is
 // linked only once GitHub has answered for it under the run's own credential,

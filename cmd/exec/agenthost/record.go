@@ -592,6 +592,11 @@ func githubRepositoryRow(ctx context.Context, stores db.Stores, info Conversatio
 // read is admitted there and in every other repository the run's credential
 // reads (runMayReadRepository), so a read the credential allowed is not
 // dropped here, and one it could not have made is.
+//
+// TODO(TFAC-1416): an org on a token rather than an App holds one credential
+// for every repository the token reads, so a run there that works in one
+// repository can read others this gate does not admit, and those reads are
+// not linked.
 func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string, read bool) (bool, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return true, nil
@@ -671,7 +676,10 @@ func runMayRecordAgainst(ctx context.Context, stores db.Stores, info Conversatio
 // Best-effort throughout: a resolve or record failure is logged, counted
 // (memoryentities.CountSkippedLink) and swallowed so it never fails the agent's
 // already-applied write or the read that triggered it — the entity self-heals
-// on a later touch or poll, and the touch row on the next addressed hit. Like
+// on a later touch or poll. The touch row is written again only if the read
+// is reported again: an exec verb reports every addressed read, and the
+// real-`gh` channel reports an object once per run, so a touch lost here from
+// that channel is lost for the run. Like
 // every entity resolution here it MUST run outside any audit tx: local mode
 // holds the single SQLite connection for the life of a synthetic-claims tx, so
 // these ...System (admin-pool) writes inside that closure would deadlock. The

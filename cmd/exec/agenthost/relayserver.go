@@ -954,25 +954,6 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 			},
 		})
 
-	case agentproc.OpRecordGHRead:
-		var a agentproc.RecordGHReadArgs
-		if err := json.Unmarshal(args, &a); err != nil {
-			return fmt.Errorf("agenthost: decode relayed gh read: %w", err)
-		}
-		// The read already returned; its touch is best-effort. The entity is
-		// resolved here from the ids the injector read, under this server's
-		// relayed info, so a repository the run's credential does not read
-		// is not linked (relayedRepositoryAdmitted).
-		RecordGHChannelRead(ctx, s.stores, s.info, ghwrite.ReadObservation{
-			ObjectRef: ghwrite.ObjectRef{Owner: a.Owner, Repo: a.Repo, Number: a.Number},
-			Identity: domain.GitHubIdentity{
-				RepositoryID: a.RepositoryID,
-				Repository:   a.RepositoryName,
-				NodeID:       a.ObjectNodeID,
-				Kind:         a.ObjectKind,
-			},
-		})
-
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs
 		if err := json.Unmarshal(args, &a); err != nil {

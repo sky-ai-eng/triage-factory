@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"testing"
 
@@ -108,32 +109,30 @@ func TestRecordGHChannelRead_DoesNotLowerAProducedLink(t *testing.T) {
 	}
 }
 
-// relayGHRead applies one record_gh_read record to srv the way the supervision
-// channel delivers it.
-func relayGHRead(t *testing.T, srv *RelayServer, args agentproc.RecordGHReadArgs) {
+// relayGHRead applies the record a sidecar queues for one gh-channel read to
+// srv the way the supervision channel delivers it.
+func relayGHRead(t *testing.T, srv *RelayServer, read ghwrite.ReadObservation) {
 	t.Helper()
+	op, args := GHChannelReadRecord(read)
 	raw, err := json.Marshal(args)
 	if err != nil {
-		t.Fatalf("marshal record_gh_read: %v", err)
+		t.Fatalf("marshal the read's record: %v", err)
 	}
-	if err := srv.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHRead, uuid.NewString(), raw); err != nil {
-		t.Fatalf("dispatch record_gh_read: %v", err)
+	if err := srv.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, op, uuid.NewString(), raw); err != nil {
+		t.Fatalf("dispatch the read's record: %v", err)
 	}
 }
 
-// TestRelay_RecordGHRead_TouchesTheEntity proves the sandbox path: the
-// sidecar's injector relays the read as record_gh_read, and the orchestrator
+// TestRelay_GHChannelRead_TouchesTheEntity proves the sandbox path: the
+// sidecar's injector relays the read as a read-touch record, and the orchestrator
 // resolves the entity from the ids it carries and records the touch against
 // its own stores.
-func TestRelay_RecordGHRead_TouchesTheEntity(t *testing.T) {
+func TestRelay_GHChannelRead_TouchesTheEntity(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	srv := NewRelayServer(stores, info, nil)
 	ctx := context.Background()
 
-	relayGHRead(t, srv, agentproc.RecordGHReadArgs{
-		Owner: "octo", Repo: "repo", Number: 7,
-		RepositoryID: "1", RepositoryName: "octo/repo", ObjectNodeID: "PR_7", ObjectKind: domain.EntityKindPullRequest,
-	})
+	relayGHRead(t, srv, ghRead("octo", "repo", 7, "1", "PR_7", domain.EntityKindPullRequest))
 
 	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", testScope("github"), "octo/repo#7")
 	if err != nil || ent == nil {
@@ -158,11 +157,7 @@ func trackRepos(t *testing.T, stores db.Stores, info ConversationInfo, ids ...st
 func relayedPullRead(t *testing.T, conn *sql.DB, stores db.Stores, info ConversationInfo, srv *RelayServer, owner, repo string, number int, repositoryID string) bool {
 	t.Helper()
 	slug := owner + "/" + repo
-	relayGHRead(t, srv, agentproc.RecordGHReadArgs{
-		Owner: owner, Repo: repo, Number: number,
-		RepositoryID: repositoryID, RepositoryName: slug,
-		ObjectNodeID: "PR_" + repo + strconv.Itoa(number), ObjectKind: domain.EntityKindPullRequest,
-	})
+	relayGHRead(t, srv, ghRead(owner, repo, number, repositoryID, "PR_"+repo+strconv.Itoa(number), domain.EntityKindPullRequest))
 	ent, err := stores.Entities.GetBySourceSystem(context.Background(), info.OrgID, "github", testScope("github"), domain.PullRequestTarget(slug, number))
 	if err != nil {
 		t.Fatalf("read the entity of %s#%d: %v", slug, number, err)
@@ -170,13 +165,13 @@ func relayedPullRead(t *testing.T, conn *sql.DB, stores db.Stores, info Conversa
 	return ent != nil && touchRole(t, conn, info.ConversationID, ent.ID) == domain.MemoryRoleTouched
 }
 
-// TestRelay_RecordGHRead_AnchoredRunTouchesOnlyItsRepositories: in multi mode
+// TestRelay_GHChannelRead_AnchoredRunTouchesOnlyItsRepositories: in multi mode
 // the ids were read by the run's sidecar and relayed, so a read links only an
 // object the run's credential could have read. A run that works in a
 // repository holds a credential for the repositories it works in and no
 // other, so a read relayed for another repository, one its team tracks
 // included, creates no entity and no link.
-func TestRelay_RecordGHRead_AnchoredRunTouchesOnlyItsRepositories(t *testing.T) {
+func TestRelay_GHChannelRead_AnchoredRunTouchesOnlyItsRepositories(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
@@ -201,13 +196,13 @@ func TestRelay_RecordGHRead_AnchoredRunTouchesOnlyItsRepositories(t *testing.T) 
 	}
 }
 
-// TestRelay_RecordGHRead_UnanchoredRunTouchesWhatItsTeamTracks: a run with no
+// TestRelay_GHChannelRead_UnanchoredRunTouchesWhatItsTeamTracks: a run with no
 // GitHub anchor, one a Jira issue or a chat message started, works in no
 // repository, and its credential reads every repository its team tracks. A
 // read it relays is linked in any of them and in no other. What the run may
 // file an act under is unchanged: with no repository it works in, a relayed
 // write stays unlinked.
-func TestRelay_RecordGHRead_UnanchoredRunTouchesWhatItsTeamTracks(t *testing.T) {
+func TestRelay_GHChannelRead_UnanchoredRunTouchesWhatItsTeamTracks(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
@@ -240,11 +235,11 @@ func TestRelay_RecordGHRead_UnanchoredRunTouchesWhatItsTeamTracks(t *testing.T) 
 	}
 }
 
-// TestRelay_RecordGHRead_ReadsACheckoutOfItsTasksOtherConversations: a task's
+// TestRelay_GHChannelRead_ReadsACheckoutOfItsTasksOtherConversations: a task's
 // conversations share one run tree, and the run's credential covers the
 // repositories any of them checked out. A read in one of those is linked,
 // though this conversation holds no worktree row for it.
-func TestRelay_RecordGHRead_ReadsACheckoutOfItsTasksOtherConversations(t *testing.T) {
+func TestRelay_GHChannelRead_ReadsACheckoutOfItsTasksOtherConversations(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
@@ -280,5 +275,37 @@ func TestRelay_RecordGHRead_ReadsACheckoutOfItsTasksOtherConversations(t *testin
 	}
 	if relayedPullRead(t, conn, stores, info, srv, "octo", "elsewhere", 5, "3") {
 		t.Error("a read relayed for a tracked repository no conversation of the task works in was linked")
+	}
+}
+
+// failingTracking is a team's tracked set whose tracking read fails.
+type failingTracking struct {
+	db.TeamGitHubReposStore
+}
+
+func (failingTracking) TracksRepositorySystem(context.Context, string, string) (bool, error) {
+	return false, errors.New("tracking read failed")
+}
+
+// TestAuthorizedRepositories_ATrackingReadThatFailsIsAnError: a run that works
+// in one repository is authorized for it alone. A failed read of whether the
+// team tracks it must not read as untracked, which would leave the run with no
+// repository of its own and so with every repository its team tracks.
+func TestAuthorizedRepositories_ATrackingReadThatFailsIsAnError(t *testing.T) {
+	_, stores, info := newCaptureStoresConn(t, true)
+	ctx := context.Background()
+	ownID := registerRepo(t, stores, "octo", "repo", "1")
+	otherID := registerRepo(t, stores, "octo", "other", "2")
+	trackRepos(t, stores, info, ownID, otherID)
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, info.OrgID, domain.ConversationWorktree{
+		ConversationID: info.ConversationID, RepositoryID: ownID, Ref: "refs/heads/main", Path: "/runs/octo/repo/main",
+	}); err != nil {
+		t.Fatalf("seed the run's worktree: %v", err)
+	}
+
+	stores.TeamGitHubRepos = failingTracking{stores.TeamGitHubRepos}
+	repos, err := AuthorizedRepositories(ctx, stores, info.OrgID, info.TeamID, "", info.ConversationID)
+	if err == nil {
+		t.Fatalf("AuthorizedRepositories = %+v, nil; want the tracking read's error", repos)
 	}
 }
