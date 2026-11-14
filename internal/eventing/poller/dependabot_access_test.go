@@ -315,33 +315,40 @@ func recordedTypes(rec *eventRecorder) []string {
 	return out
 }
 
-// TestDependabotListing_ANoAnswerProbeListsNothing: a cycle whose probe got no
-// answer lists no alerts.
-func TestDependabotListing_ANoAnswerProbeListsNothing(t *testing.T) {
+// TestDependabotListing_AProbeWithNoAnswerDoesNotStopTheListings: a
+// repository whose probe gets no answer does not hold up the listing of a
+// repository already readable.
+func TestDependabotListing_AProbeWithNoAnswerDoesNotStopTheListings(t *testing.T) {
 	ctx := context.Background()
-	gh, client := newAlertsServer(t, func(string) (int, string) {
-		return http.StatusUnauthorized, `{"message":"Bad credentials"}`
+	gh, client := newAlertsServer(t, func(repo string) (int, string) {
+		if repo == "stuck" {
+			return http.StatusUnauthorized, `{"message":"Bad credentials"}`
+		}
+		return http.StatusOK, leftPad(1)
 	})
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
-	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a"})
-	repos, _, err := stores.Repos.ListTrackedSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.Unwindowed)
-	if err != nil || len(repos) != 1 {
-		t.Fatalf("tracked = %v, %v", repos, err)
+	trackRepos(t, stores, runmode.LocalDefaultOrgID, []string{"octo/a", "octo/stuck"})
+	row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRef{Source: domain.RepoSourceGitHub, Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "a"})
+	if err != nil || row == nil {
+		t.Fatalf("read octo/a: %+v %v", row, err)
 	}
-	// A readable answer due for its recheck: the probe asks, gets no answer,
-	// and the listing waits.
-	if _, err := stores.DependabotAccess.RecordSystem(ctx, runmode.LocalDefaultOrgID, repos[0].ID, domain.DependabotAlertsReadable); err != nil {
+	// a's answer is fresh, so the probe asks only about stuck.
+	if _, err := stores.DependabotAccess.RecordSystem(ctx, runmode.LocalDefaultOrgID, row.ID, domain.DependabotAlertsReadable); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE repository_dependabot_access SET checked_at = ?`, time.Now().Add(-domain.DependabotAccessRecheck-time.Minute).UTC()); err != nil {
-		t.Fatalf("age answer: %v", err)
+	rec := &eventRecorder{}
+
+	listCycle(ctx, listingManager(database, stores, rec), dependabotPass{client, []string{"octo/a", "octo/stuck"}})
+
+	if n := gh.count("stuck"); n != 1 {
+		t.Errorf("stuck: %d requests, want its probe", n)
 	}
-
-	listCycle(ctx, listingManager(database, stores, &eventRecorder{}), dependabotPass{client, []string{"octo/a"}})
-
-	if n := gh.total(); n != 1 {
-		t.Errorf("requests = %d, want the probe alone", n)
+	if n := gh.count("a"); n != 1 {
+		t.Errorf("a: %d requests, want its listing", n)
+	}
+	if got := recordedTypes(rec); fmt.Sprint(got) != "["+domain.EventGitHubVulnerabilityAlertOpened+"]" {
+		t.Errorf("the listing emitted %v, want a's alert", got)
 	}
 }
 

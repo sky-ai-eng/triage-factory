@@ -341,6 +341,20 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 	return listActiveEntities(ctx, s.admin, orgID, source)
 }
 
+func (s *entityStore) ListActiveKindSystem(ctx context.Context, orgID, source, scope, kind string) ([]domain.Entity, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgEntitySelectCols+`
+		FROM entities
+		WHERE org_id = $1 AND source = $2 AND scope = $3 AND kind = $4 AND state = 'active'
+		ORDER BY last_polled_at ASC
+	`, orgID, source, scope, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntityList(rows)
+}
+
 // ListActiveTerminalCandidatesSystem selects active entities whose stored
 // snapshot already reads terminal, unpolled for at least unpolledFor, with
 // no terminating close ready, leased or parked in the queue — a parked one

@@ -95,6 +95,12 @@ func dependabotAlertsTurnedOff(body string) bool {
 // listing would resolve packages that still have open alerts.
 const maxDependabotAlertPages = 50
 
+// ErrDependabotListingUnusable is a listing of one repository's alerts that
+// GitHub answered with something TF cannot read as the whole listing: more
+// than maxDependabotAlertPages pages, a page whose body does not parse, or a
+// next-page link with no cursor. It says nothing about any other repository.
+var ErrDependabotListingUnusable = errors.New("dependabot alert listing unusable")
+
 // OpenDependabotAlert is one open alert as ListOpenDependabotAlerts returns it:
 // the package it is on, and the alert as a vulnerable package's snapshot
 // records it.
@@ -123,8 +129,10 @@ type OpenDependabotAlert struct {
 //
 // Any failure fails the whole listing, a later page's included: the caller
 // treats a package missing from the listing as resolved, so a partial listing
-// is never returned. As with DependabotAlertsAccess, GitHub's 403 is counted
-// as an answered request rather than a refused credential.
+// is never returned. A listing GitHub answered that TF cannot read in full
+// fails with ErrDependabotListingUnusable. As with DependabotAlertsAccess,
+// GitHub's 403 is counted as an answered request rather than a refused
+// credential.
 func (c *Client) ListOpenDependabotAlerts(ctx context.Context, owner, repo, etag string) (alerts []OpenDependabotAlert, newETag string, notModified bool, err error) {
 	ctx = withForbiddenAsAnswer(ctx)
 	path := fmt.Sprintf("/repos/%s/%s/dependabot/alerts?state=open&per_page=100", owner, repo)
@@ -140,13 +148,16 @@ func (c *Client) ListOpenDependabotAlerts(ctx context.Context, owner, repo, etag
 	}
 	newETag = header.Get("ETag")
 	for pages := 1; ; pages++ {
-		after := nextPageCursor(header.Get("Link"))
+		after, err := nextPageCursor(header.Get("Link"))
+		if err != nil {
+			return nil, "", false, fmt.Errorf("list dependabot alerts of %s/%s: %w: %w", owner, repo, ErrDependabotListingUnusable, err)
+		}
 		if after == "" {
 			break
 		}
 		newETag = ""
 		if pages == maxDependabotAlertPages {
-			return nil, "", false, fmt.Errorf("list dependabot alerts of %s/%s: more than %d pages", owner, repo, maxDependabotAlertPages)
+			return nil, "", false, fmt.Errorf("list dependabot alerts of %s/%s: %w: more than %d pages", owner, repo, ErrDependabotListingUnusable, maxDependabotAlertPages)
 		}
 		if body, header, _, err = c.getConditional(ctx, path+"&after="+url.QueryEscape(after), ""); err != nil {
 			return nil, "", false, err
@@ -195,7 +206,7 @@ type restDependabotPackage struct {
 func appendOpenDependabotAlerts(alerts []OpenDependabotAlert, owner, repo string, body []byte) ([]OpenDependabotAlert, error) {
 	var page []restDependabotAlert
 	if err := json.Unmarshal(body, &page); err != nil {
-		return nil, fmt.Errorf("parse dependabot alerts of %s/%s: %w", owner, repo, err)
+		return nil, fmt.Errorf("parse dependabot alerts of %s/%s: %w: %w", owner, repo, ErrDependabotListingUnusable, err)
 	}
 	for _, a := range page {
 		pkg := a.Dependency.Package
@@ -234,8 +245,10 @@ func appendOpenDependabotAlerts(alerts []OpenDependabotAlert, owner, repo string
 // nextPageCursor is the after cursor of the rel="next" link in a Link header,
 // "" when there is none. Only the cursor is taken from the link: the next
 // request is built on the client's own base URL, so a link naming another
-// host or path is never followed.
-func nextPageCursor(link string) string {
+// host or path is never followed. A next link that does not parse or carries
+// no after cursor is an error rather than the last page, since stopping
+// there would return a partial listing as complete.
+func nextPageCursor(link string) (string, error) {
 	for part := range strings.SplitSeq(link, ",") {
 		target, params, ok := strings.Cut(strings.TrimSpace(part), ";")
 		if !ok || !strings.Contains(params, `rel="next"`) {
@@ -243,9 +256,13 @@ func nextPageCursor(link string) string {
 		}
 		u, err := url.Parse(strings.Trim(strings.TrimSpace(target), "<>"))
 		if err != nil {
-			return ""
+			return "", fmt.Errorf("parse next page link: %w", err)
 		}
-		return u.Query().Get("after")
+		after := u.Query().Get("after")
+		if after == "" {
+			return "", fmt.Errorf("next page link %q has no after cursor", target)
+		}
+		return after, nil
 	}
-	return ""
+	return "", nil
 }

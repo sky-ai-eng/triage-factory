@@ -482,6 +482,12 @@ type EntityStore interface {
 
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
 
+	// ListActiveKindSystem is ListActiveSystem narrowed to one scope and one
+	// kind, for a reader that wants only that kind's rows: GitHub's active
+	// entities are mostly pull requests, whose snapshots it would otherwise
+	// load and discard.
+	ListActiveKindSystem(ctx context.Context, orgID, source, scope, kind string) ([]domain.Entity, error)
+
 	// ListActiveTerminalCandidatesSystem returns active entities whose
 	// STORED snapshot already reads terminal, that no poll has refreshed for
 	// at least unpolledFor, and for which no terminating close is unsettled

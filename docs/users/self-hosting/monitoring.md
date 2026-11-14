@@ -202,12 +202,15 @@ whose alerts the org's credential can read.
 
 | `outcome`      | Meaning                                                                    |
 | -------------- | -------------------------------------------------------------------------- |
-| `listed`       | GitHub returned the alerts, which changed since the previous listing       |
+| `listed`       | Returned in full: the alerts changed, or there was no ETag to send         |
 | `not_modified` | Unchanged since the previous listing; the request costs no rate limit      |
 | `refused`      | GitHub refused the repository; it is skipped until access is rechecked     |
-| `failed`       | Any other failure; that poll's remaining listings wait for the next one    |
+| `failed`       | Unreadable listing (skipped), or a failure that ends the poll's listings   |
 
-A steady rate of `failed` means no new alert reaches Triage Factory. A
+A repository's listing has no ETag to send the first time it is listed, and
+never when it has more than 100 open alerts, so such a repository counts as
+`listed` on every poll. A steady rate of `failed` means alerts are not
+reaching Triage Factory, from one repository or from all of them. A
 repository whose alerts get `refused` every poll has lost access, which the
 org's GitHub access settings page shows within a day.
 

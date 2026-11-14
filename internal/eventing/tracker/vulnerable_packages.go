@@ -53,16 +53,19 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 //
 // A listing is conditional on the previous one's ETag, so an unchanged
 // repository costs a request that does not count against the rate limit. A
-// listing some of whose writes did not land is recorded without its ETag, so
-// the next cycle lists again in full. A listing that fails changes nothing: no
-// package is resolved because a request failed.
+// listing that changed clears the stored ETag before any of its writes, and
+// stores its own only once every write landed, so a listing interrupted
+// between the two leaves the next cycle to list again in full. A listing that
+// fails changes nothing: no package is resolved because a request failed.
 //
 // A repository GitHub refuses (a 403 or 404: the credential lost the
 // permission, or alerts were turned off) is skipped and the pass goes on; the
-// access probe records the new answer at its next recheck. Any other failure
-// ends the pass and is returned, since it would meet every remaining
-// repository too: a rate limit, a refused credential, GitHub failing. Returns
-// how many events landed on the queue.
+// access probe records the new answer at its next recheck. So is one whose
+// listing GitHub answered in a form TF cannot read in full
+// (ghclient.ErrDependabotListingUnusable), which would fail the same way on
+// every cycle. Any other failure ends the pass and is returned, since it would
+// meet every remaining repository too: a rate limit, a refused credential,
+// GitHub failing. Returns how many events landed on the queue.
 func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, client *ghclient.Client, repos []AlertListing) (int, error) {
 	if t.dependabotAccess == nil || len(repos) == 0 {
 		return 0, nil
@@ -84,6 +87,11 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 		if alertsRefused(err) {
 			recordDependabotListing(dependabotListingRefused)
 			trackerLog.InfoContext(ctx, "dependabot alerts not readable; skipping the repository this cycle", "org", t.orgID, "repo", l.Repository.Slug(), "error", err)
+			continue
+		}
+		if errors.Is(err, ghclient.ErrDependabotListingUnusable) {
+			recordDependabotListing(dependabotListingFailed)
+			trackerLog.WarnContext(ctx, "dependabot alert listing unusable; skipping the repository this cycle", "org", t.orgID, "repo", l.Repository.Slug(), "error", err)
 			continue
 		}
 		var rl *ghclient.ErrRateLimited
@@ -116,13 +124,13 @@ func (t *Tracker) heldVulnerablePackages(ctx context.Context, scope string, repo
 	for _, l := range repos {
 		want[l.Repository.ID] = true
 	}
-	active, err := t.entities.ListActiveSystem(ctx, t.orgID, domain.ProviderGitHub)
+	active, err := t.entities.ListActiveKindSystem(ctx, t.orgID, domain.ProviderGitHub, scope, domain.EntityKindVulnerablePackage)
 	if err != nil {
-		return nil, fmt.Errorf("list active github entities: %w", err)
+		return nil, fmt.Errorf("list active vulnerable packages: %w", err)
 	}
 	held := map[string]map[string]domain.Entity{}
 	for _, e := range active {
-		if e.Kind != domain.EntityKindVulnerablePackage || e.Scope != scope || !want[e.RepositoryID] {
+		if !want[e.RepositoryID] {
 			continue
 		}
 		if held[e.RepositoryID] == nil {
@@ -155,6 +163,15 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 		return emitted, nil
 	}
 	recordDependabotListing(dependabotListingListed)
+	if l.Access.AlertsETag != "" {
+		// The stored ETag describes the listing before this one. Were it left
+		// while the snapshots move past it, a later listing that went back to
+		// those alerts would be answered 304 and never diffed.
+		if _, err := t.dependabotAccess.RecordAlertListingSystem(ctx, t.orgID, repo.ID, ""); err != nil {
+			trackerLog.ErrorContext(ctx, "clear dependabot alert listing ETag failed; skipping the repository this cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
+			return 0, nil
+		}
+	}
 
 	packages, updatedAt := groupDependabotAlerts(repo.Slug(), alerts)
 	complete := true
@@ -185,11 +202,10 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 		complete = complete && landed
 	}
 
-	if !complete {
-		// No ETag, so the next listing is answered in full, and the writes
-		// that did not land are made again even if the alerts have since gone
-		// back to what an earlier ETag described.
-		newETag = ""
+	if !complete || newETag == "" {
+		// The ETag is left cleared, so the next listing is answered in full
+		// and the writes that did not land are made again.
+		return emitted, nil
 	}
 	if _, err := t.dependabotAccess.RecordAlertListingSystem(ctx, t.orgID, repo.ID, newETag); err != nil {
 		trackerLog.ErrorContext(ctx, "record dependabot alert listing failed", "org", t.orgID, "repo", repo.Slug(), "error", err)

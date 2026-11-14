@@ -405,12 +405,16 @@ emits `alert_opened` for every open alert.
 
 A listing is conditional on the previous one's ETag when that listing fit on
 one page and every write it made landed, so an unchanged repository costs a
-request GitHub does not count against the rate limit. A repository no team
+request GitHub does not count against the rate limit. A listing that changed
+clears the stored ETag before its first write. A repository no team
 tracks on the org's host loses its ETag, so the listing after a team tracks it
 again is answered in full and diffed against the packages TF holds: those of a
 repository every team untracked stay active, and only the alerts that opened
-meanwhile are announced. A listing that fails changes nothing, and a
-repository GitHub refuses is skipped until the access probe rechecks it.
+meanwhile are announced. A listing that fails changes nothing. A repository
+GitHub refuses is skipped until the access probe rechecks it, and one whose
+listing cannot be read in full (more than 5,000 open alerts, a page that does
+not parse, or a next-page link with no cursor) is skipped every cycle while
+that lasts; any other failure ends the cycle's listings.
 
 ## Jira Events
 

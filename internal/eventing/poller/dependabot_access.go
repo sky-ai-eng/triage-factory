@@ -33,10 +33,9 @@ type dependabotProbe struct {
 	host   string
 	passes []dependabotPass
 
-	// What run read and answered, for listAlerts: the tracked repositories
-	// with their answers, and whether every probe due got an answer.
-	targets  map[string]dependabotTarget
-	answered bool
+	// What run read, for listAlerts: the tracked repositories with their
+	// answers, each updated by the probe that answered it.
+	targets map[string]dependabotTarget
 }
 
 // dependabotPass is one credential and the repositories it reads.
@@ -78,13 +77,13 @@ func (p *dependabotProbe) run(ctx context.Context) {
 		return
 	}
 	p.targets = targets
-	p.answered = p.probe(ctx, targets)
+	p.probe(ctx, targets)
 }
 
 // probe asks GitHub for the answers that are due and records them, updating
-// targets with each answer stored. It reports false when a request got no
+// targets with each answer stored. It stops at the first request that gets no
 // answer.
-func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependabotTarget) bool {
+func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependabotTarget) {
 	now := time.Now()
 	type due struct {
 		name   string
@@ -115,7 +114,7 @@ func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependab
 
 	for _, d := range dueRepos {
 		if ctx.Err() != nil {
-			return false
+			return
 		}
 		owner, repo, _ := strings.Cut(d.name, "/")
 		access, err := d.client.DependabotAlertsAccess(ctx, owner, repo)
@@ -124,7 +123,7 @@ func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependab
 			if !errors.As(err, &rl) {
 				githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "dependabot alerts access probe failed; the rest wait for the next cycle", "org", p.orgID, "repo", d.name, "error", err)
 			}
-			return false
+			return
 		}
 		stored, err := p.m.DependabotAccess.RecordSystem(ctx, p.orgID, d.target.repository.ID, access)
 		if err != nil {
@@ -137,16 +136,16 @@ func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependab
 		d.target.answer = &stored
 		targets[d.name] = d.target
 	}
-	return true
 }
 
 // listAlerts runs after run: it lists the open alerts of every repository a
 // pass added whose answer is readable, under the credential of the first pass
-// that added it (tracker.RefreshVulnerablePackages). A cycle whose probes got
-// no answer lists nothing, and a listing that gets none ends the cycle's
-// listings. nil-safe.
+// that added it (tracker.RefreshVulnerablePackages). It lists even when a
+// probe got no answer, since that probe's repository may be the only one
+// failing, and a failure that would meet every request ends the listings at
+// their first one. nil-safe.
 func (p *dependabotProbe) listAlerts(ctx context.Context) {
-	if p == nil || p.targets == nil || !p.answered {
+	if p == nil || p.targets == nil {
 		return
 	}
 	targets := p.targets

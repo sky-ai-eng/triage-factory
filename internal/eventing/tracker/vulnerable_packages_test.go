@@ -40,11 +40,12 @@ type alertsFake struct {
 	status      map[string]int
 	requests    map[string]int
 	notModified map[string]int
+	malformed   map[string]bool
 }
 
 func newAlertsFake(t *testing.T) (*alertsFake, *ghclient.Client) {
 	t.Helper()
-	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}}
+	f := &alertsFake{alerts: map[string][]fakeAlert{}, status: map[string]int{}, requests: map[string]int{}, notModified: map[string]int{}, malformed: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return f, ghclient.NewClient(srv.URL, "tok")
@@ -60,6 +61,10 @@ func (f *alertsFake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests[repo]++
+	if f.malformed[repo] {
+		_, _ = w.Write([]byte(`{"message":"not a list"}`))
+		return
+	}
 	if status := f.status[repo]; status != 0 {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
@@ -112,6 +117,9 @@ type vulnRig struct {
 	stores   db.Stores
 	pub      *recordingPublisher
 	repos    []string
+	// access, when set, is the store the tracker records listings in
+	// instead of the rig's own.
+	access db.RepositoryDependabotAccessStore
 }
 
 func newVulnRig(t *testing.T, repos ...string) *vulnRig {
@@ -144,8 +152,12 @@ func (r *vulnRig) rows() []domain.Repository {
 
 func (r *vulnRig) tracker() *Tracker {
 	s := r.stores
+	access := s.DependabotAccess
+	if r.access != nil {
+		access = r.access
+	}
 	return New(r.database, r.pub, s.Tasks, s.Entities, s.Repos, s.JiraProjects, s.Deliverables, s.ExternalActions, s.EventQueue, s.PRMergeability, runmode.LocalDefaultOrgID).
-		WithDependabotAccess(s.DependabotAccess)
+		WithDependabotAccess(access)
 }
 
 // cycle lists every tracked repository's alerts with the listing state as
@@ -498,5 +510,73 @@ func TestRefreshVulnerablePackages_AHostRoundTripAnnouncesWhatItClosed(t *testin
 	r.gh.set("api", lodash(1, "high"), lodash(2, "low"), lodash(3, "medium"))
 	if evts := r.mustCycle(); len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
 		t.Errorf("a later alert emitted %v, want one alert_opened", eventTypes(evts))
+	}
+}
+
+// TestRefreshVulnerablePackages_AnUnusableListingSkipsOnlyItsRepository: a
+// repository whose listing TF cannot read is skipped every cycle, its packages
+// untouched, and the repositories after it are still listed.
+func TestRefreshVulnerablePackages_AnUnusableListingSkipsOnlyItsRepository(t *testing.T) {
+	r := newVulnRig(t, "api", "web")
+	r.gh.set("api", lodash(1, "high"))
+	r.mustCycle()
+
+	r.gh.mu.Lock()
+	r.gh.malformed["api"] = true
+	r.gh.mu.Unlock()
+	r.gh.set("web", fakeAlert{number: 1, ecosystem: "npm", pkg: "react", severity: "low"})
+	evts, err := r.cycle()
+	if err != nil {
+		t.Fatalf("an unusable listing failed the pass: %v", err)
+	}
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityAlertOpened {
+		t.Errorf("emitted %v, want only web's alert", eventTypes(evts))
+	}
+	if e := r.pkg("api", "npm", "lodash"); e.State != "active" || fmt.Sprint(r.alertNumbers(e)) != "[1]" {
+		t.Errorf("the unusable repository's package = %+v, want it untouched", e)
+	}
+}
+
+// etagWriteFailing is an access store whose writes of a non-empty ETag fail.
+type etagWriteFailing struct {
+	db.RepositoryDependabotAccessStore
+}
+
+func (s etagWriteFailing) RecordAlertListingSystem(ctx context.Context, orgID, repositoryID, etag string) (domain.RepositoryDependabotAccess, error) {
+	if etag != "" {
+		return domain.RepositoryDependabotAccess{}, fmt.Errorf("injected failure")
+	}
+	return s.RepositoryDependabotAccessStore.RecordAlertListingSystem(ctx, orgID, repositoryID, etag)
+}
+
+// TestRefreshVulnerablePackages_ALostETagWriteLeavesNoStaleCondition: a
+// listing whose snapshot writes landed and whose ETag write did not leaves no
+// ETag, rather than the previous listing's. When the alerts go back to what
+// that previous listing held, the next listing is answered in full and the
+// package resolves, where a 304 would have left it open.
+func TestRefreshVulnerablePackages_ALostETagWriteLeavesNoStaleCondition(t *testing.T) {
+	r := newVulnRig(t, "api")
+	r.mustCycle()
+	row := r.rows()[0]
+	before, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID)
+	if err != nil || before == nil || before.AlertsETag == "" {
+		t.Fatalf("setup: the empty listing's ETag = %+v, %v", before, err)
+	}
+
+	r.access = etagWriteFailing{r.stores.DependabotAccess}
+	r.gh.set("api", lodash(2, "high"))
+	if evts := r.mustCycle(); len(evts) != 1 {
+		t.Fatalf("the alert emitted %v", eventTypes(evts))
+	}
+	after, err := r.stores.DependabotAccess.GetSystem(context.Background(), runmode.LocalDefaultOrgID, row.ID)
+	if err != nil || after == nil || after.AlertsETag != "" {
+		t.Fatalf("after the lost ETag write the stored ETag = %+v, %v; want none", after, err)
+	}
+
+	r.access = nil
+	r.gh.set("api")
+	evts := r.mustCycle()
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubVulnerabilityResolved {
+		t.Errorf("the alert closing emitted %v, want the package resolved", eventTypes(evts))
 	}
 }

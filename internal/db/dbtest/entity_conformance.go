@@ -941,6 +941,39 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("ListActiveKindSystem_filters_by_scope_kind_and_state", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		vuln := func(scope, key string) *domain.Entity {
+			t.Helper()
+			e, _, err := s.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, key, key, "")
+			if err != nil {
+				t.Fatalf("create %s on %s: %v", key, scope, err)
+			}
+			return e
+		}
+		want := vuln(TestGitHubHost, "owner/repo#npm:lk-open")
+		closed := vuln(TestGitHubHost, "owner/repo#npm:lk-closed")
+		if _, err := s.MarkClosed(ctx, orgID, closed.ID); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		vuln(TestOtherGitHubHost, "owner/repo#npm:lk-elsewhere")
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", TestGitHubHost, "owner/repo#77", "", "pr", "PR", ""); err != nil {
+			t.Fatalf("create pr: %v", err)
+		}
+
+		got, err := s.ListActiveKindSystem(ctx, orgID, "github", TestGitHubHost, domain.EntityKindVulnerablePackage)
+		if err != nil {
+			t.Fatalf("ListActiveKindSystem: %v", err)
+		}
+		if len(got) != 1 || got[0].ID != want.ID {
+			var keys []string
+			for _, e := range got {
+				keys = append(keys, e.SourceID)
+			}
+			t.Errorf("listed %v, want only %s: not the closed one, the other host's, or the pull request", keys, want.SourceID)
+		}
+	})
+
 	t.Run("ClearSnapshotsForSourceSystem_blanks_active_rows_of_one_source", func(t *testing.T) {
 		// The event-source pause's half of the re-enable story. Clearing puts
 		// each active row back on the tracker's quiet-seed path, so the first

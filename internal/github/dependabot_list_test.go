@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -149,8 +150,8 @@ func TestClient_ListOpenDependabotAlerts_StopsAtThePageCap(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	_, _, _, err := NewClient(srv.URL, "tok").ListOpenDependabotAlerts(context.Background(), "octo", "api", "")
-	if err == nil || !strings.Contains(err.Error(), "pages") {
-		t.Errorf("err = %v, want the page cap", err)
+	if !errors.Is(err, ErrDependabotListingUnusable) || !strings.Contains(err.Error(), "pages") {
+		t.Errorf("err = %v, want the page cap, as an unusable listing", err)
 	}
 	if requests != maxDependabotAlertPages {
 		t.Errorf("requests = %d, want %d", requests, maxDependabotAlertPages)
@@ -163,10 +164,35 @@ func TestNextPageCursor(t *testing.T) {
 		`<https://api.github.com/r?after=abc%3D&per_page=100>; rel="next"`:                                  "abc=",
 		`<https://api.github.com/r?before=zz>; rel="prev", <https://api.github.com/r?after=nx>; rel="next"`: "nx",
 		`<https://api.github.com/r?before=zz>; rel="prev"`:                                                  "",
-		`<https://api.github.com/r?page=2>; rel="next"`:                                                     "",
 	} {
-		if got := nextPageCursor(link); got != want {
-			t.Errorf("nextPageCursor(%q) = %q, want %q", link, got, want)
+		if got, err := nextPageCursor(link); err != nil || got != want {
+			t.Errorf("nextPageCursor(%q) = %q, %v; want %q", link, got, err, want)
 		}
+	}
+	for _, link := range []string{
+		`<https://api.github.com/r?page=2>; rel="next"`,
+		`<https://api.github.com/r?per_page=100>; rel="next"`,
+		`<http://[::1>; rel="next"`,
+	} {
+		if got, err := nextPageCursor(link); err == nil {
+			t.Errorf("nextPageCursor(%q) = %q, want an error for a next link with no cursor", link, got)
+		}
+	}
+}
+
+// TestClient_ListOpenDependabotAlerts_ANextLinkWithoutACursorFails: a page
+// whose next link carries no after cursor fails the listing as unusable
+// rather than ending it, so the alerts on later pages are never read as
+// resolved.
+func TestClient_ListOpenDependabotAlerts_ANextLinkWithoutACursorFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `<https://api.github.com/x?page=2>; rel="next"`)
+		_, _ = fmt.Fprintf(w, `[%s]`, alertJSON(2, "open", "npm", "a", "low"))
+	}))
+	t.Cleanup(srv.Close)
+
+	alerts, _, _, err := NewClient(srv.URL, "tok").ListOpenDependabotAlerts(context.Background(), "octo", "api", "")
+	if !errors.Is(err, ErrDependabotListingUnusable) || alerts != nil {
+		t.Errorf("= (%v, %v), want an unusable listing and no alerts", alerts, err)
 	}
 }

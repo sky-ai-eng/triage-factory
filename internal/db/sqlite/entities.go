@@ -695,6 +695,32 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 	return s.ListActive(ctx, orgID, source)
 }
 
+func (s *entityStore) ListActiveKindSystem(ctx context.Context, orgID, source, scope, kind string) ([]domain.Entity, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+entitySelectCols+`
+		FROM entities
+		WHERE source = ? AND scope = ? AND kind = ? AND state = 'active'
+		ORDER BY last_polled_at ASC
+	`, source, scope, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.Entity{}
+	for rows.Next() {
+		e, err := scanEntityFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *e)
+	}
+	return out, rows.Err()
+}
+
 // ListActiveTerminalCandidatesSystem selects active entities whose stored
 // snapshot already reads terminal, unpolled for at least unpolledFor, with
 // no terminating close ready, leased or parked in the queue — a parked one
