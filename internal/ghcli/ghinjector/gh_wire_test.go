@@ -618,7 +618,7 @@ func fakeGHEReads(t *testing.T) (srv *httptest.Server, pullReads func() int, bra
 				case "PR_open":
 					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":42,"repository":{"nameWithOwner":"octo/repo"}}}}`))
 				case "IC_open":
-					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"IssueComment","pullRequest":null,"issue":{"number":7},"repository":{"nameWithOwner":"octo/repo"}}}}`))
+					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":{"number":7},"repository":{"nameWithOwner":"octo/repo"}}}}`))
 				default:
 					_, _ = w.Write([]byte(`{"data":{"node":null}}`))
 				}

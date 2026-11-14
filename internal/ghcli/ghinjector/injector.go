@@ -184,10 +184,11 @@
 // A comment and a node id name no number, so the injector asks GitHub which
 // object they are on or name, with the credential the read was made under:
 // it reads the comment by its id over REST, or asks GraphQL what the node id
-// names (a pull request, an issue, or a comment on one), and touches that
-// object as if the read had named it by number. A node id that names anything
-// else touches nothing. Each comment and each node id is asked about once per
-// run, and the response the agent receives is not read for either.
+// names (a pull request, an issue, or a comment, review or review thread on
+// one), and touches that object as if the read had named it by number. A node
+// id that names anything else touches nothing. Each comment and each node id
+// is asked about once per run, and the response the agent receives is not
+// read for either.
 //
 // A GraphQL lookup of a branch's pull requests addresses the branch. It is how
 // `gh pr view`, `gh pr status` and `gh pr checks` find the pull request of the
@@ -1026,7 +1027,8 @@ func (s *Server) touchComment(ctx context.Context, c ghwrite.CommentRef) {
 }
 
 // touchNode reports the object a read named by node id: the pull request or
-// issue it names, or the one the comment it names is on. It asks GitHub's
+// issue it names, or the one the comment, review or review thread it names is
+// on. It asks GitHub's
 // GraphQL API which object that is, with the credential the read was made
 // under (ghclient.IdentityReader.NodeSubject), and reports the object as
 // touchRead does, under the repository name GitHub answered. A node id that

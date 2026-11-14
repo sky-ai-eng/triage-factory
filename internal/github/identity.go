@@ -335,8 +335,9 @@ func apiObjectNumber(link, collection string) (int, bool) {
 }
 
 // NodeSubject is the pull request or issue a node id names, or the one the
-// comment it names is on: its repository's owner and name as GitHub answers
-// them now, and its number. Zero for a node id that names anything else.
+// comment, review or review thread it names is on: its repository's owner and
+// name as GitHub answers them now, and its number. Zero for a node id that
+// names anything else.
 type NodeSubject struct {
 	Owner  string
 	Repo   string
@@ -346,22 +347,26 @@ type NodeSubject struct {
 // nodeSubjectQuery is the document NodeSubject sends. It names its operation
 // and selects rateLimit { cost }, as every query document in this package
 // does (recordQueryCost). A conversation comment's issue carries the number a
-// pull request's conversation shares with it; pullRequest is read first where
-// the comment is on one.
+// pull request's conversation shares with it; its pull request is read first
+// where the comment is on one. That field is aliased because a conversation
+// comment's pullRequest is nullable and every other type's is not, and GraphQL
+// refuses a document that selects two types under one response name.
 const nodeSubjectQuery = `query NodeSubject($id: ID!) {
   node(id: $id) {
     __typename
     ... on PullRequest { number repository { nameWithOwner } }
     ... on Issue { number repository { nameWithOwner } }
-    ... on IssueComment { pullRequest { number } issue { number } repository { nameWithOwner } }
+    ... on IssueComment { commentPullRequest: pullRequest { number } issue { number } repository { nameWithOwner } }
     ... on PullRequestReviewComment { pullRequest { number } repository { nameWithOwner } }
+    ... on PullRequestReview { pullRequest { number } repository { nameWithOwner } }
+    ... on PullRequestReviewThread { pullRequest { number } repository { nameWithOwner } }
   }
   rateLimit { cost }
 }`
 
 // NodeSubject asks GitHub what the node id names, through q, and answers the
-// pull request or issue it is, or the one the conversation comment or review
-// comment it is sits on. The number is the whole answer, with the repository
+// pull request or issue it is, or the one the conversation comment, review
+// comment, review or review thread it is sits on. The number is the whole answer, with the repository
 // it is in: Object reads what GitHub calls the object. A node id that names
 // anything else answers the zero NodeSubject. Both answers are cached, since a
 // node id names one object for its life. A node GitHub answers null for (one
@@ -384,11 +389,12 @@ func (r *IdentityReader) NodeSubject(ctx context.Context, q Querier, nodeID stri
 	var resp struct {
 		Data struct {
 			Node *struct {
-				Typename    string    `json:"__typename"`
-				Number      int       `json:"number"`
-				PullRequest *numbered `json:"pullRequest"`
-				Issue       *numbered `json:"issue"`
-				Repository  *struct {
+				Typename           string    `json:"__typename"`
+				Number             int       `json:"number"`
+				PullRequest        *numbered `json:"pullRequest"`
+				CommentPullRequest *numbered `json:"commentPullRequest"`
+				Issue              *numbered `json:"issue"`
+				Repository         *struct {
 					NameWithOwner string `json:"nameWithOwner"`
 				} `json:"repository"`
 			} `json:"node"`
@@ -405,12 +411,16 @@ func (r *IdentityReader) NodeSubject(ctx context.Context, q Querier, nodeID stri
 	switch node.Typename {
 	case "PullRequest", "Issue":
 		number = node.Number
-	case "IssueComment", "PullRequestReviewComment":
+	case "IssueComment":
 		switch {
-		case node.PullRequest != nil:
-			number = node.PullRequest.Number
+		case node.CommentPullRequest != nil:
+			number = node.CommentPullRequest.Number
 		case node.Issue != nil:
 			number = node.Issue.Number
+		}
+	case "PullRequestReviewComment", "PullRequestReview", "PullRequestReviewThread":
+		if node.PullRequest != nil {
+			number = node.PullRequest.Number
 		}
 	default:
 		r.rememberNode(nodeID, NodeSubject{})

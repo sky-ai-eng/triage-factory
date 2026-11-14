@@ -1581,11 +1581,11 @@ func TestInjector_BranchLookupTouchesTheOnePullRequest(t *testing.T) {
 // TestInjector_CommentAndNodeReads: a REST read of a comment by its own id
 // reports the pull request or issue the comment is on, which the injector
 // finds by reading the comment once; a GraphQL read by node id reports the
-// object the node id names, or the one the comment it names is on, which the
-// injector finds by asking GraphQL once. Both report the object with GitHub's
-// ids, once per run, whichever way the run reached it. A refused read, and a
-// node id that names something else or nothing GitHub answers for, report
-// nothing.
+// object the node id names, or the one the comment or review thread it names
+// is on, which the injector finds by asking GraphQL once. Both report the
+// object with GitHub's ids, once per run, whichever way the run reached it. A
+// refused read, and a node id that names something else or nothing GitHub
+// answers for, report nothing.
 func TestInjector_CommentAndNodeReads(t *testing.T) {
 	var mu sync.Mutex
 	gets := map[string]int{}
@@ -1610,6 +1610,8 @@ func TestInjector_CommentAndNodeReads(t *testing.T) {
 			_, _ = w.Write([]byte(`{"number":841,"node_id":"PR_kw841","base":{"repo":{"id":4242,"full_name":"acme/widgets"}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/50":
 			_, _ = w.Write([]byte(`{"number":50,"node_id":"PR_kw50","base":{"repo":{"id":4242,"full_name":"acme/widgets"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/60":
+			_, _ = w.Write([]byte(`{"number":60,"node_id":"PR_kw60","base":{"repo":{"id":4242,"full_name":"acme/widgets"}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/9":
 			_, _ = w.Write([]byte(`{"number":9,"node_id":"I_kw9"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
@@ -1640,9 +1642,11 @@ func TestInjector_CommentAndNodeReads(t *testing.T) {
 			case "PR_kw50":
 				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":50,"repository":{"nameWithOwner":"acme/widgets"}}}}`))
 			case "IC_kwPersons":
-				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"IssueComment","pullRequest":null,"issue":{"number":9},"repository":{"nameWithOwner":"acme/widgets"}}}}`))
+				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":{"number":9},"repository":{"nameWithOwner":"acme/widgets"}}}}`))
 			case "PR_kw841":
 				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":841,"repository":{"nameWithOwner":"acme/widgets"}}}}`))
+			case "PRRT_kw60":
+				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequestReviewThread","pullRequest":{"number":60},"repository":{"nameWithOwner":"acme/widgets"}}}}`))
 			case "U_kwUser":
 				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"User"}}}`))
 			case "R_kwBadRepo":
@@ -1733,6 +1737,9 @@ func TestInjector_CommentAndNodeReads(t *testing.T) {
 
 	if got := query(`query($id:ID!){node(id:$id){id}}`, map[string]any{"id": "PR_kw50"}); !slices.Equal(got, observed(50, "PR_kw50", domain.EntityKindPullRequest)) {
 		t.Errorf("a read of a pull request by node id reported %+v, want the pull request with its ids", got)
+	}
+	if got := query(`{node(id:"PRRT_kw60"){... on PullRequestReviewThread{isResolved}}}`, nil); !slices.Equal(got, observed(60, "PR_kw60", domain.EntityKindPullRequest)) {
+		t.Errorf("a read of a review thread by node id reported %+v, want the pull request it is on", got)
 	}
 	if got := query(`{a:node(id:"PR_kw50"){id} b:node(id:"PR_kw841"){id} c:node(id:"IC_kwPersons"){id}}`, nil); !slices.Equal(got, none) {
 		t.Errorf("node reads of objects the run already reported reported %+v, want nothing", got)

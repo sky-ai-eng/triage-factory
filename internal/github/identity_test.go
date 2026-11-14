@@ -402,16 +402,18 @@ func (q *nodeAnswers) PostGraphQL(_ context.Context, query string, variables map
 }
 
 // TestIdentityReader_NodeSubject: a node id answers the pull request or issue
-// it names, or the one the comment it names is on, in the repository GitHub
-// names now; any other kind of node answers nothing. Every answer is read
-// once per reader.
+// it names, or the one the comment, review or review thread it names is on, in
+// the repository GitHub names now; any other kind of node answers nothing.
+// Every answer is read once per reader.
 func TestIdentityReader_NodeSubject(t *testing.T) {
 	q := &nodeAnswers{answers: map[string]string{
 		"PR_kw7":   `{"data":{"node":{"__typename":"PullRequest","number":7,"repository":{"nameWithOwner":"octo/api"}}}}`,
 		"I_kw9":    `{"data":{"node":{"__typename":"Issue","number":9,"repository":{"nameWithOwner":"octo/renamed"}}}}`,
-		"IC_onPR":  `{"data":{"node":{"__typename":"IssueComment","pullRequest":{"number":7},"issue":{"number":7},"repository":{"nameWithOwner":"octo/api"}}}}`,
-		"IC_onI":   `{"data":{"node":{"__typename":"IssueComment","pullRequest":null,"issue":{"number":9},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"IC_onPR":  `{"data":{"node":{"__typename":"IssueComment","commentPullRequest":{"number":7},"issue":{"number":7},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"IC_onI":   `{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":{"number":9},"repository":{"nameWithOwner":"octo/api"}}}}`,
 		"PRRC_kw":  `{"data":{"node":{"__typename":"PullRequestReviewComment","pullRequest":{"number":7},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRR_kw":   `{"data":{"node":{"__typename":"PullRequestReview","pullRequest":{"number":8},"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRRT_kw":  `{"data":{"node":{"__typename":"PullRequestReviewThread","pullRequest":{"number":8},"repository":{"nameWithOwner":"octo/api"}}}}`,
 		"U_kwUser": `{"data":{"node":{"__typename":"User"}}}`,
 	}}
 	r := NewIdentityReader()
@@ -421,6 +423,8 @@ func TestIdentityReader_NodeSubject(t *testing.T) {
 		"IC_onPR":  {Owner: "octo", Repo: "api", Number: 7},
 		"IC_onI":   {Owner: "octo", Repo: "api", Number: 9},
 		"PRRC_kw":  {Owner: "octo", Repo: "api", Number: 7},
+		"PRR_kw":   {Owner: "octo", Repo: "api", Number: 8},
+		"PRRT_kw":  {Owner: "octo", Repo: "api", Number: 8},
 		"U_kwUser": {},
 	}
 	for range 2 {
@@ -441,7 +445,8 @@ func TestIdentityReader_NodeSubjectFailuresAreNotCached(t *testing.T) {
 		"PR_noRepo":   `{"data":{"node":{"__typename":"PullRequest","number":7}}}`,
 		"PR_noNum":    `{"data":{"node":{"__typename":"PullRequest","repository":{"nameWithOwner":"octo/api"}}}}`,
 		"PR_badRepo":  `{"data":{"node":{"__typename":"PullRequest","number":7,"repository":{"nameWithOwner":"octo"}}}}`,
-		"IC_noParent": `{"data":{"node":{"__typename":"IssueComment","pullRequest":null,"issue":null,"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"IC_noParent": `{"data":{"node":{"__typename":"IssueComment","commentPullRequest":null,"issue":null,"repository":{"nameWithOwner":"octo/api"}}}}`,
+		"PRRT_noPull": `{"data":{"node":{"__typename":"PullRequestReviewThread","repository":{"nameWithOwner":"octo/api"}}}}`,
 		"PR_garbled":  `not json`,
 	}}
 	r := NewIdentityReader()
