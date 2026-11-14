@@ -26,6 +26,8 @@ func AdditiveEventInjection(eventType, metadataJSON string) string {
 			eventType,
 		)
 	}
+	// TODO(TFAC-1418): the metadata is externally written and renders outside
+	// any untrusted-marker region, inside the <system-note> delivery wraps it in.
 	return fmt.Sprintf(
 		"A new %s event occurred on this entity while this run is active. Event metadata:\n%s\n"+
 			"Fold it into your current work if relevant; it will not spawn a separate run.",
@@ -132,6 +134,7 @@ func TaskClosedNote(c TaskClose) string {
 		guidance = taskDismissedGuidance
 	}
 	if c.MetadataJSON != "" && (c.Kind == TaskClosedByEvent || c.Kind == TaskClosedReassigned) {
+		// TODO(TFAC-1418): the metadata renders outside any untrusted-marker region.
 		return fmt.Sprintf("%s Event metadata:\n%s\n%s", taskCloseCause(c), c.MetadataJSON, guidance)
 	}
 	return taskCloseCause(c) + " " + guidance
@@ -153,6 +156,7 @@ func TaskCloseHeldNote(eventType, metadataJSON string) string {
 	if metadataJSON == "" {
 		return cause + " " + held
 	}
+	// TODO(TFAC-1418): the metadata renders outside any untrusted-marker region.
 	return fmt.Sprintf("%s Event metadata:\n%s\n%s", cause, metadataJSON, held)
 }
 

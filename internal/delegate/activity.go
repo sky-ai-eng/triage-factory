@@ -75,9 +75,10 @@ const (
 	// (cmd/capbroker's callTimeout), and that is the bound this backs up.
 	sidecarOpDeadline = 60*time.Second + backstopMargin
 
-	// fetchPROpDeadline covers the pull-request fetch, which goes through the
-	// GitHub client's 30-second timeout.
-	fetchPROpDeadline = 60 * time.Second
+	// setupFetchOpDeadline covers a GitHub setup's fetch, of the pull request
+	// or of a vulnerable package's repository, which goes through the GitHub
+	// client's 30-second timeout.
+	setupFetchOpDeadline = 60 * time.Second
 
 	// stallIntentTimeout bounds the stall's intent write. It runs on a fresh
 	// context because the engagement's own is about to be cancelled, and it

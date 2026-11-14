@@ -59,6 +59,9 @@ var ciFix string
 //go:embed prompts/fix-review-feedback.txt
 var fixReviewFeedback string
 
+//go:embed prompts/vulnerability-remediate.txt
+var vulnerabilityRemediate string
+
 // Prompts returns the system prompts every team gets seeded with — the single
 // source of truth shared by the local provision action (db.BootstrapLocalOrg,
 // fired by POST /api/orgs), the multi-mode org-create bootstrap
@@ -123,6 +126,12 @@ func Prompts() []domain.Prompt {
 		// read the review, fix what's right, push back on what isn't,
 		// push to branch.
 		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: fixReviewFeedback, Source: "system"},
+
+		// Vulnerable package remediation — fired on a Dependabot alert
+		// opening in a tracked repository, by a trigger that ships
+		// disabled: upgrade the package past every open alert and open one
+		// pull request.
+		{SystemSlug: "system-vulnerability-remediate", Name: "Remediate Vulnerable Package", Body: vulnerabilityRemediate, Source: "system"},
 	}
 }
 
@@ -131,7 +140,7 @@ func Prompts() []domain.Prompt {
 // system_slug (distinct table, no collision) and its single step points at that
 // prompt's slug. Wrapping keeps a shipped trigger's blueprint reference
 // resolvable (CI-fix, conflict-resolution, jira-implement, linear-implement,
-// fix-review-feedback), and it puts the prompt under the drift sync, which
+// fix-review-feedback, vulnerability-remediate), and it puts the prompt under the drift sync, which
 // walks blueprints — the reason the standalone security and correctness
 // reviews are wrapped though no trigger fires them.
 //

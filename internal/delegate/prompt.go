@@ -281,8 +281,8 @@ func resolveCLIPath(text, binaryPath string) string {
 // the facts of this particular run. agentprompt.Build is byte-identical for a
 // fixed Spec so the fleet shares one cached prefix, which leaves anything that
 // differs between two runs — what this one is pointed at, where its tree and
-// its PR checkout are, what the team calls its branches — to arrive here
-// instead.
+// the checkout its setup built are, what the team calls its branches — to
+// arrive here instead.
 //
 // System-authored, so unlike the task context it carries no untrusted markers.
 // An absent fact renders no line: a deployment with no public URL says nothing
@@ -315,7 +315,7 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-func runContext(scope, taskState, siblingWork, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
+func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
@@ -334,6 +334,11 @@ func runContext(scope, taskState, siblingWork, runRoot, prCheckout, branchTempla
 	if prCheckout != "" {
 		lines = append(lines, "PR checkout: "+prCheckout+
 			" — the pull request's checkout, already on its branch. `cd` into it before reading or changing the code.")
+	}
+	if baseCheckout != "" {
+		lines = append(lines, "Base-branch checkout: "+baseCheckout+
+			" — the repository's checkout of its base branch, detached, as `workspace add` makes one."+
+			" `cd` into it before reading or changing the code, and create your own branch before committing.")
 	}
 	if branchTemplate != "" {
 		lines = append(lines, "Branch naming convention for this team: "+branchTemplate)

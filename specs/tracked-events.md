@@ -416,7 +416,17 @@ GitHub gives no scope matches neither), `has_patched_version`, and `repo_in`.
 A value outside a field's set is refused as [Handler
 predicates](#handler-predicates) describes. `resolved` and `unreachable` have
 no predicate fields. One rule ships for `alert_opened`, matching every alert
-and disabled.
+and disabled, and one trigger, matching every alert and disabled like every
+shipped trigger, on the "Remediate Vulnerable Package" blueprint: upgrade the
+package past every open alert a released version fixes, or stop with no pull
+request when no alert has a patched version.
+
+A run on a vulnerable package starts with a detached checkout of the
+repository's base branch, the one a bare `workspace add` makes, and its
+`<task_context>` lists the package's open alerts and each advisory's summary,
+read from the snapshot at launch. An `alert_opened` on the package while a run
+works on it folds into that run, and the resolution closes the task under it
+as any close does, held while the run's pull request awaits a person.
 
 A `dependabot_alert` webhook delivery is a hint, as a pull request's are. For
 a tracked repository whose alerts the poll lists, it marks the repository's

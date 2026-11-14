@@ -41,16 +41,17 @@ func TestShippedPromptsParse(t *testing.T) {
 // just pin the prompt slugs so a rename is a visible, reviewed diff.
 func TestShippedPromptSlugsStable(t *testing.T) {
 	want := map[string]bool{
-		"system-pr-review-security":    true,
-		"system-pr-review-correctness": true,
-		"system-pr-review-aggregate":   true,
-		"system-pr-security-review":    true,
-		"system-pr-correctness-review": true,
-		"system-conflict-resolution":   true,
-		"system-ci-fix":                true,
-		"system-jira-implement":        true,
-		"system-linear-implement":      true,
-		"system-fix-review-feedback":   true,
+		"system-pr-review-security":      true,
+		"system-pr-review-correctness":   true,
+		"system-pr-review-aggregate":     true,
+		"system-pr-security-review":      true,
+		"system-pr-correctness-review":   true,
+		"system-conflict-resolution":     true,
+		"system-ci-fix":                  true,
+		"system-jira-implement":          true,
+		"system-linear-implement":        true,
+		"system-fix-review-feedback":     true,
+		"system-vulnerability-remediate": true,
 	}
 	for _, p := range Prompts() {
 		delete(want, p.SystemSlug)
