@@ -580,32 +580,57 @@ func (o *readObservations) snap() []ObservedRead {
 }
 
 // fakeGHEReads answers what gh's read commands ask the conformance fixture's
-// repository for: its GraphQL finders (graphQLFixture), the REST reads of pull
-// request 42 and issue 7 that `gh pr diff`, `gh api` and the injector's own
-// identity reads make, and a comment on each, read by its own id. It returns
-// the server and the number of times the pull request's own REST object was
-// read.
-func fakeGHEReads(t *testing.T) (*httptest.Server, func() int) {
+// repository for: its GraphQL finders (graphQLFixture), and the REST reads of
+// pull request 42 and issue 7 that `gh pr diff`, `gh api` and the injector's
+// own identity reads make. It answers the injector's lookup of a branch's open
+// pull requests too: pull request 42 is open on `feature`, two are open on
+// `two-prs`, and none on any other branch. gh's own lookup of a branch is
+// answered with no pull request whatever the branch, so a touch that follows
+// one can only have come from the injector's lookup. It returns the server,
+// the number of times the pull request's own REST object was read, and the
+// number of times the injector looked up a branch.
+func fakeGHEReads(t *testing.T) (srv *httptest.Server, pullReads func() int, branchLookups func(branch string) int) {
 	t.Helper()
 	const repoJSON = `{"id":4,"full_name":"octo/repo"}`
 	var (
-		mu        sync.Mutex
-		pullReads int
+		mu      sync.Mutex
+		pulls   int
+		lookups = map[string]int{}
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	openPull := func(number int, nodeID, branch string) string {
+		return `{"number":` + strconv.Itoa(number) + `,"node_id":"` + nodeID + `","head":{"ref":"` + branch + `"},"base":{"repo":` + repoJSON + `}}`
+	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimPrefix(r.URL.Path, restPrefix)
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
 			var envelope struct {
-				Query string `json:"query"`
+				Query     string         `json:"query"`
+				Variables map[string]any `json:"variables"`
 			}
 			_ = json.Unmarshal(body, &envelope)
 			switch {
+			case strings.Contains(envelope.Query, "query NodeSubject("):
+				// The injector's own lookup of a node id the agent read.
+				switch envelope.Variables["id"] {
+				case "PR_open":
+					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":42,"repository":{"nameWithOwner":"octo/repo"}}}}`))
+				case "IC_open":
+					_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"IssueComment","pullRequest":null,"issue":{"number":7},"repository":{"nameWithOwner":"octo/repo"}}}}`))
+				default:
+					_, _ = w.Write([]byte(`{"data":{"node":null}}`))
+				}
 			case strings.Contains(envelope.Query, "PullRequestForBranch"), strings.Contains(envelope.Query, "PullRequestList"):
 				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequests":{"totalCount":0,"nodes":[],` +
 					`"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}`))
+			case strings.Contains(envelope.Query, "PullRequestStatus"):
+				_, _ = w.Write([]byte(`{"data":{"repository":{"defaultBranchRef":{"name":"main"},` +
+					`"pullRequests":{"totalCount":0,"edges":[]}},` +
+					`"viewerCreated":{"totalCount":0,"edges":[]},"reviewRequested":{"totalCount":0,"edges":[]}}}`))
+			case strings.Contains(envelope.Query, "UserCurrent"):
+				_, _ = w.Write([]byte(`{"data":{"viewer":{"login":"agent"}}}`))
 			case strings.HasPrefix(envelope.Query, "{"), strings.HasPrefix(envelope.Query, "query("):
 				// A hand-written query: gh names every operation it sends.
 				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"title":"T"}}}}`))
@@ -616,9 +641,26 @@ func fakeGHEReads(t *testing.T) (*httptest.Server, func() int) {
 			}
 		case path == "/meta":
 			_, _ = w.Write([]byte(`{"verifiable_password_authentication":false}`))
+		case path == "/repos/octo/repo/pulls" && r.URL.Query().Has("head"):
+			branch := strings.TrimPrefix(r.URL.Query().Get("head"), "octo:")
+			mu.Lock()
+			lookups[branch]++
+			mu.Unlock()
+			switch {
+			case r.URL.Query().Get("state") != "open":
+				w.WriteHeader(http.StatusBadRequest)
+			case branch == "feature":
+				_, _ = w.Write([]byte(`[` + openPull(42, "PR_open", branch) + `]`))
+			case branch == "two-prs":
+				_, _ = w.Write([]byte(`[` + openPull(43, "PR_one", branch) + `,` + openPull(44, "PR_two", branch) + `]`))
+			default:
+				_, _ = w.Write([]byte(`[]`))
+			}
+		case path == "/repos/octo/repo/pulls":
+			_, _ = w.Write([]byte(`[]`))
 		case path == "/repos/octo/repo/pulls/42":
 			mu.Lock()
-			pullReads++
+			pulls++
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"number":42,"node_id":"PR_open","base":{"repo":` + repoJSON + `}}`))
 		case path == "/repos/octo/repo/issues/7":
@@ -638,18 +680,24 @@ func fakeGHEReads(t *testing.T) (*httptest.Server, func() int) {
 	}))
 	t.Cleanup(srv.Close)
 	return srv, func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return pullReads
-	}
+			mu.Lock()
+			defer mu.Unlock()
+			return pulls
+		}, func(branch string) int {
+			mu.Lock()
+			defer mu.Unlock()
+			return lookups[branch]
+		}
 }
 
 // TestGHWire_AddressedReadsAreTouched drives the pinned gh's read commands and
 // asserts what the read touch reports: the pull request or issue a command
 // addresses by number, once, with GitHub's ids for it, whichever transport the
-// command used, and nothing for a command that reads a set. The documents gh
-// sends are the contract here, as they are for the write audit: the reader was
-// written against them, so the binary is what has to drive it.
+// command used; the one pull request open on a branch a command looks up; and
+// nothing for a command that reads a set, or looks up a branch with no pull
+// request or several open on it. The documents gh sends are the contract here,
+// as they are for the write audit: the reader was written against them, so the
+// binary is what has to drive it.
 func TestGHWire_AddressedReadsAreTouched(t *testing.T) {
 	repo := []string{"-R", ghePROwner + "/" + ghePRRepo}
 	pull := ObservedRead{
@@ -677,22 +725,33 @@ func TestGHWire_AddressedReadsAreTouched(t *testing.T) {
 			`query=query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner, name:$name) { pullRequest(number:$number) { title } } }`},
 			want: []ObservedRead{pull}},
 
-		// A comment by its own id, and an object by node id.
+		// A comment by its own id, and an object or a comment by node id. The
+		// fixture answers the agent's own node query with a repository, so
+		// what is touched can only come from the injector's lookup.
 		{args: []string{"api", "repos/octo/repo/pulls/comments/9001"}, want: []ObservedRead{pull}},
 		{args: []string{"api", "repos/octo/repo/issues/comments/7001"}, want: []ObservedRead{issue}},
-		{args: []string{"api", "graphql", "-f", `query={ node(id: "PR_open") { ... on PullRequest { title } } }`},
-			want: []ObservedRead{ghwrite.NodeRead("PR_open")}},
-		{args: []string{"api", "graphql", "-F", "id=IC_open", "-f", `query=query($id:ID!){ node(id:$id) { id } }`},
-			want: []ObservedRead{ghwrite.NodeRead("IC_open")}},
+		{args: []string{"api", "graphql", "-f", `query={ node(id: "PR_open") { ... on PullRequest { title } } }`}, want: []ObservedRead{pull}},
+		{args: []string{"api", "graphql", "-F", "id=IC_open", "-f", `query=query($id:ID!){ node(id:$id) { id } }`}, want: []ObservedRead{issue}},
+		{args: []string{"api", "graphql", "-f", `query={ node(id: "PR_unknown") { id } }`}},
 
-		// Sets, and a lookup by branch name.
-		{args: append([]string{"pr", "list"}, repo...)},
+		// A lookup by branch name, the one gh makes for a command given a
+		// branch or no number at all. The rule follows the request, so a list
+		// filtered to one branch sends the same lookup.
+		{args: append([]string{"pr", "view", "feature"}, repo...), want: []ObservedRead{pull}},
+		{args: append([]string{"pr", "checks", "feature"}, repo...), want: []ObservedRead{pull}},
+		{args: append([]string{"pr", "list", "--head", "feature"}, repo...), want: []ObservedRead{pull}},
 		{args: append([]string{"pr", "view", "some-branch"}, repo...)},
+		{args: append([]string{"pr", "view", "two-prs"}, repo...)},
+		// With --repo, gh reads no current branch and sends the lookup empty.
+		{args: append([]string{"pr", "status"}, repo...)},
+
+		// Sets.
+		{args: append([]string{"pr", "list"}, repo...)},
 		{args: []string{"api", "repos/octo/repo/pulls"}},
 	}
 	for _, tc := range cases {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
-			upstream, _ := fakeGHEReads(t)
+			upstream, _, _ := fakeGHEReads(t)
 			var reads readObservations
 			env := ghEnvWithReads(t, upstream.URL, reads.record)
 
@@ -717,7 +776,7 @@ func TestGHWire_AddressedReadsAreTouched(t *testing.T) {
 // after the first costs nothing of the injector's own, across commands and
 // transports.
 func TestGHWire_ARunReadsAnObjectsIdentityOnce(t *testing.T) {
-	upstream, pullReads := fakeGHEReads(t)
+	upstream, pullReads, _ := fakeGHEReads(t)
 	var reads readObservations
 	env := ghEnvWithReads(t, upstream.URL, reads.record)
 	repo := []string{"-R", ghePROwner + "/" + ghePRRepo}
@@ -733,5 +792,120 @@ func TestGHWire_ARunReadsAnObjectsIdentityOnce(t *testing.T) {
 	// request is the injector's.
 	if n := pullReads(); n != 1 {
 		t.Errorf("identity reads of the pull request = %d, want 1", n)
+	}
+}
+
+// checkoutOnBranch makes a git repository checked out on branch, with one
+// commit, for a gh command that reads the current branch. It runs git with no
+// configuration of the host's, as the jail does.
+func checkoutOnBranch(t *testing.T, branch string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not installed: %v", err)
+	}
+	dir := t.TempDir()
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_AUTHOR_NAME=wire", "GIT_AUTHOR_EMAIL=wire@example.test",
+		"GIT_COMMITTER_NAME=wire", "GIT_COMMITTER_EMAIL=wire@example.test",
+	}
+	for _, args := range [][]string{
+		{"init", "--quiet", "--initial-branch=" + branch},
+		{"commit", "--quiet", "--allow-empty", "--message", "wire"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	return dir
+}
+
+// TestGHWire_NoNumberTouchesTheBranchsPullRequest is the branch lookup as an
+// agent meets it: `gh pr view`, `gh pr status` and `gh pr checks` with no
+// number, run in a checkout of a branch, touch the one pull request open on
+// that branch, and nothing when no pull request or several are open on it.
+//
+// gh finds the repository through GH_REPO here, because it matches a remote
+// against GH_HOST with the port stripped, and a test cannot serve on 443. The
+// current branch is read from the checkout as it is in the jail.
+func TestGHWire_NoNumberTouchesTheBranchsPullRequest(t *testing.T) {
+	pull := ObservedRead{
+		ObjectRef: ghwrite.ObjectRef{Owner: "octo", Repo: "repo", Number: 42},
+		Identity:  domain.GitHubIdentity{RepositoryID: "4", Repository: "octo/repo", NodeID: "PR_open", Kind: domain.EntityKindPullRequest},
+	}
+	for _, branch := range []string{"feature", "some-branch", "two-prs"} {
+		var want []ObservedRead
+		if branch == "feature" {
+			want = []ObservedRead{pull}
+		}
+		dir := checkoutOnBranch(t, branch)
+		for _, command := range []string{"view", "status", "checks"} {
+			t.Run(command+" on "+branch, func(t *testing.T) {
+				upstream, _, lookups := fakeGHEReads(t)
+				var reads readObservations
+				env := append(ghEnvWithReads(t, upstream.URL, reads.record), "GH_REPO="+ghePROwner+"/"+ghePRRepo)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, ghBinary(t), "pr", command)
+				cmd.Env = env
+				cmd.Dir = dir
+				out, _ := cmd.CombinedOutput()
+
+				if got := reads.snap(); !slices.Equal(got, want) {
+					t.Errorf("read touches = %+v, want %+v\ngh output:\n%s", got, want, out)
+				}
+				if n := lookups(branch); n != 1 {
+					t.Errorf("lookups of %q = %d, want 1\ngh output:\n%s", branch, n, out)
+				}
+			})
+		}
+	}
+}
+
+// TestGHWire_ARunLooksABranchUpOnce: a branch is looked up once per run
+// whatever the lookup answered, and the pull request it found is the one
+// object the run has read, however it reaches it after that.
+func TestGHWire_ARunLooksABranchUpOnce(t *testing.T) {
+	upstream, pullReads, lookups := fakeGHEReads(t)
+	var reads readObservations
+	env := ghEnvWithReads(t, upstream.URL, reads.record)
+	repo := []string{"-R", ghePROwner + "/" + ghePRRepo}
+	run := func(args ...string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, ghBinary(t), append(args, repo...)...)
+		cmd.Env = env
+		cmd.Dir = t.TempDir()
+		_, _ = cmd.CombinedOutput()
+	}
+
+	run("pr", "view", "feature")
+	run("pr", "checks", "feature")
+	run("pr", "view", "feature", "--json", "title")
+	run("pr", "view", "42")
+	run("pr", "view", "some-branch")
+	run("pr", "view", "some-branch")
+
+	if got := reads.snap(); len(got) != 1 || got[0].Number != 42 {
+		t.Errorf("read touches = %+v, want pull request 42 reported once", got)
+	}
+	if n := lookups("feature"); n != 1 {
+		t.Errorf("lookups of feature = %d, want 1", n)
+	}
+	if n := lookups("some-branch"); n != 1 {
+		t.Errorf("lookups of some-branch = %d, want 1: an answer of none is remembered too", n)
+	}
+	// The lookup answered what GitHub calls the pull request, so the read of it
+	// by number costs no read of the injector's own.
+	if n := pullReads(); n != 0 {
+		t.Errorf("identity reads of the pull request = %d, want 0", n)
 	}
 }

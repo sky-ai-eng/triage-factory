@@ -109,9 +109,9 @@ type Tracker struct {
 	// jiraStreaks counts each Jira project's consecutive rejected discovery
 	// cycles, which outlive this tracker; see JiraDiscoveryStreaks.
 	jiraStreaks *JiraDiscoveryStreaks
-	// changeClock is the clock the refresh gate's change window is kept on
-	// (changeNow); nil is time.Now.
-	changeClock func() time.Time
+	// clock is the clock the times the tracker both writes and reads are kept
+	// on (now); nil is time.Now.
+	clock func() time.Time
 	// marks is the org's pending refresh marks the GitHub passes honor
 	// (WithRefreshMarks).
 	marks refreshMarks
@@ -148,23 +148,24 @@ func (t *Tracker) tellTasksClosed(ctx context.Context, taskIDs []string) {
 	}
 }
 
-// WithChangeClock keeps the refresh gate's change window on now: the time a
-// refresh stamps on a pull request it saw change (PRSnapshot.ChangeSeenAt),
-// and the time the gate measures that stamp's age against. A nil now leaves
-// the window on time.Now. Only the window takes it, because its stamps are the
-// only times the tracker both writes and reads: the refresh floor's
-// last_polled_at is stamped by the store. A caller whose cycles do not run a
-// real poll interval apart sets it to see the window as a deployment polling
-// at that interval would.
-func (t *Tracker) WithChangeClock(now func() time.Time) *Tracker {
-	t.changeClock = now
+// WithClock keeps on now the times the tracker both writes and reads: the
+// refresh gate's change window (the time a refresh stamps on a pull request it
+// saw change, PRSnapshot.ChangeSeenAt, and the time the gate measures that
+// stamp's age against), and the schedule of reads of Dependabot updates (when
+// a repository's were last read, and the time their recheck interval is
+// measured against). A nil now leaves them on time.Now. Nothing else takes
+// it: the refresh floor's last_polled_at is stamped by the store. A caller
+// whose cycles do not run a real poll interval apart sets it to see both as a
+// deployment polling at that interval would.
+func (t *Tracker) WithClock(now func() time.Time) *Tracker {
+	t.clock = now
 	return t
 }
 
-// changeNow is the change window's current time.
-func (t *Tracker) changeNow() time.Time {
-	if t.changeClock != nil {
-		return t.changeClock()
+// now is the current time on the tracker's clock (WithClock).
+func (t *Tracker) now() time.Time {
+	if t.clock != nil {
+		return t.clock()
 	}
 	return time.Now()
 }
@@ -587,7 +588,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 			// one a repository's first listing returns would refresh them all
 			// every cycle for changeRefreshWindow.
 			if !terminal && openedSince(snap, lastListed[d.repositoryID]) {
-				snap.ChangeSeenAt = formatChangeSeen(t.changeNow())
+				snap.ChangeSeenAt = formatChangeSeen(t.now())
 				backfilled = append(backfilled, openedPRMentions(entity.ID, entity.RepositoryID, snap, resolver)...)
 			}
 			if !terminal && !self.Is(snap.Author, snap.AuthorID) {
@@ -662,7 +663,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 			// starts CI, so the snapshot is stamped as a change, and stamped
 			// again by the refresh that first reads its check runs.
 			if !prSnapshotTerminal(snap) && entity.State == "closed" {
-				snap.ChangeSeenAt = formatChangeSeen(t.changeNow())
+				snap.ChangeSeenAt = formatChangeSeen(t.now())
 				snapJSON, _ := json.Marshal(snap)
 				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
@@ -874,7 +875,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 		// repository's open listing, one in a repository whose listing failed,
 		// or one in an untracked repository past the floor) fall through to
 		// refresh, which is the safe default.
-		sinceChange := sinceChangeSeen(snap, t.changeNow())
+		sinceChange := sinceChangeSeen(snap, t.now())
 		// Gate against discovery's fresh snapshot when we have one. A repo
 		// that 304'd this cycle has no fresh snapshot, but a 304 means its
 		// open-PR listing (including each PR's updated_at + head sha) is
@@ -980,7 +981,7 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 	// because discovery and the refresh batches can take minutes at scale, and
 	// a stamp older than the read that saw the change would expire the window
 	// early, leaving the check runs created just after that read unread.
-	refreshedAt := formatChangeSeen(t.changeNow())
+	refreshedAt := formatChangeSeen(t.now())
 
 	allItems := append(openItems, terminalItems...)
 

@@ -261,11 +261,50 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 	})
 
+	t.Run("Record_updates_read_returns_the_stored_row_and_keeps_the_rest", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		answer := record(t, f, repoID, domain.DependabotAlertsReadable)
+		if !answer.UpdatesReadAt.IsZero() {
+			t.Fatalf("a new answer carries a read time: %+v", answer)
+		}
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"abc"`); err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		readAt := time.Date(2026, 11, 14, 2, 0, 0, 0, time.UTC)
+		read, err := f.Stores.DependabotAccess.RecordUpdatesReadSystem(ctx, f.OrgID, repoID, readAt)
+		if err != nil {
+			t.Fatalf("RecordUpdatesReadSystem: %v", err)
+		}
+		if !read.UpdatesReadAt.Equal(readAt) {
+			t.Errorf("read time = %v, want %v", read.UpdatesReadAt, readAt)
+		}
+		if read.Access != answer.Access || !read.CheckedAt.Equal(answer.CheckedAt) || read.AlertsETag != `W/"abc"` {
+			t.Errorf("recording the read moved the answer or the ETag: %+v, was %+v", read, answer)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordUpdatesReadSystem", read, func() (*domain.RepositoryDependabotAccess, error) {
+			return f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID)
+		})
+
+		// A later probe and a later listing leave the read time.
+		reprobed := record(t, f, repoID, domain.DependabotAlertsReadable)
+		relisted, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, "")
+		if err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		if !reprobed.UpdatesReadAt.Equal(readAt) || !relisted.UpdatesReadAt.Equal(readAt) {
+			t.Errorf("a probe or a listing moved the read time: %v, %v", reprobed.UpdatesReadAt, relisted.UpdatesReadAt)
+		}
+	})
+
 	t.Run("A_listing_without_an_answer_is_a_miss", func(t *testing.T) {
 		f := mk(t)
 		repoID := repo(t, f, TestGitHubHost, "api")
 		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, ""); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("RecordAlertListingSystem with no answer: err = %v, want sql.ErrNoRows", err)
+		}
+		if _, err := f.Stores.DependabotAccess.RecordUpdatesReadSystem(ctx, f.OrgID, repoID, time.Now()); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("RecordUpdatesReadSystem with no answer: err = %v, want sql.ErrNoRows", err)
 		}
 	})
 
@@ -284,6 +323,9 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OtherOrgID, repoID, `W/"x"`); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("RecordAlertListingSystem under another org: err = %v, want sql.ErrNoRows", err)
+		}
+		if _, err := f.Stores.DependabotAccess.RecordUpdatesReadSystem(ctx, f.OtherOrgID, repoID, time.Now()); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("RecordUpdatesReadSystem under another org: err = %v, want sql.ErrNoRows", err)
 		}
 		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"own"`); err != nil {
 			t.Fatalf("RecordAlertListingSystem: %v", err)

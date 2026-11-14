@@ -16,9 +16,10 @@ import "strings"
 //
 // A query is read by a second, separate walk over the same tokens (read.go),
 // which answers one question of its own: which pull requests and issues does
-// the query address by number? It goes one selection deeper than this reader,
-// into a repository's, and reads three argument values, each accepted only in
-// the shape of a repository owner, a repository name or a number. It skips
+// the query address by number, and which branches does it look pull requests
+// up by? It goes one selection deeper than this reader, into a repository's,
+// and reads four argument values, each accepted only in the shape of a
+// repository owner, a repository name, a number or a branch name. It skips
 // everything else exactly as this reader does.
 //
 // Two constructions are read exactly rather than skipped, because each is a way
@@ -511,8 +512,8 @@ func skipDirectives(sc *gqlScanner) bool {
 // collapse into one "value" class: each is one token whatever it holds, so a
 // brace inside a comment body can never be mistaken for structure. The mutation
 // reader never looks inside one. The addressed-read walk (read.go) does, for
-// four arguments only, and accepts a value only in the shape of a repository
-// owner, a repository name, an object number or a node id.
+// five arguments only, and accepts a value only in the shape of a repository
+// owner, a repository name, an object number, a branch name or a node id.
 type gqlKind uint8
 
 const (
@@ -664,8 +665,8 @@ func (s *gqlScanner) skipIgnored() {
 // matters to every reader, so that punctuation inside a pull-request body
 // cannot be mistaken for document structure. A single-line string's characters
 // ride the token uninterpreted, for the one reader that compares them against
-// the shape of a repository's owner or name or of a node id; a block string's
-// are dropped.
+// the shape of a repository's owner or name, a branch's name or a node id; a
+// block string's are dropped.
 func (s *gqlScanner) scanString() (gqlToken, bool) {
 	if strings.HasPrefix(s.src[s.pos:], `"""`) {
 		rest := s.src[s.pos+3:]

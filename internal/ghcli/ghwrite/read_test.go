@@ -121,41 +121,88 @@ func readEnvelope(t *testing.T, query, operationName string, variables map[strin
 }
 
 // The documents the pinned gh sends for its addressed reads, trimmed to the
-// part that names the object. gh_wire_test drives the binary itself; these pin
-// the reader against the same shapes without it.
+// part that names the object or the branch. gh_wire_test drives the binary
+// itself; these pin the reader against the same shapes without it.
 func TestParseGraphQLRead_PorcelainDocuments(t *testing.T) {
+	object := func(n int) AddressedReads {
+		return AddressedReads{Objects: []ObjectRef{{Owner: "octo", Repo: "repo", Number: n}}}
+	}
+	branch := AddressedReads{Branches: []BranchRef{{Owner: "octo", Repo: "repo", Branch: "feature"}}}
 	cases := []struct {
 		name      string
 		query     string
 		variables map[string]any
-		want      ObjectRef
+		want      AddressedReads
 	}{
 		{
 			name:      "pr view",
 			query:     `query PullRequestByNumber($owner: String!, $repo: String!, $pr_number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr_number) {url,number,title,author{login,...on User{id,name}},comments(first: 100){nodes{body}}} } }`,
 			variables: map[string]any{"owner": "octo", "repo": "repo", "pr_number": 42},
-			want:      ObjectRef{Owner: "octo", Repo: "repo", Number: 42},
+			want:      object(42),
 		},
 		{
 			name:      "issue view",
 			query:     `query IssueByNumber($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { hasIssuesEnabled issue: issueOrPullRequest(number: $number) { __typename ...on Issue{number,url,title} ...on PullRequest{number,url} } } }`,
 			variables: map[string]any{"owner": "octo", "repo": "repo", "number": 7},
-			want:      ObjectRef{Owner: "octo", Repo: "repo", Number: 7},
+			want:      object(7),
 		},
 		{
 			name:      "project items",
 			query:     `query IssueProjectItems($endCursor:String$name:String!$number:Int!$owner:String!){repository(owner: $owner, name: $name){issue(number: $number){projectItems(first: 100, after: $endCursor){totalCount,nodes{id,status:fieldValueByName(name: "Status"){...on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}`,
 			variables: map[string]any{"endCursor": nil, "name": "repo", "number": 7, "owner": "octo"},
-			want:      ObjectRef{Owner: "octo", Repo: "repo", Number: 7},
+			want:      object(7),
+		},
+		{
+			// `gh pr view` and `gh pr checks` with no number, or with a branch.
+			name: "pr view by branch",
+			query: "\n\tquery PullRequestForBranch($owner: String!, $repo: String!, $headRefName: String!, $states: [PullRequestState!]) {\n\t\trepository(owner: $owner, name: $repo) {\n\t\t\t" +
+				"pullRequests(headRefName: $headRefName, states: $states, first: 30, orderBy: { field: CREATED_AT, direction: DESC }) {\n\t\t\t\t" +
+				"nodes {number,headRefName,id,state,baseRefName,isCrossRepository,headRepositoryOwner{id,login,...on User{name}}}\n\t\t\t}\n\t\t\t" +
+				"defaultBranchRef { name }\n\t\t}\n\t}",
+			variables: map[string]any{"headRefName": "feature", "owner": "octo", "repo": "repo", "states": nil},
+			want:      branch,
+		},
+		{
+			// `gh pr status`, behind the fragments it defines first, with the
+			// searches beside the repository naming nothing.
+			name: "pr status",
+			query: "\n\tfragment pr on PullRequest {number,title,state,url,isDraft,headRefName}\n\tfragment prWithReviews on PullRequest {...pr,reviewDecision,latestReviews(first: 100) {nodes {author{login},state}}}\n" +
+				"\tquery PullRequestStatus($owner: String!, $repo: String!, $headRefName: String!, $viewerQuery: String!, $reviewerQuery: String!, $per_page: Int = 10) {\n" +
+				"\t\trepository(owner: $owner, name: $repo) {\n\t\t\tdefaultBranchRef {\n\t\t\t\tname\n\t\t\t}\n" +
+				"\t\t\tpullRequests(headRefName: $headRefName, first: $per_page, orderBy: { field: CREATED_AT, direction: DESC }) {\n\t\t\t\ttotalCount\n\t\t\t\tedges {\n\t\t\t\t\tnode {\n\t\t\t\t\t\t...prWithReviews\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n" +
+				"\t\tviewerCreated: search(query: $viewerQuery, type: ISSUE, first: $per_page) {\n\t\t\ttotalCount: issueCount\n\t\t\tedges {\n\t\t\t\tnode {\n\t\t\t\t\t...prWithReviews\n\t\t\t\t}\n\t\t\t}\n\t\t}\n" +
+				"\t\treviewRequested: search(query: $reviewerQuery, type: ISSUE, first: $per_page) {\n\t\t\ttotalCount: issueCount\n\t\t\tedges {\n\t\t\t\tnode {\n\t\t\t\t\t...pr\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\t",
+			variables: map[string]any{"headRefName": "feature", "number": 0, "owner": "octo", "repo": "repo",
+				"reviewerQuery": "repo:octo/repo state:open review-requested:", "viewerQuery": "repo:octo/repo state:open is:pr author:"},
+			want: branch,
+		},
+		{
+			// `gh pr status --repo`, which reads no current branch and sends it
+			// empty.
+			name:      "pr status for another repository",
+			query:     `query PullRequestStatus($owner: String!, $repo: String!, $headRefName: String!) { repository(owner: $owner, name: $repo) { pullRequests(headRefName: $headRefName, first: 10) { totalCount } } }`,
+			variables: map[string]any{"headRefName": "", "owner": "octo", "repo": "repo"},
+		},
+		{
+			// `gh pr list`, which sends no head branch.
+			name:      "pr list",
+			query:     "fragment pr on PullRequest{number,title,headRefName}\n\t\tquery PullRequestList(\n\t\t\t$owner: String!,\n\t\t\t$repo: String!,\n\t\t\t$limit: Int!,\n\t\t\t$endCursor: String,\n\t\t\t$baseBranch: String,\n\t\t\t$headBranch: String,\n\t\t\t$state: [PullRequestState!] = OPEN\n\t\t) {\n\t\t\trepository(owner: $owner, name: $repo) {\n\t\t\t\tpullRequests(\n\t\t\t\t\tstates: $state,\n\t\t\t\t\tbaseRefName: $baseBranch,\n\t\t\t\t\theadRefName: $headBranch,\n\t\t\t\t\tfirst: $limit,\n\t\t\t\t\tafter: $endCursor,\n\t\t\t\t\torderBy: {field: CREATED_AT, direction: DESC}\n\t\t\t\t) {\n\t\t\t\t\ttotalCount\n\t\t\t\t\tnodes {\n\t\t\t\t\t\t...pr\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}",
+			variables: map[string]any{"limit": 30, "owner": "octo", "repo": "repo", "state": []string{"OPEN"}},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ParseGraphQLRead(readEnvelope(t, tc.query, "", tc.variables))
-			if !slices.Equal(got.Objects, []ObjectRef{tc.want}) || len(got.Nodes) != 0 {
-				t.Errorf("addressed %+v, want %+v", got, tc.want)
-			}
+			assertAddressed(t, got, tc.want)
 		})
+	}
+}
+
+// assertAddressed compares what a request addressed with what it should have.
+func assertAddressed(t *testing.T, got, want AddressedReads) {
+	t.Helper()
+	if !slices.Equal(got.Objects, want.Objects) || !slices.Equal(got.Branches, want.Branches) || !slices.Equal(got.Nodes, want.Nodes) {
+		t.Errorf("addressed %+v, want %+v", got, want)
 	}
 }
 
@@ -167,7 +214,6 @@ func TestParseGraphQLRead_HandWritten(t *testing.T) {
 		operationName string
 		variables     map[string]any
 		want          []ObjectRef
-		wantNodes     []string
 	}{
 		{
 			name:  "shorthand with literals",
@@ -218,30 +264,8 @@ func TestParseGraphQLRead_HandWritten(t *testing.T) {
 			query: `{ repository(owner:"octo", name:"repo") { pullRequests(first: 30, states: [OPEN]) { nodes { number } } } }`,
 		},
 		{
-			name:      "a lookup by branch",
-			query:     `query PullRequestForBranch($owner: String!, $repo: String!, $headRefName: String!) { repository(owner: $owner, name: $repo) { pullRequests(headRefName: $headRefName, first: 30) { nodes { number } } } }`,
-			variables: map[string]any{"owner": "octo", "repo": "repo", "headRefName": "feature"},
-		},
-		{
 			name:  "a search",
 			query: `{ search(query: "repo:octo/repo is:pr", type: ISSUE, first: 10) { nodes { ... on PullRequest { number } } } }`,
-		},
-		{
-			name:      "a node lookup",
-			query:     `{ node(id: "PR_kwX") { ... on PullRequest { number } } }`,
-			wantNodes: []string{"PR_kwX"},
-		},
-		{
-			name:      "node ids as variables, aliased, beside a repository",
-			query:     `query($a: ID!, $b: ID!) { x: node(id: $a) { id } y: node(id: $b) { ... on Issue { title } } repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } } }`,
-			variables: map[string]any{"a": "PR_kwDOA", "b": "MDU6SXNzdWUxMjM0NTY3ODk="},
-			want:      []ObjectRef{pr(42)},
-			wantNodes: []string{"PR_kwDOA", "MDU6SXNzdWUxMjM0NTY3ODk="},
-		},
-		{
-			name:      "the same node twice is one",
-			query:     `{ a: node(id: "IC_kwDOA") { id } b: node(id: "IC_kwDOA") { id } }`,
-			wantNodes: []string{"IC_kwDOA"},
 		},
 		{
 			name:  "a repository with no object",
@@ -296,6 +320,159 @@ func TestParseGraphQLRead_HandWritten(t *testing.T) {
 			query: `query { ...F } fragment F on Query { repository(owner:"octo", name:"repo") { pullRequest(number: 1) { id } } }`,
 		},
 		{
+			name:  "an unterminated document",
+			query: `{ repository(owner:"octo", name:"repo") { pullRequest(number: 1) { id }`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseGraphQLRead(readEnvelope(t, tc.query, tc.operationName, tc.variables))
+			assertAddressed(t, got, AddressedReads{Objects: tc.want})
+		})
+	}
+}
+
+// A lookup of pull requests by head branch, directly under a repository the
+// query names, addresses the branch, in every spelling the object finders are
+// read in; anything else that mentions a branch addresses nothing.
+func TestParseGraphQLRead_Branches(t *testing.T) {
+	branch := func(name string) BranchRef { return BranchRef{Owner: "octo", Repo: "repo", Branch: name} }
+	cases := []struct {
+		name          string
+		query         string
+		operationName string
+		variables     map[string]any
+		want          AddressedReads
+	}{
+		{
+			name:  "a literal",
+			query: `{ repository(owner:"octo", name:"repo") { pullRequests(headRefName: "feat/login-form", first: 1) { nodes { number } } } }`,
+			want:  AddressedReads{Branches: []BranchRef{branch("feat/login-form")}},
+		},
+		{
+			name:      "a variable, under aliases",
+			query:     `query($b: String!) { r: repository(owner:"octo", name:"repo") { open: pullRequests(states: OPEN, headRefName: $b) { totalCount } } }`,
+			variables: map[string]any{"b": "TFAC-1415_fix"},
+			want:      AddressedReads{Branches: []BranchRef{branch("TFAC-1415_fix")}},
+		},
+		{
+			name:  "an object and a branch in one request",
+			query: `{ repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } pullRequests(headRefName: "feature") { totalCount } } }`,
+			want: AddressedReads{
+				Objects:  []ObjectRef{{Owner: "octo", Repo: "repo", Number: 42}},
+				Branches: []BranchRef{branch("feature")},
+			},
+		},
+		{
+			name:  "the same branch twice is one, under any case of its repository",
+			query: `{ a: repository(owner:"octo", name:"repo") { pullRequests(headRefName: "feature") { totalCount } } b: repository(owner:"OCTO", name:"Repo") { pullRequests(headRefName: "feature") { totalCount } } }`,
+			want:  AddressedReads{Branches: []BranchRef{branch("feature")}},
+		},
+		{
+			name:  "branches differing in case are two",
+			query: `{ repository(owner:"octo", name:"repo") { a: pullRequests(headRefName: "feature") { totalCount } b: pullRequests(headRefName: "Feature") { totalCount } } }`,
+			want:  AddressedReads{Branches: []BranchRef{branch("feature"), branch("Feature")}},
+		},
+		{
+			name:  "a branch name git admits",
+			query: `{ repository(owner:"octo", name:"repo") { a: pullRequests(headRefName: "a.b/c-d_e+f#g") { totalCount } b: pullRequests(headRefName: "fonctionnalité") { totalCount } } }`,
+			want:  AddressedReads{Branches: []BranchRef{branch("a.b/c-d_e+f#g"), branch("fonctionnalité")}},
+		},
+
+		// What addresses nothing.
+		{
+			name:  "a list with no branch",
+			query: `{ repository(owner:"octo", name:"repo") { pullRequests(first: 30, baseRefName: "main") { nodes { number } } } }`,
+		},
+		{
+			name:      "a branch that is null, empty or unset",
+			query:     `query($n: String, $e: String, $u: String) { repository(owner:"octo", name:"repo") { a: pullRequests(headRefName: null) { totalCount } b: pullRequests(headRefName: $n) { totalCount } c: pullRequests(headRefName: $e) { totalCount } d: pullRequests(headRefName: $u) { totalCount } e: pullRequests(headRefName: "") { totalCount } } }`,
+			variables: map[string]any{"n": nil, "e": ""},
+		},
+		{
+			name:      "a branch that is not a string",
+			query:     `query($b: String) { repository(owner:"octo", name:"repo") { a: pullRequests(headRefName: $b) { totalCount } b: pullRequests(headRefName: 7) { totalCount } c: pullRequests(headRefName: FEATURE) { totalCount } d: pullRequests(headRefName: ["feature"]) { totalCount } } }`,
+			variables: map[string]any{"b": 7},
+		},
+		{
+			name:      "a branch name git refuses",
+			query:     `query($a: String, $b: String, $c: String) { repository(owner:"octo", name:"repo") { a: pullRequests(headRefName: $a) { totalCount } b: pullRequests(headRefName: $b) { totalCount } c: pullRequests(headRefName: $c) { totalCount } d: pullRequests(headRefName: "octo:feature") { totalCount } e: pullRequests(headRefName: "-f") { totalCount } } }`,
+			variables: map[string]any{"a": "../main", "b": "feat\u0000ure", "c": "refs/heads/x.lock"},
+		},
+		{
+			name:  "an escaped or block string branch",
+			query: `{ repository(owner:"octo", name:"repo") { a: pullRequests(headRefName: "fe\u0061ture") { totalCount } b: pullRequests(headRefName: """feature""") { totalCount } } }`,
+		},
+		{
+			name:  "a branch on the wrong field",
+			query: `{ repository(owner:"octo", name:"repo") { pullRequest(headRefName: "feature") { id } issues(headRefName: "feature") { totalCount } } }`,
+		},
+		{
+			name:  "a number on the lookup",
+			query: `{ repository(owner:"octo", name:"repo") { pullRequests(number: 42) { totalCount } } }`,
+		},
+		{
+			name:  "a lookup below the repository's own selection",
+			query: `{ repository(owner:"octo", name:"repo") { ref(qualifiedName: "refs/heads/feature") { associatedPullRequests(headRefName: "feature", first: 1) { nodes { number } } } } }`,
+		},
+		{
+			name:  "a lookup under a repository below the top level",
+			query: `{ organization(login: "octo") { repository(name: "repo") { pullRequests(headRefName: "feature") { totalCount } } } }`,
+		},
+		{
+			name:  "a lookup in a mutation",
+			query: `mutation { repository(owner:"octo", name:"repo") { pullRequests(headRefName: "feature") { totalCount } } }`,
+		},
+		{
+			name:  "a lookup reached through a fragment",
+			query: `query { repository(owner:"octo", name:"repo") { ...F } } fragment F on Repository { pullRequests(headRefName: "feature") { totalCount } }`,
+		},
+		{
+			name:      "a lookup in a repository the request does not name",
+			query:     `query($o: String!) { repository(owner: $o, name:"repo") { pullRequests(headRefName: "feature") { totalCount } } }`,
+			variables: map[string]any{"o": "octo/repo/pulls?head="},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseGraphQLRead(readEnvelope(t, tc.query, tc.operationName, tc.variables))
+			assertAddressed(t, got, tc.want)
+		})
+	}
+}
+
+// A node selected by id at the query's top level addresses the node id, as a
+// literal or a variable, beside whatever else the query addresses; a node id
+// anywhere else, or in a shape no node id has, addresses nothing.
+func TestParseGraphQLRead_Nodes(t *testing.T) {
+	cases := []struct {
+		name      string
+		query     string
+		variables map[string]any
+		want      AddressedReads
+	}{
+		{
+			name:  "a literal",
+			query: `{ node(id: "PR_kwX") { ... on PullRequest { number } } }`,
+			want:  AddressedReads{Nodes: []string{"PR_kwX"}},
+		},
+		{
+			name:      "variables, aliased, beside a repository",
+			query:     `query($a: ID!, $b: ID!) { x: node(id: $a) { id } y: node(id: $b) { ... on Issue { title } } repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } } }`,
+			variables: map[string]any{"a": "PR_kwDOA", "b": "MDU6SXNzdWUxMjM0NTY3ODk="},
+			want: AddressedReads{
+				Objects: []ObjectRef{{Owner: "octo", Repo: "repo", Number: 42}},
+				Nodes:   []string{"PR_kwDOA", "MDU6SXNzdWUxMjM0NTY3ODk="},
+			},
+		},
+		{
+			name:  "the same node twice is one, and another casing is another",
+			query: `{ a: node(id: "IC_kwDOA") { id } b: node(id: "IC_kwDOA") { id } c: node(id: "ic_kwdoa") { id } }`,
+			want:  AddressedReads{Nodes: []string{"IC_kwDOA", "ic_kwdoa"}},
+		},
+
+		// What addresses nothing.
+		{
 			name:  "a node below the top level",
 			query: `{ viewer { node(id: "PR_kwX") { id } } repository(owner:"octo", name:"repo") { node(id: "PR_kwY") { id } } }`,
 		},
@@ -309,25 +486,41 @@ func TestParseGraphQLRead_HandWritten(t *testing.T) {
 		},
 		{
 			name:      "a node id that is not one",
-			query:     `query($a: ID!, $b: ID!) { a: node(id: $a) { id } b: node(id: $b) { id } c: node(id: "PR_\u0041") { id } d: node(id: 7) { id } e: node(id: """PR_kwX""") { id } f: node(id: "") { id } g: node(id: "PR kwX") { id } }`,
-			variables: map[string]any{"a": 7, "b": strings.Repeat("A", maxSubjectLength+1)},
+			query:     `query($a: ID!, $b: ID!, $c: ID) { a: node(id: $a) { id } b: node(id: $b) { id } c: node(id: $c) { id } d: node(id: "PR_\u0041") { id } e: node(id: 7) { id } f: node(id: """PR_kwX""") { id } g: node(id: "") { id } h: node(id: "PR kwX") { id } i: node(id: null) { id } }`,
+			variables: map[string]any{"a": 7, "b": strings.Repeat("A", maxSubjectLength+1), "c": nil},
 		},
 		{
 			name:  "a node in a mutation is the write audit's",
 			query: `mutation { addComment(input: {subjectId: "PR_x", body: "hi"}) { subject { id } } node(id: "PR_x") { id } }`,
 		},
-		{
-			name:  "an unterminated document",
-			query: `{ repository(owner:"octo", name:"repo") { pullRequest(number: 1) { id }`,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ParseGraphQLRead(readEnvelope(t, tc.query, tc.operationName, tc.variables))
-			if !slices.Equal(got.Objects, tc.want) || !slices.Equal(got.Nodes, tc.wantNodes) {
-				t.Errorf("addressed %+v, want objects %+v and nodes %v", got, tc.want, tc.wantNodes)
-			}
+			assertAddressed(t, ParseGraphQLRead(readEnvelope(t, tc.query, "", tc.variables)), tc.want)
 		})
+	}
+}
+
+// The shape a branch name is accepted in is git's own: each name here is one
+// `git branch` creates, or refuses, except that a name that is not UTF-8 is
+// refused here and not by git.
+func TestValidBranchName(t *testing.T) {
+	for _, name := range []string{
+		"feature", "feat/login-form", "a.b", "a@b", "@", "a-", "a/HEAD", "x.lockx", "a#b", "a+b", "a&b", "a%b",
+		"a=b", "{a}", "a]b", "a'b", `a"b`, "a!b", "fonctionnalité",
+	} {
+		if !validBranchName(name) {
+			t.Errorf("validBranchName(%q) = false, want git's name admitted", name)
+		}
+	}
+	for _, name := range []string{
+		"", "a..b", ".a", "a/.b", "a.lock", "a/b.lock", "a.lock/b", "a/", "/a", "a//b", "a.", "HEAD", "a@{b", "-a",
+		"a b", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", `a\b`, "a\x01b", "a\x7fb", "a\xffb",
+		strings.Repeat("a", maxBranchNameLength+1),
+	} {
+		if validBranchName(name) {
+			t.Errorf("validBranchName(%q) = true, want a name git refuses refused", name)
+		}
 	}
 }
 
@@ -340,25 +533,28 @@ func TestParseGraphQLRead_NotAnEnvelope(t *testing.T) {
 	// Variables that are not an object resolve no variable, and cost the
 	// literals nothing.
 	body := `{"query":"query($n:Int!){repository(owner:\"octo\",name:\"repo\"){a:pullRequest(number:$n){id} b:pullRequest(number:2){id}}}","variables":[1,2]}`
-	if got := ParseGraphQLRead([]byte(body)); !slices.Equal(got.Objects, []ObjectRef{{Owner: "octo", Repo: "repo", Number: 2}}) {
-		t.Errorf("addressed %+v, want the literal alone", got)
-	}
+	assertAddressed(t, ParseGraphQLRead([]byte(body)), AddressedReads{Objects: []ObjectRef{{Owner: "octo", Repo: "repo", Number: 2}}})
 }
 
-// One request addresses a bounded number of objects, however many it spells.
+// One request addresses a bounded number of objects and branches, together,
+// however many it spells.
 func TestParseGraphQLRead_Bounded(t *testing.T) {
 	var doc strings.Builder
 	doc.WriteString(`{ repository(owner:"octo", name:"repo") {`)
 	for i := 1; i <= 3*maxAddressedReads; i++ {
 		doc.WriteString(` p` + strconv.Itoa(i) + `: pullRequest(number: ` + strconv.Itoa(i) + `) { id }`)
+		doc.WriteString(` b` + strconv.Itoa(i) + `: pullRequests(headRefName: "b` + strconv.Itoa(i) + `") { totalCount }`)
 	}
 	doc.WriteString(` } }`)
 	got := ParseGraphQLRead(readEnvelope(t, doc.String(), "", nil))
-	if len(got.Objects) != maxAddressedReads {
-		t.Errorf("addressed %d objects, want the bound %d", len(got.Objects), maxAddressedReads)
+	if n := len(got.Objects) + len(got.Branches); n != maxAddressedReads {
+		t.Errorf("addressed %d objects and branches, want the bound %d", n, maxAddressedReads)
+	}
+	if len(got.Objects) == 0 || len(got.Branches) == 0 {
+		t.Errorf("addressed %+v, want the bound filled in document order, with both", got)
 	}
 
-	// Objects by number and by node id share the one bound.
+	// Node ids share the one bound.
 	doc.Reset()
 	doc.WriteString(`{`)
 	for i := 1; i <= maxAddressedReads; i++ {
@@ -376,7 +572,8 @@ func TestParseGraphQLRead_Bounded(t *testing.T) {
 func TestParseGraphQLRead_NeverNamesAWrite(t *testing.T) {
 	for _, query := range []string{
 		`mutation { repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } } }`,
-		`query A { repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } } } mutation B { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }`,
+		`mutation { repository(owner:"octo", name:"repo") { pullRequests(headRefName: "feature") { totalCount } } }`,
+		`query A { repository(owner:"octo", name:"repo") { pullRequest(number: 42) { id } pullRequests(headRefName: "feature") { totalCount } } } mutation B { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }`,
 		`query A { node(id: "PR_x") { id } } mutation B { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }`,
 	} {
 		for _, operationName := range []string{"", "B"} {
@@ -391,34 +588,41 @@ func TestParseGraphQLRead_NeverNamesAWrite(t *testing.T) {
 
 // FuzzParseGraphQLRead holds the read walk to what FuzzParseGraphQLRequest
 // holds the mutation reader to: it terminates and does not panic on any body,
-// and whatever it names is within its bounds and safe to put in the path of
-// the read the injector then makes with the run's credential.
+// and whatever it names is within its bounds and safe to put in the path or
+// the query of the read the injector then makes with the run's credential.
 func FuzzParseGraphQLRead(f *testing.F) {
 	f.Add([]byte(`{"query":"{repository(owner:\"octo\",name:\"repo\"){pullRequest(number:42){id}}}"}`))
 	f.Add([]byte(`{"query":"query($o:String!,$n:Int!){repository(owner:$o,name:\"r\"){issue(number:$n){id}}}","variables":{"o":"octo","n":7}}`))
 	f.Add([]byte(`{"query":"query A{repository(owner:\"a\",name:\"b\"){x:issueOrPullRequest(number:1){id}}} query B{viewer{login}}","operationName":"A"}`))
 	f.Add([]byte(`{"query":"{repository(owner:\"..\",name:\"b/c\"){pullRequest(number:-1){id}}}"}`))
 	f.Add([]byte(`{"query":"{repository(owner:\"a\",name:\"b\"){pullRequest(number:1){"}`))
+	f.Add([]byte(`{"query":"query($h:String!){repository(owner:\"octo\",name:\"repo\"){pullRequests(headRefName:$h,first:30){nodes{number}}}}","variables":{"h":"feat/x"}}`))
+	f.Add([]byte(`{"query":"{repository(owner:\"octo\",name:\"repo\"){pullRequests(headRefName:\"a..b\"){totalCount}}}"}`))
 	f.Add([]byte(`repository`))
 	f.Add([]byte(`{"query":"query($id:ID!){a:node(id:$id){id} b:node(id:\"IC_kw\"){id}}","variables":{"id":"PR_kw"}}`))
 
 	f.Fuzz(func(t *testing.T, body []byte) {
-		read := ParseGraphQLRead(body)
-		if n := len(read.Objects) + len(read.Nodes); n > maxAddressedReads {
-			t.Fatalf("addressed %d objects, past the %d bound", n, maxAddressedReads)
+		got := ParseGraphQLRead(body)
+		if n := len(got.Objects) + len(got.Branches) + len(got.Nodes); n > maxAddressedReads {
+			t.Fatalf("addressed %d objects, branches and nodes, past the %d bound", n, maxAddressedReads)
 		}
-		for _, ref := range read.Objects {
-			if !validRepoPart(ref.Owner) || !validRepoPart(ref.Repo) || ref.Number <= 0 {
-				t.Fatalf("addressed %+v, which names no repository's object", ref)
-			}
-		}
-		for _, id := range read.Nodes {
+		for _, id := range got.Nodes {
 			if !validNodeID(id) {
 				t.Fatalf("addressed node %q, which is not a node id", id)
 			}
 		}
-		if _, isWrite := ParseGraphQLRequest(body); isWrite && !read.Empty() {
-			t.Fatalf("a request the write audit records also addressed %+v", read)
+		for _, ref := range got.Objects {
+			if !validRepoPart(ref.Owner) || !validRepoPart(ref.Repo) || ref.Number <= 0 {
+				t.Fatalf("addressed %+v, which names no repository's object", ref)
+			}
+		}
+		for _, ref := range got.Branches {
+			if !validRepoPart(ref.Owner) || !validRepoPart(ref.Repo) || !validBranchName(ref.Branch) {
+				t.Fatalf("addressed %+v, which names no repository's branch", ref)
+			}
+		}
+		if _, isWrite := ParseGraphQLRequest(body); isWrite && !got.Empty() {
+			t.Fatalf("a request the write audit records also addressed %+v", got)
 		}
 	})
 }

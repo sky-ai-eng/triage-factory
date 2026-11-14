@@ -2931,7 +2931,7 @@ func GHChannelReadRecord(obs ghwrite.ReadObservation) (op string, args any) {
 }
 
 // ghChannelReadTarget is the display key of the object a gh-channel read
-// spelled. Only its number is read when the entity is resolved; the
+// addressed. Only its number is read when the entity is resolved; the
 // repository comes from the identity.
 func ghChannelReadTarget(obs ghwrite.ReadObservation) string {
 	return domain.PullRequestTarget(obs.Owner+"/"+obs.Repo, obs.Number)
