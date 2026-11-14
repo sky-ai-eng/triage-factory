@@ -120,7 +120,7 @@
 }
 
 .tb-col {
-  font: var(--font-weight-regular) 8.5px / 1 var(--font-mono);
+  font: var(--font-weight-regular) 8.5px / normal var(--font-mono);
   letter-spacing: 0.16em;
   color: var(--color-ink-4);
   cursor: default;
