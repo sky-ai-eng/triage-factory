@@ -502,13 +502,15 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// The native blocks name the in-jail paths and the `tfac` applet
 		// outright, so the run context carries only what differs per run and
 		// those blocks cannot state for themselves: that the task is already
-		// closed, the work that overlaps it, the PR checkout's path, the
-		// branch convention, the sources this run cannot reach, and this
-		// run's staged knowledge.
+		// closed, the work that overlaps it, the path of the checkout its
+		// setup built, the branch convention, the sources this run cannot
+		// reach, and this run's staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
 			runContext("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID),
-				s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+				s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "",
+				agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout),
+				s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
 			cfg.sources.tools(agentprompt.RuntimeNative),
 			nonTerminal,
 		)
@@ -521,7 +523,7 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts, deliverables),
+		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
 	}
 }
 

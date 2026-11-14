@@ -458,12 +458,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 	systemBlock := composeConversationSystemBlock(
 		mission,
-		runContext(cfg.scope, taskState, siblingWork, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
+		runContext(cfg.scope, taskState, siblingWork, agentRunRoot, agentPRCheckout, agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout), branchTemplate, runURL, cfg.sources.notes, knowledge),
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts, deliverables)
+	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the

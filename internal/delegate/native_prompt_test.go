@@ -137,8 +137,8 @@ func TestComposeConversationSystemBlock_OmitsWhatIsAbsent(t *testing.T) {
 // instructions reads as instruction.
 func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing.T) {
 	task, metadataJSON, skeleton, mission := hostileRun()
-	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
-	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil)
+	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
+	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
 	for _, sys := range []string{nativeSystemPrompt(), block2} {
 		for _, bad := range hostileStrings(task, metadataJSON, skeleton) {
@@ -165,7 +165,7 @@ func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing
 // section reappearing here is a trust-posture change, not a layout one.
 func TestNativeOpeningRow_IsTheTaskContextAlone(t *testing.T) {
 	task, metadataJSON, skeleton, _ := hostileRun()
-	got := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil)
+	got := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
 	for _, unwanted := range []string{"<run_context>", "<tools>"} {
 		if strings.Contains(got, unwanted) {

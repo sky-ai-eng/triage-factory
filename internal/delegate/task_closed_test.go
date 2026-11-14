@@ -328,7 +328,7 @@ func TestTellTaskResolved_ALaunchOnAClosedTaskReadsRunContextAndTheNote(t *testi
 	if want := domain.TaskClosedRunContext(domain.TaskClose{Kind: domain.TaskClosedDismissed}); line != want {
 		t.Errorf("<run_context> line = %q, want %q", line, want)
 	}
-	if block := runContext("", line, "", "/work", "", "", "", "", ""); !strings.Contains(block, line) {
+	if block := runContext("", line, "", "/work", "", "", "", "", "", ""); !strings.Contains(block, line) {
 		t.Errorf("the run context does not carry the task's state:\n%s", block)
 	}
 	// Both runtimes compose their launch's block from the same line.

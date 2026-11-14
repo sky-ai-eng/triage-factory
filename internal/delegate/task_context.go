@@ -51,13 +51,18 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // whoever opened the pull request — so it rides inside the marker-bracketed
 // region rather than alongside it.
 //
+// pkg is a vulnerable package's stored state (taskVulnerablePackage): its open
+// Dependabot alerts as the last listing recorded them, or nil for any other
+// task and when the read failed. The advisory fields are written outside the
+// org, so they ride inside the region like the rest.
+//
 // artifacts and deliverables are what the task's conversations have produced
 // so far — what this run inherits rather than what it must create: every
 // object their agents changed, once each, and the deliverables they own, as
 // artifactLines renders them. The values are external (a PR title's repo slug, a URL
 // GitHub minted), so the lines ride inside the same region; two empty sets
 // render nothing at all.
-func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, artifacts []domain.Artifact, deliverables []domain.Deliverable) string {
+func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, pkg *domain.VulnerablePackageSnapshot, artifacts []domain.Artifact, deliverables []domain.Deliverable) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -68,16 +73,22 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 	add("Task", task.Title)
 	add("Event", task.EventType)
 
-	switch task.EntitySource {
-	case "github":
+	vulnerablePackage := isVulnerablePackageTask(task)
+	switch {
+	case vulnerablePackage:
+		add("Repository", container)
+		_, ecosystem, name, _ := domain.SplitVulnerablePackageSourceID(task.EntitySourceID)
+		add("Ecosystem", ecosystem)
+		add("Package", name)
+	case task.EntitySource == "github":
 		add("Repository", container)
 		if prNumber := domain.GitHubPRNumber(task.EntitySourceID); prNumber > 0 {
 			add("Pull request", "#"+strconv.Itoa(prNumber))
 		}
-	case "jira":
+	case task.EntitySource == "jira":
 		add("Issue", task.EntitySourceID)
 		add("Project", container)
-	case "linear":
+	case task.EntitySource == "linear":
 		add("Issue", task.EntitySourceID)
 	}
 
@@ -98,7 +109,12 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 	add("Status", metaString(meta, "status"))
 	add("Priority", metaString(meta, "priority"))
 	add("Issue type", metaString(meta, "issue_type"))
-	add("Summary", metaString(meta, "summary"))
+	// An alert's metadata names its advisory's summary, which the alert list
+	// below carries under the advisory it belongs to rather than as the
+	// task's own.
+	if !vulnerablePackage {
+		add("Summary", metaString(meta, "summary"))
+	}
 
 	lines = append(lines, artifactLines(artifacts, deliverables)...)
 
@@ -112,6 +128,9 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 	}
 	if s := strings.TrimSpace(skeleton); s != "" {
 		untrusted = append(untrusted, "History of the pull request this task is about:\n"+s)
+	}
+	if vulnerablePackage && pkg != nil {
+		untrusted = append(untrusted, vulnerablePackageBlock(*pkg))
 	}
 	if hasMetadata(metadataJSON) {
 		untrusted = append(untrusted, metadataFence(metadataJSON))
@@ -131,6 +150,95 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 
 	body := framing + "\n\n" + begin + "\n" + region + "\n" + end
 	return "<task_context>\n" + body + "\n</task_context>"
+}
+
+// vulnerablePackageBlock renders a vulnerable package's open alerts, one line
+// each in the order the snapshot stores them (by number), then each advisory
+// they name with its summary, once, in the order the alerts first name it. A
+// package with no open alert left says so, which is what a run launched after
+// its resolution reads.
+//
+// Every value is flattened onto its line, as the field lines' are: a summary
+// and a manifest path are written outside TF. A segment with no value is
+// left out, except the first patched version, whose absence is what tells the
+// run no fix has been released.
+func vulnerablePackageBlock(pkg domain.VulnerablePackageSnapshot) string {
+	if len(pkg.Alerts) == 0 {
+		return "Open Dependabot alerts on this package: none. Every alert on it has closed."
+	}
+	lines := []string{"Open Dependabot alerts on this package:"}
+	var advisories []string
+	summaries := map[string]string{}
+	for _, a := range pkg.Alerts {
+		ids := singleLine(a.GHSAID)
+		if cve := singleLine(a.CVEID); cve != "" {
+			ids = strings.TrimSpace(ids + " " + cve)
+		}
+		segments := []string{"Alert #" + strconv.Itoa(a.Number) + ": " + ids}
+		if sev := singleLine(a.Severity); sev != "" {
+			segments = append(segments, "severity "+sev)
+		}
+		manifest := singleLine(a.ManifestPath)
+		if scope := singleLine(a.Scope); scope != "" {
+			manifest = strings.TrimSpace(manifest + " (" + scope + " dependency)")
+		}
+		if manifest != "" {
+			segments = append(segments, "manifest "+manifest)
+		}
+		if r := singleLine(a.VulnerableVersionRange); r != "" {
+			segments = append(segments, "vulnerable versions "+r)
+		}
+		if v := singleLine(a.FirstPatchedVersion); v != "" {
+			segments = append(segments, "first patched version "+v)
+		} else {
+			segments = append(segments, "no patched version released")
+		}
+		lines = append(lines, "- "+strings.Join(segments, "; "))
+
+		if a.GHSAID == "" {
+			continue
+		}
+		if _, seen := summaries[a.GHSAID]; !seen {
+			advisories = append(advisories, a.GHSAID)
+			summaries[a.GHSAID] = a.Summary
+		}
+	}
+	if len(advisories) > 0 {
+		lines = append(lines, "Advisories:")
+		for _, id := range advisories {
+			line := "- " + singleLine(id)
+			if summary := singleLine(summaries[id]); summary != "" {
+				line += ": " + summary
+			}
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// taskVulnerablePackage reads, for the task context, a vulnerable package's
+// stored state off its entity: the open alerts as the last listing recorded
+// them, which is what the run is to fix. Read at the launch, so a step after
+// another alert opened lists it. nil for any other task, and best-effort like
+// the rest of the block: a failed read or a snapshot that does not parse
+// renders no alert lines, and the package is still named from its key.
+func (s *Spawner) taskVulnerablePackage(ctx context.Context, orgID string, task domain.Task) *domain.VulnerablePackageSnapshot {
+	if !isVulnerablePackageTask(task) || s.entities == nil {
+		return nil
+	}
+	entity, err := s.entities.GetSystem(ctx, orgID, task.EntityID)
+	if err != nil || entity == nil {
+		delegateLog.Warn("read the vulnerable package for the task context failed; it will carry no alerts",
+			"task", task.ID, "entity", task.EntityID, "error", err)
+		return nil
+	}
+	var snap domain.VulnerablePackageSnapshot
+	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.Package == "" {
+		delegateLog.Warn("the vulnerable package's snapshot does not parse; the task context will carry no alerts",
+			"task", task.ID, "entity", task.EntityID, "error", err)
+		return nil
+	}
+	return &snap
 }
 
 // taskEventMetadata reads, for the task context, the metadata of the newest
