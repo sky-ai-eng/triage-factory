@@ -525,6 +525,8 @@ func TestGitHubWebhook_RefreshMarks_MalformedStaysBadRequest(t *testing.T) {
 		{"no ref", "push", `{"repository":{"id":9001}}`},
 		{"no alert", "dependabot_alert", `{"action":"created","repository":{"id":9001}}`},
 		{"null alert", "dependabot_alert", `{"action":"created","alert":null,"repository":{"id":9001}}`},
+		{"alert that is not an object", "dependabot_alert", `{"action":"created","alert":5,"repository":{"id":9001}}`},
+		{"alert that is a list", "dependabot_alert", `{"action":"created","alert":[],"repository":{"id":9001}}`},
 		{"alert with no repository", "dependabot_alert", `{"action":"created","alert":{"number":3}}`},
 		{"unparseable alert", "dependabot_alert", `{"action":"created","alert":{"number":3},"repository":`},
 	} {

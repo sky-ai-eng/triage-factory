@@ -44,7 +44,7 @@ type hintPayload struct {
 	Ref        string     `json:"ref"`
 	// Alert is read only for its presence: what changed on it is left to the
 	// listing.
-	Alert json.RawMessage `json:"alert"`
+	Alert *struct{} `json:"alert"`
 }
 
 // hintCheck is the part of a check_run or check_suite object a hint reads:
@@ -141,7 +141,7 @@ func parseRefreshHint(eventName string, body []byte) (*refreshHint, error) {
 			h.add(domain.BranchRefreshTarget(branch))
 		}
 	case "dependabot_alert":
-		if alert := bytes.TrimSpace(p.Alert); len(alert) == 0 || bytes.Equal(alert, []byte("null")) {
+		if p.Alert == nil {
 			return nil, errors.New("dependabot_alert payload missing alert")
 		}
 		if p.Action != "assignees_changed" {
@@ -257,7 +257,7 @@ func (s *Server) dependabotAlertsListed(ctx context.Context, orgID, repositoryID
 	if err != nil {
 		return false, fmt.Errorf("read hinted repository's dependabot access: %w", err)
 	}
-	return answer != nil && answer.Access == domain.DependabotAlertsReadable, nil
+	return answer.Listed(), nil
 }
 
 // pruneWebhookDeliveries sweeps expired delivery records after a delivery is

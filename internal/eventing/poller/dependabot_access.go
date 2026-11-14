@@ -165,7 +165,7 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 		if t.answer != nil {
 			answered = append(answered, t.listing(false))
 		}
-		if !t.readable() {
+		if !t.answer.Listed() {
 			p.marks.dropUnlistedAlerts(t.repository.ID)
 		}
 	}
@@ -175,7 +175,7 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 		var listings []tracker.AlertListing
 		for _, name := range names {
 			t := p.targets[name]
-			if t.pass == i && t.readable() {
+			if t.pass == i && t.answer.Listed() {
 				listings = append(listings, t.listing(p.marks.alertsMarked(t.repository.ID)))
 			}
 		}
@@ -230,12 +230,6 @@ type dependabotTarget struct {
 // alerts. The target has an answer.
 func (t dependabotTarget) listing(marked bool) tracker.AlertListing {
 	return tracker.AlertListing{Repository: t.repository, Access: *t.answer, Untracked: t.untracked, Marked: marked}
-}
-
-// readable reports whether the target's answer says its alerts can be read,
-// which is when the poll lists them.
-func (t dependabotTarget) readable() bool {
-	return t.answer != nil && t.answer.Access == domain.DependabotAlertsReadable
 }
 
 // load reads the org's tracked repositories on the host, the untracked ones

@@ -406,18 +406,18 @@ func (m *Manager) markedAlertListings(ctx context.Context, orgID, scope string, 
 		githubLog.ErrorContext(ctx, "read dependabot access answers for the narrowed pass failed; its alert marks wait", "org", orgID, "error", err)
 		return nil
 	}
-	byRepo := make(map[string]domain.RepositoryDependabotAccess, len(answers))
-	for _, a := range answers {
-		byRepo[a.RepositoryID] = a
+	byRepo := make(map[string]*domain.RepositoryDependabotAccess, len(answers))
+	for i := range answers {
+		byRepo[answers[i].RepositoryID] = &answers[i]
 	}
 	out := make(map[string]tracker.AlertListing, len(marked))
 	for _, r := range marked {
-		a, ok := byRepo[r.ID]
-		if !ok || a.Access != domain.DependabotAlertsReadable {
+		a := byRepo[r.ID]
+		if !a.Listed() {
 			ledger.dropUnlistedAlerts(r.ID)
 			continue
 		}
-		out[r.ID] = tracker.AlertListing{Repository: r, Access: a, Marked: true}
+		out[r.ID] = tracker.AlertListing{Repository: r, Access: *a, Marked: true}
 	}
 	return out
 }
