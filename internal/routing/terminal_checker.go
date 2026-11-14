@@ -272,6 +272,13 @@ func capIDs(ids []string) []string {
 func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef, doneByLinearTeam map[string][]domain.LinearStateRef) bool {
 	switch entity.Source {
 	case "github":
+		if entity.Kind == domain.EntityKindVulnerablePackage {
+			var snap domain.VulnerablePackageSnapshot
+			if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.Package == "" {
+				return false
+			}
+			return snap.Terminal()
+		}
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
 			return false

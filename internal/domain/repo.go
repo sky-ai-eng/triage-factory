@@ -156,10 +156,12 @@ func (r Repository) Ref() RepoRef {
 }
 
 // SplitGitHubEntitySourceID splits a GitHub entity's key into its parts:
-// "owner/repo#42" for a pull request or issue, "owner/repo" for a repository.
-// prNumber is 0 when the key names no number, and an unparseable key yields
-// empty parts rather than an error — every caller gates on a value it can
-// check, and a malformed key is the same answer as a missing one.
+// "owner/repo#42" for a pull request or issue, "owner/repo" for a repository,
+// "owner/repo#npm:lodash" for a vulnerable package (VulnerablePackageSourceID).
+// prNumber is 0 when the key names no number, which a vulnerable package's
+// never does, and an unparseable key yields empty parts rather than an error —
+// every caller gates on a value it can check, and a malformed key is the same
+// answer as a missing one.
 //
 // It is the boundary where a GitHub entity's repository enters TF: the
 // entity's create resolves the owner/repo the key names to a registry row
@@ -169,10 +171,12 @@ func (r Repository) Ref() RepoRef {
 // key; GitHubPRNumber reads the part a rename does not change.
 //
 // The "#N" suffix is cut BEFORE the owner/repo split: splitting the raw key
-// leaves the repository named "repo#42", which no repository row resolves.
+// leaves the repository named "repo#42", which no repository row resolves. It
+// is cut at the first '#', which GitHub allows in no owner or repository name,
+// so a package name holding one cannot move the cut into the package.
 func SplitGitHubEntitySourceID(sourceID string) (owner, repo string, prNumber int) {
 	repoStr := sourceID
-	if idx := strings.LastIndex(sourceID, "#"); idx >= 0 {
+	if idx := strings.IndexByte(sourceID, '#'); idx >= 0 {
 		repoStr = sourceID[:idx]
 		fmt.Sscanf(sourceID[idx+1:], "%d", &prNumber)
 	}

@@ -2,6 +2,8 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -173,6 +175,100 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		}
 	})
 
+	t.Run("Record_listing_returns_the_stored_row_and_keeps_the_answer", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		answer := record(t, f, repoID, domain.DependabotAlertsReadable)
+		if answer.AlertsETag != "" {
+			t.Fatalf("a new answer carries an ETag: %+v", answer)
+		}
+		listed, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"abc"`)
+		if err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		if listed.AlertsETag != `W/"abc"` {
+			t.Errorf("listing = %+v, want the ETag", listed)
+		}
+		if listed.Access != answer.Access || !listed.CheckedAt.Equal(answer.CheckedAt) {
+			t.Errorf("listing moved the answer: %+v, was %+v", listed, answer)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordAlertListingSystem", listed, func() (*domain.RepositoryDependabotAccess, error) {
+			return f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID)
+		})
+
+		// A later probe replaces the answer and leaves the listing.
+		reprobed := record(t, f, repoID, domain.DependabotAlertsNoPermission)
+		if reprobed.AlertsETag != `W/"abc"` {
+			t.Errorf("a probe cleared the ETag: %+v", reprobed)
+		}
+	})
+
+	t.Run("Clear_untracked_listings_clears_every_unlisted_ETag", func(t *testing.T) {
+		f := mk(t)
+		tracked := repo(t, f, TestGitHubHost, "tracked")
+		untracked := repo(t, f, TestGitHubHost, "untracked")
+		holding := repo(t, f, TestGitHubHost, "holding")
+		elsewhere := repo(t, f, TestOtherGitHubHost, "elsewhere")
+		// Untracked, but the poll still lists it for its package.
+		if _, _, err := f.Stores.Entities.FindOrCreateVulnerablePackageSystem(ctx, f.OrgID, TestGitHubHost, "octo/holding#npm:lodash", "lodash (npm)", ""); err != nil {
+			t.Fatalf("create the held package: %v", err)
+		}
+		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestGitHubHost, []string{tracked}); err != nil {
+			t.Fatalf("track on %s: %v", TestGitHubHost, err)
+		}
+		// Tracked on its own host, which is not the host the clear keeps.
+		if err := f.Stores.TeamGitHubRepos.ReplaceForTeam(ctx, f.OrgID, f.TeamID, TestOtherGitHubHost, []string{elsewhere}); err != nil {
+			t.Fatalf("track on %s: %v", TestOtherGitHubHost, err)
+		}
+		for _, id := range []string{tracked, untracked, holding, elsewhere} {
+			record(t, f, id, domain.DependabotAlertsReadable)
+			if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, id, `W/"abc"`); err != nil {
+				t.Fatalf("RecordAlertListingSystem: %v", err)
+			}
+		}
+
+		n, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OrgID, TestGitHubHost)
+		if err != nil {
+			t.Fatalf("ClearUntrackedAlertListingsSystem: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("changed %d listings, want the untracked one and the other host's", n)
+		}
+		// Only the repositories the poll lists on the host keep their ETags:
+		// the tracked one, and the untracked one holding a package.
+		for id, wantETag := range map[string]bool{
+			tracked:   true,
+			untracked: false,
+			holding:   true,
+			elsewhere: false,
+		} {
+			a, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, id)
+			if err != nil || a == nil {
+				t.Fatalf("GetSystem(%s): %+v %v", id, a, err)
+			}
+			if (a.AlertsETag != "") != wantETag {
+				t.Errorf("%s listing = %+v, want an ETag: %v", id, a, wantETag)
+			}
+			if a.Access != domain.DependabotAlertsReadable {
+				t.Errorf("%s answer = %s, want it left readable", id, a.Access)
+			}
+		}
+		if n, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OrgID, TestGitHubHost); err != nil || n != 0 {
+			t.Errorf("a second clear = %d, %v; want nothing left to clear", n, err)
+		}
+		if _, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OrgID, ""); err == nil {
+			t.Error("a clear with no host was not refused")
+		}
+	})
+
+	t.Run("A_listing_without_an_answer_is_a_miss", func(t *testing.T) {
+		f := mk(t)
+		repoID := repo(t, f, TestGitHubHost, "api")
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, ""); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("RecordAlertListingSystem with no answer: err = %v, want sql.ErrNoRows", err)
+		}
+	})
+
 	t.Run("Another_orgs_answer_is_not_read", func(t *testing.T) {
 		f := mk(t)
 		if f.OtherOrgID == "" {
@@ -186,8 +282,17 @@ func RunRepositoryDependabotAccessConformance(t *testing.T, mk RepositoryDependa
 		if _, err := f.Stores.DependabotAccess.RecordSystem(ctx, f.OtherOrgID, repoID, domain.DependabotAlertsDisabled); err == nil {
 			t.Error("RecordSystem wrote an answer for another org's repository")
 		}
-		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable {
-			t.Errorf("the org's own answer after another org's write = %+v, %v; want readable, untouched", got, err)
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OtherOrgID, repoID, `W/"x"`); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("RecordAlertListingSystem under another org: err = %v, want sql.ErrNoRows", err)
+		}
+		if _, err := f.Stores.DependabotAccess.RecordAlertListingSystem(ctx, f.OrgID, repoID, `W/"own"`); err != nil {
+			t.Fatalf("RecordAlertListingSystem: %v", err)
+		}
+		if _, err := f.Stores.DependabotAccess.ClearUntrackedAlertListingsSystem(ctx, f.OtherOrgID, TestGitHubHost); err != nil {
+			t.Fatalf("ClearUntrackedAlertListingsSystem under another org: %v", err)
+		}
+		if got, err := f.Stores.DependabotAccess.GetSystem(ctx, f.OrgID, repoID); err != nil || got == nil || got.Access != domain.DependabotAlertsReadable || got.AlertsETag != `W/"own"` {
+			t.Errorf("the org's own answer after another org's writes = %+v, %v; want readable with its own ETag, untouched", got, err)
 		}
 	})
 }

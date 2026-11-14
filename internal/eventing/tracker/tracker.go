@@ -118,6 +118,9 @@ type Tracker struct {
 	// taskClosed tells the conversations working on a task that it closed
 	// (WithTaskClosedTeller); nil tells nobody.
 	taskClosed TaskClosedTeller
+	// dependabotAccess records each repository's alert listing
+	// (WithDependabotAccess); nil lists nothing.
+	dependabotAccess db.RepositoryDependabotAccessStore
 }
 
 // TaskClosedTeller tells the conversations working on a task that the task
@@ -720,10 +723,11 @@ func (t *Tracker) refreshGitHub(ctx context.Context, scope string, client *ghcli
 	entities := make([]domain.Entity, 0, len(listed))
 	for _, e := range listed {
 		// An issue entity is created by a run's write, and this poller reads
-		// pull requests only.
+		// pull requests only. A vulnerable package is read from its
+		// repository's alert listing (RefreshVulnerablePackages).
 		// TODO(TFAC-1276): issue entities are never refreshed, seeded or
 		// closed; polling them needs its own reads and event types.
-		if e.Scope == scope && e.Kind != domain.EntityKindIssue {
+		if e.Scope == scope && e.Kind != domain.EntityKindIssue && e.Kind != domain.EntityKindVulnerablePackage {
 			entities = append(entities, e)
 		}
 	}

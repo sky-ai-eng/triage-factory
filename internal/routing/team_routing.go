@@ -196,13 +196,13 @@ func (r *Router) teamScopeVerdict(ctx context.Context, evt domain.Event, teamID 
 }
 
 // teamTracksEventRepo asks the store whether teamID tracks the repository of
-// the pull request a GitHub event is about: the registry row its entity
-// references (entities.repository_id). The id is what the team's tracked set
-// references too, so the gate reads no name: a repository renamed since the
-// event was emitted is still the one the team tracks, and a registry row lives
-// on one GitHub host, so a team tracking acme/api on one host is not tracking
-// the acme/api of another. An entity that cannot be read, or one that names no
-// repository, is undecided.
+// the pull request or vulnerable package a GitHub event is about: the registry
+// row its entity references (entities.repository_id). The id is what the
+// team's tracked set references too, so the gate reads no name: a repository
+// renamed since the event was emitted is still the one the team tracks, and a
+// registry row lives on one GitHub host, so a team tracking acme/api on one
+// host is not tracking the acme/api of another. An entity that cannot be read,
+// or one that names no repository, is undecided.
 //
 // Task routing reads undecided as "tracks" (scopeFor's open posture): dropping a
 // legitimate task on a transient DB blip is worse than the pre-ticket

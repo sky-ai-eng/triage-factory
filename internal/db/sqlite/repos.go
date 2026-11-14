@@ -536,6 +536,17 @@ const repoHeldUntracked = `NOT ` + repoTrackedByATeam + `
 	   AND e.kind <> 'issue'
 )`
 
+// repoHoldsVulnerablePackage scopes a repositories row to the rows an active
+// vulnerable package on the row's own host references.
+const repoHoldsVulnerablePackage = `EXISTS (
+	SELECT 1 FROM entities e
+	 WHERE e.repository_id = repositories.id
+	   AND e.source = 'github'
+	   AND e.scope = repositories.host
+	   AND e.state = 'active'
+	   AND e.kind = 'vulnerable_package'
+)`
+
 func (s *repoStore) ListHeldUntrackedSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {
 	rows, _, err := s.listRepositories(ctx, orgID, host, db.Unwindowed, repoHeldUntracked)
 	return rows, err

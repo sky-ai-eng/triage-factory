@@ -218,10 +218,14 @@ type EntityContainer struct {
 	JiraProject  JiraProjectRef `json:"jira_project,omitzero"`
 }
 
-// The kinds a GitHub entity is stored under: a pull request, or an issue.
+// The kinds a GitHub entity is stored under: a pull request, an issue, or a
+// vulnerable package (VulnerablePackageSourceID). The first two are objects
+// GitHub numbers within a repository; a vulnerable package is a grouping TF
+// makes of a repository's Dependabot alerts, and has no number.
 const (
-	EntityKindPullRequest = "pr"
-	EntityKindIssue       = "issue"
+	EntityKindPullRequest       = "pr"
+	EntityKindIssue             = "issue"
+	EntityKindVulnerablePackage = "vulnerable_package"
 )
 
 // GitHubIdentity is what GitHub answered for the objects a GitHub act names,
@@ -243,8 +247,9 @@ type GitHubIdentity struct {
 	Kind   string `json:"kind,omitempty"`
 }
 
-// IsGitHubObjectKind reports whether kind is one a GitHub entity is stored
-// under.
+// IsGitHubObjectKind reports whether kind is one of the GitHub objects an act
+// names by number: a pull request or an issue. A vulnerable package is not
+// one; no act names it, and no identity read returns it.
 func IsGitHubObjectKind(kind string) bool {
 	return kind == EntityKindPullRequest || kind == EntityKindIssue
 }
