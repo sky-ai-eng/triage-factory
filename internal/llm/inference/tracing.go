@@ -61,11 +61,11 @@ func firstChunkTimer(span trace.Span, started time.Time, next func()) func() {
 
 // endStream records how a call ended and ends its span.
 //
-// A failure's status message is its class, never the error's text: a
-// rendered provider error carries the provider's own message, which can quote
-// the request, and the base URL of the endpoint, which can name an operator's
-// private gateway. A cancellation is no provider outcome at all, so it ends
-// without an error status.
+// A failure's class is its outcome, and its status message a constant, never
+// the error's text: a rendered provider error carries the provider's own
+// message, which can quote the request, and the base URL of the endpoint,
+// which can name an operator's private gateway. A cancellation is no provider
+// outcome at all, so it ends without an error status.
 func endStream(ctx context.Context, span trace.Span, req Request, completion *Completion, err error) {
 	defer span.End()
 	if err == nil {
@@ -88,7 +88,7 @@ func endStream(ctx context.Context, span trace.Span, req Request, completion *Co
 		return
 	}
 	span.SetAttributes(telemetry.Outcome(string(class)))
-	span.SetStatus(codes.Error, string(class))
+	span.SetStatus(codes.Error, "the provider call failed")
 }
 
 // BilledModel is the model a completion is priced and recorded under: the one

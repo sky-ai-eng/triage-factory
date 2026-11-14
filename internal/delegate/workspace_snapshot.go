@@ -446,7 +446,13 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 
 	ctx, span := s.startSnapshotSpan(ctx, w)
 	defer func() {
-		telemetry.RecordSpanError(span, err)
+		// One line holds the whole chain, so the phases beneath log
+		// nothing of their own.
+		if err != nil {
+			telemetry.RecordSpanError(span, err, "persisting the workspace snapshot failed")
+			delegateLog.WarnContext(ctx, "workspace snapshot failed",
+				"conversation", w.conversationID, "key_id", w.keyID, "reason", w.reason, "error", err)
+		}
 		span.End()
 	}()
 
@@ -640,7 +646,7 @@ func (c *capturedSnapshot) release() {
 func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot, err error) {
 	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", w.runtime)
 	defer func() {
-		telemetry.RecordSpanError(capSpan, err)
+		telemetry.RecordSpanError(capSpan, err, "capturing the workspace failed")
 		capSpan.End()
 	}()
 	captured := &capturedSnapshot{at: time.Now()}
@@ -737,7 +743,7 @@ func (st *stagedSnapshot) discard() {
 func archiveSnapshot(ctx context.Context, w snapshotWrite, captured *capturedSnapshot) (_ *stagedSnapshot, err error) {
 	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", w.runtime)
 	defer func() {
-		telemetry.RecordSpanError(archSpan, err)
+		telemetry.RecordSpanError(archSpan, err, "archiving the workspace snapshot failed")
 		archSpan.End()
 	}()
 	man := snapshotManifest{CapturedAt: captured.at.UTC()}
@@ -792,7 +798,7 @@ func (s *Spawner) uploadSnapshot(ctx context.Context, w snapshotWrite, staged *s
 	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", w.runtime)
 	putSpan.SetAttributes(telemetry.SizeBytes(staged.compressedBytes))
 	putErr := s.Storage().Put(putCtx, snapshotKey(w.orgID, w.keyID), staged.f)
-	telemetry.RecordSpanError(putSpan, putErr)
+	telemetry.RecordSpanError(putSpan, putErr, "uploading the workspace snapshot failed")
 	putSpan.End()
 	if putErr != nil {
 		return false, fmt.Errorf("snapshot: put: %w", putErr)
@@ -1372,7 +1378,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		if prov != "" {
 			span.SetAttributes(telemetry.Workspace(string(prov)))
 		}
-		telemetry.RecordSpanError(span, err)
+		telemetry.RecordSpanError(span, err, "ensuring the workspace failed")
 		span.End()
 	}()
 

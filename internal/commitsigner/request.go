@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
@@ -124,8 +123,7 @@ func (r *Requester) Request(ctx context.Context, req Request) (res Result, err e
 	))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "requesting the signature failed")
 		} else {
 			span.SetAttributes(telemetry.Outcome(string(res.Outcome)))
 			if res.Refusal != "" {

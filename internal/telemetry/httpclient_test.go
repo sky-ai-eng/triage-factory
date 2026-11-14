@@ -2,11 +2,13 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -94,6 +96,46 @@ func TestTracedTransportTracesInsideATrace(t *testing.T) {
 		t.Error("upstream saw no traceparent on a request made inside a trace")
 	}
 }
+
+// TestTracedTransportDropsATransportErrorsText covers otelhttp's client
+// transport, which describes a failed round trip with err.Error(): a net
+// error naming the host and its address. The span keeps its error status.
+func TestTracedTransportDropsATransportErrorsText(t *testing.T) {
+	recorder, _, _ := tracedTransportFixture(t)
+
+	ctx, parent := otel.Tracer("telemetry/test").Start(context.Background(), "caller")
+	refused := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp 10.0.0.7:443: connect: connection refused")
+	})
+	client := &http.Client{Transport: TracedTransport(refused, "test")}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://github.example/repos/acme/secret-project", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if resp, err := client.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatal("a request through a refusing transport succeeded")
+	}
+	parent.End()
+
+	for _, s := range recorder.Ended() {
+		if s.Name() != "test.http" {
+			continue
+		}
+		if s.Status().Code != codes.Error {
+			t.Errorf("status code = %v, want Error", s.Status().Code)
+		}
+		if s.Status().Description != "" {
+			t.Errorf("status description = %q, want empty; a transport error names the host and its address", s.Status().Description)
+		}
+		return
+	}
+	t.Fatal("no test.http span recorded")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // TestTracedTransportRecordsGitHubURLTemplate covers the attribute that tells
 // one github.http span from another under the same parent: the request's path

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,6 +14,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -231,6 +233,33 @@ func TestScrubbedTracerProviderDropsStartOptionAttributes(t *testing.T) {
 	// must be a denylist, not a filter that keeps only what it recognizes.
 	if !slices.Contains(got, "http.route") {
 		t.Errorf("a non-URL attribute was dropped; the scrubber removes only the URL keys (attributes: %s)", strings.Join(got, ", "))
+	}
+}
+
+// TestScrubbedTracerProviderDropsErrorText covers the two ways a library
+// puts an error's text on a span: otelhttp's transport as a status
+// description, and otelsql as an exception event. The span must still read
+// as failed.
+func TestScrubbedTracerProviderDropsErrorText(t *testing.T) {
+	restoreTraceGlobals(t)
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+	_, span := ScrubbedTracerProvider().Tracer("test").Start(context.Background(), "outbound")
+	err := errors.New(`dial tcp 10.0.0.7:443: connect: connection refused (repository "acme/secret-project")`)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	span.End()
+
+	got := recorder.Ended()[0]
+	if got.Status().Code != codes.Error {
+		t.Errorf("status code = %v, want Error; only the text is dropped", got.Status().Code)
+	}
+	if got.Status().Description != "" {
+		t.Errorf("status description = %q, want empty", got.Status().Description)
+	}
+	if events := got.Events(); len(events) != 0 {
+		t.Errorf("recorded %d span events, want 0; an exception event holds the error's text", len(events))
 	}
 }
 

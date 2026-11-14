@@ -121,7 +121,8 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //     dispatching switch, which is what keeps it an enum rather than a
 //     name the caller chose. Also the name a GraphQL document gives its
 //     operation (Linear's "IssuesByID"), where every document is a
-//     constant in its client.
+//     constant in its client, and the terminal write a work-queue row
+//     failed at ("complete", "requeue"), each a literal at its call site.
 //   - Workspace — how a run's worktree came to exist ("fresh", "warm",
 //     "rehydrated"), i.e. domain.WorkspaceProvenance. Never the path.
 //   - Bucket — which of an upstream's rate-limit budgets a reading is of,

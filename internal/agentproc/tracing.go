@@ -25,9 +25,12 @@ var tracer = otel.Tracer("internal/agentproc")
 // A wrapper rather than a ctx parameter on EnsureSDK, whose callers
 // (including the installer CLI) have no run context to give it.
 func ensureSDKTraced(ctx context.Context) (string, error) {
-	_, span := tracer.Start(ctx, "agent.sdk.ensure")
+	ctx, span := tracer.Start(ctx, "agent.sdk.ensure")
 	defer span.End()
 	path, err := EnsureSDK()
-	telemetry.RecordSpanError(span, err)
+	if err != nil {
+		telemetry.RecordSpanError(span, err, "installing the agent runtime failed")
+		agentprocLog.WarnContext(ctx, "installing the agent runtime failed", "error", err)
+	}
 	return path, err
 }
