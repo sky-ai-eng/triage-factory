@@ -906,7 +906,7 @@ func (s *Spawner) recordLaunchNote(sink *conversationSink, conversationID, creat
 // session file carries the conversation and not the tree, so a resume into a
 // restored or rebuilt tree is told what the tree lost, as a native resume is.
 func workspaceNote(root string, prov domain.WorkspaceProvenance) string {
-	return agentloop.WorkspaceRebuiltNote(agentloop.WorkspaceLayout{Root: root}, prov)
+	return agentloop.WorkspaceRebuiltNote(agentloop.WorkspaceLayout{Root: agentproc.AgentVisibleRoot(root)}, prov)
 }
 
 // joinTurnText joins the non-empty parts of a turn's text in order, a blank
@@ -1259,6 +1259,12 @@ func (s *Spawner) processCompletion(
 	}
 	if completeErr != nil {
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", completeErr)
+	}
+	// A failure ends the conversation, as every other failure does: nothing
+	// resumes a failed conversation, and while it stays un-ended its task can
+	// have no other, so a person's chat would be left with nothing to send to.
+	if status == domain.StatusFailed && completeErr == nil {
+		s.endFailedConversation(bgCtx, orgID, conversationID, "agent error")
 	}
 
 	// broadcastStatus prefers the row the write actually persisted over the

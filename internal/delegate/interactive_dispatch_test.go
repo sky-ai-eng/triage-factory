@@ -240,16 +240,19 @@ func TestDispatch_InteractiveTurnIsNotNudgedForAnArtifact(t *testing.T) {
 }
 
 // TestFailedInteractiveConversationIsReplaced: a conversation a person works
-// in that fails leaves the task they still hold with a new interactive
+// in that fails, whether its runtime never started or its turn ended in an
+// error, is ended, and the task they still hold gets a new interactive
 // conversation as its current one, created for that person, while the failure
 // stays on the old row. A task the person no longer holds gets none.
 func TestFailedInteractiveConversationIsReplaced(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		unclaim     bool
+		errorResult bool
 		wantReplace bool
 	}{
 		{name: "the person still holds the task", wantReplace: true},
+		{name: "the turn ends in an error result", errorResult: true, wantReplace: true},
 		{name: "nobody holds the task", unclaim: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,8 +263,15 @@ func TestFailedInteractiveConversationIsReplaced(t *testing.T) {
 					t.Fatalf("hand the task back: %v", err)
 				}
 			}
-			// The runtime refuses to start, which fails the conversation.
-			f.dispatch(t, "why is the build red?")
+			if tc.errorResult {
+				f.s.liveRunOverride = func(_ context.Context, spec liveRunSpec) liveOutcome {
+					return liveOutcome{result: &agentproc.Result{IsError: true, Subtype: "error_during_execution", Result: "the model call failed"}, sessionID: "sess-1421-error"}
+				}
+				f.s.dispatchClaimedConversation(ctx, f.claim(t, "why is the build red?"), time.Now())
+			} else {
+				// The runtime refuses to start, which fails the conversation.
+				f.dispatch(t, "why is the build red?")
+			}
 
 			failed, err := f.stores.Conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, f.conv.ID)
 			if err != nil || failed == nil {
@@ -407,6 +417,77 @@ func TestDispatch_InteractiveSDKTurnKeepsItsSession(t *testing.T) {
 	}
 	if !sessionTranscriptExists(launched.park.claudeCwd, "sess-1421-keep") {
 		t.Error("the turn's end removed the session file the next message resumes from")
+	}
+}
+
+// TestDispatch_InteractiveSDKCutOffTurnResumesItsSession: the claim that took
+// a person's message can end before the reply does (a crash, the app quitting
+// mid-turn), leaving the conversation claimable with nothing waiting. Its
+// next claim resumes the session that holds the message, with the
+// continuation note, rather than parking with the question unanswered. With
+// no session file left there is nothing to resume, and it parks.
+func TestDispatch_InteractiveSDKCutOffTurnResumesItsSession(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		loseSession bool
+	}{
+		{name: "the session survived"},
+		{name: "the session file is gone", loseSession: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			f := newInteractiveFixture(t, "1421-cut")
+			ctx := context.Background()
+			const session = "sess-1421-cut"
+			first := f.endTurn(t, session, "the build is red because a test is flaky")
+			f.s.dispatchClaimedConversation(ctx, f.claim(t, "why is the build red?"), time.Now())
+			root := first.park.claudeCwd
+			// A follow-up resumes on the model the conversation started with,
+			// so the row carries one.
+			if _, err := f.database.Exec(`UPDATE conversations SET model = 'claude-sonnet-4-6' WHERE id = ?`, f.conv.ID); err != nil {
+				t.Fatalf("stamp the model: %v", err)
+			}
+
+			// The follow-up is sent, and an engagement takes it off the queue
+			// and ends before its reply does.
+			if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID, "which test?"); err != nil {
+				t.Fatalf("SendMessage: %v", err)
+			}
+			if _, _, ok, err := f.stores.ConversationPendingInput.Consume(ctx, runmode.LocalDefaultOrgID, f.conv.ID); err != nil || !ok {
+				t.Fatalf("take the message off the queue = (%v, %v)", ok, err)
+			}
+			if tc.loseSession {
+				worktree.RemoveClaudeProjectDir(root)
+			}
+
+			resumed := f.endTurn(t, session, "it was the retry")
+			claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+			if err != nil || claimed == nil || claimed.ID != f.conv.ID {
+				t.Fatalf("ClaimNextConversation = (%v, %v), want the cut-off conversation", claimed, err)
+			}
+			claimed.OrgID = runmode.LocalDefaultOrgID
+			f.s.dispatchClaimedConversation(ctx, claimed, time.Now())
+
+			if tc.loseSession {
+				if resumed.opts.Cwd != "" {
+					t.Errorf("a cut-off turn with no session file launched the runtime (session %q); want a park", resumed.opts.SessionID)
+				}
+			} else {
+				if resumed.opts.SessionID != session {
+					t.Fatalf("the re-claim launched session %q, want the surviving %q resumed", resumed.opts.SessionID, session)
+				}
+				if !strings.HasSuffix(resumed.opts.Message, domain.SessionContinuationNote) {
+					t.Errorf("the resumed turn sent %q, want it to end with the continuation note", resumed.opts.Message)
+				}
+			}
+			conv, err := f.stores.Conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, f.conv.ID)
+			if err != nil || conv == nil {
+				t.Fatalf("GetSystem: (%v, %v)", conv, err)
+			}
+			if conv.Status != domain.StatusOpen || conv.EndedAt != nil {
+				t.Errorf("after the re-claim: (status %q, ended %v), want open and un-ended", conv.Status, conv.EndedAt)
+			}
+		})
 	}
 }
 

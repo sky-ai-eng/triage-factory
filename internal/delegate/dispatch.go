@@ -892,10 +892,16 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// transcript, so a re-claim with nothing new to say is just the loop
 		// continuing, which is what it should do.
 		//
-		// A conversation a person works in that has a session is the same
-		// crash case: it has no step to re-run, and the next message brings
-		// its own claim.
-		if br == nil || br.Status != domain.BlueprintRunStatusRunning {
+		// A conversation a person works in has no step to re-run, but it does
+		// have a turn to finish: the claim that took the person's message
+		// ended before the reply did (a crash, or the app quitting mid-turn),
+		// and the session holds the message and what was done toward it. So a
+		// session that survived is resumed by the launch below, with the
+		// continuation note, as a running step's is. With no session file
+		// left there is nothing to resume, and it parks.
+		resumesCutOffTurn := interactive && conv.SessionID != "" && conv.WorktreePath != "" &&
+			sessionTranscriptExists(conv.WorktreePath, conv.SessionID)
+		if !resumesCutOffTurn && (br == nil || br.Status != domain.BlueprintRunStatusRunning) {
 			if fencedAtGate() {
 				return
 			}
@@ -926,7 +932,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// creator once a reassignment within the team has kept the conversation.
 	actingUserID := conv.CreatorUserID
 	if interactive {
-		actingUserID = s.turnRequester(gateCtx, orgID, conv, task)
+		actingUserID = s.turnRequester(ctx, orgID, conv, task)
 	}
 	// A session that took no turn is not resumed: the launch opens a fresh
 	// one and sends the whole of what the person has asked so far.
@@ -2782,19 +2788,10 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	if failed {
 		s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureUnclassified, reason)
 	}
-	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
-	if err != nil {
-		dispatchLog.Warn("stamp the failure boundary on the orphaned conversation failed", "conversation", conv.ID, "error", err)
-		return
-	}
 	// A conversation failed here failed BEFORE its agent ran, so it owes the
 	// memory that says so — the empty row, generated from a transcript with no
-	// assistant turn in it. Rung for the row this call stamped; a nil one had
-	// already ended and its debt belongs to that boundary.
-	if ended != nil {
-		s.kickMemoryOwed(orgID, ended.ID)
-		s.replaceFailedInteractive(orgID, ended)
-	}
+	// assistant turn in it.
+	s.endFailedConversation(bgCtx, orgID, conv.ID, "orphaned")
 }
 
 // turnRequester is the person a conversation a person works in is answering

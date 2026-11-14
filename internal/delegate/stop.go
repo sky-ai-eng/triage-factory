@@ -530,6 +530,26 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 	return domain.ConversationFailureCrash
 }
 
+// endFailedConversation stamps the failure boundary on a conversation whose
+// failure was just recorded, and settles what the boundary owes: the memory
+// the failure may owe, and a conversation to replace one a person was working
+// in. Called only once the failure itself landed: a successor's conversation
+// is not this engagement's to end. Best-effort, because the terminal is the
+// load-bearing write, and a failed stamp must not turn a recorded failure into
+// an error. what names the failure in the log line.
+func (s *Spawner) endFailedConversation(ctx context.Context, orgID, conversationID, what string) {
+	ended, err := s.conversations.EndConversationSystem(ctx, orgID, conversationID, domain.EndedFailed)
+	if err != nil {
+		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "failure", what, "error", err)
+		return
+	}
+	// A nil row had already ended, and what it owes belongs to that boundary.
+	if ended != nil {
+		s.kickMemoryOwed(orgID, ended.ID)
+		s.replaceFailedInteractive(orgID, ended)
+	}
+}
+
 // failConversation records the infra-failure terminal for a run: guarded status flip,
 // a failure row on the transcript, the boundary stamp, and the broadcast.
 //
@@ -598,21 +618,10 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 
 	// The boundary, stamped after the terminal it belongs to: a failure ends
 	// the conversation's life as its task's live one, so nothing resumes it
-	// and the memory it may owe has a row to be owed against. Reached only
-	// when the fence passed — a successor's conversation is not this
-	// engagement's to end. Best-effort: the terminal above is the load-bearing write, and a
-	// failed stamp must not turn a recorded failure into an error.
-	ended, endErr := s.conversations.EndConversationSystem(bgCtx, orgID, conversationID, domain.EndedFailed)
-	if endErr != nil {
-		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "error", endErr)
-	} else if ended != nil {
-		// The memory this failure owes: the agent may have died anywhere
-		// between "before its first tool call" and "one write short of its
-		// file", and only the transcript says which. Rung for the row this
-		// call stamped.
-		s.kickMemoryOwed(orgID, ended.ID)
-		s.replaceFailedInteractive(orgID, ended)
-	}
+	// and the memory it may owe has a row to be owed against. The agent may
+	// have died anywhere between "before its first tool call" and "one write
+	// short of its file", and only the transcript says which.
+	s.endFailedConversation(bgCtx, orgID, conversationID, "infrastructure")
 
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
