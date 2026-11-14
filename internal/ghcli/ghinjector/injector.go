@@ -1028,10 +1028,9 @@ func (s *Server) touchComment(ctx context.Context, c ghwrite.CommentRef) {
 
 // touchNode reports the object a read named by node id: the pull request or
 // issue it names, or the one the comment, review or review thread it names is
-// on. It asks GitHub's
-// GraphQL API which object that is, with the credential the read was made
-// under (ghclient.IdentityReader.NodeSubject), and reports the object as
-// touchRead does, under the repository name GitHub answered. A node id that
+// on. It asks GitHub's GraphQL API which object that is, with the credential
+// the read was made under (ghclient.IdentityReader.NodeSubject), and reports
+// the object as touchRead does, under the repository name GitHub answered. A node id that
 // names anything else touches nothing. The reader remembers each node id it
 // had an answer for, so a node id is asked about once per run; one GitHub
 // answers null for, or whose lookup failed, is not remembered. ctx bounds the

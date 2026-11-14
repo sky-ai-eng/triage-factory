@@ -1650,7 +1650,7 @@ func TestInjector_CommentAndNodeReads(t *testing.T) {
 			case "U_kwUser":
 				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"User"}}}`))
 			case "R_kwBadRepo":
-				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":1,"repository":{"nameWithOwner":"acme/../x"}}}}`))
+				_, _ = w.Write([]byte(`{"data":{"node":{"__typename":"PullRequest","number":1,"repository":{"nameWithOwner":"acme/.."}}}}`))
 			default:
 				_, _ = w.Write([]byte(`{"data":{"node":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a node"}]}`))
 			}
@@ -1778,8 +1778,10 @@ func TestInjector_CommentAndNodeReads(t *testing.T) {
 			t.Errorf("node lookups of %s = %d, want %d", id, n, want)
 		}
 	}
-	if n := gets["/repos/acme/../x/pulls/1"]; n != 0 {
-		t.Errorf("a repository name GitHub answered in a shape no repository has was read %d times", n)
+	for path := range gets {
+		if strings.Contains(path, "/..") {
+			t.Errorf("read %s, under a repository name GitHub answered in a shape no repository has", path)
+		}
 	}
 }
 

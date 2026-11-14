@@ -31,14 +31,10 @@ type Getter interface {
 
 // Querier is the one request a node lookup makes (NodeSubject): a GraphQL
 // query document with its variables, answering the response body, and an
-// error for a non-2xx response or one with no data. *Client is one. An
-// observer that holds a credential but no Client builds one with
-// NewTokenQuerier.
-//
-// REST has no read that takes a node id, so this one is GraphQL, and only an
-// observer that reaches GitHub directly can make it: the gh channel's
-// injector, which holds the run's credential. The exec verbs' per-run REST
-// proxy refuses GraphQL, and no exec verb reads by node id.
+// error for a non-2xx response or a query GitHub answered with errors and no
+// data. *Client is one. An observer that holds a credential but no Client
+// builds one with NewTokenQuerier. REST has no read that takes a node id,
+// which is why this one is GraphQL.
 type Querier interface {
 	PostGraphQL(ctx context.Context, query string, variables map[string]any) ([]byte, error)
 }
@@ -366,12 +362,13 @@ const nodeSubjectQuery = `query NodeSubject($id: ID!) {
 
 // NodeSubject asks GitHub what the node id names, through q, and answers the
 // pull request or issue it is, or the one the conversation comment, review
-// comment, review or review thread it is sits on. The number is the whole answer, with the repository
-// it is in: Object reads what GitHub calls the object. A node id that names
-// anything else answers the zero NodeSubject. Both answers are cached, since a
-// node id names one object for its life. A node GitHub answers null for (one
-// that does not exist, or that q's credential cannot read), an answer missing
-// what its type carries, and a failed request are errors, none of them cached.
+// comment, review or review thread it names is on. The number and the
+// repository it is in are the whole answer: Object reads what GitHub calls the
+// object. A node id that names anything else answers the zero NodeSubject.
+// Both answers are cached, since a node id names one object for its life. A
+// node GitHub answers null for (one that does not exist, or that q's
+// credential cannot read), an answer missing what its type carries, and a
+// failed request are errors, none of them cached.
 func (r *IdentityReader) NodeSubject(ctx context.Context, q Querier, nodeID string) (NodeSubject, error) {
 	if nodeID == "" {
 		return NodeSubject{}, errors.New("github identity: an empty node id names nothing")
