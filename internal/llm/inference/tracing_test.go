@@ -149,9 +149,9 @@ func TestStreamSpanRecordsACompletedCall(t *testing.T) {
 }
 
 // TestStreamSpanNamesAFailureByItsClassOnly pins the hygiene rule for a
-// failed call: the outcome and the status say which class of failure it was,
-// and nothing on the span carries the rendered error, which names the
-// endpoint and can carry the provider's response body.
+// failed call: the outcome says which class of failure it was, the status is
+// a constant, and nothing on the span carries the rendered error, which names
+// the endpoint and can carry the provider's response body.
 func TestStreamSpanNamesAFailureByItsClassOnly(t *testing.T) {
 	ended := recordStreamSpans(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -169,8 +169,8 @@ func TestStreamSpanNamesAFailureByItsClassOnly(t *testing.T) {
 	}
 
 	span := streamSpan(t, ended())
-	if span.Status().Code != codes.Error || span.Status().Description != "rate_limited" {
-		t.Errorf("status = %+v, want an error described as rate_limited", span.Status())
+	if span.Status().Code != codes.Error || span.Status().Description != "the provider call failed" {
+		t.Errorf("status = %+v, want an error with the constant description", span.Status())
 	}
 	if got, _ := attrOf(span, "outcome"); got.AsString() != "rate_limited" {
 		t.Errorf("outcome = %q, want rate_limited", got.AsString())

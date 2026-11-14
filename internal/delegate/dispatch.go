@@ -662,7 +662,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		gateOpen = false
 		gateSpan.SetAttributes(telemetry.Outcome(outcome))
-		telemetry.RecordSpanError(gateSpan, err)
+		telemetry.RecordSpanError(gateSpan, err, "a claim gate's read failed")
 		gateSpan.End()
 	}
 	// Backstop only: every exit below closes the gate span with its own answer,
@@ -1100,7 +1100,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	slug := skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
 	_, skillSpan := tracer.Start(ctx, "engagement.stage_skill")
 	skillErr := s.materializeStepSkill(&cfg, conv.ID, slug, stepPrompt, step.Brief)
-	telemetry.RecordSpanError(skillSpan, skillErr)
+	telemetry.RecordSpanError(skillSpan, skillErr, "staging the step's skill failed")
 	skillSpan.End()
 	if skillErr != nil {
 		s.failEngagement(conv.ID, skillErr)

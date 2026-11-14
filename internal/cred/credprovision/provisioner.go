@@ -33,7 +33,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -166,8 +165,9 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID), telemetry.Reason(string(reason))))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "sealing the credentials failed")
+			log.WarnContext(ctx, "sealing the claim's credentials failed",
+				"conversation", conversationID, "org", orgID, "reason", reason, "error", err)
 		}
 		span.End()
 	}()

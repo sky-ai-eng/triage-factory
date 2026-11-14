@@ -747,7 +747,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	endFetch := s.activityFor(conversationID).begin("fetch_pr", setupFetchOpDeadline)
 	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
 	endFetch()
-	telemetry.RecordSpanError(fetchSpan, err)
+	telemetry.RecordSpanError(fetchSpan, err, "fetching the pull request failed")
 	fetchSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
@@ -869,7 +869,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
 	endClone()
-	telemetry.RecordSpanError(cloneSpan, err)
+	telemetry.RecordSpanError(cloneSpan, err, "checking out the pull request failed")
 	cloneSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
@@ -952,7 +952,7 @@ func (s *Spawner) setupGitHubBaseCheckout(ctx context.Context, orgID, conversati
 	endFetch := s.activityFor(conversationID).begin("fetch_repository", setupFetchOpDeadline)
 	meta, err := ghClient.GetRepoMeta(fetchCtx, owner, repo)
 	endFetch()
-	telemetry.RecordSpanError(fetchSpan, err)
+	telemetry.RecordSpanError(fetchSpan, err, "fetching the repository failed")
 	fetchSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch repository: %w", err)
@@ -1010,7 +1010,7 @@ func (s *Spawner) setupGitHubBaseCheckout(ctx context.Context, orgID, conversati
 	baseCheckout, err := worktree.CreateForCheckoutInRoot(cloneCtx, worktree.Repo{ID: repoRow.ID, Owner: owner, Name: repo}, cloneURL, ref, rootKey, runRoot,
 		worktree.WithCloneAuth(cloneAuth))
 	endClone()
-	telemetry.RecordSpanError(cloneSpan, err)
+	telemetry.RecordSpanError(cloneSpan, err, "checking out the base branch failed")
 	cloneSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)

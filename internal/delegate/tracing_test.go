@@ -1,6 +1,7 @@
 package delegate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -136,14 +138,19 @@ func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 // TestEngagementRootRecordsSetupFailure: a claim that never reaches the agent
 // ends the root with an error status, and that is the ONLY outcome that does
 // — every other early end is a disposition, so "traces with errors" stays a
-// usable filter.
+// usable filter. The error's text names what setup was working on, so it goes
+// to the log under the root's trace id rather than onto the span.
 func TestEngagementRootRecordsSetupFailure(t *testing.T) {
 	read := recordSpans(t)
+	var logs bytes.Buffer
+	restore := logging.SetOutput(&logs)
+	t.Cleanup(restore)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	conv := traceTestConversation("run-fail")
 
+	const cause = "rehydrate: restore acme/secret-project/pr-18: exit status 128"
 	_, done := s.beginEngagement(context.Background(), conv)
-	s.failEngagement(conv.ID, errors.New("bring up credential sidecar: broker refused"))
+	s.failEngagement(conv.ID, errors.New(cause))
 	done()
 
 	roots := spansNamed(read(), "engagement.setup")
@@ -155,6 +162,22 @@ func TestEngagementRootRecordsSetupFailure(t *testing.T) {
 	}
 	if got := roots[0].Status().Code; got != codes.Error {
 		t.Errorf("status = %v, want Error — a setup failure is the one engagement end that is actually wrong", got)
+	}
+	if desc := roots[0].Status().Description; strings.Contains(desc, "secret-project") {
+		t.Errorf("status description %q carries the error's text", desc)
+	}
+	if events := roots[0].Events(); len(events) != 0 {
+		t.Errorf("recorded %d span events, want 0; an exception event holds the error's text", len(events))
+	}
+	traceID := roots[0].SpanContext().TraceID().String()
+	var line string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "engagement setup failed") {
+			line = l
+		}
+	}
+	if !strings.Contains(line, cause) || !strings.Contains(line, traceID) {
+		t.Errorf("no log line holds the error's text beside the root's trace id %s; logs:\n%s", traceID, logs.String())
 	}
 }
 
