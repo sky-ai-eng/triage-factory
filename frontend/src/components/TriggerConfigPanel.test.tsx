@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import TriggerConfigPanel from './TriggerConfigPanel'
 import type { TriggerHandler } from '../types'
 import { jsonBody } from '../test/apiResponse'
@@ -58,5 +58,58 @@ describe('TriggerConfigPanel blueprint badge', () => {
     await waitFor(() => expect(screen.getByText('Fix CI')).toBeTruthy())
     expect(fetchMock).toHaveBeenCalledWith('/api/blueprints/bp%2F1', expect.anything())
     expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain('/api/blueprints')
+  })
+})
+
+describe('TriggerConfigPanel on an event the watch flag cannot widen', () => {
+  it('hides the toggle and leaves applies_to_unowned out of the save', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/event-types') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          ...jsonBody([
+            {
+              id: 'github:vulnerability:alert_opened',
+              source: 'github',
+              category: 'vulnerability',
+              label: 'Vulnerability Alert Opened',
+              description: '',
+              supports_watch: false,
+            },
+          ]),
+        })
+      }
+      if (init?.method === 'PATCH') {
+        return Promise.resolve({ ok: true, status: 200, ...jsonBody({}) })
+      }
+      return Promise.resolve({ ok: true, status: 200, ...jsonBody({ name: 'Upgrade' }) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onSaved = vi.fn()
+
+    render(
+      <TriggerConfigPanel
+        open
+        trigger={{ ...trigger, event_type: 'github:vulnerability:alert_opened' }}
+        onClose={() => {}}
+        onSaved={onSaved}
+        onDeleted={() => {}}
+      />,
+    )
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.map(([url]) => url)).toContain('/api/event-types'),
+    )
+    await waitFor(() =>
+      expect(screen.queryByText('Apply to entities outside this team')).not.toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')
+    const body = JSON.parse(patch![1]!.body as string)
+    expect(body).not.toHaveProperty('applies_to_unowned')
+    expect(body).toHaveProperty('breaker_threshold', 4)
   })
 })

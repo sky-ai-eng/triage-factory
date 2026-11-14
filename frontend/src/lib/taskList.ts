@@ -27,6 +27,8 @@ export type TaskListFilters = {
    *  literally — a '%' is a percent sign. Capped at 200 characters. */
   search?: string
   sources?: string[]
+  /** Entity kinds (pr, issue, vulnerable_package, thread, message). */
+  entity_kinds?: string[]
   event_types?: string[]
   created_since?: string
   created_before?: string
@@ -129,15 +131,19 @@ export function doneListBody(teamIds: string[], filters: TaskListFilters = {}): 
   }
 }
 
-/** One event type present in a lane, and how many of its tasks sit there. */
+/** One value present in a lane, and how many of its tasks carry it. */
 export interface TaskFacet {
   value: string
   count: number
 }
 
-/** The response of POST /api/tasks/facets: a fixed schema of named cuts. */
+/** The response of POST /api/tasks/facets: a fixed schema of named cuts.
+ *  `entity_kinds` is counted without the request's own `entity_kinds`, so the
+ *  kind choices include the ones the reader narrowed away; `event_types` is
+ *  counted under it. */
 export interface TaskFacetsResponse {
   event_types: TaskFacet[]
+  entity_kinds: TaskFacet[]
 }
 
 /** The lane half of a list body — what the facet route takes. It refuses the
@@ -153,6 +159,7 @@ export type TaskFacetsRequest = Pick<
   | 'closed_since'
   | 'created_since'
   | 'sources'
+  | 'entity_kinds'
 >
 
 export function facetsBody(lane: TaskListRequest): TaskFacetsRequest {
@@ -164,6 +171,7 @@ export function facetsBody(lane: TaskListRequest): TaskFacetsRequest {
     closed_since,
     created_since,
     sources,
+    entity_kinds,
   } = lane
   return {
     statuses,
@@ -173,5 +181,6 @@ export function facetsBody(lane: TaskListRequest): TaskFacetsRequest {
     closed_since,
     created_since,
     sources,
+    entity_kinds,
   }
 }

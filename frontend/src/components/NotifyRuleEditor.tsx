@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
+import EventTypeOptions from './EventTypeOptions'
 import TeamPicker from './TeamPicker'
 import type { NotifyHandler, NotifyAudience, EventType } from '../types'
 import { toast } from './Toast/toastStore'
@@ -230,17 +231,13 @@ export default function NotifyRuleEditor({
                       className={fieldClass}
                     >
                       <option value="">Select event type…</option>
-                      {eventTypes
-                        .filter(
+                      <EventTypeOptions
+                        eventTypes={eventTypes.filter(
                           (et) =>
                             et.id === eventType ||
                             (NOTIFY_SOURCES.includes(et.source) && canProduce(et.source)),
-                        )
-                        .map((et) => (
-                          <option key={et.id} value={et.id}>
-                            {et.label} ({et.id})
-                          </option>
-                        ))}
+                        )}
+                      />
                     </select>
                     <p className="text-reported text-ink-3 mt-1.5">
                       Applies to events from now on. Nothing that already happened sends a

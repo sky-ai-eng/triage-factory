@@ -13,6 +13,8 @@ import { Bell, SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
 import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
+import VulnerableAlertList from '../components/VulnerableAlertList'
+import PackageFacts from '../components/PackageFacts'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import NotifyRulesPanel from '../components/NotifyRulesPanel'
@@ -561,6 +563,12 @@ function SwipeCard({
           {task.title}
         </h2>
 
+        {/* A vulnerable package's repository, highest severity and alert
+            count: what the title, which names the package, leaves out. */}
+        {task.vulnerable_package && (
+          <PackageFacts pkg={task.vulnerable_package} className="mb-3 shrink-0" />
+        )}
+
         {/* AI Summary — shimmer when scoring, content when scored */}
         {task.ai_summary ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">
@@ -596,8 +604,15 @@ function SwipeCard({
           </div>
         ) : null}
 
-        {/* Spacer */}
-        <div className="flex-1" />
+        {/* A vulnerable package's open alerts fill the room the spacer would,
+            scrolling inside the card rather than past it. */}
+        {task.vulnerable_package ? (
+          <div className="mb-3 min-h-0 flex-1 overflow-y-auto pr-1">
+            <VulnerableAlertList alerts={task.vulnerable_package.alerts} />
+          </div>
+        ) : (
+          <div className="flex-1" />
+        )}
 
         {/* Metadata footer */}
         <div className="flex items-end justify-between shrink-0">

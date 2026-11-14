@@ -2013,6 +2013,7 @@ func BareTaskRead(s db.TaskStore, orgID, taskID string) func() (*domain.Task, er
 		bare.Title, bare.SourceURL, bare.EntitySourceID = "", "", ""
 		bare.EntitySource, bare.EntityKind = "", ""
 		bare.OpenSubtaskCount, bare.SlackMessageCount = 0, 0
+		bare.VulnerablePackage = nil
 		return &bare, nil
 	}
 }

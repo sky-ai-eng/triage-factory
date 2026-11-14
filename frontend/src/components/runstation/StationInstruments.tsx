@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { Message, Conversation } from '../../types'
+import type { Message, Conversation, VulnerablePackage } from '../../types'
 import {
   claimIdleReadout,
   completionGloss,
@@ -16,9 +16,13 @@ import {
 import { compactNum, tint, type StationState } from './stationStyle'
 import { RailSection as Section } from './RailSection'
 import { RunArtifacts } from './RunArtifacts'
+import VulnerableAlertList from '../VulnerableAlertList'
 
 interface Props {
   conversation: Conversation
+  /** The run's task's package, when the task is about a vulnerable package:
+   *  its open alerts head the rail, since they are what the run is fixing. */
+  vulnerablePackage?: VulnerablePackage
   messages: Message[]
   state: StationState
   now: number
@@ -36,6 +40,7 @@ interface Props {
 // actually has — no faked context meter (that arrives with P4's telemetry).
 export function TelemetryRail({
   conversation,
+  vulnerablePackage,
   messages,
   state,
   now,
@@ -77,6 +82,12 @@ export function TelemetryRail({
 
   return (
     <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-line-1 bg-tint-1 px-4 py-4 lg:block">
+      {vulnerablePackage && (
+        <Section label="Alerts">
+          <VulnerableAlertList alerts={vulnerablePackage.alerts} />
+        </Section>
+      )}
+
       {/* Output gauge — the work product, the headline readout. */}
       <Section label="Output">
         <TokenGauge input={inputTokens} output={outputTokens} light={state.light} />

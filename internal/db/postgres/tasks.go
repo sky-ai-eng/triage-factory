@@ -412,6 +412,10 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 		args = append(args, f.Sources)
 		clauses = append(clauses, fmt.Sprintf("e.source = ANY($%d)", len(args)))
 	}
+	if len(f.EntityKinds) > 0 {
+		args = append(args, f.EntityKinds)
+		clauses = append(clauses, fmt.Sprintf("e.kind = ANY($%d)", len(args)))
+	}
 	teamClause, args := pgTaskTeamFilter(f.TeamIDs, args)
 	// pgTaskTeamFilter renders as " AND (...)" and numbers its placeholders
 	// off len(args), so it must stay last.
@@ -472,14 +476,25 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 // FacetEventTypes mirrors the SQLite impl: the same WHERE List renders, so
 // the counts and the rows beneath them can never come from two predicates.
 func (s *taskStore) FacetEventTypes(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	return s.facet(ctx, orgID, f, "t.event_type")
+}
+
+// FacetEntityKinds mirrors the SQLite impl.
+func (s *taskStore) FacetEntityKinds(ctx context.Context, orgID string, f db.TaskListFilter) ([]db.Facet, error) {
+	return s.facet(ctx, orgID, f, "e.kind")
+}
+
+// facet counts List's rows under f by one column. column is a constant of
+// this file, never caller input.
+func (s *taskStore) facet(ctx context.Context, orgID string, f db.TaskListFilter, column string) ([]db.Facet, error) {
 	where, args := pgTaskListWhere(orgID, f)
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT t.event_type, COUNT(*)
+		SELECT `+column+`, COUNT(*)
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 		WHERE `+where+`
-		GROUP BY t.event_type
-		ORDER BY t.event_type ASC`, args...)
+		GROUP BY `+column+`
+		ORDER BY `+column+` ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2037,6 +2052,11 @@ var pgTaskColumnsWithEntity = `
 		), '')
 		ELSE ''
 	END,
+	-- A vulnerable package's host and stored snapshot
+	-- (domain.Task.VulnerablePackage). NULL for every other kind, so no other
+	-- task carries its entity's snapshot.
+	CASE WHEN e.kind = 'vulnerable_package' THEN e.scope END,
+	CASE WHEN e.kind = 'vulnerable_package' THEN e.snapshot_json::text END,
 	-- The memory the task is still waiting on, and the newest try at
 	-- producing it. The attempt columns are NULL whenever memory_pending is
 	-- false, by construction rather than by a guard: they read the same owing
@@ -2071,6 +2091,10 @@ type taskScanState struct {
 	snoozeUntil, closedAt              sql.NullTime
 	claimedByAgentID, claimedByUserID  sql.NullString
 
+	// A vulnerable package's host and snapshot, both NULL on every other
+	// kind.
+	vulnerablePackageHost, vulnerablePackageSnapshot sql.NullString
+
 	// The memory-pending tail. memoryAttemptStartedAt is the one nullable of
 	// the four: its validity IS "an attempt exists", which is why the three
 	// text columns can be COALESCEd to empty in SQL without losing the
@@ -2101,6 +2125,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount, &t.RequestedReviewer,
+		&s.vulnerablePackageHost, &s.vulnerablePackageSnapshot,
 		&t.MemoryPending,
 		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
 		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,
@@ -2145,6 +2170,10 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	}
 	t.ClaimedByAgentID = s.claimedByAgentID.String
 	t.ClaimedByUserID = s.claimedByUserID.String
+	if s.vulnerablePackageHost.Valid {
+		snap, _ := domain.ParseVulnerablePackageSnapshot(s.vulnerablePackageSnapshot.String)
+		t.VulnerablePackage = &domain.TaskVulnerablePackage{Host: s.vulnerablePackageHost.String, Snapshot: snap}
+	}
 	if s.memoryAttemptStartedAt.Valid {
 		t.MemoryAttempt = &domain.MemoryAttemptSummary{
 			Outcome:      domain.MemoryAttemptOutcome(s.memoryAttemptOutcome),

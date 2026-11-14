@@ -1,5 +1,41 @@
 export type TaskSource = 'github' | 'jira' | 'linear' | 'slack'
-export type EntityKind = 'pr' | 'issue' | 'epic' | 'message'
+// The kinds an entity is stored under (domain.EntityKinds): a pull request,
+// an issue (GitHub, Jira or Linear), a vulnerable package in a GitHub
+// repository, or a Slack thread the bot started or was summoned into.
+export type EntityKind = 'pr' | 'issue' | 'vulnerable_package' | 'thread' | 'message'
+
+/** One open Dependabot alert on a vulnerable package. `summary` is the
+ *  advisory's, written outside the org: render it as plain text. */
+export interface DependabotAlert {
+  number: number
+  /** The alert's page on GitHub. */
+  url: string
+  ghsa_id: string
+  cve_id?: string
+  summary?: string
+  severity: DependabotSeverity
+  manifest_path: string
+  /** Absent when GitHub does not know. */
+  scope?: 'runtime' | 'development'
+  vulnerable_version_range?: string
+  /** Absent when no fixed version has been released. */
+  first_patched_version?: string
+}
+
+export type DependabotSeverity = 'low' | 'medium' | 'high' | 'critical'
+
+/** What a vulnerable-package task shows of its package. */
+export interface VulnerablePackage {
+  /** owner/name */
+  repo: string
+  ecosystem: string
+  package: string
+  /** Absent when no alert is open. */
+  highest_severity?: DependabotSeverity
+  open_alert_count: number
+  /** Highest severity first, by number within a severity. */
+  alerts: DependabotAlert[]
+}
 
 export interface Task {
   id: string
@@ -16,6 +52,9 @@ export interface Task {
   // only: dedup_key identifies the reviewer, by GitHub's id when known, and
   // pins it, so every event that bumps the task names the same one.
   requested_reviewer?: string
+  // On a task whose entity_kind is 'vulnerable_package', the package and its
+  // open alerts. Absent on every other task.
+  vulnerable_package?: VulnerablePackage
   severity?: string
   relevance_reason?: string
   scoring_status: string

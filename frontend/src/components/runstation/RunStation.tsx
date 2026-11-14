@@ -30,6 +30,7 @@ import {
 import DeliverableList from '../DeliverableList'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
+import PackageFacts from '../PackageFacts'
 import { PermissionPrompt } from '../permissions/PermissionPrompt'
 import ViewOnlyBadge from '../ViewOnlyBadge'
 import ScreenTranscript from './ScreenTranscript'
@@ -194,6 +195,7 @@ export default function RunStation({
         </div>
         <TelemetryRail
           conversation={conversation}
+          vulnerablePackage={task?.vulnerable_package}
           messages={messages}
           state={st}
           now={now}
@@ -335,6 +337,12 @@ function LabelPlate({
           {task?.title || 'Untitled run'}
         </h1>
       </div>
+
+      {/* A vulnerable package's repository, highest severity and alert
+          count; the rail lists the alerts themselves. */}
+      {task?.vulnerable_package && (
+        <PackageFacts pkg={task.vulnerable_package} className="mt-1.5 pl-[13px] text-ink-3/80" />
+      )}
 
       {hasChain && <ChainTrack steps={chain} />}
 
