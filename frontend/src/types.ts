@@ -449,8 +449,8 @@ export interface Conversation {
   resume_blocked_reason?: string
   // The boundary: when this conversation stopped being its task's live one,
   // and why — one of 'requeued' | 'delegated' | 'taken_over' |
-  // 'step_advanced' | 'team_archived' | 'failed' (internal/domain's
-  // EndedReason). Both keys are absent while it is open, and they travel
+  // 'reassigned' | 'step_advanced' | 'team_archived' | 'failed'
+  // (internal/domain's EndedReason). Both keys are absent while it is open, and they travel
   // together: the stamp writes both or neither.
   ended_at?: string
   ended_reason?: string

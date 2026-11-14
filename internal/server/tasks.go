@@ -88,9 +88,14 @@ type taskJSON struct {
 	// "vulnerable_package", the package and the Dependabot alerts open on it.
 	// Omitted on every other task.
 	VulnerablePackage *vulnerablePackageJSON `json:"vulnerable_package,omitempty"`
+	// ConversationID is the task's current conversation: the one a person's
+	// claim minted on a task a person holds, the agent's on a task the agent
+	// holds. Absent on a task nobody holds, and on one whose queued firing has
+	// not started its run.
+	ConversationID string `json:"conversation_id,omitempty"`
 	// MemoryPending says a conversation on this task ended without leaving
-	// the memory its successor is owed, and the dispatcher will not claim the
-	// task's next delegation until one exists. Not omitempty: false is a real
+	// the memory its successor is owed, and the dispatcher claims none of the
+	// task's conversations until one exists. Not omitempty: false is a real
 	// answer about the task, and a flag that vanishes when false reads as one
 	// the server failed to compute.
 	MemoryPending bool `json:"memory_pending"`
@@ -246,6 +251,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		ClaimedByUserID:     t.ClaimedByUserID,
 		TeamID:              teamIDString(t.TeamID),
 		Version:             t.Version,
+		ConversationID:      t.ConversationID,
 		MemoryPending:       t.MemoryPending,
 		MemoryAttempt:       memoryAttemptToJSON(t.MemoryAttempt),
 	}
@@ -1675,7 +1681,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	// against a queued task. WithoutCancel inherits the request's values
 	// (claims among them) while breaking the cancel chain.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	s.stopTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued)
+	s.stopTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued, "")
 	s.endTaskConversations(cleanupCtx, orgID, userID, taskID, domain.EndedRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
 	s.revertLinearStateIfApplicable(cleanupCtx, orgID, userID, task)

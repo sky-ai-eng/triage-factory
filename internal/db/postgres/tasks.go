@@ -1929,9 +1929,14 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 
 // taskMemoryOwedRowSQL is the owing-conversation condition, written once and
 // reused by everything that asks whether a task is still waiting on a memory:
-// a top-level conversation on this task that ended, and for which no
-// conversation_memory row was ever filed. The boundary stamp says the
+// a top-level conversation on this task that ended, that has run, and for
+// which no conversation_memory row was ever filed. The boundary stamp says the
 // conversation stopped; the missing memory row says its agent never wrote one.
+//
+// "Has run" is db.ConversationHasRunSQL. A conversation a person's claim
+// minted and nobody typed in has no turn to remember, so ending it owes
+// nothing: the task's next conversation does not wait, and the provisioner
+// opens no attempt for it.
 //
 // orgExpr / taskExpr are the asking query's own aliases — `t.org_id`/`t.id` on
 // the task read, `r.org_id`/`r.task_id` on the claim scan — so the two readers
@@ -1957,6 +1962,7 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
 		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
+		  AND ` + db.ConversationHasRunSQL("owed") + `
 		  AND NOT EXISTS (
 		      SELECT 1 FROM conversation_memory mem
 		      WHERE mem.conversation_id = owed.id)`
@@ -2065,7 +2071,10 @@ var pgTaskColumnsWithEntity = `
 	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "outcome") + `, ''),
 	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_kind") + `, ''),
 	COALESCE(` + taskMemoryAttemptSQL("t.org_id", "t.id", "error_message") + `, ''),
-	` + taskMemoryAttemptSQL("t.org_id", "t.id", "started_at")
+	` + taskMemoryAttemptSQL("t.org_id", "t.id", "started_at") + `,
+	-- The task's current conversation (domain.Task.ConversationID): the row
+	-- the claim scan treats as owning the task's tree, by the same definition.
+	COALESCE(` + taskLiveConversationSQL("t.org_id", "t.id") + `::text, '')`
 
 // pgTaskBareColumns is tasks' own columns — no entity join — in the order
 // taskScanState.bareTargets expects. It is the leading, identical prefix of
@@ -2129,6 +2138,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&t.MemoryPending,
 		&s.memoryAttemptOutcome, &s.memoryAttemptErrorKind,
 		&s.memoryAttemptErrorMessage, &s.memoryAttemptStartedAt,
+		&t.ConversationID,
 	)
 }
 

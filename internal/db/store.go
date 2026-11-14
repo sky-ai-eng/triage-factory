@@ -686,6 +686,12 @@ type SystemTxStores struct {
 	Blueprints BlueprintStore
 	Tasks      TaskStore
 
+	// Conversations joins the transaction, so a reassign that moves a task to
+	// another team ends the old team's conversation and mints the new
+	// holder's with the claim write, and the task never holds two un-ended
+	// conversations.
+	Conversations ConversationStore
+
 	// Ext carries the opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go) from the app pool and the
 	// transaction. Read through Extension; nil in a community build with no

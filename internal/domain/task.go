@@ -99,20 +99,32 @@ type Task struct {
 	// read in the same join; nil on every other task.
 	VulnerablePackage *TaskVulnerablePackage `json:"vulnerable_package,omitempty"`
 
+	// ConversationID is the task's current conversation: its newest un-ended
+	// top-level one, the row the claim scan treats as owning the task's tree.
+	// Derived on every read, never stored. On a task a person holds it is the
+	// conversation their claim minted; on a task the agent holds, the agent's.
+	// Empty on a task nobody holds, and on one whose queued firing has not
+	// started its run. Not projected by the bare write-returning columns.
+	ConversationID string `json:"conversation_id,omitempty"`
+
 	// MemoryPending says a conversation on this task ended without leaving a
 	// memory behind, and nothing has filed one for it yet. Derived on every
 	// read from the conversations/conversation_memory pair — there is no
 	// column, because the answer changes when a memory row lands and nothing
 	// would be there to clear a flag.
 	//
+	// Only a conversation that has run owes one (db.ConversationHasRunSQL): a
+	// conversation a person's claim minted and nobody typed in ends with
+	// nothing to hand off.
+	//
 	// It is a gate, not a decoration: the dispatcher's claim scan reads the
-	// same predicate and will not claim this task's next delegation while it
-	// holds, so the next conversation cannot open without the handoff the
-	// ended one owes. Nothing but delegation opens a conversation on a task
-	// today, and delegation mints a queued step the claim gate holds. Any
-	// future route that opens one directly must refuse with 409
-	// MEMORY_PENDING while this is set rather than quietly racing the
-	// provisioner.
+	// same predicate and claims none of this task's conversations while it
+	// holds, so the next turn cannot start without the handoff the ended
+	// conversation owes. Both ways a conversation opens on a task pass
+	// through that scan. A delegation mints a queued step, which the scan
+	// holds. A person's claim mints a parked conversation and composes no
+	// turn, and the first message a person sends to it waits behind the same
+	// check.
 	MemoryPending bool `json:"memory_pending"`
 	// MemoryAttempt is the newest attempt at the memory MemoryPending is
 	// waiting on, or nil when none has run yet (and always nil when the task

@@ -167,6 +167,9 @@ const (
 	// StopCauseTaskTakenOver — a person claimed a task the agent held. Also a
 	// still-open task, and the sentence a reader needs is who has it now.
 	StopCauseTaskTakenOver StopCause = "task_taken_over"
+	// StopCauseTaskReassigned — a person's claim was handed to someone on
+	// another team, and the task moved there with it.
+	StopCauseTaskReassigned StopCause = "task_reassigned"
 	// StopCauseTeamArchived — the team that owns the work was archived.
 	StopCauseTeamArchived StopCause = "team_archived"
 )
@@ -184,6 +187,8 @@ func (c StopCause) note() string {
 		return "Run stopped: the task was handed to a new delegation."
 	case StopCauseTaskTakenOver:
 		return "Run stopped: a person took the task over."
+	case StopCauseTaskReassigned:
+		return "Run stopped: the task was reassigned to a person on another team."
 	case StopCauseTeamArchived:
 		return "Run stopped: the team that owns this work was archived."
 	}

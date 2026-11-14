@@ -472,6 +472,85 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
+	// A person's claim cancels the task's queued firings. The conversation
+	// that claim mints keeps the task busy, so the request has to be settled
+	// by a claim the busy task would otherwise hold the row back from.
+	t.Run("RequestCancelForTask_requests_the_tasks_ready_and_leased_firings_and_a_busy_task_does_not_hold_them", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		const by, reason = "a-person", "claimed by a person"
+
+		// Leased first, while it is the only row a claim can take.
+		leased := seed.Tuple(t)
+		enqueue(t, s, orgID, leased, leased.TaskID, db.AgentClaimStamp{})
+		cf := claimOne(t, s)
+		ready := seed.Tuple(t)
+		other := seed.Tuple(t)
+		enqueue(t, s, orgID, ready, ready.TaskID, db.AgentClaimStamp{})
+		enqueue(t, s, orgID, other, other.TaskID, db.AgentClaimStamp{})
+
+		for _, tup := range []PendingFiringsTuple{leased, ready} {
+			n, err := s.RequestCancelForTask(ctx, orgID, tup.TaskID, by, reason)
+			if err != nil || n != 1 {
+				t.Fatalf("RequestCancelForTask = (%d, %v), want one request recorded", n, err)
+			}
+			got := one(t, s, orgID, tup.EntityID)
+			if got.CancelRequestedAt == nil || got.CancelRequestedBy != by || got.CancelReason != reason {
+				t.Errorf("row after the request = %+v, want it to carry the request, its requester and its reason", got)
+			}
+			// A request is not a disposition: the status is the holder's or
+			// the next claim's to move.
+			if got.Status == workitem.StatusCancelled {
+				t.Errorf("the request settled the row itself; status = %q", got.Status)
+			}
+			// Already requested: nothing left to record.
+			if n, err := s.RequestCancelForTask(ctx, orgID, tup.TaskID, by, reason); err != nil || n != 0 {
+				t.Errorf("a second RequestCancelForTask = (%d, %v), want (0, nil)", n, err)
+			}
+		}
+		if got := one(t, s, orgID, other.EntityID); got.CancelRequestedAt != nil {
+			t.Errorf("another task's firing took a request: %+v", got)
+		}
+		if n, err := s.RequestCancelForTask(ctx, orgID, "not-a-task", by, reason); err != nil || n != 0 {
+			t.Errorf("RequestCancelForTask on an id naming no task = (%d, %v), want (0, nil)", n, err)
+		}
+
+		// The task is busy from here on, as it is while a person holds it.
+		seed.LiveConversation(t, ready.TaskID, ready.PromptID)
+		batch, err := s.Claim(ctx, firingOwner, 10)
+		if err != nil {
+			t.Fatalf("Claim: %v", err)
+		}
+		if batch.Cancelled != 1 || len(batch.Firings) != 1 || batch.Firings[0].Firing.TaskID != other.TaskID {
+			t.Fatalf("Claim = %+v, want the requested row settled and only the other task's row leased", batch)
+		}
+		if got := one(t, s, orgID, ready.EntityID); got.Status != workitem.StatusCancelled {
+			t.Errorf("the busy task's requested row = %+v, want cancelled", got)
+		}
+		// The leased row is its holder's to settle, at its next renewal.
+		if _, err := s.RenewLease(ctx, cf.Receipt); !errors.Is(err, workitem.ErrCancelled) {
+			t.Fatalf("RenewLease on the requested leased row = %v, want ErrCancelled", err)
+		}
+	})
+
+	t.Run("RequestCancelForTask_on_a_transaction_bound_store_records_inside_the_transaction", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		rolledBack := errors.New("roll it back")
+		err := seed.InTx(t, func(tx db.PendingFiringsStore) error {
+			if n, err := tx.RequestCancelForTask(ctx, orgID, tup.TaskID, "a-person", "claimed by a person"); err != nil || n != 1 {
+				t.Fatalf("RequestCancelForTask on the transaction = (%d, %v), want one request", n, err)
+			}
+			return rolledBack
+		})
+		if !errors.Is(err, rolledBack) {
+			t.Fatalf("InTx returned %v, want the body's error", err)
+		}
+		if got := one(t, s, orgID, tup.EntityID); got.CancelRequestedAt != nil {
+			t.Errorf("a rolled-back request outlived its transaction: %+v", got)
+		}
+	})
+
 	t.Run("MarkFired_records_the_run_and_flips_done", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)

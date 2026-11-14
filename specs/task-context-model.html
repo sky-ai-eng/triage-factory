@@ -618,7 +618,7 @@ This task has {K} prior conversations. Their memory files are at _tfac/entity-me
         <li class="shared"><span class="col-name">type</span> 'interactive' — the reserved value, written by whatever opens a manual conversation (§9, §15)</li>
         <li class="shared"><span class="col-name">origin</span> untouched by this spec — a DEFAULT-only column nothing reads; a manual conversation needs a non-'blueprint' value to satisfy the CHECK, which is TFAC-378's to name or retire (§9)</li>
         <li class="added"><span class="col-name">ended_at</span> timestamptz — set by a boundary</li>
-        <li class="added"><span class="col-name">ended_reason</span> text — requeued | delegated | taken_over | step_advanced | team_archived | failed; app-validated, NULL while open — task end is not among them (§4)</li>
+        <li class="added"><span class="col-name">ended_reason</span> text — requeued | delegated | taken_over | reassigned | step_advanced | team_archived | failed; app-validated, NULL while open — task end is not among them (§4)</li>
         <li class="shared"><span class="col-name">archived_at</span> stays unused here (no Clear)</li>
       </ul>
     </div>
