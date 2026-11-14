@@ -58,7 +58,7 @@ func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string
 	return nil, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Context, string, string, string, string) (bool, error) {
+func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Context, string, string, string, string, string) (bool, error) {
 	return false, db.ErrClaimReleased
 }
 

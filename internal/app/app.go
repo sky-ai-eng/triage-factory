@@ -257,6 +257,13 @@ type App struct {
 	// startBrain/stopBrain, and nil-checked the same way a.wsBackplane is.
 	memoryProvisioner *memoryprovision.Manager
 
+	// delegatorNotices tells the person who delegated a conversation that it
+	// failed or is parked waiting on them, from the conversation rows. Non-nil
+	// for every brain-capable role in both modes, run with the rest of the
+	// brain in startBrain, and nudged through delegatorNoticeOwed. Nudge is
+	// nil-safe, so a role that never builds it needs no check.
+	delegatorNotices *delegate.DelegatorNotices
+
 	// metricsAddr is the resolved /metrics bind address telemetry.Init
 	// returned at boot ("" = metrics disabled) — kept so Run can start the
 	// listener after the workers are up. Role-independent: an executor
@@ -524,6 +531,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// credential one above). After buildRunCredentials and buildServer, whose
 	// recorder / credential seams and websocket hub it holds.
 	a.buildMemoryProvisioner()
+	if a.plan.brain {
+		a.delegatorNotices = delegate.NewDelegatorNotices(a.stores.Conversations, delegate.DefaultDelegatorNoticeInterval)
+	}
 	// The background-brain lease elector (TFAC-583) — control role in
 	// multi mode only. Local (role=all) never elects (startBrain runs
 	// directly, unconditionally, from Run); an executor is never

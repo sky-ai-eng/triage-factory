@@ -401,6 +401,13 @@ type Spawner struct {
 	// why a nil one is survivable — the doorbell only shortens the wait, and
 	// the brain's backstop sweep settles the debt either way.
 	memoryOwed func(orgID, conversationID string)
+	// delegatorNotice is the doorbell a failure or a park that waits on a
+	// person rings: the brain's DelegatorNotices sweep tells the person who
+	// delegated the conversation, from the rows. Nil-safe; set
+	// post-construction via SetOnDelegatorNotice and read through
+	// kickDelegatorNotice under mu, like memoryOwed beside it. A nil one costs
+	// the notice one sweep interval.
+	delegatorNotice func(orgID string)
 
 	// commitSignRequester queues a sandboxed run's commit signature requests
 	// for the control plane, handed to each engagement's relay server at
@@ -807,6 +814,15 @@ func (s *Spawner) SetOnMemoryOwed(fn func(orgID, conversationID string)) {
 	s.memoryOwed = fn
 }
 
+// SetOnDelegatorNotice wires the delegator-notice doorbell. Post-construction,
+// same pattern as SetOnMemoryOwed; nil (the default, and every test) leaves
+// the notice to the brain's next sweep.
+func (s *Spawner) SetOnDelegatorNotice(fn func(orgID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delegatorNotice = fn
+}
+
 // SetCommitSignRequester wires the queue a sandboxed run's sign_digest relay op
 // signs through. Post-construction, same pattern as SetOnMemoryOwed; the app
 // sets it on the roles that run sandboxed engagements in multi mode.
@@ -854,6 +870,20 @@ func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
 		return
 	}
 	fn(orgID, conversationID)
+}
+
+// kickDelegatorNotice rings the delegator-notice doorbell for orgID. Call it
+// once the failure or the park is recorded: the sweep it wakes reads the rows,
+// so a ring ahead of the write tells nobody until the next pass. Synchronous
+// for the reason kickMemoryOwed is.
+func (s *Spawner) kickDelegatorNotice(orgID string) {
+	s.mu.Lock()
+	fn := s.delegatorNotice
+	s.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(orgID)
 }
 
 // SetConversationFrameAudience scopes the spawner's conversation frames to

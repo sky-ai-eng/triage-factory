@@ -1291,7 +1291,7 @@ func (s *Spawner) processCompletion(
 		s.toastRunCompleted(orgID, creatorUserID, completedRow)
 	case domain.StatusFailed:
 		if completeErr == nil {
-			s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
+			s.kickDelegatorNotice(orgID)
 		}
 	}
 

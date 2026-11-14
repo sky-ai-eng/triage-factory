@@ -1457,6 +1457,14 @@ CREATE TABLE public.conversations (
     -- App-validated, no CHECK (the type/origin pattern).
     ended_at timestamp with time zone,
     ended_reason text,
+    -- When the brain posted the failure notice to the person who delegated
+    -- the conversation. NULL = not posted. Written only by the brain's sweep.
+    failure_noticed_at timestamp with time zone,
+    -- The parked_at of the park whose paused notice the brain opened. A park
+    -- keeps its parked_at until a claim or a resume clears it, so a value that
+    -- differs from parked_at names an earlier park, or none. Written only by
+    -- the brain's sweep.
+    pause_noticed_parked_at timestamp with time zone,
     CONSTRAINT conversations_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -2228,6 +2236,15 @@ CREATE INDEX idx_conversations_task ON public.conversations USING btree (task_id
 
 
 CREATE INDEX idx_conversations_trigger ON public.conversations USING btree (trigger_id);
+
+
+-- The brain's failure-notice read: failed rows accumulate, and the few still
+-- owed a notice are all it reads.
+CREATE INDEX idx_conversations_failure_notice_due ON public.conversations USING btree (completed_at, id) WHERE ((status = 'failed'::text) AND (failure_noticed_at IS NULL) AND (creator_user_id IS NOT NULL));
+
+-- The brain's paused-notice read: stored 'open' covers every concluded step,
+-- and only the live parks not yet told are what it reads.
+CREATE INDEX idx_conversations_pause_notice_due ON public.conversations USING btree (parked_at, id) WHERE ((status = 'open'::text) AND (park_reason IS NOT NULL) AND (parked_at IS NOT NULL) AND (creator_user_id IS NOT NULL) AND (ended_at IS NULL) AND (archived_at IS NULL) AND (pause_noticed_parked_at IS DISTINCT FROM parked_at));
 
 
 CREATE INDEX idx_swipe_events_action_created ON public.swipe_events USING btree (action, created_at);

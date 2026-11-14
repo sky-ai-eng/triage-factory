@@ -225,7 +225,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-fail")
 		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		ok, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, string(domain.ConversationFailureCrash))
+		ok, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, string(domain.ConversationFailureCrash), "")
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-failed after reap = (%v, %v), want ErrClaimReleased", ok, err)
 		}
@@ -356,7 +356,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if _, err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, other, fx.claimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("complete on another conversation = %v, want ErrClaimReleased", err)
 		}
-		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.ConversationFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
+		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.ConversationFailureCrash), ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-failed on another conversation = %v, want ErrClaimReleased", err)
 		}
 		if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, other, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user")); !errors.Is(err, db.ErrClaimReleased) {
@@ -518,7 +518,7 @@ func TestClaimFence_ConversationWritersTakeTheReleaseOrder(t *testing.T) {
 			return err
 		}},
 		{"MarkFailed", func(fx fenceFixture) error {
-			_, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, string(domain.ConversationFailureCrash))
+			_, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, string(domain.ConversationFailureCrash), "")
 			return err
 		}},
 		{"SetSession", func(fx fenceFixture) error {

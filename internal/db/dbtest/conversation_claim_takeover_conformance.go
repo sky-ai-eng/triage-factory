@@ -520,7 +520,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if err != nil || again == nil || again.ID != resumed.ID {
 			t.Fatalf("re-claim of the resumed step = (%+v, %v), want %s", again, err, resumed.ID)
 		}
-		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, resumed.ID, again.ClaimID, string(domain.ConversationFailureUnclassified)); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, resumed.ID, again.ClaimID, string(domain.ConversationFailureUnclassified), ""); err != nil || !ok {
 			t.Fatalf("MarkFailedIfActiveForClaimSystem(resumed) = (%v, %v)", ok, err)
 		}
 

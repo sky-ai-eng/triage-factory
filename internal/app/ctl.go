@@ -31,6 +31,9 @@ import (
 //	"github_refresh_marked" → the brain's look at an org's GitHub refresh
 //	                        marks after a webhook delivery wrote some,
 //	                        holder-gated the same way
+//	"delegator_notice"    → the brain's DelegatorNotices pass after a run
+//	                        failed or parked waiting on its delegator,
+//	                        holder-gated the same way
 //	"sign_request"        → this control pod's commit signer, NOT
 //	                        holder-gated: every control pod signs
 //	"sign_done"           → the signature request this executor's run is
@@ -79,7 +82,7 @@ func (a *App) dispatchCtl(payload string) {
 		if a.spawner != nil {
 			a.spawner.HandleCtlNotification(payload)
 		}
-	case "trigger", "pollsoon", "cred_request", "sources_changed", "memory_owed", ctlbus.KindGitHubRefreshMarked:
+	case "trigger", "pollsoon", "cred_request", "sources_changed", "memory_owed", ctlbus.KindGitHubRefreshMarked, ctlbus.KindDelegatorNotice:
 		var msg ctlbus.Message
 		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 			appLog.Warn("tf_ctl: malformed relay message; dropping", "error", err)

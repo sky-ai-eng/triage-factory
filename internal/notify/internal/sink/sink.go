@@ -8,8 +8,14 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// Guard is a producer's own write, run first in the transaction that writes
+// a notification: the notification is written only when it reports true, and
+// a failed notification write rolls it back. notify.Guard documents it.
+type Guard func(ctx context.Context, tx db.SystemTxStores) (bool, error)
 
 // Kind is what a sink needs of a registered kind. notify's concrete kind is
 // the only implementation.
@@ -29,11 +35,12 @@ type EventKey struct {
 
 // Sink carries out the verbs and answers the reads, OpenOrgs and OpenEvents.
 // p and the members of active and keep are the kind's params type. For the
-// event verbs, k is notify's event kind and raise is a notify.EventRaise.
+// event verbs, k is notify's event kind and raise is a notify.EventRaise. A
+// nil guard on Set or Post is none.
 type Sink interface {
-	Set(ctx context.Context, k Kind, orgID string, p any, active bool)
+	Set(ctx context.Context, k Kind, orgID string, p any, active bool, guard Guard)
 	Sync(ctx context.Context, k Kind, orgID string, active, keep []any)
-	Post(ctx context.Context, k Kind, orgID string, p any)
+	Post(ctx context.Context, k Kind, orgID string, p any, guard Guard)
 	ClearSource(ctx context.Context, orgID, source string)
 	OpenOrgs(ctx context.Context, k Kind) ([]string, error)
 

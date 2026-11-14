@@ -33,7 +33,7 @@ import (
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
 // ("kick", "new", "ack", "cred_request", "memory_owed", "sign_request",
-// "sign_done", "github_refresh_marked").
+// "sign_done", "github_refresh_marked", "delegator_notice").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -69,6 +69,12 @@ const Channel = "tf_ctl"
 // pod whose delivery just wrote refresh marks for the org, nudging the brain to
 // read them now. Lossy like the rest: the marks are stored, so a dropped
 // message costs only the wait until the next pass that reads them.
+//
+// KindDelegatorNotice uses OrgID: a conversation in the org just failed, or
+// parked waiting on the person who delegated it, nudging the brain's
+// delegator-notice sweep (internal/delegate.DelegatorNotices) to tell them now.
+// Lossy like the rest: the sweep reads the conversation rows, so a dropped
+// message costs one sweep interval.
 type Message struct {
 	Kind           string `json:"kind"`
 	Manager        string `json:"manager,omitempty"`
@@ -82,6 +88,10 @@ type Message struct {
 // KindGitHubRefreshMarked is the Message kind a GitHub webhook receiver
 // publishes after a delivery's refresh marks commit.
 const KindGitHubRefreshMarked = "github_refresh_marked"
+
+// KindDelegatorNotice is the Message kind the spawner's delegator-notice
+// doorbell publishes after a run fails or parks waiting on its delegator.
+const KindDelegatorNotice = "delegator_notice"
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled
 // connection is fine, pg_notify() doesn't require a dedicated session

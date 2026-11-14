@@ -15,3 +15,11 @@ func AssertClaimActiveInTx(ctx context.Context, tx *sql.Tx, orgID, conversationI
 // ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
 // ledger conformance suite can hold the two to each other.
 const ActionObjectIDSQLForTest = pgActionObjectIDSQL
+
+// PauseNoticesDueQueryForTest and FailureNoticesDueQueryForTest expose the
+// delegator-notice reads' statements so the query-plan test can EXPLAIN what
+// the store runs.
+var (
+	PauseNoticesDueQueryForTest   = pauseNoticesDueQuery
+	FailureNoticesDueQueryForTest = failureNoticesDueQuery
+)
