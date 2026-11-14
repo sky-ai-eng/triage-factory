@@ -30,7 +30,8 @@ export interface VulnerablePackage {
   repo: string
   ecosystem: string
   package: string
-  /** Absent when no alert is open. */
+  /** Absent when no open alert carries one of the four severities, which
+   *  includes a package with no open alert. */
   highest_severity?: DependabotSeverity
   open_alert_count: number
   /** Highest severity first, by number within a severity. */

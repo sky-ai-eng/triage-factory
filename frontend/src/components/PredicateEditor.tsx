@@ -391,9 +391,7 @@ function EnumListField({
         ))}
       </div>
       {selected.length === 0 && (
-        <p className="text-reported text-ink-3">
-          None selected: no filter on the {label.toLowerCase()}.
-        </p>
+        <p className="text-reported text-ink-3">None selected: no filter.</p>
       )}
     </div>
   )

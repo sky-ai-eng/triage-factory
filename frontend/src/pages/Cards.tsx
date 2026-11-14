@@ -605,9 +605,16 @@ function SwipeCard({
         ) : null}
 
         {/* A vulnerable package's open alerts fill the room the spacer would,
-            scrolling inside the card rather than past it. */}
+            scrolling inside the card rather than past it. The card is a drag
+            target on both axes, which turns touch scrolling off beneath it, so
+            the list starts no drag and scrolls vertically itself: a swipe
+            meant to read the next alert never snoozes or delegates the task. */}
         {task.vulnerable_package ? (
-          <div className="mb-3 min-h-0 flex-1 overflow-y-auto pr-1">
+          <div
+            ref={startsNoDrag}
+            className="mb-3 min-h-0 flex-1 overflow-y-auto pr-1"
+            style={{ touchAction: 'pan-y' }}
+          >
             <VulnerableAlertList alerts={task.vulnerable_package.alerts} />
           </div>
         ) : (
@@ -643,6 +650,17 @@ function SwipeCard({
       </div>
     </motion.div>
   )
+}
+
+// startsNoDrag keeps a press inside el from starting the card's drag. Motion
+// listens for pointerdown natively on the card, ahead of React's delegated
+// handlers, so a React onPointerDown that stops propagation arrives too late;
+// a native listener on el runs first.
+function startsNoDrag(el: HTMLElement | null) {
+  if (!el) return
+  const stop = (e: PointerEvent) => e.stopPropagation()
+  el.addEventListener('pointerdown', stop)
+  return () => el.removeEventListener('pointerdown', stop)
 }
 
 function PriorityGauge({ value }: { value: number }) {

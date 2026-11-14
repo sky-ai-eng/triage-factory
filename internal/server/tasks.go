@@ -133,8 +133,8 @@ type vulnerablePackageJSON struct {
 	Ecosystem string `json:"ecosystem"`
 	Package   string `json:"package"`
 	// HighestSeverity is the highest severity among the open alerts, one of
-	// low, medium, high and critical. Absent when no alert is open, which is
-	// the state of a package whose last alert closed.
+	// low, medium, high and critical. Absent when no open alert carries one of
+	// those four, which includes a package whose last alert closed.
 	HighestSeverity string `json:"highest_severity,omitempty"`
 	OpenAlertCount  int    `json:"open_alert_count"`
 	// Alerts are the open alerts, highest severity first and by number within

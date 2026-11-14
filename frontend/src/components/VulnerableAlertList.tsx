@@ -37,8 +37,6 @@ export default function VulnerableAlertList({
               rel="noopener noreferrer"
               title={`Open alert #${a.number} on GitHub`}
               className="inline-flex min-w-0 items-center gap-1 text-ink-2 transition-colors hover:text-warm"
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => e.stopPropagation()}
             >
               <span className="truncate">{a.ghsa_id || `Alert #${a.number}`}</span>
               <ExternalLink size={10} className="shrink-0" aria-hidden />
