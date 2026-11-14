@@ -398,6 +398,26 @@ found emits `ci_check_failed`. A repository's first listing therefore
 announces every open alert, and since `alert_opened` has no `dedup_key`, a
 handler that matches them makes one task per package.
 
+A vulnerable package has no author, so its events route by tracked set, not
+by owner: an event reaches every team that tracks the repository and has a
+matching handler, and its task is visible to each of them. `applies_to_unowned`
+has no effect on these events, and the catalog shows no toggle for it. When
+several teams' triggers match, they fire in order of the team's highest
+matched-rule `default_priority` (0.5 for a team that matched only by a
+trigger), then the lowest team id, and the first to fire claims the task.
+
+A handler on `alert_opened` filters on the alert that opened, not on the
+package's other alerts: `min_severity` (`low`, `medium`, `high` or `critical`,
+matching that severity or higher), `ecosystem_in` (GitHub's advisory
+ecosystems: `actions`, `composer`, `erlang`, `go`, `maven`, `npm`, `nuget`,
+`other`, `pip`, `pub`, `rubygems`, `rust` and `swift`), `package_in` (package
+names, compared ignoring case), `scope` (`runtime` or `development`; an alert
+GitHub gives no scope matches neither), `has_patched_version`, and `repo_in`.
+A value outside a field's set is refused as [Handler
+predicates](#handler-predicates) describes. `resolved` and `unreachable` have
+no predicate fields. One rule ships for `alert_opened`, matching every alert
+and disabled.
+
 Each package on a host the org has left is retired with `unreachable` at the
 start of the next GitHub cycle, as its pull requests are, and closes with its
 tasks. Nothing fixed its alerts, so pointing the org back at the old host
@@ -1158,7 +1178,7 @@ A GitHub handler predicate names people and teams by GitHub's id, which a rename
 
 As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
-Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate.repo_in`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
+Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request or vulnerable package references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate.repo_in`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
 
 ### GitHub Vulnerable Package Snapshot
 
