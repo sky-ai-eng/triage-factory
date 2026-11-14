@@ -381,6 +381,10 @@ type entityCoordinate struct {
 	// repository (domain.GitHubIdentity), the only thing a GitHub entity is
 	// resolved from. externalID is unused for GitHub.
 	github domain.GitHubIdentity
+	// read marks the coordinate of an addressed read rather than of a write.
+	// It decides which repositories a relayed GitHub identity is admitted
+	// under (relayedRepositoryAdmitted).
+	read bool
 }
 
 // resolveTouchedEntityInfo maps a coordinate to an entities row, returning an
@@ -471,8 +475,8 @@ func followsProviderKey(info ConversationInfo) bool {
 // read failed, or the act names no pull request or issue), one whose
 // repository id names no row the run may record against, one from another
 // scope than the org's current GitHub host, and, in multi mode, one whose
-// node id names an entity in a repository the run does not work in
-// (runMayRecordAgainst): the node id was relayed too. No GitHub entity is found
+// node id names an entity in a repository the relayed identity is not
+// admitted under (relayedRepositoryAdmitted): the node id was relayed too. No GitHub entity is found
 // or created from a key alone: a key's owner/repo is a spelling, which GitHub
 // may since have given to another repository.
 func resolveGitHubEntity(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (*domain.Entity, error) {
@@ -492,7 +496,7 @@ func resolveGitHubEntity(ctx context.Context, stores db.Stores, info Conversatio
 		return nil, err
 	}
 	if entity != nil {
-		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, entity.RepositoryID); err != nil || !ok {
+		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, entity.RepositoryID, c.read); err != nil || !ok {
 			return nil, err
 		}
 		return entity, nil
@@ -501,7 +505,7 @@ func resolveGitHubEntity(ctx context.Context, stores db.Stores, info Conversatio
 	if !ok {
 		return nil, nil
 	}
-	row, err := githubRepositoryRow(ctx, stores, info, scope, id)
+	row, err := githubRepositoryRow(ctx, stores, info, scope, id, c.read)
 	if err != nil || row == nil {
 		return nil, err
 	}
@@ -527,16 +531,16 @@ func resolveGitHubEntity(ctx context.Context, stores db.Stores, info Conversatio
 // carries no id, or names no row the run may record against.
 //
 // In multi mode the id was read by the run's sidecar and relayed, so it must
-// name a row the run may write to: one of its conversation_worktrees rows, or
-// its task's own repository (IsTaskOwnRepository), the same two arms the
-// repository gate admits a write by. Any other id is answered nil, which
-// records the act unlinked, so a sidecar cannot choose the repository an act
-// is filed under. Local mode has no relay and no gate, and a repository with
+// name a row the identity is admitted under (relayedRepositoryAdmitted): for
+// an act, a repository the run works in; for an addressed read (read), one the
+// run's credential reads. Any other id is answered nil, which records the act
+// unlinked and the read untouched, so a sidecar cannot choose the repository
+// either is filed under. Local mode has no relay and no gate, and a repository with
 // no row there is registered by its id first (FindOrCreateByExternalID, under
 // the name GitHub answered with it), never get-or-created from a name; a name
 // a row holds under another id is a repository GitHub has given the name to
 // since, which the poller has not seen yet, and is answered nil.
-func githubRepositoryRow(ctx context.Context, stores db.Stores, info ConversationInfo, host string, id domain.GitHubIdentity) (*domain.Repository, error) {
+func githubRepositoryRow(ctx context.Context, stores db.Stores, info ConversationInfo, host string, id domain.GitHubIdentity, read bool) (*domain.Repository, error) {
 	if id.RepositoryID == "" || host == "" || stores.Repos == nil {
 		return nil, nil
 	}
@@ -548,7 +552,7 @@ func githubRepositoryRow(ctx context.Context, stores db.Stores, info Conversatio
 		if row == nil {
 			return nil, nil
 		}
-		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, row.ID); err != nil || !ok {
+		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, row.ID, read); err != nil || !ok {
 			return nil, err
 		}
 		return row, nil
@@ -579,20 +583,62 @@ func githubRepositoryRow(ctx context.Context, stores db.Stores, info Conversatio
 	return &registered, nil
 }
 
-// relayedRepositoryAdmitted reports whether an act may be filed under the
-// repository whose registry row is repositoryID: always in local mode, and in
-// multi mode, where the identity naming it was relayed by the run's sidecar,
-// only for a repository the run works in (runMayRecordAgainst).
-func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string) (bool, error) {
+// relayedRepositoryAdmitted reports whether an act, or an addressed read
+// (read), may be filed under the repository whose registry row is
+// repositoryID: always in local mode, and in multi mode, where the identity
+// naming it was relayed by the run's sidecar, only for a repository the run
+// could have reached that way. An act is admitted in a repository the run
+// works in (runMayRecordAgainst), the set its writes are authorized over. A
+// read is admitted there and in every other repository the run's credential
+// reads (runMayReadRepository), so a read the credential allowed is not
+// dropped here, and one it could not have made is.
+func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string, read bool) (bool, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return true, nil
 	}
 	ok, err := runMayRecordAgainst(ctx, stores, info, repositoryID)
+	if err == nil && !ok && read {
+		ok, err = runMayReadRepository(ctx, stores, info, repositoryID)
+	}
 	if err == nil && !ok {
-		agenthostLog.Info("a relayed GitHub id names a repository the run does not work in; recording unlinked",
-			"conversation", info.ConversationID, "repository", repositoryID)
+		agenthostLog.Info("a relayed GitHub id names a repository the run does not reach; recording unlinked",
+			"conversation", info.ConversationID, "repository", repositoryID, "read", read)
 	}
 	return ok, err
+}
+
+// runMayReadRepository reports whether the repository whose registry row is
+// repositoryID is one the run's GitHub credential is minted for
+// (AuthorizedRepositories): the repositories the run and the rest of its
+// task's conversations work in, or, for a run with no GitHub anchor, every
+// repository its team tracks. It is the set the provisioner mints the run's
+// tokens over, computed by the same function, so the gate admits what the
+// credential reads and no more.
+//
+// The task is resolved from the conversation here, as IsTaskOwnRepository
+// resolves it, rather than taken from a field a caller stamped. A
+// conversation that cannot be read admits nothing.
+func runMayReadRepository(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string) (bool, error) {
+	if stores.Conversations == nil || info.ConversationID == "" || repositoryID == "" {
+		return false, nil
+	}
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil {
+		return false, err
+	}
+	if conv == nil {
+		return false, nil
+	}
+	repos, err := AuthorizedRepositories(ctx, stores, info.OrgID, info.TeamID, conv.TaskID, info.ConversationID)
+	if err != nil {
+		return false, err
+	}
+	for _, repo := range repos {
+		if repo.ID == repositoryID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // runMayRecordAgainst reports whether the repository whose registry row is
@@ -632,6 +678,7 @@ func runMayRecordAgainst(ctx context.Context, stores db.Stores, info Conversatio
 // read path carries no tx. It returns the entity it resolved (empty for a
 // skipped or failed resolve).
 func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) string {
+	c.read = true
 	id, err := resolveTouchedEntityInfo(ctx, stores, info, c)
 	if err != nil {
 		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
@@ -817,7 +864,7 @@ func resolveActionRepository(ctx context.Context, stores db.Stores, info Convers
 		if act.Action == domain.ActionGitDenied || act.Action == domain.ActionGHWriteDenied {
 			row, e = deniedRepository(ctx, stores, info, act)
 		} else {
-			row, e = githubRepositoryRow(ctx, stores, info, act.Scope, github)
+			row, e = githubRepositoryRow(ctx, stores, info, act.Scope, github, false)
 		}
 		return e
 	})

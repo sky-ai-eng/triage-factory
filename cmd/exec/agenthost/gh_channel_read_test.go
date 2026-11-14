@@ -2,12 +2,15 @@ package agenthost
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -141,16 +144,45 @@ func TestRelay_RecordGHRead_TouchesTheEntity(t *testing.T) {
 	}
 }
 
-// TestRelay_RecordGHRead_RepositoryOutsideTheRunIsNotTouched: in multi mode the
-// ids were read by the run's sidecar and relayed, so a read links only an
-// object in a repository the run works in, the rule a relayed write's link
-// follows. A read of anything else creates no entity and no link.
-func TestRelay_RecordGHRead_RepositoryOutsideTheRunIsNotTouched(t *testing.T) {
+// trackRepos makes ids the tracked repositories of the run's team.
+func trackRepos(t *testing.T, stores db.Stores, info ConversationInfo, ids ...string) {
+	t.Helper()
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), info.OrgID, info.TeamID, testScope("github"), ids); err != nil {
+		t.Fatalf("track repositories: %v", err)
+	}
+}
+
+// relayedPullRead relays a read of the pull request numbered number in
+// owner/repo, whose repository GitHub calls repositoryID, and reports whether
+// the run now has a touched link to its entity.
+func relayedPullRead(t *testing.T, conn *sql.DB, stores db.Stores, info ConversationInfo, srv *RelayServer, owner, repo string, number int, repositoryID string) bool {
+	t.Helper()
+	slug := owner + "/" + repo
+	relayGHRead(t, srv, agentproc.RecordGHReadArgs{
+		Owner: owner, Repo: repo, Number: number,
+		RepositoryID: repositoryID, RepositoryName: slug,
+		ObjectNodeID: "PR_" + repo + strconv.Itoa(number), ObjectKind: domain.EntityKindPullRequest,
+	})
+	ent, err := stores.Entities.GetBySourceSystem(context.Background(), info.OrgID, "github", testScope("github"), domain.PullRequestTarget(slug, number))
+	if err != nil {
+		t.Fatalf("read the entity of %s#%d: %v", slug, number, err)
+	}
+	return ent != nil && touchRole(t, conn, info.ConversationID, ent.ID) == domain.MemoryRoleTouched
+}
+
+// TestRelay_RecordGHRead_AnchoredRunTouchesOnlyItsRepositories: in multi mode
+// the ids were read by the run's sidecar and relayed, so a read links only an
+// object the run's credential could have read. A run that works in a
+// repository holds a credential for the repositories it works in and no
+// other, so a read relayed for another repository, one its team tracks
+// included, creates no entity and no link.
+func TestRelay_RecordGHRead_AnchoredRunTouchesOnlyItsRepositories(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	runmode.SetForTest(t, runmode.ModeMulti)
 	ctx := context.Background()
 	ownID := registerRepo(t, stores, "octo", "repo", "1")
-	registerRepo(t, stores, "octo", "other", "2")
+	otherID := registerRepo(t, stores, "octo", "other", "2")
+	trackRepos(t, stores, info, ownID, otherID)
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, info.OrgID, domain.ConversationWorktree{
 		ConversationID: info.ConversationID, RepositoryID: ownID, Ref: "refs/heads/main", Path: "/runs/octo/repo/main",
 	}); err != nil {
@@ -158,23 +190,95 @@ func TestRelay_RecordGHRead_RepositoryOutsideTheRunIsNotTouched(t *testing.T) {
 	}
 	srv := NewRelayServer(stores, info, nil)
 
-	relayGHRead(t, srv, agentproc.RecordGHReadArgs{
-		Owner: "octo", Repo: "repo", Number: 7,
-		RepositoryID: "1", RepositoryName: "octo/repo", ObjectNodeID: "PR_7", ObjectKind: domain.EntityKindPullRequest,
-	})
-	relayGHRead(t, srv, agentproc.RecordGHReadArgs{
-		Owner: "octo", Repo: "other", Number: 4,
-		RepositoryID: "2", RepositoryName: "octo/other", ObjectNodeID: "PR_other4", ObjectKind: domain.EntityKindPullRequest,
-	})
-
-	own, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, "github", testScope("github"), "octo/repo#7")
-	if err != nil || own == nil {
-		t.Fatalf("a read in the run's repository resolved no entity: ent=%v err=%v", own, err)
+	if !relayedPullRead(t, conn, stores, info, srv, "octo", "repo", 7, "1") {
+		t.Error("a read in the repository the run works in left no touched link")
 	}
-	if role := touchRole(t, conn, info.ConversationID, own.ID); role != domain.MemoryRoleTouched {
-		t.Errorf("link role in the run's repository = %q, want %q", role, domain.MemoryRoleTouched)
+	if relayedPullRead(t, conn, stores, info, srv, "octo", "other", 4, "2") {
+		t.Error("a read relayed for a tracked repository the run's credential does not reach was linked")
 	}
 	if e, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, "github", testScope("github"), "octo/other#4"); err != nil || e != nil {
-		t.Errorf("octo/other#4 = %+v, %v; want no entity for a repository the run does not work in", e, err)
+		t.Errorf("octo/other#4 = %+v, %v; want no entity", e, err)
+	}
+}
+
+// TestRelay_RecordGHRead_UnanchoredRunTouchesWhatItsTeamTracks: a run with no
+// GitHub anchor, one a Jira issue or a chat message started, works in no
+// repository, and its credential reads every repository its team tracks. A
+// read it relays is linked in any of them and in no other. What the run may
+// file an act under is unchanged: with no repository it works in, a relayed
+// write stays unlinked.
+func TestRelay_RecordGHRead_UnanchoredRunTouchesWhatItsTeamTracks(t *testing.T) {
+	conn, stores, info := newCaptureStoresConn(t, true)
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ctx := context.Background()
+	trackedID := registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "untracked", "2")
+	trackRepos(t, stores, info, trackedID)
+	srv := NewRelayServer(stores, info, nil)
+
+	if !relayedPullRead(t, conn, stores, info, srv, "octo", "repo", 7, "1") {
+		t.Error("a read in a repository the run's team tracks left no touched link")
+	}
+	if relayedPullRead(t, conn, stores, info, srv, "octo", "untracked", 4, "2") {
+		t.Error("a read relayed for a repository the run's team does not track was linked")
+	}
+
+	// The exec verbs' relayed read touch passes the same gate.
+	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
+	rt.RecordReadTouch(ctx, domain.ProviderGitHub, "octo/repo#8", "", domain.EntityContainer{},
+		domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_repo8", Kind: domain.EntityKindPullRequest}, "")
+	if e, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, "github", testScope("github"), "octo/repo#8"); err != nil || e == nil {
+		t.Errorf("octo/repo#8 = %+v, %v; want the entity a relayed exec read touched", e, err)
+	}
+
+	act := domain.ExternalAction{Provider: domain.ProviderGitHub, Action: domain.ActionLabelAdded, Target: "octo/repo#7", Credential: domain.CredentialGitHubApp}
+	recordExternalWrite(ctx, stores, srv.info, nil, &act, domain.EntityContainer{},
+		domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_repo7", Kind: domain.EntityKindPullRequest})
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 || acts[0].EntityID != "" || acts[0].RepositoryID != "" {
+		t.Errorf("a relayed write in a repository the run does not work in = %+v, want it recorded unlinked", acts)
+	}
+}
+
+// TestRelay_RecordGHRead_ReadsACheckoutOfItsTasksOtherConversations: a task's
+// conversations share one run tree, and the run's credential covers the
+// repositories any of them checked out. A read in one of those is linked,
+// though this conversation holds no worktree row for it.
+func TestRelay_RecordGHRead_ReadsACheckoutOfItsTasksOtherConversations(t *testing.T) {
+	conn, stores, info := newCaptureStoresConn(t, true)
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ctx := context.Background()
+	ownID := registerRepo(t, stores, "octo", "repo", "1")
+	siblingID := registerRepo(t, stores, "octo", "other", "2")
+	elsewhereID := registerRepo(t, stores, "octo", "elsewhere", "3")
+	trackRepos(t, stores, info, ownID, siblingID, elsewhereID)
+
+	const sibling = "44444444-4444-4444-4444-444444444444"
+	for _, stmt := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO entities (id, source, source_id, kind, scope, repository_id) VALUES ('ent-1', 'github', 'octo/repo#1', 'pr', ?, ?)`, []any{testScope("github"), ownID}},
+		{`INSERT INTO events (id, event_type, entity_id) VALUES ('evt-1', 'github:pr:ci_check_failed', 'ent-1')`, nil},
+		{`INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES ('task-1', 'ent-1', 'github:pr:ci_check_failed', 'evt-1')`, nil},
+		{`UPDATE conversations SET task_id = 'task-1' WHERE id = ?`, []any{info.ConversationID}},
+		{`INSERT INTO conversations (id, origin, status, task_id) VALUES (?, 'interactive', 'running', 'task-1')`, []any{sibling}},
+	} {
+		if _, err := conn.Exec(stmt.query, stmt.args...); err != nil {
+			t.Fatalf("seed (%s): %v", stmt.query, err)
+		}
+	}
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, info.OrgID, domain.ConversationWorktree{
+		ConversationID: sibling, RepositoryID: siblingID, Ref: "refs/heads/main", Path: "/runs/octo/other/main",
+	}); err != nil {
+		t.Fatalf("seed the other conversation's worktree: %v", err)
+	}
+	srv := NewRelayServer(stores, info, nil)
+
+	if !relayedPullRead(t, conn, stores, info, srv, "octo", "other", 4, "2") {
+		t.Error("a read in a repository another conversation of the task checked out left no touched link")
+	}
+	if relayedPullRead(t, conn, stores, info, srv, "octo", "elsewhere", 5, "3") {
+		t.Error("a read relayed for a tracked repository no conversation of the task works in was linked")
 	}
 }

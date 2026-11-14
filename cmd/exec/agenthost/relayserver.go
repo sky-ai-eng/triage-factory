@@ -961,8 +961,8 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		}
 		// The read already returned; its touch is best-effort. The entity is
 		// resolved here from the ids the injector read, under this server's
-		// relayed info, so a repository the run does not work in is not
-		// linked (relayedRepositoryAdmitted).
+		// relayed info, so a repository the run's credential does not read
+		// is not linked (relayedRepositoryAdmitted).
 		RecordGHChannelRead(ctx, s.stores, s.info, ghwrite.ReadObservation{
 			ObjectRef: ghwrite.ObjectRef{Owner: a.Owner, Repo: a.Repo, Number: a.Number},
 			Identity: domain.GitHubIdentity{
