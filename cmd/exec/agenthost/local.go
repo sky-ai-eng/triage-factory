@@ -1547,29 +1547,35 @@ type repoClient struct {
 	identity ghclient.Identity
 }
 
-// githubClientForRepo resolves an authenticated client for owner/repo, gated +
-// down-scoped in multi mode (see resolveRepoClient).
+// githubClientForRepo resolves an authenticated client for owner/repo, gated,
+// and down-scoped in multi mode (see resolveRepoClient).
 func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, error) {
 	client, _, err := c.resolveRepoClient(ctx, owner, repo)
 	return client, err
 }
 
 // resolveRepoClient is the single funnel every exec-gh GitHub call goes
-// through. In MULTI mode it enforces the per-run repo gate (the run may only
+// through. In both modes it enforces the per-run repo gate (the run may only
 // touch a repo its team tracks AND that it has materialized — its eagerly-
-// cloned task repo, recorded in conversation_worktrees, or a workspace-add'd one) and
-// resolves a per-repo DOWN-SCOPED client (the injected token is narrowed to
-// owner/repo), memoized per repo so several calls in one subcommand mint once.
-// In LOCAL mode (N=1, unscoped — mirroring the git proxy being nil locally) it
-// is the prior behavior verbatim: no gate, no scoping.
+// cloned task repo, recorded in conversation_worktrees, or a workspace-add'd
+// one). In MULTI mode it then resolves a per-repo DOWN-SCOPED client (the
+// injected token is narrowed to owner/repo), memoized per repo so several
+// calls in one subcommand mint once. In LOCAL mode the client is the org's
+// credential, unscoped.
 func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
+	if err := c.authorizeRepo(ctx, owner, repo); err != nil {
+		return nil, ghclient.IdentityUnknown, err
+	}
+	return c.repoClientPastGate(ctx, owner, repo)
+}
+
+// repoClientPastGate is resolveRepoClient after its gate has admitted
+// owner/repo, or for a read the gate does not apply to (recordingRepoClient).
+func (c *LocalClient) repoClientPastGate(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		client, identity, err := c.legacyRepoClient(ctx, owner, repo)
 		c.noteGitHubCredential(identity)
 		return client, identity, err
-	}
-	if err := c.authorizeRepo(ctx, owner, repo); err != nil {
-		return nil, ghclient.IdentityUnknown, err
 	}
 	key := strings.ToLower(owner + "/" + repo)
 	if rc, ok := c.ghClients[key]; ok {
@@ -1585,6 +1591,19 @@ func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string)
 	}
 	c.ghClients[key] = repoClient{client: client, identity: identity}
 	return client, identity, nil
+}
+
+// recordingRepoClient is the client targetIdentity reads a recorded act's
+// objects through. In local mode it skips the repository gate: the act has
+// already happened, and the read only names what it reached, so a push the
+// operator's own SSH made, which no proxy authorized, is still recorded in its
+// repository. In multi mode it is the gated client every exec-gh call takes.
+func (c *LocalClient) recordingRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, error) {
+	if runmode.Current() == runmode.ModeMulti {
+		return c.githubClientForRepo(ctx, owner, repo)
+	}
+	client, _, err := c.repoClientPastGate(ctx, owner, repo)
+	return client, err
 }
 
 // noteGitHubCredential records the tier a just-resolved client acts under, so
@@ -1642,11 +1661,10 @@ func (c *LocalClient) scopedRepoClient(ctx context.Context, owner, repo string) 
 	return c.legacyRepoClient(ctx, owner, repo)
 }
 
-// legacyRepoClient is the pre-scoping resolution: the App/PAT client + its
-// identity, unscoped. Used in local mode and as the fallback for a resolver
-// that doesn't implement ScopedRepoResolver. Mirrors the original
-// githubClientForRepo (RepoIdentityResolver, else ClientForRepo +
-// IdentityUnknown).
+// legacyRepoClient is the unscoped resolution: the App/PAT client + its
+// identity. Used in local mode and as the fallback for a resolver that
+// doesn't implement ScopedRepoResolver (RepoIdentityResolver, else
+// ClientForRepo + IdentityUnknown).
 func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if ir, ok := c.githubResolver().(ghclient.RepoIdentityResolver); ok {
 		client, identity, err := ir.ClientForRepoWithIdentity(ctx, c.info.OrgID, owner, repo)
@@ -1662,7 +1680,7 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 	return client, ghclient.IdentityUnknown, nil
 }
 
-// authorizeRepo is the exec-gh repo gate (multi mode): the run may only act on
+// authorizeRepo is the exec-gh repo gate, in both modes: the run may only act on
 // a repo its team tracks AND that it has materialized in conversation_worktrees
 // (a delegated run's task repo — recorded at setup — or a workspace-add'd repo).
 // Same team-tracks predicate as the git proxy's Authorize; the second arm is
@@ -2621,15 +2639,21 @@ func (c *LocalClient) recordGitHubAction(ctx context.Context, act *domain.Extern
 // is logged and swallowed, and a denial is a security signal recorded even for
 // a denied read.
 func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op, reason string) {
+	c.recordBotAction(ctx, gitDeniedAction(owner+"/"+repo, ref, op, reason, c.githubCredential()))
+}
+
+// gitDeniedAction builds the git_denied row for one refused op against the
+// repository target names.
+func gitDeniedAction(target, ref, op, reason, credential string) *domain.ExternalAction {
 	detail, _ := json.Marshal(map[string]string{"op": op, "ref": ref, "reason": reason})
-	c.recordBotAction(ctx, &domain.ExternalAction{
+	return &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionGitDenied,
-		Target:     owner + "/" + repo,
+		Target:     target,
 		ExternalID: ref,
-		Credential: c.githubCredential(),
+		Credential: credential,
 		DetailJSON: string(detail),
-	})
+	}
 }
 
 // egressDeniedAction builds the `egress_denied` audit row for one outbound
@@ -2988,6 +3012,95 @@ func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal, credential st
 		Credential: credential,
 		DetailJSON: string(payload),
 	}
+}
+
+// GHRepositoryDenial is one request the real-`gh` channel's repository gate
+// refused, as the injector reports it.
+type GHRepositoryDenial struct {
+	// Repository is the repository refused: the owner/repo GitHub answered the
+	// injector with, else the request's spelling, and "" for a request whose
+	// repository could not be read at all.
+	Repository string
+	// RepositoryID is GitHub's id for it, "" when GitHub did not answer.
+	RepositoryID string
+	// Unresolved reports a refusal because the gate could not tell whether the
+	// repository is one the run works in.
+	Unresolved bool
+	// Path is the request's, the row's target when it names no repository.
+	Path string
+}
+
+// RecordGHChannelRepositoryDenied records one request the real-`gh` channel's
+// repository gate refused: the git_denied row the `exec gh` verbs' repository
+// gate writes (authorizeRepo), under its op "gh", so a run refused a
+// repository through either leaves the same row. The reason is decided here,
+// on the side that holds the team's tracking (ghRepositoryDenialReason).
+//
+// Exported for local mode, which records it with stores and a
+// ConversationInfo in hand, as RecordGHChannelWrite is; a sandboxed run's
+// sidecar relays it (OpRecordGHRepositoryDenial). credential is the tier the
+// channel attaches upstream. Best-effort.
+func RecordGHChannelRepositoryDenied(ctx context.Context, stores db.Stores, info ConversationInfo, d GHRepositoryDenial, credential string) {
+	target := d.Repository
+	if target == "" {
+		target = d.Path
+	}
+	reason := ghRepositoryDenialReason(ctx, stores, info, d)
+	RecordExternalWrite(ctx, stores, info, nil, gitDeniedAction(target, "", "gh", reason, credential))
+}
+
+// RecordGHChannelRepositoryDenied records one request the real-`gh` channel's
+// repository gate refused (RecordGHChannelRepositoryDenied). Host-side only:
+// the gate runs outside the jail. Best-effort.
+func (c *LocalClient) RecordGHChannelRepositoryDenied(ctx context.Context, d GHRepositoryDenial) {
+	RecordGHChannelRepositoryDenied(ctx, c.stores, c.info, d, c.githubCredential())
+}
+
+// ghRepositoryDenialReason is the reason the `exec gh` verbs' repository gate
+// would give for a repository the gh channel's gate refused: "authorize-error"
+// for one the gate could not settle, "repo-not-materialized" for one this
+// team tracks, and "repo-not-tracked" for any other. The repository is found
+// by GitHub's id when the injector learned it, so a renamed one is found under
+// either name, and by its name otherwise. A read that fails is
+// "authorize-error" too: the row cannot say which of the other two it is.
+func ghRepositoryDenialReason(ctx context.Context, stores db.Stores, info ConversationInfo, d GHRepositoryDenial) string {
+	const (
+		notTracked      = "repo-not-tracked"
+		notMaterialized = "repo-not-materialized"
+		unsettled       = "authorize-error"
+	)
+	if d.Unresolved {
+		return unsettled
+	}
+	if stores.Repos == nil || stores.TeamGitHubRepos == nil || stores.Orgs == nil {
+		return notTracked
+	}
+	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, info.OrgID)
+	if err != nil {
+		return unsettled
+	}
+	var row *domain.Repository
+	if d.RepositoryID != "" {
+		if row, err = stores.Repos.GetByExternalIDSystem(ctx, info.OrgID, host, d.RepositoryID); err != nil {
+			return unsettled
+		}
+	}
+	if row == nil && d.Repository != "" {
+		if row, err = stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRefFromSlug(host, d.Repository)); err != nil {
+			return unsettled
+		}
+	}
+	if row == nil {
+		return notTracked
+	}
+	tracks, err := stores.TeamGitHubRepos.TracksRepositorySystem(ctx, info.TeamID, row.ID)
+	switch {
+	case err != nil:
+		return unsettled
+	case tracks:
+		return notMaterialized
+	}
+	return notTracked
 }
 
 // RecordGHWriteDenied appends the audit row for one gh-channel request the

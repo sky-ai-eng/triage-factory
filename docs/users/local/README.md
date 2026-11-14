@@ -19,7 +19,7 @@ Claude, repositories, teams) is set up in the app.
 
 - [Install](install.md): Homebrew, a release tarball, or a source build
 - [Running](running.md): flags, network exposure, `install` / `uninstall`
-- [Configuration](configuration.md): where state lives, credentials, the Linux agent sandbox, the clone protocol
+- [Configuration](configuration.md): where state lives, credentials, the Linux agent sandbox, the repositories an agent reaches, the clone protocol
 - [Secret storage](secret-storage.md): keychain or encrypted file, `TF_SECRET_ENCRYPTION_KEY`
 - [Running on a server](server.md): a host with no keychain or browser
 - [Tuning](tuning.md): run concurrency, disk, logging, tracing, the Claude binary

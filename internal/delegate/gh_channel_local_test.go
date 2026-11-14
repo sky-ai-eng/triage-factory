@@ -7,9 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
@@ -112,5 +119,53 @@ func TestLocalGitTokenSource_OnlyAMarkedOutageStaysRetryable(t *testing.T) {
 				t.Errorf("retryable = %v, want %v (err %v)", got, tc.retryable, err)
 			}
 		})
+	}
+}
+
+// The local gh channel's repository gate reads the run's authorized set from
+// the stores on every request: a run with no GitHub anchor reaches every
+// repository its team tracks, by name and by GitHub's id, and one that has
+// checked a repository out reaches that one, from the next request on.
+func TestLocalGHRepositories_ReadsTheRunsSetPerRequest(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	const conversationID = "44444444-4444-4444-4444-444444444444"
+	dbtest.SeedConversation(t, database, domain.Conversation{ID: conversationID})
+	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: conversationID}
+	if err := dbtest.TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"}, {Owner: "acme", Repo: "web"},
+	}); err != nil {
+		t.Fatalf("track repos: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE repositories SET external_id = '7' WHERE owner = 'acme' AND repo = 'api'`); err != nil {
+		t.Fatalf("record acme/api's GitHub id: %v", err)
+	}
+	source := localGHRepositories(stores, true, info)
+	sorted := func() []ghinjector.AuthorizedRepository {
+		t.Helper()
+		repos, gated, err := source(ctx)
+		if err != nil || !gated {
+			t.Fatalf("source = %v, %v, %v; want the gate on", repos, gated, err)
+		}
+		slices.SortFunc(repos, func(a, b ghinjector.AuthorizedRepository) int { return strings.Compare(a.Name, b.Name) })
+		return repos
+	}
+
+	if got, want := sorted(), []ghinjector.AuthorizedRepository{{Name: "acme/api", ID: "7"}, {Name: "acme/web"}}; !slices.Equal(got, want) {
+		t.Errorf("an unanchored run's set = %+v, want its team's tracked repositories %+v", got, want)
+	}
+
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: conversationID, RepositoryID: repositoryIDFor(t, stores, "acme", "web"), Path: t.TempDir(), Ref: "default",
+	}); err != nil {
+		t.Fatalf("check out acme/web: %v", err)
+	}
+	if got, want := sorted(), []ghinjector.AuthorizedRepository{{Name: "acme/web"}}; !slices.Equal(got, want) {
+		t.Errorf("after a checkout the set = %+v, want %+v", got, want)
+	}
+
+	if _, _, err := localGHRepositories(db.Stores{}, false, info)(ctx); !errors.Is(err, errLocalRepositoriesUnwired) {
+		t.Errorf("a channel with no stores: err = %v, want a refusal", err)
 	}
 }

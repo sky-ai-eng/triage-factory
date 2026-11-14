@@ -187,6 +187,8 @@ func ghEnvWithConfig(t testing.TB, upstream string, callbacks Config) []string {
 		ObserveWrite:   callbacks.ObserveWrite,
 		ObserveRead:    callbacks.ObserveRead,
 		AuthorizeWrite: callbacks.AuthorizeWrite,
+		Repositories:   callbacks.Repositories,
+		DenyRepository: callbacks.DenyRepository,
 		TokenSource:    func(context.Context) (string, error) { return "ghs_realtoken", nil },
 	})
 	if err != nil {

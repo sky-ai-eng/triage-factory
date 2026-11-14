@@ -954,6 +954,20 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 			},
 		})
 
+	case agentproc.OpRecordGHRepositoryDenial:
+		var a agentproc.RecordGHRepositoryDenialArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("agenthost: decode relayed gh repository denial: %w", err)
+		}
+		// The request was already refused; the row is best-effort, and its
+		// reason is read from this side's tracking, never from the wire.
+		s.audit.RecordGHChannelRepositoryDenied(ctx, GHRepositoryDenial{
+			Repository:   a.Repository,
+			RepositoryID: a.RepositoryID,
+			Unresolved:   a.Unresolved,
+			Path:         a.Path,
+		})
+
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs
 		if err := json.Unmarshal(args, &a); err != nil {

@@ -9,10 +9,12 @@ import (
 )
 
 // The repositories a run's GitHub credential is minted for. One function
-// answers it for the two places that must agree: the provisioner, which mints
-// the run's tokens over this set (internal/cred/credprovision), and the gate a
-// relayed read's touch passes (runMayReadRepository), which admits a
-// repository only when the run's credential could have read it.
+// answers it for the places that must agree: the provisioner, which mints
+// the run's tokens over this set (internal/cred/credprovision) and seals it
+// for the real-gh channel's repository gate, the local-mode gh channel, whose
+// gate reads it per request (internal/delegate), and the gate a relayed
+// read's touch passes (runMayReadRepository), which admits a repository only
+// when the run's credential could have read it.
 
 // AuthorizedRepositories returns the conversation's authorized repository set as
 // registry rows: every distinct repository in the conversation_worktrees ledger
@@ -134,6 +136,24 @@ func AuthorizedRepositories(ctx context.Context, stores db.Stores, orgID, teamID
 		}
 	}
 	return out, nil
+}
+
+// ConversationAuthorizedRepositories is AuthorizedRepositories for the
+// conversation info names, with its task resolved from the conversation, as
+// IsTaskOwnRepository resolves it, rather than taken from a field a caller
+// stamped. A conversation that cannot be found has no repositories.
+func ConversationAuthorizedRepositories(ctx context.Context, stores db.Stores, info ConversationInfo) ([]domain.Repository, error) {
+	if stores.Conversations == nil || info.ConversationID == "" {
+		return nil, nil
+	}
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conv == nil {
+		return nil, nil
+	}
+	return AuthorizedRepositories(ctx, stores, info.OrgID, info.TeamID, conv.TaskID, info.ConversationID)
 }
 
 // repositoryRow is the registry row id names, or nil when there is no id or

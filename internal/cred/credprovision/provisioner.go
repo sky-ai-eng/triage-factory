@@ -500,7 +500,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
 
-	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}}
+	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}, RepoIDs: map[string]string{}}
 	id, err := m.commitIdentity(ctx, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve commit identity: %w", err)
@@ -526,6 +526,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	for _, row := range authorized {
 		owner, repo, repoID := row.Owner, row.Repo, row.Slug()
 		repoIDs = append(repoIDs, repoID)
+		gh.RepoIDs[repoID] = row.ExternalID
 		tok, identity, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {

@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghbin"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghchannel"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
@@ -27,11 +28,17 @@ type noopChannelCloser struct{}
 
 func (noopChannelCloser) Close() error { return nil }
 
-// localReadTouchBudget bounds recording one read's touch. The injector calls
-// the recorder before it releases the agent's response, and local mode's
-// database serves one connection at a time, so an unbounded write would hold
-// the read behind whatever else is writing.
+// localReadTouchBudget bounds recording one read's touch, and the repository
+// gate's read of the run's set and record of a refusal. The injector makes
+// each before it answers the agent, and local mode's database serves one
+// connection at a time, so an unbounded one would hold the request behind
+// whatever else is writing.
 const localReadTouchBudget = 5 * time.Second
+
+// errLocalRepositoriesUnwired is the repository gate's answer for a channel
+// whose stores never arrived: with no set to read, a request naming a
+// repository is refused.
+var errLocalRepositoriesUnwired = errors.New("delegate: local gh channel has no stores to read the run's repositories from")
 
 // startLocalGHChannel provisions the real-`gh` credential channel for a
 // local-mode run: the TF-owned pinned binary, a loopback injector holding the
@@ -130,6 +137,22 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 			defer cancel()
 			agenthost.RecordGHChannelRead(ctx, stores, info, read)
 		},
+		Repositories: localGHRepositories(stores, storesSet, info),
+		DenyRepository: func(ctx context.Context, d ghinjector.DeniedRepository) {
+			if !storesSet {
+				return
+			}
+			// The recorder the relayed (multi) path applies. The refusal waits
+			// on it, so it is bounded like a read's touch.
+			ctx, cancel := context.WithTimeout(ctx, localReadTouchBudget)
+			defer cancel()
+			agenthost.RecordGHChannelRepositoryDenied(ctx, stores, info, agenthost.GHRepositoryDenial{
+				Repository:   d.Name(),
+				RepositoryID: d.Identity.RepositoryID,
+				Unresolved:   d.Unresolved,
+				Path:         d.Path,
+			}, credential)
+		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {
 			// The same decision the sandbox path relays, minus the relay and
 			// minus the re-derivation it exists for: the proxy that recognized
@@ -158,6 +181,31 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		BinDir:         ch.BinDir,
 		ConfigDir:      ch.ConfigDir,
 	}, ch
+}
+
+// localGHRepositories is the local gh channel's repository gate source: the
+// run's authorized set (agenthost.ConversationAuthorizedRepositories), the
+// one a multi-mode App credential is minted for. Every local credential
+// reaches further than the run does, so the gate is always on. The set is read
+// from the stores per request, so a `workspace add` is in force on the next
+// one. A channel whose stores never arrived has no set to read, and refuses.
+func localGHRepositories(stores db.Stores, storesSet bool, info agenthost.ConversationInfo) ghinjector.RepositorySource {
+	return func(ctx context.Context) ([]ghinjector.AuthorizedRepository, bool, error) {
+		if !storesSet {
+			return nil, true, errLocalRepositoriesUnwired
+		}
+		ctx, cancel := context.WithTimeout(ctx, localReadTouchBudget)
+		defer cancel()
+		rows, err := agenthost.ConversationAuthorizedRepositories(ctx, stores, info)
+		if err != nil {
+			return nil, true, err
+		}
+		repos := make([]ghinjector.AuthorizedRepository, 0, len(rows))
+		for _, row := range rows {
+			repos = append(repos, ghinjector.AuthorizedRepository{Name: row.Slug(), ID: row.ExternalID})
+		}
+		return repos, true, nil
+	}
 }
 
 // localGHTokenSource resolves the credential the local gh channel's injector

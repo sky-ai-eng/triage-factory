@@ -101,13 +101,26 @@ type CommentRef struct {
 // AddressedReads is what one GraphQL read addressed: the pull requests and
 // issues it selects by number, the branches it looks pull requests up by, and
 // the node ids it selects objects by.
+//
+// Repositories is every repository the read selects at its top level, by
+// owner and name, whatever it selects under each, deduplicated and not
+// bounded by maxAddressedReads: it is what the injector's repository gate
+// checks, and a bound would leave the repositories past it unchecked.
+// UnreadRepository reports a repository the read may name that nobody can
+// check: a top-level repository whose owner or name could not be read in the
+// shape of one, or a document that mentions a repository and that the reader
+// cannot walk.
 type AddressedReads struct {
 	Objects  []ObjectRef
 	Branches []BranchRef
 	Nodes    []string
+
+	Repositories     []RepoRef
+	UnreadRepository bool
 }
 
-// Empty reports whether the read addressed nothing.
+// Empty reports whether the read addressed no object, branch or node. The
+// repositories it names are not touches, and do not count.
 func (a AddressedReads) Empty() bool {
 	return len(a.Objects) == 0 && len(a.Branches) == 0 && len(a.Nodes) == 0
 }
@@ -214,8 +227,11 @@ var (
 // query that runs, and each `pullRequest`, `issue` or
 // `issueOrPullRequest(number:)`, and each `pullRequests(headRefName:)`,
 // selected directly under it, and each `node(id:)` at that top level, with
-// aliases resolved. Empty for a mutation (the write audit's), for a query that
-// addresses nothing, and for a document the reader cannot walk.
+// aliases resolved. It names each such repository too, whatever is selected
+// under it (AddressedReads.Repositories). Empty for a mutation (the write
+// audit's) and for a query that addresses nothing. A document the reader
+// cannot walk addresses nothing, and is UnreadRepository when it mentions a
+// repository, since the gate cannot tell which one it names.
 //
 // It reads five argument values and no others: the repository's owner and
 // name, the object's number, the branch's name, and the node's id, each either
@@ -237,10 +253,12 @@ func ParseGraphQLRead(body []byte) AddressedReads {
 	}
 	ops, walked := parseReadOperations(envelope.Query)
 	if !walked {
-		return AddressedReads{}
+		// A document the walk cannot read may name any repository, and the
+		// repository gate refuses what it cannot settle.
+		return AddressedReads{UnreadRepository: strings.Contains(envelope.Query, readRepositoryField)}
 	}
 	op, selected := selectReadOperation(ops, envelope.OperationName)
-	if !selected || op.typ != gqlOperationQuery || len(op.reads) == 0 {
+	if !selected || op.typ != gqlOperationQuery || (len(op.reads) == 0 && len(op.repositories) == 0) {
 		return AddressedReads{}
 	}
 
@@ -251,6 +269,20 @@ func ParseGraphQLRead(body []byte) AddressedReads {
 		_ = json.Unmarshal(envelope.Variables, &vars)
 	}
 	var out AddressedReads
+	repositories := map[string]bool{}
+	for _, named := range op.repositories {
+		owner, okOwner := named.owner.repoPart(vars)
+		repo, okRepo := named.name.repoPart(vars)
+		if !okOwner || !okRepo {
+			out.UnreadRepository = true
+			continue
+		}
+		ref := RepoRef{Owner: owner, Repo: repo}
+		if !repositories[ref.Key()] {
+			repositories[ref.Key()] = true
+			out.Repositories = append(out.Repositories, ref)
+		}
+	}
 	objects, branches, nodes := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, read := range op.reads {
 		if read.node != (gqlArgument{}) {
@@ -439,12 +471,22 @@ type gqlAddressed struct {
 }
 
 // gqlReadOperation is one operation definition as the read walk sees it: which
-// kind it is, its name, and the objects, branches and nodes its top level
-// addresses. Only a query's are collected.
+// kind it is, its name, the objects, branches and nodes its top level
+// addresses, and the repositories its top level selects. Only a query's are
+// collected.
 type gqlReadOperation struct {
-	typ   string
-	name  string
-	reads []gqlAddressed
+	typ          string
+	name         string
+	reads        []gqlAddressed
+	repositories []gqlRepository
+}
+
+// gqlRepository is one repository a query selects at its top level, before
+// its owner and name are resolved against the request's variables. An
+// argument given as something that is neither a variable nor a literal is
+// kept as the zero gqlArgument, which resolves to nothing.
+type gqlRepository struct {
+	owner, name gqlArgument
 }
 
 // selectReadOperation resolves which operation of a document runs, by the rule
@@ -478,11 +520,11 @@ func parseReadOperations(doc string) ([]gqlReadOperation, bool) {
 		switch {
 		case tok.punct("{"):
 			// The shorthand form: a bare selection set is an anonymous query.
-			reads, walked := readQuerySelection(sc)
+			reads, repositories, walked := readQuerySelection(sc)
 			if !walked {
 				return nil, false
 			}
-			ops = append(ops, gqlReadOperation{typ: gqlOperationQuery, reads: reads})
+			ops = append(ops, gqlReadOperation{typ: gqlOperationQuery, reads: reads, repositories: repositories})
 		case tok.name("fragment"):
 			if _, _, walked := parseFragmentDefinition(sc); !walked {
 				return nil, false
@@ -528,46 +570,51 @@ func parseReadOperation(sc *gqlScanner, typ string) (gqlReadOperation, bool) {
 	if typ != gqlOperationQuery {
 		return op, sc.skipBalanced("{", "}")
 	}
-	reads, walked := readQuerySelection(sc)
-	op.reads = reads
+	var walked bool
+	op.reads, op.repositories, walked = readQuerySelection(sc)
 	return op, walked
 }
 
 // readQuerySelection walks a query's top-level selection set, its opening
 // brace already consumed, for each repository it selects by owner and name and
 // the objects and branches addressed under it, and each node it selects by id.
-func readQuerySelection(sc *gqlScanner) ([]gqlAddressed, bool) {
-	var reads []gqlAddressed
+// A repository given both arguments is collected whatever their values are, so
+// one whose values cannot be read is still one the query names.
+func readQuerySelection(sc *gqlScanner) (reads []gqlAddressed, repositories []gqlRepository, walked bool) {
 	for {
 		field, args, selects, done, ok := readSelectedField(sc, readTopLevelFields, readOwnerArgument, readNameArgument, readIDArgument)
 		if !ok {
-			return nil, false
+			return nil, nil, false
 		}
 		if done {
-			return reads, true
+			return reads, repositories, true
+		}
+		owner, hasOwner := args[readOwnerArgument]
+		name, hasName := args[readNameArgument]
+		if field == readRepositoryField && hasOwner && hasName {
+			repositories = append(repositories, gqlRepository{owner: owner, name: name})
 		}
 		if field == readNodeField {
 			if id := args[readIDArgument]; id != (gqlArgument{}) && len(reads) < maxAddressedReads {
 				reads = append(reads, gqlAddressed{node: id})
 			}
 			if selects && !sc.skipBalanced("{", "}") {
-				return nil, false
+				return nil, nil, false
 			}
 			continue
 		}
 		if !selects {
 			continue
 		}
-		owner, name := args[readOwnerArgument], args[readNameArgument]
 		if field != readRepositoryField || owner == (gqlArgument{}) || name == (gqlArgument{}) {
 			if !sc.skipBalanced("{", "}") {
-				return nil, false
+				return nil, nil, false
 			}
 			continue
 		}
 		members, walked := readRepositorySelection(sc)
 		if !walked {
-			return nil, false
+			return nil, nil, false
 		}
 		for _, read := range members {
 			if len(reads) >= maxAddressedReads {

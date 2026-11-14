@@ -91,6 +91,12 @@ type Config struct {
 	// doc for why that is the fail-closed reading rather than an off switch.
 	AuthorizeWrite ghinjector.AuthorizeWrite
 
+	// Repositories and DenyRepository are the injector's repository gate: the
+	// run's authorized set, read per request, and the record of each refusal.
+	// Local mode wires both, since no local credential is confined to the run.
+	Repositories   ghinjector.RepositorySource
+	DenyRepository func(context.Context, ghinjector.DeniedRepository)
+
 	// GitHandler, when non-nil, serves git smart HTTP on the same TLS origin as
 	// the GitHub API. This keeps GH_HOST and git's rewritten remote identical.
 	GitHandler http.Handler
@@ -178,6 +184,8 @@ func Start(cfg Config) (*Channel, error) {
 		ObserveWrite:   cfg.ObserveWrite,
 		ObserveRead:    cfg.ObserveRead,
 		AuthorizeWrite: cfg.AuthorizeWrite,
+		Repositories:   cfg.Repositories,
+		DenyRepository: cfg.DenyRepository,
 		GitHandler:     cfg.GitHandler,
 		// Loopback only — no veth, no other host may reach this listener.
 	})

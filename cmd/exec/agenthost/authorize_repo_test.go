@@ -2,6 +2,10 @@ package agenthost
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -218,5 +222,56 @@ func TestReviewDraft_ReadsThePullRequestThroughTheGate(t *testing.T) {
 	}
 	if _, _, err := c.ResetReviewDraft(ctx, "acme", "widgets", 7); err == nil || !strings.Contains(err.Error(), "not tracked by this team") {
 		t.Errorf("ResetReviewDraft on an untracked repo = %v, want the not-tracked refusal", err)
+	}
+}
+
+// TestLocalClient_GithubVerbsAreGatedInLocalMode: in local mode the exec-gh
+// verbs pass the repository gate they pass in multi mode. Untracked and
+// unchecked-out repositories are refused before any GitHub call, with a
+// denial row each, and a repository the run checked out is read.
+func TestLocalClient_GithubVerbsAreGatedInLocalMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	ctx := context.Background()
+	var calls []string
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if !answerPRRead(w, r) {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(gh.Close)
+	stores, info := newCaptureStores(t, true)
+	client := NewLocal(stores, info)
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
+
+	if _, err := client.GithubGetPR(ctx, "acme", "payments", 12, false); err == nil || !strings.Contains(err.Error(), "not tracked by this team") {
+		t.Fatalf("GithubGetPR on an untracked repo = %v, want the not-tracked refusal", err)
+	}
+	widgets := registerRepo(t, stores, "acme", "widgets", testRepoID("acme/widgets"))
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, info.OrgID, info.TeamID, testScope("github"), []string{widgets}); err != nil {
+		t.Fatalf("track acme/widgets: %v", err)
+	}
+	if _, err := client.GithubGetPR(ctx, "acme", "widgets", 12, false); err == nil || !strings.Contains(err.Error(), "workspace add acme/widgets") {
+		t.Fatalf("GithubGetPR on a tracked repo the run has not checked out = %v, want the not-materialized refusal", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("GitHub calls %v, want none for a refused verb", calls)
+	}
+	var reasons []string
+	for _, a := range listExternalActions(t, stores) {
+		if a.Action == domain.ActionGitDenied {
+			var detail map[string]string
+			_ = json.Unmarshal([]byte(a.DetailJSON), &detail)
+			reasons = append(reasons, a.Target+" "+detail["reason"])
+		}
+	}
+	slices.Sort(reasons)
+	if want := []string{"acme/payments repo-not-tracked", "acme/widgets repo-not-materialized"}; !slices.Equal(reasons, want) {
+		t.Errorf("denials = %v, want %v", reasons, want)
+	}
+
+	checkOutRepoForTest(t, stores, info, widgets)
+	if _, err := client.GithubGetPR(ctx, "acme", "widgets", 12, false); err != nil {
+		t.Fatalf("GithubGetPR on a repo the run checked out = %v, want it read", err)
 	}
 }

@@ -144,6 +144,67 @@ func TestIdentityReader_RepositoryIsCachedPerReader(t *testing.T) {
 	}
 }
 
+func TestIdentityReader_RepositoryVisibility(t *testing.T) {
+	ctx := context.Background()
+	want := domain.GitHubIdentity{RepositoryID: "4242", Repository: "octo/api"}
+	for name, tc := range map[string]struct {
+		body   string
+		public bool
+	}{
+		"public":  {body: `{"id": 4242, "full_name": "octo/api", "private": false}`, public: true},
+		"private": {body: `{"id": 4242, "full_name": "octo/api", "private": true}`},
+		// GitHub answers an Enterprise's internal repository as private.
+		"internal": {body: `{"id": 4242, "full_name": "octo/api", "private": true, "visibility": "internal"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, c := newIdentityFixture(t, map[string]string{"/repos/octo/api": tc.body})
+			r := NewIdentityReader()
+			for range 2 {
+				id, public, err := r.RepositoryVisibility(ctx, c, "octo", "api")
+				if err != nil {
+					t.Fatalf("RepositoryVisibility: %v", err)
+				}
+				if id != want || public != tc.public {
+					t.Errorf("RepositoryVisibility = %+v, %v; want %+v, %v", id, public, want, tc.public)
+				}
+			}
+			if n := f.count("/repos/octo/api"); n != 1 {
+				t.Errorf("repository reads = %d, want 1", n)
+			}
+		})
+	}
+
+	t.Run("an answer that does not say is an error", func(t *testing.T) {
+		_, c := newIdentityFixture(t, map[string]string{"/repos/octo/api": repoBody})
+		if id, public, err := NewIdentityReader().RepositoryVisibility(ctx, c, "octo", "api"); err == nil {
+			t.Errorf("RepositoryVisibility = %+v, %v; want an error", id, public)
+		}
+	})
+
+	t.Run("a 404 is one", func(t *testing.T) {
+		_, c := newIdentityFixture(t, map[string]string{})
+		if _, _, err := NewIdentityReader().RepositoryVisibility(ctx, c, "octo", "api"); !IsHTTP404(err) {
+			t.Errorf("RepositoryVisibility error = %v, want a 404", err)
+		}
+	})
+
+	t.Run("a pull request's read answers it", func(t *testing.T) {
+		f, c := newIdentityFixture(t, map[string]string{"/repos/octo/api/pulls/7": strings.Replace(
+			pullBody, `"full_name": "octo/api"`, `"full_name": "octo/api", "private": true`, 1)})
+		r := NewIdentityReader()
+		if _, err := r.Object(ctx, c, "octo", "api", 7); err != nil {
+			t.Fatalf("Object: %v", err)
+		}
+		id, public, err := r.RepositoryVisibility(ctx, c, "octo", "api")
+		if err != nil || id != want || public {
+			t.Errorf("RepositoryVisibility = %+v, %v, %v; want %+v, false", id, public, err, want)
+		}
+		if n := f.total(); n != 1 {
+			t.Errorf("reads = %d, want only the pull request's", n)
+		}
+	})
+}
+
 func TestIdentityReader_MismatchedAnswerIsAnError(t *testing.T) {
 	cases := map[string]map[string]string{
 		"pull request with another number": {"/repos/octo/api/pulls/7": strings.Replace(pullBody, `"number": 7`, `"number": 8`, 1)},

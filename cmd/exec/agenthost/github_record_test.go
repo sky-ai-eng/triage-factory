@@ -99,8 +99,14 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 	}
 	client := NewLocal(stores, info)
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: ghURL, token: "org-pat"})
+	ungateRecordingClient(client)
 	return conn, stores, info, client
 }
+
+// ungateRecordingClient turns the exec-gh repository gate off for a client a
+// test drives to see what a verb records. No fixture repository is one the
+// run checked out, and the gate is authorize_repo_test.go's to test.
+func ungateRecordingClient(c *LocalClient) { c.gateWired = false }
 
 // commentRows is the conversation's ledger rows of the given action, failing
 // the test when the writes left a deliverable.

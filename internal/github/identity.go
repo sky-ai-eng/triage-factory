@@ -45,11 +45,15 @@ type Querier interface {
 // has open is not cached (OpenPullForBranch). A number names one object for
 // the life of a repository, a comment sits on one object and a node id names
 // one object for their lives, and an id names one repository for the life of
-// its name, which a run does not outlast in practice. A nil reader reads
-// without caching. Safe for concurrent use.
+// its name, which a run does not outlast in practice. A repository's
+// visibility is cached beside its id on the same reasoning. A nil reader
+// reads without caching. Safe for concurrent use.
 type IdentityReader struct {
 	mu    sync.Mutex
 	cache map[string]domain.GitHubIdentity // repoCacheKey and objectCacheKey
+	// public is whether each repository read is public, keyed by
+	// repoCacheKey, for every answer that said.
+	public map[string]bool
 	// subjects is the number of the pull request or issue each comment read
 	// is on, by commentCacheKey.
 	subjects map[string]int
@@ -156,7 +160,7 @@ func (r *IdentityReader) pullIdentity(owner, repo string, number int, body []byt
 	if err != nil {
 		return domain.GitHubIdentity{}, fmt.Errorf("github identity: %s/%s#%d: %w", owner, repo, number, err)
 	}
-	r.remember(repoCacheKey(owner, repo), out)
+	r.rememberRepository(owner, repo, out, pr.Base.Repo.Private)
 	out.NodeID, out.Kind = pr.NodeID, domain.EntityKindPullRequest
 	return out, nil
 }
@@ -225,7 +229,7 @@ func (r *IdentityReader) OpenPullForBranch(ctx context.Context, g Getter, owner,
 	if err != nil {
 		return BranchPull{}, fmt.Errorf("github identity: %s/%s branch %q: %w", owner, repo, branch, err)
 	}
-	r.remember(repoCacheKey(owner, repo), out)
+	r.rememberRepository(owner, repo, out, pr.Base.Repo.Private)
 	out.NodeID, out.Kind = pr.NodeID, domain.EntityKindPullRequest
 	r.remember(objectCacheKey(owner, repo, pr.Number), out)
 	return BranchPull{Number: pr.Number, Identity: out}, nil
@@ -242,20 +246,53 @@ func (r *IdentityReader) Repository(ctx context.Context, g Getter, owner, repo s
 	if out, ok := r.cached(repoCacheKey(owner, repo)); ok {
 		return out, nil
 	}
+	out, _, err := r.readRepository(ctx, g, owner, repo)
+	return out, err
+}
+
+// RepositoryVisibility reads owner/repo's GitHub id and current name, as
+// Repository does, and whether it is public, from the cache when this reader
+// has read both before. A repository that is private, or internal to a GitHub
+// Enterprise, is not public. An answer that does not say is an error, so a
+// repository is never taken for public on a missing field. A failed read is an
+// error, and is not cached; one GitHub answers 404 for satisfies IsHTTP404.
+func (r *IdentityReader) RepositoryVisibility(ctx context.Context, g Getter, owner, repo string) (id domain.GitHubIdentity, public bool, err error) {
+	if owner == "" || repo == "" {
+		return domain.GitHubIdentity{}, false, fmt.Errorf("github identity: %q/%q names no repository", owner, repo)
+	}
+	key := repoCacheKey(owner, repo)
+	if out, ok := r.cached(key); ok {
+		if public, ok := r.cachedPublic(key); ok {
+			return out, public, nil
+		}
+	}
+	out, private, err := r.readRepository(ctx, g, owner, repo)
+	if err != nil {
+		return domain.GitHubIdentity{}, false, err
+	}
+	if private == nil {
+		return domain.GitHubIdentity{}, false, fmt.Errorf("github identity: %s/%s answered no visibility", owner, repo)
+	}
+	return out, !*private, nil
+}
+
+// readRepository reads owner/repo itself and remembers what it answered.
+// private is nil when the answer did not say.
+func (r *IdentityReader) readRepository(ctx context.Context, g Getter, owner, repo string) (domain.GitHubIdentity, *bool, error) {
 	body, err := g.Get(ctx, fmt.Sprintf("/repos/%s/%s", owner, repo))
 	if err != nil {
-		return domain.GitHubIdentity{}, fmt.Errorf("github identity: read %s/%s: %w", owner, repo, err)
+		return domain.GitHubIdentity{}, nil, fmt.Errorf("github identity: read %s/%s: %w", owner, repo, err)
 	}
 	var meta repoIdentityJSON
 	if err := json.Unmarshal(body, &meta); err != nil {
-		return domain.GitHubIdentity{}, fmt.Errorf("github identity: parse %s/%s: %w", owner, repo, err)
+		return domain.GitHubIdentity{}, nil, fmt.Errorf("github identity: parse %s/%s: %w", owner, repo, err)
 	}
 	out, err := meta.identity()
 	if err != nil {
-		return domain.GitHubIdentity{}, fmt.Errorf("github identity: %s/%s: %w", owner, repo, err)
+		return domain.GitHubIdentity{}, nil, fmt.Errorf("github identity: %s/%s: %w", owner, repo, err)
 	}
-	r.remember(repoCacheKey(owner, repo), out)
-	return out, nil
+	r.rememberRepository(owner, repo, out, meta.Private)
+	return out, meta.Private, nil
 }
 
 // commentSubjects is, for each of GitHub's comment numberings, the collection
@@ -439,6 +476,7 @@ func (r *IdentityReader) NodeSubject(ctx context.Context, q Querier, nodeID stri
 type repoIdentityJSON struct {
 	ID       int64  `json:"id"`
 	FullName string `json:"full_name"`
+	Private  *bool  `json:"private"`
 }
 
 func (j repoIdentityJSON) identity() (domain.GitHubIdentity, error) {
@@ -468,6 +506,32 @@ func (r *IdentityReader) remember(key string, id domain.GitHubIdentity) {
 		r.cache = map[string]domain.GitHubIdentity{}
 	}
 	r.cache[key] = id
+}
+
+// rememberRepository remembers what GitHub answered for owner/repo, and its
+// visibility when the answer said.
+func (r *IdentityReader) rememberRepository(owner, repo string, id domain.GitHubIdentity, private *bool) {
+	key := repoCacheKey(owner, repo)
+	r.remember(key, id)
+	if r == nil || private == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.public == nil {
+		r.public = map[string]bool{}
+	}
+	r.public[key] = !*private
+}
+
+func (r *IdentityReader) cachedPublic(key string) (public, ok bool) {
+	if r == nil {
+		return false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	public, ok = r.public[key]
+	return public, ok
 }
 
 func (r *IdentityReader) cachedSubject(key string) (int, bool) {

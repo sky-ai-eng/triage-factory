@@ -7,13 +7,18 @@
 // lives only in the capless sidecar that runs this proxy and never enters the
 // jail's env, argv, or any file (placeholder only).
 //
-// # One traffic policy
+// # Two traffic policies
 //
-// Most of the scope is carried by the credential: an App-org token is minted
-// scoped to the team's authorized repo set, so a request for a repo outside
-// that set gets GitHub's own 404 masking, verbatim. There is no path allowlist,
-// and a request for a repo the run may work in is forwarded whatever it asks
-// of it — with one exception, which is the whole of this proxy's traffic policy.
+// Which repositories a request reaches is carried by the credential where the
+// credential can carry it: a multi-mode App org's token is minted scoped to
+// the run's authorized repo set, so a request for a repo outside that set gets
+// GitHub's own 404 masking, verbatim. Every other credential — a token org's,
+// and any in local mode — reaches further than the run does, and for those the
+// repository gate (repos.go) refuses a request that names a repository outside
+// the run's set. That gate is courtesy isolation, not a boundary: it stops the
+// ordinary case, and repos.go lists what it does not see. A request for a repo
+// the run may work in is forwarded whatever it asks of it — with one
+// exception, the second policy.
 //
 // Three families of write are refused before they are forwarded: submitting a
 // review, creating a repository, and opening a pull request. So is any GraphQL
@@ -46,8 +51,9 @@
 //
 // Requests are READ in exactly one place: a POST to the GraphQL endpoint, whose
 // body is buffered under maxRequestBody and parsed for the name of the mutation
-// it performs, or, when it performs none, for the pull requests, issues,
-// branches and node ids its query addresses (see "Read touches" below). That is a deliberate, bounded
+// it performs, or, when it performs none, for the repositories its query names
+// and the pull requests, issues, branches and node ids it addresses (see "Read
+// touches" below). That is a deliberate, bounded
 // exception to reading no request at all, and it is not free — this
 // is the one process that holds a run's live GitHub credential while parsing
 // hostile upstream output, and it now also parses outbound documents an agent
@@ -340,6 +346,16 @@ type Config struct {
 	// never the production shape — both modes supply it.
 	AuthorizeWrite AuthorizeWrite
 
+	// Repositories, when non-nil, is the run's authorized repository set the
+	// repository gate refuses a request outside of (repos.go). nil applies no
+	// gate, which leaves the repositories a request reaches to the credential.
+	Repositories RepositorySource
+
+	// DenyRepository, when non-nil, is called for each request the repository
+	// gate refuses, before the refusal is answered, to record its denial.
+	// Called inline, so the callback must not block.
+	DenyRepository func(ctx context.Context, d DeniedRepository)
+
 	// ConversationID names the conversation this injector serves, for log
 	// attribution only. It is never sent upstream and never reaches an audit
 	// row — those are attributed by the orchestrator from its own conversation
@@ -517,6 +533,11 @@ func (s *Server) Handler() http.Handler {
 			s.misses.Respond(w, err)
 			return
 		}
+		// After the credential, which the gate's own lookup of a name it does
+		// not know is made with.
+		if s.refusedRepository(w, r, addressed) {
+			return
+		}
 		ctx := context.WithValue(r.Context(), authCtxKey{}, tok)
 		if facts != nil {
 			ctx = context.WithValue(ctx, graphQLFactsKey{}, facts)
@@ -553,7 +574,8 @@ type graphQLReadsKey struct{}
 // The mutation read runs whether or not the write audit is wired, because the
 // refusal policy reads the same facts and a run with no audit callback is still
 // a run that may not merge. The addressed read runs only for a request that is
-// not a write, and only when something is listening for it.
+// not a write, and only when something reads it: the read touch, or the
+// repository gate.
 //
 // The buffering is unconditional for POSTs to the GraphQL endpoint, because
 // whether a body is a read cannot be known before reading it. What stays cheap
@@ -582,7 +604,7 @@ func (s *Server) captureGraphQL(r *http.Request) (facts *ghwrite.GraphQLFacts, a
 	if isWrite {
 		return &write, addressed
 	}
-	if s.cfg.ObserveRead == nil {
+	if s.cfg.ObserveRead == nil && s.cfg.Repositories == nil {
 		return nil, addressed
 	}
 	return nil, ghwrite.ParseGraphQLRead(body)
