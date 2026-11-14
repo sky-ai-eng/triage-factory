@@ -10,11 +10,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // deadRun is a LaunchedRun that never was: it stands in for a jail whose
@@ -69,6 +74,69 @@ func TestToolHostJail_ConnectReportsJailStderr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("error = %v, want it to carry the jail's stderr; without it the failure is unattributable", err)
+	}
+}
+
+// One provider for the whole test binary: the package's tracer is created at
+// init, and the OTel global wires it to the first provider installed in the
+// process and never again, so a provider installed per test would leave a
+// repeated run's spans on the first run's recorder.
+var (
+	traceOnce     sync.Once
+	traceRecorder = tracetest.NewSpanRecorder()
+)
+
+// TestToolHostJail_ConnectIsTraced pins the span over the wait for the tool
+// host to dial back. Without it a cold resume's trace shows that wait only as
+// a gap before the agent goes live.
+func TestToolHostJail_ConnectIsTraced(t *testing.T) {
+	traceOnce.Do(func() {
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(traceRecorder)))
+	})
+	start := len(traceRecorder.Ended())
+
+	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "tools.sock"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	jail := &toolHostJail{listener: ln, run: deadRun{}, waitDone: make(chan struct{})}
+
+	dialed := make(chan error, 1)
+	go func() {
+		c, err := net.Dial("unix", ln.Addr().String())
+		if err == nil {
+			_ = c.Close()
+		}
+		dialed <- err
+	}()
+
+	ctx, parent := otel.Tracer("test").Start(context.Background(), "engagement.setup")
+	conn, err := jail.Connect(ctx, 5*time.Second)
+	parent.End()
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_ = conn.Close()
+	if err := <-dialed; err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	var connects []sdktrace.ReadOnlySpan
+	for _, s := range traceRecorder.Ended()[start:] {
+		if s.Name() == "agent.tool_host.connect" {
+			connects = append(connects, s)
+		}
+	}
+	if len(connects) != 1 {
+		t.Fatalf("recorded %d agent.tool_host.connect spans, want 1", len(connects))
+	}
+	got := connects[0]
+	if got.Parent().TraceID() != parent.SpanContext().TraceID() || got.Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Errorf("agent.tool_host.connect parent = %v, want the caller's span %v", got.Parent(), parent.SpanContext())
+	}
+	if got.Status().Code == codes.Error {
+		t.Errorf("a connect that succeeded has status %v (%q)", got.Status().Code, got.Status().Description)
 	}
 }
 
