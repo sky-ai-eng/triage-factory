@@ -381,7 +381,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// The provisioning inside this call replaces the operation with the
 	// credentials wait for as long as it lasts (sidecarProvisionFor).
 	endBringUp := activity.begin("sidecar_bringup", sidecarOpDeadline)
-	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID), params)
+	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID, conv.ClaimID), params)
 	endBringUp()
 	if err != nil {
 		telemetry.RecordSpanError(bringUpSpan, err, "bringing up the credential sidecar failed")
@@ -637,7 +637,12 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 // failing the bring-up; the dispatcher then hands the claim back without
 // spending the setup budget (handlePreAgentFailure). Only the executor role
 // reaches here (bringUpRunSidecar returns nil otherwise).
-func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.SidecarProvisionFunc {
+//
+// The bundle arriving ends the park, so the poll that finds it moves claimID's
+// phase to fetching: every multi engagement, of every source, fresh or resumed,
+// next assembles the task context the agent starts from, and a claim left at
+// awaiting_credentials past this point names a step that is over.
+func (s *Spawner) sidecarProvisionFor(orgID, conversationID, claimID string) agentproc.SidecarProvisionFunc {
 	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
 		// The awaiting-credentials park, measured from the run's side: how long
@@ -687,6 +692,9 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 				// means different things for the two, and only one of them is a
 				// working doorbell.
 				span.SetAttributes(telemetry.Count(polls), telemetry.Outcome("sealed"))
+				// The fence result is not acted on here: the agent_starting
+				// write is where a fenced engagement stops.
+				s.updatePhase(provCtx, orgID, conversationID, claimID, domain.ClaimPhaseFetching)
 				return b.Sealed, b.BootEpoch, nil
 			}
 			select {

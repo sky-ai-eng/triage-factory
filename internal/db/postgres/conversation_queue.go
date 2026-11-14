@@ -1625,11 +1625,19 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	// property of the engagement, not the surface, so this one scan is the
 	// whole provisioner's input and the caller routes on the type it
 	// returns.
+	//
+	// A parked claim that already holds a bundle is left out. A claim
+	// publishes its sidecar key once and the bundle row is keyed by the
+	// claim, so that bundle is sealed to the key the claim is waiting on;
+	// sealing again would overwrite it and mint installation tokens nothing
+	// revokes. The executor's next poll takes the claim out of this phase,
+	// and until then this keeps the sweep off it.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
 		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE cl.phase = 'awaiting_credentials'
+		  AND NOT EXISTS (SELECT 1 FROM claim_credentials cc WHERE cc.claim_id = cl.id)
 		ORDER BY cl.claimed_at ASC, cl.id ASC
 	`)
 	if err != nil {

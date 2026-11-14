@@ -1361,11 +1361,12 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // A warm tree an older binary laid out — its root a git checkout — is not
 // warm: it is removed and the ladder continues as though it were gone.
 //
-// conv.ClaimID is read, not just carried: a rebuild records the checkouts' rows
-// before it fetches them and re-stamps worktree_path, and those writes are this
-// engagement's to make only while it still holds the conversation. Every caller
-// is a claimed dispatch, so it is populated at both — including the config the
-// step builder synthesizes, which copies it across for exactly this reason.
+// conv.ClaimID is read, not just carried: a rebuild moves the claim's phase to
+// cloning, records the checkouts' rows before it fetches them and re-stamps
+// worktree_path, and those writes are this engagement's to make only while it
+// still holds the conversation. Every caller is a claimed dispatch, so it is
+// populated at both — including the config the step builder synthesizes, which
+// copies it across for exactly this reason.
 func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, restorer checkoutRestorer, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, asOf *float64, err error) {
 	// The provenance IS the interesting part of this span — nothing downstream
 	// can tell the three rungs apart, since past here they are the same
@@ -1423,6 +1424,11 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	beginRehydrate := func() (context.Context, func()) {
 		return s.beginWorkspaceOp(ctx, conv.ID, "rehydrate")
 	}
+	// The rebuild is the setup step now under way. A rebuild that finds no
+	// snapshot falls to the fresh builder, which writes its own phases after
+	// this one. The fence result is not acted on: the agent_starting write is
+	// where a fenced engagement stops.
+	s.updatePhase(ctx, orgID, conv.ID, conv.ClaimID, domain.ClaimPhaseCloning)
 	opCtx, endOp := beginRehydrate()
 	defer func() { endOp() }()
 

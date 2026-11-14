@@ -908,12 +908,12 @@ type ConversationQueueStore interface {
 
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
-	// phase='awaiting_credentials'. One scan serves the whole provisioner:
-	// the phase column is the substrate and ConversationType is how the
-	// caller routes. The brain-side backstop sweep's input; primary
-	// provisioning happens synchronously off the executor's cred_request
-	// tf_ctl notification, and this recovers whatever the lossy relay
-	// dropped.
+	// phase='awaiting_credentials' and holds no sealed bundle yet. One scan
+	// serves the whole provisioner: the phase column is the substrate and
+	// ConversationType is how the caller routes. The brain-side backstop
+	// sweep's input; primary provisioning happens synchronously off the
+	// executor's cred_request tf_ctl notification, and this recovers
+	// whatever the lossy relay dropped.
 	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsConversation, error)
 
 	// ListActiveNeedingCredentialRefresh returns every conversation with a

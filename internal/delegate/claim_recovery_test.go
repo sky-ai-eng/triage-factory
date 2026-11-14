@@ -141,9 +141,43 @@ func TestSidecarProvision_TimeoutIsTheSentinel(t *testing.T) {
 	f.s.SetExecutorID("lf-exec", 1)
 	f.s.SetAwaitingCredentialsTimeout(20*time.Millisecond, 5*time.Millisecond)
 
-	_, _, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID)(context.Background(), "pubkey")
+	_, _, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(context.Background(), "pubkey")
 	if !errors.Is(err, errAwaitingCredentialsTimeout) {
 		t.Fatalf("provision after the wait ran out = %v, want errAwaitingCredentialsTimeout", err)
+	}
+}
+
+// ownBundle is a credentials channel holding a bundle sealed for one executor
+// boot, as the brain leaves it once it has answered the doorbell.
+type ownBundle struct {
+	db.ClaimCredentialsStore
+	executorID string
+	bootEpoch  int64
+}
+
+func (b ownBundle) Get(context.Context, string, string) (db.SealedBundle, bool, error) {
+	return db.SealedBundle{ExecutorID: b.executorID, BootEpoch: b.bootEpoch, Sealed: []byte("sealed")}, true, nil
+}
+
+// TestSidecarProvision_TheBundleArrivingMovesThePhaseToFetching: the park ends
+// when the poll finds this executor's bundle, so the claim names the step that
+// follows the seal rather than the wait that is over.
+func TestSidecarProvision_TheBundleArrivingMovesThePhaseToFetching(t *testing.T) {
+	f := newLaunchFixture(t, "cred-arrived")
+	f.s.claimCredentials = ownBundle{executorID: "lf-exec", bootEpoch: 1}
+	f.s.SetExecutorID("lf-exec", 1)
+	f.s.SetAwaitingCredentialsTimeout(time.Second, 5*time.Millisecond)
+
+	sealed, epoch, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(context.Background(), "pubkey")
+	if err != nil || string(sealed) != "sealed" || epoch != 1 {
+		t.Fatalf("provision = (%q, %d, %v), want this executor's bundle", sealed, epoch, err)
+	}
+	var phase string
+	if err := f.database.QueryRow(`SELECT COALESCE(phase, '') FROM claims WHERE id = ?`, f.conv.ClaimID).Scan(&phase); err != nil {
+		t.Fatalf("read claim phase: %v", err)
+	}
+	if phase != domain.ClaimPhaseFetching {
+		t.Errorf("claim phase after the bundle arrived = %q, want %q", phase, domain.ClaimPhaseFetching)
 	}
 }
 

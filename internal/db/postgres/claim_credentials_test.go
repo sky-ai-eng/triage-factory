@@ -241,3 +241,45 @@ func TestListActiveNeedingCredentialRefresh_Postgres(t *testing.T) {
 		}
 	}
 }
+
+// TestListAwaitingCredentials_Postgres_SkipsAParkedClaimThatHoldsABundle: the
+// backstop sweep re-seals only a parked claim the brain has not answered yet.
+// One whose bundle is written is waiting on the executor's next poll, and a
+// second seal would only replace that bundle.
+func TestListAwaitingCredentials_Postgres_SkipsAParkedClaimThatHoldsABundle(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	park := func() string {
+		t.Helper()
+		convID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
+		seedPgActiveClaim(t, h, orgID, convID, "executor-1", 1)
+		if matched, err := stores.ConversationQueue.MarkAwaitingCredentials(ctx, orgID, convID, "pubkey"); err != nil || !matched {
+			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
+		}
+		return convID
+	}
+	waiting := park()
+	sealed := park()
+	if err := stores.ClaimCredentials.Put(ctx, orgID, sealed, "executor-1", 1, []byte("sealed"), domain.SourceManifest{"github": {State: domain.SourceSealed}}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := stores.ConversationQueue.ListAwaitingCredentials(ctx)
+	if err != nil {
+		t.Fatalf("ListAwaitingCredentials: %v", err)
+	}
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.ConversationID)
+	}
+	if !slices.Contains(ids, waiting) {
+		t.Errorf("awaiting list %v is missing %s, a parked claim with no bundle", ids, waiting)
+	}
+	if slices.Contains(ids, sealed) {
+		t.Errorf("awaiting list %v includes %s, whose bundle is already written", ids, sealed)
+	}
+}
