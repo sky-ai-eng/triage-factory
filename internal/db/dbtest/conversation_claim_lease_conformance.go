@@ -263,7 +263,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 				return err
 			}},
 			{"MarkFailedIfActiveForClaimSystem", func() error {
-				_, err := conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID, string(domain.ConversationFailureCrash))
+				_, err := conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID, string(domain.ConversationFailureCrash), "")
 				return err
 			}},
 			{"SetSessionForClaimSystem", func() error {

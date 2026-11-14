@@ -1304,12 +1304,14 @@ type ConversationStore interface {
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
+	// summary is why it failed, stored as result_summary, which the failure
+	// notice reports; "" keeps the stored value.
 	//
 	// Refused once the engagement has been fenced out: ok=false means the row
 	// was already terminal, while a fenced-out caller gets ErrClaimReleased,
 	// which is a different thing and must not be treated as a lost race. A
 	// pending stop intent is cleared with the flip.
-	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error)
+	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error)
 
 	// ParkOpenForClaimSystem flips a conversation to `open`: a turn ended without a verdict. This is
 	// the ONLY writer of that state, and there is deliberately only one —
@@ -1489,6 +1491,52 @@ type ConversationStore interface {
 	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
 	// the door and orgID is bound by argument.
 	ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error)
+
+	// ListPauseNoticesDueSystem returns, across orgs, the parks whose
+	// kinds.ConversationPaused notice the brain has not opened: the rows
+	// ListAwaitingPersonSystem selects whose parked_at is not the park
+	// MarkPauseNoticedSystem last recorded. Ordered by parked_at then id, at
+	// most limit rows; the sweep reads the next page on its next pass.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and each row carries its org.
+	ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error)
+
+	// MarkPauseNoticedSystem records that the notice for the park at parkedAt
+	// was opened, and only while the conversation is still on that park and
+	// not yet marked for it: a park that ended, with a new one begun since the
+	// read, stays due. It reports whether it marked the row.
+	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), so the mark commits only with the notice, and of two
+	// passes that read the same park only the one whose mark lands opens it.
+	// A bookkeeping write that returns no row: its only reader is
+	// ListPauseNoticesDueSystem, and its caller needs only whether it marked.
+	MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error)
+
+	// ListFailureNoticesDueSystem returns, across orgs, the failed
+	// conversations a person delegated whose kinds.ConversationFailed notice
+	// the brain has not posted, ordered by completed_at then id, at most limit
+	// rows. A conversation a trigger fired has nobody to tell and is never
+	// listed. The task and its entity are outer-joined: their key is display
+	// only.
+	//
+	// A conversation fails at most once, since failed is the only terminal
+	// status and a failed conversation never runs again, so a timestamp is
+	// enough to mark it.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and each row carries its org.
+	ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error)
+
+	// MarkFailureNoticedSystem records that the conversation's failure notice
+	// was posted, unless it already was, and reports whether it marked the
+	// row.
+	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), for the reasons MarkPauseNoticedSystem gives. A
+	// bookkeeping write that returns no row, for the same reasons.
+	MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// HasActiveClaimForTaskSystem reports whether any conversation
 	// on taskID has a live claim — i.e. whether an executor is

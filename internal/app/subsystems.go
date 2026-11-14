@@ -233,6 +233,9 @@ func (a *App) buildExecution() error {
 	// brain would otherwise only learn about from its next sweep, and
 	// memoryOwed relays over tf_ctl for it.
 	a.spawner.SetOnMemoryOwed(a.memoryOwed)
+	// The delegator-notice doorbell a failure or a park that waits on a person
+	// rings, wired on every role for the same reason.
+	a.spawner.SetOnDelegatorNotice(a.delegatorNoticeOwed)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
 	// claims.executor_id on claimed rows must equal the registry id, and

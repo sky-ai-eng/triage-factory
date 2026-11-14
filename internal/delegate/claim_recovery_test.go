@@ -79,6 +79,7 @@ func TestDispatch_LossBudgetSpent_FailsTheConversationWithoutRunningIt(t *testin
 	if waker.count() == 0 {
 		t.Error("the firing worker was never woken; the task's queued firings wait on this conversation")
 	}
+	passOnce(t, f.s)
 	rec.Active(t, org, kinds.ConversationFailed, f.conv.ID)
 }
 

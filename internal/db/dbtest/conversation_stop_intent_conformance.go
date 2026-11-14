@@ -237,7 +237,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		failed, _ := f.StageStep(t)
 		conv = claim(t, f, failed)
 		request(t, f, failed, stopTestUser)
-		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash)); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash), ""); err != nil || !ok {
 			t.Fatalf("mark failed: (%v, %v)", ok, err)
 		}
 		assertNoIntent(t, f, failed, "MarkFailedIfActiveForClaimSystem")
@@ -566,7 +566,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		failed, _ := f.StageStep(t)
 		conv = claim(t, f, failed)
 		requestStall(t, f, failed)
-		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash)); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash), ""); err != nil || !ok {
 			t.Fatalf("mark failed: (%v, %v)", ok, err)
 		}
 		assertNoIntent(t, f, failed, "MarkFailedIfActiveForClaimSystem")

@@ -2258,7 +2258,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		refuse("RequeueInputForClaimSystem", store.RequeueInputForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(ownedID)}))
 		_, err = store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", "")
 		refuse("CompleteForClaimSystem", err)
-		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
+		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash), "")
 		refuse("MarkFailedIfActiveForClaimSystem", err)
 		_, err = store.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, db.ParkIdle())
 		refuse("ParkOpenForClaimSystem", err)
@@ -2706,7 +2706,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
 
-		ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
+		ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash), "")
 		if err != nil {
 			t.Fatalf("MarkFailedIfActiveForClaimSystem: %v", err)
 		}
@@ -2723,6 +2723,28 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		claims := seed.ClaimRows(t, conversationID)
 		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "failed" {
 			t.Fatalf("claims = %+v, want the engagement released as failed", claims)
+		}
+	})
+
+	// The failure notice reports result_summary, so the infra-failure terminal
+	// stores the text it was given.
+	t.Run("MarkFailedIfActiveForClaimSystem_StoresTheSummary", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		claimID, _, err := holderClaim(ctx, store, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureUnclassified), "its blueprint run vanished"); err != nil || !ok {
+			t.Fatalf("MarkFailedIfActiveForClaimSystem: ok=%v err=%v", ok, err)
+		}
+		got, err := store.GetSystem(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("GetSystem: err=%v got=%v", err, got)
+		}
+		if got.ResultSummary != "its blueprint run vanished" {
+			t.Errorf("result_summary = %q, want the summary the failure was given", got.ResultSummary)
 		}
 	})
 
@@ -5386,6 +5408,138 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		if other, err := store.ListAwaitingPersonSystem(ctx, uuid.NewString()); err == nil && len(other) != 0 {
 			t.Errorf("another org's set = %+v, want none", other)
+		}
+	})
+
+	// --- The delegator's notices ---
+	//
+	// The brain's sweep tells a delegator from these two due sets and marks
+	// each row it told. A row a set wrongly keeps is a notice sent on every
+	// pass; a row it wrongly drops is a notice never sent.
+
+	t.Run("ListFailureNoticesDue_ListsADelegatedFailureUntilMarked", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "failure-notice")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		fail := func(id string) {
+			t.Helper()
+			claimID, _, err := holderClaim(ctx, store, orgID, id)
+			if err != nil {
+				t.Fatalf("claim %s: %v", id, err)
+			}
+			if ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, id, claimID, string(domain.ConversationFailureCrash), "exit 1"); err != nil || !ok {
+				t.Fatalf("fail %s: ok=%v err=%v", id, ok, err)
+			}
+		}
+		delegated := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		fail(delegated)
+		// A trigger fired it: nobody delegated it to tell.
+		fired := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			TriggerType: "event", BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		fail(fired)
+
+		due, err := store.ListFailureNoticesDueSystem(ctx, 100)
+		if err != nil {
+			t.Fatalf("ListFailureNoticesDueSystem: %v", err)
+		}
+		if len(due) != 1 {
+			t.Fatalf("due = %+v, want only %s", due, delegated)
+		}
+		want := domain.FailureNoticeDue{
+			OrgID: orgID, ConversationID: delegated, CreatorUserID: userID,
+			FailureKind: domain.ConversationFailureCrash, ResultSummary: "exit 1",
+			EntitySourceID: due[0].EntitySourceID,
+		}
+		if due[0] != want || !strings.Contains(due[0].EntitySourceID, "failure-notice") {
+			t.Errorf("due row = %+v, want %+v with the seeded entity's key", due[0], want)
+		}
+
+		if marked, err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil || !marked {
+			t.Fatalf("MarkFailureNoticedSystem = (%v, %v), want it marked", marked, err)
+		}
+		if due, err := store.ListFailureNoticesDueSystem(ctx, 100); err != nil || len(due) != 0 {
+			t.Errorf("due after the mark = %+v (err %v), want none", due, err)
+		}
+		// A second pass that read the row before the mark finds nothing to
+		// mark, which is what keeps it from posting the notice again.
+		if marked, err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil || marked {
+			t.Errorf("a second MarkFailureNoticedSystem = (%v, %v), want nothing marked", marked, err)
+		}
+	})
+
+	t.Run("ListPauseNoticesDue_ListsEachParkUntilMarked", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "pause-notice")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		park := func(id string) {
+			t.Helper()
+			if ok, err := HolderPark(store, ctx, orgID, id, db.ParkStopped(domain.ParkReasonStalled, "")); err != nil || !ok {
+				t.Fatalf("park %s: ok=%v err=%v", id, ok, err)
+			}
+		}
+		due := func() []domain.PauseNoticeDue {
+			t.Helper()
+			got, err := store.ListPauseNoticesDueSystem(ctx, 100)
+			if err != nil {
+				t.Fatalf("ListPauseNoticesDueSystem: %v", err)
+			}
+			return got
+		}
+		conversationID := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		park(conversationID)
+		// The awaiting-person test applies: a trigger fired this one.
+		fired := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			TriggerType: "event", BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		park(fired)
+
+		first := due()
+		if len(first) != 1 || first[0].ConversationID != conversationID {
+			t.Fatalf("due = %+v, want only %s", first, conversationID)
+		}
+		if got := first[0]; got.OrgID != orgID || got.CreatorUserID != userID ||
+			got.ParkReason != domain.ParkReasonStalled || got.ParkedAt.IsZero() ||
+			!strings.Contains(got.EntitySourceID, "pause-notice") {
+			t.Errorf("due row = %+v, want the stalled park in org %s by %s, with its parked_at and entity key", got, orgID, userID)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || !marked {
+			t.Fatalf("MarkPauseNoticedSystem = (%v, %v), want it marked", marked, err)
+		}
+		if got := due(); len(got) != 0 {
+			t.Fatalf("due after the mark = %+v, want none", got)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || marked {
+			t.Errorf("a second MarkPauseNoticedSystem = (%v, %v), want nothing marked", marked, err)
+		}
+
+		// Woken and parked again: a new park, owed its own notice.
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
+			t.Fatalf("resume: ok=%v err=%v", ok, err)
+		}
+		park(conversationID)
+		again := due()
+		if len(again) != 1 || again[0].ConversationID != conversationID || again[0].ParkedAt.Equal(first[0].ParkedAt) {
+			t.Fatalf("due after parking anew = %+v, want %s at a parked_at other than %v", again, conversationID, first[0].ParkedAt)
+		}
+		// A mark naming the park that ended marks nothing.
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || marked {
+			t.Fatalf("MarkPauseNoticedSystem(stale) = (%v, %v), want nothing marked", marked, err)
+		}
+		if got := due(); len(got) != 1 {
+			t.Fatalf("due after a stale mark = %+v, want the new park still due", got)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, again[0].ParkedAt); err != nil || !marked {
+			t.Fatalf("MarkPauseNoticedSystem = (%v, %v), want it marked", marked, err)
+		}
+		if got := due(); len(got) != 0 {
+			t.Errorf("due after marking the new park = %+v, want none", got)
 		}
 	})
 

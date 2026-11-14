@@ -818,28 +818,12 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 }
 
 func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error) {
-	reasons := domain.ParkReasonsAwaitingPerson()
-	names := make([]string, len(reasons))
-	for i, r := range reasons {
-		names[i] = string(r)
-	}
-	// A claim clears park_reason as it takes a row off its park, so a
-	// conversation someone woke leaves the set at its claim. The entity is
-	// outer-joined: its key is display only, and a task that names none still
-	// leaves its delegator waiting.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
-		FROM conversations c
-		JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
-		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
-		WHERE c.org_id = $1
-		  AND c.status = 'open'
-		  AND c.park_reason = ANY($2::text[])
-		  AND c.creator_user_id IS NOT NULL
-		  AND c.ended_at IS NULL
-		  AND c.archived_at IS NULL
+		`+parkedForPersonSQL("$2")+`
+		  AND c.org_id = $1
 		ORDER BY c.id
-	`, orgID, names)
+	`, orgID, parkedForPersonReasons())
 	if err != nil {
 		return nil, err
 	}
@@ -855,6 +839,141 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, pauseNoticesDueQuery, parkedForPersonReasons(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PauseNoticeDue
+	for rows.Next() {
+		var d domain.PauseNoticeDue
+		var reason string
+		if err := rows.Scan(&d.OrgID, &d.ParkedAt, &d.ConversationID, &d.CreatorUserID, &reason, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.ParkReason = domain.ParkReason(reason)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error) {
+	// The IS DISTINCT FROM is what a concurrent pass's mark meets: the row
+	// lock makes it wait for the first, and once that commits the row no
+	// longer matches.
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE conversations SET pause_noticed_parked_at = parked_at
+		WHERE org_id = $1 AND id = $2 AND parked_at = $3
+		  AND pause_noticed_parked_at IS DISTINCT FROM parked_at
+	`, orgID, conversationID, parkedAt)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, failureNoticesDueQuery, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.FailureNoticeDue
+	for rows.Next() {
+		var d domain.FailureNoticeDue
+		var kind string
+		if err := rows.Scan(&d.OrgID, &d.ConversationID, &d.CreatorUserID, &kind, &d.ResultSummary, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.FailureKind = domain.ConversationFailureKind(kind)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE conversations SET failure_noticed_at = now()
+		WHERE org_id = $1 AND id = $2 AND failure_noticed_at IS NULL
+	`, orgID, conversationID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// pauseNoticesDueQuery is ListPauseNoticesDueSystem's statement. A park keeps
+// its parked_at until a claim or a resume takes the row off it, so a marker
+// that differs from it names an earlier park, or none.
+//
+// Its predicate and order are idx_conversations_pause_notice_due's, so the
+// read walks the parks still owed a notice rather than every open
+// conversation, concluded steps included.
+var pauseNoticesDueQuery = `
+		SELECT c.org_id::text, c.parked_at, c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
+		` + parkedForPersonSQL("$1") + `
+		  AND c.parked_at IS NOT NULL
+		  AND c.pause_noticed_parked_at IS DISTINCT FROM c.parked_at
+		ORDER BY c.parked_at, c.id
+		LIMIT $2`
+
+// failureNoticesDueQuery is ListFailureNoticesDueSystem's statement. Its
+// predicate and order are idx_conversations_failure_notice_due's, so the read
+// walks the few failures still owed a notice rather than every failure ever
+// recorded.
+const failureNoticesDueQuery = `
+		SELECT c.org_id::text, c.id::text, c.creator_user_id::text,
+		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
+		FROM conversations c
+		LEFT JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
+		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
+		WHERE c.status = 'failed'
+		  AND c.failure_noticed_at IS NULL
+		  AND c.creator_user_id IS NOT NULL
+		ORDER BY c.completed_at, c.id
+		LIMIT $1`
+
+// parkedForPersonSQL is the FROM and WHERE of a conversation that waits on the
+// person who delegated it (domain.ParkReason.AwaitsPerson), with reasons the
+// placeholder binding parkedForPersonReasons. ListAwaitingPersonSystem, which
+// resolves paused notices, and ListPauseNoticesDueSystem, which opens them,
+// both read it, so a notice the sweep opens is one it keeps.
+//
+// A claim clears park_reason as it takes a row off its park, so a
+// conversation someone woke leaves the set at its claim. The entity is
+// outer-joined: its key is display only, and a task that names none still
+// leaves its delegator waiting.
+func parkedForPersonSQL(reasons string) string {
+	return `
+		FROM conversations c
+		JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
+		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
+		WHERE c.status = 'open'
+		  AND c.park_reason = ANY(` + reasons + `::text[])
+		  AND c.creator_user_id IS NOT NULL
+		  AND c.ended_at IS NULL
+		  AND c.archived_at IS NULL`
+}
+
+// parkedForPersonReasons is the bind for parkedForPersonSQL's reasons.
+func parkedForPersonReasons() []string {
+	reasons := domain.ParkReasonsAwaitingPerson()
+	names := make([]string, len(reasons))
+	for i, r := range reasons {
+		names[i] = string(r)
+	}
+	return names
 }
 
 func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error) {
@@ -1250,14 +1369,14 @@ func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversa
 // fence. The two negative answers stay distinct: ok=false is the guarded
 // flip's own "somebody else reached the terminal first", ErrClaimReleased is
 // "you are not the one who gets to decide".
-func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
+func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error
-		flipped, err = markFailedIfActive(ctx, q, orgID, conversationID, failureKind)
+		flipped, err = markFailedIfActive(ctx, q, orgID, conversationID, failureKind, summary)
 		if err != nil || !flipped {
 			return err
 		}
@@ -1269,7 +1388,7 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 	return flipped, nil
 }
 
-func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind string) (bool, error) {
+func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind, summary string) (bool, error) {
 	// 'open' without a verdict is deliberately failable here — see
 	// ConversationStore.MarkFailedIfActiveForClaimSystem: a warm 'open'
 	// conversation has no durable snapshot yet, so an infra error reaching
@@ -1278,10 +1397,11 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
 		    failure_kind = NULLIF($2, ''),
+		    result_summary = COALESCE(NULLIF($5, ''), result_summary),
 		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 		WHERE org_id = $3 AND id = $4
 		  AND `+db.UnsettledConversationSQL("conversations")+`
-	`, time.Now().UTC(), failureKind, orgID, conversationID)
+	`, time.Now().UTC(), failureKind, orgID, conversationID, summary)
 	if err != nil {
 		return false, err
 	}
