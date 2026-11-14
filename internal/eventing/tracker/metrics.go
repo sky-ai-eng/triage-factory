@@ -66,6 +66,11 @@ const (
 	dependabotListingFailed      = "failed"
 )
 
+// missedHintDependabotListing is the missed-hint rule of a scheduled listing
+// of a repository's open Dependabot alerts, beside the pull request refresh
+// gate's timer rules.
+const missedHintDependabotListing refreshRule = "dependabot_listing"
+
 // overlapSetSizeBounds are the histogram's buckets, as a share of the base's
 // open pull requests. The measured mean is about 1%, so the low buckets are
 // the fine ones.
@@ -110,7 +115,7 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", pathFetchesMetric, "error", err)
 	}
 	if in.missedHints, err = m.Int64Counter(missedHintsMetric,
-		metric.WithDescription("Scheduled refreshes of a pull request that a timer rule forced, with no refresh mark naming it and no change in its listing, that emitted an event, by org and rule (change_window, floor, in_flight_ci): a change no webhook hint announced.")); err != nil {
+		metric.WithDescription("Scheduled refreshes that emitted an event with no refresh mark naming what they refreshed, by org and rule: a pull request refresh a timer rule forced with no change in its listing (change_window, floor, in_flight_ci), or a listing of a repository's open Dependabot alerts (dependabot_listing). Each is a change no webhook hint announced.")); err != nil {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", missedHintsMetric, "error", err)
 	}
 	if in.dependabotListings, err = m.Int64Counter(dependabotListingsMetric,
@@ -127,8 +132,8 @@ func recordDependabotListing(outcome string) {
 	}
 }
 
-// recordMissedHint counts one timer-forced refresh that found a change no
-// mark named.
+// recordMissedHint counts one scheduled refresh, timer-forced or an alert
+// listing, that found a change no mark named.
 func recordMissedHint(orgID string, rule refreshRule) {
 	if s := stats.Load(); s != nil {
 		s.missedHints.Add(context.Background(), 1, metric.WithAttributes(telemetry.OrgID(orgID), attribute.String("rule", string(rule))))

@@ -65,6 +65,15 @@ type RepositoryDependabotAccess struct {
 	AlertsETag string
 }
 
+// Listed reports whether the poll lists the repository's open alerts, which
+// it does when the answer says they can be read. A repository with no answer
+// (a nil a) is not listed. A webhook delivery marks a repository's alerts
+// only when this holds, and a pass clears a mark on alerts for which it does
+// not.
+func (a *RepositoryDependabotAccess) Listed() bool {
+	return a != nil && a.Access == DependabotAlertsReadable
+}
+
 // DependabotAccessCounts counts an org's tracked repositories on one GitHub
 // host by their stored answer. Unchecked is the tracked repositories with no
 // current answer: the poll has not reached them yet, or their answer is older

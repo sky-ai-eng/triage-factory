@@ -31,6 +31,14 @@ type AlertListing struct {
 	// package it holds no entity for gets none, as a pull request opened in
 	// an untracked repository is not discovered.
 	Untracked bool
+	// Marked is a repository a refresh mark names: a webhook delivery said
+	// its alerts changed. Its listing sends no condition: after a change a
+	// conditional request is answered in full anyway, and without one a 304
+	// can never stand in for the change the delivery announced. A delivery
+	// that announced nothing new, a duplicate or a replay, costs one listing
+	// that diffs to nothing. The stored ETag is still cleared before the
+	// listing's writes and replaced after them.
+	Marked bool
 }
 
 // WithDependabotAccess hands the tracker the store each alert listing is
@@ -67,7 +75,12 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 // fails changes nothing: no package is resolved because a request failed.
 //
 // A listing with Untracked set is of a repository no team tracks, listed only
-// for the packages TF holds in it (AlertListing.Untracked).
+// for the packages TF holds in it (AlertListing.Untracked), and one with
+// Marked set sends no condition (AlertListing.Marked).
+//
+// A listing of a tracked repository that no mark named, and that announced an
+// alert opening or a package resolving against an earlier listing of the
+// repository, counts a missed hint: a change no webhook delivery announced.
 //
 // The repositories are listed concurrently, as many at once as the pull
 // request listing (repoConcurrency). Each repository's listing and writes
@@ -81,21 +94,28 @@ func (t *Tracker) WithDependabotAccess(store db.RepositoryDependabotAccessStore)
 // every cycle. Any other failure ends the pass, since it would meet every
 // remaining repository too: a rate limit, a refused credential, GitHub
 // failing. No listing starts after it, the listings already in flight finish
-// with their writes, and the first such failure is returned. Returns how many
-// events landed on the queue.
-func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, client *ghclient.Client, repos []AlertListing) (int, error) {
+// with their writes, and the first such failure is returned.
+//
+// Returns how many events landed on the queue, and finished: the listings of
+// repos the pass is done with, each listed or skipped, in the order of repos.
+// A listing that ended the pass, and one the pass never started, is left
+// out. A tracker without the store lists nothing and finishes none.
+func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, client *ghclient.Client, repos []AlertListing) (emitted int, finished []AlertListing, err error) {
 	if t.dependabotAccess == nil || len(repos) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	held, err := t.heldVulnerablePackages(ctx, scope, repos)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	var emitted atomic.Int64
+	var events atomic.Int64
 	var stopped atomic.Bool
+	// done is written by each listing's goroutine at its own index, and read
+	// once Wait has returned.
+	done := make([]bool, len(repos))
 	g := new(errgroup.Group) // no WithContext: a failure ends the pass by stopping new listings, not by cancelling the ones in flight
 	g.SetLimit(repoConcurrency())
-	for _, l := range repos {
+	for i, l := range repos {
 		if stopped.Load() {
 			break
 		}
@@ -109,16 +129,37 @@ func (t *Tracker) RefreshVulnerablePackages(ctx context.Context, scope string, c
 				stopped.Store(true)
 				return err
 			}
-			n, err := t.refreshRepositoryAlerts(ctx, scope, client, l, held[l.Repository.ID])
-			emitted.Add(int64(n))
+			n, announced, err := t.refreshRepositoryAlerts(ctx, scope, client, l, held[l.Repository.ID])
+			events.Add(int64(n))
+			if err == nil && announced > 0 && missedAlertHint(l, held[l.Repository.ID]) {
+				recordMissedHint(t.orgID, missedHintDependabotListing)
+			}
 			if err = t.alertListingFailure(ctx, l.Repository, err); err != nil {
 				stopped.Store(true)
+				return err
 			}
-			return err
+			done[i] = true
+			return nil
 		})
 	}
 	err = g.Wait()
-	return int(emitted.Load()), err
+	for i, l := range repos {
+		if done[i] {
+			finished = append(finished, l)
+		}
+	}
+	return int(events.Load()), finished, err
+}
+
+// missedAlertHint reports whether a listing that announced a change is a
+// missed hint: of a tracked repository no mark named, which held packages
+// from an earlier listing or carried that listing's ETag. A repository's first
+// listing, or the first since a host change or lost access retired its
+// packages and cleared its ETag, announces what was already open, which no
+// delivery could have named. Receivers mark no untracked repository, so its
+// listing would count every change.
+func missedAlertHint(l AlertListing, held map[string]domain.Entity) bool {
+	return !l.Marked && !l.Untracked && (l.Access.AlertsETag != "" || len(held) > 0)
 }
 
 // alertListingFailure is what a repository's listing error does to its pass:
@@ -239,24 +280,30 @@ func (t *Tracker) heldVulnerablePackages(ctx context.Context, scope string, repo
 
 // refreshRepositoryAlerts lists one repository's open alerts and applies
 // them to its packages. held is the repository's active packages by key.
-func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, client *ghclient.Client, l AlertListing, held map[string]domain.Entity) (int, error) {
+// emitted counts every event that landed on the queue, and announced the ones
+// the listing's diff produced (alert_opened and resolved), which leaves out
+// the closes owed to packages whose resolution landed on an earlier listing.
+func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, client *ghclient.Client, l AlertListing, held map[string]domain.Entity) (emitted, announced int, err error) {
 	repo := l.Repository
-	alerts, newETag, notModified, err := client.ListOpenDependabotAlerts(ctx, repo.Owner, repo.Repo, l.Access.AlertsETag)
-	if err != nil {
-		return 0, err
+	condition := l.Access.AlertsETag
+	if l.Marked {
+		condition = ""
 	}
-	emitted := 0
+	alerts, newETag, notModified, err := client.ListOpenDependabotAlerts(ctx, repo.Owner, repo.Repo, condition)
+	if err != nil {
+		return 0, 0, err
+	}
 	if notModified {
 		recordDependabotListing(dependabotListingNotModified)
 		// Nothing opened or closed. A package whose resolution was emitted
 		// and whose close has not landed is still owed one.
 		for _, key := range slices.Sorted(maps.Keys(held)) {
-			if prev, ok := storedVulnerablePackageSnapshot(held[key]); ok && prev.Terminal() {
+			if awaitingClose(held[key]) {
 				n, _ := t.oweVulnerablePackageClose(ctx, held[key])
 				emitted += n
 			}
 		}
-		return emitted, nil
+		return emitted, 0, nil
 	}
 	recordDependabotListing(dependabotListingListed)
 	if l.Access.AlertsETag != "" {
@@ -265,7 +312,7 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 		// those alerts would be answered 304 and never diffed.
 		if _, err := t.dependabotAccess.RecordAlertListingSystem(ctx, t.orgID, repo.ID, ""); err != nil {
 			trackerLog.ErrorContext(ctx, "clear dependabot alert listing ETag failed; skipping the repository this cycle", "org", t.orgID, "repo", repo.Slug(), "error", err)
-			return 0, nil
+			return 0, 0, nil
 		}
 	}
 
@@ -291,28 +338,53 @@ func (t *Tracker) refreshRepositoryAlerts(ctx context.Context, scope string, cli
 			}
 			e = *created
 		}
+		if awaitingClose(e) {
+			// Its resolution was emitted and its close has not landed. The
+			// alerts open on the package again belong to the entity the next
+			// listing creates once this one has closed, so nothing is written
+			// here, and the close is owed if it was lost.
+			n, _ := t.oweVulnerablePackageClose(ctx, e)
+			emitted += n
+			complete = false
+			continue
+		}
 		n, landed := t.applyVulnerablePackage(ctx, e, repo, snap, updatedAt)
 		emitted += n
+		announced += n
 		complete = complete && landed
 	}
 	for _, key := range slices.Sorted(maps.Keys(held)) {
 		if _, open := packages[key]; open {
 			continue
 		}
+		if awaitingClose(held[key]) {
+			n, landed := t.oweVulnerablePackageClose(ctx, held[key])
+			emitted += n
+			complete = complete && landed
+			continue
+		}
 		n, landed := t.resolveVulnerablePackage(ctx, held[key], repo)
 		emitted += n
+		announced += n
 		complete = complete && landed
 	}
 
 	if !complete || newETag == "" {
 		// The ETag is left cleared, so the next listing is answered in full
 		// and the writes that did not land are made again.
-		return emitted, nil
+		return emitted, announced, nil
 	}
 	if _, err := t.dependabotAccess.RecordAlertListingSystem(ctx, t.orgID, repo.ID, newETag); err != nil {
 		trackerLog.ErrorContext(ctx, "record dependabot alert listing failed", "org", t.orgID, "repo", repo.Slug(), "error", err)
 	}
-	return emitted, nil
+	return emitted, announced, nil
+}
+
+// awaitingClose reports whether e's stored snapshot already says the package
+// resolved: its resolution was emitted, and its close has not landed.
+func awaitingClose(e domain.Entity) bool {
+	prev, ok := storedVulnerablePackageSnapshot(e)
+	return ok && prev.Terminal()
 }
 
 // groupDependabotAlerts groups a repository's open alerts into one snapshot per
@@ -341,18 +413,10 @@ func groupDependabotAlerts(repoSlug string, alerts []ghclient.OpenDependabotAler
 // applyVulnerablePackage commits curr, a package's open alerts, as entity e's
 // snapshot, with an alert_opened for each alert e's stored snapshot did not
 // hold, which is every alert when e has none stored. landed reports whether
-// the write went through.
-//
-// An entity whose stored snapshot is already terminal has had its resolution
-// emitted and is waiting on its close: alerts open on the package again belong
-// to the entity the next listing creates once this one has closed, so nothing
-// is written here, and the close is owed if it was lost.
+// the write went through. e's stored snapshot is not terminal
+// (awaitingClose).
 func (t *Tracker) applyVulnerablePackage(ctx context.Context, e domain.Entity, repo domain.Repository, curr domain.VulnerablePackageSnapshot, updatedAt map[int]time.Time) (emitted int, landed bool) {
 	prev, hasPrev := storedVulnerablePackageSnapshot(e)
-	if hasPrev && prev.Terminal() {
-		n, _ := t.oweVulnerablePackageClose(ctx, e)
-		return n, false
-	}
 	evts := DiffVulnerablePackage(prev, curr, e.ID, repo.ID, updatedAt)
 	ok, enqueued, err := t.commitRefresh(ctx, t.orgID, e.ID, canonicalVulnerablePackageJSON(prev, hasPrev), mustJSON(curr), e.PollSeq, evts)
 	if err != nil {
@@ -369,8 +433,8 @@ func (t *Tracker) applyVulnerablePackage(ctx context.Context, e domain.Entity, r
 // resolveVulnerablePackage applies a listing that holds no open alert of the
 // package entity e is: e's stored alerts close, and resolved is emitted with
 // the terminal snapshot. An entity that stored no snapshot never recorded an
-// open alert, so it closes with no event; one whose snapshot is already
-// terminal is owed its close.
+// open alert, so it closes with no event. e's stored snapshot is not terminal
+// (awaitingClose).
 func (t *Tracker) resolveVulnerablePackage(ctx context.Context, e domain.Entity, repo domain.Repository) (emitted int, landed bool) {
 	prev, hasPrev := storedVulnerablePackageSnapshot(e)
 	if !hasPrev {
@@ -382,9 +446,6 @@ func (t *Tracker) resolveVulnerablePackage(ctx context.Context, e domain.Entity,
 			return 0, false
 		}
 		return 0, ok
-	}
-	if prev.Terminal() {
-		return t.oweVulnerablePackageClose(ctx, e)
 	}
 	curr := prev
 	curr.Repo = repo.Slug()

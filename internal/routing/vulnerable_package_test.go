@@ -66,7 +66,7 @@ func TestVulnerablePackage_AlertsFoldIntoOneTaskAndTheResolutionClosesIt(t *test
 		}
 		tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Deliverables, st.ExternalActions, st.EventQueue, st.PRMergeability, org).
 			WithDependabotAccess(st.DependabotAccess)
-		if _, err := tr.RefreshVulnerablePackages(ctx, dbtest.TestGitHubHost, ghclient.NewClient(srv.URL, "tok"), []tracker.AlertListing{{Repository: repos[0], Access: *a}}); err != nil {
+		if _, _, err := tr.RefreshVulnerablePackages(ctx, dbtest.TestGitHubHost, ghclient.NewClient(srv.URL, "tok"), []tracker.AlertListing{{Repository: repos[0], Access: *a}}); err != nil {
 			t.Fatalf("RefreshVulnerablePackages: %v", err)
 		}
 		mustDrain(t, router)

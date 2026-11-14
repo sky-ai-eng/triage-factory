@@ -35,6 +35,10 @@ type dependabotProbe struct {
 	orgID  string
 	host   string
 	passes []dependabotPass
+	// marks is the cycle's refresh marks: a repository a mark names the
+	// alerts of is listed with no condition, and the mark is honored once its
+	// listing finishes.
+	marks *markLedger
 
 	// What run read, for listAlerts: the repositories with their answers,
 	// each updated by the probe that answered it.
@@ -51,13 +55,14 @@ type dependabotPass struct {
 	reach  tracker.GitHubReach
 }
 
-// newDependabotProbe returns the cycle's probe, or nil when the Manager holds
-// no store to record answers in (tests and embedders that haven't wired it).
-func (m *Manager) newDependabotProbe(orgID, host string) *dependabotProbe {
+// newDependabotProbe returns the cycle's probe, with marks the cycle's refresh
+// marks (nil for none), or nil when the Manager holds no store to record
+// answers in (tests and embedders that haven't wired it).
+func (m *Manager) newDependabotProbe(orgID, host string, marks *markLedger) *dependabotProbe {
 	if m.DependabotAccess == nil {
 		return nil
 	}
-	return &dependabotProbe{m: m, orgID: orgID, host: host}
+	return &dependabotProbe{m: m, orgID: orgID, host: host, marks: marks}
 }
 
 // add queues a credential pass: client, the tracked repos it reads, and its
@@ -141,7 +146,13 @@ func (p *dependabotProbe) probe(ctx context.Context, targets map[string]dependab
 // credential (tracker.RefreshVulnerablePackages). It lists even when a probe
 // got no answer, since that probe's repository may be the only one failing,
 // and a failure that would meet every request ends the listings at their
-// first one. nil-safe.
+// first one.
+//
+// A repository whose alerts a refresh mark names is listed with no condition
+// (tracker.AlertListing.Marked), and the mark is honored once its listing
+// finishes. A mark naming alerts the poll does not list, on a repository whose
+// answer is not readable or that has none, names nothing and is cleared.
+// nil-safe.
 func (p *dependabotProbe) listAlerts(ctx context.Context) {
 	if p == nil || p.targets == nil {
 		return
@@ -150,8 +161,12 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 	names := slices.Sorted(maps.Keys(p.targets))
 	var answered []tracker.AlertListing
 	for _, name := range names {
-		if t := p.targets[name]; t.answer != nil {
-			answered = append(answered, t.listing())
+		t := p.targets[name]
+		if t.answer != nil {
+			answered = append(answered, t.listing(false))
+		}
+		if !t.answer.Listed() {
+			p.marks.dropUnlistedAlerts(t.repository.ID)
 		}
 	}
 	tr.RetireUnreadableVulnerablePackages(ctx, p.host, answered)
@@ -160,14 +175,16 @@ func (p *dependabotProbe) listAlerts(ctx context.Context) {
 		var listings []tracker.AlertListing
 		for _, name := range names {
 			t := p.targets[name]
-			if t.pass == i && t.answer != nil && t.answer.Access == domain.DependabotAlertsReadable {
-				listings = append(listings, t.listing())
+			if t.pass == i && t.answer.Listed() {
+				listings = append(listings, t.listing(p.marks.alertsMarked(t.repository.ID)))
 			}
 		}
 		if len(listings) == 0 {
 			continue
 		}
-		if _, err := tr.RefreshVulnerablePackages(ctx, p.host, pass.client, listings); err != nil {
+		_, finished, err := tr.RefreshVulnerablePackages(ctx, p.host, pass.client, listings)
+		p.marks.honorAlerts(finished)
+		if err != nil {
 			var rl *ghclient.ErrRateLimited
 			if !errors.As(err, &rl) {
 				githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "dependabot alerts listing failed; the rest wait for the next cycle", "org", p.orgID, "error", err)
@@ -209,8 +226,10 @@ type dependabotTarget struct {
 	pass       int
 }
 
-func (t dependabotTarget) listing() tracker.AlertListing {
-	return tracker.AlertListing{Repository: t.repository, Access: *t.answer, Untracked: t.untracked}
+// listing is the target's alert listing, marked when a refresh mark names its
+// alerts. The target has an answer.
+func (t dependabotTarget) listing(marked bool) tracker.AlertListing {
+	return tracker.AlertListing{Repository: t.repository, Access: *t.answer, Untracked: t.untracked, Marked: marked}
 }
 
 // load reads the org's tracked repositories on the host, the untracked ones
