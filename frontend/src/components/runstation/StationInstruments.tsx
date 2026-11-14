@@ -13,6 +13,7 @@ import {
   retryingAt,
   workStartedAt,
 } from '../../lib/conversationStatus'
+import { useModelCatalog } from '../../hooks/useModelCatalog'
 import { compactNum, tint, type StationState } from './stationStyle'
 import { RailSection as Section } from './RailSection'
 import { RunArtifacts } from './RunArtifacts'
@@ -59,6 +60,8 @@ export function TelemetryRail({
   // usage-bearing row, not a sum — and the rail re-renders every second for
   // the elapsed readout (`now`), so memoize it on the message array.
   const contextUsed = useMemo(() => latestContextSize(messages), [messages])
+  const { all: catalog } = useModelCatalog()
+  const catalogWindow = catalog.find((m) => m.key === conversation.Model)?.context_window
   // Working time and queue dwell are separate gauges: elapsed/running tick
   // from the claim stamp (queue time never inflates them), the queued readout
   // carries the wait — live while the run is in line, settled once it ran.
@@ -107,7 +110,7 @@ export function TelemetryRail({
         <Section label="Context">
           <ContextGauge
             used={contextUsed}
-            limit={contextLimit(conversation.Model)}
+            limit={contextLimit(conversation.Model, catalogWindow)}
             light={state.light}
           />
         </Section>
@@ -303,19 +306,20 @@ function latestContextSize(messages: Message[]): number | null {
   return null
 }
 
-// contextLimit maps a model id to its context-window size in tokens.
-// Current as of 2026-06 — update when new families ship: Fable 5, Opus
-// 4.6/4.7/4.8, and Sonnet 4.6 are 1M-context natively (no [1m] variant id
-// needed); Haiku 4.5 and the pre-4.6 families (Sonnet/Opus 4.5 and earlier)
-// are 200k (haiku has no clause below — it rides the fallback; if a future
-// haiku ships at 1M, add `haiku-4-[6-9]` to the pattern). Unknown families
-// fall back to 200k on purpose: for a pressure gauge the safe error is
-// over-reporting fullness — a false alarm draws a look — never hiding real
-// exhaustion behind a too-large denominator.
-function contextLimit(model: string): number {
+// contextLimit is the model's context window in tokens. The catalog is the
+// source: its entry for the key carries the window, passed in as
+// `catalogWindow`. The pattern is only for a key the catalog can't describe —
+// a local SDK alias, which carries no window on the wire, or a key the build
+// no longer offers. It reads every 5.x family, Fable, Opus 4.6–4.8, and
+// Sonnet 4.6 as 1M, and everything else as 200k. That fallback is on purpose:
+// for a pressure gauge the safe error is over-reporting fullness — a false
+// alarm draws a look — never hiding real exhaustion behind a too-large
+// denominator.
+function contextLimit(model: string, catalogWindow?: number): number {
+  if (catalogWindow != null && catalogWindow > 0) return catalogWindow
   const m = (model || '').toLowerCase()
   if (m.includes('[1m]') || /\b1m\b/.test(m)) return 1_000_000
-  if (/fable|opus-4-[678]|sonnet-4-6/.test(m)) return 1_000_000
+  if (/fable|opus-4-[678]|sonnet-4-6|(haiku|sonnet|opus|fable)-5/.test(m)) return 1_000_000
   return 200_000
 }
 

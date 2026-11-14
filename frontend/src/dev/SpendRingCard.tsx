@@ -26,7 +26,7 @@ export function SpendRingCard() {
             models={[
               { name: 'claude-opus-5', v: 24.8 },
               { name: 'claude-sonnet-5', v: 13.1 },
-              { name: 'claude-haiku-4-5-20251001', v: 3.3 },
+              { name: 'claude-haiku-5-5', v: 3.3 },
             ]}
           />
         </div>

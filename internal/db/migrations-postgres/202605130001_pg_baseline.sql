@@ -934,7 +934,7 @@ CREATE TABLE public.org_settings (
     enabled_models text,
     -- The modelcatalog key both headless system jobs (scorer, repo profiler) run
     -- on; app-validated. Empty = not picked, and those jobs skip their cycles.
-    -- The SQLite twin defaults to 'claude-haiku-4-5-20251001' — do not converge.
+    -- The SQLite twin defaults to the SDK alias 'haiku' — do not converge.
     background_jobs_model text DEFAULT ''::text NOT NULL,
     -- Org-wide daily LLM spend cap. NULL (and 0, app-side) = no cap. At or above
     -- it, Spawner.Delegate refuses new runs; in-flight runs are unaffected and

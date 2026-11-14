@@ -141,7 +141,7 @@ func TestProxyInjectsBedrockBearer(t *testing.T) {
 
 	_, proxyURL := startProxyWithAddr(t, llmproxy.ProviderBedrockBearer, "bdrk-REAL-BEARER", upstream.URL)
 
-	req, _ := http.NewRequest("POST", proxyURL+"/model/anthropic.claude-haiku-4-5/invoke", strings.NewReader(`{}`))
+	req, _ := http.NewRequest("POST", proxyURL+"/model/anthropic.claude-haiku-5-5/invoke", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer caller-supplied-garbage")
 
 	resp, err := http.DefaultClient.Do(req)

@@ -167,8 +167,8 @@ const MODELS_READ = {
       display_order: 1,
     },
     {
-      key: 'claude-haiku-4-5',
-      display_name: 'Claude Haiku 4.5',
+      key: 'claude-haiku-5-5',
+      display_name: 'Claude Haiku 5.5',
       provider: 'anthropic',
       provider_display_name: 'Anthropic',
       enabled: true,
@@ -832,20 +832,20 @@ describe('the models panel', () => {
   async function openPanel() {
     renderPage()
     fireEvent.click(await screen.findByText('CONFIGURED MODELS'))
-    await screen.findByText('Claude Haiku 4.5')
+    await screen.findByText('Claude Haiku 5.5')
   }
 
   it('moves the star onto an unenabled row and enables it in the same PATCH', async () => {
     await openPanel()
-    const row = within(table()).getByText('Claude Haiku 4.5').closest('.tb-row') as HTMLElement
+    const row = within(table()).getByText('Claude Haiku 5.5').closest('.tb-row') as HTMLElement
     fireEvent.click(within(row).getByRole('button'))
 
     await waitFor(() => expect(patches()).toHaveLength(1))
     const [path, init] = patches()[0]
     expect(path).toBe('/api/teams/t1/settings')
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({
-      ai_model: 'claude-haiku-4-5',
-      enabled_models: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+      ai_model: 'claude-haiku-5-5',
+      enabled_models: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5-5'],
     })
   })
 

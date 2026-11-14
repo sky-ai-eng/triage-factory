@@ -54,7 +54,7 @@ func TestLive_ProxyForwardsRealAnthropicRequest(t *testing.T) {
 
 	// Smallest possible messages request — one Haiku turn, ~10 tokens.
 	body := strings.NewReader(`{
-		"model": "claude-haiku-4-5",
+		"model": "claude-haiku-5-5",
 		"max_tokens": 16,
 		"messages": [{"role": "user", "content": "Reply with the single word: PROXY_OK"}]
 	}`)
@@ -144,7 +144,7 @@ func TestLive_SDKViaProxy(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "node", wrapperPath,
 		"-p", "Reply with the single word: PROXY_OK",
-		"--model", "claude-haiku-4-5",
+		"--model", "claude-haiku-5-5",
 		"--max-turns", "1")
 	cmd.Env = subprocessEnv
 	cwd, err := os.MkdirTemp("", "llmproxy-live-")
@@ -215,7 +215,7 @@ func TestLive_AgentFailsWithBadProxyURL(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "node", wrapperPath,
 		"-p", "say hi",
-		"--model", "claude-haiku-4-5",
+		"--model", "claude-haiku-5-5",
 		"--max-turns", "1")
 	cmd.Env = subprocessEnv
 	cwd, err := os.MkdirTemp("", "llmproxy-bad-")

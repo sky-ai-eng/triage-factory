@@ -20,7 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 )
 
-const testModel = "claude-haiku-4-5-20251001"
+const testModel = "claude-haiku-5-5"
 
 // fakeCompleter stands in for the recorder's completion. It writes the ledger
 // row the real one would (from the caller-minted RunID), so the attempt's link

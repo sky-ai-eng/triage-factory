@@ -11,8 +11,8 @@ import { jsonBody } from '../../test/apiResponse'
 
 const catalog: ModelCatalogEntry[] = [
   {
-    key: 'claude-haiku-4-5-20251001',
-    display_name: 'Claude Haiku 4.5',
+    key: 'claude-haiku-5-5',
+    display_name: 'Claude Haiku 5.5',
     provider: 'anthropic',
     enabled: true,
   },
