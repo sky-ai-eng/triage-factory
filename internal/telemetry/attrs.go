@@ -149,11 +149,11 @@ func Credential(id string) attribute.KeyValue     { return keyCredential.String(
 // WorkKind names an adopting work table by its registered kind name, and
 // Reason says why something happened where Outcome alone does not: why a work
 // item was parked, why a conversation's memory link to an entity went
-// unwritten, why a native turn parked, why a compaction ran, and what ended a
-// tool call (a lost tool host's cause, the bash memory budget). Both are
-// closed vocabularies TF declares itself: kind names are registry
-// identifiers, reasons are the typed outcomes and each package's own
-// constants, never a notice or an error's text.
+// unwritten, why a native turn parked, why a compaction ran, what ran a
+// credential seal, and what ended a tool call (a lost tool host's cause, the
+// bash memory budget). Both are closed vocabularies TF declares itself: kind
+// names are registry identifiers, reasons are the typed outcomes and each
+// package's own constants, never a notice or an error's text.
 func WorkKind(name string) attribute.KeyValue { return keyWorkKind.String(name) }
 func Reason(value string) attribute.KeyValue  { return keyReason.String(value) }
 
