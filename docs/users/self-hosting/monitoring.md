@@ -479,5 +479,9 @@ menu.
 - **Credentials and signatures** are made on a control pod while the executor
   waits (`credentials.provision`, `commit_signing.decide`). They aren't linked
   to the run's trace; search by `conversation.id`. A seal's `reason` says what
-  ran it: `cred_request` (the executor asked), `awaiting_sweep` (the request
-  was missed), or `refresh_sweep` (a running run's credentials were renewed).
+  ran it: `cred_request` (a run started waiting for credentials, or a running
+  run added a repository), `awaiting_sweep` (the periodic pass over runs still
+  waiting), or `refresh_sweep` (the periodic re-seal of a running run). The
+  awaiting pass also seals a run whose first seal hasn't been picked up yet,
+  so an `awaiting_sweep` seal beside a `cred_request` one doesn't by itself
+  mean a request was lost.

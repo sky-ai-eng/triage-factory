@@ -2,6 +2,7 @@ package credprovision
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
@@ -10,16 +11,27 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// One recorder for the test binary: the package tracer binds to the first
+// provider the OTel global is given and never rebinds, so a provider installed
+// per test would leave every run after the first recording nothing.
+var (
+	spanRecorderOnce sync.Once
+	spanRecorder     *tracetest.SpanRecorder
+)
+
+func recordSpans() *tracetest.SpanRecorder {
+	spanRecorderOnce.Do(func() {
+		spanRecorder = tracetest.NewSpanRecorder()
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder)))
+	})
+	return spanRecorder
+}
+
 // TestProvision_SpanRecordsReason: each seal's credentials.provision span
 // carries the reason its caller gave, so a trace can tell the executor's
 // request from either sweep's re-seal.
 func TestProvision_SpanRecordsReason(t *testing.T) {
-	// The package tracer binds to the first provider the global is given and
-	// never rebinds, so this is installed once for the test binary; no other
-	// test here installs one.
-	recorder := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
-
+	recorder := recordSpans()
 	for _, reason := range []Reason{ReasonCredRequest, ReasonAwaitingSweep, ReasonRefreshSweep} {
 		t.Run(string(reason), func(t *testing.T) {
 			rig := newProvisionRig(t, eventsource.Availability{

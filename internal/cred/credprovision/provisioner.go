@@ -129,10 +129,13 @@ func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolve
 type Reason string
 
 const (
-	// ReasonCredRequest is the executor's cred_request notification.
+	// ReasonCredRequest is a cred_request notification, rung when a claim
+	// parks awaiting credentials and when a running conversation records a
+	// worktree in a repository it held none in.
 	ReasonCredRequest Reason = "cred_request"
 	// ReasonAwaitingSweep is the backstop sweep over claims parked in
-	// awaiting_credentials.
+	// awaiting_credentials, which seals every one of them, including a claim
+	// whose cred_request seal is still running or not yet picked up.
 	ReasonAwaitingSweep Reason = "awaiting_sweep"
 	// ReasonRefreshSweep is the sweep that re-seals an active claim's aging
 	// or unresolved bundle.
@@ -141,10 +144,9 @@ const (
 
 // ProvisionForConversation resolves conversationID's credentials and seals them to its
 // current claimant's published pubkey, writing claim_credentials. Called
-// synchronously off the executor's cred_request notification (the fast
-// path) and by both sweeps (the backstop / refresh paths), each naming
-// itself as reason — idempotent and safe to call repeatedly for the same
-// conversation.
+// synchronously off a cred_request notification (the fast path) and by both
+// sweeps (the backstop / refresh paths), each naming itself as reason —
+// idempotent and safe to call repeatedly for the same conversation.
 //
 // A no-op (nil error, no write) when the conversation isn't currently claimed by
 // anyone, or the claiming instance hasn't published a pubkey — there is
