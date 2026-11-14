@@ -70,7 +70,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font: 500 9px/1 var(--font-mono);
+  font: 500 9px / normal var(--font-mono);
   letter-spacing: 0.04em;
 }
 .sh-scope {
@@ -379,7 +379,7 @@
 }
 .sh-tail {
   margin-left: auto;
-  font: 400 9.5px/1 var(--font-mono);
+  font: 400 9.5px / normal var(--font-mono);
   color: var(--color-ink-4);
   opacity: 0;
   transition: opacity 0.16s;
@@ -394,12 +394,18 @@
   display: flex;
   gap: 8px;
 }
+/* The dot is placed from the digit's baseline, at half the 0.7em cap height,
+   instead of centred in the line box. On a 1x display the engine places the
+   digit and a centred 5px dot on whole pixels separately, and for half the
+   row positions the dot lands a pixel below the figure it marks. Measured
+   from the baseline, it moves with the digit. */
 .sh-tail.sh-two span {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
 }
 .sh-tail.sh-two i {
+  translate: 0 calc(50% - 0.35em);
   width: 5px;
   height: 5px;
   border-radius: 999px;
@@ -524,7 +530,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font: 500 9px/1 var(--font-mono);
+  font: 500 9px / normal var(--font-mono);
   color: var(--color-ink-3);
 }
 
@@ -1165,7 +1171,6 @@
 }
 .sh-offtail {
   color: var(--color-ink-4);
-  font: 400 9.5px/1 var(--font-mono);
 }
 @keyframes sh-retry {
   0%,
