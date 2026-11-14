@@ -465,6 +465,11 @@ menu.
 - **An event.** A poll cycle's trace ends when it emits events. Each event's
   routing is its own `route.event` trace, linked back to the poll. A trigger
   that delegates carries the run's `conversation.id` on `route.delegate`.
+- **A write to a run.** The server span of a message, a stop, a permission
+  answer, or a deliverable refresh
+  (`POST /api/agent/conversations/{conversationID}/…`) carries
+  `conversation.id`, so the request shows up beside the run's other traces.
+  Reads of a run carry none.
 - **A run's setup.** Each attempt is one trace rooted at `engagement.setup`,
   from claim to agent start, numbered by `claim.attempt`. Its `outcome` is
   `agent_live`, `cancelled`, `shutdown`, `fenced`, `loss_budget_spent`, or
