@@ -170,7 +170,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
 		// Trigger rows in ShippedEventHandlers reference these blueprints.
 		ids := seedBlueprints(t,
 			"system-pr-review",
@@ -201,6 +201,17 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		if triggers == 0 {
 			t.Errorf("Seed produced 0 trigger rows; want > 0")
+		}
+		// Rules ship enabled unless marked Disabled, triggers disabled.
+		for _, shipped := range db.ShippedEventHandlers {
+			got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, shipped.ID)
+			if got == nil {
+				t.Errorf("Seed left out shipped handler %s", shipped.ID)
+				continue
+			}
+			if want := shipped.Kind == domain.EventHandlerKindRule && !shipped.Disabled; got.Enabled != want {
+				t.Errorf("seeded %s enabled=%v, want %v", shipped.ID, got.Enabled, want)
+			}
 		}
 	})
 

@@ -23,7 +23,17 @@ var ErrTxBoundStore = errors.New("db: this verb opens its own transaction and is
 // The lifecycle is the contract's: Enqueue admits a ready row, Claim leases
 // rows and hands back receipts, and RenewLease / MarkFired / MarkSkipped /
 // Requeue / DeferWhileTaskBusy are the holder's fenced writes.
-// HandOffToConversation marks a ready row and settles nothing. The per-task
+// HandOffToConversation and ReleaseHandOff mark and unmark a ready row and
+// settle nothing.
+//
+// A firing can be held behind a staged note, which it names in
+// handed_note_id: when an engagement starting under the task's running
+// blueprint is handed the firing's queued event (HandOffToConversation), and
+// when the router folds the event into a running step and keeps the firing
+// it replaced (EnqueueHanded). Either way the row holds no key and waits for
+// the run to end, and the firing worker settles it by whether the note was
+// read. A step that starts while an earlier step's note is still unread
+// takes the event over (ReleaseHandOff, then HandOffToConversation). The per-task
 // gate lives in the claim query itself, as the kind's claim filter: a firing
 // is claimable only while its task is not busy — no live top-level
 // conversation, and no blueprint run still marked running
@@ -73,6 +83,20 @@ type PendingFiringsStore interface {
 	// a caller acts on — claimed is about the task row, which no firing row
 	// could carry.
 	Enqueue(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID string, claim AgentClaimStamp) (inserted, claimed bool, err error)
+
+	// EnqueueHanded admits a ready firing that already names noteID, the
+	// staged note the router folded the firing's event into a running
+	// blueprint step as, and stamps the task's agent claim in the same
+	// transaction, pending_firings before tasks, as Enqueue does. The row
+	// holds no unique key, as a row HandOffToConversation marks holds none:
+	// it never collapses onto another row, and nothing collapses onto it.
+	// The claim filter holds it while the blueprint runs, and the firing
+	// worker settles it by whether the note was read. An empty noteID is
+	// refused, since the row would then be an unkeyed ordinary firing.
+	//
+	// Exempt from the returned-row rule, as Enqueue is: claimed is about the
+	// task row, and the admitted row is the worker's to read.
+	EnqueueHanded(ctx context.Context, orgID, entityID, taskID, triggerID, triggeringEventID, noteID string, claim AgentClaimStamp) (claimed bool, err error)
 
 	// Claim leases up to n claimable rows across every org (org "" to
 	// workitem.Claim) and reads each leased row's own columns by id in one
@@ -148,6 +172,22 @@ type PendingFiringsStore interface {
 	//
 	// Exempt from the returned-row rule, as the holder verbs are.
 	HandOffToConversation(ctx context.Context, orgID string, firingID int64, note *domain.StagedInjection, sharedNoteID string) (noteID string, handed bool, err error)
+
+	// ReleaseHandOff takes a ready firing's note back from the conversation
+	// it was staged on so that conversationID, the step of the blueprint
+	// starting now, can be handed the event instead. In one transaction it
+	// withdraws the note (as StagedInjectionStore.DeleteSystem does) and
+	// clears the row's handed_note_id. The note is withdrawn only while it is
+	// undelivered and staged on a conversation other than conversationID; a
+	// note an earlier call withdrew is still undelivered, so every firing
+	// sharing it is released in turn. The column is cleared only while the
+	// row is ready, still names noteID, and carries no cancellation request.
+	// released is false, and nothing is written, when either write matches
+	// no row: the note was read, it waits on conversationID itself (a resume
+	// of the same step, which reads it), or the row moved on.
+	//
+	// Exempt from the returned-row rule, as the holder verbs are.
+	ReleaseHandOff(ctx context.Context, orgID string, firingID int64, noteID, conversationID string) (released bool, err error)
 
 	// WithdrawHandedNote answers, for the holder of a firing that names a
 	// handed note, whether the note was read, and withdraws it when it was

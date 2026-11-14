@@ -323,6 +323,12 @@ type Stores struct {
 	// reads and clears them here.
 	GitHubRefreshMarks GitHubRefreshMarkStore
 
+	// DependabotAccess owns repository_dependabot_access — per repository,
+	// whether the org's GitHub credential can read its Dependabot alerts.
+	// Admin pool in Postgres: the poll writes it with no claims, and the one
+	// request-path read is behind an org-admin gate.
+	DependabotAccess RepositoryDependabotAccessStore
+
 	// GitHubPendingBinds owns github_pending_binds — one row per initiated
 	// deployment-App bind ceremony, the durable half of the CSRF pair that
 	// proves a returning installation belongs to the org that asked for

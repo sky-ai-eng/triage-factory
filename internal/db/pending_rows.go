@@ -70,14 +70,19 @@ func StagedInjectionFromPending(r PendingRow) domain.StagedInjection {
 	}
 	if r.Metadata != "" {
 		var meta struct {
-			Producer  string `json:"producer"`
-			EventID   string `json:"event_id"`
-			EventType string `json:"event_type"`
-			TaskClose string `json:"task_close"`
+			Producer     string `json:"producer"`
+			EventID      string `json:"event_id"`
+			EventType    string `json:"event_type"`
+			TaskClose    string `json:"task_close"`
+			AssignedTask string `json:"assigned_task"`
+			Assignee     string `json:"assignee"`
 		}
 		_ = json.Unmarshal([]byte(r.Metadata), &meta)
 		n.Producer = meta.Producer
-		n.Provenance = domain.NoteProvenance{EventID: meta.EventID, EventType: meta.EventType, TaskClose: meta.TaskClose}
+		n.Provenance = domain.NoteProvenance{
+			EventID: meta.EventID, EventType: meta.EventType, TaskClose: meta.TaskClose,
+			AssignedTask: meta.AssignedTask, Assignee: meta.Assignee,
+		}
 	}
 	return n
 }

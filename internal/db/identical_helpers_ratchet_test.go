@@ -120,6 +120,7 @@ var identicalHelperRatchet = map[string]helperTier{
 	"EpisodeLostEngagementsSQL":   tierSQLFragment,
 	"EpisodeSetupFailuresSQL":     tierSQLFragment,
 	"EpisodeUpstreamHandBacksSQL": tierSQLFragment,
+	"liveConversationSQL":         tierSQLFragment,
 	"liveTopLevelConversationSQL": tierSQLFragment,
 	"taskLiveConversationSQL":     tierSQLFragment,
 	"taskMemoryAttemptSQL":        tierSQLFragment,
@@ -128,15 +129,16 @@ var identicalHelperRatchet = map[string]helperTier{
 	"workspaceKeyMembersSQL":      tierSQLFragment,
 	"workspaceKeyUnclaimedSQL":    tierSQLFragment,
 
-	"newCommitSignatureStore":   tierConstructor,
-	"newConversationQueueStore": tierConstructor,
-	"newDashboardStore":         tierConstructor,
-	"newEventStore":             tierConstructor,
-	"newFactoryReadStore":       tierConstructor,
-	"newGitHubRefreshMarkStore": tierConstructor,
-	"newModelAvailabilityStore": tierConstructor,
-	"newScoreStore":             tierConstructor,
-	"newTeamActivityStore":      tierConstructor,
+	"newCommitSignatureStore":            tierConstructor,
+	"newConversationQueueStore":          tierConstructor,
+	"newDashboardStore":                  tierConstructor,
+	"newEventStore":                      tierConstructor,
+	"newFactoryReadStore":                tierConstructor,
+	"newGitHubRefreshMarkStore":          tierConstructor,
+	"newModelAvailabilityStore":          tierConstructor,
+	"newRepositoryDependabotAccessStore": tierConstructor,
+	"newScoreStore":                      tierConstructor,
+	"newTeamActivityStore":               tierConstructor,
 }
 
 func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {

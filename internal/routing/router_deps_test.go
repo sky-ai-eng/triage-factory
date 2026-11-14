@@ -102,8 +102,8 @@ func (refusingDelegator) Delegate(domain.Task, delegate.DelegateOpts) (string, e
 
 func (refusingDelegator) ReviewsDismissedSystem(context.Context, string, []domain.Deliverable) {}
 
-func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.InjectOutcome {
-	return delegate.InjectNotDelivered
+func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.AdditiveDelivery {
+	return delegate.AdditiveDelivery{Outcome: delegate.InjectNotDelivered}
 }
 
 func (refusingDelegator) TellTaskClosed(context.Context, string, string, []string) {

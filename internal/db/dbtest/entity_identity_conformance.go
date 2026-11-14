@@ -210,6 +210,44 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	ctx := context.Background()
 	const scope = "ws-a"
 
+	t.Run("a_vulnerable_package_is_found_only_while_active", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		const key = "acme/api#npm:lodash"
+		first, created, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, key, "lodash (npm)", "https://example.test/acme/api/security/dependabot")
+		if err != nil || !created {
+			t.Fatalf("create: created=%v err=%v", created, err)
+		}
+		if first.Kind != domain.EntityKindVulnerablePackage || first.Source != domain.ProviderGitHub || first.ExternalID != "" || first.RepositoryID == "" {
+			t.Errorf("created row = %+v, want an id-less GitHub vulnerable package referencing its repository", first)
+		}
+		if stored, err := s.Entities.GetSystem(ctx, orgID, first.ID); err != nil || stored == nil || stored.SourceID != key || stored.Kind != first.Kind || stored.RepositoryID != first.RepositoryID {
+			t.Errorf("stored row = %+v (err=%v), want the created one", stored, err)
+		}
+		repo, err := s.Repos.GetSystem(ctx, orgID, first.RepositoryID)
+		if err != nil || repo == nil || repo.Slug() != "acme/api" {
+			t.Errorf("the row references %+v (err=%v), want acme/api", repo, err)
+		}
+
+		again, created, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, key, "other", "")
+		if err != nil || created || again.ID != first.ID || again.Title != "lodash (npm)" {
+			t.Errorf("second call = (%+v, %v, %v), want the active row as stored", again, created, err)
+		}
+
+		if _, err := s.Entities.MarkClosed(ctx, orgID, first.ID); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		next, created, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, key, "lodash (npm)", "")
+		if err != nil || !created || next.ID == first.ID || next.State != "active" {
+			t.Errorf("after the close = (%+v, %v, %v), want a new active row", next, created, err)
+		}
+
+		for _, bad := range []string{"acme/api#7", "acme/api", "acme#npm:lodash", "acme/api#:lodash", "acme/api#npm:"} {
+			if _, _, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, scope, bad, "t", ""); err == nil {
+				t.Errorf("FindOrCreateVulnerablePackageSystem(%q) created a row; want it refused", bad)
+			}
+		}
+	})
+
 	t.Run("GetByExternalIDSystem_finds_the_row_under_any_key", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		row, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-1", "uuid-1", "team-eng", "t", "")

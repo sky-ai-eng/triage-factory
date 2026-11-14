@@ -705,8 +705,9 @@ func (r *credRuntime) ghInjectorEndpoint(host string) string {
 // ghInjectorConfig builds the gh channel's per-run wiring, the sibling of
 // gitProxyConfig: the TokenSource reads the held bundle's single
 // team-set-scoped CLIToken live (so a mid-run re-seal is picked up), and the
-// two callbacks relay to the orchestrator, which holds the DB: the observed
-// write as a queued audit record, the authorization as a call.
+// three callbacks relay to the orchestrator, which holds the DB: the observed
+// write as a queued audit record, the object a read addressed as a queued
+// record of the run's touch, the authorization as a call.
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
@@ -758,6 +759,12 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// ever saw — the orchestrator receives the act's name or nothing.
 			args.GraphQL = ghWriteFactsToWire(w.GraphQL)
 			r.recordAudit(agentproc.OpRecordGHWrite, args)
+		},
+		ObserveRead: func(_ context.Context, read ghinjector.ObservedRead) {
+			// Queued like a write's record: the read already returned, and the
+			// orchestrator holds the DB the run's touched entities live in.
+			op, args := agenthost.GHChannelReadRecord(read)
+			r.recordAudit(op, args)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
 			// A Call, not a record: the agent's request is held until the

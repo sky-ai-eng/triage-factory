@@ -569,10 +569,16 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 // announceWake is what follows a wake that flipped conv back to the queue: the
 // status push the views refetch on, the resume on the task's timeline
 // (attributed to userID, whose message the wake is for), and the dispatcher
-// nudge.
+// nudge. conv is the conversation as read before the flip, so a wake from
+// concluded is told apart from a wake from parked: the concluded one was not
+// live while it sat, and is caught up on the work that overlaps it before
+// anything is told to drive it.
 func (s *Spawner) announceWake(ctx context.Context, orgID, userID string, conv domain.Conversation) {
 	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
 	s.recordResumeTaskEvent(ctx, orgID, userID, conv)
+	if conv.Concluded() {
+		s.tellWokenOfSiblingWork(ctx, orgID, conv.ID)
+	}
 	// Same-process fast path (local): the wake is a ~ms in-process
 	// dispatcher nudge. Cross-pod there is no wake nudge by design — the
 	// claiming executor's own scan-interval backstop picks the row up.

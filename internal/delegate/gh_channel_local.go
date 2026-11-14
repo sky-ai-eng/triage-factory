@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -49,6 +50,12 @@ func isolatedGHConfig(conversationID string) (*agentproc.GHChannelParams, io.Clo
 	}
 	return &agentproc.GHChannelParams{ConfigDir: configDir}, isolatedChannelCloser{dir: channelDir}
 }
+
+// localReadTouchBudget bounds recording one read's touch. The injector calls
+// the recorder before it releases the agent's response, and local mode's
+// database serves one connection at a time, so an unbounded write would hold
+// the read behind whatever else is writing.
+const localReadTouchBudget = 5 * time.Second
 
 // startLocalGHChannel provisions the real-`gh` credential channel for a
 // local-mode run: the TF-owned pinned binary, a loopback injector holding the
@@ -135,6 +142,18 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 			// observation type, so a write audited here is byte-identical to one
 			// audited from a sandbox.
 			agenthost.RecordGHChannelWrite(ctx, stores, info, w, credential)
+		},
+		ObserveRead: func(ctx context.Context, read ghinjector.ObservedRead) {
+			if !storesSet {
+				return
+			}
+			// The recorder the relayed (multi) path applies, so an object read
+			// here is the touched entity it is from a sandbox. The agent's
+			// response waits on it, so it is bounded: past the budget the
+			// touch is dropped rather than the read held.
+			ctx, cancel := context.WithTimeout(ctx, localReadTouchBudget)
+			defer cancel()
+			agenthost.RecordGHChannelRead(ctx, stores, info, read)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {
 			// The same decision the sandbox path relays, minus the relay and

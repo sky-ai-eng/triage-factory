@@ -142,6 +142,26 @@ export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus
   }
 }
 
+// DependabotAccess counts the org's tracked repositories by whether its GitHub
+// credential can read their Dependabot alerts, as the poll last found them.
+// `unchecked` is the tracked repositories not probed yet.
+export interface DependabotAccess {
+  readable: number
+  no_permission: number
+  disabled: number
+  unchecked: number
+}
+
+export async function getDependabotAccess(orgId: string): Promise<DependabotAccess> {
+  try {
+    return await apiJSON<DependabotAccess>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/dependabot-access`,
+    )
+  } catch (e) {
+    throw asError(e, 'Could not load Dependabot alert access.')
+  }
+}
+
 // refreshGitHubAppInstallations reconciles the org's App installation mirror
 // against GitHub on demand (TFAC-324's POST endpoint) and returns the refreshed
 // status. This is the authoritative install-discovery path in local mode, where

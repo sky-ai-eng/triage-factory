@@ -717,7 +717,7 @@ func TestWarmClaim_EventIsStagedForTheThreadAndStartsNoTurn(t *testing.T) {
 	f.awaitWarm(t, 1)
 
 	if got := f.control.StageOrDeliverAdditiveEvent(context.Background(), f.orgID, f.conversationID, "test",
-		"the CI check failed again", domain.NoteProvenance{}, AdditiveFiringRef{}); got != InjectStagedResumable {
+		"the CI check failed again", domain.NoteProvenance{}, AdditiveFiringRef{}).Outcome; got != InjectStagedResumable {
 		t.Fatalf("StageOrDeliverAdditiveEvent = %v, want InjectStagedResumable", got)
 	}
 	time.Sleep(300 * time.Millisecond)

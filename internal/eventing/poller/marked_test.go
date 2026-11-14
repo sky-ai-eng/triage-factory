@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"database/sql"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -366,5 +367,152 @@ func TestRecordGitHubCursor_RateLimitHoldsThePolls(t *testing.T) {
 	}
 	if !m.pollDue("github", "org", reset) || m.pollHeld("github", "org", reset) {
 		t.Error("the hold outlasted its reset")
+	}
+}
+
+// withAlerts has the rig's GitHub serve each repository's Dependabot alerts
+// listing with bodies, and records both repositories' alerts as readable, so
+// the scheduled cycle lists them without probing first.
+func (r *markedRig) withAlerts(bodies map[string]string) {
+	r.t.Helper()
+	r.m.DependabotAccess = r.stores.DependabotAccess
+	r.gh.serveAlerts(bodies)
+	for _, repo := range []string{"acme/one", "beta/two"} {
+		r.recordAlertsAccess(repo, domain.DependabotAlertsReadable)
+	}
+}
+
+func (r *markedRig) recordAlertsAccess(repo string, access domain.DependabotAlertsAccess) {
+	r.t.Helper()
+	if _, err := r.stores.DependabotAccess.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, r.repoID(repo), access); err != nil {
+		r.t.Fatalf("record %s's dependabot access: %v", repo, err)
+	}
+}
+
+func (r *markedRig) repoID(repo string) string {
+	r.t.Helper()
+	owner, name, _ := strings.Cut(repo, "/")
+	row, err := r.stores.Repos.FindOrCreateByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRef{Host: "https://github.com", Owner: owner, Repo: name})
+	if err != nil {
+		r.t.Fatalf("register %s: %v", repo, err)
+	}
+	return row.ID
+}
+
+// settleAlerts is settle, then forgets the alert listings it made.
+func (r *markedRig) settleAlerts() {
+	r.t.Helper()
+	r.settle()
+	r.gh.takeAlertReads()
+}
+
+// A narrowed pass lists the alerts of a repository a mark names them in, with
+// no condition, under the installation whose grant holds it, and makes no
+// other request for it: a mark naming alerts asks for no pull request
+// listing. The diff announces the new alert, the mark is cleared, and the
+// scorer is kicked. A pass with marks of both kinds runs each where it is
+// named.
+func TestRefreshMarkedGitHub_ListsTheAlertsAMarkNames(t *testing.T) {
+	r := newMarkedRig(t)
+	org := runmode.LocalDefaultOrgID
+	r.withAlerts(map[string]string{"acme/one": `[]`, "beta/two": `[]`})
+	r.settleAlerts()
+
+	r.gh.serveAlerts(map[string]string{"acme/one": alertsBody(map[int]string{1: "left-pad"}), "beta/two": `[]`})
+	r.mark("acme/one", domain.DependabotAlertsRefreshTarget())
+	r.m.RefreshMarkedGitHubOnce(context.Background(), org)
+
+	if paths := r.gh.takePaths(); len(paths) != 1 || !strings.HasPrefix(paths[0], "tok-1 GET ") || !strings.HasSuffix(paths[0], "/repos/acme/one/dependabot/alerts") {
+		t.Errorf("requests = %v, want only tok-1's listing of acme/one's alerts", paths)
+	}
+	if reads := r.gh.takeAlertReads(); !slices.Equal(reads, []string{"tok-1 acme/one"}) {
+		t.Errorf("alert listings = %v, want one unconditional listing of acme/one", reads)
+	}
+	if n := len(r.pub.ofType(domain.EventGitHubVulnerabilityAlertOpened)); n != 1 {
+		t.Errorf("alert_opened events = %d, want 1", n)
+	}
+	if got := r.pending(); len(got) != 0 {
+		t.Errorf("marks after the pass = %+v, want the honored mark cleared", got)
+	}
+	if n := r.scored.Load(); n != 1 {
+		t.Errorf("scorer kicks = %d, want 1 after a pass that emitted", n)
+	}
+
+	// Both kinds: beta/two's pull request is refreshed under tok-2, and
+	// acme/one's alerts listed under tok-1, unchanged, which emits nothing.
+	r.mark("beta/two", domain.PullRequestRefreshTarget(2))
+	r.mark("acme/one", domain.DependabotAlertsRefreshTarget())
+	r.m.RefreshMarkedGitHubOnce(context.Background(), org)
+	if sent := r.gh.takeSent(); !slices.Equal(sent["tok-2"], []string{"PR_two"}) || len(sent) != 1 {
+		t.Errorf("refreshes sent %v, want only PR_two under tok-2", sent)
+	}
+	if reads := r.gh.takeAlertReads(); !slices.Equal(reads, []string{"tok-1 acme/one"}) {
+		t.Errorf("alert listings = %v, want acme/one's alone", reads)
+	}
+	for _, p := range r.gh.takePaths() {
+		if strings.Contains(p, "acme/one/pulls") {
+			t.Errorf("request %q: an alerts mark asks for no pull request listing", p)
+		}
+	}
+	if n := len(r.pub.ofType(domain.EventGitHubVulnerabilityAlertOpened)); n != 1 {
+		t.Errorf("alert_opened events = %d, want still 1: an unchanged listing announces nothing", n)
+	}
+	if got := r.pending(); len(got) != 0 {
+		t.Errorf("marks after the pass = %+v, want both cleared", got)
+	}
+}
+
+// A mark naming alerts the poll does not list, on a repository whose answer
+// says they cannot be read, names nothing: a narrowed pass makes no request
+// for it and clears it.
+func TestRefreshMarkedGitHub_ClearsAMarkOnAlertsThePollDoesNotList(t *testing.T) {
+	r := newMarkedRig(t)
+	r.withAlerts(map[string]string{"acme/one": `[]`, "beta/two": `[]`})
+	r.settleAlerts()
+	r.recordAlertsAccess("acme/one", domain.DependabotAlertsNoPermission)
+
+	r.mark("acme/one", domain.DependabotAlertsRefreshTarget())
+	r.m.RefreshMarkedGitHubOnce(context.Background(), runmode.LocalDefaultOrgID)
+	if paths := r.gh.takePaths(); len(paths) != 0 {
+		t.Errorf("requests = %v, want none", paths)
+	}
+	if got := r.pending(); len(got) != 0 {
+		t.Errorf("marks = %+v, want the mark cleared", got)
+	}
+}
+
+// The scheduled cycle lists a repository whose alerts a mark names with no
+// condition, where the repository's stored ETag would have been answered 304,
+// and every other repository conditionally, as without marks. The pull
+// request pass does not honor an alerts mark: one whose listing the cycle did
+// not finish stays for the next pass, while a pull request mark beside it is
+// cleared.
+func TestRunGitHubCycleForOrg_ListsMarkedAlertsWithNoCondition(t *testing.T) {
+	r := newMarkedRig(t)
+	org := runmode.LocalDefaultOrgID
+	r.withAlerts(map[string]string{"acme/one": `[]`, "beta/two": `[]`})
+	r.settleAlerts()
+
+	r.mark("acme/one", domain.DependabotAlertsRefreshTarget())
+	r.m.runGitHubCycleForOrg(context.Background(), org)
+	if reads := r.gh.takeAlertReads(); !slices.Equal(reads, []string{"tok-1 acme/one", "tok-2 beta/two conditional"}) {
+		t.Errorf("alert listings = %v, want acme/one's unconditional and beta/two's conditional", reads)
+	}
+	if got := r.pending(); len(got) != 0 {
+		t.Errorf("marks after the cycle = %+v, want the alerts mark cleared", got)
+	}
+
+	r.mark("acme/one", domain.DependabotAlertsRefreshTarget())
+	r.mark("acme/one", domain.PullRequestRefreshTarget(1))
+	r.gh.failAlerts("acme/one", http.StatusUnauthorized)
+	r.m.runGitHubCycleForOrg(context.Background(), org)
+	if got := r.pending(); len(got) != 1 || got[0].Target != domain.DependabotAlertsRefreshTarget() {
+		t.Errorf("marks after a cycle whose alert listing failed = %+v, want only the alerts mark kept", got)
+	}
+
+	r.gh.failAlerts("acme/one", 0)
+	r.m.runGitHubCycleForOrg(context.Background(), org)
+	if got := r.pending(); len(got) != 0 {
+		t.Errorf("marks after the listing succeeded = %+v, want none", got)
 	}
 }

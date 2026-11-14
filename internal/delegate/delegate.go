@@ -711,6 +711,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 
 	prNumber := domain.GitHubPRNumber(task.EntitySourceID)
 	if prNumber == 0 {
+		// TODO(TFAC-1412): a vulnerable package's task names no pull request
+		// and is refused here; its run is to start from a checkout of the
+		// repository's base branch, with the package's alerts in its context.
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
 	// The registry row keys the ledger entry and the bare clone below, and its

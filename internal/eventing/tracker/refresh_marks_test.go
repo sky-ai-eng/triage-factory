@@ -15,9 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -433,22 +431,7 @@ func TestRefreshGitHub_CountsTimerRefreshesThatFoundAChange(t *testing.T) {
 	r.agePolled(t, a2, staleRefreshFloor+time.Minute)
 	r.scheduled(r.mark("octo/a", domain.PullRequestRefreshTarget(2)))
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collect: %v", err)
-	}
-	got := map[string]int64{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != missedHintsMetric {
-				continue
-			}
-			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
-				rule, _ := dp.Attributes.Value(attribute.Key("rule"))
-				got[rule.AsString()] += dp.Value
-			}
-		}
-	}
+	got := missedHintsByRule(t, reader)
 	if len(got) != 1 || got[string(refreshFloor)] != 1 {
 		t.Errorf("missed hints = %v; want one under rule=floor, for the unmarked pull request", got)
 	}

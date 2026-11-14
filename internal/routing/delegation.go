@@ -39,10 +39,15 @@ import (
 // conversation or enqueues onto pending_firings instead of being dropped
 // silently.
 //
-// Returns fired=true iff this call actually committed the bot to the task —
-// an immediate fireDelegate success, or a new row landed in pending_firings
-// (queued because the task was busy; the commitment is real even though
-// the conversation hasn't started yet). Every other exit — already claimed by
+// Returns fired=true iff this call committed the bot to a run of its own on
+// the task — an immediate fireDelegate success, or a new row landed in
+// pending_firings because the task was busy with no conversation live to fold
+// into (the commitment is real even though the conversation hasn't started
+// yet). A fold into the task's live conversation returns (false, nil), even
+// one that holds its firing behind the note it staged: the event went to a
+// conversation already working the task, which
+// tryAutoDelegateTrackingInjection reports, and the held firing starts a run
+// only if that note goes unread. Every other exit — already claimed by
 // another team or by a person, the bot disabled for the team, no agent
 // bootstrapped, the breaker tripped, a duplicate already queued, a replay
 // hitting ErrAlreadyFired, or a task that closed under the fire — returns
@@ -375,6 +380,18 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 // silently lose it). Neither case has a durable row to fall back on, so the
 // caller decides the firing.
 //
+// A fold into a step of a running blueprint, on a task no person has
+// claimed, keeps the firing it replaced instead of marking the event
+// injected: the spawner names the staged note (HandedNoteID), and the firing
+// is admitted naming it (EnqueueHanded). A step can conclude without reading
+// the note, and nothing wakes a concluded conversation for an event alone, so
+// the held firing is the event's durable record until the firing worker
+// settles it once the run ends: as injected if the note was read, and
+// otherwise as the firing it is, fired on an open task or rerouted from one
+// the run's finish closed. A person's claim keeps the mark instead: the
+// worker would skip the firing as claim_changed, and the claim filter would
+// hold it behind a person's thread for as long as the thread stays open.
+//
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a
 // live remote executor now owns recording task_events 'injected' (or
 // compensating with a pending_firing enqueue if the conversation turns out
@@ -399,7 +416,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body,
+	delivery := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body,
 		domain.NoteProvenance{EventID: triggeringEventID, EventType: trigger.EventType},
 		delegate.AdditiveFiringRef{
 			EntityID:          entityID,
@@ -408,7 +425,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 			TriggeringEventID: triggeringEventID,
 			TaskClaim:         claim,
 		})
-	switch outcome {
+	switch delivery.Outcome {
 	case delegate.InjectNotDelivered:
 		return false
 	case delegate.InjectDeliveredRemote:
@@ -417,6 +434,21 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 		r.stampAgentClaim(ctx, orgID, task, claim)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
+		// The held firing and the claim are one durable step. The task event
+		// stays unmarked: the firing worker marks it injected once it finds
+		// the note read.
+		if delivery.HandedNoteID != "" && task.ClaimedByUserID == "" {
+			claimed, err := r.firings.EnqueueHanded(ctx, orgID, entityID, task.ID, trigger.ID, triggeringEventID, delivery.HandedNoteID, claim)
+			if err == nil {
+				r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, claimed)
+				routerLog.Info("injected additive event into a running blueprint step, its firing held behind the note",
+					"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID,
+					"event_type", trigger.EventType, "note_id", delivery.HandedNoteID)
+				return true
+			}
+			routerLog.Error("hold a firing behind the folded note failed; marking the event injected instead",
+				"task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID, "error", err)
+		}
 		// The mark and the claim are one durable step, so a failure loses both
 		// together rather than committing the fold against a task the board
 		// still shows as free. The injection itself is already delivered
@@ -458,8 +490,9 @@ func claimStamp(agentID, actingTeamID string) dbpkg.AgentClaimStamp {
 // claimCommitted reconciles the router with a claim stamp that has already
 // committed inside its engagement's transaction: it updates the in-memory
 // task — the cross-team guard reads ClaimedByAgentID when this same event's
-// next matched trigger comes round — and broadcasts task_claimed so the Board
-// re-renders its per-claim lanes.
+// next matched trigger comes round — broadcasts task_claimed so the Board
+// re-renders its per-claim lanes, and publishes the assignment for the
+// conversations whose work overlaps the task (publishTaskAssigned).
 //
 // claimed=false is the store's three-way refusal: a user beat the bot to the
 // claim (don't steal), the bot already owns it (idempotent no-op), or the task
@@ -494,6 +527,23 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 		OrgID: orgID,
 		Data:  map[string]any{},
 	})
+	r.publishTaskAssigned(orgID, task.ID, agentID)
+}
+
+// publishTaskAssigned publishes system:task:assigned for an agent's claim
+// stamp that landed, after the transaction it rode committed. Its subscriber
+// tells the live conversations whose work overlaps the task. It is published
+// exactly where task_claimed is broadcast: a refused or idempotent stamp
+// moved nothing, and a second run under a claim the agent already holds
+// stamps nothing, so neither is a new assignee. Best effort: the claim
+// stands whatever becomes of the event.
+func (r *Router) publishTaskAssigned(orgID, taskID, agentID string) {
+	evt, err := events.TaskAssigned(orgID, taskID, agentID, "")
+	if err != nil {
+		routerLog.Warn("build the task assignment event failed", "task_id", taskID, "error", err)
+		return
+	}
+	r.publisher.Publish(evt)
 }
 
 // syncClaimAfterCommit reads back the claim and the owner that rode the
@@ -526,6 +576,7 @@ func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *d
 			OrgID: orgID,
 			Data:  map[string]any{},
 		})
+		r.publishTaskAssigned(orgID, task.ID, agentID)
 	}
 }
 

@@ -46,8 +46,8 @@ func (s *fenceStubDelegator) TellTaskClosed(context.Context, string, string, []s
 func (s *fenceStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
-func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
-	return delegate.InjectNotDelivered
+func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.AdditiveDelivery {
+	return delegate.AdditiveDelivery{Outcome: delegate.InjectNotDelivered}
 }
 
 // setupFenceScenario seeds entity + prompt + an immediate-fire trigger

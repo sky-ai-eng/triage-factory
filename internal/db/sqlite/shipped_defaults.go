@@ -127,9 +127,9 @@ func (s *shippedDefaultsStore) SeedShippedIntoTeam(ctx context.Context, orgID, t
 	}
 
 	// Phase 3: handlers. EventHandlerStore.Seed already does exactly this —
-	// rules enabled, triggers disabled (shipped convention), each trigger's
-	// blueprint slug resolved through blueprintIDsBySlug — so reuse it
-	// rather than duplicate its SQL.
+	// rules enabled unless marked Disabled, triggers disabled (shipped
+	// convention), each trigger's blueprint slug resolved through
+	// blueprintIDsBySlug — so reuse it rather than duplicate its SQL.
 	if err := s.eventHandlers.Seed(ctx, orgID, teamID, blueprintIDsBySlug); err != nil {
 		return fmt.Errorf("shipped_defaults seed: %w", err)
 	}

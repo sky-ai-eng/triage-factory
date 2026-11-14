@@ -78,6 +78,11 @@ type Config struct {
 	// this straight into the recorder in-process; there is no relay hop to make.
 	ObserveWrite func(context.Context, ghinjector.ObservedWrite)
 
+	// ObserveRead, when non-nil, receives each pull request or issue a read
+	// addressed, once per run — the run's touched entities. Wired in-process
+	// like ObserveWrite.
+	ObserveRead func(context.Context, ghinjector.ObservedRead)
+
 	// AuthorizeWrite decides the shapes the injector's refusal policy gates and
 	// records their denials. Multi mode relays the same decision to the
 	// orchestrator; here it is an ordinary call, since the process holding the
@@ -171,6 +176,7 @@ func Start(cfg Config) (*Channel, error) {
 		ConversationID: cfg.ConversationID,
 		TokenSource:    cfg.TokenSource,
 		ObserveWrite:   cfg.ObserveWrite,
+		ObserveRead:    cfg.ObserveRead,
 		AuthorizeWrite: cfg.AuthorizeWrite,
 		GitHandler:     cfg.GitHandler,
 		// Loopback only — no veth, no other host may reach this listener.

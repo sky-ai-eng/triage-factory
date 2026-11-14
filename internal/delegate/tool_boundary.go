@@ -18,7 +18,8 @@ import (
 // injection, domain.MessageSubtypeInjectionSystemNote for every other note),
 // producer tags the row (domain.StagedInjectionProducer*), prov records the
 // event the note was composed from, and body is the bare, already-rendered
-// line. Reports whether the note was staged; a blank body stages nothing.
+// line. Reports whether the note was staged, and the staged row's id; a blank
+// body stages nothing.
 //
 // A native loop reads the row before its next model call, which is that
 // boundary already. A live SDK process has its handle armed (toolBoundary)
@@ -28,17 +29,18 @@ import (
 // note that lands as the turn ends waits for the next resume. A
 // conversation with no live process here, parked or concluded or owned by
 // another executor, reads the row on its next resume.
-func (s *Spawner) stageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, subtype, producer, body string, prov domain.NoteProvenance) bool {
+func (s *Spawner) stageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, subtype, producer, body string, prov domain.NoteProvenance) (stagedID string, ok bool) {
 	if body == "" {
-		return false
+		return "", false
 	}
-	if _, ok := s.stageInjection(ctx, orgID, conversationID, subtype, producer, body, prov); !ok {
-		return false
+	stagedID, ok = s.stageInjection(ctx, orgID, conversationID, subtype, producer, body, prov)
+	if !ok {
+		return "", false
 	}
 	if h := s.getProc(conversationID); h != nil {
 		h.boundary.arm()
 	}
-	return true
+	return stagedID, true
 }
 
 // toolBoundary is whether a live SDK process owes its agent waiting input at

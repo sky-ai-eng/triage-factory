@@ -769,6 +769,137 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
+	t.Run("EnqueueHanded_admits_a_ready_row_naming_the_note_with_no_key_and_stamps_the_claim", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		if _, err := s.EnqueueHanded(ctx, orgID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, "", db.AgentClaimStamp{}); err == nil {
+			t.Errorf("EnqueueHanded with no note = nil error, want a refusal")
+		}
+		claimed, err := s.EnqueueHanded(ctx, orgID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, "4242", db.AgentClaimStamp{AgentID: seed.AgentID})
+		if err != nil || !claimed {
+			t.Fatalf("EnqueueHanded: claimed=%v err=%v, want the claim stamped", claimed, err)
+		}
+		row := one(t, s, orgID, tup.EntityID)
+		if row.Status != workitem.StatusReady || row.HandedNoteID != "4242" || row.UniqueKey != "" || row.SkipReason != "" {
+			t.Errorf("held row = %+v, want ready, naming the note, with no key", row)
+		}
+		if row.TaskID != tup.TaskID || row.TriggerID != tup.TriggerID || row.TriggeringEventID != tup.EventID {
+			t.Errorf("held row identity = %+v", row)
+		}
+		if agentID, _ := seed.TaskClaim(t, tup.TaskID); agentID != seed.AgentID {
+			t.Errorf("task claimed_by_agent_id = %q, want %q", agentID, seed.AgentID)
+		}
+		// A later event for the same (task, trigger) admits a row of its own.
+		if inserted, _ := enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{}); !inserted {
+			t.Errorf("Enqueue for the same (task, trigger) beside a held row collapsed, want a new row")
+		}
+		if rows := list(t, s, orgID, tup.EntityID); len(rows) != 2 {
+			t.Errorf("rows = %d, want the held row and the new one", len(rows))
+		}
+	})
+
+	t.Run("ReleaseHandOff_releases_only_a_note_unread_on_another_conversation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			// read delivers the note before the release.
+			read bool
+			// onNotesConversation names the conversation the note is staged
+			// on as the starting one.
+			onNotesConversation bool
+			want                bool
+		}{
+			{name: "unread on another conversation", want: true},
+			{name: "read", read: true},
+			{name: "staged on the given conversation", onNotesConversation: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s, orgID, seed := mk(t)
+				tup := seed.Tuple(t)
+				enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+				earlier := seed.LiveConversation(t, tup.TaskID, tup.PromptID)
+				other := seed.Tuple(t)
+				starting := seed.LiveConversation(t, other.TaskID, other.PromptID)
+				firing := one(t, s, orgID, tup.EntityID)
+				note := domain.StagedInjection{ConversationID: earlier, Subtype: domain.MessageSubtypeInjectionEvent, Producer: "p", Body: "the event"}
+				noteID, handed, err := s.HandOffToConversation(ctx, orgID, firing.ID, &note, "")
+				if err != nil || !handed {
+					t.Fatalf("HandOffToConversation: handed=%v err=%v", handed, err)
+				}
+				if tc.read {
+					seed.DeliverNotes(t, earlier)
+				}
+				releaseOn := starting
+				if tc.onNotesConversation {
+					releaseOn = earlier
+				}
+
+				released, err := s.ReleaseHandOff(ctx, orgID, firing.ID, noteID, releaseOn)
+				if err != nil || released != tc.want {
+					t.Fatalf("ReleaseHandOff = %v, err=%v, want %v", released, err, tc.want)
+				}
+				row := one(t, s, orgID, tup.EntityID)
+				notes := seed.StagedNotes(t, earlier)
+				if !tc.want {
+					wantNotes := 1
+					if tc.read {
+						wantNotes = 0
+					}
+					if row.Status != workitem.StatusReady || row.HandedNoteID != noteID || len(notes) != wantNotes {
+						t.Errorf("after a refused release: row = %+v, notes = %v; want the row still naming %q and %d note(s) waiting", row, notes, noteID, wantNotes)
+					}
+					return
+				}
+				if row.Status != workitem.StatusReady || row.HandedNoteID != "" {
+					t.Errorf("released row = %+v, want ready and naming no note", row)
+				}
+				if len(notes) != 0 {
+					t.Errorf("notes waiting on the earlier conversation = %v, want the note withdrawn", notes)
+				}
+				// The released row is an ordinary ready firing again: the
+				// starting conversation can be handed it.
+				next := domain.StagedInjection{ConversationID: starting, Subtype: domain.MessageSubtypeInjectionEvent, Producer: "p", Body: "the event"}
+				if _, handed, err := s.HandOffToConversation(ctx, orgID, firing.ID, &next, ""); err != nil || !handed {
+					t.Errorf("HandOffToConversation after the release: handed=%v err=%v", handed, err)
+				}
+			})
+		}
+	})
+
+	t.Run("ReleaseHandOff_releases_every_firing_sharing_a_withdrawn_note", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		second := seed.Tuple(t)
+		enqueue(t, s, orgID, tup, tup.TaskID, db.AgentClaimStamp{})
+		if inserted, _, err := s.Enqueue(ctx, orgID, tup.EntityID, tup.TaskID, second.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil || !inserted {
+			t.Fatalf("Enqueue the second trigger's firing: inserted=%v err=%v", inserted, err)
+		}
+		earlier := seed.LiveConversation(t, tup.TaskID, tup.PromptID)
+		starting := seed.LiveConversation(t, second.TaskID, second.PromptID)
+		rows := list(t, s, orgID, tup.EntityID)
+		if len(rows) != 2 {
+			t.Fatalf("rows = %d, want 2", len(rows))
+		}
+		note := domain.StagedInjection{ConversationID: earlier, Subtype: domain.MessageSubtypeInjectionEvent, Producer: "p", Body: "the event"}
+		noteID, handed, err := s.HandOffToConversation(ctx, orgID, rows[0].ID, &note, "")
+		if err != nil || !handed {
+			t.Fatalf("HandOffToConversation: handed=%v err=%v", handed, err)
+		}
+		if _, handed, err := s.HandOffToConversation(ctx, orgID, rows[1].ID, nil, noteID); err != nil || !handed {
+			t.Fatalf("HandOffToConversation with the shared note: handed=%v err=%v", handed, err)
+		}
+
+		for _, f := range rows {
+			if released, err := s.ReleaseHandOff(ctx, orgID, f.ID, noteID, starting); err != nil || !released {
+				t.Errorf("ReleaseHandOff of firing %d = %v, err=%v, want released", f.ID, released, err)
+			}
+		}
+		for _, f := range list(t, s, orgID, tup.EntityID) {
+			if f.HandedNoteID != "" {
+				t.Errorf("firing %d still names note %q", f.ID, f.HandedNoteID)
+			}
+		}
+	})
+
 	t.Run("WithdrawHandedNote_reports_a_read_note_and_withdraws_an_unread_one", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)

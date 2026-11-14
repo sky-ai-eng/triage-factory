@@ -714,7 +714,7 @@ func (r *directRuntime) RecordBranchPush(ctx context.Context, push BranchPush, g
 	if err == nil {
 		err = withRecordRetry(ctx, func() error {
 			var e error
-			row, e = githubRepositoryRow(ctx, r.stores, r.info, act.Scope, github)
+			row, e = githubRepositoryRow(ctx, r.stores, r.info, act.Scope, github, false)
 			return e
 		})
 	}

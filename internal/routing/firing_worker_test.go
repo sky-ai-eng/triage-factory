@@ -153,8 +153,8 @@ func (s *stubDelegator) dismissedCopy() []domain.Deliverable {
 	return append([]domain.Deliverable(nil), s.dismissed...)
 }
 
-func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
-	return delegate.InjectNotDelivered
+func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.AdditiveDelivery {
+	return delegate.AdditiveDelivery{Outcome: delegate.InjectNotDelivered}
 }
 
 func (s *stubDelegator) TellTaskClosed(ctx context.Context, orgID, taskID string, conversationIDs []string) {

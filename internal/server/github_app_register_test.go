@@ -214,7 +214,7 @@ func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(
 	if events["installation"] || events["installation_repositories"] {
 		t.Errorf("manifest must not subscribe to installation events: %v", rawEvents)
 	}
-	for _, want := range []string{"pull_request", "check_suite", "issue_comment"} {
+	for _, want := range []string{"pull_request", "check_suite", "issue_comment", "dependabot_alert"} {
 		if !events[want] {
 			t.Errorf("manifest missing expected default_event %q: %v", want, rawEvents)
 		}

@@ -136,7 +136,9 @@ export default function GitHubAccessGroup({
             bots poll your organization with. <code className="text-ink-2">read:org</code> lets them
             resolve your organization&rsquo;s team memberships so review requests routed to teams
             (e.g. CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly
-            are visible.
+            are visible. <code className="text-ink-2">repo</code> also covers Dependabot alerts (its{' '}
+            <code className="text-ink-2">security_events</code> scope), read on each repository the
+            token&rsquo;s account may see them on.
           </p>
         </Field>
         {/* Clone protocol is local-mode-only: multi-mode deployments

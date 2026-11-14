@@ -31,9 +31,9 @@ type foldingDelegator struct {
 	folded []string
 }
 
-func (d *foldingDelegator) StageOrDeliverAdditiveEvent(_ context.Context, _, conversationID, _, _ string, _ domain.NoteProvenance, _ delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (d *foldingDelegator) StageOrDeliverAdditiveEvent(_ context.Context, _, conversationID, _, _ string, _ domain.NoteProvenance, _ delegate.AdditiveFiringRef) delegate.AdditiveDelivery {
 	d.folded = append(d.folded, conversationID)
-	return delegate.InjectDeliveredLocal
+	return delegate.AdditiveDelivery{Outcome: delegate.InjectDeliveredLocal}
 }
 
 // reopenFixture is a ci_check_failed task whose trigger fired: the agent

@@ -9,8 +9,12 @@ import "time"
 // once the task holds no live conversation and no run still marked running,
 // validates it against the world now, and fires it or skips it with a reason.
 // A firing queued while its task's blueprint is running has its event handed
-// to the blueprint's next engagement as a note (HandedNoteID), and the worker
-// settles it as injected once the run ends, if the note was read.
+// to the blueprint's next engagement as a note (HandedNoteID). A firing the
+// router replaced by folding its event into a running step is kept, naming
+// the note the event was staged as. Either way the worker settles it once the
+// run ends: as injected if the note was read, and otherwise as the ordinary
+// firing it then is again. A step that starts while an earlier step's note is
+// unread is handed the event in its place.
 //
 // The row is the work-item block plus this kind's own columns: the four
 // identity columns are fixed at admission, and exactly one of SkipReason and
@@ -29,9 +33,9 @@ type PendingFiring struct {
 	// FiredBlueprintRunID is the blueprint run a done row fired into.
 	FiredBlueprintRunID *string `json:"fired_run_id,omitempty"`
 	// HandedNoteID is the staged note the firing's event was handed to a
-	// conversation as, while the task's blueprint was running. The firing
-	// stays unsettled; the worker settles it once the run ends, by whether
-	// the note was read.
+	// conversation as, or folded into a running step as, while the task's
+	// blueprint was running. The firing stays unsettled; the worker settles
+	// it once the run ends, by whether the note was read.
 	HandedNoteID string `json:"handed_note_id,omitempty"`
 
 	Status        string     `json:"status"` // workitem.StatusReady | StatusLeased | StatusDone | StatusParked | StatusCancelled

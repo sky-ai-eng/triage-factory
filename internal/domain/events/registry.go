@@ -119,7 +119,8 @@ func All() map[string]EventSchema {
 //
 //	json:"field_name,omitempty"  — JSON key (required)
 //	doc:"human-readable blurb"    — shown in the predicate editor
-//	enum:"a,b,c"                  — dropdown values for string fields
+//	enum:"a,b,c"                  — the values a string field, or each entry
+//	                                of a list field, may take
 func fieldsFromPredicate(t reflect.Type) []FieldSchema {
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()

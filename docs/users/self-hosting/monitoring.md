@@ -176,23 +176,51 @@ there), or untrack them.
 
 ### GitHub changes no webhook announced
 
-With a GitHub App, Triage Factory refreshes a pull request a few seconds after
-GitHub sends a webhook about it. The scheduled poll still refreshes pull
-requests on three timers, which catch a change whose webhook never arrived.
+With a GitHub App, Triage Factory refreshes a pull request, or lists a
+repository's Dependabot alerts, a few seconds after GitHub sends a webhook
+about it. The scheduled poll still refreshes pull requests on three timers,
+and lists alerts on every poll, which catch a change whose webhook never
+arrived.
 
-`tf_github_missed_hints_total` counts, by `org_id` and `rule`, the refreshes a
-timer made that found a change, one that produced an event, which no webhook
-had announced since the pull request was last refreshed:
+`tf_github_missed_hints_total` counts, by `org_id` and `rule`, the refreshes
+the poll made that found a change, one that produced an event, which no
+webhook had announced since the pull request was last refreshed or the
+alerts last listed:
 
-| `rule`          | The timer                                                                |
-| --------------- | ------------------------------------------------------------------------ |
-| `change_window` | Every poll for 5 minutes after the pull request last changed             |
-| `floor`         | A pull request not refreshed for 10 minutes                              |
-| `in_flight_ci`  | Every poll while one of the pull request's check runs is still running   |
+| `rule`               | The refresh                                                              |
+| -------------------- | ------------------------------------------------------------------------ |
+| `change_window`      | Every poll for 5 minutes after the pull request last changed             |
+| `floor`              | A pull request not refreshed for 10 minutes                              |
+| `in_flight_ci`       | Every poll while one of the pull request's check runs is still running   |
+| `dependabot_listing` | Every poll's listing of a tracked repository's Dependabot alerts         |
+
+A repository's first alert listing is not counted, since its alerts were open
+before any webhook could announce them.
 
 An org whose webhooks arrive reads close to 0. An org connected with a token,
 or with an App that has no webhook URL, receives no webhooks, so every change
 its timers find is counted.
+
+### Dependabot alert listings
+
+Each GitHub poll lists the open Dependabot alerts of every tracked repository
+whose alerts the org's credential can read.
+`tf_github_dependabot_listings_total` counts those listings by `outcome`:
+
+| `outcome`      | Meaning                                                                    |
+| -------------- | -------------------------------------------------------------------------- |
+| `listed`       | Returned in full: the alerts changed, or there was no ETag to send         |
+| `not_modified` | Unchanged since the previous listing; the request costs no rate limit      |
+| `refused`      | GitHub refused the repository; it is skipped until access is rechecked     |
+| `failed`       | Unreadable listing (skipped), or a failure that ends the poll's listings   |
+
+A repository's listing has no ETag to send the first time it is listed, and
+never when it has more than 100 open alerts, so such a repository counts as
+`listed` on every poll. A listing a webhook asked for sends no ETag either, and
+counts as `listed`. A steady rate of `failed` means alerts are not
+reaching Triage Factory, from one repository or from all of them. A
+repository whose alerts get `refused` every poll has lost access, which the
+org's GitHub access settings page shows within a day.
 
 ### Mergeability probes
 

@@ -888,6 +888,7 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 	// AssignToSelf call the user is the assignee in Jira too, so the event
 	// metadata is accurate for either starting state.
 	var claimOK bool
+	var taskID string
 	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
 		eventID, e := recordCarryOverAssignedEvent(r.Context(), tx.Events, b.orgID, *entity, snap)
 		if e != nil {
@@ -897,6 +898,7 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		if e != nil {
 			return e
 		}
+		taskID = task.ID
 		// Claim is on the responsibility axis, not status. Stamp the user
 		// claim optimistically — if the task pre-existed in some non-queued
 		// state or was already claimed by someone else, surface that as a
@@ -918,6 +920,7 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 	if !claimOK {
 		return stockFailed(snap.Key, httpx.ReasonConflict, "task already claimed or no longer queued")
 	}
+	s.publishTaskAssigned(b.orgID, taskID, "", b.userID)
 	return stockItemResult{IssueKey: snap.Key, OK: true}
 }
 

@@ -605,6 +605,9 @@ func (a *App) newPollerManager() *poller.Manager {
 	// scheduled cycle, and read between cycles by the narrowed pass the
 	// receivers' nudge (applyGitHubRefreshMarked) and the base tick start.
 	m.RefreshMarks = a.stores.GitHubRefreshMarks
+	// Per tracked repository, whether the org's credential can read its
+	// Dependabot alerts, probed once a day by the scheduled cycle.
+	m.DependabotAccess = a.stores.DependabotAccess
 	// A narrowed pass emits no completed-poll notice, so it kicks the scorer
 	// itself. Through the relay wrapper, because a pass in flight when the
 	// lease moves finishes on a pod that no longer holds the brain.

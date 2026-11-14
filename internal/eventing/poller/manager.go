@@ -148,6 +148,13 @@ type Manager struct {
 	// gate (tests, and any embedder that hasn't wired it).
 	RefreshMarks db.GitHubRefreshMarkStore
 
+	// DependabotAccess records, per tracked repository, whether the org's
+	// GitHub credential can read its Dependabot alerts, and the state of the
+	// listing of them: the scheduled cycle probes each repository its
+	// credentials read once a day, and lists the open alerts of each one that
+	// can be read (dependabotProbe). nil probes and lists nothing.
+	DependabotAccess db.RepositoryDependabotAccessStore
+
 	// TriggerScorer kicks the org's scorer after a narrowed pass emitted
 	// events, as the completed-poll notice kicks it after a scheduled cycle,
 	// so the tasks those events create are scored now. nil-safe.
@@ -279,7 +286,8 @@ func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, m.mergeability, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery).
 		WithChangeClock(m.ChangeClock).
-		WithTaskClosedTeller(m.TaskClosed)
+		WithTaskClosedTeller(m.TaskClosed).
+		WithDependabotAccess(m.DependabotAccess)
 }
 
 // sourceDisabled reports whether this cycle must not run, and the span outcome
@@ -833,6 +841,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// that does not work on the new host is no reason to keep the old host's
 	// pull requests open.
 	m.trackerForOrg(orgID).RetireGitHubOutOfScope(ctx, scope)
+	m.forgetUntrackedAlertListings(ctx, orgID, scope)
 
 	// Refresh what the App can reach before reading any of it, and BEFORE the
 	// tracked-set gate below: an org that tracks nothing is precisely the org
@@ -1038,6 +1047,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle.
 	grants := make(map[string]tracker.GitHubReach, len(installs))
 	defer func() { m.rememberGrants(orgID, installs, grants) }()
+	probe := m.newDependabotProbe(orgID, scope, marks)
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientForInstallation(ctx, orgID, inst)
 		if cerr != nil {
@@ -1087,6 +1097,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			// does every installation on a cycle whose read failed.
 			if heldRows, _ := held(); len(heldRows) > 0 && reach.HoldsAny(heldRows) {
 				m.refreshHeldGitHub(ctx, orgID, scope, client, domain.GitHubAccount{}, reach, resolver)
+				probe.add(client, nil, reach)
 			}
 			continue
 		}
@@ -1117,6 +1128,11 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			rateLimitResumeFrom, rateLimitErr = resumeFrom, rl
 			break
 		}
+		probe.add(client, scoped, reach)
+	}
+	if rateLimitErr == nil {
+		probe.run(ctx)
+		probe.listAlerts(ctx)
 	}
 
 	// Decide the cycle's actual resume point once, after every installation
@@ -1283,7 +1299,12 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 		marks.honorReach(tracker.ReachAll())
 	}
 	var rl *ghclient.ErrRateLimited
-	errors.As(rerr, &rl)
+	if !errors.As(rerr, &rl) {
+		probe := m.newDependabotProbe(orgID, scope, marks)
+		probe.add(client, repos, tracker.ReachAll())
+		probe.run(ctx)
+		probe.listAlerts(ctx)
+	}
 	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
 	return rerr == nil
 }
@@ -1297,6 +1318,12 @@ func (m *Manager) refreshHeldGitHubPAT(ctx context.Context, conn *cycleConnectio
 		return
 	}
 	m.refreshHeldGitHub(ctx, orgID, scope, client, self, tracker.ReachAll(), resolver)
+	// No marks: the org tracks nothing, and a mark on a repository no team
+	// tracks is cleared when the cycle reads it.
+	probe := m.newDependabotProbe(orgID, scope, nil)
+	probe.add(client, nil, tracker.ReachAll())
+	probe.run(ctx)
+	probe.listAlerts(ctx)
 }
 
 // patPass resolves what a pass on the PAT path runs with: the org's PAT

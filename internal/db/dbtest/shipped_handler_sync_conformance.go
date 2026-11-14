@@ -72,8 +72,11 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 	t.Run("InsertMissing_HonorsEnabledConventions", func(t *testing.T) {
 		stores, orgID, teamID, _, handlerID := factory(t)
 		bpID := seedOneStepBlueprint(t, stores, orgID, teamID, "hbp-conv")
+		disabledRule := syncRule("hr-conv-off", domain.EventGitHubPRCICheckFailed, "", "HRuleOff", 0.5, 1)
+		disabledRule.Disabled = true
 		handlers := []db.ShippedEventHandler{
 			syncRule("hr-conv", domain.EventGitHubPRCICheckFailed, "", "HRule", 0.5, 0),
+			disabledRule,
 			syncTrigger("ht-conv", domain.EventGitHubPRCICheckFailed, "", "hbp-conv", 3, 0.0),
 		}
 		if err := stores.EventHandlers.Sync(ctx, orgID, teamID, handlers, map[string]string{"hbp-conv": bpID}); err != nil {
@@ -82,6 +85,10 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		rule := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-conv")
 		if rule == nil || !rule.Enabled {
 			t.Errorf("inserted rule = %+v; want a row with enabled=true", rule)
+		}
+		off := handlerBySlug(t, stores, handlerID, orgID, teamID, "hr-conv-off")
+		if off == nil || off.Enabled {
+			t.Errorf("inserted Disabled rule = %+v; want a row with enabled=false", off)
 		}
 		trig := handlerBySlug(t, stores, handlerID, orgID, teamID, "ht-conv")
 		if trig == nil || trig.Enabled {
@@ -297,7 +304,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 				t.Errorf("shipped handler %s not inserted by SyncShippedIntoTeam", h.ID)
 				continue
 			}
-			wantEnabled := h.Kind == domain.EventHandlerKindRule
+			wantEnabled := h.Kind == domain.EventHandlerKindRule && !h.Disabled
 			if got.Enabled != wantEnabled {
 				t.Errorf("handler %s enabled=%v, want %v", h.ID, got.Enabled, wantEnabled)
 			}

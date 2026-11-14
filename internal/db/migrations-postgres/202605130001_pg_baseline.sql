@@ -4395,8 +4395,9 @@ REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service
 -- Pending refresh marks: one row per target in a tracked repository that a
 -- GitHub webhook delivery said changed, written in the transaction that
 -- records the delivery in github_webhook_deliveries. kind says what target
--- holds: a pull request number in decimal, a head SHA, or a branch name
--- without refs/heads/. Deliveries naming the same target land on one row:
+-- holds: a pull request number in decimal, a head SHA, a branch name without
+-- refs/heads/, or nothing for dependabot_alerts, which names the repository's
+-- alerts as a whole. Deliveries naming the same target land on one row:
 -- each bumps revision and marked_at, and first_marked_at stays. A pass clears
 -- a mark only at the revision it read, so a delivery landing mid-pass keeps
 -- its mark.
@@ -4407,11 +4408,12 @@ CREATE TABLE public.github_refresh_marks (
     id              uuid NOT NULL DEFAULT gen_random_uuid(),
     org_id          uuid NOT NULL,
     repository_id   uuid NOT NULL,
-    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch')),
-    target          text NOT NULL CHECK (target <> ''),
+    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch', 'dependabot_alerts')),
+    target          text NOT NULL,
     revision        bigint NOT NULL DEFAULT 1,
     first_marked_at timestamp with time zone NOT NULL,
-    marked_at       timestamp with time zone NOT NULL
+    marked_at       timestamp with time zone NOT NULL,
+    CHECK ((kind = 'dependabot_alerts') = (target = ''))
 );
 
 ALTER TABLE ONLY public.github_refresh_marks
@@ -4437,6 +4439,46 @@ GRANT ALL ON TABLE public.github_refresh_marks TO anon;
 GRANT ALL ON TABLE public.github_refresh_marks TO authenticated;
 GRANT ALL ON TABLE public.github_refresh_marks TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.github_refresh_marks TO tf_app;
+
+
+-- Whether the org's GitHub credential can read a repository's Dependabot
+-- alerts, as GitHub last answered the poll's probe: readable, no_permission
+-- (the credential was refused), or disabled (alerts are turned off on the
+-- repository). One row per repository, replaced by each probe; a repository
+-- the poll has not probed has no row.
+--
+-- Beside the answer, alerts_etag: the ETag GitHub answered the poll's last
+-- listing of the repository's open alerts with, the next listing's condition,
+-- '' when there is none to send.
+--
+-- Admin-pool wired with org_id bound per statement; the policy below is
+-- defense-in-depth.
+CREATE TABLE public.repository_dependabot_access (
+    repository_id uuid NOT NULL,
+    org_id        uuid NOT NULL,
+    access        text NOT NULL CHECK (access IN ('readable', 'no_permission', 'disabled')),
+    checked_at    timestamp with time zone NOT NULL,
+    alerts_etag   text DEFAULT ''::text NOT NULL
+);
+
+ALTER TABLE ONLY public.repository_dependabot_access
+    ADD CONSTRAINT repository_dependabot_access_pkey PRIMARY KEY (repository_id);
+
+ALTER TABLE ONLY public.repository_dependabot_access
+    ADD CONSTRAINT repository_dependabot_access_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.repository_dependabot_access
+    ADD CONSTRAINT repository_dependabot_access_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
+
+ALTER TABLE public.repository_dependabot_access ENABLE ROW LEVEL SECURITY;
+CREATE POLICY repository_dependabot_access_all ON public.repository_dependabot_access
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.repository_dependabot_access TO postgres;
+GRANT ALL ON TABLE public.repository_dependabot_access TO anon;
+GRANT ALL ON TABLE public.repository_dependabot_access TO authenticated;
+GRANT ALL ON TABLE public.repository_dependabot_access TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.repository_dependabot_access TO tf_app;
 
 
 -- The pending-bind record: one row per initiated deployment-App bind ceremony.

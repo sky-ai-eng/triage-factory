@@ -112,8 +112,8 @@ type importRequiredPermission struct {
 //   - Soft (warn): checks:read / actions:read (CI check + workflow events),
 //     statuses:read (the open-PR statusCheckRollup CI query — its contexts union
 //     touches the commit-statuses resource), members:read (GitHub team import +
-//     team-based review-request detection) — specific features degrade, the rest
-//     works.
+//     team-based review-request detection), vulnerability_alerts:read
+//     (Dependabot alerts) — specific features degrade, the rest works.
 var importRequiredPermissions = []importRequiredPermission{
 	{name: "emails", level: "read", hard: true},
 	{name: "issues", level: "write", hard: true},
@@ -124,6 +124,7 @@ var importRequiredPermissions = []importRequiredPermission{
 	{name: "actions", level: "read", feature: "workflow run events"},
 	{name: "statuses", level: "read", feature: "open-PR CI status rollup"},
 	{name: "members", level: "read", feature: "GitHub team import and team-based review-request detection"},
+	{name: "vulnerability_alerts", level: "read", feature: "Dependabot alerts"},
 }
 
 // permissionLevel maps a GitHub App permission value to a comparable rank so a

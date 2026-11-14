@@ -103,6 +103,28 @@ const (
 	EventGitHubPRUnreachable = "github:pr:unreachable"
 )
 
+// GitHub vulnerable-package events: a package in a repository with open
+// Dependabot alerts (domain.EntityKindVulnerablePackage). Split on whether the
+// package needs attention: an alert opening says it does, the last alert
+// closing says it no longer does. An alert closing while another stays open
+// changes nothing that needs attention and emits nothing; severity, scope and
+// the rest stay metadata.
+const (
+	// One per alert that is open now and was not open on the previous
+	// listing: created, reopened, or reintroduced. The dedup key is empty, so
+	// a second alert on a package folds into the task the first one made.
+	EventGitHubVulnerabilityAlertOpened = "github:vulnerability:alert_opened"
+	// The package has no open alert left. Terminating: it closes the entity
+	// and its tasks, and a later alert on the package creates a new entity.
+	EventGitHubVulnerabilityResolved = "github:vulnerability:resolved"
+	// TF no longer follows the package: the org's GitHub base URL now names
+	// another host, whose listings cannot answer for this one's repositories.
+	// Terminating, like resolved, but says nothing about the alerts, so a
+	// handler on resolved never takes a host change for a fix. Emitted without
+	// asking GitHub, as github:pr:unreachable is.
+	EventGitHubVulnerabilityUnreachable = "github:vulnerability:unreachable"
+)
+
 // Jira events
 const (
 	EventJiraIssueAvailable       = "jira:issue:available"
@@ -205,6 +227,16 @@ const (
 	// disposition values.
 	EventSystemRoutingDisposition = "system:routing:disposition"
 
+	// EventSystemTaskAssigned marks a task gaining a new assignee: the
+	// agent's claim stamp landing, or a person's claim, takeover,
+	// reassignment or Delegate. It is published after the write commits, by
+	// the router or by whichever control pod served the request, and carries
+	// no entity, so the router never sees it. Its one subscriber tells the
+	// live conversations whose work overlaps the task
+	// (delegate.Spawner.HandleTaskAssigned). See
+	// internal/domain/events/system.go for the metadata shape.
+	EventSystemTaskAssigned = "system:task:assigned"
+
 	// EventSystemEntityCloseOwed is the poll's close obligation: a refresh
 	// found an entity still active whose stored snapshot was ALREADY terminal
 	// on the previous cycle, and no terminating close for it is unsettled in
@@ -221,6 +253,7 @@ const (
 
 // EntityTerminatingEventTypes is the set of source transitions that
 // terminate an entity: a merged, closed or unreachable pull request, a
+// vulnerable package with no open alert left or no longer followed, a
 // completed or unreachable Jira or Linear issue. The routing package derives the same set from its
 // close relations; a routing test asserts the two agree, so the store layer
 // can read it without importing the router.
@@ -229,6 +262,8 @@ func EntityTerminatingEventTypes() []string {
 		EventGitHubPRMerged,
 		EventGitHubPRClosed,
 		EventGitHubPRUnreachable,
+		EventGitHubVulnerabilityResolved,
+		EventGitHubVulnerabilityUnreachable,
 		EventJiraIssueCompleted,
 		EventJiraIssueUnreachable,
 		EventLinearIssueCompleted,
@@ -307,6 +342,11 @@ func AllEventTypes() []EventType {
 		{ID: EventGitHubPRClosed, Source: "github", Category: "pr", Label: "PR Closed", Description: "A pull request was closed without merging"},
 		{ID: EventGitHubPRUnreachable, Source: "github", Category: "pr", Label: "PR Unreachable", Description: "Triage Factory no longer follows a tracked pull request — the org's GitHub base URL now names another host, which cannot vouch for the old host's objects. Never asked of GitHub"},
 
+		// --- GitHub vulnerable packages (Dependabot alerts) ---
+		{ID: EventGitHubVulnerabilityAlertOpened, Source: "github", Category: "vulnerability", Label: "Vulnerability Alert Opened", Description: "A Dependabot alert opened on a package in a tracked repository: created, reopened, or reintroduced. Alerts already open when Triage Factory first lists the repository emit too, one event each"},
+		{ID: EventGitHubVulnerabilityResolved, Source: "github", Category: "vulnerability", Label: "Vulnerability Resolved", Description: "A package in a tracked repository has no open Dependabot alert left: each was fixed or dismissed"},
+		{ID: EventGitHubVulnerabilityUnreachable, Source: "github", Category: "vulnerability", Label: "Vulnerability Unreachable", Description: "Triage Factory no longer follows a vulnerable package: the org's GitHub base URL now names another host, or the org's credential can no longer read the repository's Dependabot alerts, or they were turned off. Says nothing about whether the alerts were fixed"},
+
 		// --- Jira ---
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you"},
 		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue"},
@@ -349,6 +389,7 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
 		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},
 		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
+		{ID: EventSystemTaskAssigned, Source: "system", Category: "task", Label: "Task Assigned", Description: "A task gained a new assignee: the agent's claim landed, or a person claimed, took over, reassigned or delegated it"},
 		{ID: EventSystemEntityCloseOwed, Source: "system", Category: "entity", Label: "Entity close owed", Description: "The poll observed a terminal snapshot on an active entity with no close in flight"},
 	}
 }

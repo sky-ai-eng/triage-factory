@@ -55,11 +55,22 @@ func (f *fakeDispositionPublisher) Publish(evt domain.Event) {
 	f.events = append(f.events, evt)
 }
 
+// eventsCopy returns the disposition sentinels published so far. The router
+// publishes other sentinels on the same publisher, which eventsOfType reads.
 func (f *fakeDispositionPublisher) eventsCopy() []domain.Event {
+	return f.eventsOfType(domain.EventSystemRoutingDisposition)
+}
+
+// eventsOfType returns the published events of eventType, in publish order.
+func (f *fakeDispositionPublisher) eventsOfType(eventType string) []domain.Event {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]domain.Event, len(f.events))
-	copy(out, f.events)
+	var out []domain.Event
+	for _, evt := range f.events {
+		if evt.EventType == eventType {
+			out = append(out, evt)
+		}
+	}
 	return out
 }
 

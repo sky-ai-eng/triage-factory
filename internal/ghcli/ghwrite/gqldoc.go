@@ -3,7 +3,8 @@ package ghwrite
 import "strings"
 
 // A GraphQL document reader that answers one question — which top-level fields
-// does this request's mutation select? — and refuses to answer anything else.
+// does this request's mutation select? — and refuses to answer anything else
+// about a mutation.
 //
 // It is not a GraphQL implementation and must not grow into one. Everything
 // below a top-level selection set is skipped as balanced punctuation: argument
@@ -12,6 +13,13 @@ import "strings"
 // process holding the run's live GitHub credential, on a document an agent
 // composed from text the internet wrote, so the smaller its idea of the grammar,
 // the smaller the surface that hostile input can reach.
+//
+// A query is read by a second, separate walk over the same tokens (read.go),
+// which answers one question of its own: which pull requests and issues does
+// the query address by number? It goes one selection deeper than this reader,
+// into a repository's, and reads three argument values, each accepted only in
+// the shape of a repository owner, a repository name or a number. It skips
+// everything else exactly as this reader does.
 //
 // Two constructions are read exactly rather than skipped, because each is a way
 // a request can perform an act under a name the reader would otherwise miss —
@@ -500,9 +508,11 @@ func skipDirectives(sc *gqlScanner) bool {
 }
 
 // gqlKind is the token classes this reader distinguishes. Strings and numbers
-// collapse into one "value" class because nothing here ever reads their
-// contents — they exist so that a brace inside a comment body can never be
-// mistaken for structure.
+// collapse into one "value" class: each is one token whatever it holds, so a
+// brace inside a comment body can never be mistaken for structure. The mutation
+// reader never looks inside one. The addressed-read walk (read.go) does, for
+// three arguments only, and accepts a value only in the shape of a repository
+// owner, a repository name or an object number.
 type gqlKind uint8
 
 const (
@@ -511,9 +521,15 @@ const (
 	gqlKindValue
 )
 
+// gqlToken is one token. text is a name's or a punctuator's own spelling. For
+// a value it is a number as written, or the characters between a single-line
+// string's quotes, uninterpreted (an escape is left as its backslash and the
+// character after it); quoted tells the two apart. A block string keeps no
+// text.
 type gqlToken struct {
-	kind gqlKind
-	text string
+	kind   gqlKind
+	text   string
+	quoted bool
 }
 
 func (t gqlToken) punct(s string) bool { return t.kind == gqlKindPunct && t.text == s }
@@ -610,11 +626,12 @@ func (s *gqlScanner) scan() (gqlToken, bool) {
 		return gqlToken{kind: gqlKindName, text: s.src[start:s.pos]}, true
 	}
 	if c == '-' || (c >= '0' && c <= '9') {
+		start := s.pos
 		s.pos++
 		for s.pos < len(s.src) && isNumberContinue(s.src[s.pos]) {
 			s.pos++
 		}
-		return gqlToken{kind: gqlKindValue}, true
+		return gqlToken{kind: gqlKindValue, text: s.src[start:s.pos]}, true
 	}
 
 	// A byte the grammar has no place for. Stopping here (rather than skipping
@@ -643,9 +660,11 @@ func (s *gqlScanner) skipIgnored() {
 	}
 }
 
-// scanString consumes a string value, block or single-line, without keeping it.
-// The contents are never read — only their extent matters, so that punctuation
-// inside a pull-request body cannot be mistaken for document structure.
+// scanString consumes a string value, block or single-line. Its extent is what
+// matters to every reader, so that punctuation inside a pull-request body
+// cannot be mistaken for document structure. A single-line string's characters
+// ride the token uninterpreted, for the one reader that compares them against
+// the shape of a repository's owner or name; a block string's are dropped.
 func (s *gqlScanner) scanString() (gqlToken, bool) {
 	if strings.HasPrefix(s.src[s.pos:], `"""`) {
 		rest := s.src[s.pos+3:]
@@ -656,7 +675,7 @@ func (s *gqlScanner) scanString() (gqlToken, bool) {
 			}
 			if strings.HasPrefix(rest[i:], `"""`) {
 				s.pos += 3 + i + 3
-				return gqlToken{kind: gqlKindValue}, true
+				return gqlToken{kind: gqlKindValue, quoted: true}, true
 			}
 		}
 		s.bad = true
@@ -672,8 +691,9 @@ func (s *gqlScanner) scanString() (gqlToken, bool) {
 			s.bad = true
 			return gqlToken{}, false
 		case '"':
+			text := s.src[s.pos+1 : i]
 			s.pos = i + 1
-			return gqlToken{kind: gqlKindValue}, true
+			return gqlToken{kind: gqlKindValue, text: text, quoted: true}, true
 		}
 	}
 	s.bad = true

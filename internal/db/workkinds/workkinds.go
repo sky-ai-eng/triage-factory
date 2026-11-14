@@ -120,7 +120,9 @@ const (
 // rather than minting a new one, and an operator redrives or cancels it. A
 // firing whose event was handed to a conversation as a note gives its key up
 // (PendingFiringsStore.HandOffToConversation), so the pair's next event is
-// admitted as a row of its own.
+// admitted as a row of its own, and a firing admitted behind a note the
+// router folded its event into never holds one
+// (PendingFiringsStore.EnqueueHanded).
 //
 // The claim filter is the per-task gate as the claim query applies it: a
 // firing is claimable only while its task is not busy (PendingFiringsTaskBusy).
@@ -135,7 +137,9 @@ const (
 // time. Frozen is empty: the kind's columns are immutable after admission
 // except skip_reason and fired_run_id, which only the terminal write sets,
 // and handed_note_id, which a hand-off sets on a ready row together with
-// releasing its key, so the store reads them by id after Claim returns.
+// releasing its key and a release of the hand-off clears on a ready row
+// (PendingFiringsStore.ReleaseHandOff), so the store reads them by id after
+// Claim returns.
 func PendingFirings(d workitem.Dialect) workitem.Kind {
 	return workitem.Kind{
 		Table:   "pending_firings",

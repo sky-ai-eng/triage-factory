@@ -416,7 +416,7 @@ func TestDriveLiveConversation_AWaitingMessageOutlivesThePause(t *testing.T) {
 // for its next engagement.
 func TestDriveLiveConversation_APauseStandsOverANewEvent(t *testing.T) {
 	s, _, proc, park := liveInputFixture(t, "r-pause-event")
-	if !s.stageNoteAtToolBoundary(context.Background(), park.orgID, "r-pause-event", domain.MessageSubtypeInjectionEvent, "p", "a new event", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(context.Background(), park.orgID, "r-pause-event", domain.MessageSubtypeInjectionEvent, "p", "a new event", domain.NoteProvenance{}); !ok {
 		t.Fatal("the injection was not staged")
 	}
 	results := make(chan *agentproc.Result, 2)
@@ -444,10 +444,10 @@ func TestDriveLiveConversation_APauseStandsOverANewEvent(t *testing.T) {
 func TestDriveLiveConversation_ANewEventIsTheNextTurn(t *testing.T) {
 	s, _, proc, park := liveInputFixture(t, "r-event")
 	ctx := context.Background()
-	if !s.stageNoteAtToolBoundary(ctx, park.orgID, "r-event", domain.MessageSubtypeInjectionSystemNote, "p", "a pull request note", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, park.orgID, "r-event", domain.MessageSubtypeInjectionSystemNote, "p", "a pull request note", domain.NoteProvenance{}); !ok {
 		t.Fatal("the note was not staged")
 	}
-	if !s.stageNoteAtToolBoundary(ctx, park.orgID, "r-event", domain.MessageSubtypeInjectionEvent, "p", "a new event", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(ctx, park.orgID, "r-event", domain.MessageSubtypeInjectionEvent, "p", "a new event", domain.NoteProvenance{}); !ok {
 		t.Fatal("the injection was not staged")
 	}
 	results := make(chan *agentproc.Result, 4)
@@ -476,7 +476,7 @@ func TestDriveLiveConversation_ANewEventIsTheNextTurn(t *testing.T) {
 // let go of with the note still staged for the next engagement.
 func TestDriveLiveConversation_ANoteAloneLetsTheTurnEnd(t *testing.T) {
 	s, _, proc, park := liveInputFixture(t, "r-note")
-	if !s.stageNoteAtToolBoundary(context.Background(), park.orgID, "r-note", domain.MessageSubtypeInjectionSystemNote, "p", "a pull request note", domain.NoteProvenance{}) {
+	if _, ok := s.stageNoteAtToolBoundary(context.Background(), park.orgID, "r-note", domain.MessageSubtypeInjectionSystemNote, "p", "a pull request note", domain.NoteProvenance{}); !ok {
 		t.Fatal("the note was not staged")
 	}
 	results := make(chan *agentproc.Result, 2)

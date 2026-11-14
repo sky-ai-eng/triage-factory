@@ -19,7 +19,7 @@ import (
 func launchBlock(mission string) string {
 	return composeConversationSystemBlock(
 		mission,
-		runContext("Repository: owner/repo\nPR: #7", "", "/work", "", "tfac/SKY-9", "https://tf.example/runs/r-1", "", ""),
+		runContext("Repository: owner/repo\nPR: #7", "", "", "/work", "", "tfac/SKY-9", "https://tf.example/runs/r-1", "", ""),
 		agentprompt.GitHubToolsReference(),
 		agentprompt.NonTerminalCompletion(),
 	)
@@ -227,7 +227,7 @@ func TestNativeLaunch_StampsBlockTwoOnTheRow(t *testing.T) {
 func TestNativeLaunch_ToolsAreTheNativeComposition(t *testing.T) {
 	f := newLaunchFixture(t, "native-tools")
 	kinds := []string{"github", "jira"}
-	text := f.s.buildNativeLaunchText(context.Background(), f.task(t), "triage the ticket", runConfig{
+	text := f.s.buildNativeLaunchText(context.Background(), "", f.task(t), "triage the ticket", runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: kinds},
@@ -490,7 +490,7 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 // pass rendered, and the block a previous launch stamped.
 func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge, replayed string) nativeLaunchText {
 	t.Helper()
-	return f.s.buildNativeLaunchText(context.Background(), f.task(t), mission, runConfig{
+	return f.s.buildNativeLaunchText(context.Background(), "", f.task(t), mission, runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: []string{"github"}},

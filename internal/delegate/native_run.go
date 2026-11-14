@@ -164,7 +164,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// into the memory tree the launch is about to mount read-only. Block 1 is the
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
-	launchText := s.buildNativeLaunchText(ctx, task, mission, cfg, knowledge, replay.block)
+	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay.block)
 	systemPrompt := nativeSystemPrompt()
 
 	// The task context's retention. Nothing is pinned through a compaction, so
@@ -484,7 +484,7 @@ type nativeLaunchText struct {
 //
 // Nothing in it fails: the one read it makes degrades to a task context with no
 // event fields rather than refusing the launch.
-func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
+func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
 	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
 	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 
@@ -502,11 +502,13 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// The native blocks name the in-jail paths and the `tfac` applet
 		// outright, so the run context carries only what differs per run and
 		// those blocks cannot state for themselves: that the task is already
-		// closed, the PR checkout's path, the branch convention, the sources
-		// this run cannot reach, and this run's staged knowledge.
+		// closed, the work that overlaps it, the PR checkout's path, the
+		// branch convention, the sources this run cannot reach, and this
+		// run's staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
-			runContext("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID), "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+			runContext("", s.closedTaskContext(context.WithoutCancel(ctx), cfg.orgID, task.ID),
+				s.siblingWorkContext(context.WithoutCancel(ctx), cfg.orgID, conversationID), "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
 			cfg.sources.tools(agentprompt.RuntimeNative),
 			nonTerminal,
 		)
