@@ -1361,7 +1361,7 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // A warm tree an older binary laid out — its root a git checkout — is not
 // warm: it is removed and the ladder continues as though it were gone.
 //
-// conv.ClaimID is read, not just carried: a rebuild moves the claim's phase to
+// conv.ClaimID is read, not just carried: a restore moves the claim's phase to
 // cloning, records the checkouts' rows before it fetches them and re-stamps
 // worktree_path, and those writes are this engagement's to make only while it
 // still holds the conversation. Every caller is a claimed dispatch, so it is
@@ -1424,11 +1424,6 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	beginRehydrate := func() (context.Context, func()) {
 		return s.beginWorkspaceOp(ctx, conv.ID, "rehydrate")
 	}
-	// The rebuild is the setup step now under way. A rebuild that finds no
-	// snapshot falls to the fresh builder, which writes its own phases after
-	// this one. The fence result is not acted on: the agent_starting write is
-	// where a fenced engagement stops.
-	s.updatePhase(ctx, orgID, conv.ID, conv.ClaimID, domain.ClaimPhaseCloning)
 	opCtx, endOp := beginRehydrate()
 	defer func() { endOp() }()
 
@@ -1477,6 +1472,13 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		return "", "", nil, fmt.Errorf("rehydrate: get snapshot: %w", err)
 	}
 	defer func() { _ = rc.Close() }()
+
+	// Written here, once a snapshot is in hand, rather than before the lookup:
+	// the wait for a persist clones nothing, and a fall-through to the fresh
+	// builder is a source's own setup, which names its own steps. The fence
+	// result is not acted on: the agent_starting write is where a fenced
+	// engagement stops.
+	s.updatePhase(ctx, orgID, conv.ID, conv.ClaimID, domain.ClaimPhaseCloning)
 
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).

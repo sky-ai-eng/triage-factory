@@ -1626,12 +1626,10 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	// whole provisioner's input and the caller routes on the type it
 	// returns.
 	//
-	// A parked claim that already holds a bundle is left out. A claim
-	// publishes its sidecar key once, and Put writes a claim's row only with
-	// a seal made to that claim's key, so the bundle is the one the claim is
-	// waiting on; sealing again would overwrite it and mint installation
-	// tokens nothing revokes. The executor's next poll takes the claim out of this phase,
-	// and until then this keeps the sweep off it.
+	// A parked claim that already holds a bundle is left out: a claim
+	// publishes its sidecar key once and its bundle row is sealed to that key,
+	// so the bundle is the one the claim is waiting on, and sealing again
+	// would overwrite it and mint installation tokens nothing revokes.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r

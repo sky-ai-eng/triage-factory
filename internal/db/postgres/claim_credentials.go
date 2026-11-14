@@ -26,7 +26,7 @@ var _ db.ClaimCredentialsStore = (*claimCredentialsStore)(nil)
 
 // Put addresses the claim the caller read, never the conversation's active
 // claim at write time. The caller sealed to the key that claim published, so
-// the bundle is that claim's or nobody's: resolving the active claim here
+// the bundle belongs to that claim alone: resolving the active claim here
 // would let a seal for a claim released mid-provision land under the next
 // claim, sealed to a key its sidecar never minted. The guard is the claim's
 // row as the caller read it: unreleased, with the executor and boot epoch the

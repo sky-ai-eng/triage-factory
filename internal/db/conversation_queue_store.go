@@ -1110,9 +1110,9 @@ type AwaitingCredentialsConversation struct {
 	TeamID           string
 	TaskID           string
 	// ClaimID is the active claim's id, empty when the conversation has none.
-	// A seal is written to this claim and no other (ClaimCredentialsStore.Put),
-	// so it is the key the claim published, not whichever claim is active by
-	// the time the seal lands, that the bundle answers.
+	// The provisioner writes a bundle by this id, because the key it seals to
+	// belongs to this claim and the conversation can hold another by the time
+	// the write lands.
 	ClaimID    string
 	ExecutorID string
 	BootEpoch  int64

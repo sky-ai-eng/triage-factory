@@ -243,6 +243,30 @@ func TestEnsureWorkspace_ColdRehydrate_MovesThePhaseToCloning(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkspace_NoSnapshot_LeavesThePhaseToTheFreshBuilder: with nothing
+// to restore, no cloning is under way, so the rebuild writes no phase and the
+// fresh builder's source setup names its own steps.
+func TestEnsureWorkspace_NoSnapshot_LeavesThePhaseToTheFreshBuilder(t *testing.T) {
+	f := newSnapshotFixture(t, "task-no-snapshot-phase")
+	f.loseRoot(t)
+	phases := &claimPhaseLog{}
+	f.s.conversations = phases
+
+	conv := f.conv("")
+	conv.Runtime = domain.ConversationRuntimeNative
+	fresh := func(context.Context) (string, error) { return worktree.MakeRunRoot(f.key) }
+	_, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), fresh)
+	if err != nil {
+		t.Fatalf("ensureWorkspace (no snapshot): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceFresh {
+		t.Fatalf("provenance = %q, want %q", prov, domain.WorkspaceProvenanceFresh)
+	}
+	if got, ok := phases.byClaim[conv.ClaimID]; ok {
+		t.Errorf("a rebuild with no snapshot wrote phase %q; the fresh builder names its own steps", got)
+	}
+}
+
 // claimPhaseLog holds the last phase written for each claim, through the
 // claim-fenced door, and answers no other conversation write.
 type claimPhaseLog struct {

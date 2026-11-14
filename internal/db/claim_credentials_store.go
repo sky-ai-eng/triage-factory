@@ -83,10 +83,10 @@ type ClaimCredentialsStore interface {
 	// Get's doc).
 	//
 	// The write lands only while claimID is still active and still carries
-	// executorID/bootEpoch. A claim released while the caller was sealing
-	// takes the seal with it: nothing lands under the conversation's next
-	// claim, whose sidecar published a different key and which the backstop
-	// sweep stops sealing once it holds a bundle. A re-seal of the same claim
+	// executorID/bootEpoch. A seal for a claim released while the caller was
+	// sealing lands nowhere, and never under the conversation's next claim,
+	// whose sidecar published a different key and which the backstop sweep
+	// stops sealing once it holds a bundle. A re-seal of the same claim
 	// (re-minted tokens for a long-lived one) replaces the row.
 	//
 	// A nil error does NOT mean the bundle landed: with the claim released
@@ -112,9 +112,8 @@ type ClaimCredentialsStore interface {
 	// sources is the engagement's source manifest, written onto the claim's
 	// row (claims.source_manifest) in the same statement, and only when the
 	// ciphertext write itself applies, so the manifest always describes the
-	// bundle the row holds. The claims row outlives claim_credentials, which
-	// teardown deletes, so the manifest keeps describing the engagement after
-	// it ends.
+	// bundle the row holds. It stays on the claims row after the engagement
+	// ends, which is what the fleet console reads for a finished one.
 	Put(ctx context.Context, orgID, claimID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error
 
 	// Get returns the sealed bundle for conversationID's active claim, or ok=false

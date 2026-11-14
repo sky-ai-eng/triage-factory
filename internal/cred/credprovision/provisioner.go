@@ -276,8 +276,8 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	if err != nil {
 		return fmt.Errorf("credprovision: seal bundle for conversation %s: %w", conversationID, err)
 	}
-	// Written to the claim whose key it was sealed to, never to whichever
-	// claim is active by the time it lands.
+	// By claim rather than by conversation: the key sealed to belongs to the
+	// claim read above, and the conversation can hold another claim by now.
 	if err := m.stores.ClaimCredentials.Put(ctx, orgID, claim.ClaimID, claim.ExecutorID, inst.BootEpoch, sealed, sources); err != nil {
 		return fmt.Errorf("credprovision: write bundle for conversation %s: %w", conversationID, err)
 	}
