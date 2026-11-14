@@ -336,6 +336,8 @@ export function resumeBlockedCopy(conversation: Conversation): string {
       return 'The team that owned this work was archived, so nothing will pick it back up.'
     case 'ended_failed':
       return 'This run failed, so it can’t be continued. Delegate the task again to start fresh.'
+    // TODO(TFAC-1423): 'ended_reassigned', the boundary a reassign to another
+    // team stamps, has no sentence of its own and reads the generic one below.
     default:
       return 'This conversation can’t take a follow-up.'
   }

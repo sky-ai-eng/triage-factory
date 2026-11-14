@@ -45,26 +45,25 @@ func unendedConversations(t *testing.T, database *sql.DB, taskID string) []strin
 	return ids
 }
 
-// countAfterWriteTx records how many un-ended conversations the watched task
+// countAfterWriteTx records the most un-ended conversations any one task
 // holds each time one of the route's write transactions commits, which is
-// every moment another reader could see the task between the claim and the
-// cleanup that follows it.
+// every moment another reader could see a task between the claim and the
+// cleanup that follows it. It reads every task because the stock deck's claim
+// creates the task it claims, so no id exists to watch ahead of the call.
 type countAfterWriteTx struct {
 	db.TxRunner
 	database **sql.DB
-	taskID   *string
 	seen     *[]int
 }
 
 func (w countAfterWriteTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	err := w.TxRunner.WithTx(ctx, orgID, userID, fn)
-	if *w.taskID == "" {
-		return err
-	}
 	var n int
 	if qerr := (*w.database).QueryRow(`
-		SELECT COUNT(*) FROM conversations
-		WHERE task_id = ? AND ended_at IS NULL AND parent_conversation_id IS NULL`, *w.taskID).Scan(&n); qerr == nil {
+		SELECT COALESCE(MAX(n), 0) FROM (
+			SELECT COUNT(*) AS n FROM conversations
+			WHERE ended_at IS NULL AND parent_conversation_id IS NULL
+			GROUP BY task_id)`).Scan(&n); qerr == nil {
 		*w.seen = append(*w.seen, n)
 	}
 	return err
@@ -155,51 +154,52 @@ func TestPersonClaim_MintsTheTasksConversation(t *testing.T) {
 		// run stages a task, claims it, and answers the task, the
 		// conversation_id the claim's caller is told, and the conversation the
 		// agent held before the claim ("" when the agent held none).
-		run func(t *testing.T, s *Server, watch *string) (taskID, toldConversationID, agentConversationID string)
+		run func(t *testing.T, s *Server) (taskID, toldConversationID, agentConversationID string)
+		// stagedMints is how many conversations run mints while staging,
+		// ahead of the claim under test.
+		stagedMints int
 		// wantMinted is how many conversations the claim under test mints.
 		wantMinted int
 	}{
 		{
 			name: "from the queue",
-			run: func(t *testing.T, s *Server, watch *string) (string, string, string) {
+			run: func(t *testing.T, s *Server) (string, string, string) {
 				taskID := seedTaskFixture(t, s.db, taskFixture{name: "queue-claim", status: "queued"})
-				*watch = taskID
 				return taskID, claimTask(t, s, taskID), ""
 			},
 			wantMinted: 1,
 		},
 		{
 			name: "from the agent",
-			run: func(t *testing.T, s *Server, watch *string) (string, string, string) {
+			run: func(t *testing.T, s *Server) (string, string, string) {
 				taskID, agentConversationID, _ := pendingApprovalFixture(t, s.db)
 				// Mid-turn, so the cleanup's stop pass has the agent's
 				// conversation to stop beside the one it must pass over.
 				execSQL(t, s.db, `UPDATE conversations SET completed_at = NULL WHERE id = ?`, agentConversationID)
-				*watch = taskID
 				return taskID, claimTask(t, s, taskID), agentConversationID
 			},
 			wantMinted: 1,
 		},
 		{
 			name: "an idempotent re-claim of a task that has its conversation",
-			run: func(t *testing.T, s *Server, watch *string) (string, string, string) {
+			run: func(t *testing.T, s *Server) (string, string, string) {
 				taskID := seedTaskFixture(t, s.db, taskFixture{name: "re-claim", status: "queued"})
 				first := claimTask(t, s, taskID)
 				if first == "" {
 					t.Fatal("the first claim told its caller no conversation_id")
 				}
-				*watch = taskID
 				again := claimTask(t, s, taskID)
 				if again != first {
 					t.Errorf("the re-claim answered conversation_id %q, want the one the first claim minted, %q", again, first)
 				}
 				return taskID, again, ""
 			},
-			wantMinted: 0,
+			stagedMints: 1,
+			wantMinted:  0,
 		},
 		{
 			name: "the Jira stock deck",
-			run: func(t *testing.T, s *Server, watch *string) (string, string, string) {
+			run: func(t *testing.T, s *Server) (string, string, string) {
 				seedStockConfig(t, s)
 				seedStockTicket(t, s, "SKY-1")
 				fake := newJiraIssueFake(t, statusToDoID, "")
@@ -220,11 +220,10 @@ func TestPersonClaim_MintsTheTasksConversation(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
 			keyring.MockInit()
-			var watch string
 			var seen []int
 			var database *sql.DB
 			s := newTestServerWithTx(t, func(tx db.TxRunner) db.TxRunner {
-				return countAfterWriteTx{TxRunner: tx, database: &database, taskID: &watch, seen: &seen}
+				return countAfterWriteTx{TxRunner: tx, database: &database, seen: &seen}
 			})
 			database = s.db
 			// A spawner, so the cleanup's stop pass runs rather than
@@ -235,7 +234,7 @@ func TestPersonClaim_MintsTheTasksConversation(t *testing.T) {
 			if err := s.db.QueryRow(`SELECT COUNT(*) FROM conversations WHERE type = ?`, domain.ConversationTypeInteractive).Scan(&before); err != nil {
 				t.Fatalf("count interactive conversations: %v", err)
 			}
-			taskID, told, agentConversationID := c.run(t, s, &watch)
+			taskID, told, agentConversationID := c.run(t, s)
 
 			live := unendedConversations(t, s.db, taskID)
 			if len(live) != 1 {
@@ -253,18 +252,15 @@ func TestPersonClaim_MintsTheTasksConversation(t *testing.T) {
 			if err := s.db.QueryRow(`SELECT COUNT(*) FROM conversations WHERE type = ?`, domain.ConversationTypeInteractive).Scan(&after); err != nil {
 				t.Fatalf("count interactive conversations: %v", err)
 			}
-			minted := after - before
-			if c.name == "an idempotent re-claim of a task that has its conversation" {
-				// The first claim's mint is staging; the re-claim is the
-				// claim under test.
-				minted--
-			}
-			if minted != c.wantMinted {
+			if minted := after - before - c.stagedMints; minted != c.wantMinted {
 				t.Errorf("the claim minted %d conversations, want %d", minted, c.wantMinted)
+			}
+			if len(seen) == 0 {
+				t.Fatal("the claim committed no write transaction the test observed")
 			}
 			for i, n := range seen {
 				if n > 1 {
-					t.Errorf("after write transaction %d the task held %d un-ended conversations; it never holds two", i, n)
+					t.Errorf("after write transaction %d a task held %d un-ended conversations; it never holds two", i, n)
 				}
 			}
 

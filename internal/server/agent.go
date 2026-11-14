@@ -641,6 +641,7 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// Whether the conversation holds an assistant message. A conversation a
 		// person's claim minted reads false until its first turn.
 		"has_run":              conv.HasRun,
+		"type":                 conv.Type,
 		"TriggerType":          conv.TriggerType,
 		"TriggerID":            conv.TriggerID,
 		"actor_agent_id":       conv.ActorAgentID,

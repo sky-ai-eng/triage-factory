@@ -1935,8 +1935,8 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 //
 // "Has run" is db.ConversationHasRunSQL. A conversation a person's claim
 // minted and nobody typed in has no turn to remember, so ending it owes
-// nothing: the task's next conversation does not wait, and the provisioner
-// opens no attempt for it.
+// nothing: the task's next conversation does not wait, and the memory sweep
+// does not list it.
 //
 // orgExpr / taskExpr are the asking query's own aliases — `t.org_id`/`t.id` on
 // the task read, `r.org_id`/`r.task_id` on the claim scan — so the two readers

@@ -176,6 +176,14 @@ type CollapseMap = Record<ColumnId, boolean>
 
 const COLLAPSE_STORAGE_PREFIX = 'sky330.board.collapsed.v1'
 
+// isUnusedClaimConversation reports the conversation a person's claim opened
+// in which nothing has run. It holds nothing a card shows, so it never takes a
+// card from an earlier conversation: a run a person took over keeps its
+// deliverables and its chain on the card, and its link.
+function isUnusedClaimConversation(c: Conversation): boolean {
+  return c.type === 'interactive' && c.has_run === false
+}
+
 function collapseStorageKey(userID: string): string {
   return `${COLLAPSE_STORAGE_PREFIX}.${userID || 'anon'}`
 }
@@ -486,7 +494,8 @@ export default function Board() {
       for (const taskID of taskIDs) {
         const taskConversations = conversationsByTask[taskID]
         if (!taskConversations || taskConversations.length === 0) continue
-        const latestConversation = taskConversations[0]
+        const latestConversation =
+          taskConversations.find((c) => !isUnusedClaimConversation(c)) ?? taskConversations[0]
         const blueprintRunID = latestConversation.blueprint_run_id
         if (blueprintRunID) {
           const stepConversations = taskConversations
@@ -783,7 +792,8 @@ export default function Board() {
                 if (
                   existing &&
                   existing.ID !== fullConversation.ID &&
-                  existing.StartedAt >= fullConversation.StartedAt
+                  (existing.StartedAt >= fullConversation.StartedAt ||
+                    isUnusedClaimConversation(fullConversation))
                 ) {
                   return p
                 }
@@ -834,7 +844,17 @@ export default function Board() {
             } else {
               apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
                 .then((fullConversation) => {
-                  setConversations((p) => ({ ...p, [fullConversation.TaskID]: fullConversation }))
+                  setConversations((p) => {
+                    const existing = p[fullConversation.TaskID]
+                    if (
+                      existing &&
+                      existing.ID !== fullConversation.ID &&
+                      isUnusedClaimConversation(fullConversation)
+                    ) {
+                      return p
+                    }
+                    return { ...p, [fullConversation.TaskID]: fullConversation }
+                  })
                   if (fullConversation.blueprint_run_id) {
                     seedChainStepConversations(
                       fullConversation.TaskID,
@@ -857,7 +877,8 @@ export default function Board() {
                 if (
                   existing &&
                   existing.ID !== fullConversation.ID &&
-                  existing.StartedAt >= fullConversation.StartedAt
+                  (existing.StartedAt >= fullConversation.StartedAt ||
+                    isUnusedClaimConversation(fullConversation))
                 ) {
                   return p
                 }

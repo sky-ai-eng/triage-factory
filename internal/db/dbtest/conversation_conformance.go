@@ -3503,48 +3503,58 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	// moment one stopped being the live one. The stamp is about the task
 	// moving on, so none of these assertions is conditioned on status.
 
-	t.Run("EndConversationsForTask_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "end-all")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	// Both doors: the request's, and its admin-pool twin a transaction with no
+	// claims uses.
+	for _, door := range []struct {
+		name string
+		end  func(db.ConversationStore, context.Context, string, string, domain.EndedReason) ([]domain.Conversation, error)
+	}{
+		{"EndConversationsForTask", db.ConversationStore.EndConversationsForTask},
+		{"EndConversationsForTaskSystem", db.ConversationStore.EndConversationsForTaskSystem},
+	} {
+		t.Run(door.name+"_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			ctx := context.Background()
+			ent := seed.Entity(t, "end-all")
+			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// One per rung of the status ladder the stamp is NOT conditioned on:
-		// mid-flight, parked, cleanly concluded, failed. The `completed` row
-		// is the one a conditioned predicate would miss — a requeued task's
-		// abort row is exactly what the boundary has to end.
-		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
-		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
-		concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
+			// One per rung of the status ladder the stamp is NOT conditioned on:
+			// mid-flight, parked, cleanly concluded, failed. The `completed` row
+			// is the one a conditioned predicate would miss — a requeued task's
+			// abort row is exactly what the boundary has to end.
+			live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+			parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
+			concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
+			failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
 
-		before := time.Now().UTC().Add(-time.Second)
-		stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
-		if err != nil {
-			t.Fatalf("EndConversationsForTask: %v", err)
-		}
-		want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
-		if len(stamped) != len(want) {
-			t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
-		}
-		for _, c := range stamped {
-			if _, ok := want[c.ID]; !ok {
-				t.Errorf("stamped an unexpected conversation %s", c.ID)
+			before := time.Now().UTC().Add(-time.Second)
+			stamped, err := door.end(store, ctx, orgID, taskID, domain.EndedRequeued)
+			if err != nil {
+				t.Fatalf("%s: %v", door.name, err)
 			}
-			if c.EndedReason != domain.EndedRequeued {
-				t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+			want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
+			if len(stamped) != len(want) {
+				t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
 			}
-			if c.EndedAt == nil || c.EndedAt.Before(before) {
-				t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+			for _, c := range stamped {
+				if _, ok := want[c.ID]; !ok {
+					t.Errorf("stamped an unexpected conversation %s", c.ID)
+				}
+				if c.EndedReason != domain.EndedRequeued {
+					t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+				}
+				if c.EndedAt == nil || c.EndedAt.Before(before) {
+					t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+				}
+				// The returned row IS the stored row, laterals and all — nobody
+				// should re-read to broadcast what the write handed back.
+				AssertWriteReturnedStoredRow(t, door.name+" "+c.ID, c, func() (*domain.Conversation, error) {
+					return store.Get(ctx, orgID, c.ID)
+				})
 			}
-			// The returned row IS the stored row, laterals and all — nobody
-			// should re-read to broadcast what the write handed back.
-			AssertWriteReturnedStoredRow(t, "EndConversationsForTask "+c.ID, c, func() (*domain.Conversation, error) {
-				return store.Get(ctx, orgID, c.ID)
-			})
-		}
-	})
+		})
+	}
 
 	t.Run("EndConversationsForTask_SkipsSubagentAndAlreadyEndedRows", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
@@ -3644,6 +3654,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			if _, err := store.EndConversationsForTask(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
 				t.Errorf("EndConversationsForTask(%q) err = %v, want ErrInvalidEndedReason", reason, err)
+			}
+			if _, err := store.EndConversationsForTaskSystem(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
+				t.Errorf("EndConversationsForTaskSystem(%q) err = %v, want ErrInvalidEndedReason", reason, err)
 			}
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
