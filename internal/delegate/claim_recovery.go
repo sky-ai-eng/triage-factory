@@ -196,6 +196,7 @@ func (s *Spawner) disposeOfLostConversation(ctx context.Context, conv *domain.Co
 		dispatchLog.Warn("stamp the failure boundary on a conversation whose loss budget is spent failed", "conversation", conv.ID, "error", err)
 	} else if ended != nil {
 		s.kickMemoryOwed(orgID, ended.ID)
+		s.replaceFailedInteractive(orgID, ended)
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "failed")
 	s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureExecutorLost, summary)

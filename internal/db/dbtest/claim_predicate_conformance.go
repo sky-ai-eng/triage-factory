@@ -976,6 +976,33 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		mustClaim(t, h, persons.ID)
 	})
 
+	// The other half of the gate: a conversation a person's claim mints has
+	// no blueprint run, and on a task that owes no memory the person's message
+	// makes it claimable on the first scan. The agent's conversation here
+	// ended without running, so it owes nothing.
+	t.Run("AnInteractiveConversationWithNoRunIsClaimedOnThePersonsMessage", func(t *testing.T) {
+		h := mk(t)
+		unrun := h.StageDelegation(t, "sdk")
+		agents, err := h.Stores.Conversations.GetSystem(ctx, h.OrgID, unrun)
+		if err != nil || agents == nil {
+			t.Fatalf("read the agent's conversation: (%v, %v)", agents, err)
+		}
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, unrun, domain.EndedTakenOver); err != nil {
+			t.Fatalf("end the agent's conversation: %v", err)
+		}
+		persons, err := h.Stores.Conversations.MintForPersonClaimSystem(ctx, h.OrgID, agents.TaskID, agents.CreatorUserID)
+		if err != nil || persons == nil {
+			t.Fatalf("MintForPersonClaimSystem = (%v, %v)", persons, err)
+		}
+		mustNotClaim(t, h)
+
+		h.InsertRow(t, persons.ID, userRow("what happened here?", false))
+		got := mustClaim(t, h, persons.ID)
+		if got.BlueprintRunID != "" || got.Type != domain.ConversationTypeInteractive {
+			t.Errorf("claimed = (blueprint run %q, type %q), want an interactive conversation with no run", got.BlueprintRunID, got.Type)
+		}
+	})
+
 	// A conversation that ended and DID leave a memory owes nothing, so its
 	// task's next step is claimed on the first scan. Without this the subtest
 	// above proves only that ending a conversation blocks a task, which is

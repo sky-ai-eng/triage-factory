@@ -462,7 +462,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)
-	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
+	systemPrompt := sdkSystemPrompt(cfg.surface, systemBlock, agentBin)
 	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
 
 	// The task context's retention, on the same terms as the native path: the
@@ -662,7 +662,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// recorded through the sink's own insert door. Last before the launch, so
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
 	// that really was about to speak.
-	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, taskMemories, taskContext); err != nil {
+	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, cfg.interactive, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the
 			// conversation, and every row this engagement still wrote would
@@ -707,11 +707,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			runtime:        domain.ConversationRuntimeSDK,
 			mirror:         mirror,
 		},
-		opts:   baseOpts,
-		perms:  perms,
-		sink:   sink,
-		mirror: mirror,
-		nudge:  turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, cfg.appendSysPrompt == "")),
+		opts:         baseOpts,
+		perms:        perms,
+		sink:         sink,
+		mirror:       mirror,
+		nudge:        turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg))),
+		hasBlueprint: cfg.blueprintRunID != "",
 	})
 
 	// Fenced out mid-stream: the claim this engagement holds was released and
@@ -818,11 +819,20 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // refused write leaves them staged, and opts.OnOpeningUnsent puts them back
 // on the queue if the message never reaches the agent; it is nil when no
 // note was flushed.
+//
+// A conversation a person works in (interactive) opens on the person's own
+// message rather than a mission, so its opening ends with the messages they
+// left waiting, after the notes, as one final block. Their rows are already
+// on the transcript, where the opening is sequenced ahead of them
+// (mintOpeningRows), so nothing is written for them: they are only taken off
+// the queue, here, past every hand-back and just before the runtime starts,
+// which is where the resume path takes its message too (dispatchResumeClaim).
 func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
 	sink *conversationSink,
 	orgID, conversationID, creatorUserID, lastHandBackOutcome string,
+	interactive bool,
 	memories []domain.TaskMemory,
 	taskContext string,
 ) error {
@@ -849,9 +859,38 @@ func (s *Spawner) composeLaunchTurn(
 	if notes != "" {
 		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: notes})
 	}
+	if interactive {
+		if waiting := s.takeWaitingPersonInput(ctx, orgID, conversationID); waiting != "" {
+			blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: waiting})
+		}
+	}
 	opts.Message = ""
 	opts.OpeningBlocks = blocks
 	return nil
+}
+
+// takeWaitingPersonInput takes the messages a person left waiting on the
+// conversation off the queue and returns them joined, oldest first, or "" when
+// there are none.
+//
+// A failed take sends the turn without them and leaves the rows undelivered.
+// That is the recoverable way to be wrong: the rows still wake the
+// conversation once this turn ends, and by then it has a session, so the
+// resume path delivers them.
+func (s *Spawner) takeWaitingPersonInput(ctx context.Context, orgID, conversationID string) string {
+	if s.pendingInput == nil {
+		return ""
+	}
+	msg, _, ok, err := s.pendingInput.Consume(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("take the person's waiting messages for the first turn failed; the turn starts without them, and they wake the conversation again once it ends",
+			"conversation", conversationID, "error", err)
+		return ""
+	}
+	if !ok {
+		return ""
+	}
+	return msg
 }
 
 // continuationNote is the note a launch resuming a session sends, by how the
@@ -1129,10 +1168,11 @@ func (s *Spawner) processCompletion(
 	// cancelled turn still owns its terminal bookkeeping.
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
-	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
-	// blueprint), so this helper never owns task disposition: it persists
-	// outcome/status only and leaves advancement + task close to the orchestrator
-	// (reactToStepTerminal / terminateBlueprint). blueprintRunID is always non-empty here.
+	// This helper never owns task disposition: it persists outcome/status only
+	// and leaves advancement + task close to the orchestrator
+	// (reactToStepTerminal / terminateBlueprint). A conversation a person works
+	// in has no blueprint run, so it has nothing to advance and nothing here
+	// closes its task either.
 
 	resultSummary := ""
 	status := domain.StatusOpen

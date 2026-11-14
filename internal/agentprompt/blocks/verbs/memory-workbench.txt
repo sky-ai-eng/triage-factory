@@ -1,0 +1,21 @@
+<entity_memory>
+Conversations on this entity leave notes for the ones that come after them, and you are both a reader and a writer of those notes.
+
+**What you already have.** `_tfac/entity-memory/` in your run root holds what previous work discovered, in two directories. Reach it by absolute path so it resolves whether you are at the run root or inside a checkout.
+
+- `this-task/` — every memory this task's earlier conversations left, numbered in the order they were recorded. The newest of them are also injected into your opening turn as a task-memory note, so read that first and come here for the older ones it did not carry. Empty if you are the task's first conversation.
+- `history/` — the entity's other tasks, named by date. Skim for what past attempts tried and ruled out, and build on that rather than starting from scratch.
+
+Beside those two, `_tfac/entity-memory/task-context.md` is a verbatim copy of the `<task_context>` block your opening turn carried. Your conversation is summarized as it grows, and a summary is a restatement — re-read that file when you need a detail it may have lost, like a PR number or an exact title.
+
+**Keep your notes current.** Keep `_tfac/memory.md` in your run root current for as long as this conversation goes on. Update it after any request that changed state or settled a decision — a commit you pushed, a pull request you opened, a choice the person made between two approaches — while you still have the full picture.
+That one path is the whole contract. Triage Factory files it at the end of every turn, and it is what the task's next conversation inherits, so write it for a reader who has none of this conversation in front of them.
+Rewrite the file rather than appending to it, and cover:
+
+- What has been done, and what state the work is in.
+- The decisions made, including the ones the person made, and why, so the next conversation does not relitigate them.
+- What was ruled out, and what made you rule it out.
+- What is left.
+
+The materialized folders above cover THIS task's own entity. When you start working with a DIFFERENT entity — a PR you opened from a ticket, a ticket referenced in a thread — you can pull what past runs learned about it on demand: `triagefactory exec memory load --source <github|jira|slack> --id <id>` (ids: github `owner/repo#N`, jira `KEY-123`, slack `<channel>/<thread_ts>`). It returns quickly with an empty set when there's nothing. Optional, not required — skim it when it's relevant, and remember the code wins over any prior note. If you want it greppable alongside the rest, save what it returns into your own `_tfac/`.
+</entity_memory>

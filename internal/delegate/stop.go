@@ -606,6 +606,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 		// file", and only the transcript says which. Rung for the row this
 		// call stamped.
 		s.kickMemoryOwed(orgID, ended.ID)
+		s.replaceFailedInteractive(orgID, ended)
 	}
 
 	s.broadcastConversationFailed(orgID, conversationID, kind)

@@ -106,9 +106,10 @@ const (
 
 // The conversations.type vocabulary — which surface owns a conversation.
 // App-validated (no schema CHECK, the house pattern for open vocabularies).
-// One claim loop drives every type. The dispatcher has one execution arm, the
-// blueprint step's, and fails a claimed conversation with no blueprint run as
-// blueprint_missing.
+// One claim loop and one dispatcher drive every type. The dispatcher drives a
+// delegation as a step of its blueprint run, and fails one whose run is gone as
+// blueprint_missing; it drives an interactive conversation with no blueprint
+// run at all, under the workbench prompt.
 const (
 	// ConversationTypeDelegation is a task-driven conversation — every
 	// blueprint step today.
@@ -116,7 +117,9 @@ const (
 	// ConversationTypeInteractive is the conversation a person drives on a
 	// task they hold. A person's claim mints it
 	// (ConversationStore.MintForPersonClaim), parked with no verdict, and it
-	// stays the task's conversation until a boundary ends it.
+	// stays the task's conversation until a boundary ends it. A person's
+	// message starts each of its turns, and every turn ends parked with no
+	// verdict, so it idles between turns and never completes.
 	ConversationTypeInteractive = "interactive"
 )
 

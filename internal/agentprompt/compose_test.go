@@ -17,15 +17,17 @@ func machinistSpec(mode Mode) Spec {
 // than passing silently.
 func allSpecs() []Spec {
 	var out []Spec
-	for _, mode := range []Mode{ModeLocal, ModeMulti} {
-		for _, rt := range []Runtime{RuntimeSDK, RuntimeNative} {
-			// Native is sandboxed by construction, so it has no local arm —
-			// see nativeMachinistBlocks, and TestBuild_NativeRequiresMulti
-			// below, which pins that this gap is deliberate.
-			if rt == RuntimeNative && mode == ModeLocal {
-				continue
+	for _, surface := range []Surface{SurfaceMachinist, SurfaceWorkbench} {
+		for _, mode := range []Mode{ModeLocal, ModeMulti} {
+			for _, rt := range []Runtime{RuntimeSDK, RuntimeNative} {
+				// Native is sandboxed by construction, so it has no local arm —
+				// see nativeMachinistBlocks, and TestBuild_NativeRequiresMulti
+				// below, which pins that this gap is deliberate.
+				if rt == RuntimeNative && mode == ModeLocal {
+					continue
+				}
+				out = append(out, Spec{Surface: surface, Runtime: rt, Family: FamilyClaude, Mode: mode})
 			}
-			out = append(out, Spec{Surface: SurfaceMachinist, Runtime: rt, Family: FamilyClaude, Mode: mode})
 		}
 	}
 	return out
@@ -40,16 +42,73 @@ func allSpecs() []Spec {
 // prompt whose every path is a lie; the launch would fail moments later
 // regardless, and failing here says why.
 func TestBuild_NativeRequiresMulti(t *testing.T) {
-	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeLocal}
-	if _, err := manifest(spec); err == nil {
-		t.Fatal("a native local-mode Spec composed a prompt; its paths only exist inside the jail")
+	for _, surface := range []Surface{SurfaceMachinist, SurfaceWorkbench} {
+		t.Run(string(surface), func(t *testing.T) {
+			spec := Spec{Surface: surface, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeLocal}
+			if _, err := manifest(spec); err == nil {
+				t.Fatal("a native local-mode Spec composed a prompt; its paths only exist inside the jail")
+			}
+			defer func() {
+				if recover() == nil {
+					t.Error("Build did not panic on a Spec the manifest refuses")
+				}
+			}()
+			_ = Build(spec)
+		})
 	}
-	defer func() {
-		if recover() == nil {
-			t.Error("Build did not panic on a Spec the manifest refuses")
-		}
-	}()
-	_ = Build(spec)
+}
+
+// TestBuild_WorkbenchComposition covers the workbench arm on both runtimes. A
+// person is present and there is no blueprint, so each composition carries the
+// workbench's own identity and memory sections and none of the completion
+// contract, which explains a tool the conversation is never offered.
+func TestBuild_WorkbenchComposition(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		spec             Spec
+		identity, memory string
+	}{
+		{
+			name:     "sdk local",
+			spec:     Spec{Surface: SurfaceWorkbench, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeLocal},
+			identity: blockIdentityWorkbench, memory: blockVerbMemoryWorkbench,
+		},
+		{
+			name:     "sdk multi",
+			spec:     Spec{Surface: SurfaceWorkbench, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeMulti},
+			identity: blockIdentityWorkbench, memory: blockVerbMemoryWorkbench,
+		},
+		{
+			name:     "native multi",
+			spec:     Spec{Surface: SurfaceWorkbench, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti},
+			identity: blockIdentityWorkbenchNv, memory: blockVerbMemoryWorkbenchNv,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths, err := manifest(tc.spec)
+			if err != nil {
+				t.Fatalf("manifest: %v", err)
+			}
+			first, second := Build(tc.spec), Build(tc.spec)
+			if first != second {
+				t.Error("the composition is not stable across calls")
+			}
+			if paths[0] != tc.identity {
+				t.Errorf("the composition opens with %s, want the workbench identity %s", paths[0], tc.identity)
+			}
+			if !slices.Contains(paths, tc.memory) {
+				t.Errorf("the composition does not include the workbench memory section %s", tc.memory)
+			}
+			for _, p := range []string{blockCompletion, blockCompletionNonTerminal, blockIdentityMachinist, blockIdentityMachinistNv, blockVerbMemory, blockVerbMemoryNv, blockPracticesComms} {
+				if slices.Contains(paths, p) {
+					t.Errorf("the composition includes %s, which is the machinist's", p)
+				}
+			}
+			if first == Build(Spec{Surface: SurfaceMachinist, Runtime: tc.spec.Runtime, Family: tc.spec.Family, Mode: tc.spec.Mode}) {
+				t.Error("the workbench composes to the machinist's prompt")
+			}
+		})
+	}
 }
 
 // TestBuild_StableForSpec is the cacheable-prefix property (rule 3): a fixed
