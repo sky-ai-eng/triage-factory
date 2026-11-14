@@ -167,7 +167,7 @@ func TestDispatch_InteractiveConversationRunsWithNoBlueprintRun(t *testing.T) {
 	// not because it has no blueprint run.
 	var failure string
 	for _, r := range allRows(t, f.s, f.conv.ID) {
-		if r.IsError {
+		if r.Subtype == domain.MessageSubtypeStopNote {
 			failure = r.Content
 		}
 	}
@@ -292,5 +292,43 @@ func TestFailedInteractiveConversationIsReplaced(t *testing.T) {
 				t.Errorf("replacement = (status %q, ended %v), want parked and un-ended", replacement.Status, replacement.EndedAt)
 			}
 		})
+	}
+}
+
+// TestFailureBeforeTheModelSpokeOwesNoMemory: the failure record is TF's
+// statement, not a turn the model took, so a conversation that fails before
+// its model speaks has not run and owes its task no memory. The person's next
+// message on the replacement is claimed at once rather than held for a memory
+// of work nobody did.
+func TestFailureBeforeTheModelSpokeOwesNoMemory(t *testing.T) {
+	f := newInteractiveFixture(t, "1421-unrun")
+	ctx := context.Background()
+	// The runtime refuses to start, which fails the conversation.
+	f.dispatch(t, "why is the build red?")
+
+	failed, err := f.stores.Conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, f.conv.ID)
+	if err != nil || failed == nil {
+		t.Fatalf("GetSystem: (%v, %v)", failed, err)
+	}
+	if failed.Status != domain.StatusFailed {
+		t.Fatalf("the conversation's status = %q, want failed", failed.Status)
+	}
+	if failed.HasRun {
+		t.Error("a conversation whose only rows are the person's message and TF's failure record reads as one that has run")
+	}
+
+	task, err := f.stores.Tasks.GetSystem(ctx, runmode.LocalDefaultOrgID, f.taskID)
+	if err != nil || task == nil || task.ConversationID == "" || task.ConversationID == f.conv.ID {
+		t.Fatalf("the task's replacement conversation = (%+v, %v), want a new one", task, err)
+	}
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, task.ConversationID, runmode.LocalDefaultUserID, "try again"); err != nil {
+		t.Fatalf("SendMessage to the replacement: %v", err)
+	}
+	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil {
+		t.Fatalf("ClaimNextConversation: %v", err)
+	}
+	if claimed == nil || claimed.ID != task.ConversationID {
+		t.Errorf("claimed %+v, want the replacement %s with no memory owed ahead of it", claimed, task.ConversationID)
 	}
 }
