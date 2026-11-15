@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -145,6 +146,78 @@ func TestSidecarProvision_TimeoutIsTheSentinel(t *testing.T) {
 	_, _, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(context.Background(), "pubkey")
 	if !errors.Is(err, errAwaitingCredentialsTimeout) {
 		t.Fatalf("provision after the wait ran out = %v, want errAwaitingCredentialsTimeout", err)
+	}
+}
+
+// lateBundle is a credentials channel whose bundle the brain writes only after
+// the wait's first read has missed it.
+type lateBundle struct {
+	db.ClaimCredentialsStore
+	mu        sync.Mutex
+	reads     int
+	firstRead chan struct{}
+	bundle    *db.SealedBundle
+}
+
+func (b *lateBundle) Get(context.Context, string, string) (db.SealedBundle, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reads++
+	if b.reads == 1 {
+		close(b.firstRead)
+	}
+	if b.bundle == nil {
+		return db.SealedBundle{}, false, nil
+	}
+	return *b.bundle, true, nil
+}
+
+func (b *lateBundle) seal(sealed db.SealedBundle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bundle = &sealed
+}
+
+// TestSidecarProvision_TheSealedRingWakesTheWait: a bundle the brain writes
+// after the wait's first read is read once the conversation's doorbell rings,
+// not on the wait's next poll, which here is an hour away.
+func TestSidecarProvision_TheSealedRingWakesTheWait(t *testing.T) {
+	f := newLaunchFixture(t, "cred-ring")
+	store := &lateBundle{firstRead: make(chan struct{})}
+	f.s.claimCredentials = store
+	f.s.SetExecutorID("lf-exec", 1)
+	f.s.SetAwaitingCredentialsTimeout(2*time.Hour, time.Hour)
+	doorbells := ctlbus.NewDoorbells()
+	f.s.SetCredentialDoorbells(doorbells)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		sealed []byte
+		epoch  int64
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sealed, epoch, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(ctx, "pubkey")
+		done <- result{sealed, epoch, err}
+	}()
+
+	select {
+	case <-store.firstRead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait never read claim_credentials")
+	}
+	store.seal(db.SealedBundle{ExecutorID: "lf-exec", BootEpoch: 1, Sealed: []byte("sealed")})
+	doorbells.Ring(f.conv.ID)
+
+	select {
+	case r := <-done:
+		if r.err != nil || string(r.sealed) != "sealed" || r.epoch != 1 {
+			t.Fatalf("provision = (%q, %d, %v), want the bundle sealed after the first read", r.sealed, r.epoch, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ring did not wake the wait to read the bundle")
 	}
 }
 

@@ -49,6 +49,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -119,7 +120,11 @@ type App struct {
 	deploymentSignerHealth *commitsigner.DeploymentHealth
 	// commitSignDoorbells routes sign_done to the signature requests this
 	// executor's runs are waiting on. nil on a control pod and in local mode.
-	commitSignDoorbells *commitsigner.Doorbells
+	commitSignDoorbells *ctlbus.Doorbells
+	// credDoorbells routes cred_sealed to the credential waits this
+	// executor's engagements are parked in. nil on a control pod and in local
+	// mode.
+	credDoorbells *ctlbus.Doorbells
 	// signerHealth makes the periodic and post-push checks of each org's
 	// signer, kicked by the GitHub poll's completions. Built on every
 	// brain-capable process and triggered only while it holds the brain.

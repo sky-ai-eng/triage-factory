@@ -67,7 +67,7 @@ func newSidecarSigning(t *testing.T, budgets commitsigner.Budgets) *sidecarSigni
 	// The control plane's stores hold the key; the relay server's do not.
 	cpStores := stores
 	cpStores.Secrets = keySecrets{key: string(private)}
-	doorbells := commitsigner.NewDoorbells()
+	doorbells := ctlbus.NewDoorbells()
 	var cp *commitsigner.ControlPlane
 	publish := func(_ context.Context, msg ctlbus.Message) error {
 		switch msg.Kind {

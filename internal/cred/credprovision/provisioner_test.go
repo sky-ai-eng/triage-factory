@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,8 +58,10 @@ type fakeScopedResolver struct {
 	identity    ghclient.Identity // the tier TokenForRepoScoped reports
 	identityErr error             // what the org's commit identity read fails with
 	errFor      map[string]error  // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
-	calls       []scopedCall
-	reposCalls  []reposScopedCall
+	// mu guards the call records: a seal mints its tokens concurrently.
+	mu         sync.Mutex
+	calls      []scopedCall
+	reposCalls []reposScopedCall
 }
 
 func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error) {
@@ -95,7 +98,9 @@ func (f *fakeScopedResolver) HasAnyCredential(context.Context, string) (bool, er
 }
 
 func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, repo string, perms map[string]string) (githubapp.Token, ghclient.Identity, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, scopedCall{owner: owner, repo: repo, perms: perms})
+	f.mu.Unlock()
 	if err := f.errFor[owner+"/"+repo]; err != nil {
 		return githubapp.Token{}, ghclient.IdentityUnknown, err
 	}
@@ -103,7 +108,9 @@ func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, rep
 }
 
 func (f *fakeScopedResolver) TokenForReposScoped(_ context.Context, _, owner string, repos []string, perms map[string]string) (githubapp.Token, error) {
+	f.mu.Lock()
 	f.reposCalls = append(f.reposCalls, reposScopedCall{owner: owner, repos: repos, perms: perms})
+	f.mu.Unlock()
 	if err := f.errFor[owner]; err != nil {
 		return githubapp.Token{}, err
 	}
