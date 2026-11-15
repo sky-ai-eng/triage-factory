@@ -51,6 +51,7 @@ function renderRunDetail() {
     <MemoryRouter initialEntries={['/runs/c1']}>
       <Routes>
         <Route path="/runs/:conversationID" element={<RunDetail />} />
+        <Route path="/board" element={<p>The board</p>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -192,5 +193,66 @@ describe('RunDetail send', () => {
       model: 'opus',
       effort: 'high',
     })
+  })
+})
+
+describe('RunDetail Escape', () => {
+  // A parked run a person may write, which is when the station shows the
+  // composer.
+  function parked(conversation: Partial<Conversation> = {}) {
+    detail.conversation = {
+      ...stopping,
+      TaskID: 't1',
+      Status: 'open',
+      has_run: true,
+      stop_requested_at: undefined,
+      ...conversation,
+    }
+    detail.task = { id: 't1', team_id: 'team1', memory_pending: false } as Task
+  }
+
+  const escape = () => fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+
+  it('closes the message-settings popover and stays on the page', async () => {
+    parked()
+    renderRunDetail()
+    fireEvent.change(screen.getByLabelText(/message to resume/i), {
+      target: { value: 'a draft' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /message settings/i }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+
+    escape()
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.queryByText('The board')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/message to resume/i)).toHaveValue('a draft')
+  })
+
+  it('closes a deliverable overlay and stays on the page', async () => {
+    parked({
+      has_unresolved_deliverables: true,
+      unresolved_pr_count: 1,
+      pending_deliverable_ids: ['d1'],
+    })
+    renderRunDetail()
+    fireEvent.click(screen.getByRole('button', { name: /open pr/i }))
+    expect(await screen.findByRole('dialog', { name: 'Draft PR' })).toBeInTheDocument()
+
+    escape()
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Draft PR' })).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText('The board')).not.toBeInTheDocument()
+  })
+
+  it('goes back to the board with nothing open', () => {
+    parked()
+    renderRunDetail()
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+
+    expect(screen.getByText('The board')).toBeInTheDocument()
   })
 })

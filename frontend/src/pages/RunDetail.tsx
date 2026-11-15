@@ -204,21 +204,25 @@ export default function RunDetail() {
     setActiveDeliverable({ kind, id: deliverableId })
   }, [])
 
-  // Keyboard: Esc → back.
+  // Keyboard: Esc → back, but only for a press no other layer took. A layer
+  // that dismissed on it marked it: the shell's, and the composer's settings
+  // popover. An open deliverable overlay closes on it from a window listener of
+  // its own, which can run after this one and so has not marked it yet; the
+  // page knows it is open from its own state instead. Marking the press when it
+  // navigates keeps the toast log off it too.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || activeDeliverable) return
       if (e.target instanceof HTMLElement) {
         const tag = e.target.tagName
         if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return
       }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        navigate(orgHref('/board'))
-      }
+      e.preventDefault()
+      navigate(orgHref('/board'))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navigate, orgHref])
+  }, [navigate, orgHref, activeDeliverable])
 
   if (loading) return <FloorMessage tone="text-ink-3">Spinning up the station…</FloorMessage>
 
