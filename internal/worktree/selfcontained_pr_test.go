@@ -173,3 +173,14 @@ func gitCfgValue(t *testing.T, dir, key string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// gitCfgValues reads every value of a multi-valued git config key from dir,
+// one per line, returning "" when the key is unset.
+func gitCfgValues(t *testing.T, dir, key string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "config", "--get-all", key).Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}

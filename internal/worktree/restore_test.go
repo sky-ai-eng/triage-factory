@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -521,5 +522,62 @@ func TestParseCheckoutSlug(t *testing.T) {
 		if _, _, ok := ParseCheckoutSlug(bad); ok {
 			t.Errorf("ParseCheckoutSlug(%q) accepted", bad)
 		}
+	}
+}
+
+// TestLinkedCheckouts_BareTracksTheBranchTheyFetch: a linked worktree fetches
+// through the shared bare's config, so each kind of linked checkout, fresh or
+// restored, leaves the bare tracking the branch a snapshot's bundle stops at:
+// its base for a pull request, its ref otherwise. Two checkouts on one branch
+// leave one entry, and a tracked branch deleted upstream does not fail a
+// `git fetch origin` in a worktree.
+func TestLinkedCheckouts_BareTracksTheBranchTheyFetch(t *testing.T) {
+	setRestoreMode(t, false)
+	upstream := makeSkillsTrackingUpstream(t)
+	gitAt(t, upstream, "update-ref", "refs/heads/topic", "refs/heads/main")
+	const key = "bare-tracking-run"
+	root := mustRunRoot(t, key)
+	t.Cleanup(func() { RemoveRunRoot(key) })
+	ctx := context.Background()
+	bare, _ := repoDir(testRepo("acme", "repo").ID)
+	tracked := func() []string {
+		t.Helper()
+		return strings.Fields(gitCfgValues(t, bare, "remote.origin.fetch"))
+	}
+	const mainSpec, topicSpec = "+refs/heads/main*:refs/remotes/origin/main*", "+refs/heads/topic*:refs/remotes/origin/topic*"
+
+	prDir, err := CreateForPRInRoot(ctx, testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root, WithBaseBranch("main"))
+	if err != nil {
+		t.Fatalf("CreateForPRInRoot: %v", err)
+	}
+	if got := tracked(); !slices.Equal(got, []string{mainSpec}) {
+		t.Fatalf("after a pull request checkout the bare tracks %v, want %v", got, []string{mainSpec})
+	}
+	if _, err := CreateForCheckoutInRoot(ctx, testRepo("acme", "repo"), upstream, "main", "conv-a", root); err != nil {
+		t.Fatalf("CreateForCheckoutInRoot main: %v", err)
+	}
+	if _, err := CreateForCheckoutInRoot(ctx, testRepo("acme", "repo"), upstream, "topic", "conv-a", root); err != nil {
+		t.Fatalf("CreateForCheckoutInRoot topic: %v", err)
+	}
+	if got := tracked(); !slices.Equal(got, []string{mainSpec, topicSpec}) {
+		t.Fatalf("after checkouts of main and topic the bare tracks %v, want one entry for each", got)
+	}
+
+	gitAt(t, upstream, "update-ref", "-d", "refs/heads/topic")
+	gitAt(t, prDir, "fetch", "-q", "origin")
+
+	delta, err := CaptureWorkspaceGit(ctx, prDir)
+	if err != nil {
+		t.Fatalf("CaptureWorkspaceGit: %v", err)
+	}
+	RemoveRunRoot(key)
+	if err := os.RemoveAll(bare); err != nil {
+		t.Fatalf("remove bare: %v", err)
+	}
+	root = mustRunRoot(t, key)
+	restoreDelta(t, root, key, "acme", "repo", PRRefSlug(7), upstream, CloneAuth{}, delta,
+		&PRCheckout{HeadRef: "feature", HeadCloneURL: upstream, BaseRef: "main"})
+	if got := tracked(); !slices.Equal(got, []string{mainSpec}) {
+		t.Errorf("after a restore into a fresh bare it tracks %v, want %v", got, []string{mainSpec})
 	}
 }

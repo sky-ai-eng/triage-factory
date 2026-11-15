@@ -160,9 +160,10 @@ func (e *MissingCommitError) Unwrap() error { return e.Err }
 //  3. Build the checkout. A self-contained clone takes a transient run-scoped
 //     branch at HEAD — the createCheckoutCloneAt pattern — which is dropped
 //     from the bare once the clone has copied the objects.
-//  4. Re-derive push settings: a pr-<N> checkout gets the push tracking a
-//     fresh --pr checkout gets, a ref-*/default one the origin fetch refspec a
-//     fresh checkout leaves.
+//  4. Re-derive push and fetch settings: a pr-<N> checkout gets the push
+//     tracking a fresh --pr checkout gets, and every checkout the origin fetch
+//     refspec a fresh one leaves, in the clone or, for a linked worktree, in
+//     the bare.
 
 // Nothing of TF's is written into the checkout. On any failure the checkout,
 // its registration in the bare and the per-run refs and push config it wrote
@@ -342,6 +343,11 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 	// 3. The checkout.
 	if selfContainedRunTrees() {
 		return restoreSelfContainedLocked(ctx, r, bareDir, wtDir, trackBranch, prNumber, prKey, prLocal, prHead)
+	}
+	if trackBranch != "" {
+		if err := trackOriginBranchInBareLocked(ctx, bareDir, trackBranch); err != nil {
+			return err
+		}
 	}
 	return restoreLinkedLocked(ctx, r, bareDir, wtDir, prNumber, prKey, prLocal, prHead, res)
 }

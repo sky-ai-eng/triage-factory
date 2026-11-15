@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -147,6 +148,15 @@ func createPRWorktreeAt(ctx context.Context, r Repo, upstreamCloneURL, headClone
 	// Local mode keeps the zero-copy worktree (the bare is reachable on-host).
 	if selfContained {
 		return finishSelfContainedPRClone(ctx, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, headCloneURL, headBranch, rootKey, prNumber, hasHeadRepo, isFork, auth)
+	}
+
+	// A linked worktree fetches through the bare's config, so the base branch
+	// is tracked there, for the reason finishSelfContainedPRClone names it in a
+	// clone's own refspec.
+	if baseBranch != "" {
+		if err := trackOriginBranchInBareLocked(ctx, bareDir, baseBranch); err != nil {
+			return "", err
+		}
 	}
 
 	// Pass the bare branch name (not refs/heads/<name>) so git
@@ -321,6 +331,32 @@ func materializeSelfContainedClone(ctx context.Context, bareDir, wtDir, branch, 
 				worktreeLog.Warn("copy base branch ref into run clone failed; diff frames against recorded base / API", "base", baseBranch, "error", err)
 			}
 		}
+	}
+	return nil
+}
+
+// trackOriginBranchInBareLocked makes `git fetch origin <branch>`, run from any
+// linked worktree of the bare, move refs/remotes/origin/<branch>. A bare clone
+// has no fetch refspec, so that fetch otherwise writes only FETCH_HEAD. A
+// snapshot's bundle stops at the ref, so a branch a run fetches and merges
+// stays out of its later bundles only if the ref moves.
+//
+// The refspec is a pattern on the branch's name, not the name itself. The
+// bare's config is shared by every worktree of the repository, and nothing
+// takes an entry back out. An exact refspec for a branch the remote has since
+// deleted fails every `git fetch origin` in every one of those worktrees; a
+// pattern that matches nothing is not an error. The pattern also matches
+// branches whose names begin with this one, which `git fetch origin` with no
+// refspec then fetches as well. Caller holds the per-repo lock.
+func trackOriginBranchInBareLocked(ctx context.Context, bareDir, branch string) error {
+	spec := fmt.Sprintf("+refs/heads/%s*:refs/remotes/origin/%s*", branch, branch)
+	// A key with no value yet is git's exit 1, the same as an empty answer.
+	configured, _ := gitOutputCtx(ctx, bareDir, "config", "--get-all", "remote.origin.fetch")
+	if slices.Contains(strings.Fields(configured), spec) {
+		return nil
+	}
+	if err := gitRunCtx(ctx, bareDir, "config", "--add", "remote.origin.fetch", spec); err != nil {
+		return fmt.Errorf("track %s in the bare: %w", branch, err)
 	}
 	return nil
 }

@@ -359,35 +359,40 @@ func TestRestoreCheckout_ForcePushedPRRestoresFromTheBundle(t *testing.T) {
 
 // TestCaptureWorkspaceGit_MergedBaseCommitsStayOutOfTheBundle: a run fetches
 // its pull request's base branch and merges it, as the conflict-resolution
-// prompt asks. The fetch moves origin/<base> in a fresh checkout, so the bundle
-// holds the merge commit and stops at the base branch's new tip.
+// prompt asks. The fetch moves origin/<base> in a fresh checkout of either
+// layout, so the bundle holds the merge commit and stops at the base branch's
+// new tip.
 func TestCaptureWorkspaceGit_MergedBaseCommitsStayOutOfTheBundle(t *testing.T) {
-	setRestoreMode(t, true)
-	o := newPrivateOrigin(t)
-	const key = "merged-base-run"
-	root := mustRunRoot(t, key)
-	t.Cleanup(func() { RemoveRunRoot(key) })
+	for _, mode := range restoreModes {
+		t.Run(mode.name, func(t *testing.T) {
+			setRestoreMode(t, mode.selfContained)
+			o := newPrivateOrigin(t)
+			const key = "merged-base-run"
+			root := mustRunRoot(t, key)
+			t.Cleanup(func() { RemoveRunRoot(key) })
 
-	wtDir := o.prCheckout(t, root, 7)
-	moved := o.commit(t, o.main, "base.txt", "landed on the base branch\n")
-	o.push(t, moved, "refs/heads/main")
-	gitAt(t, wtDir, "config", "user.email", "agent@example.com")
-	gitAt(t, wtDir, "config", "user.name", "Agent")
-	o.gitAuthed(t, wtDir, "fetch", "-q", "origin", "main")
-	o.gitAuthed(t, wtDir, "merge", "-q", "--no-edit", "origin/main")
-	merge := strings.TrimSpace(gitAt(t, wtDir, "rev-parse", "HEAD"))
+			wtDir := o.prCheckout(t, root, 7)
+			moved := o.commit(t, o.main, "base.txt", "landed on the base branch\n")
+			o.push(t, moved, "refs/heads/main")
+			gitAt(t, wtDir, "config", "user.email", "agent@example.com")
+			gitAt(t, wtDir, "config", "user.name", "Agent")
+			o.gitAuthed(t, wtDir, "fetch", "-q", "origin", "main")
+			o.gitAuthed(t, wtDir, "merge", "-q", "--no-edit", "origin/main")
+			merge := strings.TrimSpace(gitAt(t, wtDir, "rev-parse", "HEAD"))
 
-	v := viewBundle(t, captureJailed(t, wtDir).Bundle)
-	if v.objects[merge] != "commit" || v.objects[o.pr7] != "commit" {
-		t.Errorf("the bundle lacks the merge commit %s or the pull request's commit %s", merge, o.pr7)
-	}
-	for _, base := range []string{moved, o.main} {
-		if _, ok := v.objects[base]; ok {
-			t.Errorf("the bundle holds the base branch's commit %s", base)
-		}
-	}
-	if !slices.Contains(v.prerequisites, moved) {
-		t.Errorf("prerequisites = %v, want the base branch's new tip %s among them", v.prerequisites, moved)
+			v := viewBundle(t, captureJailed(t, wtDir).Bundle)
+			if v.objects[merge] != "commit" || v.objects[o.pr7] != "commit" {
+				t.Errorf("the bundle lacks the merge commit %s or the pull request's commit %s", merge, o.pr7)
+			}
+			for _, base := range []string{moved, o.main} {
+				if _, ok := v.objects[base]; ok {
+					t.Errorf("the bundle holds the base branch's commit %s", base)
+				}
+			}
+			if !slices.Contains(v.prerequisites, moved) {
+				t.Errorf("prerequisites = %v, want the base branch's new tip %s among them", v.prerequisites, moved)
+			}
+		})
 	}
 }
 
