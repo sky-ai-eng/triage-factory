@@ -14,9 +14,8 @@ import (
 // against the ADMIN pool in postgres.New: the writer is the brain's memory
 // provisioner, a boot-launched goroutine with no JWT-claims context, so an
 // app-pool write under the conversation_memory_attempts_all RLS policy would
-// be rejected — and tf_app holds SELECT alone anyway. That org-scoped policy
-// is what gates the app-pool reads; org_id stays bound in every statement as
-// defense in depth.
+// be rejected — and tf_app holds SELECT alone anyway. org_id stays bound in
+// every statement as defense in depth.
 type memoryAttemptStore struct{ admin queryer }
 
 func newMemoryAttemptStore(admin queryer) db.MemoryAttemptStore {

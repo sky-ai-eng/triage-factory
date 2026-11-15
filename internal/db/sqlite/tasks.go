@@ -2039,9 +2039,11 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 // Postgres twins' predicate in the other dialect — see internal/db/postgres/
 // tasks.go for what "owing" means, why the subagent rows are excluded, and why
 // the attempt subquery settles which conversation it speaks for before it
-// reads an attempt rather than ranking the two together. Same words, same
-// index (idx_conversations_task_ended), and the same two readers: this file's
-// task read and the claim scan in conversation_queue.go.
+// reads an attempt rather than ranking the two together. Same words and the
+// same index (idx_conversations_task_ended). Postgres answers the pending flag
+// and the attempt through tf.task_memory_wait, which reads past RLS so a task
+// reassigned to another team reports the wait to its new holder; SQLite has no
+// RLS, so the subqueries below read every conversation on the task already.
 func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
 		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL

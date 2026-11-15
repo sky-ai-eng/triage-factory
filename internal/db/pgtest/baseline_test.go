@@ -1844,6 +1844,7 @@ func TestSearchPathHardening_AllSensitiveFunctions(t *testing.T) {
 		{"tf", "set_updated_at"},
 		{"tf", "guard_org_owners"},
 		{"tf", "guard_org_owner_transfer"},
+		{"tf", "task_memory_wait"},
 	}
 	for _, fn := range hardened {
 		// array_to_string collapses the text[] into a single scalar

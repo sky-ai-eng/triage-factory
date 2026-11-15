@@ -123,9 +123,7 @@ var identicalHelperRatchet = map[string]helperTier{
 	"liveConversationSQL":         tierSQLFragment,
 	"liveTopLevelConversationSQL": tierSQLFragment,
 	"taskLiveConversationSQL":     tierSQLFragment,
-	"taskMemoryAttemptSQL":        tierSQLFragment,
 	"taskMemoryOwedRowSQL":        tierSQLFragment,
-	"taskMemoryPendingSQL":        tierSQLFragment,
 	"workspaceKeyMembersSQL":      tierSQLFragment,
 	"workspaceKeyUnclaimedSQL":    tierSQLFragment,
 
