@@ -98,7 +98,7 @@ func doInstall() (string, error) {
 	// the unconditional checkNode/checkNpm pair would error there
 	// because nothing on PATH satisfies them. Local-mode users on a
 	// fresh laptop still hit the install path and still get the
-	// human-readable "install Node 18.14+" error in that case.
+	// human-readable "install Node" error in that case.
 	if !needsInstall(sdkDir, lockChanged) {
 		return wrapperPath, nil
 	}
@@ -195,24 +195,35 @@ func writeFileIfChanged(path string, content []byte, perm os.FileMode) (bool, er
 	return true, nil
 }
 
-// checkNode verifies a usable Node is on PATH, at the floor the pinned SDK
-// declares in its package.json engines field (18.14.0). We surface a
-// human-readable error here so a missing-Node user sees "install Node
-// 18.14+" rather than the opaque ENOENT exec.Command would otherwise raise
-// when run.go later tries to spawn the wrapper.
+// nodeFloorMajor and nodeFloorMinor are the oldest Node the pinned SDK runs
+// on: the engines.node its package.json declares, which moves with an SDK
+// bump.
+const (
+	nodeFloorMajor = 18
+	nodeFloorMinor = 14
+)
+
+// checkNode verifies a usable Node is on PATH, at the pinned SDK's floor. We
+// surface a human-readable error here so a missing-Node user sees "install
+// Node" rather than the opaque ENOENT exec.Command would otherwise raise when
+// run.go later tries to spawn the wrapper.
 func checkNode() error {
 	out, err := exec.Command("node", "--version").Output()
 	if err != nil {
-		return fmt.Errorf("node not found on PATH: install Node 18.14+ (https://nodejs.org/) — required for the Triage Factory agent runtime")
+		return fmt.Errorf("node not found on PATH: install Node %d.%d+ (https://nodejs.org/) — required for the Triage Factory agent runtime", nodeFloorMajor, nodeFloorMinor)
 	}
 	major, minor, err := parseNodeVersion(strings.TrimSpace(string(out)))
 	if err != nil {
 		return fmt.Errorf("parse node --version output %q: %w", string(out), err)
 	}
-	if major < 18 || (major == 18 && minor < 14) {
-		return fmt.Errorf("node %s is too old; Triage Factory requires Node 18.14+", strings.TrimSpace(string(out)))
+	if !nodeMeetsFloor(major, minor) {
+		return fmt.Errorf("node %s is too old; Triage Factory requires Node %d.%d+", strings.TrimSpace(string(out)), nodeFloorMajor, nodeFloorMinor)
 	}
 	return nil
+}
+
+func nodeMeetsFloor(major, minor int) bool {
+	return major > nodeFloorMajor || (major == nodeFloorMajor && minor >= nodeFloorMinor)
 }
 
 // checkNpm verifies npm is on PATH. The official Node installer ships
