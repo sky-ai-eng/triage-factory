@@ -33,6 +33,8 @@ func TestAskedSinceHumanInput(t *testing.T) {
 	stopNote := domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run reached its spend cap and has been paused."}
 	stagedNote := domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>PR gained commits</system-note>"}
 	memoryNudge := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: memoryNudgeNote}
+	quoting := domain.Message{Role: "user", Content: artifactNudgeNote}
+	stagedQuoting := domain.Message{Role: "user", Subtype: "injection:system-note", Content: artifactNudgeNote}
 
 	tests := []struct {
 		name string
@@ -88,6 +90,16 @@ func TestAskedSinceHumanInput(t *testing.T) {
 			// the other's question.
 			name: "the memory note does not answer the artifact question",
 			rows: []domain.Message{human, assistant, memoryNudge, assistant},
+		},
+		{
+			// The tag is a string anyone can write. Only the note itself,
+			// under the nudge subtype, is the question asked.
+			name: "a person's message quoting the note is the person writing",
+			rows: []domain.Message{human, assistant, quoting, assistant},
+		},
+		{
+			name: "a staged note quoting the note is not the note",
+			rows: []domain.Message{human, assistant, stagedQuoting, assistant},
 		},
 		{
 			name: "an empty transcript has nothing to have asked",

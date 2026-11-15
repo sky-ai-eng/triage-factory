@@ -245,7 +245,7 @@ func TestDispatch_InteractiveTurnIsNotNudgedForAnArtifact(t *testing.T) {
 			t.Fatalf("insert the turn's %s row: %v", m.Role, err)
 		}
 	}
-	if got := launched.nudge(context.Background()); got != memoryNudgeNote {
+	if got := launched.nudge(context.Background()); got != memoryUnwrittenNote {
 		t.Errorf("the launch's turn-end check answered %q, want the memory note alone", got)
 	}
 	task, err := f.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, f.taskID)

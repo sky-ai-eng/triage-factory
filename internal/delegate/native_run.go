@@ -350,6 +350,19 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		NewSandbox: true,
 	}
 
+	// A turn of a conversation a person works in records the answer the person
+	// got as its summary, not the agent's reply to the memory note.
+	run := engine.Run
+	if cfg.interactive {
+		run = func(ctx context.Context, params agentloop.Params) agentloop.Result {
+			result := engine.Run(ctx, params)
+			if result.Kind == agentloop.ResultConcluded {
+				result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
+			}
+			return result
+		}
+	}
+
 	return s.runNativeTail(ctx, nativeTail{
 		orgID:          orgID,
 		conversationID: conversationID,
@@ -360,7 +373,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		creatorUserID:  creatorUserID,
 		startTime:      startTime,
 		mirror:         mirror,
-		run:            engine.Run,
+		run:            run,
 		params:         params,
 		transcript:     transcript,
 		ckpt:           ckpt,
@@ -866,7 +879,7 @@ func askedSinceHumanInput(rows []domain.Message, tag string) bool {
 		if rows[i].Role != "user" {
 			continue
 		}
-		if strings.Contains(rows[i].Content, tag) {
+		if isNudgeNote(rows[i], tag) {
 			return true
 		}
 		if agentloop.IsHumanInput(rows[i]) {
@@ -874,6 +887,15 @@ func askedSinceHumanInput(rows []domain.Message, tag string) bool {
 		}
 	}
 	return false
+}
+
+// isNudgeNote reports whether a row is the note a turn-end nudge sent, the one
+// whose text opens with tag. The tag alone is not enough: it is a string in
+// this repository and in every transcript the note lands in, so a person's
+// message or a staged note quoting it would otherwise read as the question
+// asked.
+func isNudgeNote(r domain.Message, tag string) bool {
+	return r.Role == "user" && r.Subtype == domain.MessageSubtypeInjectionNudge && strings.HasPrefix(r.Content, tag)
 }
 
 // turnEndNudge adapts the would-stop hook to the SDK driver's shape, which

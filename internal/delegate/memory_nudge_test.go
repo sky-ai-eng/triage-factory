@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -74,10 +75,12 @@ func (c memoryChat) ask() string {
 	return check(context.Background(), 1, "")
 }
 
-func (c memoryChat) wantAsked(step string) {
+// wantAsked checks the turn's end sends note: memoryNudgeNote for notes the
+// agent wrote, memoryUnwrittenNote for a conversation that wrote none.
+func (c memoryChat) wantAsked(step, note string) {
 	c.t.Helper()
-	if got := c.ask(); got != memoryNudgeNote {
-		c.t.Errorf("%s: not asked to update the memory; got %q", step, got)
+	if got := c.ask(); got != note {
+		c.t.Errorf("%s: got %q, want %q", step, got, note)
 	}
 }
 
@@ -98,10 +101,12 @@ func TestMemoryUpdateNudge_ADelegationIsNotAsked(t *testing.T) {
 }
 
 // TestMemoryUpdateNudge_AChatThatNeverWroteItsMemory: a chat whose agent never
-// wrote the file is asked at the end of its first turn that made tool calls,
-// once, and again only after the person writes again. A question answered
-// without tool calls is never followed by a note.
+// wrote the file is asked at the end of its first turn that made tool calls.
+// An agent that leaves the note unanswered is asked again only once
+// memoryNudgeAfterPersonMessages of the person's messages have arrived since.
+// A question answered without tool calls is never followed by a note.
 func TestMemoryUpdateNudge_AChatThatNeverWroteItsMemory(t *testing.T) {
+	n := memoryNudgeAfterPersonMessages
 	c := newMemoryChat(t, "1450-never")
 
 	c.person("what does this ticket want?")
@@ -110,27 +115,29 @@ func TestMemoryUpdateNudge_AChatThatNeverWroteItsMemory(t *testing.T) {
 
 	c.person("try the retry")
 	c.work("the retry is in and the tests pass")
-	c.wantAsked("a turn that made tool calls, with no memory written")
+	c.wantAsked("a turn that made tool calls, with no memory written", memoryUnwrittenNote)
 
 	c.nudged()
 	c.work("done")
 	c.wantQuiet("the turn that answered the note")
 
-	c.person("thanks, what was the root cause?")
-	c.answer("a timeout shorter than the upload")
-	c.wantQuiet("the person wrote again, and the turn made no tool calls")
-
-	c.person("raise the timeout too")
-	c.work("raised")
-	c.wantAsked("the person wrote again, and the turn made tool calls")
+	for i := 1; i < n; i++ {
+		c.person(fmt.Sprintf("follow-up %d", i))
+		c.work("done")
+		c.wantQuiet(fmt.Sprintf("%d of %d messages since the agent was asked", i, n))
+	}
+	c.person(fmt.Sprintf("follow-up %d", n))
+	c.work("done")
+	c.wantAsked(fmt.Sprintf("%d messages since the agent was asked", n), memoryUnwrittenNote)
 }
 
 // TestMemoryUpdateNudge_AChatWhoseMemoryFellBehind: a chat whose agent wrote
 // the file is asked once memoryNudgeAfterPersonMessages of the person's
-// messages have arrived without it changing, at the end of the next turn that
-// makes tool calls, and not again until the person writes again. Writing the
-// same notes again does not count as changing them; writing new ones resets
-// the count.
+// messages have arrived without it changing. An agent that leaves its notes
+// as they are, as the note allows, is asked again only after as many messages
+// more, at the end of the next turn that makes tool calls. Writing the same
+// notes again does not count as changing them; writing new ones restarts the
+// count.
 func TestMemoryUpdateNudge_AChatWhoseMemoryFellBehind(t *testing.T) {
 	n := memoryNudgeAfterPersonMessages
 	c := newMemoryChat(t, "1450-behind")
@@ -147,20 +154,25 @@ func TestMemoryUpdateNudge_AChatWhoseMemoryFellBehind(t *testing.T) {
 	}
 	c.person(fmt.Sprintf("follow-up %d", n))
 	c.work("done")
-	c.wantAsked(fmt.Sprintf("%d messages since the memory changed", n))
+	c.wantAsked(fmt.Sprintf("%d messages since the memory changed", n), memoryNudgeNote)
 
 	c.nudged()
-	c.work("updated")
-	// The agent rewrote the notes byte for byte: that is not a change.
+	c.work("checked")
+	// The agent kept its notes, rewriting them byte for byte: not a change.
 	c.remember("added a retry to the upload", domain.MemorySourceAgent)
 	c.wantQuiet("asked since the person last wrote")
 
+	for i := 1; i < n; i++ {
+		c.person(fmt.Sprintf("later %d", i))
+		c.work("done")
+		c.wantQuiet(fmt.Sprintf("%d of %d messages since the agent kept its notes", i, n))
+	}
 	c.person("what's left?")
 	c.answer("only the PR")
-	c.wantQuiet("the person wrote again, but the turn made no tool calls")
+	c.wantQuiet(fmt.Sprintf("%d messages since the agent was asked, but the turn made no tool calls", n))
 	c.person("open the PR")
 	c.work("opened")
-	c.wantAsked("the next turn that made tool calls, with the notes still unchanged")
+	c.wantAsked("the next turn that made tool calls", memoryNudgeNote)
 
 	c.nudged()
 	c.work("updated")
@@ -187,7 +199,7 @@ func TestMemoryUpdateNudge_AMemoryTheAgentDidNotWriteIsNotItsNotes(t *testing.T)
 			c.person("fix the flaky upload")
 			c.work("added a retry")
 			c.remember(tc.content, tc.source)
-			c.wantAsked("a " + tc.name + " memory row")
+			c.wantAsked("a "+tc.name+" memory row", memoryUnwrittenNote)
 		})
 	}
 }
@@ -195,8 +207,9 @@ func TestMemoryUpdateNudge_AMemoryTheAgentDidNotWriteIsNotItsNotes(t *testing.T)
 // TestToolCallsSinceHumanInput pins which turn the memory check reads as the
 // one ending: everything after the newest row a person wrote.
 func TestToolCallsSinceHumanInput(t *testing.T) {
-	human := domain.Message{Role: "user", Content: "fix it"}
-	steered := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "and the tests"}
+	human := domain.Message{Role: "user", UserID: "u", Content: "fix it"}
+	steered := domain.Message{Role: "user", UserID: "u", Subtype: domain.MessageSubtypeInjectionSteer, Content: "and the tests"}
+	authorless := domain.Message{Role: "user", Content: "a row no person wrote"}
 	call := domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c", Name: "bash"}}}
 	result := domain.Message{Role: "tool", ToolCallID: "c", Content: "ok"}
 	reply := domain.Message{Role: "assistant", Content: "done"}
@@ -214,6 +227,9 @@ func TestToolCallsSinceHumanInput(t *testing.T) {
 		{name: "tool calls only before the person's newest message", rows: []domain.Message{human, call, result, reply, human, reply}},
 		{name: "a steer is the person writing", rows: []domain.Message{human, call, result, steered, reply}},
 		{name: "a note TF wrote is not the person writing", rows: []domain.Message{human, call, result, reply, nudge, reply}, want: true},
+		// The same rows the person-message count counts: a blank row with no
+		// author is not one.
+		{name: "a row with no author is not the person writing", rows: []domain.Message{human, call, result, authorless, reply}, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := toolCallsSinceHumanInput(tc.rows); got != tc.want {
@@ -274,7 +290,90 @@ func TestDispatch_AnInteractiveFollowUpIsAskedAboutItsMemory(t *testing.T) {
 		t.Fatal("the follow-up's engagement arms no turn-end check")
 	}
 	c.work("fixed")
-	if got := resumed.nudge(ctx); got != memoryNudgeNote {
+	if got := resumed.nudge(ctx); got != memoryUnwrittenNote {
 		t.Errorf("a follow-up that made tool calls with no memory written: got %q, want the memory note", got)
+	}
+}
+
+// TestAnswerBeforeMemoryNote pins which text a turn that answered the memory
+// note records as its summary: the newest the agent wrote before the note, and
+// only when the note came after the person's newest message.
+func TestAnswerBeforeMemoryNote(t *testing.T) {
+	person := domain.Message{Role: "user", UserID: "u", Content: "why is the build red?"}
+	answer := domain.Message{Role: "assistant", Content: "a flaky test"}
+	later := domain.Message{Role: "assistant", Content: "it is fixed now"}
+	note := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: memoryNudgeNote}
+	reply := domain.Message{Role: "assistant", Content: "Notes are current."}
+	quoting := domain.Message{Role: "user", UserID: "u", Content: memoryNudgeNote}
+
+	for _, tc := range []struct {
+		name string
+		rows []domain.Message
+		want string
+		ok   bool
+	}{
+		{name: "an empty transcript"},
+		{name: "a turn that was not asked", rows: []domain.Message{person, answer}},
+		{name: "the answer before the note, not the reply", rows: []domain.Message{person, answer, note, reply}, want: answer.Content, ok: true},
+		{name: "a note with no reply yet", rows: []domain.Message{person, answer, note}, want: answer.Content, ok: true},
+		{name: "a note before the person's newest message", rows: []domain.Message{person, answer, note, reply, person, later}},
+		{name: "no text before the note", rows: []domain.Message{person, note, reply}},
+		{name: "a person's message quoting the note", rows: []domain.Message{quoting, answer}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := answerBeforeMemoryNote(tc.rows)
+			if got != tc.want || ok != tc.ok {
+				t.Errorf("answerBeforeMemoryNote = (%q, %v), want (%q, %v)", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestDispatch_ATurnThatAnsweredTheMemoryNoteRecordsTheAnswer: the summary an
+// SDK chat's turn records is the answer the person got, not the agent's reply
+// to the memory note that followed it. A turn that was not asked records its
+// own last text.
+func TestDispatch_ATurnThatAnsweredTheMemoryNoteRecordsTheAnswer(t *testing.T) {
+	const answer = "the build is red because a test is flaky"
+	for _, tc := range []struct {
+		name   string
+		suffix string
+		noted  bool
+		want   string
+	}{
+		{name: "asked about its memory", suffix: "noted", noted: true, want: answer},
+		{name: "not asked", suffix: "plain", want: "Notes are current."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			c := newMemoryChat(t, "1450-summary-"+tc.suffix)
+			ctx := context.Background()
+			c.s.liveRunOverride = func(_ context.Context, spec liveRunSpec) liveOutcome {
+				sink := spec.sink.(*conversationSink)
+				if err := sink.OnSession("sess-1450-summary"); err != nil {
+					t.Errorf("stamp the session: %v", err)
+				}
+				record := func(text string) {
+					if err := sink.OnMessage(&domain.Message{ConversationID: c.conv.ID, Role: "assistant", Content: text}); err != nil {
+						t.Errorf("record %q: %v", text, err)
+					}
+				}
+				record(answer)
+				if tc.noted {
+					c.nudged()
+				}
+				record("Notes are current.")
+				return liveOutcome{result: &agentproc.Result{StopReason: "end_turn", Result: "Notes are current."}, sessionID: "sess-1450-summary"}
+			}
+			c.s.dispatchClaimedConversation(ctx, c.claim(t, "why is the build red?"), time.Now())
+
+			conv, err := c.stores.Conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, c.conv.ID)
+			if err != nil || conv == nil {
+				t.Fatalf("GetSystem: (%v, %v)", conv, err)
+			}
+			if conv.ResultSummary != tc.want {
+				t.Errorf("ResultSummary = %q, want %q", conv.ResultSummary, tc.want)
+			}
+		})
 	}
 }

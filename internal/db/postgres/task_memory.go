@@ -58,9 +58,6 @@ func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, co
 // created_at is bound from Go-side time.Now() rather than the schema
 // DEFAULT now() so multi-conversation bursts within the same Postgres tx
 // don't tie on the tx-start timestamp — matches the EventStore pattern.
-// updated_at takes the same value, on the same clock as messages.created_at,
-// which is what it is compared against; the conflict arm keeps the stored one
-// when the content is unchanged.
 // Empty / whitespace-only content lands as SQL NULL, the shape
 // db.ValidateMemorySource has already tied to source = 'none'.
 //
