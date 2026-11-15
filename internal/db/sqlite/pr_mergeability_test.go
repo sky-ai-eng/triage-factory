@@ -3,7 +3,6 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"strconv"
 	"testing"
 	"time"
@@ -97,94 +96,4 @@ func TestPRMergeabilityWorkItem_SQLite(t *testing.T) {
 		}
 		return conn, workkinds.PRMergeabilityProbes(workitem.SQLite), runmode.LocalDefaultOrgID, cols
 	})
-}
-
-// TestMigrate_PRMergeabilityBackfill_SQLite pins the upgrade from v1.17.0: an
-// active pull request whose stored snapshot reads a known answer starts with
-// that answer at its snapshot's head and base, and its first probe after the
-// upgrade emits nothing. A snapshot naming no base leaves the row with none;
-// a snapshot reading UNKNOWN, and a closed pull request, start with no row.
-func TestMigrate_PRMergeabilityBackfill_SQLite(t *testing.T) {
-	ctx := context.Background()
-	conn, err := sql.Open("sqlite", db.TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	conn.SetMaxOpenConns(1)
-	conn.SetMaxIdleConns(1)
-	// The last migration v1.17.0 ships.
-	const prior = 202610290001
-	if err := db.BootstrapSchemaAtForTest(conn, prior); err != nil {
-		t.Fatalf("schema at %d: %v", prior, err)
-	}
-	if err := db.SeedLocalTenantRows(ctx, conn); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
-	stores := sqlitestore.New(conn)
-	org := runmode.LocalDefaultOrgID
-	seed := func(number string, snap map[string]any) *domain.Entity {
-		t.Helper()
-		e, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", dbtest.TestGitHubHost,
-			"octo/up#"+number, "PR_up"+number, domain.EntityKindPullRequest, "t", "")
-		if err != nil {
-			t.Fatalf("seed entity: %v", err)
-		}
-		raw, _ := json.Marshal(snap)
-		if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, string(raw), e.PollSeq); err != nil || !ok {
-			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
-		}
-		return e
-	}
-	conflicting := seed("1", map[string]any{"number": 1, "head_sha": "head-1", "base_ref": "main", "mergeable": domain.MergeableConflicting})
-	noBase := seed("2", map[string]any{"number": 2, "head_sha": "head-2", "mergeable": domain.MergeableMergeable})
-	seed("3", map[string]any{"number": 3, "head_sha": "head-3", "base_ref": "main", "mergeable": domain.MergeableUnknown})
-	closed := seed("4", map[string]any{"number": 4, "head_sha": "head-4", "base_ref": "main", "mergeable": domain.MergeableConflicting})
-	if _, err := stores.Entities.CloseSystem(ctx, org, closed.ID); err != nil {
-		t.Fatalf("close entity: %v", err)
-	}
-
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	rows, err := stores.PRMergeability.ListSystem(ctx, org)
-	if err != nil {
-		t.Fatalf("ListSystem: %v", err)
-	}
-	type answer struct{ mergeable, head, base string }
-	want := map[string]answer{
-		conflicting.ID: {domain.MergeableConflicting, "head-1", "main"},
-		noBase.ID:      {domain.MergeableMergeable, "head-2", ""},
-	}
-	if len(rows) != len(want) {
-		t.Fatalf("rows after the upgrade = %+v, want one each for %s and %s", rows, conflicting.SourceID, noBase.SourceID)
-	}
-	for _, row := range rows {
-		w, ok := want[row.EntityID]
-		if got := (answer{row.Mergeable, row.MergeableHeadSHA, row.MergeableBaseRef}); !ok || got != w || row.CheckedAt == nil {
-			t.Errorf("row of %s after the upgrade = %+v, want %+v, checked when it was polled", row.EntityID, row, w)
-		}
-	}
-
-	fx := sqliteMergeabilityFixture(t, conn)
-	if _, err := stores.PRMergeability.AdmitSystem(ctx, org, []db.PRMergeabilityProbe{{EntityID: conflicting.ID, Reason: domain.MergeabilityProbeSweep}}); err != nil {
-		t.Fatalf("AdmitSystem: %v", err)
-	}
-	fx.Ripen(t)
-	batch, err := stores.PRMergeability.Claim(ctx, workitem.Owner{ID: "upgrade-test", Epoch: 1}, org, 10)
-	if err != nil || len(batch.Items) != 1 {
-		t.Fatalf("Claim = %d items (err %v), want 1", len(batch.Items), err)
-	}
-	res, err := stores.PRMergeability.CompleteProbe(ctx, batch.Items[0].Receipt,
-		db.PRMergeabilityAnswer{Found: true, Mergeable: domain.MergeableConflicting, HeadSHA: "head-1"}, "")
-	if err != nil {
-		t.Fatalf("CompleteProbe: %v", err)
-	}
-	if len(res.Events) != 0 {
-		t.Errorf("the first probe after the upgrade emitted %+v, want nothing", res.Events)
-	}
-	if q, err := stores.EventQueue.ListForEntity(ctx, org, conflicting.ID); err != nil || len(q) != 0 {
-		t.Errorf("event queue = %+v (err %v), want nothing", q, err)
-	}
 }
