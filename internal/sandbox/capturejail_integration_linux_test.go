@@ -353,7 +353,7 @@ func patchGens(t *testing.T, stream []byte) (a, b int) {
 	t.Helper()
 	sr := NewCaptureStreamReader(bytes.NewReader(stream))
 	for {
-		name, body, err := sr.Next()
+		name, _, body, err := sr.Next()
 		if err != nil {
 			t.Fatalf("no patch member in the stream: %v", err)
 		}

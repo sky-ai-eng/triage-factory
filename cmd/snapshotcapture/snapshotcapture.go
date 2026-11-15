@@ -89,7 +89,9 @@ func Run(ctx context.Context, root string, checkouts []string, stream io.Writer,
 			return err
 		}
 		defer func() { _ = f.Close() }()
-		m, err := sw.Member(name)
+		// Its own permission bits: a tree rebuilt from this capture restores
+		// the file at them, and the stream is the only place they travel.
+		m, err := sw.Member(name, fi.Mode().Perm())
 		if err != nil {
 			return err
 		}
@@ -128,7 +130,7 @@ func streamFile(sw *sandbox.CaptureStreamWriter, name, path string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	m, err := sw.Member(name)
+	m, err := sw.Member(name, 0o600)
 	if err != nil {
 		return err
 	}
@@ -170,7 +172,7 @@ func (l *lazyMember) Write(p []byte) (int, error) {
 		if err := l.m.finish(); err != nil {
 			return 0, err
 		}
-		w, err := l.m.sw.Member(l.name)
+		w, err := l.m.sw.Member(l.name, 0o600)
 		if err != nil {
 			return 0, err
 		}

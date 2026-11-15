@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -148,13 +150,24 @@ func doEnsureRootfs(ctx context.Context) (string, error) {
 // bare alpine minirootfs has busybox only; every real agent run needs
 // node + git + rg + python + go + rust + build tools.
 //
-// chroot(2) needs CAP_SYS_CHROOT, which root has. The sandbox path
-// already runs as root in production (netns + iptables manipulation
-// require their own caps, and the wrapper script re-execs under
-// sudo), so callers reach this with sufficient privilege; we don't
-// add a separate preflight. apk ships as a static binary inside the
-// alpine minirootfs, so we don't need apk installed on the host.
+// chroot(2) needs CAP_SYS_CHROOT and the /dev/null node below needs
+// CAP_MKNOD; the cap broker that runs this holds both through Docker's
+// default capability set, so we don't add a separate preflight. apk
+// ships as a static binary inside the alpine minirootfs, so we don't
+// need apk installed on the host.
 func installToolchain(ctx context.Context, rootfsDir string) error {
+	// Package scripts send output to /dev/null (git-lfs's post-install runs
+	// `git version >/dev/null`), and the minirootfs ships an empty /dev, so
+	// without the node a script fails and apk fails with it. It is removed
+	// when the install returns so the cache holds no device node; a node a
+	// failed remove leaves is never seen, because the jail and the capture
+	// jail both mount a tmpfs over /dev.
+	devNull, err := createChrootDevNull(rootfsDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(devNull) }()
+
 	// Some packages we install (ripgrep, go) live in the community
 	// repository, which the bare minirootfs does NOT enable by
 	// default. Enable it before apk-add or the install fails with
@@ -190,6 +203,27 @@ func installToolchain(ctx context.Context, rootfsDir string) error {
 		return fmt.Errorf("install rust: %w", err)
 	}
 	return nil
+}
+
+// createChrootDevNull creates the character device /dev/null (1, 3) inside
+// rootfsDir and returns its host path. The build extracts into a directory it
+// has just emptied, so no node exists beforehand.
+func createChrootDevNull(rootfsDir string) (string, error) {
+	devDir := filepath.Join(rootfsDir, "dev")
+	if err := os.MkdirAll(devDir, 0o755); err != nil {
+		return "", fmt.Errorf("create /dev in the chroot: %w", err)
+	}
+	devNull := filepath.Join(devDir, "null")
+	if err := unix.Mknod(devNull, unix.S_IFCHR|0o666, int(unix.Mkdev(1, 3))); err != nil {
+		return "", fmt.Errorf("create /dev/null in the chroot (the cap broker needs CAP_MKNOD): %w", err)
+	}
+	// The umask narrows the mode mknod is given, and a process that is not
+	// root can write to /dev/null only at 0666.
+	if err := os.Chmod(devNull, 0o666); err != nil {
+		_ = os.Remove(devNull)
+		return "", fmt.Errorf("chmod /dev/null in the chroot: %w", err)
+	}
+	return devNull, nil
 }
 
 // installRust installs the pinned Rust release (rustVersion) into the

@@ -15,7 +15,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-type streamMember struct{ name, body string }
+type streamMember struct {
+	name, body string
+	perm       os.FileMode
+}
 
 // stubJailCapture installs a capture jail that answers with manifest and
 // streams members into the staging file the way the real one would.
@@ -27,7 +30,7 @@ func stubJailCapture(t *testing.T, manifest worktree.CaptureManifest, members []
 		var buf bytes.Buffer
 		w := sandbox.NewCaptureStreamWriter(&buf)
 		for _, m := range members {
-			mw, err := w.Member(m.name)
+			mw, err := w.Member(m.name, m.perm)
 			if err != nil {
 				return nil, err
 			}
@@ -43,6 +46,26 @@ func stubJailCapture(t *testing.T, manifest worktree.CaptureManifest, members []
 			return nil, err
 		}
 		return json.Marshal(manifest)
+	}
+}
+
+// captureInProcessJail installs a capture jail that runs the jail's own capture
+// body in this process, over the tree as it stands.
+func captureInProcessJail(t *testing.T) {
+	t.Helper()
+	orig := captureViaSandbox
+	t.Cleanup(func() { captureViaSandbox = orig })
+	captureViaSandbox = func(ctx context.Context, p sandbox.CaptureParams) ([]byte, error) {
+		stream, err := os.OpenFile(filepath.Join(p.StagingDir, sandbox.CaptureStreamFile), os.O_WRONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = stream.Close() }()
+		var man bytes.Buffer
+		if err := snapshotcapture.Run(ctx, p.Root, p.Checkouts, stream, &man); err != nil {
+			return nil, err
+		}
+		return man.Bytes(), nil
 	}
 }
 
@@ -73,11 +96,11 @@ func goodManifest() worktree.CaptureManifest {
 
 func goodMembers() []streamMember {
 	return []streamMember{
-		{worktree.CaptureBundleMember("acme/app/default"), "bundle-bytes"},
-		{worktree.CapturePatchMember("acme/app/default"), "patch-bytes"},
-		{worktree.CaptureLFSMember("acme/app/default", goodLFSOID), "lfs-bytes"},
-		{worktree.CaptureScratchPrefix + "notes.txt", "scratch note"},
-		{worktree.CaptureScratchPrefix + "sub/deep.txt", "deep"},
+		{worktree.CaptureBundleMember("acme/app/default"), "bundle-bytes", 0o644},
+		{worktree.CapturePatchMember("acme/app/default"), "patch-bytes", 0o644},
+		{worktree.CaptureLFSMember("acme/app/default", goodLFSOID), "lfs-bytes", 0o644},
+		{worktree.CaptureScratchPrefix + "notes.txt", "scratch note", 0o666},
+		{worktree.CaptureScratchPrefix + "sub/deep.txt", "deep", 0o755},
 	}
 }
 
@@ -114,6 +137,25 @@ func TestCaptureTreeInJail_UnpacksWhatTheJailStreamed(t *testing.T) {
 			t.Errorf("scratch %s = %q, %v", rel, got, err)
 		}
 	}
+	// A scratch file keeps the mode the jail streamed, less group and other
+	// write; a checkout member is the orchestrator's own and stays owner-only
+	// whatever the jail said.
+	modes := map[string]os.FileMode{
+		filepath.Join(sc.root, worktree.ScratchDir, "notes.txt"):    0o644,
+		filepath.Join(sc.root, worktree.ScratchDir, "sub/deep.txt"): 0o755,
+		st.BundlePath:               0o600,
+		st.PatchPath:                0o600,
+		st.Delta.LFSObjects[0].Path: 0o600,
+	}
+	for path, want := range modes {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s staged at %v, want %v", path, got, want)
+		}
+	}
 }
 
 // TestCaptureTreeInJail_RefusesWhatTheJailMayNotSay: the jail ran git over
@@ -126,39 +168,39 @@ func TestCaptureTreeInJail_RefusesWhatTheJailMayNotSay(t *testing.T) {
 		truncate int
 	}{
 		{"member nobody asked for", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{"checkouts/other/repo/default/bundle", "x"})
+			return append(m, streamMember{"checkouts/other/repo/default/bundle", "x", 0o600})
 		}, 0},
 		{"scratch member escaping the scratch", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + "../escape", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + "../escape", "x", 0o600})
 		}, 0},
 		{"absolute scratch member", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + "/etc/passwd", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + "/etc/passwd", "x", 0o600})
 		}, 0},
 		{"unclean scratch member", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + "a/../b", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + "a/../b", "x", 0o600})
 		}, 0},
 		{"knowledge scratch member", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.KnowledgeDir + "/team/k.md", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.KnowledgeDir + "/team/k.md", "x", 0o600})
 		}, 0},
 		{"entity-memory scratch member", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.EntityMemoryDir + "/e.md", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.EntityMemoryDir + "/e.md", "x", 0o600})
 		}, 0},
 		{"ci-logs scratch member", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.CILogsDir + "/run1/log.txt", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.CILogsDir + "/run1/log.txt", "x", 0o600})
 		}, 0},
 		{"scratch member named twice", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + "notes.txt", "again"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + "notes.txt", "again", 0o600})
 		}, 0},
 		{"scratch file under another file", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureScratchPrefix + "notes.txt/inner", "x"})
+			return append(m, streamMember{worktree.CaptureScratchPrefix + "notes.txt/inner", "x", 0o600})
 		}, 0},
 		{"announced member missing", nil, func(m []streamMember) []streamMember { return m[1:] }, 0},
 		{"announced LFS object missing", nil, func(m []streamMember) []streamMember { return append(m[:2:2], m[3:]...) }, 0},
 		{"LFS object nobody announced", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureLFSMember("acme/app/default", strings.Repeat("f", 64)), "x"})
+			return append(m, streamMember{worktree.CaptureLFSMember("acme/app/default", strings.Repeat("f", 64)), "x", 0o600})
 		}, 0},
 		{"LFS object streamed twice", nil, func(m []streamMember) []streamMember {
-			return append(m, streamMember{worktree.CaptureLFSMember("acme/app/default", goodLFSOID), "again"})
+			return append(m, streamMember{worktree.CaptureLFSMember("acme/app/default", goodLFSOID), "again", 0o600})
 		}, 0},
 		{"LFS object id that is not one", func(m *worktree.CaptureManifest) {
 			m.Checkouts[0].LFSObjects = []string{"../../escape"}
@@ -236,20 +278,7 @@ func TestCaptureTreeInJail_CheckoutWithNothingUnpushed(t *testing.T) {
 	}
 	gitT(t, w.checkouts[1].path, "commit", "-q", "--allow-empty", "-m", "unpushed")
 
-	orig := captureViaSandbox
-	t.Cleanup(func() { captureViaSandbox = orig })
-	captureViaSandbox = func(ctx context.Context, p sandbox.CaptureParams) ([]byte, error) {
-		stream, err := os.OpenFile(filepath.Join(p.StagingDir, sandbox.CaptureStreamFile), os.O_WRONLY, 0)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = stream.Close() }()
-		var man bytes.Buffer
-		if err := snapshotcapture.Run(ctx, p.Root, p.Checkouts, stream, &man); err != nil {
-			return nil, err
-		}
-		return man.Bytes(), nil
-	}
+	captureInProcessJail(t)
 
 	captured := &capturedSnapshot{}
 	defer captured.release()
