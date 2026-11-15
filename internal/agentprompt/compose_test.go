@@ -60,8 +60,9 @@ func TestBuild_NativeRequiresMulti(t *testing.T) {
 
 // TestBuild_WorkbenchComposition covers the workbench arm on both runtimes. A
 // person is present and there is no blueprint, so each composition carries the
-// workbench's own identity and memory sections and none of the completion
-// contract, which explains a tool the conversation is never offered.
+// workbench's own identity, the memory section both surfaces share, and none
+// of the completion contract, which explains a tool the conversation is never
+// offered.
 func TestBuild_WorkbenchComposition(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -71,17 +72,17 @@ func TestBuild_WorkbenchComposition(t *testing.T) {
 		{
 			name:     "sdk local",
 			spec:     Spec{Surface: SurfaceWorkbench, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeLocal},
-			identity: blockIdentityWorkbench, memory: blockVerbMemoryWorkbench,
+			identity: blockIdentityWorkbench, memory: blockVerbMemory,
 		},
 		{
 			name:     "sdk multi",
 			spec:     Spec{Surface: SurfaceWorkbench, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeMulti},
-			identity: blockIdentityWorkbench, memory: blockVerbMemoryWorkbench,
+			identity: blockIdentityWorkbench, memory: blockVerbMemory,
 		},
 		{
 			name:     "native multi",
 			spec:     Spec{Surface: SurfaceWorkbench, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti},
-			identity: blockIdentityWorkbenchNv, memory: blockVerbMemoryWorkbenchNv,
+			identity: blockIdentityWorkbenchNv, memory: blockVerbMemoryNv,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,9 +98,9 @@ func TestBuild_WorkbenchComposition(t *testing.T) {
 				t.Errorf("the composition opens with %s, want the workbench identity %s", paths[0], tc.identity)
 			}
 			if !slices.Contains(paths, tc.memory) {
-				t.Errorf("the composition does not include the workbench memory section %s", tc.memory)
+				t.Errorf("the composition does not include the memory section %s", tc.memory)
 			}
-			for _, p := range []string{blockCompletion, blockCompletionNonTerminal, blockIdentityMachinist, blockIdentityMachinistNv, blockVerbMemory, blockVerbMemoryNv, blockPracticesComms} {
+			for _, p := range []string{blockCompletion, blockCompletionNonTerminal, blockIdentityMachinist, blockIdentityMachinistNv, blockPracticesComms} {
 				if slices.Contains(paths, p) {
 					t.Errorf("the composition includes %s, which is the machinist's", p)
 				}

@@ -19,13 +19,8 @@ const (
 	blockIdentityWorkbench   = "identity/workbench.txt"
 	blockIdentityWorkbenchNv = "identity/workbench-native.txt"
 
-	// The workbench's own counterparts of three surface-invariant sections.
-	// Its memory contract has no completion gate to write against (TF files
-	// the file at every turn end, so the blocks ask for it to be kept current
-	// rather than written before finishing), and its communication block is
+	// The workbench's counterpart of the native communication section,
 	// written for a person reading as the agent works.
-	blockVerbMemoryWorkbench     = "verbs/memory-workbench.txt"
-	blockVerbMemoryWorkbenchNv   = "verbs/memory-workbench-native.txt"
 	blockPracticesCommsWorkbench = "practices/communication-workbench.txt"
 
 	// runtime
@@ -186,10 +181,10 @@ func nativeMachinistBlocks(spec Spec) ([]string, error) {
 }
 
 // workbenchBlocks composes the prompt for the agent a person works with on a
-// task. Each arm is the machinist's, section for section, with identity,
-// communication and memory resolved to the workbench's files and the
-// completion contract dropped: the conversation has no blueprint to stop, so
-// there is no ending to explain.
+// task. Each arm is the machinist's, section for section, with identity and
+// communication resolved to the workbench's files and the completion contract
+// dropped: the conversation has no blueprint to stop, so there is no ending to
+// explain.
 //
 // The SDK arm has no communication section, as the machinist's has none: TF
 // appends to Claude Code's own system prompt, which is written for a person at
@@ -208,7 +203,7 @@ func workbenchBlocks(spec Spec) ([]string, error) {
 		gitAccessFor(spec.Mode),
 		isolationFor(spec.Mode),
 		blockHarnessSDKScratch,
-		blockVerbMemoryWorkbench,
+		blockVerbMemory,
 	}, nil
 }
 
@@ -233,6 +228,6 @@ func nativeWorkbenchBlocks(spec Spec) ([]string, error) {
 		gitAccessFor(spec.Mode),
 		isolationFor(spec.Mode),
 		blockHarnessNativeScratch,
-		blockVerbMemoryWorkbenchNv,
+		blockVerbMemoryNv,
 	}, nil
 }
