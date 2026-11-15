@@ -20,7 +20,7 @@ export type ActivityDay = {
 export type ActivityDaySource = { date: string; source: string; events: number; tasks: number }
 export type ActivitySourceRow = {
   source: string
-  /** null when the count is undefined for this source (Slack has no tracked
+  /** null when the count is undefined for this source (one with no tracked
    * set), which renders as a dash — never as a zero claiming a quiet week. */
   events: number | null
   tasks: number

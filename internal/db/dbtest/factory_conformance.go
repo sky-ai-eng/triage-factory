@@ -86,17 +86,18 @@ type FactorySeeder struct {
 	SetConversationMemory func(t *testing.T, conversationID, content string, source domain.MemorySource)
 
 	// GroupedEntity inserts an active entity of source ("github", "jira" or
-	// "linear") the belt shows, and returns its id and the id the belt groups
-	// it by: its repository's registry row, its Jira project's registry row,
-	// or its Linear team.
+	// "linear") in the team's tracked set, and returns its id and its unit's:
+	// its repository's registry row, its Jira project's registry row, or its
+	// Linear team.
 	GroupedEntity func(t *testing.T, source string) (entityID, groupingID string)
 
-	// TrackedEntity inserts an active entity of source ("github", "jira" or
-	// "linear") in a unit of its own that the team tracks, and returns its id
-	// and the unit's: its repository's registry row, its Jira project's
-	// registry row, or its Linear team. Every call is a new unit, so a
-	// subtest can hold several of one source. Set by the team activity
-	// suites, whose tracked-set cut reads the tracking rows in both dialects.
+	// TrackedEntity inserts an active entity of source ("github", "jira",
+	// "linear", or in multi-mode "slack") in a unit of its own that the team
+	// tracks, and returns its id and the unit's: its repository's registry
+	// row, its Jira project's registry row, its Linear team, or its Slack
+	// channel's registry row. Every call is a new unit, so a subtest can hold
+	// several of one source. Set by the team activity suites, whose
+	// tracked-set cut reads the tracking rows in both dialects.
 	TrackedEntity func(t *testing.T, source string) (entityID, unitID string)
 }
 
@@ -458,35 +459,39 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 	})
 
-	t.Run("Entities_CarryTheirGroupingIDs", func(t *testing.T) {
-		// Each row carries the grouping id of its own source, read from the
-		// entity's column, and no other source's.
+	t.Run("Entities_CarryOnlyTheBeltSource", func(t *testing.T) {
+		// A Jira issue and a Linear issue in the team's tracked set have no
+		// station on the floor, so the belt leaves them out, and the pull
+		// request carries the repository the belt groups it by.
 		store, orgID, seed := mk(t)
-		type ids struct{ repository, jiraProject, linearTeam string }
 		pr, repo := seed.GroupedEntity(t, "github")
-		issue, project := seed.GroupedEntity(t, "jira")
-		linear, team := seed.GroupedEntity(t, "linear")
-		if repo == "" || project == "" || team == "" {
-			t.Fatalf("seeded grouping ids (%q, %q, %q); want every one set", repo, project, team)
+		issue, _ := seed.GroupedEntity(t, "jira")
+		linear, _ := seed.GroupedEntity(t, "linear")
+		if repo == "" {
+			t.Fatal("seeded no repository for the pull request")
 		}
-		want := map[string]ids{pr: {repository: repo}, issue: {jiraProject: project}, linear: {linearTeam: team}}
+		// Closed inside the grace window, so the closed half is held to the
+		// same rule as the active half.
+		seed.CloseEntity(t, linear, time.Now().Add(-5*time.Second))
 
 		rows, err := store.Entities(context.Background(), orgID, 100, nil)
 		if err != nil {
 			t.Fatalf("Entities: %v", err)
 		}
+		sawPR := false
 		for _, r := range rows {
-			w, ok := want[r.Entity.ID]
-			if !ok {
-				continue
-			}
-			delete(want, r.Entity.ID)
-			if got := (ids{r.Entity.RepositoryID, r.Entity.JiraProjectID, r.Entity.LinearTeamID}); got != w {
-				t.Errorf("%s %s: grouping ids = %+v, want %+v", r.Entity.Source, r.Entity.SourceID, got, w)
+			switch r.Entity.ID {
+			case pr:
+				sawPR = true
+				if r.Entity.RepositoryID != repo {
+					t.Errorf("pull request repository = %q, want %q", r.Entity.RepositoryID, repo)
+				}
+			case issue, linear:
+				t.Errorf("belt carries %s %s, a source the floor has no station for", r.Entity.Source, r.Entity.SourceID)
 			}
 		}
-		if len(want) != 0 {
-			t.Errorf("belt is missing the seeded entities %v", want)
+		if !sawPR {
+			t.Error("belt is missing the seeded pull request")
 		}
 	})
 

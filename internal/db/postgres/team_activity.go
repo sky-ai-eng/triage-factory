@@ -20,10 +20,9 @@ import (
 // entity and takes no task predicate, scoping on the conversation's own
 // team_id — the team that owns the run.
 //
-// Slack is deliberately absent from teamActivityEventSources: with no
-// tracked set there is no team-scoped definition of "a slack event", so its
-// count comes back nil (undefined) rather than a zero that would read as
-// "nothing happened".
+// A source outside teamActivityEventSources has no tracked set, so there is
+// no team-scoped definition of its events: its count comes back nil
+// (undefined) rather than a zero that would read as "nothing happened".
 type teamActivityStore struct{ q queryer }
 
 func newTeamActivityStore(q queryer) db.TeamActivityStore {
@@ -35,7 +34,7 @@ var _ db.TeamActivityStore = (*teamActivityStore)(nil)
 // teamActivityEventSources mirrors factoryEntityTrackedExists's arms: the
 // sources for which a tracked set — and therefore a team event count —
 // exists.
-var teamActivityEventSources = []string{"github", "jira", "linear"}
+var teamActivityEventSources = []string{"github", "jira", "linear", "slack"}
 
 // teamActivityTaskTeamPredicate scopes a tasks row (alias t) to the subject
 // team, bound at $4: owned by it, or visible to it through task_teams while
@@ -54,11 +53,13 @@ const teamActivityTaskTeamPredicate = ` AND (
 // pgTeamActivityUnitKey is an entities row's (alias e) unit in its source's
 // tracked set: the column that source's tracking rows reference — the
 // repository's registry row, the Jira project's registry row, the Linear
-// team's UUID. Empty for a source with no tracked set, which names no unit.
+// team's UUID, the Slack channel's registry row. Empty for a source with no
+// tracked set, which names no unit.
 const pgTeamActivityUnitKey = `COALESCE(CASE e.source
 		WHEN 'github' THEN e.repository_id::text
 		WHEN 'jira' THEN e.jira_project_id::text
 		WHEN 'linear' THEN e.linear_team_id
+		WHEN 'slack' THEN e.slack_channel_id::text
 	END, '')`
 
 // pgTeamActivityTrackedSet lists the subject team's tracked set, bound at $1
@@ -79,7 +80,11 @@ const pgTeamActivityTrackedSet = `
 	FROM linear_team_rules lr
 	JOIN teams tm ON tm.id = lr.team_id
 	WHERE tm.org_id = $1 AND lr.team_id = $2
-	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = $1)`
+	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = $1)
+	UNION ALL
+	SELECT 'slack', sc.slack_channel_id::text
+	FROM team_slack_channels sc
+	WHERE sc.org_id = $1 AND sc.team_id = $2`
 
 func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, teamID string, since, until time.Time) (domain.TeamActivity, error) {
 	sinceArg, untilArg := since.UTC(), until.UTC()

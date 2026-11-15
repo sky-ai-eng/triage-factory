@@ -118,8 +118,8 @@ const MEMBERS = {
   ],
 }
 
-// The flow node and the spend slice the figures read. Slack's null count is
-// the shape's point: an undefined measurement renders as a dash, not a zero.
+// The flow node and the spend slice the figures read. The null count is the
+// shape's point: an undefined measurement renders as a dash, not a zero.
 const ACTIVITY = {
   team_id: 't1',
   by_day: [{ date: '2026-08-20', events: 8, tasks: 4 }],

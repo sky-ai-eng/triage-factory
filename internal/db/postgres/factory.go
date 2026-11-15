@@ -272,33 +272,38 @@ const pgFactoryEntitySelectColumns = `
 	COALESCE(e.title, ''), COALESCE(e.url, ''),
 	COALESCE(e.snapshot_json::text, ''), COALESCE(e.description, ''),
 	e.state, e.created_at, e.last_polled_at, e.closed_at,
-	COALESCE(e.repository_id::text, ''), COALESCE(e.jira_project_id::text, ''), COALESCE(e.linear_team_id, ''),
+	COALESCE(e.repository_id::text, ''),
 	(SELECT event_type FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1),
 	(SELECT created_at FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
 
 // --- Tracked-set membership (TFAC-516) --------------------------------
 //
-// The multi-mode factory belt sources entity visibility from each team's
-// *tracked set*, not from task existence. An entity belongs on a team's
-// factory iff it sits in that team's tracked set — a GitHub entity whose
+// The multi-mode factory sources entity visibility from each team's
+// *tracked set*, not from task existence. An entity belongs to a team's
+// flow iff it sits in that team's tracked set — a GitHub entity whose
 // repository is one of the team's tracked repos (team_github_repos), a
 // Jira entity whose project is attached to the team
-// (jira_project_status_rules), or a Linear entity whose Linear team the team
-// tracks (linear_team_rules). This decouples the belt from task
+// (jira_project_status_rules), a Linear entity whose Linear team the team
+// tracks (linear_team_rules), or a Slack thread in a channel the team
+// watches (team_slack_channels). This decouples the belt from task
 // creation: an untasked PR on a tracked repo now appears, where the prior
-// task-existence semi-join hid it until a rule minted a task. SQLite/
-// local is N=1 and stays unscoped (sqlite/factory.go).
+// task-existence semi-join hid it until a rule minted a task. The station
+// counters and the team activity node share the same predicate; the belt's
+// own entity read keeps further to db.FactoryBeltSource. SQLite/local is N=1
+// and stays unscoped (sqlite/factory.go).
 //
 // The team scoping is free under the app pool (tf_app, RLS active): the
-// team_github_repos_select, jira_rules_select and linear_rules_select
-// policies already constrain visible rows to the viewer's team memberships, so each EXISTS
+// team_github_repos_select, jira_rules_select, linear_rules_select and
+// team_slack_channels_select policies already constrain visible rows to the
+// viewer's team memberships, so each EXISTS
 // auto-scopes to the viewer's teams with no explicit team_id — the same
 // RLS-does-the-scoping pattern ListActiveJiraTeamScoped uses
 // for the Jira discovery deck. The org bind (via e.org_id) is
 // defense-in-depth so the filter still holds on the admin pool where RLS
-// is bypassed: team_github_repos and jira_project_status_rules bind it on
-// their own org_id, linear_team_rules through the teams join.
+// is bypassed: team_github_repos, jira_project_status_rules and
+// team_slack_channels bind it on their own org_id, linear_team_rules through
+// the teams join.
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
@@ -318,7 +323,8 @@ const factoryGitHubRepoTrackedExists = `EXISTS (
 // jiraTeamProjectMembershipExists (the Jira deck's semi-join): the entity
 // and the rule both reference the project's registry row, so they meet on its
 // id, which a project key rename does not move, and the column outlives the
-// snapshot, so a row stays on its teams' belts while its source is turned off.
+// snapshot, so a row stays in its teams' tracked set while its source is
+// turned off.
 const factoryJiraProjectTrackedExists = `EXISTS (
 	SELECT 1 FROM jira_project_status_rules jr
 	WHERE jr.org_id = e.org_id
@@ -329,8 +335,8 @@ const factoryJiraProjectTrackedExists = `EXISTS (
 // the Linear teams attached to the viewer's teams. The entity's Linear team
 // is entities.linear_team_id, the UUID linear_team_rules is keyed by — not
 // the identifier's key prefix, which a team key rename in Linear changes. The
-// column outlives the snapshot, so a row stays on its teams' belts while its
-// source is turned off. Only rules saved under the org's current Linear
+// column outlives the snapshot, so a row stays in its teams' tracked set while
+// its source is turned off. Only rules saved under the org's current Linear
 // workspace count, as everywhere else rules are read: a rule from a workspace
 // the org has moved off names a team no current issue belongs to.
 const factoryLinearTeamTrackedExists = `EXISTS (
@@ -341,20 +347,35 @@ const factoryLinearTeamTrackedExists = `EXISTS (
 	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = e.org_id)
 )`
 
+// factorySlackChannelTrackedExists scopes a slack entities row (alias e) to
+// the channels the viewer's teams watch. A thread entity references its
+// channel's registry row (entities.slack_channel_id), the row a
+// team_slack_channels row binds a team to, so the two meet on its id, which a
+// channel id change in Slack does not move. Every team watching the channel
+// matches, primary or not: the primary flag decides whose task a mention
+// becomes, not whose flow the channel's traffic is.
+const factorySlackChannelTrackedExists = `EXISTS (
+	SELECT 1 FROM team_slack_channels sc
+	WHERE sc.org_id = e.org_id
+	  AND sc.slack_channel_id = e.slack_channel_id
+)`
+
 // factoryEntityTrackedExists is the combined tracked-set membership
 // predicate correlated against an entities row (alias e): a github entity
-// in a tracked repo, a jira entity in a tracked project, or a linear entity
-// in a tracked Linear team. Entities of any other source (slack) have no
-// tracked-set notion and never match — they are off the factory belt by
-// construction.
+// in a tracked repo, a jira entity in a tracked project, a linear entity in
+// a tracked Linear team, or a slack thread in a watched channel. An entity
+// of any other source has no tracked set and never matches.
 const factoryEntityTrackedExists = `(
 	(e.source = 'github' AND ` + factoryGitHubRepoTrackedExists + `)
 	OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedExists + `)
 	OR (e.source = 'linear' AND ` + factoryLinearTeamTrackedExists + `)
+	OR (e.source = 'slack' AND ` + factorySlackChannelTrackedExists + `)
 )`
 
 // factoryGitHubRepoTrackedForTeams / factoryJiraProjectTrackedForTeams /
-// factoryLinearTeamTrackedForTeams are the team-narrowed variants used by the per-page read filter: the
+// factoryLinearTeamTrackedForTeams / factorySlackChannelTrackedForTeams are
+// the team-narrowed variants used by the per-page read filter and the team
+// activity node: the
 // correlated tracked-set row must additionally belong to one of the teams
 // in placeholders (the comma-joined "$3, $4" list bound to team ids).
 // Each branch stays RLS-scoped to the viewer under tf_app (a forged team
@@ -390,11 +411,21 @@ func factoryLinearTeamTrackedForTeams(placeholders string) string {
 	)`
 }
 
+func factorySlackChannelTrackedForTeams(placeholders string) string {
+	return `EXISTS (
+		SELECT 1 FROM team_slack_channels sc
+		WHERE sc.org_id = e.org_id
+		  AND sc.team_id IN (` + placeholders + `)
+		  AND sc.slack_channel_id = e.slack_channel_id
+	)`
+}
+
 func factoryEntityTrackedForTeams(placeholders string) string {
 	return `(
 		(e.source = 'github' AND ` + factoryGitHubRepoTrackedForTeams(placeholders) + `)
 		OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedForTeams(placeholders) + `)
 		OR (e.source = 'linear' AND ` + factoryLinearTeamTrackedForTeams(placeholders) + `)
+		OR (e.source = 'slack' AND ` + factorySlackChannelTrackedForTeams(placeholders) + `)
 	)`
 }
 
@@ -448,6 +479,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.state = 'active'
+		  AND e.source = '`+db.FactoryBeltSource+`'
 		  AND `+activeMembership+`
 		ORDER BY e.created_at DESC
 		LIMIT $2
@@ -460,6 +492,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.closed_at IS NOT NULL AND e.closed_at > $2
+		  AND e.source = '`+db.FactoryBeltSource+`'
 		  AND `+closedMembership+`
 		ORDER BY e.closed_at DESC
 		LIMIT $3
@@ -492,7 +525,7 @@ func queryFactoryEntities(ctx context.Context, q queryer, query string, args ...
 			&row.Entity.Title, &row.Entity.URL,
 			&row.Entity.SnapshotJSON, &row.Entity.Description,
 			&row.Entity.State, &row.Entity.CreatedAt, &lastPolledAt, &closedAt,
-			&row.Entity.RepositoryID, &row.Entity.JiraProjectID, &row.Entity.LinearTeamID,
+			&row.Entity.RepositoryID,
 			&latestType, &latestAt,
 		); err != nil {
 			return nil, err

@@ -47,8 +47,8 @@ type teamActivityDaySourceJSON struct {
 }
 
 // teamActivitySourceJSON is one source's totals. events is null — not 0 —
-// when the count is undefined for the source (Slack has no tracked set, so
-// "the team's slack events" names nothing); last_poll_at is null for a
+// when the count is undefined for the source (one with no tracked set, for
+// which "the team's events" names nothing); last_poll_at is null for a
 // source with no poller or one that hasn't completed a cycle. A client
 // renders both as a dash, never as a zero.
 type teamActivitySourceJSON struct {

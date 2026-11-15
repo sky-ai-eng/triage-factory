@@ -87,20 +87,18 @@ type FactoryReadStore interface {
 	// FactoryClosedGraceLimit) so the chip can finish animating to
 	// its terminal station before disappearing.
 	//
-	// Each row's Entity carries the registry ids the belt groups chips
-	// by — RepositoryID, JiraProjectID or LinearTeamID, whichever its
-	// source has — beside the display fields.
+	// Only entities of FactoryBeltSource are returned, in both backends.
+	//
+	// Each row's Entity carries its repository's registry id
+	// (RepositoryID), which the belt groups chips by, beside the display
+	// fields.
 	//
 	// Multi-mode (Postgres) scopes to the viewer's teams by the
-	// *tracked set*: a GitHub entity is included iff its repository
+	// *tracked set*: a pull request is included iff its repository
 	// registry row is one of the viewer's teams' tracked repos
-	// (team_github_repos), a Jira entity iff its project — the registry
-	// row on its site — is attached to one of those teams
-	// (jira_project_status_rules), a Linear entity iff its Linear team is
-	// one those teams track (linear_team_rules). This is
-	// independent of whether any
-	// task was ever minted on the entity — an untasked PR on a tracked
-	// repo rides the belt. The org-level GitHub App polls org-wide, so
+	// (team_github_repos). This is independent of whether any task was
+	// ever minted on the entity — an untasked PR on a tracked repo rides
+	// the belt. The org-level GitHub App polls org-wide, so
 	// polling produces org-wide entities; the entity↔team relationship
 	// is derived through the tracked set, which the SELECT-policy RLS on
 	// those tables auto-scopes to the viewer's teams under tf_app — no
@@ -113,8 +111,8 @@ type FactoryReadStore interface {
 	// tracker already scopes discovery to the user's own involvement
 	// (author / review-requested / reviewed-by), so every entity is
 	// personally relevant by construction. The tracked-set scoping lives
-	// only in the Postgres impl; the SQLite impl returns the full active
-	// set as before — local mode is unaffected.
+	// only in the Postgres impl; the SQLite impl returns every active pull
+	// request.
 	//
 	// The entity's station (latest-event derivation in the SELECT) is
 	// orthogonal to membership and computed from the shared event log,
@@ -133,6 +131,13 @@ type FactoryReadStore interface {
 	// the factory. Postgres-only effect; SQLite is N=1 and ignores it.
 	Entities(ctx context.Context, orgID string, limit int, teamIDs []string) ([]domain.FactoryEntityRow, error)
 }
+
+// FactoryBeltSource is the source the factory floor has stations for, and
+// so the only one Entities returns. An entity of another source has no
+// station to stand at and is dropped before it is drawn, but it would still
+// take a slot under the active limit, pushing out an entity the floor can
+// draw. A source joins here when the floor gains stations for it.
+const FactoryBeltSource = "github"
 
 // FactoryClosedGracePeriod is the window during which a freshly-closed
 // entity remains in the factory snapshot so the chip can ride the final
