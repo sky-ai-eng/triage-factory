@@ -66,7 +66,7 @@ func ModelMaxOutput(model string) (int, bool) {
 	if err != nil || table == nil {
 		return 0, false
 	}
-	price, ok := lookupPrice(table, model)
+	price, ok := lookupDatasheetRow(table, model)
 	if !ok || price.MaxOutputTokens == nil || *price.MaxOutputTokens <= 0 {
 		return 0, false
 	}

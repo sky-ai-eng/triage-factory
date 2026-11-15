@@ -73,37 +73,37 @@ func TestSiblingWork_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
 		return dbtest.TaskCloseDeferralStores{
-				Tasks:            stores.Tasks,
-				Entities:         stores.Entities,
-				StagedInjections: stores.StagedInjections,
-				Conversations:    stores.Conversations,
-				UserID:           userID,
-			}, orgID, dbtest.SiblingWorkSeeder{
-				TaskCloseDeferralSeeder: newPgCloseDeferralSeeder(h.AdminDB, orgID, userID),
-				Touch: func(t *testing.T, conversationID, entityID string) {
-					t.Helper()
-					if _, err := h.AdminDB.Exec(`
+			Tasks:            stores.Tasks,
+			Entities:         stores.Entities,
+			StagedInjections: stores.StagedInjections,
+			Conversations:    stores.Conversations,
+			UserID:           userID,
+		}, orgID, dbtest.SiblingWorkSeeder{
+			TaskCloseDeferralSeeder: newPgCloseDeferralSeeder(h.AdminDB, orgID, userID),
+			Touch: func(t *testing.T, conversationID, entityID string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`
 						INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role)
 						VALUES ($1, $2, $3, 'touched')
 					`, orgID, conversationID, entityID); err != nil {
-						t.Fatalf("seed touch: %v", err)
-					}
-				},
-				MoveToOtherTeam: func(t *testing.T, taskID string) {
-					t.Helper()
-					teamID := uuid.New().String()
-					if _, err := h.AdminDB.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
-						teamID, orgID, "other-"+teamID[:8], "Other"); err != nil {
-						t.Fatalf("seed team: %v", err)
-					}
-					if _, err := h.AdminDB.Exec(`INSERT INTO task_teams (task_id, team_id) SELECT id, team_id FROM tasks WHERE org_id = $1 AND id = $2`, orgID, taskID); err != nil {
-						t.Fatalf("seed the visibility row the move leaves behind: %v", err)
-					}
-					if _, err := h.AdminDB.Exec(`UPDATE tasks SET team_id = $3 WHERE org_id = $1 AND id = $2`, orgID, taskID, teamID); err != nil {
-						t.Fatalf("move task: %v", err)
-					}
-				},
-			}
+					t.Fatalf("seed touch: %v", err)
+				}
+			},
+			MoveToOtherTeam: func(t *testing.T, taskID string) {
+				t.Helper()
+				teamID := uuid.New().String()
+				if _, err := h.AdminDB.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+					teamID, orgID, "other-"+teamID[:8], "Other"); err != nil {
+					t.Fatalf("seed team: %v", err)
+				}
+				if _, err := h.AdminDB.Exec(`INSERT INTO task_teams (task_id, team_id) SELECT id, team_id FROM tasks WHERE org_id = $1 AND id = $2`, orgID, taskID); err != nil {
+					t.Fatalf("seed the visibility row the move leaves behind: %v", err)
+				}
+				if _, err := h.AdminDB.Exec(`UPDATE tasks SET team_id = $3 WHERE org_id = $1 AND id = $2`, orgID, taskID, teamID); err != nil {
+					t.Fatalf("move task: %v", err)
+				}
+			},
+		}
 	})
 }
 
