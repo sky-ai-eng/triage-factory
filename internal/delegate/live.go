@@ -521,8 +521,9 @@ func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, pr
 // moveLiveSettings puts the live process on the newest person message's
 // settings before a turn starts, and reports whether the turn may start on
 // this process. It may not when the message names a model another provider
-// serves, or when the settings could not be written, which leaves the input
-// waiting for the next engagement. A person row that recorded no settings, or
+// serves, or when the process did not confirm the move (SetSettings), which
+// leaves the input waiting for the next engagement: its cold resume starts on
+// the message's settings. A person row that recorded no settings, or
 // a read that fails, leaves the process as it is.
 func (s *Spawner) moveLiveSettings(ctx context.Context, park liveParkContext, proc liveProc) bool {
 	last, err := s.newestStampedPersonRow(ctx, park.orgID, park.conversationID)

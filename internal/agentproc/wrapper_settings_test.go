@@ -8,7 +8,7 @@ import (
 // settingsStubSDK stands in for @anthropic-ai/claude-agent-sdk to report, with
 // each user message the wrapper pushes, the model and effort the query was on
 // when the message arrived: the launch's options until setModel and
-// applyFlagSettings move them.
+// applyFlagSettings move them. setModel refuses the model "unknown".
 const settingsStubSDK = `
 export function query({ prompt, options }) {
   let model = options.model ?? ""
@@ -21,7 +21,10 @@ export function query({ prompt, options }) {
     },
     async interrupt() {},
     async setPermissionMode() {},
-    async setModel(m) { model = m },
+    async setModel(m) {
+      if (m === "unknown") throw new Error("no such model")
+      model = m
+    },
     async applyFlagSettings(s) { effort = s.effortLevel === null ? "<default>" : s.effortLevel },
   }
 }
@@ -31,6 +34,7 @@ export function query({ prompt, options }) {
 // query's options beside --model, and a set_settings control moves both
 // before a user_message written after it is pushed, so the turn that message
 // starts runs on them. An empty effort clears it to Claude Code's default.
+// Each set_settings is answered under its id, and a refused move says so.
 func TestWrapperSetSettingsLandsBeforeTheNextMessage(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -49,11 +53,27 @@ func TestWrapperSetSettingsLandsBeforeTheNextMessage(t *testing.T) {
 	w.control(t, map[string]any{"kind": "user_message", "text": "first"})
 	expect("first", "haiku", "low")
 
-	w.control(t, map[string]any{"kind": "set_settings", "model": "opus", "effort": "max"})
+	settled := func(id string, applied bool) {
+		t.Helper()
+		got := w.next()
+		if got["subtype"] != "settings_result" || got["id"] != id || got["applied"] != applied {
+			t.Fatalf("answer = %#v, want settings_result %s applied=%v", got, id, applied)
+		}
+		if _, hasErr := got["error"]; hasErr == applied {
+			t.Errorf("answer = %#v: an error belongs on a refused move only", got)
+		}
+	}
+
+	w.control(t, map[string]any{"kind": "set_settings", "id": "1", "model": "opus", "effort": "max"})
 	w.control(t, map[string]any{"kind": "user_message", "text": "second"})
+	settled("1", true)
 	expect("second", "opus", "max")
 
-	w.control(t, map[string]any{"kind": "set_settings", "model": "sonnet", "effort": ""})
+	w.control(t, map[string]any{"kind": "set_settings", "id": "2", "model": "sonnet", "effort": ""})
 	w.control(t, map[string]any{"kind": "user_message", "text": "third"})
+	settled("2", true)
 	expect("third", "sonnet", "<default>")
+
+	w.control(t, map[string]any{"kind": "set_settings", "id": "3", "model": "unknown", "effort": "high"})
+	settled("3", false)
 }

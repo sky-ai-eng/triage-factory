@@ -255,3 +255,74 @@ func TestLiveRun_SendBlocksRefusesEmpty(t *testing.T) {
 		t.Errorf("refused send still wrote %q", stdin.String())
 	}
 }
+
+// TestLiveRun_SetSettingsWaitsForTheWrapper: SetSettings returns only once
+// the wrapper answers its set_settings, and the process reports the new
+// settings only when the answer says they applied. A refused move, or a
+// process that ends first, is an error and leaves the old settings.
+func TestLiveRun_SetSettingsWaitsForTheWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		answer             func(l *LiveRun, id string)
+		wantErr            bool
+		wantModel, wantEff string
+	}{
+		{"applied", func(l *LiveRun, id string) {
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":true}`)
+		}, false, "opus", "max"},
+		{"refused", func(l *LiveRun, id string) {
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":false,"error":"no such model"}`)
+		}, true, "haiku", "low"},
+		{"the process ended first", func(l *LiveRun, _ string) { close(l.done) }, true, "haiku", "low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := newSyncBuffer()
+			l := &LiveRun{
+				stdin: captureWriteCloser{stdin},
+				ready: make(chan struct{}),
+				done:  make(chan struct{}),
+				model: "haiku", effort: "low",
+			}
+			errc := make(chan error, 1)
+			go func() { errc <- l.SetSettings(context.Background(), "opus", "max") }()
+
+			var sent struct {
+				Kind, ID, Model, Effort string
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for sent.ID == "" {
+				if time.Now().After(deadline) {
+					t.Fatal("no set_settings was written")
+				}
+				_ = json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &sent)
+				time.Sleep(time.Millisecond)
+			}
+			if sent.Kind != "set_settings" || sent.Model != "opus" || sent.Effort != "max" {
+				t.Fatalf("control = %+v, want set_settings opus max", sent)
+			}
+			select {
+			case err := <-errc:
+				t.Fatalf("SetSettings returned %v before the wrapper answered", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			tc.answer(l, sent.ID)
+			if err := <-errc; (err != nil) != tc.wantErr {
+				t.Fatalf("SetSettings = %v, want error %v", err, tc.wantErr)
+			}
+			if model, effort := l.Settings(); model != tc.wantModel || effort != tc.wantEff {
+				t.Errorf("settings = (%s, %s), want (%s, %s)", model, effort, tc.wantModel, tc.wantEff)
+			}
+		})
+	}
+}
+
+// settleAnswer hands line to the run as the reader would: parsed as a
+// control line, then settled.
+func (l *LiveRun) settleAnswer(t *testing.T, line string) {
+	t.Helper()
+	ctl, ok := parseControlLine([]byte(line))
+	if !ok || ctl.Subtype != "settings_result" {
+		t.Fatalf("%s is not a settings_result", line)
+	}
+	l.settleSettings(ctl)
+}

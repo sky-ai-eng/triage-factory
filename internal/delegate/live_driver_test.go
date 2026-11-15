@@ -43,13 +43,19 @@ type fakeLiveProc struct {
 	// SetSettings as "set_settings <model> <effort>", in order.
 	model, effort string
 	controls      []string
+	// settingsErr is what SetSettings answers, so a test can model a process
+	// that does not confirm the move; its settings then stay as they were.
+	settingsErr error
 }
 
 func (f *fakeLiveProc) SetSettings(_ context.Context, model, effort string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.model, f.effort = model, effort
 	f.controls = append(f.controls, "set_settings "+model+" "+effort)
+	if f.settingsErr != nil {
+		return f.settingsErr
+	}
+	f.model, f.effort = model, effort
 	return nil
 }
 
@@ -665,18 +671,21 @@ func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 // TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings: a turn started
 // for a person's message runs on the settings the message records. On the
 // process's provider they are written to it before the message; on another
-// provider nothing is sent and the process is let go, with the message still
-// waiting for a claim that seals that provider.
+// provider, or when the process does not confirm the move, nothing is sent
+// and the process is let go, with the message still waiting for a claim that
+// starts on its settings.
 func TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	for _, tc := range []struct {
 		name         string
 		model        string
+		settingsErr  error
 		wantNext     bool
 		wantControls []string
 	}{
-		{"the same provider", "claude-fable-5-1", true, []string{"set_settings claude-fable-5-1 high", "send"}},
-		{"another provider", "us.anthropic.claude-sonnet-5-5", false, nil},
+		{"the same provider", "claude-fable-5-1", nil, true, []string{"set_settings claude-fable-5-1 high", "send"}},
+		{"another provider", "us.anthropic.claude-sonnet-5-5", nil, false, nil},
+		{"a move the process does not confirm", "claude-fable-5-1", errors.New("not applied"), false, []string{"set_settings claude-fable-5-1 high"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
@@ -690,6 +699,7 @@ func TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings(t *testing.T) {
 			}
 			proc := newFakeLiveProc("sess")
 			proc.model = "claude-sonnet-5-5"
+			proc.settingsErr = tc.settingsErr
 			park := liveParkContext{
 				orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-settings",
 				claimID: claimID, runtime: domain.ConversationRuntimeSDK,
