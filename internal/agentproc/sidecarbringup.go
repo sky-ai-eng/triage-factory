@@ -193,7 +193,7 @@ type SidecarBringUpParams struct {
 	// only in a test fixture, where a relayed op fails closed.
 	Relay RelayDispatcher
 
-	// GitHubAPIEnabled requests the GitHub-REST credential proxy (GetPR +
+	// GitHubAPIEnabled requests the GitHub-REST credential proxy (the PR read +
 	// agenthost gh verbs). The REST base it prepends is derived sidecar-side
 	// from the sealed bundle; the orchestrator points its client at the bare
 	// proxy URL the result returns.
@@ -216,7 +216,7 @@ type SidecarBringUpParams struct {
 // BringUpRunSidecar drives the full credential handshake with a launched
 // sidecar and returns the coordinates its proxies produced — the non-secret
 // sandbox env AND the per-run proxy URLs + placeholder tokens the orchestrator
-// routes its own pre-sandbox clone / GetPR / agenthost through — plus the live
+// routes its own pre-sandbox clone / PR read / agenthost through — plus the live
 // supervision Conn (kept open for the run's lifetime so the git proxy's
 // authorize callbacks and any mid-run bundle refresh keep working). The caller
 // closes the returned Conn when the run ends (and closes the sidecar handle

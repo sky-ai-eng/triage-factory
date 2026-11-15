@@ -3,10 +3,15 @@ package delegate
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -189,6 +194,72 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	}
 	assertEntries(t, got[0].Auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.3:4100", "https://github.com", "run-placeholder"))
+}
+
+// TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest: a PR checkout's
+// push tracking is rebuilt from the pull request's refs and head repository,
+// which the pull request object carries, so the rebuild asks GitHub for that
+// object alone. Each further read, of its reviews or its comments, is one
+// more serial request through the sidecar before the agent can start.
+func TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest(t *testing.T) {
+	f := newSnapshotFixture(t, "task-pr-read")
+	f.addCheckout(t, "acme/app", "pr-7")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	const cloneURL = "https://github.com/acme/app.git"
+	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "app", CloneURL: cloneURL}}
+
+	var (
+		mu    sync.Mutex
+		paths []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path != "/repos/acme/app/pulls/7" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": cloneURL}},
+			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": cloneURL}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	// Recorded, not run: the git proxy address routes nowhere in a test, and
+	// the pull request's fields reaching the restore are what is checked.
+	var got []worktree.CheckoutRestore
+	restore := restoreCheckout
+	restoreCheckout = func(_ context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		got = append(got, r)
+		return worktree.RestoredCheckout{Owner: r.Owner, Repo: r.Repo, Path: filepath.Join(r.Root, r.Owner, r.Repo, r.Slug)}, nil
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	sidecar := &runSidecar{res: &sidecarproto.StartProxiesResult{
+		GitProxyURL: "http://10.42.0.3:4100", GitProxyToken: "run-placeholder",
+		GitHubAPIURL: srv.URL, GitHubAPIToken: "api-placeholder",
+	}}
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, "entity-unread", sidecar, nil)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("cold rehydrate rebuilt %d checkouts, want 1", len(got))
+	}
+	want := worktree.PRCheckout{HeadRef: "feature", HeadCloneURL: cloneURL, BaseRef: "main"}
+	if got[0].PR == nil || *got[0].PR != want {
+		t.Errorf("restore push tracking = %+v, want %+v from the pull request", got[0].PR, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if wantPaths := []string{"/repos/acme/app/pulls/7"}; !slices.Equal(paths, wantPaths) {
+		t.Errorf("GitHub requests = %v, want only %v", paths, wantPaths)
+	}
 }
 
 // TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare: an executor that never

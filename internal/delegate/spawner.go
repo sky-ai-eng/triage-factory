@@ -1178,7 +1178,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // would let credbundle.ResolveRepoToken's map iteration pick an arbitrary sibling
 // repo's token, which then 403s every call it's used for.
 func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
-	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
+	// TF_ROLE=executor never reaches here for a run's PR read — setupGitHub
 	// builds its client against the credential sidecar's GitHub-REST proxy
 	// (sidecar), so this resolver path serves only all/local.
 	s.mu.Lock()

@@ -716,7 +716,7 @@ func withGitHubResolveCause(err, resolveErr error) error {
 
 // setupGitHub prepares a worktree for a GitHub PR task.
 //
-// On the executor path (sidecar non-nil) the GetPR client and the host-side
+// On the executor path (sidecar non-nil) the PR read's client and the host-side
 // clone both route through the run's credential sidecar — the client against
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Local reads the PR through
@@ -755,7 +755,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// The GitHub client bounds the call itself; the watchdog's operation is
 	// the backstop behind that bound.
 	endFetch := s.activityFor(conversationID).begin("fetch_pr", setupFetchOpDeadline)
-	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
+	pr, err := ghClient.GetPRBasic(fetchCtx, owner, repo, prNumber)
 	endFetch()
 	telemetry.RecordSpanError(fetchSpan, err, "fetching the pull request failed")
 	fetchSpan.End()

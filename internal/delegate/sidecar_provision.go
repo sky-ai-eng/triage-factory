@@ -26,7 +26,7 @@ import (
 // sidecar brought up: the process holding the unsealed bundle, the
 // supervision channel to it, and the coordinates for reaching its proxies. The
 // dispatcher stands it up on TF_ROLE=executor BEFORE the pre-sandbox clone, so
-// the clone (and GetPR, and the agenthost) route through those proxies while
+// the clone (and the PR read, and the agenthost) route through those proxies while
 // the orchestrator holds no credential. It owns its own teardown, which the
 // dispatcher defers until after the agent run returns.
 //
@@ -352,7 +352,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		// the exec verb-trace DB ops, all identity-bound from ConversationInfo. Holds
 		// the stores + secrets the capless sidecar cannot.
 		Relay: relaySrv,
-		// Every delegated run may touch a GitHub repo (clone/push + GetPR +
+		// Every delegated run may touch a GitHub repo (clone/push + the PR read +
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
 		// No upstream travels with them: the host each lane forwards to is the
 		// one sealed into this run's bundle beside the token, so a base-URL
