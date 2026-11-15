@@ -152,7 +152,7 @@ type liveRunSpec struct {
 	// mirror is on park, so the engagement's ending sees whatever the last
 	// tool call did not.
 	mirror *memoryMirror
-	// nudge is the would-stop hook (artifactContractNudge), asked before a
+	// nudge is the would-stop hook (turnEndNudges), asked before a
 	// turn concludes on its own: a non-empty note is sent into the process
 	// and the run goes on. Nil asks nothing.
 	nudge func(context.Context) string
@@ -567,7 +567,7 @@ func (s *Spawner) moveLiveSettings(ctx context.Context, park liveParkContext, pr
 
 // sendNudge sends the would-stop hook's note into the live process and records
 // it on the transcript, where the hook reads it back to know it has asked
-// (askedAboutArtifactAlready). Sent before it is recorded: a row written for a
+// (askedSinceHumanInput). Sent before it is recorded: a row written for a
 // message the process never took would say the agent was asked something it
 // was not.
 //
@@ -713,7 +713,7 @@ func (s *Spawner) handBackOnShutdown(ctx context.Context, park liveParkContext, 
 // The cause is still there, so a successor claimed at once would only meet it
 // again. lastErr is the provider's last failure, kept on the row so a person
 // looking at a run that is waiting can see what it is waiting out. sessionID
-// is the SDK session the snapshot carries, "" for a native engagement.
+// is the SDK session this ending saves, "" for a native engagement.
 //
 // Nothing is written to the transcript: the next engagement continues it from
 // the call that failed, and for the model nothing has happened yet.
@@ -819,6 +819,13 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	// still the only holder of what its process spent.
 	s.settleEngagementSpend(snapCtx, park)
 
+	// An SDK session's blob is saved BEFORE the release too, unlike the
+	// snapshot, and whether or not the snapshot below happens or lands: the
+	// next engagement resumes the session from it whenever the file is gone,
+	// and once the claim is released that engagement can be running. It is
+	// one file, not a capture.
+	s.saveSession(snapCtx, park.orgID, park.conversationID, park.claudeCwd, sessionID)
+
 	fenced = release(ctx, park)
 
 	// The release ended the stall watchdog with the claim, so the snapshot's
@@ -829,7 +836,7 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 		persistCtx, cancel := context.WithTimeout(snapCtx, s.resolvedActivityTimings().workspaceOp)
 		err := s.persistWorkspaceSnapshot(persistCtx, snapshotWrite{
 			orgID: park.orgID, conversationID: park.conversationID, keyID: park.namespace, claimID: park.claimID,
-			wtPath: park.claudeCwd, sessionID: sessionID, runtime: park.runtime, reason: reason,
+			wtPath: park.claudeCwd, runtime: park.runtime, reason: reason,
 			adoptTree: adoptTree,
 		}, leaseHeld)
 		cancel()

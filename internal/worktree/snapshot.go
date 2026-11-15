@@ -63,18 +63,15 @@ type GitDelta struct {
 	LFSObjects []LFSObject `json:"-"`
 }
 
-// CapturedState is one capture's result: a checkout's git delta, or the
-// session transcript the local, in-process capture reads. In multi mode the
-// delta's large members are staged on disk by the orchestrator, from the
-// capture jail's stream, and named by BundlePath and PatchPath; the byte
-// fields are the local-mode representation, where capture is in-process and
-// has no jail to cross.
+// CapturedState is one capture's result: a checkout's git delta. In multi
+// mode the delta's large members are staged on disk by the orchestrator, from
+// the capture jail's stream, and named by BundlePath and PatchPath; the
+// delta's byte fields are the local-mode representation, where capture is
+// in-process and has no jail to cross.
 type CapturedState struct {
 	Delta      *GitDelta
-	SessionID  string
 	BundlePath string
 	PatchPath  string
-	Transcript []byte
 }
 
 // ReadClaudeSessionTranscript reads the Claude session transcript for sessionID

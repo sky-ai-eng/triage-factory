@@ -11,22 +11,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestBlueprintWorktreeCleanup_KeepsASessionTheSnapshotDoesNotHold: a
-// blueprint's end removes the task's run tree whatever the snapshot says, and
-// the SDK session file kept outside it goes too only when the store holds the
-// key's latest persist. Any other answer leaves the file, since it may be the
-// only copy of the conversation a follow-up resumes.
-func TestBlueprintWorktreeCleanup_KeepsASessionTheSnapshotDoesNotHold(t *testing.T) {
+// TestBlueprintWorktreeCleanup_RemovesTheSessionFileWhateverTheSnapshotDid: a
+// blueprint's end removes the task's run tree and the SDK session file kept
+// outside it, whatever the key's snapshot came to. The session's durable copy
+// is its own blob, not the snapshot.
+func TestBlueprintWorktreeCleanup_RemovesTheSessionFileWhateverTheSnapshotDid(t *testing.T) {
 	for i, tc := range []struct {
-		name     string
-		state    string // the key's lifecycle row; "" records none
-		blob     bool
-		wantKept bool
+		name  string
+		state string // the key's lifecycle row; "" records none
+		blob  bool
 	}{
-		{"the latest persist is stored", domain.WorkspaceSnapshotWritten, true, false},
-		{"the latest persist failed over an earlier step's blob", domain.WorkspaceSnapshotFailed, true, true},
-		{"the row says written but the blob is gone", domain.WorkspaceSnapshotWritten, false, true},
-		{"no persist was recorded", "", false, true},
+		{"the latest persist is stored", domain.WorkspaceSnapshotWritten, true},
+		{"the latest persist failed over an earlier step's blob", domain.WorkspaceSnapshotFailed, true},
+		{"the row says written but the blob is gone", domain.WorkspaceSnapshotWritten, false},
+		{"no persist was recorded", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateRunNamespace(t)
@@ -61,9 +59,8 @@ func TestBlueprintWorktreeCleanup_KeepsASessionTheSnapshotDoesNotHold(t *testing
 			if _, err := os.Stat(root); !os.IsNotExist(err) {
 				t.Errorf("run root after the blueprint's end: stat err = %v, want it removed", err)
 			}
-			_, err = os.Stat(session)
-			if kept := err == nil; kept != tc.wantKept {
-				t.Errorf("session file kept = %v (stat err %v), want %v", kept, err, tc.wantKept)
+			if _, err := os.Stat(session); !os.IsNotExist(err) {
+				t.Errorf("session file after the blueprint's end: stat err = %v, want it removed", err)
 			}
 		})
 	}

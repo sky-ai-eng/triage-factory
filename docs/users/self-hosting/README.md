@@ -27,7 +27,7 @@ networks at present.
 - [Upgrading](upgrading.md) — moving to a newer release
 - [Monitoring](monitoring.md) — health endpoints, metrics, traces
 - [Scaling](scaling.md) — more executors, multiple control pods, database pools
-- [Networking](networking.md) — client IPs behind a load balancer
+- [Networking](networking.md) — client IPs behind a load balancer, and outbound proxies
 - [Object storage](storage.md) — workspace snapshots and team knowledge
 - [Secrets](secrets.md) — supplying secrets from files
 - [JWT key rotation](jwt-key-rotation.md) — rotating the key that signs login sessions

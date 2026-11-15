@@ -18,6 +18,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // upstreamCapture records what the fake GitHub upstream saw, so a test can
@@ -41,9 +42,9 @@ func (c *upstreamCapture) snap() (auth, path, method, rawq string) {
 // trusts its per-run cert, plus the GH_HOST value (bound addr).
 func newInjector(t *testing.T, upstream, incoming string) (*Server, *http.Client, string) {
 	t.Helper()
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	srv, err := New(Config{
 		Upstream:      upstream,
@@ -159,7 +160,7 @@ func TestInjector_GraphQLRoutesToSiblingEndpoint(t *testing.T) {
 	// use a base literally containing "api.github.com" would route off-box; here
 	// we assert the derivation via a GHES-shaped base instead.
 	ghesBase := upstream.URL + "/api/v3"
-	cert, _, _ := GenerateCert("127.0.0.1")
+	cert, _, _ := proxycert.Generate("gh injector", "127.0.0.1")
 	srv, err := New(Config{Upstream: ghesBase, IncomingToken: "", Cert: cert,
 		TokenSource: func(context.Context) (string, error) { return "ghs_x", nil }})
 	if err != nil {
@@ -208,7 +209,7 @@ func TestInjector_TokenSourceFailureIs502(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
 	defer upstream.Close()
 
-	cert, certPEM, _ := GenerateCert("127.0.0.1")
+	cert, certPEM, _ := proxycert.Generate("gh injector", "127.0.0.1")
 	srv, err := New(Config{Upstream: upstream.URL, Cert: cert,
 		TokenSource: func(context.Context) (string, error) { return "", io.ErrUnexpectedEOF }})
 	if err != nil {
@@ -416,9 +417,9 @@ func TestGraphQLUpstream_ExactHostMatch(t *testing.T) {
 func newInjectorWithWrites(t *testing.T, upstream string,
 	observeWrite func(context.Context, ObservedWrite)) (*http.Client, string) {
 	t.Helper()
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	srv, err := New(Config{
 		Upstream:     upstream,
@@ -1289,9 +1290,9 @@ func TestInjector_AddressedReadsAreReportedOnce(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	var reads []ObservedRead
 	srv, err := New(Config{
@@ -1466,9 +1467,9 @@ func TestInjector_BranchLookupTouchesTheOnePullRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	var reads []ObservedRead
 	srv, err := New(Config{
@@ -1660,9 +1661,9 @@ func TestInjector_CommentAndNodeReads(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	var reads []ObservedRead
 	srv, err := New(Config{

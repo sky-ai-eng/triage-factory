@@ -2755,6 +2755,22 @@ func (s *conversationStore) NewestPersonMessageSystem(ctx context.Context, orgID
 	`, conversationID)
 }
 
+func (s *conversationStore) CountPersonMessagesSinceSystem(ctx context.Context, orgID, conversationID string, since time.Time) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	var n int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM messages m_p
+		WHERE m_p.conversation_id = ? AND m_p.created_at > ? AND `+personMessageSQL+`
+	`, conversationID, since.UTC()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count person messages since: %w", err)
+	}
+	return n, nil
+}
+
 func (s *conversationStore) NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

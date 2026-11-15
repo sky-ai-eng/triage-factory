@@ -166,7 +166,7 @@ func TestBuildStepConfig_RedelegationRehydratesRatherThanCloning(t *testing.T) {
 	f.s.SetStorage(blobs)
 	src := filepath.Join(t.TempDir(), "workspace")
 	writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "run A got this far")
-	if err := f.s.snapshotWorkspace(ctx, org, f.conversationIDs[0], f.task.ID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := f.s.snapshotWorkspace(ctx, org, f.conversationIDs[0], f.task.ID, "", src, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(rebuilt); err != nil {

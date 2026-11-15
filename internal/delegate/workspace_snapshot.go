@@ -67,12 +67,15 @@ import (
 )
 
 // Snapshot tar member names. The blob is one compressed tar holding a
-// manifest — always the first member — each checkout's git delta, the
-// ephemeral _tfac tree, and the Claude session transcript; rehydrate demuxes by
-// these names.
+// manifest — always the first member — each checkout's git delta, and the
+// ephemeral _tfac tree; rehydrate demuxes by these names. An SDK
+// conversation's session file is not in it: it has a blob of its own
+// (session_blob.go).
 const (
 	snapManifest = "manifest.json"
-	snapSession  = "session.jsonl"
+	// snapSession is the Claude session transcript, which blobs written before
+	// a session had its own blob carry and none written now does.
+	snapSession = "session.jsonl"
 	// snapScratchPrefix names the scratch members INSIDE the blob, which is a
 	// storage format rather than a path: it is deliberately not derived from the
 	// on-disk directory name, so renaming that directory never strands the
@@ -134,7 +137,9 @@ type snapshotManifest struct {
 	// Checkouts are the checkouts under the root the blob carries, in path
 	// order.
 	Checkouts []manifestCheckout `json:"checkouts,omitempty"`
-	SessionID string             `json:"session_id"`
+	// SessionID names the session whose transcript the snapSession member
+	// holds, on a blob that carries one.
+	SessionID string `json:"session_id"`
 	// CILogsOmitted says the captured workspace held extracted CI logs that
 	// this blob deliberately left out, which is what a rehydrate needs to know
 	// to explain the absence in the tree it rebuilds. Absent on a snapshot
@@ -247,13 +252,11 @@ const (
 // engagement, and why.
 type snapshotWrite struct {
 	orgID, conversationID, keyID, claimID string
-	wtPath, sessionID                     string
+	wtPath                                string
 	// runtime is the conversation's engine (domain.ConversationRuntimeSDK |
-	// ConversationRuntimeNative), carried onto the span family because the
-	// blob's members are not runtime-agnostic: only a delegated SDK-runtime
-	// conversation snapshots a session transcript, so transcript sizes read
-	// without the attribute would look like a property of all snapshots. Empty
-	// is a caller that doesn't know (a fixture), and simply omits the
+	// ConversationRuntimeNative), carried onto the span family so a snapshot's
+	// phases can be read per engine: only a native conversation checkpoints.
+	// Empty is a caller that doesn't know (a fixture), and simply omits the
 	// attribute.
 	runtime string
 	// reason is one of the snapshotReason values.
@@ -401,11 +404,11 @@ func validCheckoutRel(rel, repoID, slug string) bool {
 }
 
 // snapshotWorkspace writes a finished engagement's non-recoverable workspace
-// state — the git delta, the ephemeral _tfac subdirs, and the Claude session
-// transcript — to durable storage under the run's snapshot key, so a resume
-// that lands without the warm on-disk worktree can rebuild it (see
-// ensureWorkspace). It runs identically in both modes: local writes the same
-// blob through fsStorage under the state-root, multi through the object store.
+// state — the git delta and the ephemeral _tfac subdirs — to durable storage
+// under the run's snapshot key, so a resume that lands without the warm on-disk
+// worktree can rebuild it (see ensureWorkspace). It runs identically in both
+// modes: local writes the same blob through fsStorage under the state-root,
+// multi through the object store.
 //
 // claimID is the engagement writing this snapshot, and it is what makes the
 // blob's lifecycle knowable and its ordering safe. The write is bracketed by a
@@ -423,10 +426,10 @@ func validCheckoutRel(rel, repoID, slug string) bool {
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string) error {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, runtime string) error {
 	return s.persistWorkspaceSnapshot(ctx, snapshotWrite{
 		orgID: orgID, conversationID: conversationID, keyID: keyID, claimID: claimID,
-		wtPath: wtPath, sessionID: sessionID, runtime: runtime, reason: snapshotReasonConclusion,
+		wtPath: wtPath, runtime: runtime, reason: snapshotReasonConclusion,
 	}, false)
 }
 
@@ -568,13 +571,9 @@ func (s *Spawner) startSnapshotSpan(ctx context.Context, w snapshotWrite) (conte
 	return s.startPunctual(ctx, w.conversationID, "workspace.snapshot", attrs...)
 }
 
-// capturedSnapshot is a tree read and not yet archived: the run root's
-// transcript (local mode), each checkout's git delta, the members staged on
-// disk in multi mode, and when the tree was read.
+// capturedSnapshot is a tree read and not yet archived: each checkout's git
+// delta, the members staged on disk in multi mode, and when the tree was read.
 type capturedSnapshot struct {
-	// state is the run root's capture: the session and its transcript. The
-	// root has no git delta of its own.
-	state     worktree.CapturedState
 	checkouts []capturedCheckout
 	// scratch is the tree's _tfac scratch as a capture jail read it, nil when
 	// the capture was in-process and the archive reads the tree itself.
@@ -631,13 +630,13 @@ func (c *capturedSnapshot) release() {
 }
 
 // captureSnapshot reads the tree's non-recoverable state — the git delta of
-// every checkout w names, the _tfac scratch, and in local mode the session
-// transcript at the root. In multi mode the whole read runs in one capture jail
-// (captureTreeInJail), so the checkouts' filter-honoring git never executes an
-// agent-planted driver anywhere but in a jail with no network and no way to
-// write the tree. The jail is one of the privileged operations that never
-// trace themselves, so this executor-side span IS its measurement; in local
-// mode the same span covers the in-process capture.
+// every checkout w names and the _tfac scratch. In multi mode the whole read
+// runs in one capture jail (captureTreeInJail), so the checkouts'
+// filter-honoring git never executes an agent-planted driver anywhere but in a
+// jail with no network and no way to write the tree. The jail is one of the
+// privileged operations that never trace themselves, so this executor-side span
+// IS its measurement; in local mode the same span covers the in-process
+// capture.
 //
 // The tree must not change while the capture reads it, and this function does
 // not make it stand still: the caller does — an ending has stopped the run's
@@ -658,20 +657,12 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 	}()
 
 	if jailedCapture() {
-		captured.state = worktree.CapturedState{SessionID: w.sessionID}
 		if err := captureTreeInJail(capCtx, w, captured); err != nil {
 			return nil, fmt.Errorf("snapshot: capture: %w", err)
 		}
 	} else {
-		state, err := captureWorkspaceGit(capCtx, w.wtPath, w.sessionID)
-		if err != nil {
-			return nil, fmt.Errorf("snapshot: capture: %w", err)
-		}
-		// Only the transcript is the root's: it is a plain folder.
-		state.Delta, state.BundlePath, state.PatchPath = nil, "", ""
-		captured.state = state
 		for _, co := range w.checkouts {
-			coState, err := captureWorkspaceGit(capCtx, co.path, "")
+			coState, err := captureWorkspaceGit(capCtx, co.path)
 			if err != nil {
 				return nil, fmt.Errorf("snapshot: capture checkout %s: %w", co.rel, err)
 			}
@@ -708,15 +699,10 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 		kept = append(kept, co)
 	}
 	captured.checkouts = kept
-	transcriptBytes, err := capturedBytesSize(captured.state.Transcript, "")
-	if err != nil {
-		return nil, fmt.Errorf("snapshot: capture transcript size: %w", err)
-	}
 	capSpan.SetAttributes(
 		telemetry.SnapshotBundleBytes(bundleBytes),
 		telemetry.SnapshotPatchBytes(patchBytes),
 		telemetry.SnapshotLFSBytes(lfsBytes),
-		telemetry.SnapshotTranscriptBytes(transcriptBytes),
 		telemetry.Count(len(captured.checkouts)),
 	)
 	return captured, nil
@@ -1061,12 +1047,10 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // manifest, built on man, first — so whether a blob is one this binary can
 // restore is answered by its first member (snapshotLayoutAt) — then every
 // checkout's potentially unbounded bundle, uncommitted patch and Git LFS
-// objects, the ephemeral _tfac tree (streamed file by file), and the Claude
-// session transcript.
+// objects, and the ephemeral _tfac tree (streamed file by file).
 func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapshot, wtPath string, man snapshotManifest) error {
 	tw := tar.NewWriter(w)
 	man.LayoutVersion = snapshotLayoutVersion
-	man.SessionID = captured.state.SessionID
 	// The scratch walk reports the same, and runs after the manifest is out;
 	// this is that walk's answer for the one directory it asks about.
 	if captured.scratch != nil {
@@ -1115,21 +1099,6 @@ func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapsh
 	}
 	if _, err := tarScratch(ctx, tw, captured.scratchRoot(wtPath)); err != nil {
 		return fmt.Errorf("tar scratch: %w", err)
-	}
-	if captured.state.SessionID != "" {
-		if len(captured.state.Transcript) > 0 {
-			if err := writeCapturedMember(tw, snapSession, captured.state.Transcript, ""); err != nil {
-				return err
-			}
-		} else {
-			// The run has a session but the capture came back without its
-			// transcript (absent on disk, or a capture that couldn't read it). The
-			// blob is still written — worktree state matters on its own — but a
-			// resume from it will hit the transcript-missing guard and fail.
-			// Surface it: this is otherwise silent, and it's exactly the shape that
-			// produced a resume-fails-with-no-reason report.
-			delegateLog.Warn("snapshot omits session transcript; a resume of this conversation will not be able to continue where it left off", "session", captured.state.SessionID, "worktree", wtPath)
-		}
 	}
 	return tw.Close()
 }
@@ -1343,10 +1312,11 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 //     blob is already under the key too: the key is the task's, so the blob
 //     there is an earlier persist's, and the one in flight outranks it.
 //   - fresh — no persist is coming (it failed, its writer died, or the wait
-//     gave up). A native conversation is rebuilt from nothing and told so, its
-//     continuity being the transcript rather than the tree. An SDK
-//     conversation cannot: its continuity WAS the session file inside the
-//     blob, so it gets the expired answer instead.
+//     gave up). The tree is rebuilt from nothing and the agent told so, for a
+//     conversation whose continuity is not the tree: a native one's is its
+//     transcript, and an SDK one's is its session, which has a blob of its
+//     own. An SDK conversation whose session was never saved gets the expired
+//     answer instead.
 //
 // The provenance is returned rather than inferred downstream because this is
 // the only frame that knows it: past here a warm tree and a reconstruction of
@@ -1503,22 +1473,23 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 }
 
 // workspaceFromNothing is the ladder's last rung: there is no workspace to
-// recover and none is coming. The runtime decides what happens next, and that
-// is a fact about where each engine keeps the conversation rather than a
-// preference. A native one is replayed from its `messages` rows into whatever
-// tree it is given, so a workspace built from nothing is a real if lossier
-// continuation — the fresh provenance is what tells the agent which. An SDK
-// one is resumed by session id against a transcript that lived inside the
-// blob, so without it there is nothing to reconnect to.
+// recover and none is coming. Whether the conversation continues in a tree
+// built from nothing is a fact about where its engine keeps the conversation
+// rather than a preference (continuesOnFreshTree), and where it does, the
+// tree is a real if lossier continuation — the fresh provenance is what tells
+// the agent which.
 //
-// A caller with no builder gets the refusal whatever the runtime; the SDK
-// resume dispatch is the one such caller, and it could not use this arm anyway.
+// A caller with no builder gets the refusal whatever the runtime.
 func (s *Spawner) workspaceFromNothing(ctx context.Context, orgID string, conv *domain.Conversation, keyID string, fresh freshWorkspaceBuilder) (string, domain.WorkspaceProvenance, error) {
-	// TODO(TFAC-1438): an SDK conversation is refused here because its
-	// session file's only durable copy is the snapshot; with a session blob of
-	// its own it resumes onto a fresh tree, as a native one does.
-	if resumeSourceFor(conv.Runtime) != resumeSourceMessages || fresh == nil {
+	if fresh == nil {
 		return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from: %w", conv.WorktreePath, keyID, ErrWorkspaceExpired)
+	}
+	continues, err := s.continuesOnFreshTree(ctx, orgID, conv)
+	if err != nil {
+		return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from: %w", conv.WorktreePath, keyID, err)
+	}
+	if !continues {
+		return "", "", fmt.Errorf("worktree %q missing, no snapshot for %s to rehydrate from, and no session to resume onto a fresh tree: %w", conv.WorktreePath, keyID, ErrWorkspaceExpired)
 	}
 	delegateLog.Warn("no workspace to recover; building this conversation a fresh one — uncommitted work from the prior engagement is lost",
 		"conversation", conv.ID, "key_id", keyID, "org", orgID)
@@ -1528,6 +1499,26 @@ func (s *Spawner) workspaceFromNothing(ctx context.Context, orgID string, conv *
 	}
 	s.restampWorktreePath(ctx, orgID, conv, wtDir)
 	return wtDir, domain.WorkspaceProvenanceFresh, nil
+}
+
+// continuesOnFreshTree reports whether conv can continue in a tree built from
+// nothing. A native conversation can: it is replayed from its `messages` rows
+// into whatever tree it is given. An SDK one is resumed by session id, and can
+// when its session has a blob, which the launch or the resume puts back beside
+// the tree (restoreSession); one whose session was never saved has nothing to
+// reconnect to. An error is a store that cannot say.
+func (s *Spawner) continuesOnFreshTree(ctx context.Context, orgID string, conv *domain.Conversation) (bool, error) {
+	switch resumeSourceFor(conv.Runtime) {
+	case resumeSourceMessages:
+		return true, nil
+	case resumeSourceSession:
+		saved, err := s.sessionSaved(ctx, orgID, conv.ID)
+		if err != nil {
+			return false, fmt.Errorf("read the session blob: %w", err)
+		}
+		return saved, nil
+	}
+	return false, nil
 }
 
 // restampWorktreePath points the conversation (and the cleanup paths that key
@@ -1556,8 +1547,8 @@ var errSnapshotLayout = errors.New("rehydrate: snapshot is of an older run-tree 
 // rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the run tree
 // at keyID's run root: a fresh root, every checkout the manifest names rebuilt
 // beneath it the way `workspace add` builds one (worktree.RestoreCheckout), the
-// ephemeral _tfac tree restored, and the Claude session transcript dropped at
-// the root's encoding so `claude --resume` reconnects.
+// ephemeral _tfac tree restored, and a session transcript the blob carries put
+// back where `claude --resume` reads it for the root (restoreCarriedSession).
 //
 // Like `workspace add`, it records each checkout as conv's own before it
 // fetches any of them (recordRestoringCheckouts): every fetch goes through the
@@ -1766,11 +1757,33 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID string, conv 
 	}()
 
 	if len(session) > 0 && man.SessionID != "" {
-		if err := restoreSessionTranscript(root, man.SessionID, session); err != nil {
-			return snapshotManifest{}, err
+		if err := s.restoreCarriedSession(ctx, orgID, conv.ID, root, man.SessionID, session); err != nil {
+			return snapshotManifest{}, fmt.Errorf("rehydrate: %w", err)
 		}
 	}
 	return man, nil
+}
+
+// restoreCarriedSession puts back the session a blob written before sessions
+// had their own blob carries, where it cannot shadow a newer copy: never over
+// a session file that is there, and not when conversationID, the task's live
+// conversation, has a session blob. That blob was saved at an ending after
+// this snapshot was written, and restoreSession puts it back; a session of any
+// other conversation on the task is one nothing resumes. A blob that cannot be
+// read is an error rather than a guess, since either guess can lose the newer
+// copy.
+func (s *Spawner) restoreCarriedSession(ctx context.Context, orgID, conversationID, root, sessionID string, data []byte) error {
+	if sessionTranscriptExists(root, sessionID) {
+		return nil
+	}
+	saved, err := s.sessionSaved(ctx, orgID, conversationID)
+	if err != nil {
+		return fmt.Errorf("read the session blob: %w", err)
+	}
+	if saved {
+		return nil
+	}
+	return writeSessionFile(root, sessionID, data)
 }
 
 // restoreParallelism caps how many checkouts one rehydrate rebuilds at once.
@@ -2202,22 +2215,6 @@ func stageScratchMember(stagingDir, relPath string, r io.Reader, mode os.FileMod
 	// a file that already existed alone.
 	if err := os.Chmod(dest, mode); err != nil {
 		return fmt.Errorf("rehydrate: chmod scratch %s: %w", relPath, err)
-	}
-	return nil
-}
-
-// restoreSessionTranscript writes the carried transcript to the new cwd's
-// encoded project dir so `claude --resume <sessionID>` finds it.
-func restoreSessionTranscript(wtDir, sessionID string, data []byte) error {
-	p, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(wtDir), sessionID)
-	if err != nil {
-		return fmt.Errorf("rehydrate: session path: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return fmt.Errorf("rehydrate: mkdir session dir: %w", err)
-	}
-	if err := os.WriteFile(p, data, 0o600); err != nil {
-		return fmt.Errorf("rehydrate: write session: %w", err)
 	}
 	return nil
 }

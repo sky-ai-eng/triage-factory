@@ -22,6 +22,10 @@ type EnvCredentials struct {
 	Resolve func(ctx context.Context) (map[string]string, error)
 	// Models is the whitelist stamped on the key.
 	Models []string
+	// CACertPEM is a certificate the client trusts for the endpoint the env
+	// names, beside the system roots: the one a run's credential proxy serves.
+	// nil trusts the system roots alone.
+	CACertPEM []byte
 	// NewClient builds the client from an account. nil uses inference.New.
 	NewClient func(schemas.Account) (Provider, func(), error)
 }
@@ -39,6 +43,7 @@ func (c *EnvCredentials) ForCall(ctx context.Context) (schemas.ModelProvider, Pr
 	if err != nil {
 		return "", nil, nil, err
 	}
+	creds.CACertPEM = c.CACertPEM
 	account, err := inference.NewAccount(creds)
 	if err != nil {
 		return "", nil, nil, err

@@ -35,6 +35,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -330,8 +331,9 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 
 	// The LLM coordinates travel back to the orchestrator's own engine only —
 	// no jail is ever pointed at the proxy. The proxy holds the key; the
-	// caller holds a per-run placeholder.
-	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv(), JailEndpoints: handle.JailEndpoints()}
+	// caller holds a per-run placeholder and the certificate to trust the
+	// proxy's TLS by.
+	result := sidecarproto.StartProxiesResult{Env: env, LLMEnv: handle.LLMEnv(), LLMCertPEM: handle.LLMCertPEM(), JailEndpoints: handle.JailEndpoints()}
 	result.IdentityName, result.IdentityEmail, result.IdentityAccountID = identity.name, identity.email, identity.accountID
 	if signer != nil {
 		result.CommitSigner = string(signer.Mode)
@@ -663,7 +665,7 @@ func (r *credRuntime) heldGitHub() (gh *credbundle.GitHubCreds, ok bool) {
 // the channel still works for `gh api` and explicitly-scoped commands, and
 // inference stays broken exactly as it was.
 func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID string, gitHandler http.Handler) (string, string, []byte, error) {
-	cert, certPEM, err := ghinjector.GenerateCert(hostVethIP)
+	cert, certPEM, err := proxycert.Generate("gh injector", hostVethIP)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("runsidecar: generate gh-injector cert: %w", err)
 	}

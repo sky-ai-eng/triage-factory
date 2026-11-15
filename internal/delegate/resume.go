@@ -93,10 +93,10 @@ var ErrStepHandedOff = errors.New("resume: this step just handed off to the next
 
 // ErrWorkspaceExpired is returned when a resumable conversation's workspace is
 // gone for good: its warm worktree was swept, no snapshot is there or coming,
-// and its runtime cannot continue without one. That last clause is an SDK
-// answer — its continuity lived in the session transcript the blob carried,
-// while a native conversation's lives in `messages` and survives a workspace
-// built from nothing, so a native one falls back instead of reaching here.
+// and it cannot continue without one. That last clause is an SDK answer, for
+// a conversation whose session was never saved to a blob of its own: one
+// whose session was, and a native one, whose continuity lives in `messages`,
+// both continue in a workspace built from nothing instead of reaching here.
 //
 // The conversation's status is left unchanged (no flip), so the user gets a
 // clear "this workspace has expired" signal rather than seeing the run
@@ -158,11 +158,13 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 // workspace evidence is read, which is also what keeps a control pod — which
 // serves this check and holds no workspace store — from reading snapshots.
 //
-// An SDK conversation is expired without the session transcript the blob
-// carried, so it walks four rungs, most-certain-first:
+// An SDK conversation continues from its session, so it walks five rungs,
+// most-certain-first:
 //
 //   - the warm worktree survives on disk (and is not one an older binary laid
 //     out, which the claim removes rather than reuses);
+//   - its session has a blob of its own, which a claim puts back beside
+//     whatever tree it gets, one built from nothing included;
 //   - the durable snapshot blob is present to cold-rehydrate from, of the
 //     layout this binary restores — an older blob is no snapshot;
 //   - neither, but the record says a persist is in flight and the engagement
@@ -200,6 +202,14 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 	}
 	blobs := s.Storage()
 	if blobs == nil {
+		return true
+	}
+	saved, err := s.sessionSaved(ctx, orgID, conv.ID)
+	if err != nil {
+		delegateLog.Warn("resume: session blob existence check failed; treating as recoverable", "conversation", conv.ID, "error", err)
+		return true
+	}
+	if saved {
 		return true
 	}
 	keyID := workspaceKey(conv.TaskID)

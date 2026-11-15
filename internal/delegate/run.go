@@ -398,6 +398,18 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
 
+	// The session this launch would resume goes back where --resume reads it
+	// when it is not there: a tree rebuilt or built fresh brings no session
+	// file along, and the session's blob is its durable copy. A store that
+	// cannot answer hands the launch back, rather than open a fresh session
+	// over one that exists.
+	if err := s.restoreSession(ctx, orgID, conversationID, claudeCwd, priorSessionID); err != nil {
+		if ctx.Err() != nil {
+			return cancelled("", 0)
+		}
+		return engagementDisposition{launchErr: err}
+	}
+
 	// Whether this launch sends the conversation's opening: it has no session to
 	// resume, so it starts a model that knows nothing. A launch resuming a
 	// session sends a continuation note instead (composeLaunchTurn), and the
@@ -692,7 +704,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		perms:        perms,
 		sink:         sink,
 		mirror:       mirror,
-		nudge:        turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg))),
+		nudge:        turnEndNudge(s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive)),
 		hasBlueprint: cfg.blueprintRunID != "",
 	})
 
@@ -1211,6 +1223,12 @@ func (s *Spawner) processCompletion(
 		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
 	default: // turnConcluded — every other non-error turn parked above
 		resultSummary = verdict.Summary
+		// A conversation a person works in has no blueprint run, and its turn
+		// records the answer the person got, not the agent's reply to the
+		// memory note.
+		if blueprintRunID == "" && completion.Terminal == nil {
+			resultSummary = strings.TrimSpace(s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, resultSummary))
+		}
 		outcome = string(verdict.Outcome)
 		// stop_blueprint states a reason for either ending, and it is
 		// recorded either way, as on the native runtime. A turn that
@@ -1243,15 +1261,15 @@ func (s *Spawner) processCompletion(
 	// finish terminates) per blueprintDecisionForStepConversation, and the approval state is
 	// derived downstream from the unresolved-deliverable set (has_unresolved_deliverables).
 
-	// Every verdict snapshots its workspace while the worktree and session
-	// transcript are still on disk. The tree does not outlive its blueprint's
-	// end or the idle evictor, so a cold rehydrate from this blob is how a
-	// later follow-up resumes. Whatever the outcome: an abort is picked back up by a human, and a
-	// finish is the case a follow-up on concluded work needs — a workspace that
-	// only exists for the runs that went badly is a workspace nobody can follow
-	// up on. A failed run is excluded: the infrastructure under it died, so
-	// there is nothing coherent to rehydrate, and failConversation drops
-	// whatever blob it had.
+	// Every verdict snapshots its workspace, and saves its session, while the
+	// worktree and session file are still on disk. The tree does not outlive
+	// its blueprint's end or the idle evictor, so a cold rehydrate from this
+	// blob is how a later follow-up resumes. Whatever the outcome: an abort is
+	// picked back up by a human, and a finish is the case a follow-up on
+	// concluded work needs — a workspace that only exists for the runs that
+	// went badly is a workspace nobody can follow up on. A failed run is
+	// excluded: the infrastructure under it died, so there is nothing coherent
+	// to rehydrate, and failConversation drops whatever blob it had.
 	//
 	// Every step of a blueprint writes to the one key the blueprint shares, so a
 	// multi-step run overwrites its own blob per step and the last writer — the
@@ -1265,9 +1283,14 @@ func (s *Spawner) processCompletion(
 	//
 	// The claim is still held, so the snapshot is one of the engagement's
 	// operations: bounded, and the idle limit does not apply while it runs.
+	//
+	// The session's own blob goes first, under the same ordering contract,
+	// and whatever becomes of the snapshot: a follow-up resumes the session
+	// from it onto whatever tree it gets.
 	if status == domain.StatusOpen {
+		s.saveSession(bgCtx, orgID, conversationID, claudeCwd, sessionID)
 		snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
-		err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, claimID, claudeCwd, sessionID, domain.ConversationRuntimeSDK)
+		err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, claimID, claudeCwd, domain.ConversationRuntimeSDK)
 		endSnap()
 		if err != nil {
 			delegateLog.Warn("snapshot workspace for concluded conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)

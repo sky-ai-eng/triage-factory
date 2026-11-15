@@ -1956,9 +1956,13 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 // conversation_memory's policy grants exactly what the conversations policy
 // grants for the same row, so a reader can never see the boundary while the
 // memory that settles it is hidden. A reader who can see neither reads "not
-// pending" — which is only reachable for a task whose conversations belong to
-// a team they are not in, and the tasks policies do not show them that task
-// either. The gate the dispatcher enforces runs on the admin pool regardless.
+// pending". The gate the dispatcher enforces runs on the admin pool regardless.
+//
+// TODO(TFAC-1452): a task reassigned to another team keeps its earlier
+// conversations on the team that had them, so its new holder can read the task
+// but not the conversation that owes its memory, and reads memory_pending
+// false and no attempt while the claim gate holds their conversation. The run
+// station's memory-wait line depends on this read.
 func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
 		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL

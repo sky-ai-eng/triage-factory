@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -66,6 +67,12 @@ type ProviderCredentials struct {
 	// is the prize this class of guard exists to protect, is out of reach
 	// regardless of what this field says.
 	AllowPrivateNetwork bool
+
+	// CACertPEM is one or more PEM certificates the client trusts for this
+	// provider's endpoint in addition to the system roots: the per-run
+	// certificate a run's credential proxy serves, so the hop to it is
+	// verified like any other. Optional.
+	CACertPEM []byte
 
 	// Concurrency / BufferSize override the modest defaults for this provider's
 	// worker pool and queue. Zero uses the defaults.
@@ -152,6 +159,12 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 		Weight: 1,
 	}
 
+	// bifrost's Anthropic provider only logs a CA it cannot parse and then
+	// fails the handshake on every call, so the refusal is made here.
+	if len(c.CACertPEM) > 0 && !x509.NewCertPool().AppendCertsFromPEM(c.CACertPEM) {
+		return schemas.Key{}, fmt.Errorf("the CA certificate is not a PEM certificate")
+	}
+
 	if c.Provider == ProviderBedrock && c.Bedrock == nil {
 		return schemas.Key{}, fmt.Errorf("a Bedrock provider requires Bedrock credentials")
 	}
@@ -208,7 +221,9 @@ func bedrockDialURL(v *schemas.SecretVar) string {
 
 // buildProviderConfig sizes the worker pool modestly and lets bifrost fill the
 // remaining network defaults (timeouts, retries) via CheckAndSetDefaults. A
-// Bedrock base URL is not set here: it rides the key (bedrockEndpoints).
+// Bedrock base URL is not set here: it rides the key (bedrockEndpoints). The
+// CA certificate is set here for every provider; both the Bedrock and the
+// Anthropic client read it from the network config.
 func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	concurrency := c.Concurrency
 	if concurrency <= 0 {
@@ -227,6 +242,7 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 			BaseURL:             baseURL,
 			ExtraHeaders:        plainHeaders(c.ExtraHeaders),
 			AllowPrivateNetwork: c.AllowPrivateNetwork,
+			CACertPEM:           optionalSecret(string(c.CACertPEM)),
 		},
 		ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
 			Concurrency: concurrency,

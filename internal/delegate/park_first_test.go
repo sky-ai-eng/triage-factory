@@ -349,7 +349,7 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	go func() {
 		time.Sleep(30 * time.Millisecond)
 		persisted <- s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-			namespace, writerClaim, writerTree, "", domain.ConversationRuntimeNative)
+			namespace, writerClaim, writerTree, domain.ConversationRuntimeNative)
 	}()
 	t.Cleanup(func() {
 		if err := <-persisted; err != nil {
@@ -391,7 +391,7 @@ func TestEnsureWorkspace_AnInFlightPersistOutranksAnEarlierBlob(t *testing.T) {
 	earlierTree := t.TempDir()
 	writeFile(t, filepath.Join(earlierTree, "_tfac", "notes.txt"), "as of the last step boundary")
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		namespace, "claim-earlier", earlierTree, "", domain.ConversationRuntimeNative); err != nil {
+		namespace, "claim-earlier", earlierTree, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("earlier snapshot: %v", err)
 	}
 

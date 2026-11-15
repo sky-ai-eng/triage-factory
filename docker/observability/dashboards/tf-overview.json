@@ -4219,7 +4219,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "What the capture phase read, per snapshot: the git bundle (committed work), the uncommitted patch, and the session transcript. `transcript_bytes` is populated only where `runtime` is `sdk` \u2014 native conversations never snapshot a transcript, so a zero on a native row is the member not existing, not a failed read. A non-git run-root (a Jira lazy run) reports zero bundle and patch the same way.",
+      "description": "What the capture phase read, per snapshot: the git bundle (committed work) and the uncommitted patch. A non-git run-root (a Jira lazy run) reports zero bundle and patch: the members do not exist, it is not a failed read.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -4291,18 +4291,6 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "snapshot.transcript_bytes"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "bytes"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
               "options": "runtime"
             },
             "properties": [
@@ -4333,13 +4321,13 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name = \"workspace.snapshot.capture\" } | select(span.snapshot.bundle_bytes, span.snapshot.patch_bytes, span.snapshot.transcript_bytes, span.runtime)",
+          "query": "{ name = \"workspace.snapshot.capture\" } | select(span.snapshot.bundle_bytes, span.snapshot.patch_bytes, span.runtime)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
         }
       ],
-      "title": "Capture members \u2014 bundle, patch, transcript",
+      "title": "Capture members \u2014 bundle, patch",
       "type": "table"
     },
     {

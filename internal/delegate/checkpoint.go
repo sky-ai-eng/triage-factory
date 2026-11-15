@@ -678,8 +678,8 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 
 // snapshotFingerprint digests what a snapshot of this capture would carry:
 // every checkout's identity, the commits its bundle carries, the bytes of its
-// patch and the ids of its Git LFS objects, in path order, then the
-// transcript, and a stat walk of the scratch the archive would walk. Two
+// patch and the ids of its Git LFS objects, in path order, then a stat walk
+// of the scratch the archive would walk. Two
 // captures with the same fingerprint carry the same workspace, so a checkpoint
 // that matches the last one written has nothing to store.
 //
@@ -715,10 +715,6 @@ func snapshotFingerprint(ctx context.Context, captured *capturedSnapshot, wtPath
 		}
 		slices.Sort(oids)
 		field(append([]string{"lfs", strconv.Itoa(len(oids))}, oids...)...)
-	}
-	field("session", captured.state.SessionID)
-	if err := hashMember(h, captured.state.Transcript, ""); err != nil {
-		return "", fmt.Errorf("fingerprint transcript: %w", err)
 	}
 	digest, omittedCILogs := "", false
 	if captured.scratch != nil {

@@ -206,6 +206,15 @@ func (rs *runSidecar) engineLLMEnv() []string {
 	return rs.res.LLMEnv
 }
 
+// engineLLMCertPEM is the certificate the LLM proxy engineLLMEnv names serves
+// TLS with, which the engine trusts for that hop. nil-safe.
+func (rs *runSidecar) engineLLMCertPEM() []byte {
+	if rs == nil || rs.res == nil {
+		return nil
+	}
+	return rs.res.LLMCertPEM
+}
+
 // runCell is the engagement's cell, which the jail launches into. nil-safe.
 func (rs *runSidecar) runCell() cell.Cell {
 	if rs == nil {

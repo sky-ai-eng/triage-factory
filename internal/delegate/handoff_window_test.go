@@ -318,9 +318,9 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 // TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot is what the
 // ordering above buys, end to end: a conversation with no reactor between it
 // and a person, so the wake gate opens the moment the status commits and there
-// is no window to hide an unfinished snapshot in. The blob is asserted whole —
-// the session transcript an SDK resume re-invokes by id, and the ephemeral
-// scratch tree that exists nowhere else.
+// is no window to hide an unfinished snapshot in. The blob is asserted to
+// carry the ephemeral scratch tree that exists nowhere else, and the session
+// an SDK resume re-invokes by id to be in its own blob.
 func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	org := runmode.LocalDefaultOrgID
@@ -353,10 +353,11 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	}
 
 	members := snapshotMembers(t, blobs, snapshotKey(org, taskID))
-	for _, want := range []string{snapSession, snapScratchPrefix + "notes/build.log"} {
-		if !members[want] {
-			t.Errorf("snapshot member %q missing; the resume this follow-up queued would rehydrate an incomplete workspace (members: %v)", want, members)
-		}
+	if want := snapScratchPrefix + "notes/build.log"; !members[want] {
+		t.Errorf("snapshot member %q missing; the resume this follow-up queued would rehydrate an incomplete workspace (members: %v)", want, members)
+	}
+	if saved, err := s.sessionSaved(ctx, org, conversationID); err != nil || !saved {
+		t.Errorf("session blob saved = %v (err %v); the resume this follow-up queued would have no session to re-invoke", saved, err)
 	}
 }
 
