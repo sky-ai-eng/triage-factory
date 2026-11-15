@@ -432,10 +432,6 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		SortOrder:       7,
 	},
 	{
-		// Disabled: granting Dependabot access to an org with a backlog
-		// announces every open alert in one cycle, and an enabled rule would
-		// turn that into one task per vulnerable package on every team
-		// tracking a repository.
 		ID:              "system-rule-vulnerability-alert-opened",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubVulnerabilityAlertOpened,
@@ -443,7 +439,6 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Name:            "Vulnerable package in a tracked repository",
 		DefaultPriority: 0.60,
 		SortOrder:       8,
-		Disabled:        true,
 	},
 
 	// ----- triggers ---------------------------------------------------------
