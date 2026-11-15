@@ -297,8 +297,8 @@ func (s *conversationStore) parkAndRelease(ctx context.Context, orgID, conversat
 // write, so the stop columns cleared below are still the pending intent where
 // the reason reads them.
 func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Park) (bool, error) {
-	// A deliberate stop re-parks an already-parked row; an idle turn-end does
-	// not. Spelled as an extra clause rather than two queries.
+	// A deliberate stop re-parks an already-parked row; a turn_incomplete park
+	// does not. Spelled as an extra clause rather than two queries.
 	reparkGuard := ` AND (status IS NULL OR status <> 'open')`
 	if park.Deliberate {
 		reparkGuard = ``

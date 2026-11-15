@@ -68,12 +68,12 @@ type liveParkContext struct {
 	claudeCwd      string
 	// claimID names the engagement writing the park, and is required: the
 	// park goes through the claim fence and nowhere else. Every park a
-	// dispatched run writes carries one — the idle turn-end as much as the
-	// cancel, since a zombie's idle park would flip a conversation its
-	// successor is mid-turn on.
+	// dispatched run writes carries one — the turn_incomplete park as much as
+	// the cancel, since a zombie's turn_incomplete park would flip a
+	// conversation its successor is mid-turn on.
 	claimID string
-	// reason is why: db.ParkIdle() for a turn that simply ended,
-	// db.ParkStopped(...) for a cancel. See
+	// reason is why: db.ParkTurnIncomplete() for a turn that stopped before
+	// it finished, db.ParkStopped(...) for a cancel. See
 	// ConversationStore.ParkOpenForClaimSystem.
 	reason db.Park
 	// costUSD is the spend this engagement's process reported — the SDK's
@@ -595,9 +595,9 @@ func (s *Spawner) sendNudge(ctx context.Context, park liveParkContext, proc live
 // It writes through the claim fence and nothing else: a park is the holder's
 // write, in one transaction with its claim release, so a zombie executor
 // cannot park a conversation its successor holds. Every dispatched run
-// reaches this with a claim, deliberate stop and idle turn-end alike, and a
-// park with no claim to name is a caller bug — refused and logged at error,
-// never written unfenced.
+// reaches this with a claim, deliberate stop and turn_incomplete park alike,
+// and a park with no claim to name is a caller bug — refused and logged at
+// error, never written unfenced.
 //
 // Returns fenced: true when nothing was written because this engagement holds
 // no live claim. Nothing was recorded or broadcast, and the caller must not
@@ -644,8 +644,8 @@ func (s *Spawner) markConversationOpenFlipped(ctx context.Context, park livePark
 		return false, false
 	}
 	if !flipped {
-		// A racing terminal flip won, or this is an idle re-park of a row
-		// already `open` — leave its status and say nothing.
+		// A racing terminal flip won, or this is a turn_incomplete re-park of a
+		// row already `open` — leave its status and say nothing.
 		return false, false
 	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")

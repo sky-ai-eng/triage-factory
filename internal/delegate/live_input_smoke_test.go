@@ -54,7 +54,7 @@ func startSDKLiveCheck(t *testing.T, convID, message string) *sdkLiveCheck {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	park := liveParkContext{
 		orgID: org, conversationID: convID, namespace: "seedbpr-" + convID, claudeCwd: cwd,
-		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
+		claimID: claimID, reason: db.ParkTurnIncomplete(), runtime: domain.ConversationRuntimeSDK,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	e := &sdkLiveCheck{

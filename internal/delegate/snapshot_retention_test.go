@@ -263,7 +263,7 @@ func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := dbtest.HolderPark(s.conversations, ctx, runmode.LocalDefaultOrgID, conversationID, db.ParkIdle()); err != nil {
+	if _, err := dbtest.HolderPark(s.conversations, ctx, runmode.LocalDefaultOrgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 		t.Fatalf("park: %v", err)
 	}
 	if !parkedAtSet(t, database, conversationID) {

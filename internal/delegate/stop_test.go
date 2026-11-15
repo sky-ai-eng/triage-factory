@@ -206,7 +206,7 @@ func TestStopConversationAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *te
 func TestCancelBlueprintRun_RecordsIntentAndTheSettlementCancels(t *testing.T) {
 	for name, stage := range map[string]string{
 		"queued": `UPDATE conversations SET status = NULL WHERE id = ?`,
-		"parked": `UPDATE conversations SET status = 'open', park_reason = 'idle' WHERE id = ?`,
+		"parked": `UPDATE conversations SET status = 'open', park_reason = 'turn_incomplete' WHERE id = ?`,
 	} {
 		t.Run(name, func(t *testing.T) { testCancelBlueprintRunSettles(t, stage) })
 	}
@@ -734,7 +734,7 @@ func TestMarkConversationOpen_RefusesAParkWithNoClaim(t *testing.T) {
 	if fenced := s.markConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: "r-claimless",
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}); !fenced {
 		t.Error("a claimless park reported success")
 	}
@@ -827,8 +827,8 @@ func TestRecordNativeResult_ParkedSettlesThroughTheClaim(t *testing.T) {
 	).Scan(&status, &parkReason); err != nil {
 		t.Fatalf("read conversation: %v", err)
 	}
-	if status != "open" || parkReason != string(domain.ParkReasonIdle) {
-		t.Errorf("after the guard park = (%q, %q), want (open, idle)", status, parkReason)
+	if status != "open" || parkReason != string(domain.ParkReasonTurnIncomplete) {
+		t.Errorf("after the guard park = (%q, %q), want (open, turn_incomplete)", status, parkReason)
 	}
 	if hasActiveClaim(t, database, conversationID) {
 		t.Error("the guard park left the claim live; the park and the release are one write")

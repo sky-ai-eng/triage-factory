@@ -252,7 +252,7 @@ export function completionGloss(conversation: Conversation): string {
 // no entry here is printed to a person as a raw identifier, and an entry the
 // backend never writes is a gloss nobody will ever see.
 export const PARK_REASON_LABELS: Record<string, string> = {
-  idle: 'paused — nothing further came',
+  turn_incomplete: 'paused — the last reply didn’t finish',
   user_cancelled: 'stopped by user',
   system_cancelled: 'stopped by system',
   blueprint_cancelled: 'workflow cancelled',

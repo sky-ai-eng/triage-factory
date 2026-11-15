@@ -254,7 +254,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 				return err
 			}},
 			{"ParkOpenForClaimSystem", func() error {
-				_, err := conversations.ParkOpenForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID, db.ParkIdle())
+				_, err := conversations.ParkOpenForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID, db.ParkTurnIncomplete())
 				return err
 			}},
 			{"CompleteForClaimSystem", func() error {

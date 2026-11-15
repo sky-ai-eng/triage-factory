@@ -128,12 +128,12 @@ func TestEnsureWorkspace_ARehydrateTimeoutIsAnError(t *testing.T) {
 	}
 }
 
-// TestStall_AnIdleParkWithASlowSnapshotFilesNoStop: an idle park releases the
-// claim and then snapshots. However long that snapshot takes, the engagement
-// no longer holds the conversation, so the watchdog must not file a stop: one
-// would turn the idle park into a stalled one, or stop whatever holds the
-// conversation next.
-func TestStall_AnIdleParkWithASlowSnapshotFilesNoStop(t *testing.T) {
+// TestStall_ATurnIncompleteParkWithASlowSnapshotFilesNoStop: a turn_incomplete
+// park releases the claim and then snapshots. However long that snapshot
+// takes, the engagement no longer holds the conversation, so the watchdog must
+// not file a stop: one would turn the park into a stalled one, or stop
+// whatever holds the conversation next.
+func TestStall_ATurnIncompleteParkWithASlowSnapshotFilesNoStop(t *testing.T) {
 	const idle = 400 * time.Millisecond
 	f := newWorkspaceStallFixture(t, "r-park-slow-snapshot", activityTimings{idle: idle})
 	f.s.SetStorage(&slowPutStorage{Storage: f.s.Storage(), delay: 3 * idle})
@@ -144,7 +144,7 @@ func TestStall_AnIdleParkWithASlowSnapshotFilesNoStop(t *testing.T) {
 		f.keyID, f.tree, runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultParked}, nil)
 	if disp.fenced || disp.handedBack {
-		t.Fatalf("disposition = %+v, want the idle park to land", disp)
+		t.Fatalf("disposition = %+v, want the turn_incomplete park to land", disp)
 	}
 	if !f.blobExists(t) {
 		t.Fatal("the park's snapshot was not written")
@@ -163,8 +163,8 @@ func TestStall_AnIdleParkWithASlowSnapshotFilesNoStop(t *testing.T) {
 	).Scan(&status, &parkReason); err != nil {
 		t.Fatalf("read conversation: %v", err)
 	}
-	if status != domain.StatusOpen || parkReason != string(domain.ParkReasonIdle) {
-		t.Errorf("conversation = (%q, %q), want (open, idle)", status, parkReason)
+	if status != domain.StatusOpen || parkReason != string(domain.ParkReasonTurnIncomplete) {
+		t.Errorf("conversation = (%q, %q), want (open, turn_incomplete)", status, parkReason)
 	}
 }
 

@@ -878,7 +878,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	// The park is the holder's write on the admin pool; the resume that
 	// follows is the one request-path status write, driven under the user's
 	// claims — the open→queued CAS the resume path runs.
-	parked, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkIdle())
+	parked, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkTurnIncomplete())
 	if err != nil {
 		t.Fatalf("park: %v", err)
 	}

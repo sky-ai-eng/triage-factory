@@ -342,14 +342,14 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 //
 // A pending stop decides the reason whatever the caller passed, because the
 // intent is what records who asked, and every path that delivers a stop —
-// the local cancel, the cross-pod signal, the renewal, an idle turn-end that
-// happens to land first — reaches this write. The derivation is one CASE so a
+// the local cancel, the cross-pod signal, the renewal, a turn_incomplete park
+// that happens to land first — reaches this write. The derivation is one CASE so a
 // further kind of stop is one more arm. Every SET expression reads the row as
 // it stood before the write, so the stop columns cleared below are still the
 // pending intent where the reason reads them.
 func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park db.Park) (bool, error) {
-	// A deliberate stop re-parks an already-parked row; an idle turn-end does
-	// not. Spelled as an extra clause rather than two queries.
+	// A deliberate stop re-parks an already-parked row; a turn_incomplete park
+	// does not. Spelled as an extra clause rather than two queries.
 	reparkGuard := ` AND (status IS NULL OR status <> 'open')`
 	if park.Deliberate {
 		reparkGuard = ``

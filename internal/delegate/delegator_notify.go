@@ -24,15 +24,15 @@ import (
 
 // announcePark tells the delegator about a park that just landed: the paused
 // notification's doorbell when the row now waits on them, and a toast when the
-// park is a turn that ended. It reads the row rather than trusting the park it
-// asked for, because a stop requested in the meantime overrides the reason in
-// the store, so a turn that ends while the stall watchdog stops it parks
+// park is not a deliberate stop. It reads the row rather than trusting the park
+// it asked for, because a stop requested in the meantime overrides the reason
+// in the store, so a turn that ends while the stall watchdog stops it parks
 // stalled.
 //
-// Only the idle park toasts. A deliberate stop terminates the blueprint behind
-// it, so "resumes on the next message" would be a promise this build cannot
-// keep: the claim gate refuses a parked step under a finished blueprint until
-// the resume work lands.
+// Only a turn_incomplete park toasts. A deliberate stop terminates the
+// blueprint behind it, so "resumes on the next message" would be a promise
+// this build cannot keep: the claim gate refuses a parked step under a
+// finished blueprint until the resume work lands.
 func (s *Spawner) announcePark(park liveParkContext) {
 	conv := s.readConversation(park.orgID, park.conversationID)
 	if conv == nil {
@@ -49,8 +49,7 @@ func (s *Spawner) announcePark(park liveParkContext) {
 
 // waitsOnDelegator is ListAwaitingPersonSystem's test on a row already read,
 // so a park rings the doorbell only when it waits on the person who delegated
-// it, which is when the sweep it wakes may have a notice to open. An idle
-// park, the end of every turn, rings nothing.
+// it, which is when the sweep it wakes may have a notice to open.
 func waitsOnDelegator(conv *domain.Conversation) bool {
 	return conv.CreatorUserID != "" && conv.Status == domain.StatusOpen && conv.EndedAt == nil &&
 		conv.ArchivedAt == nil && conv.ParkReason.AwaitsPerson()

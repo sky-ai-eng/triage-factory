@@ -1157,7 +1157,7 @@ func (s *Spawner) processCompletion(
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        claimID,
-			reason:         db.ParkIdle(),
+			reason:         db.ParkTurnIncomplete(),
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        completion.CostUSD,
 			mirror:         mirror,

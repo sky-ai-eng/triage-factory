@@ -1130,7 +1130,7 @@ func (s *Spawner) recordNativeResult(
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         db.ParkIdle(),
+			reason:         db.ParkTurnIncomplete(),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),

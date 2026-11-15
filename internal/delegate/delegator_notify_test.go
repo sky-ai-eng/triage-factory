@@ -17,15 +17,16 @@ import (
 )
 
 // A run's toasts are for the person who delegated it, and nothing a run says
-// reaches the org at large: a turn that ends toasts its delegator alone.
-func TestIdlePark_ToastsOnlyTheDelegator(t *testing.T) {
+// reaches the org at large: a turn that did not finish toasts its delegator
+// alone.
+func TestTurnIncompletePark_ToastsOnlyTheDelegator(t *testing.T) {
 	f := newStallFixture(t, "r-toast", activityTimings{idle: time.Hour})
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
 
 	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
-		reason: db.ParkIdle(),
+		reason: db.ParkTurnIncomplete(),
 	}); fenced || !flipped {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
@@ -353,29 +354,29 @@ func TestPausedConversation_OpensFromTheRowsAndResolvesWhenWoken(t *testing.T) {
 	rec.Inactive(t, org, kinds.ConversationPaused)
 }
 
-// An idle park is a turn that ended, not a wait: it rings nothing and the
-// sweep opens nothing for it.
-func TestPausedConversation_AnIdleParkOpensNothing(t *testing.T) {
+// A turn_incomplete park is not one of the reasons that wait on a person: it
+// rings nothing and the sweep opens nothing for it.
+func TestPausedConversation_ATurnIncompleteParkOpensNothing(t *testing.T) {
 	f := newStallFixture(t, "r-idle", activityTimings{idle: time.Hour})
 	rec := notifytest.Record(t)
 	rings := ringOn(f.s)
 
 	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
-		reason: db.ParkIdle(),
+		reason: db.ParkTurnIncomplete(),
 	}); fenced || !flipped {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
 	if got := rings.rang(); len(got) != 0 {
-		t.Errorf("doorbell rang %v for an idle park, want no ring", got)
+		t.Errorf("doorbell rang %v for a turn_incomplete park, want no ring", got)
 	}
 	passOnce(t, f.s)
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
 }
 
-// A turn that ends while the stall watchdog's stop is pending parks stalled,
+// A turn that stops while the stall watchdog's stop is pending parks stalled,
 // whatever the park asked for, and that park waits on the delegator.
-func TestPausedConversation_AnIdleParkThatLandsAStallOpensIt(t *testing.T) {
+func TestPausedConversation_ATurnIncompleteParkThatLandsAStallOpensIt(t *testing.T) {
 	f := newStallFixture(t, "r-idle-stalled", activityTimings{idle: time.Hour})
 	rec := notifytest.Record(t)
 	rings := ringOn(f.s)
@@ -386,7 +387,7 @@ func TestPausedConversation_AnIdleParkThatLandsAStallOpensIt(t *testing.T) {
 
 	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
-		reason: db.ParkIdle(),
+		reason: db.ParkTurnIncomplete(),
 	}); fenced || !flipped {
 		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
 	}
