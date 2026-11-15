@@ -141,3 +141,22 @@ func TestWriteFileIfChanged_ReportsWhetherItWrote(t *testing.T) {
 		t.Error("changed content: expected wrote=true, got false")
 	}
 }
+
+func TestParseNodeVersion(t *testing.T) {
+	for _, tc := range []struct {
+		in           string
+		major, minor int
+		ok           bool
+	}{
+		{"v18.14.0", 18, 14, true},
+		{"v18.13.2", 18, 13, true},
+		{"v22.11.0", 22, 11, true},
+		{"v18", 0, 0, false},
+		{"vx.1.0", 0, 0, false},
+	} {
+		major, minor, err := parseNodeVersion(tc.in)
+		if ok := err == nil; ok != tc.ok || major != tc.major || minor != tc.minor {
+			t.Errorf("parseNodeVersion(%q) = %d, %d, %v; want %d, %d, ok=%v", tc.in, major, minor, err, tc.major, tc.minor, tc.ok)
+		}
+	}
+}
