@@ -501,8 +501,6 @@ func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Wor
 				"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "key", key, "error", err)
 		}
 	}
-	// The Socket Mode reconciler closes a connection whose app has no rows
-	// left.
 	notifyConfigChanged(ws.OrgID)
 	slackLog.Warn("slack app removed from the workspace in Slack; disconnected it",
 		"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_type", ev.Type)

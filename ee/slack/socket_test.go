@@ -861,6 +861,44 @@ func TestSocketManager_TwoRowsOneApp_ExactlyOneConnection(t *testing.T) {
 	}
 }
 
+// TestSocketManager_RowWithTheConnectionsTokenRemoved_RedialsWithAnother: one
+// app connected in two workspaces runs one connection, dialed with one row's
+// copy of the app token. When that row goes and its secrets are deleted (a
+// disconnect, or Slack removing the app from that workspace), the next dial
+// reads the other row's copy, so the app's remaining workspace keeps Socket
+// Mode.
+func TestSocketManager_RowWithTheConnectionsTokenRemoved_RedialsWithAnother(t *testing.T) {
+	withFastSocketTimings(t)
+	fake := newFakeSlackSocket(t)
+	refA := "slack_ws_T1A_" + socketTestAppID + "_app_token"
+	refB := "slack_ws_T2B_" + socketTestAppID + "_app_token"
+	rowA := &slackstore.Workspace{WorkspaceID: "T1A", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: refA}
+	rowB := &slackstore.Workspace{WorkspaceID: "T2B", APIAppID: socketTestAppID, OrgID: socketTestOrgID, Transport: transportSocket, AppTokenRef: refB}
+	rig := newSocketTestRig(t, rowA, rowB)
+	runManager(t, rig.mgr)
+	conn1 := fake.nextConn(t)
+
+	rig.mgr.mu.Lock()
+	running := rig.mgr.conns[socketTestAppID]
+	rig.mgr.mu.Unlock()
+	gone, kept := rowA, rowB
+	if running.tokenRef() == refB {
+		gone, kept = rowB, rowA
+	}
+	rig.wsStore.deleteRow(gone.WorkspaceID, gone.APIAppID)
+	rig.secrets.deleteValue(gone.OrgID, gone.AppTokenRef)
+	select {
+	case rig.configChanged <- struct{}{}:
+	default:
+	}
+
+	sendDisconnect(t, conn1, "refresh_requested")
+	conn2 := fake.nextConn(t) // a redial found a token
+	payload := eventCallbackPayload(kept.WorkspaceID, socketTestAppID, "Ev-after-removal", mentionInner("C1", "U1", "1.0"))
+	sendEventsAPI(t, conn2, "Env-after-removal", payload)
+	expectAck(t, conn2, "Env-after-removal")
+}
+
 func TestSocketManager_Shutdown_ClosesConnectionsPromptly(t *testing.T) {
 	withFastSocketTimings(t)
 	fake := newFakeSlackSocket(t)

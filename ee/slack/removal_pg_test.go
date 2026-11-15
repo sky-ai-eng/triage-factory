@@ -112,12 +112,12 @@ func (r *removalRig) outcomes() map[string]int64 {
 	return sumByAttr(r.t, r.metrics, "slack.ingest.events", "outcome")
 }
 
-// payload builds the event_callback envelope both transports carry.
+// removalPayload is eventCallbackPayload carrying an event_time, which the
+// removal's reconnect guard reads.
 func removalPayload(workspaceID, eventID string, eventTime time.Time, inner map[string]any) map[string]any {
-	return map[string]any{
-		"type": "event_callback", "team_id": workspaceID, "api_app_id": removalTestApp,
-		"event_id": eventID, "event_time": eventTime.Unix(), "event": inner,
-	}
+	p := eventCallbackPayload(workspaceID, removalTestApp, eventID, inner)
+	p["event_time"] = eventTime.Unix()
+	return p
 }
 
 func (r *removalRig) postSigned(workspaceID string, payload map[string]any) *httptest.ResponseRecorder {

@@ -44,9 +44,8 @@ type socketEnvelope struct {
 // Disposable, never repaired — run's loop tears the whole connection down on
 // any error and dials fresh; there is no in-place recovery.
 type appConnection struct {
-	appID       string
-	orgID       string // the app's org (app->one-org, TFAC-533) — captured once at start
-	appTokenRef string // org_secrets key for the app-level (xapp-) token
+	appID string
+	orgID string // the app's org (app->one-org, TFAC-533) — captured once at start
 
 	cancel context.CancelFunc // stops just this connection, independent of its siblings
 	done   chan struct{}      // closed when run returns
@@ -59,6 +58,22 @@ type appConnection struct {
 	mu        sync.Mutex
 	status    connStatus
 	sightings map[string]*sightingView // keyed by team_id
+	// appTokenRef is the org_secrets key each dial reads the app-level
+	// (xapp-) token from. The reconciler moves it to another of the app's
+	// rows when the row it names is gone.
+	appTokenRef string
+}
+
+func (c *appConnection) tokenRef() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.appTokenRef
+}
+
+func (c *appConnection) setTokenRef(ref string) {
+	c.mu.Lock()
+	c.appTokenRef = ref
+	c.mu.Unlock()
 }
 
 // snapshot returns a value copy of the connection's current status,
@@ -196,7 +211,7 @@ func (c *appConnection) run(ctx context.Context, stores db.Stores, pipeline *ing
 // returns a non-nil err (ctx cancellation errors are discarded by the caller,
 // which checks ctx.Err() itself).
 func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipeline *ingestPipeline, client *http.Client) (connectedAt time.Time, err error) {
-	appToken, err := stores.Secrets.GetSystem(ctx, c.orgID, c.appTokenRef)
+	appToken, err := stores.Secrets.GetSystem(ctx, c.orgID, c.tokenRef())
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read app token: %w", err)
 	}
@@ -438,7 +453,7 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 		// Dormancy: an entitlement lapse mid-connection race. The reconciler
 		// takes the whole connection down within a tick; until then, drop
 		// silently — same as the webhook's ackEmpty for a lapsed org. An
-		// app removal passes, as it does there.
+		// app removal passes (removesConnection).
 		return true
 	}
 
