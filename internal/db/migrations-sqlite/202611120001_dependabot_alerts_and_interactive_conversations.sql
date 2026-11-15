@@ -113,9 +113,9 @@ CREATE INDEX idx_conversations_pause_notice_due ON conversations (status, parked
       AND creator_user_id IS NOT NULL AND ended_at IS NULL AND archived_at IS NULL
       AND pause_noticed_parked_at IS NOT parked_at;
 
--- A turn that stops before it finishes parks as `turn_incomplete`. Rows earlier
--- builds stored spell it `idle`, which nothing else wrote (a turn that
--- finishes parks with no reason), so every `idle` row is relabelled.
+-- A turn that stops before it finishes parks as `turn_incomplete`, where
+-- earlier builds stored `idle`. `idle` was never written for a turn that
+-- finished, which parks with no reason, so every `idle` row is relabelled.
 UPDATE conversations
 SET park_reason = 'turn_incomplete'
 WHERE park_reason = 'idle';
