@@ -683,9 +683,9 @@ func TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings(t *testing.T) {
 		wantNext     bool
 		wantControls []string
 	}{
-		{"the same provider", "claude-fable-5-1", nil, true, []string{"set_settings claude-fable-5-1 high", "send"}},
+		{"the same provider", "claude-fable-5-2", nil, true, []string{"set_settings claude-fable-5-2 high", "send"}},
 		{"another provider", "us.anthropic.claude-sonnet-5-5", nil, false, nil},
-		{"a move the process does not confirm", "claude-fable-5-1", errors.New("not applied"), false, []string{"set_settings claude-fable-5-1 high"}},
+		{"a move the process does not confirm", "claude-fable-5-2", errors.New("not applied"), false, []string{"set_settings claude-fable-5-2 high"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
@@ -787,7 +787,7 @@ func TestDriveLiveConversation_AnUnconfirmedMoveIsTriedOnce(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
 	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
 		pendingUserInput("r-live-unconfirmed", runmode.LocalDefaultUserID, "think harder",
-			domain.TurnSettings{Model: "claude-fable-5-1", Effort: domain.EffortHigh})); err != nil {
+			domain.TurnSettings{Model: "claude-fable-5-2", Effort: domain.EffortHigh})); err != nil {
 		t.Fatalf("queue the person's message: %v", err)
 	}
 	proc := newFakeLiveProc("sess")
@@ -810,7 +810,7 @@ func TestDriveLiveConversation_AnUnconfirmedMoveIsTriedOnce(t *testing.T) {
 	proc.mu.Lock()
 	controls := append([]string(nil), proc.controls...)
 	proc.mu.Unlock()
-	if want := []string{"set_settings claude-fable-5-1 high"}; strings.Join(controls, "|") != strings.Join(want, "|") {
+	if want := []string{"set_settings claude-fable-5-2 high"}; strings.Join(controls, "|") != strings.Join(want, "|") {
 		t.Errorf("controls = %q, want %q", controls, want)
 	}
 	if asked != 0 {

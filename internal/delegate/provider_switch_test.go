@@ -64,7 +64,7 @@ func TestWarmResume_KeepsTheEngagementForASwitchableModel(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	const (
 		engagement = "claude-sonnet-5-5"
-		sameProv   = "claude-fable-5-1"
+		sameProv   = "claude-fable-5-2"
 		otherProv  = "us.anthropic.claude-sonnet-5-5"
 	)
 	for _, tc := range []struct {
