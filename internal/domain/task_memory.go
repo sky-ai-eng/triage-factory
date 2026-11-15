@@ -62,6 +62,10 @@ type TaskMemory struct {
 	Content        string
 	Source         MemorySource
 	CreatedAt      time.Time
+	// UpdatedAt is when Content last changed: CreatedAt until a write stores
+	// different content. A write that stores the same content again leaves it
+	// where it is, so it dates the content and not the last write.
+	UpdatedAt time.Time
 
 	// TaskID is the producing conversation's task, projected through the same
 	// join StepIndex and PromptName come through. It is what splits an

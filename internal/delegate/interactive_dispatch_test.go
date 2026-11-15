@@ -223,14 +223,30 @@ func TestDispatch_InteractiveSDKFirstTurnCarriesThePersonsMessage(t *testing.T) 
 // TestDispatch_InteractiveTurnIsNotNudgedForAnArtifact: the artifact-contract
 // nudge sends a blueprint's final step that produced nothing back to work. A
 // turn in a person's conversation that produced nothing is ordinary, so the
-// launch arms no nudge, though the conversation, with no artifact and no
-// deliverable, is one an armed check would send back.
+// launch's turn-end check asks only about the memory, though the
+// conversation, with no artifact and no deliverable, is one an armed artifact
+// check would send back.
 func TestDispatch_InteractiveTurnIsNotNudgedForAnArtifact(t *testing.T) {
 	f := newInteractiveFixture(t, "1421-nudge")
 	launched := f.dispatch(t, "what does this ticket want?")
 
-	if launched.nudge != nil {
-		t.Errorf("the launch arms a turn-end nudge: %q", launched.nudge(context.Background()))
+	if launched.nudge == nil {
+		t.Fatal("the launch arms no turn-end check; a person's conversation is asked about its memory")
+	}
+	// A turn that made a tool call and wrote no memory: the memory check asks
+	// about it, and an artifact check, asked first, would have asked instead.
+	for _, m := range []domain.Message{
+		{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "call-1", Name: "bash"}}},
+		{Role: "tool", ToolCallID: "call-1", Content: "ok"},
+		{Role: "assistant", Content: "it wants a retry"},
+	} {
+		m.ConversationID = f.conv.ID
+		if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &m); err != nil {
+			t.Fatalf("insert the turn's %s row: %v", m.Role, err)
+		}
+	}
+	if got := launched.nudge(context.Background()); got != memoryNudgeNote {
+		t.Errorf("the launch's turn-end check answered %q, want the memory note alone", got)
 	}
 	task, err := f.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, f.taskID)
 	if err != nil || task == nil {

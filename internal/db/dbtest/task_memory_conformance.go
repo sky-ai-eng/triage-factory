@@ -296,6 +296,53 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
+	t.Run("updated_at_moves_only_when_the_content_changes", func(t *testing.T) {
+		// updated_at dates the content, not the write: a check counting what
+		// happened since the memory was last written must not have its count
+		// reset by a write of the same bytes again, nor by one that only
+		// renames who wrote them.
+		s, orgID, seed := mk(t)
+		conversationID, _ := seed.Conversation(t, "updated-at")
+		write := func(content string, source domain.MemorySource) domain.TaskMemory {
+			t.Helper()
+			mem, err := s.UpsertAgentMemory(ctx, orgID, conversationID, "", content, source)
+			if err != nil {
+				t.Fatalf("UpsertAgentMemory(%q, %s): %v", content, source, err)
+			}
+			return mem
+		}
+
+		first := write("first", domain.MemorySourceAgent)
+		if !first.UpdatedAt.Equal(first.CreatedAt) {
+			t.Errorf("insert: UpdatedAt = %v, want CreatedAt %v", first.UpdatedAt, first.CreatedAt)
+		}
+		for _, source := range []domain.MemorySource{domain.MemorySourceAgent, domain.MemorySourceGenerated} {
+			if same := write("first", source); !same.UpdatedAt.Equal(first.UpdatedAt) {
+				t.Errorf("rewriting the same content as %s moved UpdatedAt from %v to %v", source, first.UpdatedAt, same.UpdatedAt)
+			}
+		}
+		second := write("second", domain.MemorySourceAgent)
+		if !second.UpdatedAt.After(first.UpdatedAt) {
+			t.Errorf("new content: UpdatedAt = %v, want after %v", second.UpdatedAt, first.UpdatedAt)
+		}
+		// NULL content is content too: clearing it, and filling it again, are
+		// both changes.
+		cleared := write("", domain.MemorySourceNone)
+		if !cleared.UpdatedAt.After(second.UpdatedAt) {
+			t.Errorf("cleared content: UpdatedAt = %v, want after %v", cleared.UpdatedAt, second.UpdatedAt)
+		}
+		if again := write("", domain.MemorySourceNone); !again.UpdatedAt.Equal(cleared.UpdatedAt) {
+			t.Errorf("clearing cleared content moved UpdatedAt from %v to %v", cleared.UpdatedAt, again.UpdatedAt)
+		}
+		refilled := write("third", domain.MemorySourceAgent)
+		if !refilled.UpdatedAt.After(cleared.UpdatedAt) {
+			t.Errorf("refilled content: UpdatedAt = %v, want after %v", refilled.UpdatedAt, cleared.UpdatedAt)
+		}
+		if !refilled.CreatedAt.Equal(first.CreatedAt) {
+			t.Errorf("CreatedAt moved from %v to %v", first.CreatedAt, refilled.CreatedAt)
+		}
+	})
+
 	t.Run("GetMemoriesForEntity_orders_by_created_at_ASC", func(t *testing.T) {
 		// Materializer reads in oldest-first order so the next agent
 		// reading prior memories sees them chronologically. Insert two

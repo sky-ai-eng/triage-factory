@@ -692,7 +692,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		perms:        perms,
 		sink:         sink,
 		mirror:       mirror,
-		nudge:        turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg))),
+		nudge:        turnEndNudge(s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive)),
 		hasBlueprint: cfg.blueprintRunID != "",
 	})
 

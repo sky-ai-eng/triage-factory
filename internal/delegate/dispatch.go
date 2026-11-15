@@ -1617,6 +1617,8 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// resume's first claim-fenced write meets the same fence.
 	s.updatePhase(stepCtx, orgID, conv.ID, conv.ClaimID, "")
 
+	finalStep := blueprintRunID != "" && s.resumedStepIsFinal(stepCtx, orgID, conv)
+	nudge := turnEndNudge(s.turnEndNudges(orgID, conv.ID, *task, finalStep, conv.Type == domain.ConversationTypeInteractive))
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,
 		Effort:            s.claimEffort(stepCtx, orgID, conv.ID, conv.Model),
@@ -1630,7 +1632,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		claimID:           conv.ClaimID,
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
-		nudge:             turnEndNudge(s.artifactContractNudge(orgID, conv.ID, *task, blueprintRunID != "" && s.resumedStepIsFinal(stepCtx, orgID, conv))),
+		nudge:             nudge,
 		conversationType:  conv.Type,
 		hasBlueprint:      blueprintRunID != "",
 		commitSigner:      &commitSigner,

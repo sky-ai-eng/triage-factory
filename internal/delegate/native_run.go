@@ -311,7 +311,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// Every tool call is a chance the agent just wrote its memory
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
-			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg)),
+			ShouldStopAfterTurn: s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -782,8 +782,7 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // terminal external action, which is what its addendum tells it. finalStep
 // says which this is.
 //
-// Both runtimes ask it: the native loop as its ShouldStopAfterTurn hook, and
-// the SDK driver through turnEndNudge.
+// Both runtimes ask it, through turnEndNudges.
 //
 // Asking twice about the same silence would be badgering — the model already
 // answered. Asking again after a human has intervened is not: the premise
@@ -843,31 +842,31 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
 			return ""
 		}
-		if askedAboutArtifactAlready(rows) {
+		if askedSinceHumanInput(rows, artifactNudgeTag) {
 			return ""
 		}
 		return artifactNudgeNote
 	}
 }
 
-// askedAboutArtifactAlready reports whether the nudge has been put with no
-// human input since.
+// askedSinceHumanInput reports whether the nudge whose note opens with tag has
+// been put with no human input since.
 //
 // Walking back from the newest row to the first one that speaks for someone:
 // the nudge itself means the question stands answered and nothing has
 // happened to change it; genuine human input means a person spoke
 // afterwards, so the run is working on something the question was never
 // asked about. Everything else the system wrote on the agent's behalf — a
-// park's stop-note, a staged event note, the crash notice — speaks for no
-// one and is skipped, using the same closed human set the engine's drain
-// keys on. The nudge check comes first because the nudge row itself is
-// system-authored: the human filter would skip it.
-func askedAboutArtifactAlready(rows []domain.Message) bool {
+// park's stop-note, a staged event note, the crash notice, another nudge's
+// note — speaks for no one and is skipped, using the same closed human set
+// the engine's drain keys on. The tag check comes first because the nudge
+// row itself is system-authored: the human filter would skip it.
+func askedSinceHumanInput(rows []domain.Message, tag string) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Role != "user" {
 			continue
 		}
-		if strings.Contains(rows[i].Content, artifactNudgeTag) {
+		if strings.Contains(rows[i].Content, tag) {
 			return true
 		}
 		if agentloop.IsHumanInput(rows[i]) {

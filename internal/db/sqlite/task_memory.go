@@ -46,12 +46,15 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversa
 	if blueprintRunID != "" {
 		blueprintRun = blueprintRunID
 	}
+	now := time.Now().UTC()
 	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx, `
-		INSERT INTO conversation_memory (id, conversation_id, blueprint_run_id, agent_content, source, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, source = excluded.source, blueprint_run_id = excluded.blueprint_run_id
+		INSERT INTO conversation_memory (id, conversation_id, blueprint_run_id, agent_content, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, source = excluded.source, blueprint_run_id = excluded.blueprint_run_id,
+			updated_at = CASE WHEN conversation_memory.agent_content IS NOT excluded.agent_content
+			                  THEN excluded.updated_at ELSE conversation_memory.updated_at END
 		RETURNING `+taskMemoryRowColumns,
-		uuid.New().String(), conversationID, blueprintRun, agentContent, string(source), time.Now().UTC()))
+		uuid.New().String(), conversationID, blueprintRun, agentContent, string(source), now, now))
 	if err != nil {
 		return domain.TaskMemory{}, fmt.Errorf("upsert conversation_memory: %w", err)
 	}
@@ -154,7 +157,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 // a row whose conversation or prompt is gone still comes back — it loses its
 // legible name, never its content.
 const taskMemorySelect = `
-	SELECT rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
+	SELECT rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at, rm.updated_at,
 	       c.task_id, c.blueprint_step_index, p.name
 	FROM conversation_memory rm
 	LEFT JOIN conversations c ON c.id = rm.conversation_id
@@ -168,7 +171,7 @@ const taskMemorySelect = `
 // against the bare conversations/prompts table names instead — the same
 // restriction sqliteClaimReturningColumns (conversation.go) exists for.
 const taskMemoryRowColumns = `
-	id, conversation_id, blueprint_run_id, agent_content, source, created_at,
+	id, conversation_id, blueprint_run_id, agent_content, source, created_at, updated_at,
 	(SELECT c.task_id FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT c.blueprint_step_index FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT p.name FROM conversations c JOIN prompts p ON p.id = c.prompt_id WHERE c.id = conversation_memory.conversation_id)
@@ -182,8 +185,8 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	var blueprintRunID, agentContent, taskID, promptName sql.NullString
 	var source string
 	var stepIndex sql.NullInt64
-	var createdAt time.Time
-	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
+	var createdAt, updatedAt time.Time
+	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt, &updatedAt,
 		&taskID, &stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
@@ -191,6 +194,7 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	m.Content = agentContent.String
 	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
+	m.UpdatedAt = updatedAt
 	m.TaskID = taskID.String
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)

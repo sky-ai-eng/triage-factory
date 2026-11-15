@@ -98,7 +98,8 @@ type Hooks struct {
 	// ShouldStopAfterTurn runs when the model would conclude (an assistant
 	// message with no tool calls). A non-empty nudge is inserted as pending
 	// input and the loop continues instead of concluding; "" lets the
-	// conclusion stand. This is where the artifact-contract nudge lives.
+	// conclusion stand. This is where the turn-end nudges live: the artifact
+	// contract and the memory update.
 	//
 	// Whether a nudge repeats is the hook's business, not the engine's. The
 	// engine deliberately keeps no "already nudged" flag: that would be
@@ -853,7 +854,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			continue
 		}
 
-		// The would-stop hook (the artifact contract, today). Its answer is
+		// The would-stop hook (the turn-end nudges). Its answer is
 		// taken as given — see Hooks.ShouldStopAfterTurn for why the engine
 		// keeps no state about whether it has fired.
 		if e.Hooks.ShouldStopAfterTurn != nil {
