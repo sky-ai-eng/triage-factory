@@ -38,10 +38,11 @@ type insertRow func(context.Context, *domain.Message) error
 // per injected prior memory, oldest first, then the task context — and returns
 // them in that order, or nil when the conversation already carries an opening.
 //
-// Runtime-neutral by construction: it takes the transcript it must not
-// re-read, the memories the launch already loaded, and the door to write
-// through, so both engines mint the same rows in the same order and a surface
-// reading the transcript cannot tell which produced it.
+// Runtime-neutral by construction: it takes whether the conversation has been
+// opened, the transcript it must not re-read, the memories the launch already
+// loaded, and the door to write through, so both engines mint the same rows in
+// the same order and a surface reading the transcript cannot tell which
+// produced it.
 //
 // The rows are DELIVERED rather than pending, which is deliberate on both
 // runtimes. The native engine assembles delivered rows on its first call, so
@@ -50,14 +51,13 @@ type insertRow func(context.Context, *domain.Message) error
 // user row is the resume queue — writing the opening there would have a
 // re-claim replay it as new input.
 //
-// The gate is the task-context row's subtype, never an empty transcript: a
-// conversation can already carry a queued follow-up (a person typed while it
-// waited for an executor) or a stop note from a bring-up that never reached
-// the agent, and counting those as an opening leaves the run with no task
-// context at all. The window it does not close is a crash between the memory
-// rows and the task-context row, which the next claim re-mints over — one
-// duplicated memory in a transcript, against a per-row gate that would have to
-// read metadata on every claim to prevent it.
+// The gate is opened, the caller's OpeningTaskContextSystem answer, rather
+// than anything read off rows: rows are the assembly window, and a compaction
+// takes the opening out of it without un-opening the conversation. The case the
+// gate does not cover is a crash between the memory rows and the task-context
+// row, which the next claim re-mints over — one duplicated memory in a
+// transcript, against a per-row gate that would have to read metadata on every
+// claim to prevent it.
 //
 // Those same rows are why the opening is SEQUENCED rather than just appended.
 // A row's assembly position is COALESCE(seq, id) and these are inserted last,
@@ -75,11 +75,12 @@ type insertRow func(context.Context, *domain.Message) error
 func mintOpeningRows(
 	ctx context.Context,
 	insert insertRow,
+	opened bool,
 	rows []domain.Message,
 	memories []domain.TaskMemory,
 	conversationID, userID, taskContext string,
 ) ([]domain.Message, error) {
-	if conversationOpened(rows) {
+	if opened {
 		return nil, nil
 	}
 
@@ -187,59 +188,6 @@ func selectInjectedMemories(memories []domain.TaskMemory) []domain.TaskMemory {
 		picked[i], picked[j] = picked[j], picked[i]
 	}
 	return picked
-}
-
-// conversationOpened reports whether a conversation's opening has been minted,
-// by the one row that says so: the task context.
-//
-// It is what the two native gates ask — the mint's own idempotence gate and
-// the inherited-memory clear — and both would be wrong asking whether the
-// transcript holds ANY row. A conversation that has only been handed a queued
-// follow-up or a stop note has not started: minting nothing for it leaves it
-// with no task context, and keeping its predecessor's memory file credits this
-// run with work it did not do.
-func conversationOpened(rows []domain.Message) bool {
-	_, opened := openingTaskContext(rows)
-	return opened
-}
-
-// openingTaskContext is the content of the row conversationOpened finds: the
-// task context the conversation's opening sent (mintOpeningRows). ok is false
-// for a conversation that has not been opened.
-func openingTaskContext(rows []domain.Message) (taskContext string, ok bool) {
-	for _, r := range rows {
-		if r.Subtype == domain.MessageSubtypeInjectionTaskContext {
-			return r.Content, true
-		}
-	}
-	return "", false
-}
-
-// conversationHasWork reports whether a transcript holds anything a failure
-// would destroy — the question a disposition asks, which is not quite the
-// question conversationOpened answers.
-//
-// Two arms, and both carry weight. A task-context row is the opening every
-// runtime mints. An assistant row is evidence the model has taken a turn, and
-// it is all a conversation opened by an earlier build has to offer — those
-// transcripts begin at the agent's first reply, so asking for the opening
-// alone would read one as fresh and fail its blueprint over a runtime that
-// would not restart.
-//
-// What neither arm admits is the class both gates exist to exclude: rows the
-// control plane wrote to a conversation that never ran. A queued follow-up and
-// a stop note are role=user, an injected memory and a claim-time notice carry
-// their own subtypes, and none of them is work.
-func conversationHasWork(rows []domain.Message) bool {
-	if conversationOpened(rows) {
-		return true
-	}
-	for _, r := range rows {
-		if r.Role == "assistant" {
-			return true
-		}
-	}
-	return false
 }
 
 // openingRowsOf returns the rows a conversation was opened with — the injected

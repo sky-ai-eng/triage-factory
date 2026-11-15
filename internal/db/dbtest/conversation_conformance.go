@@ -4657,6 +4657,95 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The opening is read across every window state, and only the task-context
+	// row is one: a compaction marks it inactive without un-opening the
+	// conversation, and the control plane's own rows land before any opening.
+	t.Run("OpeningTaskContext_FindsTheTaskContextRowInAnyWindowState", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		delivered, undelivered := true, false
+		insert := func(conversationID string, m domain.Message) {
+			t.Helper()
+			m.ConversationID = conversationID
+			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+		}
+		opening := func(conversationID string) (string, bool) {
+			t.Helper()
+			content, ok, err := store.OpeningTaskContextSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("OpeningTaskContextSystem: %v", err)
+			}
+			return content, ok
+		}
+
+		unopened := seedConversationForTest(t, orgID, seed, "queued")
+		if _, ok := opening(unopened); ok {
+			t.Error("an empty transcript reads as opened")
+		}
+		insert(unopened, domain.Message{Role: "user", Content: "and update the README", Delivered: &undelivered})
+		insert(unopened, domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "would not start", Delivered: &delivered})
+		insert(unopened, domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "restored", Delivered: &delivered})
+		insert(unopened, domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionMemory, Content: "prior", Delivered: &delivered})
+		if _, ok := opening(unopened); ok {
+			t.Error("a follow-up, a stop note, a claim-time notice and a memory read as an opening")
+		}
+
+		for _, state := range []domain.MessageWindowState{domain.MessageWindowActive, domain.MessageWindowInactive} {
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			const want = "<task_context>\nas the opening rendered it\n</task_context>"
+			insert(conversationID, domain.Message{
+				Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: want,
+				Delivered: &delivered, WindowState: state,
+			})
+			insert(conversationID, domain.Message{Role: "assistant", Content: "on it", WindowState: state})
+			if got, ok := opening(conversationID); !ok || got != want {
+				t.Errorf("window state %q: opening = (%q, %v), want (%q, true)", state, got, ok, want)
+			}
+		}
+	})
+
+	t.Run("HasAssistantMessage_CountsAnAssistantRowInAnyWindowState", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		delivered := true
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		has := func() bool {
+			t.Helper()
+			got, err := store.HasAssistantMessageSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("HasAssistantMessageSystem: %v", err)
+			}
+			return got
+		}
+
+		if has() {
+			t.Error("an empty transcript holds an assistant message")
+		}
+		for _, m := range []domain.Message{
+			{Role: "user", Content: "the person's ask", Delivered: &delivered},
+			{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "would not start", Delivered: &delivered},
+			{Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "<task_context/>", Delivered: &delivered},
+		} {
+			m.ConversationID = conversationID
+			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+		}
+		if has() {
+			t.Error("user rows read as an assistant message")
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: conversationID, Role: "assistant", Content: "compacted", WindowState: domain.MessageWindowInactive,
+		}); err != nil {
+			t.Fatalf("InsertMessage assistant: %v", err)
+		}
+		if !has() {
+			t.Error("an inactive assistant message is not counted; a compacted conversation would read as one the model never answered")
+		}
+	})
+
 	t.Run("DisplayReads_HideWithdrawnPendingRows", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

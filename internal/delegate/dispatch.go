@@ -2646,8 +2646,10 @@ func (s *Spawner) failUnstartedStep(orgID string, br *domain.BlueprintRun, conv 
 }
 
 // conversationHasWork reports whether this conversation holds anything a
-// failure would destroy — conversationHasWork's reading of the transcript,
-// which both runtimes answer: a minted opening, or a turn the model took.
+// failure would destroy: a minted opening, or a turn the model took. Both are
+// read across every window state, because a compaction marks them inactive
+// and the work they stand for is still there. The second is all a
+// conversation opened before openings were minted has to offer.
 //
 // It is deliberately not "does the transcript hold any row". The rows that can
 // reach a conversation that never ran are the control plane's own — a
@@ -2662,13 +2664,18 @@ func (s *Spawner) conversationHasWork(orgID, conversationID string) bool {
 	if s.conversations == nil {
 		return false
 	}
-	rows, err := s.conversations.ListForAssemblySystem(context.Background(), orgID, conversationID)
+	ctx := context.Background()
+	_, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
+	replied := false
+	if err == nil && !opened {
+		replied, err = s.conversations.HasAssistantMessageSystem(ctx, orgID, conversationID)
+	}
 	if err != nil {
 		dispatchLog.Warn("read transcript to decide an exhausted conversation's disposition failed; treating it as work in progress",
 			"conversation", conversationID, "error", err)
 		return true
 	}
-	return conversationHasWork(rows)
+	return opened || replied
 }
 
 // parkAfterLaunchExhaustion puts a conversation whose runtime would not start

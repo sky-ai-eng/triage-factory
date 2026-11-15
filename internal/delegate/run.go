@@ -891,13 +891,12 @@ func (s *Spawner) firstTurnPersonInput(ctx context.Context, orgID, conversationI
 // engagement wrote there stays, rather than being replaced by a file that is
 // not a copy of the row.
 func (s *Spawner) openedTaskContext(ctx context.Context, orgID, conversationID string) string {
-	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	taskContext, _, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read the transcript for its task-context row failed; this launch writes no task-context file",
+		delegateLog.Warn("read the conversation's task-context row failed; this launch writes no task-context file",
 			"conversation", conversationID, "error", err)
 		return ""
 	}
-	taskContext, _ := openingTaskContext(rows)
 	return taskContext
 }
 
@@ -958,8 +957,7 @@ func joinTurnText(parts ...string) string {
 // them into the content blocks of its first user message.
 //
 // It is the runtime half of mintOpeningRows, the counterpart of native's
-// mintOpeningTurn: the transcript read the gate needs, the insert door the rows
-// go through — the sink's, so the rows broadcast to the run station and pass
+// mintOpeningTurn: the two reads it needs, the insert door the rows go through — the sink's, so the rows broadcast to the run station and pass
 // the claim fence like every other row this engagement writes — and then the
 // one assembler both runtimes send through.
 //
@@ -968,12 +966,16 @@ func joinTurnText(parts ...string) string {
 // no session to resume starts an SDK process that knows nothing, on a
 // transcript whose opening was minted by the engagement that died.
 func (s *Spawner) openingTurnBlocks(ctx context.Context, sink *conversationSink, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) ([]agentproc.ContentBlock, error) {
+	_, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("read the conversation's opening: %w", err)
+	}
 	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("read transcript: %w", err)
 	}
 	insert := func(_ context.Context, msg *domain.Message) error { return sink.OnMessage(msg) }
-	opening, err := mintOpeningRows(ctx, insert, rows, memories, conversationID, creatorUserID, taskContext)
+	opening, err := mintOpeningRows(ctx, insert, opened, rows, memories, conversationID, creatorUserID, taskContext)
 	if err != nil {
 		return nil, err
 	}

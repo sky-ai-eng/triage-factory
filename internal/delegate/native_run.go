@@ -415,16 +415,21 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, conversationI
 // injected memories, then the task context — through the claim-fenced
 // transcript.
 //
-// It is the runtime half of mintOpeningRows: the transcript read the gate
-// needs, and the insert door the rows go through. Everything about which rows
-// exist and in what order lives there, so the SDK opens a conversation with
-// the same rows by supplying its own door.
+// It is the runtime half of mintOpeningRows: the two reads it needs — whether
+// the conversation has been opened, and the window an opening is sequenced
+// ahead of — and the insert door the rows go through. Everything about which
+// rows exist and in what order lives there, so the SDK opens a conversation
+// with the same rows by supplying its own door.
 //
 // What the run was asked to do is not here: the mission is a system block, so
 // it is re-sent on every call and a compaction can never summarize it away.
 // These rows can be, and the task context's bytes are on disk for the agent to
 // re-read.
 func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) error {
+	_, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return fmt.Errorf("read the conversation's opening: %w", err)
+	}
 	rows, err := transcript.ListForAssembly(ctx, orgID, conversationID)
 	if err != nil {
 		return err
@@ -433,7 +438,7 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 		_, err := transcript.Insert(ctx, orgID, msg)
 		return err
 	}
-	_, err = mintOpeningRows(ctx, insert, rows, memories, conversationID, creatorUserID, taskContext)
+	_, err = mintOpeningRows(ctx, insert, opened, rows, memories, conversationID, creatorUserID, taskContext)
 	return err
 }
 
@@ -536,11 +541,12 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 // claimReplay is what a native claim inherits from the conversation it is
 // picking up, resolved before it composes anything.
 type claimReplay struct {
-	// opened is whether that conversation has already been opened — the
-	// transcript's task-context row, which is this runtime's "has it run
-	// before" and stands in for the prior session id the SDK path has. It
-	// decides both which memory file the claim may trust and whether block 2 is
-	// this claim's to compose.
+	// opened is whether that conversation has already been opened — its
+	// task-context row, in any window state (OpeningTaskContextSystem), which
+	// is this runtime's "has it run before" and stands in for the prior session
+	// id the SDK path has. It decides which memory file the claim may trust,
+	// whether block 2 is this claim's to compose, and whether the task context
+	// is composed or replayed.
 	opened bool
 	// block is the block 2 to run under, verbatim: what the launch stamped on an
 	// opened conversation. Empty when this claim must compose its own.
@@ -568,19 +574,18 @@ type claimReplay struct {
 // never writes the column back; here the difference between "empty" and
 // "unreadable" decides a write, so it has to survive.
 //
-// Neither read failing refuses the claim. A transcript this process cannot read
+// Neither read failing refuses the claim. An opening this process cannot read
 // is treated as unopened, which is the cheap mistake for the memory file it
 // gates — crediting this run with a predecessor's notes corrupts the entity's
 // durable record, while distrusting its own costs one run's notes. Both failures
 // then cost this turn a recomposed block 2, and neither costs the row its own.
 func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID string) claimReplay {
-	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	taskContext, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read transcript to classify this claim failed; composing this engagement's block 2 and leaving the row's to the next claim",
+		delegateLog.Warn("read the conversation's opening to classify this claim failed; composing this engagement's block 2 and leaving the row's to the next claim",
 			"conversation", conversationID, "error", err)
 		return claimReplay{}
 	}
-	taskContext, opened := openingTaskContext(rows)
 	if !opened {
 		// This claim IS the launch, so the block it composes is the one the row
 		// owes every claim after it.
@@ -626,8 +631,8 @@ func nativeSpec(surface agentprompt.Surface) agentprompt.Spec {
 //
 // Both are skipped for an opened conversation: a parked engagement picking up a
 // steer, whose own memory file is at that path. opened is nativeClaimReplay's
-// answer, which is the same conversationOpened reading mintOpeningRows makes a
-// few calls later.
+// answer, read from the same OpeningTaskContextSystem the mint's gate is a few
+// calls later.
 func prepareInheritedMemory(cwd string, handedOff, opened bool) *memoryFingerprint {
 	if opened {
 		return nil

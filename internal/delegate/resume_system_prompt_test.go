@@ -353,15 +353,15 @@ func TestNativeClaim_OpenedRowWithNoBlockComposesOnceAndStamps(t *testing.T) {
 // whether a claim replays or composes.
 type storeReadDown struct {
 	db.ConversationStore
-	transcript bool
-	block      bool
+	opening bool
+	block   bool
 }
 
-func (d storeReadDown) ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	if d.transcript {
-		return nil, errors.New("read transcript: connection reset")
+func (d storeReadDown) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
+	if d.opening {
+		return "", false, errors.New("read opening: connection reset")
 	}
-	return d.ConversationStore.ListForAssemblySystem(ctx, orgID, conversationID)
+	return d.ConversationStore.OpeningTaskContextSystem(ctx, orgID, conversationID)
 }
 
 func (d storeReadDown) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
@@ -388,10 +388,10 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 		wantOpened bool
 	}{
 		{name: "the system-block read is down", down: storeReadDown{block: true}, wantOpened: true},
-		// An unreadable transcript cannot say the conversation was opened, and
-		// the claim reads as fresh — which is the memory gate's cheap mistake,
-		// and must still not cost the row its block.
-		{name: "the transcript read is down", down: storeReadDown{transcript: true}},
+		// An unreadable opening cannot say the conversation was opened, and the
+		// claim reads as fresh — which is the memory gate's cheap mistake, and
+		// must still not cost the row its block.
+		{name: "the opening read is down", down: storeReadDown{opening: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLaunchFixture(t, "native-readfail")
@@ -439,6 +439,35 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 				t.Errorf("a failed read rewrote the row;\ngot:\n%s\n\nwant:\n%s", got, launched)
 			}
 		})
+	}
+}
+
+// TestNativeReclaim_ACompactedConversationIsStillOpened: a compaction takes the
+// task-context row out of the assembly window, and the conversation it opened
+// has still been opened. Its next claim replays the stamped block rather than
+// composing and stamping a new one, and keeps the opening's task context.
+func TestNativeReclaim_ACompactedConversationIsStillOpened(t *testing.T) {
+	f := newLaunchFixture(t, "native-compacted")
+	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+	}
+	launched := f.storedSystemBlock(t)
+	if launched == "" {
+		t.Fatal("the launch stamped nothing; this test would pass vacuously")
+	}
+	f.open(t)
+	f.speak(t, "assistant", "on it")
+	f.compact(t)
+
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	if !replay.opened {
+		t.Fatal("a compacted conversation reads as never opened")
+	}
+	if replay.block != launched || replay.stampable {
+		t.Errorf("replay = (block %q, stampable %v), want the launch's block and no stamp", replay.block, replay.stampable)
+	}
+	if replay.taskContext != fixtureTaskContextRow {
+		t.Errorf("taskContext = %q, want the opening's %q", replay.taskContext, fixtureTaskContextRow)
 	}
 }
 

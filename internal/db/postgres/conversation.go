@@ -2887,6 +2887,37 @@ func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, co
 	return scanMessageRows(rows)
 }
 
+// OpeningTaskContextSystem — see the interface doc. Reads every window state,
+// on the admin pool for the reason ListForAssemblySystem does: its callers are
+// claims driving a conversation with no request identity.
+func (s *conversationStore) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
+	var content sql.NullString
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT content
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND subtype = $3
+		ORDER BY COALESCE(seq, (id)::double precision) ASC, id ASC
+		LIMIT 1
+	`, orgID, conversationID, domain.MessageSubtypeInjectionTaskContext).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return content.String, true, nil
+}
+
+// HasAssistantMessageSystem — see the interface doc. Reads every window state,
+// on the admin pool for the same reason.
+func (s *conversationStore) HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	var exists bool
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM messages WHERE org_id = $1 AND conversation_id = $2 AND role = 'assistant')
+	`, orgID, conversationID).Scan(&exists)
+	return exists, err
+}
+
 // MarkDeliveredForClaimSystem is the engagement's drain flush, behind the
 // fence. Consuming a pending row is a claim on it: the rows an engagement
 // folds into its assembly must not be marked spent by an engagement that has
