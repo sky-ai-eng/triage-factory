@@ -192,6 +192,25 @@ func (s *workspaceStore) Delete(ctx context.Context, orgID, workspaceID, apiAppI
 	return nil
 }
 
+// DeleteSystem's updated_at condition holds against a concurrent connect: the
+// connect's UPDATE holds the row's lock, and once it commits Postgres
+// re-checks the condition against the row it wrote, whose updated_at the
+// trigger moved.
+func (s *workspaceStore) DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		DELETE FROM org_slack_workspaces
+		WHERE workspace_id = $1 AND api_app_id = $2 AND org_id = $3 AND updated_at = $4
+	`, workspaceID, apiAppID, orgID, updatedAt)
+	if err != nil {
+		return false, fmt.Errorf("delete org_slack_workspaces (system): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete org_slack_workspaces (system): rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 func (s *workspaceStore) ListAllSystem(ctx context.Context) ([]slackstore.Workspace, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+workspaceColumns+`

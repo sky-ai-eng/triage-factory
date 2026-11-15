@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
 // slackTitleMaxRunes bounds a Slack entity's title — enough to be
@@ -81,6 +82,22 @@ type inboundMention struct {
 	// type that sets them (and the only one that leaves Channel empty).
 	OldChannelID string
 	NewChannelID string
+
+	// EventTime is when Slack generated the event, to the second (the
+	// envelope's event_time); zero when the envelope carries none.
+	EventTime time.Time
+	// RevokedBots carries a tokens_revoked event's tokens.bot list, the bot
+	// user ids whose tokens Slack revoked.
+	RevokedBots []string
+}
+
+// removesConnection reports whether an inner event type is Slack saying the
+// app's bot token in the workspace is dead. Both receivers run these past the
+// slack entitlement gate: removing a dead credential is cleanup, and an org
+// that renews its licence should not come back to a connection that cannot
+// work.
+func removesConnection(eventType string) bool {
+	return eventType == "app_uninstalled" || eventType == "tokens_revoked"
 }
 
 // ingestPipeline is the transport-neutral core both the Events API receiver
@@ -92,6 +109,10 @@ type ingestPipeline struct {
 	// delivery mark, a mention's thread and the event's queue row commit
 	// together, through the Slack bundle and event queue it binds.
 	tx db.TxRunner
+	// workspaces and secrets remove a connection Slack reports dead
+	// (handleAppRemoved): its row on the admin pool, and its secrets after.
+	workspaces slackstore.WorkspaceStore
+	secrets    db.SecretStore
 	// deliveries prunes the dedup table after each delivery's transaction;
 	// DeliveryStore.PruneDeliveredSystem has why never inside it.
 	deliveries slackstore.DeliveryStore
@@ -138,11 +159,12 @@ type ingestPipeline struct {
 // (app_mention) mints/re-derives the thread entity and always publishes; an
 // un-mentioned message.channels / message.groups delivery is an engaged-thread
 // follow-up that publishes only if it lands in a thread the bot already owns;
-// a channel_id_changed moves the channel's rows to its new id. Any other type
-// is dropped defensively. Returns an error only for a genuine failure (store
-// error, marshal failure); every "nothing to do" case is a nil-error early
-// return, logged at debug — none of those are failures the caller should
-// retry or 5xx on.
+// a channel_id_changed moves the channel's rows to its new id; an
+// app_uninstalled, or a tokens_revoked naming a bot token, removes the
+// connection. Any other type is dropped defensively. Returns an error only
+// for a genuine failure (store error, marshal failure); every "nothing to do"
+// case is a nil-error early return, logged at debug — none of those are
+// failures the caller should retry or 5xx on.
 //
 // Exactly one outcome is recorded per call — each branch names its return
 // path (accepted, or the drop reason), and an error return overrides it as
@@ -158,6 +180,19 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		outcome, err = p.handleThreadMessage(ctx, ws, ev)
 	case "channel_id_changed":
 		outcome, err = p.handleChannelIDChanged(ctx, ws, ev)
+	case "app_uninstalled":
+		outcome, err = p.handleAppRemoved(ctx, ws, ev)
+	case "tokens_revoked":
+		// Any bot id counts, without comparing it with ws.BotUserID: an app
+		// has one bot user per workspace, and the delivery is addressed by
+		// (team_id, api_app_id), so the only bot token it can be about is
+		// this row's.
+		if len(ev.RevokedBots) == 0 {
+			slackLog.Debug("dropping tokens_revoked: no bot token revoked", "workspace", ws.WorkspaceID, "app", ws.APIAppID)
+			outcome = dropUserTokensOnly
+			break
+		}
+		outcome, err = p.handleAppRemoved(ctx, ws, ev)
 	default:
 		slackLog.Debug("dropping unsupported slack event type", "type", ev.Type, "workspace", ws.WorkspaceID)
 		outcome = dropUnsupportedType
@@ -402,6 +437,74 @@ func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slacksto
 			"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "absorbed", moved.Absorbed, "handlers", moved.SkippedHandlers)
 	}
 	return outcomeChannelMoved, nil
+}
+
+// handleAppRemoved disconnects the (workspace, app) row when Slack reports
+// the app uninstalled from the workspace or its bot token revoked. The token
+// cannot come back: reinstalling the app mints a new one, which TF learns
+// only through a new connect. What it leaves is what an admin's Disconnect
+// leaves, without the access-log row; the channel registry, team tracking,
+// threads, tasks and identities stay for a reconnect to pick up.
+//
+// The row goes first and the secrets after, because no transaction holds
+// both stores: a failure between the two leaves secrets no row points to,
+// never a row whose secrets are gone. Each secret is deleted only while it
+// holds the value read before the row's delete, so one a connect has written
+// since stays.
+//
+// Not deduped through slack_event_deliveries: a redelivery finds no row, and
+// its receiver acks it empty. An error is returned for Slack to redeliver.
+func (p *ingestPipeline) handleAppRemoved(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
+	// The receiver reads the row per delivery, so a retry of a removal that
+	// failed, or was acked late, reads the row an admin has connected again
+	// since. Slack generated the removal before that connection; it is not
+	// about the token the row holds now. event_time is whole seconds, so a
+	// connect in the event's own second counts as before it.
+	if !ev.EventTime.IsZero() && ws.UpdatedAt.Unix() > ev.EventTime.Unix() {
+		slackLog.Info("slack app removal predates the workspace's current connection; kept it",
+			"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_type", ev.Type,
+			"event_time", ev.EventTime, "connected_at", ws.UpdatedAt)
+		return dropReconnected, nil
+	}
+
+	keys := integrations.SlackWorkspaceKeysFor(ws.WorkspaceID, ws.APIAppID).All()
+	values := make([]string, len(keys))
+	for i, key := range keys {
+		v, err := p.secrets.GetSystem(ctx, ws.OrgID, key)
+		if err != nil {
+			return outcomeError, fmt.Errorf("read slack secret %s: %w", key, err)
+		}
+		values[i] = v
+	}
+
+	deleted, err := p.workspaces.DeleteSystem(ctx, ws.OrgID, ws.WorkspaceID, ws.APIAppID, ws.UpdatedAt)
+	if err != nil {
+		return outcomeError, fmt.Errorf("delete removed slack workspace: %w", err)
+	}
+	if !deleted {
+		// A connect, a disconnect, or a concurrent removal (Slack sends
+		// tokens_revoked beside app_uninstalled) changed the row after the
+		// receiver read it.
+		slackLog.Info("slack app removal: the workspace's row changed since the delivery read it; left it",
+			"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_type", ev.Type)
+		return dropRowChanged, nil
+	}
+
+	for i, key := range keys {
+		if values[i] == "" {
+			continue
+		}
+		if _, err := p.secrets.DeleteSystemIfValue(ctx, ws.OrgID, key, values[i]); err != nil {
+			// Not a failed delivery: the row is gone, so nothing reads the
+			// key, and the next connect of this (workspace, app) overwrites it.
+			slackLog.Warn("slack app removal: deleting a secret of the removed workspace failed",
+				"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "key", key, "error", err)
+		}
+	}
+	notifyConfigChanged(ws.OrgID)
+	slackLog.Warn("slack app removed from the workspace in Slack; disconnected it",
+		"org_id", ws.OrgID, "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_type", ev.Type)
+	return outcomeDisconnected, nil
 }
 
 // resolveChannel returns the registry row a delivered channel id names now —

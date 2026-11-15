@@ -20,6 +20,9 @@ const (
 	// outcomeChannelMoved is a channel_id_changed delivery that moved the
 	// channel's rows to its new id, or found them already moved.
 	outcomeChannelMoved = "channel_moved"
+	// outcomeDisconnected is an app_uninstalled or tokens_revoked delivery
+	// that removed the (workspace, app) row and its secrets.
+	outcomeDisconnected = "disconnected"
 	// outcomeError is any genuine pipeline failure (store error, marshal
 	// failure) — the transport 5xxes / withholds its ack so Slack redelivers,
 	// meaning the same event may be counted again under its retry.
@@ -33,6 +36,9 @@ const (
 	dropMentionDedup       = "mention_dedup"       // threaded @-mention owned by its app_mention twin delivery
 	dropNotEngaged         = "not_engaged"         // no active bot-owned thread entity for this reply
 	dropDuplicate          = "duplicate"           // slack_event_deliveries dedup hit (a Slack redelivery)
+	dropUserTokensOnly     = "user_tokens_only"    // tokens_revoked naming no bot token; TF holds no user tokens
+	dropReconnected        = "reconnected"         // app removal Slack generated before the row's current connection
+	dropRowChanged         = "row_changed"         // app removal whose row changed after the receiver read it
 )
 
 // ingestStats owns the Slack ingest metric instruments — the message-volume

@@ -127,6 +127,14 @@ type WorkspaceStore interface {
 	ListForOrg(ctx context.Context, orgID string) ([]Workspace, error)
 	Get(ctx context.Context, orgID, workspaceID, apiAppID string) (*Workspace, error)
 	Delete(ctx context.Context, orgID, workspaceID, apiAppID string) error
+
+	// DeleteSystem removes orgID's (workspaceID, apiAppID) row on the admin
+	// pool, and only while its updated_at still equals updatedAt, reporting
+	// whether it did. For system code acting on a row it read: ingest, when
+	// Slack reports the app removed from the workspace. A connect or a
+	// disconnect landing after that read changes the row, and it is left.
+	DeleteSystem(ctx context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (deleted bool, err error)
+
 	// ListAllSystem returns every connected workspace across every org, on
 	// the admin pool (bypasses RLS). System-code-only — see the type doc.
 	ListAllSystem(ctx context.Context) ([]Workspace, error)
