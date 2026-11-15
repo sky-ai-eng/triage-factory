@@ -5,7 +5,8 @@ import { TONE_TEXT } from './board/cardStyle'
 // PackageFacts — a vulnerable package's repository, highest open severity and
 // open alert count as one mono readout, separated by middle dots, for the
 // surfaces that show one task large: the triage deck and the run page. The
-// board card states the same facts through TaskCard's own readout line.
+// board card states the severity and count alone through TaskCard's own
+// readout line, since its title links to the repository.
 export default function PackageFacts({
   pkg,
   className = '',
