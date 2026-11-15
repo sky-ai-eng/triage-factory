@@ -64,8 +64,7 @@ func assertDirtyCheckout(t *testing.T, wtDir, head string) {
 // work, rebuilt after its run root is gone — on a host that kept its bare and
 // on a fresh one that did not. It comes back exactly, on its branch, with the
 // push tracking a fresh --pr checkout gets; and a capture of the restored
-// checkout still bundles the unpushed commit, which a tracking ref pointed at
-// the local tip would have dropped.
+// checkout still bundles the unpushed commit.
 func TestRestoreCheckout_PRRoundTrip(t *testing.T) {
 	for _, mode := range restoreModes {
 		for _, freshBare := range []bool{false, true} {

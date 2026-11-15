@@ -112,12 +112,14 @@ func lfsStoreExists(objectsDir string) bool {
 }
 
 // unpushedLFSObjects lists the Git LFS objects named by pointers in the
-// commits a snapshot's bundle carries (rev --not --remotes), which the
-// checkout holds and nothing upstream may have. It scans the range as `git lfs
-// pre-push` does: every blob in it under the pointer size cutoff, read as a
-// pointer. An object the checkout does not hold, or holds at a size its
-// pointer does not name, is left out: what the store has there is not the
-// object.
+// commits no remote-tracking ref reaches (rev --not --remotes), which the
+// checkout holds and nothing upstream may have. The range is narrower than the
+// bundle's in a pull request checkout: it stops at the pull request's head as
+// well as the base branch, since the objects of commits already pushed are
+// upstream. It scans the range as `git lfs pre-push` does: every blob in it
+// under the pointer size cutoff, read as a pointer. An object the checkout
+// does not hold, or holds at a size its pointer does not name, is left out:
+// what the store has there is not the object.
 //
 // --missing=allow-any keeps the walk from fetching a blob a partial clone
 // lacks. Such a blob came from upstream, so whatever object it names is not
@@ -127,8 +129,8 @@ func unpushedLFSObjects(ctx context.Context, wtPath, rev string) ([]LFSObject, e
 	if err != nil {
 		return nil, err
 	}
-	// The walk costs what the bundle's does, so a repository that keeps
-	// nothing in Git LFS does not pay for it twice.
+	// The walk reads every object of the range, so a repository that keeps
+	// nothing in Git LFS does not pay for it.
 	if !lfsStoreExists(objectsDir) {
 		return nil, nil
 	}

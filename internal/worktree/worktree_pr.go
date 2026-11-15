@@ -103,13 +103,14 @@ func createPRWorktreeAt(ctx context.Context, r Repo, upstreamCloneURL, headClone
 
 	branchRef := fmt.Sprintf("+refs/pull/%d/head:refs/heads/%s", prNumber, localBranch)
 	// Mirror the fetched tip into a remote-tracking ref alongside the local
-	// branch. The workspace snapshot bounds its git bundle with `--not
-	// --remotes` ("commits GitHub doesn't already have"), and a bare clone
-	// keeps everything under refs/heads/* — a repo that only ever hosted
-	// PR-review runs would have ZERO remote-tracking refs, making that
-	// exclusion empty and the bundle a full-history pack (minutes of CPU on
-	// a real repo). The mirror records "GitHub already knows this tip" in
-	// the namespace the bundle excludes.
+	// branch: the record that GitHub already has this tip. A workspace
+	// snapshot reads it twice. The Git LFS objects it carries are those of the
+	// commits past every remote-tracking ref, so the ones the pull request
+	// already pushed stay out. And its bundle, which runs from the base branch
+	// and passes over this ref, stops here instead when the checkout holds no
+	// other remote-tracking ref (the base branch's never landed): a bare
+	// clone keeps everything under refs/heads/*, so with no ref to stop at
+	// the bundle would be a full-history pack.
 	mirrorRef := fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/%s", prNumber, localBranch)
 	start := time.Now()
 	// origin == upstreamCloneURL (just ensured), so the same credential that
@@ -231,6 +232,20 @@ func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch
 	// The clone owns the objects it needs now; drop the per-run branch and its
 	// mirror from the shared bare so it accumulates no per-run refs.
 	dropBareRunRefs(ctx, bareDir, localBranch)
+
+	// The clone's fetch refspec names the per-run branch it was cloned from,
+	// which the upstream does not have. Name the base branch instead, so `git
+	// fetch origin <base>` moves origin/<base>. A snapshot's bundle stops at
+	// that ref: left where the checkout was created, every base commit the run
+	// merges in afterwards would be in every later bundle. With no known base
+	// the refspec stays as cloned, as a restore leaves it.
+	if baseBranch != "" {
+		if err := gitRunCtx(ctx, wtDir, "config", "remote.origin.fetch",
+			fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)); err != nil {
+			_ = os.RemoveAll(wtDir)
+			return "", fmt.Errorf("repoint clone fetch refspec: %w", err)
+		}
+	}
 
 	switch {
 	case hasHeadRepo:
@@ -665,9 +680,10 @@ func configurePRPushTracking(ctx context.Context, gitDir, rootKey string, prNumb
 // configurePRPushTrackingAt is configurePRPushTracking with the PR head named
 // rather than read off localBranch. A restore needs the split: its local branch
 // may carry commits the agent never pushed, and the tracking ref is the
-// statement "GitHub already has this", which the next snapshot's bundle bound
-// (--not --remotes) reads. Pointing it at an unpushed tip would drop those
-// commits from every later bundle.
+// statement "GitHub already has this". `git status` reports the branch against
+// it, and the next snapshot carries the Git LFS objects of the commits past it
+// (--not --remotes) only. Pointing it at an unpushed tip would drop those
+// commits' objects from every later snapshot.
 func configurePRPushTrackingAt(ctx context.Context, gitDir, rootKey string, prNumber int, localBranch, pushURL, headBranch, headSHA string) error {
 	// Both come from GitHub's answer for the PR, and both are spelled into git
 	// arguments below: a URL with a leading dash would be read as an option,

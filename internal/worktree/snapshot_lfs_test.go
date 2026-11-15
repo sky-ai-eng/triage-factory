@@ -183,6 +183,53 @@ func TestRestoreCheckout_CarriesUnpushedLFSObjects(t *testing.T) {
 	}
 }
 
+// TestCaptureWorkspaceGit_PRCheckoutCarriesOnlyUnpushedLFSObjects: a pull
+// request's pushed commit holds an LFS file and the run commits another. The
+// bundle carries both commits, since it runs back to the base branch, and the
+// snapshot carries the object of the run's commit alone: the pull request's
+// is already upstream.
+func TestCaptureWorkspaceGit_PRCheckoutCarriesOnlyUnpushedLFSObjects(t *testing.T) {
+	for _, mode := range restoreModes {
+		t.Run(mode.name, func(t *testing.T) {
+			setRestoreMode(t, mode.selfContained)
+			ctx := context.Background()
+			onBase, inPR, added := newLFSContent("on the base branch\n"), newLFSContent("pushed with the pull request\n"), newLFSContent("the run's new asset\n")
+			upstream := makeLFSUpstream(t, onBase)
+			pr := filepath.Join(t.TempDir(), "pr")
+			gitNoLFS(t, t.TempDir(), "clone", "-q", upstream, pr)
+			writeUnder(t, pr, "inpr.bin", inPR.pointer)
+			gitNoLFS(t, pr, "add", "-A")
+			gitNoLFS(t, pr, "-c", "user.name=Author", "-c", "user.email=author@example.test", "commit", "-q", "-m", "pull request asset")
+			gitNoLFS(t, pr, "push", "-q", "--no-verify", upstream, "HEAD:refs/pull/7/head")
+			prHead := strings.TrimSpace(gitAt(t, pr, "rev-parse", "HEAD"))
+
+			const key = "lfs-pr-run"
+			root := mustRunRoot(t, key)
+			t.Cleanup(func() { RemoveRunRoot(key) })
+			wtDir, err := CreateForPRInRoot(ctx, testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root, WithBaseBranch("main"))
+			if err != nil {
+				t.Fatalf("CreateForPRInRoot: %v", err)
+			}
+			storeLFSObject(t, wtDir, inPR)
+			storeLFSObject(t, wtDir, added)
+			writeUnder(t, wtDir, "added.bin", added.pointer)
+			gitNoLFS(t, wtDir, "add", "-A")
+			gitNoLFS(t, wtDir, "-c", "user.name=Agent", "-c", "user.email=agent@example.test", "commit", "-q", "-m", "add asset")
+
+			delta, err := CaptureWorkspaceGit(ctx, wtDir)
+			if err != nil {
+				t.Fatalf("CaptureWorkspaceGit: %v", err)
+			}
+			if viewBundle(t, delta.Bundle).objects[prHead] != "commit" {
+				t.Fatalf("fixture: the bundle does not carry the pull request's commit %s", prHead)
+			}
+			if len(delta.LFSObjects) != 1 || delta.LFSObjects[0].OID != added.oid {
+				t.Errorf("captured LFS objects = %+v, want only the run's %s", delta.LFSObjects, added.oid)
+			}
+		})
+	}
+}
+
 // TestInstallLFSObjects_RefusesContentThatIsNotTheObject pins that a restore
 // installs an object only as content hashing to its id, and goes on without
 // one that does not.

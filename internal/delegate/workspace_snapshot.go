@@ -1823,6 +1823,13 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 				// The error's text names the checkout's path, so the status
 				// message is fixed and the error is not recorded.
 				span.SetStatus(codes.Error, "restore failed")
+				// A commit the git host will not send fails every later
+				// attempt the same way, so it is counted where a person
+				// looking for how often it happens will find it.
+				var missing *worktree.MissingCommitError
+				if errors.As(err, &missing) {
+					recordRestoreMissingCommit(missing.Kind)
+				}
 			}
 			span.End()
 			results[i] = result{restored: c, err: err}

@@ -1,8 +1,9 @@
 // Snapshot/rehydrate git primitives for the durable blueprint workspace.
-// CaptureWorkspaceGit distills one checkout down to its non-recoverable git
-// state (the agent's local-only commits + the uncommitted working tree);
-// RestoreCheckout (restore.go) rebuilds a checkout from the persistent bare
-// clone and layers that delta back on. The split keeps git knowledge in this
+// CaptureWorkspaceGit distills one checkout down to the git state a rebuild
+// cannot count on getting back from the remote (its commits past the branch it
+// was made from + the uncommitted working tree); RestoreCheckout (restore.go)
+// rebuilds a checkout from the persistent bare clone and layers that delta
+// back on. The split keeps git knowledge in this
 // package while the storage/tar orchestration lives in internal/delegate.
 
 package worktree
@@ -20,10 +21,12 @@ import (
 	"strings"
 )
 
-// GitDelta is the non-recoverable git state of one checkout at a dormancy
-// point. Everything recoverable — the bare clone, anything already pushed to a
-// remote — is deliberately absent; RestoreCheckout reconstructs those from the
-// bare and layers this delta on top. A nil *GitDelta means the path was not a
+// GitDelta is the git state of one checkout at a dormancy point that a rebuild
+// cannot count on getting back from the remote. What a branch on the remote
+// holds — the history up to the branch the checkout was made from — is
+// deliberately absent; RestoreCheckout reconstructs that from the bare and
+// layers this delta on top. A pull request's own commits are carried even when
+// pushed: a force-push leaves them on no branch. A nil *GitDelta means the path was not a
 // git worktree (a run root, which never is), so there is no git state to carry.
 //
 // SECURITY INVARIANT — the agent's .git/config is NEVER part of this delta,
@@ -46,18 +49,18 @@ type GitDelta struct {
 	// never pushed to a remote (the never-pushed-local-branch case), or check
 	// out a detached HEAD (no branch at all).
 	Head string
-	// Bundle is a `git bundle` of the commits reachable from Head but not
-	// from any remote-tracking ref — i.e. only the agent's local-only work.
-	// nil when the tip is already on a remote (nothing local to carry); the
-	// bare reproduces the committed state by itself in that case, and Head is
-	// reachable there.
+	// Bundle is a git bundle of the commits reachable from Head and not from
+	// the refs the capture stops at (bundleStopArgs): the base branch in a
+	// pull request checkout, so the pull request's commits and the run's own;
+	// the checked-out ref in any other, so the run's commits alone. nil when
+	// no commit is in that range, and Head is then one the stop refs reach.
 	Bundle []byte
 	// Patch is a single binary diff capturing every uncommitted change
 	// (tracked modifications and untracked additions alike). nil when the
 	// working tree is clean.
 	Patch []byte
-	// LFSObjects are the Git LFS objects the bundle's commits name that the
-	// checkout holds (unpushedLFSObjects). Never encoded: the capture jail
+	// LFSObjects are the Git LFS objects the checkout's unpushed commits name
+	// that the checkout holds (unpushedLFSObjects). Never encoded: the capture jail
 	// names them in its manifest by id and streams their bytes, and a path
 	// the jail wrote is not one this process reads.
 	LFSObjects []LFSObject `json:"-"`
@@ -110,9 +113,9 @@ func IsGitWorktree(wtPath string) bool {
 }
 
 // CaptureWorkspaceGit captures the non-recoverable git delta of the checkout at
-// wtPath: the current branch, a bounded bundle of the agent's local-only
-// commits, and a single patch covering every uncommitted change. Returns (nil,
-// nil) when wtPath is not a git worktree.
+// wtPath: the current branch, a bundle of the commits the checkout holds past
+// the refs it stops at, and a single patch covering every uncommitted change.
+// Returns (nil, nil) when wtPath is not a git worktree.
 func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) {
 	if !IsGitWorktree(wtPath) {
 		return nil, nil
@@ -139,11 +142,13 @@ func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) 
 		}
 	}
 
-	bundle, err := bundleLocalCommits(ctx, wtPath, d.Branch)
+	bundle, err := bundleLocalCommits(ctx, wtPath, d.Head, d.Branch)
 	if err != nil {
 		return nil, err
 	}
 	d.Bundle = bundle
+	// A bundle is the cheap sign the checkout holds commits at all past its
+	// stop refs; the LFS walk decides on its own range which are unpushed.
 	if bundle != nil {
 		if d.LFSObjects, err = unpushedLFSObjects(ctx, wtPath, localRev(d.Branch)); err != nil {
 			return nil, err
@@ -162,7 +167,7 @@ func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) 
 // CaptureWorkspaceGitToWriters is the multi-mode capture body. It writes the
 // two unbounded git members directly to caller-prepared files (handed in as
 // writers across exec) and returns the branch/HEAD metadata, with the Git LFS
-// objects the bundle's commits name for the caller to stream.
+// objects the checkout's unpushed commits name for the caller to stream.
 func CaptureWorkspaceGitToWriters(ctx context.Context, wtPath string, bundle, patch io.Writer) (_ *GitDelta, hasBundle, hasPatch bool, err error) {
 	if !IsGitWorktree(wtPath) {
 		return nil, false, false, nil
@@ -171,7 +176,7 @@ func CaptureWorkspaceGitToWriters(ctx context.Context, wtPath string, bundle, pa
 	if err != nil {
 		return nil, false, false, err
 	}
-	hasBundle, err = bundleLocalCommitsTo(ctx, wtPath, d.Branch, bundle)
+	hasBundle, err = bundleLocalCommitsTo(ctx, wtPath, d.Head, d.Branch, bundle)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -202,13 +207,13 @@ func captureWorkspaceGitMetadata(ctx context.Context, wtPath string) (*GitDelta,
 	return d, nil
 }
 
-// bundleLocalCommits writes a `git bundle` of <rev> --not --remotes — the
-// commits the agent made that aren't on any remote-tracking ref yet — and
-// returns its bytes. Returns (nil, nil) when there are no such commits: the tip
-// is already published, so the bare reproduces the committed state unaided.
-func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, error) {
+// bundleLocalCommits returns a bundle of the commits reachable from head and
+// not from the refs the capture stops at (bundleStopArgs), or (nil, nil) when
+// there are none: the stop refs then reach head, so the bare reproduces the
+// committed state unaided.
+func bundleLocalCommits(ctx context.Context, wtPath, head, branch string) ([]byte, error) {
 	var out bytes.Buffer
-	ok, err := bundleLocalCommitsTo(ctx, wtPath, branch, &out)
+	ok, err := bundleLocalCommitsTo(ctx, wtPath, head, branch, &out)
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -216,30 +221,126 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 }
 
 // bundleLocalCommitsTo is bundleLocalCommits writing to w, reporting whether
-// it wrote a bundle. Emptiness is decided by rev-list before `git bundle` runs,
-// because `git bundle` writes its signature to stdout before it refuses an
-// empty bundle: on a streaming w those bytes would already be a capture member
-// the manifest then says is absent. A `git bundle` failure after the precheck
-// is an error.
-func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Writer) (bool, error) {
-	rev := localRev(branch)
-	// The trailing "--" keeps a branch named like a path in the checkout (a
-	// `docs` branch beside a docs/ directory) from failing as ambiguous.
-	local, err := gitCapture(ctx, wtPath, nil, "rev-list", "--max-count=1", rev, "--not", "--remotes", "--")
+// it wrote a bundle. head is the checkout's HEAD commit and branch its branch,
+// "" when detached.
+//
+// The bundle is written here rather than by `git bundle create`, whose pack is
+// always thin: it stores a changed file as a delta against a version outside
+// the pack and reads that version while it packs. A checkout is a blobless
+// partial clone that usually lacks it, the capture has no route to fetch it,
+// and neither has the import on the other side. The pack written here is
+// self-contained: every object of the range the checkout holds, each whole or
+// as a delta against another object in the pack.
+//
+// --missing=allow-promisor leaves out an object the checkout lacks only when a
+// promisor pack says the remote has it, which is a blob the remote sent a tree
+// for and the checkout never read. The restore's bare gets such a blob from
+// the remote when something reads it. A missing object no promisor pack
+// accounts for is one the run made and lost, and still fails the capture;
+// allow-any would write a bundle past it.
+//
+// Nothing is written before the range is known to hold a commit: on a
+// streaming w, bytes written are already a capture member.
+func bundleLocalCommitsTo(ctx context.Context, wtPath, head, branch string, w io.Writer) (bool, error) {
+	stop, err := bundleStopArgs(ctx, wtPath)
+	if err != nil {
+		return false, err
+	}
+	// The trailing "--" ends the revisions, so nothing after the stop refs is
+	// read as a path.
+	out, err := gitCapture(ctx, wtPath, nil, slices.Concat([]string{"rev-list", "--boundary", head, "--not"}, stop, []string{"--"})...)
 	if err != nil {
 		return false, fmt.Errorf("git rev-list: %w", err)
 	}
-	if len(bytes.TrimSpace(local)) == 0 {
+	// --boundary prints each commit the walk stopped at with a leading "-":
+	// the bundle's prerequisites, the commits an importer must already hold.
+	var prerequisites []string
+	local := false
+	for _, line := range strings.Fields(string(out)) {
+		if oid, ok := strings.CutPrefix(line, "-"); ok {
+			prerequisites = append(prerequisites, oid)
+		} else {
+			local = true
+		}
+	}
+	if !local {
 		return false, nil
 	}
-	if err := gitCaptureTo(ctx, wtPath, nil, w, "bundle", "create", "-", rev, "--not", "--remotes", "--"); err != nil {
-		return false, fmt.Errorf("git bundle: %w", err)
+	// Sorted, and with no subject text after the id, so the header is a
+	// function of the commits alone: it is what a checkpoint fingerprints.
+	slices.Sort(prerequisites)
+
+	var header, revs strings.Builder
+	header.WriteString("# v2 git bundle\n")
+	revs.WriteString(head + "\n")
+	for _, oid := range prerequisites {
+		header.WriteString("-" + oid + "\n")
+		revs.WriteString("^" + oid + "\n")
+	}
+	ref := "HEAD"
+	if branch != "" {
+		ref = "refs/heads/" + branch
+	}
+	header.WriteString(head + " " + ref + "\n\n")
+	if _, err := io.WriteString(w, header.String()); err != nil {
+		return false, fmt.Errorf("write bundle header: %w", err)
+	}
+	if err := gitCaptureIO(ctx, wtPath, nil, strings.NewReader(revs.String()), w,
+		"pack-objects", "--stdout", "--revs", "--delta-base-offset", "--missing=allow-promisor"); err != nil {
+		return false, fmt.Errorf("git pack-objects: %w", err)
 	}
 	return true, nil
 }
 
-// localRev is the tip of a checkout's local work: its branch, or HEAD when it
-// is detached.
+// prHeadRefExcludes are the remote-tracking refs that record a pull request's
+// own head, as rev-list --exclude patterns (relative to refs/remotes/, with *
+// matching across slashes): the run's branch mirror
+// refs/remotes/origin/triagefactory/<key>/pr-<N> (prLocalBranch) and the push
+// remote's refs refs/remotes/tfpush-<key>-<N>/* (prPushRemoteName).
+var prHeadRefExcludes = []string{"origin/triagefactory/*", "tfpush-*/*"}
+
+// recordsPRHead reports whether the remote-tracking ref named name, relative
+// to refs/remotes/, matches one of prHeadRefExcludes.
+func recordsPRHead(name string) bool {
+	if strings.HasPrefix(name, "origin/triagefactory/") {
+		return true
+	}
+	rest, ok := strings.CutPrefix(name, "tfpush-")
+	return ok && strings.Contains(rest, "/")
+}
+
+// bundleStopArgs is the revisions a checkout's bundle stops at, as the
+// arguments that follow --not: every remote-tracking ref except the ones
+// recording a pull request's own head. In a pull request checkout that leaves
+// the base branch, so the bundle carries the pull request's commits as well as
+// the run's, and a pull request force-pushed while the run is parked restores
+// from the bundle rather than from a commit the remote may no longer serve.
+// A checkout of a ref holds only that ref's remote-tracking ref, which the
+// exclusion does not touch.
+//
+// When the exclusion would leave no ref at all (a pull request checkout whose
+// base ref never landed) the bundle stops at every remote-tracking ref, the
+// pull request's head among them: an empty stop set would bundle the whole
+// history.
+func bundleStopArgs(ctx context.Context, wtPath string) ([]string, error) {
+	out, err := gitCapture(ctx, wtPath, nil, "for-each-ref", "--format=%(refname)", "refs/remotes/")
+	if err != nil {
+		return nil, fmt.Errorf("git for-each-ref: %w", err)
+	}
+	for _, ref := range strings.Fields(string(out)) {
+		if !recordsPRHead(strings.TrimPrefix(ref, "refs/remotes/")) {
+			args := make([]string, 0, len(prHeadRefExcludes)+1)
+			for _, pattern := range prHeadRefExcludes {
+				args = append(args, "--exclude="+pattern)
+			}
+			return append(args, "--remotes"), nil
+		}
+	}
+	return []string{"--remotes"}, nil
+}
+
+// localRev names the tip of a checkout's local work: its branch, or HEAD when
+// it is detached.
 func localRev(branch string) string {
 	if branch == "" {
 		return "HEAD"
@@ -520,8 +621,8 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 	return filepath.Join(dir, sessionID+".jsonl"), nil
 }
 
-// gitCapture runs git and returns its stdout (only) so a `git diff` /
-// `git bundle` payload isn't corrupted by progress text on stderr — unlike
+// gitCapture runs git and returns its stdout (only) so a `git diff` or
+// `git pack-objects` payload isn't corrupted by progress text on stderr — unlike
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
 //
@@ -586,7 +687,7 @@ func gitCaptureIO(ctx context.Context, dir string, env []string, stdin io.Reader
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Capture paths are local-only (rev-parse, bundle, diff against the
+	// Capture paths are local-only (rev-parse, pack-objects, diff against the
 	// bare/worktree), but still run with prompts disabled for consistency: a
 	// supplied env already starts from gitBaseEnv() (see captureUncommitted), and
 	// a nil env falls back to it here.
