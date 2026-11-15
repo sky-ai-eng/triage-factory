@@ -198,7 +198,7 @@ func (f *fixture) denials(t *testing.T) []domain.ExternalAction {
 type bell struct {
 	mu        sync.Mutex
 	sent      []ctlbus.Message
-	doorbells *Doorbells
+	doorbells *ctlbus.Doorbells
 	drop      bool
 }
 
@@ -545,7 +545,7 @@ func TestControlPlane_SignsWithTheKeyTheSignerNames(t *testing.T) {
 // is an hour, so only the sign_done doorbell can wake the waiting request.
 func TestRequester_GetsItsAnswerByDoorbell(t *testing.T) {
 	f := newFixture(t)
-	doorbells := NewDoorbells()
+	doorbells := ctlbus.NewDoorbells()
 	cp := f.controlPlane("pod-a", roomyBudgets, &bell{doorbells: doorbells})
 	r := &Requester{
 		Signatures: f.stores.CommitSignatures,
@@ -575,7 +575,7 @@ func TestRequester_GetsItsAnswerByDoorbell(t *testing.T) {
 
 func TestRequester_ReadsADecisionWhoseDoorbellWasDropped(t *testing.T) {
 	f := newFixture(t)
-	doorbells := NewDoorbells()
+	doorbells := ctlbus.NewDoorbells()
 	cp := f.controlPlane("pod-a", Budgets{PerOrgMinute: 1, PerClaim: 5000}, &bell{doorbells: doorbells, drop: true})
 	f.signedAt(t, time.Now().Add(-30*time.Second))
 	r := &Requester{
@@ -604,7 +604,7 @@ func TestRequester_ReadsADecisionWhoseDoorbellWasDropped(t *testing.T) {
 func TestRequester_ASweepFindsADroppedRequest(t *testing.T) {
 	reader := useTestInstruments(t)
 	f := newFixture(t)
-	doorbells := NewDoorbells()
+	doorbells := ctlbus.NewDoorbells()
 	cp := f.controlPlane("pod-a", roomyBudgets, &bell{doorbells: doorbells})
 	r := &Requester{
 		Signatures:   f.stores.CommitSignatures,
@@ -647,7 +647,7 @@ func TestRequester_TimesOutUnanswered(t *testing.T) {
 	f := newFixture(t)
 	r := &Requester{
 		Signatures:   f.stores.CommitSignatures,
-		Doorbells:    NewDoorbells(),
+		Doorbells:    ctlbus.NewDoorbells(),
 		Publish:      func(context.Context, ctlbus.Message) error { return nil },
 		PollInterval: 10 * time.Millisecond,
 		Timeout:      100 * time.Millisecond,

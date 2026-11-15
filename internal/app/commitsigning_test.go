@@ -4,14 +4,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 )
 
 // The unified tf_ctl dispatcher routes sign_done to the request an executor's
 // run is waiting on, outside the brain's holder gate: an executor never holds
 // the lease, so a gated doorbell would never ring.
 func TestApp_DispatchCtl_RingsTheWaitingSignatureRequest(t *testing.T) {
-	a := &App{commitSignDoorbells: commitsigner.NewDoorbells()}
+	a := &App{commitSignDoorbells: ctlbus.NewDoorbells()}
 	ring, stop := a.commitSignDoorbells.Listen("sig-1")
 	defer stop()
 

@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -17,5 +18,10 @@ func (a *App) buildCredProvisioner() error {
 	}
 	a.credProvisioner = credprovision.NewManager(a.stores, a.llmResolver, a.linearResolver)
 	a.credProvisioner.SetDeploymentSigner(a.deploymentSigner)
+	// The executor waiting on the bundle is on another process, so the ring
+	// rides tf_ctl to whichever one listens for the conversation.
+	a.credProvisioner.SetOnSealed(func(orgID, conversationID string) {
+		a.publishCtl(ctlbus.Message{Kind: ctlbus.KindCredSealed, OrgID: orgID, ConversationID: conversationID})
+	})
 	return nil
 }

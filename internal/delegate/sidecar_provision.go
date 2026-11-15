@@ -632,9 +632,10 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 // sidecar's published public key. It publishes that key onto the run's claim
 // (claims.cred_pubkey) and fires the cred_request doorbell — so the brain seals
 // THIS run's bundle to the sidecar's per-run key, not the claiming instance's
-// key — then polls claim_credentials for the OPAQUE sealed bytes and hands them
-// back. The orchestrator never opens them; only the sidecar holds the matching
-// private key. This is what replaces the pre-sandbox awaitCredentials unseal.
+// key — then reads claim_credentials, when the brain's cred_sealed ring wakes
+// it or on its poll, for the OPAQUE sealed bytes and hands them back. The
+// orchestrator never opens them; only the sidecar holds the matching private
+// key. This is what replaces the pre-sandbox awaitCredentials unseal.
 //
 // A timeout (brain down at claim time) surfaces as errAwaitingCredentialsTimeout,
 // failing the bring-up; the dispatcher then hands the claim back without
@@ -658,6 +659,14 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID, claimID string) age
 		provCtx, span := tracer.Start(provCtx, "engagement.credentials.await",
 			trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
 		defer span.End()
+
+		// Listen before the key is published: the brain can seal as soon as
+		// it reads the key, and a ring that lands before anything listens
+		// leaves the bundle to the next poll. Keyed by conversation, which
+		// holds at most one active claim; a ring for a bundle sealed to
+		// another claim costs one read that the check below skips.
+		ring, stopListening := s.credentialDoorbells().Listen(conversationID)
+		defer stopListening()
 
 		// Publish the sidecar's per-run pubkey onto the claim + fire the
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
@@ -704,6 +713,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID, claimID string) age
 			case <-provCtx.Done():
 				telemetry.RecordSpanError(span, provCtx.Err(), "the credentials wait was cancelled")
 				return nil, 0, provCtx.Err()
+			case <-ring:
 			case <-ticker.C:
 				if time.Now().After(deadline) {
 					err := fmt.Errorf("%w: conversation %s after %s (brain not provisioning)", errAwaitingCredentialsTimeout, conversationID, timeout)

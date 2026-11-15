@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -100,6 +101,11 @@ type Spawner struct {
 	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
 	// nil-safe (local resolves credentials directly and never gates on it).
 	claimCredentials db.ClaimCredentialsStore
+	// credDoorbells rings an engagement's credential wait when the brain
+	// has sealed its bundle (cred_sealed). nil-safe: a nil set never rings,
+	// and the wait reads on its poll alone. Set via SetCredentialDoorbells, in
+	// multi mode on a process that runs engagements.
+	credDoorbells *ctlbus.Doorbells
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout.
@@ -821,6 +827,24 @@ func (s *Spawner) SetOnDelegatorNotice(fn func(orgID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.delegatorNotice = fn
+}
+
+// SetCredentialDoorbells wires the doorbells this process's tf_ctl listener
+// rings on cred_sealed, keyed by conversation, so an engagement's credential
+// wait reads its bundle once the brain has written it. Post-construction,
+// same pattern as SetCommitSignRequester.
+func (s *Spawner) SetCredentialDoorbells(d *ctlbus.Doorbells) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credDoorbells = d
+}
+
+// credentialDoorbells is the doorbells SetCredentialDoorbells wired, read
+// under mu.
+func (s *Spawner) credentialDoorbells() *ctlbus.Doorbells {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.credDoorbells
 }
 
 // SetCommitSignRequester wires the queue a sandboxed run's sign_digest relay op

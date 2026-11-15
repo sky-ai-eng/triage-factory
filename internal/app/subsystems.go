@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -410,6 +411,12 @@ func (a *App) buildExecution() error {
 	// executor just as much as an executor needs it to apply signals
 	// targeting itself.
 	if runmode.Current() == runmode.ModeMulti {
+		// The brain's cred_sealed ring wakes an engagement's credential wait,
+		// so only a process that runs engagements listens for it.
+		if a.plan.dispatcher {
+			a.credDoorbells = ctlbus.NewDoorbells()
+			a.spawner.SetCredentialDoorbells(a.credDoorbells)
+		}
 		a.spawner.SetConversationSignals(a.stores.ConversationSignals, a.database)
 		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
 			appLog.Warn("signal ack timeout", "error", terr)

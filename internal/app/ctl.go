@@ -38,6 +38,8 @@ import (
 //	                        holder-gated: every control pod signs
 //	"sign_done"           → the signature request this executor's run is
 //	                        waiting on
+//	"cred_sealed"         → the credential wait this executor's engagement
+//	                        is parked in, NOT holder-gated either
 //
 // Uses wsbackplane.DirectDSN (TF_DATABASE_DIRECT_URL falling back to
 // TF_DATABASE_URL) — LISTEN needs a session-scoped connection that
@@ -103,6 +105,16 @@ func (a *App) dispatchCtl(payload string) {
 		} else {
 			a.commitSignDoorbells.Ring(msg.SignatureID)
 		}
+	case ctlbus.KindCredSealed:
+		var msg ctlbus.Message
+		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+			appLog.Warn("tf_ctl: malformed cred_sealed doorbell; dropping", "error", err)
+			return
+		}
+		// Not holder-gated: the brain rings an executor, which never holds
+		// the lease. nil-safe on a process that runs no engagement, and a
+		// non-blocking send on one that does.
+		a.credDoorbells.Ring(msg.ConversationID)
 	case "kick":
 		// nil on a pod whose backplane build found no DSN — no sockets to
 		// kick there anyway (local never reaches this listener at all).
