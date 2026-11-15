@@ -3,15 +3,11 @@ package delegate
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -207,28 +203,10 @@ func TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest(t *testing.T) {
 	f.snapshot(t, "", domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
-	const cloneURL = "https://github.com/acme/app.git"
-	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "app", CloneURL: cloneURL}}
-
-	var (
-		mu    sync.Mutex
-		paths []string
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		paths = append(paths, r.URL.Path)
-		mu.Unlock()
-		if r.URL.Path != "/repos/acme/app/pulls/7" {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"number": 7,
-			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": cloneURL}},
-			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": cloneURL}},
-		})
-	}))
-	t.Cleanup(srv.Close)
+	// An HTTPS origin, so push tracking takes the pull request's clone_url.
+	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "app", CloneURL: "https://github.com/acme/app.git"}}
+	var requests requestLog
+	srv := f.prServer(t, &requests)
 
 	// Recorded, not run: the git proxy address routes nowhere in a test, and
 	// the pull request's fields reaching the restore are what is checked.
@@ -251,13 +229,11 @@ func TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("cold rehydrate rebuilt %d checkouts, want 1", len(got))
 	}
-	want := worktree.PRCheckout{HeadRef: "feature", HeadCloneURL: cloneURL, BaseRef: "main"}
+	want := worktree.PRCheckout{HeadRef: "feature", HeadCloneURL: f.upstream(t, "acme/app"), BaseRef: "main"}
 	if got[0].PR == nil || *got[0].PR != want {
 		t.Errorf("restore push tracking = %+v, want %+v from the pull request", got[0].PR, want)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if wantPaths := []string{"/repos/acme/app/pulls/7"}; !slices.Equal(paths, wantPaths) {
+	if paths, wantPaths := requests.all(), []string{"/repos/acme/app/pulls/7"}; !slices.Equal(paths, wantPaths) {
 		t.Errorf("GitHub requests = %v, want only %v", paths, wantPaths)
 	}
 }

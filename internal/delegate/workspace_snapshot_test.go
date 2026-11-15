@@ -1379,14 +1379,14 @@ func (f *snapshotFixture) restorer() checkoutRestorer {
 }
 
 // prServer is a GitHub REST stand-in that answers pull request acme/app#7 with
-// the fixture's acme/app origin as both base and head, counting the requests
-// it serves when fetches is non-nil.
-func (f *snapshotFixture) prServer(t *testing.T, fetches *atomic.Int32) *httptest.Server {
+// the fixture's acme/app origin as both base and head, logging the path of
+// each request it serves when requests is non-nil.
+func (f *snapshotFixture) prServer(t *testing.T, requests *requestLog) *httptest.Server {
 	t.Helper()
 	origin := f.upstream(t, "acme/app")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fetches != nil {
-			fetches.Add(1)
+		if requests != nil {
+			requests.add(r.URL.Path)
 		}
 		if r.URL.Path != "/repos/acme/app/pulls/7" {
 			http.NotFound(w, r)
@@ -1400,6 +1400,25 @@ func (f *snapshotFixture) prServer(t *testing.T, fetches *atomic.Int32) *httptes
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// requestLog holds the paths a test server was asked for, in arrival order.
+// A server handles each request on its own goroutine, so the log is locked.
+type requestLog struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (l *requestLog) add(path string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.paths = append(l.paths, path)
+}
+
+func (l *requestLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.paths)
 }
 
 // taskRegistry backs the fixture's spawner with a database holding the task's

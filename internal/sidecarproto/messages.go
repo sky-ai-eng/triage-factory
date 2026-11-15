@@ -126,9 +126,9 @@ type StartProxiesResult struct {
 
 	// GitProxyURL / GitProxyToken are the sidecar's git-over-HTTPS proxy
 	// address and the per-run placeholder the orchestrator presents to it, so
-	// the orchestrator's OWN pre-sandbox clone (the run's PR checkout)
-	// routes through the same proxy the jailed agent uses — holding only the
-	// placeholder while the real GitHub token stays in the sidecar. Empty when
+	// the orchestrator's OWN pre-sandbox clone routes through the same proxy
+	// the jailed agent uses — holding only the placeholder while the real
+	// GitHub token stays in the sidecar. Empty when
 	// GitEnabled was false (a prompt-only / Jira-only run pre-clones nothing).
 	GitProxyURL   string `json:"git_proxy_url,omitempty"`
 	GitProxyToken string `json:"git_proxy_token,omitempty"`
