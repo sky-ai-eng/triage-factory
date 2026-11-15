@@ -41,12 +41,12 @@ func TestResumeAppend_IsTheLaunchAppendByteForByte(t *testing.T) {
 	ctx := context.Background()
 
 	block := launchBlock("review the pull request and leave a summary")
-	launchAppend := sdkSystemPrompt(block, "/bin/tf")
+	launchAppend := sdkSystemPrompt(agentprompt.SurfaceMachinist, block, "/bin/tf")
 	if fenced := s.persistSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-append", claimID, block); fenced {
 		t.Fatal("persistSystemBlock reported the fence on a live claim")
 	}
 
-	resumeAppend := sdkSystemPrompt(
+	resumeAppend := sdkSystemPrompt(agentprompt.SurfaceMachinist,
 		s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-append"), "/bin/tf")
 	if resumeAppend != launchAppend {
 		t.Errorf("the resume's append is not the launch's;\ngot:\n%s\n\nwant:\n%s", resumeAppend, launchAppend)
@@ -95,7 +95,7 @@ func TestResumeAppend_IsTheLaunchedMissionNotTodaysPromptRow(t *testing.T) {
 		t.Fatalf("the fixture's prompt edit did not land: %v %+v", err, p)
 	}
 
-	woke := sdkSystemPrompt(s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-edited"), "/bin/tf")
+	woke := sdkSystemPrompt(agentprompt.SurfaceMachinist, s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, "r-edited"), "/bin/tf")
 	if !strings.Contains(woke, launched) {
 		t.Error("the resumed turn lost the mission its launch was given")
 	}
@@ -147,7 +147,7 @@ func TestLaunchedSystemBlock_DegradesToTheFrameworkBlocksAlone(t *testing.T) {
 		if got := s.launchedSystemBlock(ctx, runmode.LocalDefaultOrgID, conversationID); got != "" {
 			t.Errorf("%s: launchedSystemBlock = %q, want the empty block", conversationID, got)
 		}
-		if got := sdkSystemPrompt("", "/bin/tf"); got != frameworkBlocks(t) {
+		if got := sdkSystemPrompt(agentprompt.SurfaceMachinist, "", "/bin/tf"); got != frameworkBlocks(t) {
 			t.Errorf("%s: an empty block must compose the framework blocks alone;\n%s", conversationID, got)
 		}
 	}
@@ -480,6 +480,7 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 		teamID:         runmode.LocalDefaultTeamID,
 		claimID:        f.conv.ClaimID,
 		blueprintRunID: f.br.ID,
+		surface:        agentprompt.SurfaceMachinist,
 		runRoot:        f.worktree,
 		sources:        sourceDocs{kinds: []string{"github"}},
 	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)

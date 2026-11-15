@@ -98,18 +98,25 @@ type runConfig struct {
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
-	// Chain-mode toggles. The blueprint orchestrator owns the worktree
-	// lifecycle — it reclaims the task's tree once, after the chain
-	// terminates — so runAgent holds no worktree cleanup of its own. What
-	// isBlueprintStep still gates is the ghost ~/.claude/projects tidy, which
-	// short-circuits so a step's session state survives into the next one.
-	// appendSysPrompt is forwarded to agentproc as --append-system-prompt so
-	// the chain protocol reaches the model without modifying the step's prompt
-	// body.
+	// Chain-mode fields, empty for a conversation with no blueprint run. The
+	// blueprint orchestrator owns the worktree lifecycle — it reclaims the
+	// task's tree once, after the chain terminates — so runAgent holds no
+	// worktree cleanup of its own. appendSysPrompt is forwarded to agentproc
+	// as --append-system-prompt so the chain protocol reaches the model
+	// without modifying the step's prompt body.
 	blueprintRunID  string
 	blueprintStep   int
-	isBlueprintStep bool
 	appendSysPrompt string
+
+	// surface is the framework prompt the conversation runs under, from its
+	// stored type (surfaceFor): the machinist for a blueprint step, the
+	// workbench for a conversation a person works in.
+	surface agentprompt.Surface
+	// interactive is whether the conversation is one a person works in
+	// (domain.ConversationTypeInteractive). Its turns start from the person's
+	// messages, so an SDK launch with no session to resume sends them as the
+	// end of its first turn (composeLaunchTurn).
+	interactive bool
 
 	// skillsSourcePath is the orchestrator-owned staging dir holding this step's
 	// SKILL.md, bind-mounted read-only into the jail (agentproc's

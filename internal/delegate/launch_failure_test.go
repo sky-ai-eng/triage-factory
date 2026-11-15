@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -373,6 +374,7 @@ func TestRunNativeAgent_ToolHostLaunchFailureRecordsNothing(t *testing.T) {
 		teamID:         runmode.LocalDefaultTeamID,
 		claimID:        f.conv.ClaimID,
 		blueprintRunID: f.br.ID,
+		surface:        agentprompt.SurfaceMachinist,
 		runRoot:        f.worktree,
 	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)
 

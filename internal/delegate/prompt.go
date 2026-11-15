@@ -150,17 +150,30 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 	return p, nil
 }
 
-// machinistSpec selects the delegated agent's block set from
-// internal/agentprompt. Mode is resolved here rather than inside Build, which
-// stays a pure function of its Spec — that is what makes both mode variants
-// testable without manipulating process state.
-func machinistSpec() agentprompt.Spec {
+// sdkSpec selects an SDK conversation's block set from internal/agentprompt,
+// for the surface its conversation's type names (surfaceFor). Mode is resolved
+// here rather than inside Build, which stays a pure function of its Spec —
+// that is what makes both mode variants testable without manipulating process
+// state.
+func sdkSpec(surface agentprompt.Surface) agentprompt.Spec {
 	return agentprompt.Spec{
-		Surface: agentprompt.SurfaceMachinist,
+		Surface: surface,
 		Runtime: agentprompt.RuntimeSDK,
 		Family:  agentprompt.FamilyClaude,
 		Mode:    agentprompt.ModeFor(string(runmode.Current())),
 	}
+}
+
+// surfaceFor is the framework prompt a conversation of convType runs under:
+// the workbench for a conversation a person works in, the machinist for
+// everything a delegation drives. Every build of a conversation's framework
+// prompt asks this of its stored type, so a resume composes the surface its
+// conversation opened with.
+func surfaceFor(convType string) agentprompt.Surface {
+	if convType == domain.ConversationTypeInteractive {
+		return agentprompt.SurfaceWorkbench
+	}
+	return agentprompt.SurfaceMachinist
 }
 
 // sdkSystemPrompt is the whole of what the SDK harness is appended: the
@@ -189,9 +202,9 @@ func machinistSpec() agentprompt.Spec {
 // own knowledge base; the two things the rewrite must never touch — the task
 // context and the injected memories, the only externally-authored text a run
 // reads — are transcript rows and never part of this string.
-func sdkSystemPrompt(conversationBlock, binaryPath string) string {
+func sdkSystemPrompt(surface agentprompt.Surface, conversationBlock, binaryPath string) string {
 	return resolveCLIPath(joinSections(
-		agentprompt.Build(machinistSpec()),
+		agentprompt.Build(sdkSpec(surface)),
 		conversationBlock,
 	), binaryPath)
 }

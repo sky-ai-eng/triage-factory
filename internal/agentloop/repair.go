@@ -47,25 +47,46 @@ func interruptedToolResult(prov domain.WorkspaceProvenance, executorChanged, aft
 		"verify state before repeating any side-effectful action."
 }
 
+// WorkspaceLayout is where a run's tree sits as its agent addresses it, which
+// is what a rebuilt-workspace notice names.
+type WorkspaceLayout struct {
+	// Root is the run root's path as the agent sees it.
+	Root string
+	// HomeInRoot says the agent's home directory is inside Root, so a
+	// rebuild also loses the toolchain caches kept there.
+	HomeInRoot bool
+}
+
+// jailLayout is the tree this loop's agent runs in: the jail's run root and
+// its home directory are both /work.
+var jailLayout = WorkspaceLayout{Root: "/work", HomeInRoot: true}
+
 // uncapturedSentence names what no capture carries. A capture keeps each
-// repository's commits and every change git would stage, plus /work/_tfac/, so
-// gitignored files and the rest of the run root are absent from any restored
-// tree — the toolchains' caches among them, since the jail's home directory is
-// /work. An agent told its tree is whole would build against dependencies that
-// are not there.
-const uncapturedSentence = "Gitignored files, such as installed dependencies and build output, and anything " +
-	"under /work outside your repositories and /work/_tfac/, such as the toolchain caches in your home directory, " +
-	"were not kept: reinstall dependencies before you build or run tests. "
+// repository's commits and every change git would stage, plus the root's
+// _tfac/, so gitignored files and the rest of the run root are absent from any
+// restored tree — the toolchains' caches among them when the home directory is
+// inside the root. An agent told its tree is whole would build against
+// dependencies that are not there.
+func uncapturedSentence(l WorkspaceLayout) string {
+	s := "Gitignored files, such as installed dependencies and build output, and anything " +
+		"under " + l.Root + " outside your repositories and " + l.Root + "/_tfac/, "
+	if l.HomeInRoot {
+		s += "such as the toolchain caches in your home directory, "
+	}
+	return s + "were not kept: reinstall dependencies before you build or run tests. "
+}
 
 // snapshotRestoredBody describes a workspace rebuilt from its snapshot
 // exactly: snapshots are taken at graceful dormancy points, so what a capture
 // carries survived as of the last park or step boundary, uncapturedSentence
 // names what it does not, and precisely the interrupted engagement's work
 // since that point is absent.
-const snapshotRestoredBody = "Your workspace was restored from its last snapshot. " +
-	"As of that snapshot, your commits and your uncommitted and untracked files are present, and so is " +
-	"/work/_tfac/. " + uncapturedSentence + "Any changes made after it — during the engagement that was " +
-	"interrupted — are not present. Check the working tree and git log before building on what you remember doing."
+func snapshotRestoredBody(l WorkspaceLayout) string {
+	return "Your workspace was restored from its last snapshot. " +
+		"As of that snapshot, your commits and your uncommitted and untracked files are present, and so is " +
+		l.Root + "/_tfac/. " + uncapturedSentence(l) + "Any changes made after it — during the engagement that was " +
+		"interrupted — are not present. Check the working tree and git log before building on what you remember doing."
+}
 
 // builtFreshBody is the other rebuild, and it is a strictly larger loss: no
 // snapshot was involved, so the tree holds what the remote holds and nothing
@@ -85,9 +106,9 @@ const builtFreshBody = "Your workspace was built from scratch — there was no s
 // it are not present" would tell the agent to redo work it still has. What is
 // missing is exactly the tool calls after the checkpoint, and the transcript
 // names them.
-const checkpointRestoredLead = "Your workspace was restored from a checkpoint taken during the interrupted engagement. " +
+var checkpointRestoredLead = "Your workspace was restored from a checkpoint taken during the interrupted engagement. " +
 	"As of that checkpoint, your commits and your uncommitted and untracked files are present, and so is " +
-	"/work/_tfac/. " + uncapturedSentence
+	jailLayout.Root + "/_tfac/. " + uncapturedSentence(jailLayout)
 
 // checkpointSummarizedSentence covers the calls a compaction took out of the
 // window: a summary written after the checkpoint may describe work made
@@ -149,9 +170,24 @@ func (f resumeFacts) lead() string {
 // blurred them would overstate what survived exactly when the agent has least
 // to work from.
 func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, facts resumeFacts) string {
+	return rebuiltNotice(jailLayout, prov, facts)
+}
+
+// WorkspaceRebuiltNote is the notice for a conversation with prior work
+// resuming into a tree rebuilt where its workspace was, on a runtime other
+// than this loop, so it says nothing about executors or sandboxes. l names
+// that runtime's tree. Empty when prov is not a rebuild.
+func WorkspaceRebuiltNote(l WorkspaceLayout, prov domain.WorkspaceProvenance) string {
+	if !prov.Rebuilt() {
+		return ""
+	}
+	return rebuiltNotice(l, prov, resumeFacts{})
+}
+
+func rebuiltNotice(l WorkspaceLayout, prov domain.WorkspaceProvenance, facts resumeFacts) string {
 	body := builtFreshBody
 	if prov == domain.WorkspaceProvenanceRehydrated {
-		body = snapshotRestoredBody
+		body = snapshotRestoredBody(l)
 	}
 	return "<system-note>\n" + facts.lead() + body + "\n</system-note>"
 }

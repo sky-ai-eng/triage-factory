@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -58,14 +59,20 @@ func TestSpendStore_SQLite(t *testing.T) {
 			t.Fatalf("seed trigger: %v", err)
 		}
 
+		otherUserID := uuid.New().String()
+		if _, err := conn.Exec(`INSERT INTO users (id, display_name) VALUES (?, 'Other')`, otherUserID); err != nil {
+			t.Fatalf("seed a second user: %v", err)
+		}
+
 		return dbtest.SpendStoreFixture{
-			Store:     stores.Spend,
-			OrgID:     runmode.LocalDefaultOrgID,
-			TeamID:    runmode.LocalDefaultTeamID,
-			UserID:    runmode.LocalDefaultUserID,
-			AgentID:   agentID,
-			TriggerID: triggerID,
-			Seeder:    newSQLiteSpendSeeder(conn),
+			Store:       stores.Spend,
+			OrgID:       runmode.LocalDefaultOrgID,
+			TeamID:      runmode.LocalDefaultTeamID,
+			UserID:      runmode.LocalDefaultUserID,
+			AgentID:     agentID,
+			TriggerID:   triggerID,
+			OtherUserID: otherUserID,
+			Seeder:      newSQLiteSpendSeeder(conn),
 		}
 	})
 }
@@ -98,15 +105,15 @@ func openSQLiteSpendConn(t *testing.T) *sql.DB {
 // Cost serialize to SQL NULL. The conversation arm plants one assistant
 // ledger row and returns ITS id — the view's source_id.
 func newSQLiteSpendSeeder(conn *sql.DB) dbtest.SpendSeeder {
-	seedLedgerRow := func(t *testing.T, convID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
+	seedLedgerRow := func(t *testing.T, convID, userID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
 		t.Helper()
 		res, err := conn.Exec(`
 			INSERT INTO messages
-				(org_id, conversation_id, role, subtype, content, model,
+				(org_id, conversation_id, user_id, role, subtype, content, model,
 				 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 				 cost_usd, created_at)
-			VALUES (?, ?, 'assistant', '', 'work', ?, ?, ?, ?, ?, ?, ?)
-		`, runmode.LocalDefaultOrgID, convID, nullStr(model),
+			VALUES (?, ?, ?, 'assistant', '', 'work', ?, ?, ?, ?, ?, ?, ?)
+		`, runmode.LocalDefaultOrgID, convID, nullStr(userID), nullStr(model),
 			tok.Input, tok.Output, tok.CacheRead, tok.CacheCreation, cost, at)
 		if err != nil {
 			t.Fatalf("seed ledger row: %v", err)
@@ -126,17 +133,21 @@ func newSQLiteSpendSeeder(conn *sql.DB) dbtest.SpendSeeder {
 			if concluded {
 				completedAt = f.StartedAt
 			}
+			convType := f.Type
+			if convType == "" {
+				convType = domain.ConversationTypeDelegation
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO conversations
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at, completed_at)
-				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?)
+					(id, org_id, type, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at, completed_at)
+				VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?)
 			`,
-				id, runmode.LocalDefaultOrgID, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
+				id, runmode.LocalDefaultOrgID, convType, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
 				nullStr(f.ActorAgentID), nullStr(f.TriggerID), f.Model, status, f.StartedAt, completedAt,
 			); err != nil {
 				t.Fatalf("seed conversation: %v", err)
 			}
-			return seedLedgerRow(t, id, f.Model, costArg(f.Cost), f.Tokens, f.StartedAt)
+			return seedLedgerRow(t, id, f.MessageUserID, f.Model, costArg(f.Cost), f.Tokens, f.StartedAt)
 		},
 		System: func(t *testing.T, f dbtest.SystemSpendFixture) string {
 			t.Helper()

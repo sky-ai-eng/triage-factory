@@ -201,7 +201,7 @@ func TestFollowUp_AnSDKResumeDecidesItsBlueprintLikeAFreshStep(t *testing.T) {
 			}
 			claimID := holderClaimFor(t, s, org, convID)
 			conv := loadConversation(t, s, convID)
-			if _, fenced := s.processCompletion(ctx, org, convID, brID, claimID, loadTask(t, s, taskID), tc.turn,
+			if fenced := s.processCompletion(ctx, org, convID, brID, claimID, loadTask(t, s, taskID), tc.turn,
 				t.TempDir(), nil, "sess-"+convID, runmode.LocalDefaultUserID); fenced {
 				t.Fatal("processCompletion reported fenced under a live claim")
 			}

@@ -16,6 +16,12 @@ const (
 	// surface
 	blockIdentityMachinist   = "identity/machinist.txt"
 	blockIdentityMachinistNv = "identity/machinist-native.txt"
+	blockIdentityWorkbench   = "identity/workbench.txt"
+	blockIdentityWorkbenchNv = "identity/workbench-native.txt"
+
+	// The workbench's counterpart of the native communication section,
+	// written for a person reading as the agent works.
+	blockPracticesCommsWorkbench = "practices/communication-workbench.txt"
 
 	// runtime
 	blockHarnessSDK           = "harness/sdk-claude-code.txt"
@@ -95,8 +101,8 @@ func isolationFor(mode Mode) string {
 // manifest returns the ordered block list for spec, or an error for a
 // combination no arm covers. Order is the order the agent reads them in, and
 // it is load-bearing: identity, then harness, then the verbs that orient a
-// run, then the rules, then the completion contract last so it is the final
-// thing in the window.
+// run, then the rules, then the completion contract, on a surface that has
+// one, last so it is the final thing in the window.
 func manifest(spec Spec) ([]string, error) {
 	if spec.Family != FamilyClaude {
 		return nil, fmt.Errorf("agentprompt: no block set for model family %q", spec.Family)
@@ -104,6 +110,8 @@ func manifest(spec Spec) ([]string, error) {
 	switch spec.Surface {
 	case SurfaceMachinist:
 		return machinistBlocks(spec)
+	case SurfaceWorkbench:
+		return workbenchBlocks(spec)
 	default:
 		return nil, fmt.Errorf("agentprompt: unknown surface %q", spec.Surface)
 	}
@@ -169,5 +177,57 @@ func nativeMachinistBlocks(spec Spec) ([]string, error) {
 		blockHarnessNativeScratch,
 		blockVerbMemoryNv,
 		blockCompletion,
+	}, nil
+}
+
+// workbenchBlocks composes the prompt for the agent a person works with on a
+// task. Each arm is the machinist's, section for section, with identity and
+// communication resolved to the workbench's files and the completion contract
+// dropped: the conversation has no blueprint to stop, so there is no ending to
+// explain.
+//
+// The SDK arm has no communication section, as the machinist's has none: TF
+// appends to Claude Code's own system prompt, which is written for a person at
+// the keyboard.
+func workbenchBlocks(spec Spec) ([]string, error) {
+	if spec.Runtime == RuntimeNative {
+		return nativeWorkbenchBlocks(spec)
+	}
+	return []string{
+		blockIdentityWorkbench,
+		blockHarnessSDK,
+		blockVerbLinkedContext,
+		blockVerbWorkspace,
+		blockVerbTeamKnowledge,
+		blockGuardrailsCommon,
+		gitAccessFor(spec.Mode),
+		isolationFor(spec.Mode),
+		blockHarnessSDKScratch,
+		blockVerbMemory,
+	}, nil
+}
+
+// nativeWorkbenchBlocks is the native loop's workbench arm. It requires multi
+// for the reason nativeMachinistBlocks does: its blocks name the in-jail
+// paths, which exist only behind a sandboxed launch.
+func nativeWorkbenchBlocks(spec Spec) ([]string, error) {
+	if spec.Mode != ModeMulti {
+		return nil, fmt.Errorf("agentprompt: the native runtime has no %q block set — a native engagement is always sandboxed", spec.Mode)
+	}
+	return []string{
+		blockIdentityWorkbenchNv,
+		blockHarnessNative,
+		blockPracticesCoding,
+		blockPracticesCommsWorkbench,
+		blockHarnessNativeGH,
+		blockHarnessNativeVerbs,
+		blockVerbLinkedContextNv,
+		blockVerbWorkspaceNv,
+		blockVerbTeamKnowledgeNv,
+		blockGuardrailsCommonNv,
+		gitAccessFor(spec.Mode),
+		isolationFor(spec.Mode),
+		blockHarnessNativeScratch,
+		blockVerbMemoryNv,
 	}, nil
 }

@@ -44,14 +44,14 @@ func hostileStrings(task domain.Task, metadataJSON, skeleton string) []string {
 // conversation in the org reads. A per-run section added here later fails this
 // instead of quietly forking the fleet's cached prefix per run.
 func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
-	if got, want := nativeSystemPrompt(), agentprompt.Build(nativeSpec()); got != want {
+	if got, want := nativeSystemPrompt(agentprompt.SurfaceMachinist), agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)); got != want {
 		t.Errorf("block 1 is not the composed blocks alone;\ngot  %.200q\nwant %.200q", got, want)
 	}
 	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
 	if addendum == "" {
 		t.Fatal("the native handoff addendum is empty; this test would pass vacuously")
 	}
-	if strings.Contains(nativeSystemPrompt(), addendum) {
+	if strings.Contains(nativeSystemPrompt(agentprompt.SurfaceMachinist), addendum) {
 		t.Error("block 1 carries the handoff addendum, which is per step and belongs in block 2")
 	}
 }
@@ -61,8 +61,8 @@ func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
 // step position, the task behind them — still compose the same block 1, so the
 // entry written at its breakpoint is one the whole fleet reads.
 func TestNativeSystemPrompt_IsByteIdenticalAcrossRuns(t *testing.T) {
-	first := nativeSystemPrompt()
-	if second := nativeSystemPrompt(); first != second {
+	first := nativeSystemPrompt(agentprompt.SurfaceMachinist)
+	if second := nativeSystemPrompt(agentprompt.SurfaceMachinist); first != second {
 		t.Fatal("two runs of the same spec composed different block 1s")
 	}
 	// The missions differ; block 1 cannot, because no mission reaches it.
@@ -140,7 +140,7 @@ func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing
 	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
 	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
-	for _, sys := range []string{nativeSystemPrompt(), block2} {
+	for _, sys := range []string{nativeSystemPrompt(agentprompt.SurfaceMachinist), block2} {
 		for _, bad := range hostileStrings(task, metadataJSON, skeleton) {
 			if strings.Contains(sys, bad) {
 				t.Errorf("externally-authored text reached a system block: %.60q", bad)

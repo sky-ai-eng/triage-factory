@@ -302,11 +302,12 @@ func EpisodeJailLossesSQL(convAlias string) string {
 // conversation carries the owning team for the capture writers. The claim
 // identity fields (ExecutorID/ClaimedAt) and the episode counts are hydrated from the
 // freshly minted claims row, not this projection.
-const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
+var conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
 	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
 	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
-	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index`
+	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index,
+	` + db.ConversationHasRunSQL("r")
 
 // insertConversation is the mint a delegation conversation is written by. It
 // takes the queryer because it always runs on the transaction that also
@@ -1784,7 +1785,7 @@ func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
