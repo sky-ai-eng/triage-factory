@@ -112,8 +112,7 @@ func (a *App) dispatchCtl(payload string) {
 			return
 		}
 		// Not holder-gated: the brain rings an executor, which never holds
-		// the lease. nil-safe on a process that runs no engagement, and a
-		// non-blocking send on one that does.
+		// the lease.
 		a.credDoorbells.Ring(msg.ConversationID)
 	case "kick":
 		// nil on a pod whose backplane build found no DSN — no sockets to

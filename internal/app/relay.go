@@ -193,8 +193,8 @@ func (a *App) dispatchManagerTrigger(manager, orgID string, force bool) {
 // consolidation the listener is process-lifetime and role-wide — every
 // multi-mode pod hears every relay message — so "only the brain acts on
 // relay traffic" is enforced by the holder gate below, not by
-// subscription scope. A relay message is published only by a non-holder
-// and NOTIFY fans out to every listener, so exactly the current holder acts
+// subscription scope. publishCtl is only ever called by a non-holder and
+// NOTIFY fans out to every listener, so exactly the current holder acts
 // on each message; a message published in a holderless gap (mid-failover)
 // is dropped by every pod — the relay is lossy by contract (spec §3), and
 // the next system:poll:* sentinel re-kicks whatever it carried.
@@ -254,13 +254,12 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 	}
 }
 
-// publishCtl publishes a message on tf_ctl. Its callers are all in multi
-// mode, so a.database is always a live Postgres admin pool here: the relays
-// above, which publish only when !isBrainHolder() (a standby control pod, or
-// an executor), and the brain's credential provisioner, which rings the
-// executor waiting on a bundle it sealed. tf_ctl is lossy by design
-// (spec §3): a publish failure costs what a dropped NOTIFY does, one
-// deferred pass or one poll interval, so this logs and moves on rather than
+// publishCtl publishes a relay message on tf_ctl. Only ever called when
+// !isBrainHolder(), which — given isBrainHolder's role switch — can only
+// happen in multi mode (a standby control pod, or an executor), so
+// a.database is always a live Postgres admin pool here. Relay is lossy by
+// design (spec §3): a publish failure just costs one deferred pass, the
+// same cost as a dropped NOTIFY, so this logs and moves on rather than
 // retrying or surfacing an error to the caller.
 func (a *App) publishCtl(msg ctlbus.Message) {
 	if err := ctlbus.Publish(context.Background(), a.database, msg); err != nil {

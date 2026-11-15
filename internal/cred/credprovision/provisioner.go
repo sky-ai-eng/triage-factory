@@ -97,7 +97,7 @@ type Manager struct {
 	deploymentSigner *commitsigner.DeploymentSigner
 	// onSealed is told of each seal an executor's credential wait may be
 	// waiting on, once its bundle is written. nil tells nothing.
-	onSealed func(orgID, conversationID string)
+	onSealed func(ctx context.Context, orgID, conversationID string)
 
 	// sources overrides the availability resolve (availability) for a test
 	// that drives a whole provision over fake stores. nil in production.
@@ -296,7 +296,7 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	// on that bundle, and the sidecar takes it up through its own refresh
 	// relay.
 	if m.onSealed != nil && (reason == ReasonCredRequest || reason == ReasonAwaitingSweep) {
-		m.onSealed(orgID, conversationID)
+		m.onSealed(ctx, orgID, conversationID)
 	}
 	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
@@ -653,8 +653,10 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 
 // SetOnSealed sets the function told, once a seal's bundle is written, that
 // conversationID's claim has one to read, so the executor waiting on it can
-// read it at once rather than on its next poll. Call it before the first seal.
-func (m *Manager) SetOnSealed(fn func(orgID, conversationID string)) {
+// read it at once rather than on its next poll. fn runs inside the seal, under
+// its context: the awaiting sweep seals one claim at a time, so fn must return
+// promptly. Call it before the first seal.
+func (m *Manager) SetOnSealed(fn func(ctx context.Context, orgID, conversationID string)) {
 	m.onSealed = fn
 }
 

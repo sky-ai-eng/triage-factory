@@ -26,7 +26,7 @@ func TestProvision_TellsOfTheSealsAWaitIsWaitingOn(t *testing.T) {
 			}, &installTokens{})
 			type told struct{ orgID, conversationID string }
 			var got []told
-			rig.m.SetOnSealed(func(orgID, conversationID string) {
+			rig.m.SetOnSealed(func(_ context.Context, orgID, conversationID string) {
 				if rig.claims.puts == 0 {
 					t.Error("told of the seal before its bundle was written")
 				}
