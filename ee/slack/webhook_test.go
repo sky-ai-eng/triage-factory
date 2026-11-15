@@ -79,6 +79,17 @@ func (f *fakeWorkspaceStore) Get(context.Context, string, string, string) (*slac
 	return nil, nil
 }
 func (f *fakeWorkspaceStore) Delete(context.Context, string, string, string) error { return nil }
+func (f *fakeWorkspaceStore) DeleteSystem(_ context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := workspaceID + "/" + apiAppID
+	row, ok := f.byWorkspaceApp[key]
+	if !ok || row.OrgID != orgID || !row.UpdatedAt.Equal(updatedAt) {
+		return false, nil
+	}
+	delete(f.byWorkspaceApp, key)
+	return true, nil
+}
 func (f *fakeWorkspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

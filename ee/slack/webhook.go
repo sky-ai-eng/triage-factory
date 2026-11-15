@@ -39,6 +39,8 @@ type slackEventEnvelope struct {
 	Challenge string          `json:"challenge"`
 	EventID   string          `json:"event_id"`
 	Event     json.RawMessage `json:"event"`
+	// EventTime is when Slack generated the event, in unix seconds.
+	EventTime int64 `json:"event_time"`
 	// MinuteRateLimited is set on a type=app_rate_limited envelope: the unix
 	// timestamp of the minute Slack started dropping this app's event
 	// deliveries (its 30k events/workspace/hour Events API budget was
@@ -69,6 +71,37 @@ type slackInnerEvent struct {
 	// Slack retired and the one it now uses.
 	OldChannelID string `json:"old_channel_id"`
 	NewChannelID string `json:"new_channel_id"`
+	// Tokens carries a tokens_revoked event's revoked tokens, each named by
+	// the id of the user it belongs to. TF holds no user tokens, so
+	// tokens.oauth is not read.
+	Tokens struct {
+		Bot []string `json:"bot"`
+	} `json:"tokens"`
+}
+
+// newInboundMention is the one translation both transports make from an
+// event_callback envelope and its parsed inner event.
+func newInboundMention(envelope slackEventEnvelope, inner slackInnerEvent) inboundMention {
+	ev := inboundMention{
+		Type:     inner.Type,
+		Subtype:  inner.Subtype,
+		EventID:  envelope.EventID,
+		Channel:  inner.Channel,
+		User:     inner.User,
+		BotID:    inner.BotID,
+		Text:     inner.Text,
+		TS:       inner.TS,
+		ThreadTS: inner.ThreadTS,
+
+		OldChannelID: inner.OldChannelID,
+		NewChannelID: inner.NewChannelID,
+
+		RevokedBots: inner.Tokens.Bot,
+	}
+	if envelope.EventTime > 0 {
+		ev.EventTime = time.Unix(envelope.EventTime, 0)
+	}
+	return ev
 }
 
 // webhookHandler serves POST /api/webhooks/slack/{org_id} — the Events API
@@ -110,7 +143,8 @@ type webhookHandler struct {
 //     configured, not processing work, so a lapsed org can still complete
 //     it; a lapsed org's real (validly-signed) event deliveries get
 //     200-empty so Slack doesn't deactivate the subscription for
-//     persistent failures.
+//     persistent failures. An app removal passes the gate
+//     (removesConnection).
 func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	pathOrgID := r.PathValue("org_id")
 
@@ -177,10 +211,6 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "url_verification":
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"challenge": envelope.Challenge})
 	case "event_callback":
-		if !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
-			ackEmpty(w)
-			return
-		}
 		h.handleEventCallback(w, r, *ws, envelope)
 	case "app_rate_limited":
 		// Slack exhausted this app's Events API budget (30k events per
@@ -210,21 +240,11 @@ func (h *webhookHandler) handleEventCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	ev := inboundMention{
-		Type:     inner.Type,
-		Subtype:  inner.Subtype,
-		EventID:  envelope.EventID,
-		Channel:  inner.Channel,
-		User:     inner.User,
-		BotID:    inner.BotID,
-		Text:     inner.Text,
-		TS:       inner.TS,
-		ThreadTS: inner.ThreadTS,
-
-		OldChannelID: inner.OldChannelID,
-		NewChannelID: inner.NewChannelID,
+	if !removesConnection(inner.Type) && !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
+		ackEmpty(w)
+		return
 	}
-	if err := h.pipeline.handleEventCallback(r.Context(), ws, ev); err != nil {
+	if err := h.pipeline.handleEventCallback(r.Context(), ws, newInboundMention(envelope, inner)); err != nil {
 		httpx.InternalError(w, "slack-webhook", err)
 		return
 	}

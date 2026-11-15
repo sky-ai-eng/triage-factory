@@ -165,6 +165,87 @@ func TestWorkspaceStore_Postgres_Delete(t *testing.T) {
 	}
 }
 
+// TestWorkspaceStore_Postgres_DeleteSystem: DeleteSystem removes the row only
+// while its updated_at is the one the caller read, and reports a miss —
+// whether an Upsert moved updated_at, the row is another org's, or there is no
+// row — as false with the row left as it was.
+func TestWorkspaceStore_Postgres_DeleteSystem(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "slack-delete-system")
+	otherOrg, _, _ := pgtest.SeedOrgWithUser(t, h, "slack-delete-system-other")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	workspaces := slackstore.FromStores(stores).Workspaces
+	ctx := context.Background()
+
+	read := func(workspaceID string) *slackstore.Workspace {
+		t.Helper()
+		ws, err := workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, defaultAppID(workspaceID))
+		if err != nil {
+			t.Fatalf("GetByWorkspaceAppSystem(%s): %v", workspaceID, err)
+		}
+		return ws
+	}
+	upsert := func(ws slackstore.Workspace) {
+		t.Helper()
+		mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
+			return slackstore.FromTx(tx).Workspaces.Upsert(ctx, ws)
+		})
+	}
+	deleteSystem := func(org, workspaceID string, updatedAt time.Time) bool {
+		t.Helper()
+		deleted, err := workspaces.DeleteSystem(ctx, org, workspaceID, defaultAppID(workspaceID), updatedAt)
+		if err != nil {
+			t.Fatalf("DeleteSystem(%s): %v", workspaceID, err)
+		}
+		return deleted
+	}
+
+	t.Run("matching updated_at deletes", func(t *testing.T) {
+		upsert(testWorkspace(orgID, "T0DELSYS1"))
+		ws := read("T0DELSYS1")
+		if !deleteSystem(orgID, "T0DELSYS1", ws.UpdatedAt) {
+			t.Fatal("DeleteSystem = false; want true for the row as read")
+		}
+		if got := read("T0DELSYS1"); got != nil {
+			t.Errorf("row after DeleteSystem = %+v; want none", got)
+		}
+	})
+
+	t.Run("moved updated_at keeps the row", func(t *testing.T) {
+		upsert(testWorkspace(orgID, "T0DELSYS2"))
+		stale := read("T0DELSYS2")
+		upsert(testWorkspace(orgID, "T0DELSYS2")) // a reconnect: the trigger moves updated_at
+		current := read("T0DELSYS2")
+		if !current.UpdatedAt.After(stale.UpdatedAt) {
+			t.Fatalf("updated_at after the second Upsert = %v; want after %v", current.UpdatedAt, stale.UpdatedAt)
+		}
+		if deleteSystem(orgID, "T0DELSYS2", stale.UpdatedAt) {
+			t.Fatal("DeleteSystem = true for a row whose updated_at moved; want false")
+		}
+		if got := read("T0DELSYS2"); got == nil || !got.UpdatedAt.Equal(current.UpdatedAt) {
+			t.Errorf("row after a stale DeleteSystem = %+v; want it unchanged", got)
+		}
+	})
+
+	t.Run("another org's row is kept", func(t *testing.T) {
+		upsert(testWorkspace(orgID, "T0DELSYS3"))
+		ws := read("T0DELSYS3")
+		if deleteSystem(otherOrg, "T0DELSYS3", ws.UpdatedAt) {
+			t.Fatal("DeleteSystem under another org = true; want false")
+		}
+		if read("T0DELSYS3") == nil {
+			t.Error("row deleted by another org's DeleteSystem; want kept")
+		}
+	})
+
+	t.Run("no row reports false", func(t *testing.T) {
+		if deleteSystem(orgID, "T0DELSYS4", time.Now()) {
+			t.Fatal("DeleteSystem with no row = true; want false")
+		}
+	})
+}
+
 // TestWorkspaceStore_Postgres_CrossOrgConflict: the (workspace_id,
 // api_app_id) composite PRIMARY KEY binds a (workspace, app) pair to
 // exactly one org, deployment-wide — a second org's Upsert for an
