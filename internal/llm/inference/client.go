@@ -106,8 +106,7 @@ type Request struct {
 
 	// Effort is the reasoning effort, one of TF's five levels
 	// (domain.EffortLevels: low, medium, high, xhigh and max). Empty leaves
-	// reasoning at the provider default. Whether a model takes a level as
-	// Anthropic's output_config.effort is CarriesEffort's answer.
+	// reasoning at the provider default.
 	Effort string
 	// MaxTokens caps the completion. Zero resolves the per-provider budget
 	// policy (MaxOutputTokens) against this request's provider and model —

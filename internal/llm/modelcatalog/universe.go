@@ -103,13 +103,8 @@ func nativeModels() []Model {
 // low, medium and high with supports_reasoning, xhigh and max with their own
 // flags, and nothing above a Bedrock row's ceiling. A row without
 // supports_reasoning takes none, whatever the other flags say, since they
-// describe levels of a reasoning it does not do.
-//
-// A level is offered only when the inference client also carries it to the
-// model as Anthropic's output_config.effort (Entry.CarriedEfforts): bifrost
-// sends some models a thinking budget in place of an effort, which a model
-// that takes only adaptive thinking refuses. inference's wire test pins what
-// is carried per model and level.
+// describe levels of a reasoning it does not do. inference's wire test checks
+// that bifrost sends each level offered here as the model takes it.
 func effortLevels(e Entry) []string {
 	levels := []string{}
 	if !e.SupportsReasoning {
@@ -120,7 +115,7 @@ func effortLevels(e Entry) []string {
 		ceiling = i
 	}
 	for i, level := range domain.EffortLevels {
-		if i > ceiling || !slices.Contains(e.CarriedEfforts, level) ||
+		if i > ceiling ||
 			(level == domain.EffortXHigh && !e.SupportsXHighEffort) ||
 			(level == domain.EffortMax && !e.SupportsMaxEffort) {
 			continue

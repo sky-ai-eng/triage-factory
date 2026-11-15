@@ -45,7 +45,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
@@ -100,10 +99,7 @@ type Entry struct {
 	SupportsXHighEffort bool
 	SupportsMaxEffort   bool
 	EffortCeiling       string
-	// CarriedEfforts are the levels the inference client carries to this
-	// model as output_config.effort (inference.CarriesEffort).
-	CarriedEfforts []string
-	DisplayOrder   int
+	DisplayOrder        int
 }
 
 // tokensPerMTok converts the datasheet's per-token rates to the per-million
@@ -127,17 +123,6 @@ var (
 	entries []Entry
 	joinErr error
 )
-
-// carriedEfforts are the levels the inference client carries to key unchanged.
-func carriedEfforts(key string) []string {
-	var out []string
-	for _, level := range domain.EffortLevels {
-		if inference.CarriesEffort(key, level) {
-			out = append(out, level)
-		}
-	}
-	return out
-}
 
 func init() {
 	entries, joinErr = load(supportedModelsJSON, inference.ModelInfo)
@@ -228,7 +213,6 @@ func load(fileJSON []byte, lookup func(string) (inference.Info, bool)) ([]Entry,
 			SupportsXHighEffort:   info.SupportsXHighEffort,
 			SupportsMaxEffort:     info.SupportsMaxEffort,
 			EffortCeiling:         info.EffortCeiling,
-			CarriedEfforts:        carriedEfforts(s.Key),
 			// Position in the returned slice, not in the file: a dropped
 			// entry must not leave a hole in the ordering the API publishes.
 			DisplayOrder: len(out),

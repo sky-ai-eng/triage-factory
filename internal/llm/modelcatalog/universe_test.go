@@ -259,30 +259,24 @@ func equalStrings(a, b []string) bool {
 
 func TestEffortLevels_FollowTheDatasheetFlags(t *testing.T) {
 	all := domain.EffortLevels
-	carried := func(e Entry) Entry {
-		e.CarriedEfforts = all
-		return e
-	}
 	cases := []struct {
 		name  string
 		entry Entry
 		want  []string
 	}{
-		{"reasoning alone", carried(Entry{SupportsReasoning: true}),
+		{"reasoning alone", Entry{SupportsReasoning: true},
 			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh}},
-		{"reasoning with xhigh and max", carried(Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true}), all},
+		{"reasoning with xhigh and max", Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true}, all},
 		{"an xhigh ceiling drops max",
-			carried(Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true, EffortCeiling: domain.EffortXHigh}),
+			Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true, EffortCeiling: domain.EffortXHigh},
 			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh, domain.EffortXHigh}},
 		{"a high ceiling drops both upper levels",
-			carried(Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true, EffortCeiling: domain.EffortHigh}),
+			Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true, EffortCeiling: domain.EffortHigh},
 			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh}},
 		{"max without xhigh",
-			carried(Entry{SupportsReasoning: true, SupportsMaxEffort: true}),
+			Entry{SupportsReasoning: true, SupportsMaxEffort: true},
 			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh, domain.EffortMax}},
-		{"no reasoning", carried(Entry{SupportsXHighEffort: true, SupportsMaxEffort: true}), []string{}},
-		{"a model the client carries no effort to",
-			Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true}, []string{}},
+		{"no reasoning", Entry{SupportsXHighEffort: true, SupportsMaxEffort: true}, []string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,18 +294,16 @@ func TestEffortLevels_FollowTheDatasheetFlags(t *testing.T) {
 			}
 		}
 	})
-	// The shipped rows, as the pinned bifrost carries them: an effort reaches
-	// Sonnet 5.x and Fable 5.x, and Opus 5.x and Haiku 5.5 are sent a thinking
-	// budget instead (inference.TestClient_EffortReachesAnthropicAsOutputConfigEffort).
+	// The shipped rows, as the datasheet describes them: a direct Anthropic 5.x
+	// model takes all five, and a Bedrock row with an xhigh ceiling stops there.
 	t.Run("the shipped native rows", func(t *testing.T) {
 		u := UniverseFor(true)
 		for key, want := range map[string]int{
 			"claude-sonnet-5-5":              5,
-			"claude-fable-5-1":               5,
+			"claude-opus-5-5":                5,
+			"claude-haiku-5-5":               5,
 			"us.anthropic.claude-sonnet-5-5": 4,
-			"us.anthropic.claude-fable-5-1":  4,
-			"claude-opus-5-5":                0,
-			"claude-haiku-5-5":               0,
+			"us.anthropic.claude-haiku-5-5":  4,
 		} {
 			m, ok := u.Lookup(key)
 			if !ok {
