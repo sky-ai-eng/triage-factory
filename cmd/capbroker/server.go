@@ -161,9 +161,10 @@ func (s *Server) Serve(l net.Listener) error {
 }
 
 // Shutdown cancels every in-flight dispatch's context (unwinding any
-// ctx-aware privileged op that's still running) and waits up to ctx's
-// deadline for in-flight handlers to finish. Caller closes the listener
-// separately (unblocks Serve's Accept).
+// ctx-aware privileged op that's still running), waits up to ctx's
+// deadline for in-flight handlers to finish, and kills every runtime the
+// server supervises. Caller closes the listener separately (unblocks
+// Serve's Accept).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
@@ -175,6 +176,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.cancelBase()
+	// The cancel reaches each supervised runtime through a goroutine of that
+	// runtime's own, and the broker exits once this returns: one that had not
+	// run by then would leave its runtime behind with nothing to end it. So
+	// every runtime is signalled on the way out, once the handlers that could
+	// still register one have finished or ctx has run out.
+	defer s.killSupervised()
 
 	done := make(chan struct{})
 	go func() {
@@ -186,6 +193,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// killSupervised SIGKILLs every runtime in the run registry. It does not
+// wait for them: each one's supervising goroutine reaps it.
+func (s *Server) killSupervised() {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	for _, entry := range s.runs {
+		_ = entry.rt.Kill()
 	}
 }
 

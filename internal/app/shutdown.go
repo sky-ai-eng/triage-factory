@@ -15,9 +15,11 @@ import (
 // Bounded rather than indefinite, because the orchestrator's grace period is
 // the real ceiling — a SIGKILL truncates the write whether or not we are still
 // waiting — so an unbounded wait buys nothing and costs the chance to log why
-// the drain did not finish. It shares that ceiling with the two deadlines that
-// follow it on an executor (5s to stop the healthz listener, 5s to flush
-// traces), so 15s keeps the whole sequence inside the common 30s default.
+// the drain did not finish. It shares that ceiling with the three deadlines
+// that follow it on an executor: 10s to release the claims no engagement took
+// with it, 5s to stop the healthz listener, and 5s to flush traces. The whole
+// sequence is bounded at 35s, inside the 45s grace period docker-compose.yml
+// sets on the executor.
 const shutdownDrainTimeout = 15 * time.Second
 
 // drainDispatches is the shutdown join: it stops this process answering ready,

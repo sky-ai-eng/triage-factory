@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -671,6 +674,64 @@ func TestWarmClaim_ShutdownReleasesTheClaim(t *testing.T) {
 	if after := f.turnEndState(t); after != before {
 		t.Errorf("the shutdown moved the conversation:\nbefore %+v\nafter  %+v", before, after)
 	}
+}
+
+// A shutdown that lets a warm claim go snapshots the tree as the warm wait
+// left it, which is newer than the turn-end snapshot. The claim is released
+// before the capture is uploaded, and the conversation is not written.
+func TestWarmClaim_ShutdownSnapshotsTheTree(t *testing.T) {
+	spans := recordSpans(t)
+	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+	f.awaitWarm(t, 1)
+	before := f.turnEndState(t)
+	// What a process the agent left running wrote after the turn ended.
+	writeFile(t, filepath.Join(f.wtPath, "_tfac", "notes.md"), "written while the claim was warm")
+
+	f.gate.hold()
+	f.cancel(errDispatcherShutdown)
+	select {
+	case <-f.gate.entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the shutdown never uploaded a snapshot")
+	}
+	if released, outcome, _ := f.claimRelease(t); !released || outcome != "completed" {
+		t.Errorf("claim during the upload = {released %v, outcome %q}, want released completed: the release waited on the capture", released, outcome)
+	}
+	f.assertState(t, domain.WorkspaceSnapshotPending, f.claim.ClaimID)
+	f.gate.let()
+
+	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+		t.Fatalf("disposition = %+v, want the release, not a hand-back", d)
+	}
+	f.assertReleased(t)
+	f.assertState(t, domain.WorkspaceSnapshotWritten, f.claim.ClaimID)
+	if after := f.turnEndState(t); after != before {
+		t.Errorf("the shutdown moved the conversation:\nbefore %+v\nafter  %+v", before, after)
+	}
+
+	var shutdown []sdktrace.ReadOnlySpan
+	for _, span := range spansNamed(spans(), "workspace.snapshot") {
+		if spanAttr(t, span, "reason").AsString() == snapshotReasonShutdown {
+			shutdown = append(shutdown, span)
+		}
+	}
+	if len(shutdown) != 1 {
+		t.Fatalf("workspace.snapshot spans with reason %q = %d, want 1", snapshotReasonShutdown, len(shutdown))
+	}
+	if shutdown[0].Status().Code == codes.Error {
+		t.Errorf("the shutdown snapshot ended in error: %s", shutdown[0].Status().Description)
+	}
+
+	// The next boot deletes the tree, so the blob is all a resume has.
+	f.removeTree(t)
+	cwd, prov, err := f.ensureOn(t, f.y, f.claim, failingFreshBuilder(t))
+	if err != nil {
+		t.Fatalf("ensureWorkspace after the shutdown: %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceRehydrated {
+		t.Fatalf("provenance = %q, want rehydrated", prov)
+	}
+	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "written while the claim was warm")
 }
 
 // A lease fence writes nothing: the claim is someone else's to release.

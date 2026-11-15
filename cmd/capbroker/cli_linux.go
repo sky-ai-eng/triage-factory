@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,10 @@ import (
 // finish once a shutdown signal arrives.
 const shutdownDrain = 5 * time.Second
 
+// parentPollInterval is how often the broker checks that the process that
+// started it is still its parent.
+const parentPollInterval = time.Second
+
 var brokerLog = logging.Component("cap-broker")
 
 // runBroker is the `triagefactory cap-broker` subcommand body: create the
@@ -35,7 +40,16 @@ var brokerLog = logging.Component("cap-broker")
 // dev/bare-metal fallback path (orchestrator_linux.go's Start, when
 // nothing is already listening on the socket) still spawns it as a plain
 // child too.
+//
+// Either way the broker leaves its parent's process group before anything
+// else, so a signal sent to that group does not reach it. It stops on a
+// signal sent to its own pid, and when its parent exits.
 func runBroker(args []string) error {
+	if err := leaveCallerProcessGroup(); err != nil {
+		return err
+	}
+	parent := os.Getppid()
+
 	fs := flag.NewFlagSet("cap-broker", flag.ContinueOnError)
 	socketPath := fs.String("socket", DefaultSocketPath, "unix socket path to serve on")
 	orchestratorUID := fs.Int("orchestrator-uid", -1, "uid the orchestrator process runs as after the exec-time capability drop; when set (>=0), the control socket is chowned to this uid so that different-uid, unprivileged process can still connect")
@@ -107,13 +121,50 @@ func runBroker(args []string) error {
 
 	logBootLine(*socketPath)
 
-	srv := NewServer(sandbox.NewHostOps())
+	return serve(NewServer(sandbox.NewHostOps()), l, parent)
+}
 
+// leaveCallerProcessGroup moves this process into a process group of its own,
+// which the sidecars and jails it spawns then inherit.
+//
+// A stop reaches the orchestrator as a signal to its whole process group: tini
+// fans a container stop's SIGTERM out to the group, and a terminal sends
+// Ctrl-C to the foreground group. The orchestrator answers one by handing its
+// runs back, which snapshots each tree through the broker and drains each
+// sidecar's audit records. A broker in that group gets the same signal at the
+// same instant and ends every cell before the hand-back can use them.
+//
+// A process that already leads its group has nothing to leave, and setpgid
+// refuses a session leader with EPERM.
+func leaveCallerProcessGroup() error {
+	if syscall.Getpgrp() == os.Getpid() {
+		return nil
+	}
+	if err := syscall.Setpgid(0, 0); err != nil {
+		return fmt.Errorf("capbroker: move into a process group of its own: %w", err)
+	}
+	return nil
+}
+
+// serve runs srv on l until the broker is told to stop, by SIGTERM or SIGINT
+// or by the exit of parent, the process that started it. It then stops
+// serving, ends the cells srv supervises, and waits up to shutdownDrain for
+// the calls in flight.
+func serve(srv *Server, l net.Listener, parent int) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(l) }()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The parent watch cancels a context derived from the signal's, not the
+	// signal's own: stop would also give SIGTERM back its default action, and
+	// one arriving during the drain would then end the broker mid-teardown.
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
+	// A broker started by init has no parent whose exit it could see.
+	if parent != 1 {
+		go watchParent(ctx, parent, parentPollInterval, cancel)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -129,6 +180,36 @@ func runBroker(args []string) error {
 	case err := <-serveErr:
 		// Accept loop died on its own (not via our shutdown) — surface it.
 		return err
+	}
+}
+
+// watchParent calls stop once the process's parent is no longer parent, and
+// returns when ctx ends.
+//
+// A broker outliving the orchestrator that started it would hold its cells
+// with nothing left to drive or end them. In the container the orchestrator's
+// exit ends the container and the kernel kills what is left, so this matters
+// there only if that fails; for an orchestrator run outside the container and
+// then killed, nothing else ends the broker.
+//
+// It polls because PR_SET_PDEATHSIG cannot do this for a Go parent: that
+// signal is sent when the thread that spawned the child exits, not the parent
+// process, and the Go runtime does not keep that thread.
+func watchParent(ctx context.Context, parent int, every time.Duration, stop func()) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if now := os.Getppid(); now != parent {
+				brokerLog.Warn("the broker's parent exited; ending its cells and exiting",
+					"parent_pid", parent, "reparented_to", now)
+				stop()
+				return
+			}
+		}
 	}
 }
 

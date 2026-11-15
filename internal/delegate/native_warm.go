@@ -127,7 +127,7 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 		case warmLetGo:
 			return s.letGoWarm(ctx, n, result)
 		case warmShutdown:
-			return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+			return s.letGoWarmOnShutdown(context.WithoutCancel(ctx), n, result)
 		case warmStopped:
 			return s.endWarmStopped(ctx, n, result)
 		case warmFenced:
@@ -417,7 +417,29 @@ func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domai
 // It records the engagement's terminal span, as recordNativeResult does for
 // every other ending. result is the last turn's ending, carrying the turns,
 // time and spend of the whole engagement.
-func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.Result) (disp engagementDisposition) {
+func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.Result) engagementDisposition {
+	return s.endWarmClaim(ctx, n, result, false)
+}
+
+// letGoWarmOnShutdown is letGoWarm for a dispatcher that is shutting down,
+// and it also snapshots the tree. The turn-end snapshot is as old as the warm
+// wait, the jail it kept can have gone on changing the tree since, and the
+// next boot of this executor deletes the tree, so what this ending does not
+// capture is lost.
+//
+// Nothing else a hand-back does applies. The conversation is not mid-flight,
+// so it is not written and no hand-back outcome is recorded, and the turn end
+// already filed the memory file and the spend.
+func (s *Spawner) letGoWarmOnShutdown(ctx context.Context, n nativeTail, result agentloop.Result) engagementDisposition {
+	return s.endWarmClaim(ctx, n, result, true)
+}
+
+// endWarmClaim is the ending letGoWarm and letGoWarmOnShutdown share.
+// captureTree is the one difference between them: a snapshot of the tree,
+// decided and recorded before the release and captured after it, as
+// leaveConversation orders its own. The capture runs whatever the release
+// returned; its upload is guarded by the key's record, not by the claim.
+func (s *Spawner) endWarmClaim(ctx context.Context, n nativeTail, result agentloop.Result, captureTree bool) (disp engagementDisposition) {
 	_, span := s.startNativeEngagementSpan(ctx, n.orgID, n.conversationID, n.task.ID, result)
 	defer func() {
 		terminal := "concluded_" + string(result.Outcome)
@@ -430,7 +452,25 @@ func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.
 	n.release()
 	n.ckpt.stop()
 	s.releaseActivity(n.conversationID, n.cfg.claimID)
-	released, err := s.conversations.ReleaseWarmClaimSystem(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.cfg.claimID)
+
+	writeCtx := context.WithoutCancel(ctx)
+	var park liveParkContext
+	var snap endingSnapshot
+	if captureTree {
+		park = liveParkContext{
+			orgID:          n.orgID,
+			conversationID: n.conversationID,
+			namespace:      n.namespace,
+			claudeCwd:      n.claudeCwd,
+			claimID:        n.cfg.claimID,
+			runtime:        domain.ConversationRuntimeNative,
+			cell:           n.cfg.sidecar.treeHandOff(),
+		}
+		snap = s.openEndingSnapshot(writeCtx, park)
+	}
+
+	released, err := s.conversations.ReleaseWarmClaimSystem(writeCtx, n.orgID, n.conversationID, n.cfg.claimID)
+	s.persistEndingSnapshot(writeCtx, park, snapshotReasonShutdown, snap)
 	if err != nil {
 		delegateLog.Warn("release the warm claim failed; its lease lapses and the takeover releases it",
 			"conversation", n.conversationID, "claim", n.cfg.claimID, "error", err)

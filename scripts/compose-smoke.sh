@@ -390,7 +390,11 @@ posture=$(dc exec -T executor sh -c '
   [ "$duid" = "$ouid" ] || { echo "/run/tf owned by uid $duid, want the orchestrator uid $ouid (its per-launch stdio sockets are created there unprivileged)"; exit 1; }
   dmode=$(stat -c %a /run/tf)
   [ "$dmode" = "711" ] || { echo "/run/tf mode $dmode, want 711 (no group or other write: a sidecar creates only inside its own run directory)"; exit 1; }
-  echo "broker pid $broker (root, caps); orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero, no groups); /run/tf $duid 0711"
+  bpgrp=$(awk "{print \$5}" "/proc/$broker/stat")
+  opgrp=$(awk "{print \$5}" "/proc/$orch/stat")
+  [ -n "$bpgrp" ] && [ -n "$opgrp" ] || { echo "could not read the process groups of the broker (\"$bpgrp\") and the orchestrator (\"$opgrp\")"; exit 1; }
+  [ "$bpgrp" != "$opgrp" ] || { echo "cap-broker shares process group $bpgrp with the orchestrator; a container stop would signal both at once and end every sandbox before the orchestrator hands its runs back"; exit 1; }
+  echo "broker pid $broker (root, caps, pgrp $bpgrp); orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero, no groups, pgrp $opgrp); /run/tf $duid 0711"
 ' 2>&1) || fail "executor privsep posture: $posture"
 pass "executor privsep posture: $posture"
 
