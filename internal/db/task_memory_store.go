@@ -137,10 +137,7 @@ type TaskMemoryStore interface {
 	//
 	//   - every memory written by a conversation on taskID, whatever team that
 	//     conversation belongs to. A task's own memories are its handoff, and
-	//     they move with the task when it is reassigned to another team. The
-	//     task's memory wait (memory_pending) holds its next conversation for
-	//     its earlier conversations' memory with no team filter, so the read
-	//     sees what the wait waited for.
+	//     they move with the task when it is reassigned to another team.
 	//   - on the entity's other tasks, memory whose parent conversation the
 	//     team can see: team-visible conversations owned by teamID plus any
 	//     org-visible conversation, matching what a member of that team sees

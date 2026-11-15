@@ -187,12 +187,12 @@ func reverseTaskMemories(mems []domain.TaskMemory) {
 //
 // The reader sees two sets. Its own task's memory, from every conversation on
 // the task whatever team or visibility that conversation has: a task's
-// memories are its handoff, and the task's memory wait holds its next
-// conversation for them with no filter of its own, so the read has none
-// either. And the entity's other memory as a member of the reading team would
-// through conversations_select: org-visible conversations, plus team-visible
-// ones the team owns. Private-visibility conversations are excluded from that
-// second set, being creator-scoped with no user here to match.
+// memories are its handoff, so they move with the task to whatever team holds
+// it, and none of them is withheld. And the entity's other memory as a member
+// of the reading team would see it through conversations_select: org-visible
+// conversations, plus team-visible ones the team owns. Private-visibility
+// conversations are excluded from that second set, being creator-scoped with
+// no user here to match.
 //
 // $3 and $4 bind through NULLIF(...)::uuid, so an empty team or task matches
 // no conversation on its arm rather than failing the uuid cast. org_id stays

@@ -943,9 +943,9 @@ func actionMemoryRole(act domain.ExternalAction) string {
 // best-effort conversation→entity 'touched' row (loading IS an address).
 //
 // ConversationInfo carries no task id, so the task is resolved from the
-// conversation row, as IsTaskOwnRepository resolves it, rather than trusted
-// from a field a caller stamped. A conversation that cannot be found reads as
-// one with no task: the load still answers for its team.
+// conversation row rather than trusted from a field a caller stamped. A
+// conversation that cannot be found reads as one with no task: the load still
+// answers for its team.
 //
 // Unlike recordEntityTouch's resolve-or-create, a miss here records NOTHING and
 // returns an empty result with an empty EntityID — the deliberate asymmetry the
