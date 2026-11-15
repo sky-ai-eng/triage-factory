@@ -43,6 +43,28 @@ export interface ModelCatalogEntry {
   availability?: ModelAvailability
   availability_detail?: string
   availability_checked_at?: string
+  /** The reasoning efforts a message on this model may ask for, lowest
+   *  first. Always on the wire; empty for a model that takes none, which a
+   *  composer answers by hiding its effort control. */
+  effort_levels?: string[]
+}
+
+/** Effort is a reasoning effort as the wire spells it. */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+/** EFFORT_LABELS is how every effort control names a level. */
+export const EFFORT_LABELS: Record<Effort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+}
+
+/** effortLabel names an effort for a person, or returns a level this build
+ *  does not know as the server spelled it. */
+export function effortLabel(effort: string): string {
+  return EFFORT_LABELS[effort as Effort] ?? effort
 }
 
 // The read also carries `display_order`, and nothing here reads it: the items

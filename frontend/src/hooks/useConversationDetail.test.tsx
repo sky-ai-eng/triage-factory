@@ -3,7 +3,7 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import { useConversationDetail } from './useConversationDetail'
 import { TelemetryRail } from '../components/runstation/StationInstruments'
 import { stationState } from '../components/runstation/stationStyle'
-import type { Conversation, Message, WSEvent } from '../types'
+import type { Conversation, Message, Task, WSEvent } from '../types'
 import { jsonBody } from '../test/apiResponse'
 
 // The hook's live updates arrive through the singleton websocket. Mocking the
@@ -883,5 +883,54 @@ describe('useConversationDetail deliverable refresh', () => {
     })
     expect(urlsEndingWith(fetchMock, '/conversations/r1')).toHaveLength(r1Reads)
     expect(screen.getByTestId('status').textContent).toBe('running')
+  })
+})
+
+function TaskProbe() {
+  const { task } = useConversationDetail(CONVERSATION_ID)
+  return <div data-testid="memory">{task ? String(task.memory_pending) : ''}</div>
+}
+
+describe('useConversationDetail task refresh', () => {
+  beforeEach(() => {
+    dispatch = null
+  })
+
+  it('keeps the newest task read when pushes answer out of order', async () => {
+    // The memory lands between two pushes. The first push's read answers
+    // last, with the wait still open, and must not bring it back.
+    const firstPush = deferred<Task>()
+    const taskReads: Array<Task | Promise<Task>> = [
+      { id: 't1', memory_pending: true } as Task,
+      firstPush.promise,
+      { id: 't1', memory_pending: false } as Task,
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const path = url.split('?')[0]
+        const body: unknown =
+          path === '/api/tasks/t1'
+            ? taskReads.shift()
+            : path.endsWith('/messages')
+              ? { items: [], next_page_token: '' }
+              : path.endsWith('/deliverables/refresh')
+                ? { updated: 0 }
+                : conversation({ TaskID: 't1', Status: 'open' })
+        return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
+      }),
+    )
+    render(<TaskProbe />)
+    await waitFor(() => expect(screen.getByTestId('memory').textContent).toBe('true'))
+
+    send({ type: 'task_updated', data: {} })
+    send({ type: 'task_updated', data: {} })
+    await waitFor(() => expect(screen.getByTestId('memory').textContent).toBe('false'))
+
+    await act(async () => {
+      firstPush.settle({ id: 't1', memory_pending: true } as Task)
+      await firstPush.promise
+    })
+    expect(screen.getByTestId('memory').textContent).toBe('false')
   })
 })

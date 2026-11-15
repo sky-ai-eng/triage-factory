@@ -92,6 +92,10 @@ export interface Task {
   // when the viewer belongs to ≥2 teams.
   // TODO: board row color-coding consumes this.
   team_id?: string
+  // conversation_id names the task's current conversation: the one a
+  // person's claim opened, or the delegation working it. Absent while the
+  // task holds none, which includes a task just returned to the queue.
+  conversation_id?: string
   // The task's version. Every task write sends the one its caller read
   // (lib/taskWrites), and the server refuses a write whose task has changed
   // since with 409 VERSION_CONFLICT. Every write answers the new one, which is
@@ -268,6 +272,20 @@ export interface Conversation {
   // has_run is whether the agent has taken a turn in the conversation. A
   // person's claim opens one that reads false until its first message runs.
   has_run?: boolean
+  // runtime is the engine driving the transcript: 'sdk' or 'native'. It says
+  // when a change of model or effort takes effect on a turn already running.
+  runtime?: string
+  // next_message_model / next_message_effort are what a message naming no
+  // settings would run on, and so what the composer opens with. Detail read
+  // only. Both are absent when the send would refuse such a message (a team
+  // whose default model is no longer enabled), and the effort is absent too
+  // when it is the provider's default.
+  next_message_model?: string
+  next_message_effort?: string
+  // cache_warm_until is when the provider's prompt cache from the newest
+  // assistant turn goes cold, RFC 3339. Detail read only; absent for a
+  // conversation with no assistant turn.
+  cache_warm_until?: string
   Model: string
   StartedAt: string
   // QueuedAt is when the conversation last entered the queue; ClaimedAt is when the

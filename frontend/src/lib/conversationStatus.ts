@@ -331,10 +331,15 @@ export function resumeBlockedCopy(conversation: Conversation): string {
       return 'This step is done and the workflow has moved on — follow up on its latest step.'
     case 'ended_team_archived':
       return 'The team that owned this work was archived, so nothing will pick it back up.'
+    case 'ended_reassigned':
+      return 'This task was reassigned to someone on another team, whose team carries the work now in a conversation of its own.'
     case 'ended_failed':
-      return 'This run failed, so it can’t be continued. Delegate the task again to start fresh.'
-    // TODO(TFAC-1423): 'ended_reassigned', the boundary a reassign to another
-    // team stamps, has no sentence of its own and reads the generic one below.
+      // A failed chat is replaced for the person who holds the task, so the
+      // reader's next step is that conversation; the station links to it. A
+      // delegation is replaced by nothing.
+      return conversation.type === 'interactive'
+        ? 'This chat failed, so it can’t be continued. A new conversation was opened on the task for the person who holds it.'
+        : 'This run failed, so it can’t be continued. Delegate the task again to start fresh.'
     default:
       return 'This conversation can’t take a follow-up.'
   }
@@ -390,7 +395,13 @@ export function retryingAt(
 // retryingAtLabel renders retryingAt's time for a person, in their local time
 // and the 24-hour clock the run views stamp times with.
 export function retryingAtLabel(at: Date): string {
-  return `Retrying at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
+  return `Retrying at ${clockTime(at)}`
+}
+
+// clockTime is a time of day as the run views stamp one: local time, on the
+// 24-hour clock.
+export function clockTime(at: Date): string {
+  return at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 export function formatDurationMs(ms: number): string {

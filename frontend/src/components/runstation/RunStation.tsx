@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { motion, useReducedMotion } from 'motion/react'
 import * as Popover from '@radix-ui/react-popover'
 import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
 import type { Message, Conversation, Task } from '../../types'
 import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
+import type { ApiErrorItem } from '../../lib/apiClient'
 import {
   isActiveStatus,
   isFailedStatus,
@@ -36,7 +37,22 @@ import ViewOnlyBadge from '../ViewOnlyBadge'
 import ScreenTranscript from './ScreenTranscript'
 import { TelemetryRail } from './StationInstruments'
 import { liveHeat, stationState, tint } from './stationStyle'
+import { useComposerSettings } from './composerSettings'
+import SettingsControl from './SettingsControl'
 import { useOrgHref } from '../../hooks/useOrgHref'
+
+/** One message as the composer sends it: its text and the settings it runs
+ *  on. `effort` is '' when the message names none. */
+export interface OutgoingMessage {
+  text: string
+  model: string
+  effort: string
+}
+
+/** What a send came back with. A refused send carries the faults about its
+ *  model or effort, which the composer's settings control shows itself;
+ *  every other fault has already been reported. */
+export type SendOutcome = { sent: true } | { sent: false; settingsErrors: ApiErrorItem[] }
 
 export interface StationActions {
   onBack: () => void
@@ -51,8 +67,8 @@ export interface StationActions {
    *  approval state live on the conversation row). */
   onDeliverableResolved?: () => void
   /** Steer the conversation with a free-form message (live process or `open`
-   *  resume). */
-  onMessage?: (text: string) => void
+   *  resume), naming the model and effort it runs on. */
+  onMessage?: (message: OutgoingMessage) => Promise<SendOutcome>
   /** Stop the conversation (→ open, resumable). Same operation as onCancel;
    *  the two controls are not merged yet. */
   onInterrupt?: () => void
@@ -206,6 +222,7 @@ export default function RunStation({
 
       <IntakeDock
         conversation={conversation}
+        task={task}
         state={st}
         active={active}
         actions={actions}
@@ -513,12 +530,14 @@ function VentHeat({ heat, light, live }: { heat: number; light: string; live: bo
 // draft survives a prompt appearing and resolving.
 function IntakeDock({
   conversation,
+  task,
   state,
   active,
   actions,
   pending,
 }: {
   conversation: Conversation
+  task: Task | null
   state: ReturnType<typeof stationState>
   active: boolean
   actions: StationActions
@@ -552,6 +571,37 @@ function IntakeDock({
   // org-visible one) gets no composer, no stop, and no Allow/Deny. Absent is
   // unknown, and offers the controls.
   const canWrite = conversation.can_write !== false
+  const orgHref = useOrgHref()
+  const settings = useComposerSettings(conversation, task)
+  // The task waits on the memory its previous conversation owes, and this is
+  // the conversation that waits, with nothing running: a message sent now is
+  // queued until the memory lands. An earlier conversation of the task,
+  // the one owing the memory among them, has nothing waiting on it.
+  const memoryWait = !!task?.memory_pending && task.conversation_id === conversation.ID && !active
+  // A failed chat is replaced for the person who holds the task, so the line
+  // that says so leads to the replacement.
+  const replacementHref =
+    conversation.resume_blocked_reason === 'ended_failed' &&
+    conversation.type === 'interactive' &&
+    !!task?.conversation_id &&
+    task.conversation_id !== conversation.ID
+      ? orgHref(`/runs/${task.conversation_id}`)
+      : null
+
+  const send = async (text: string): Promise<boolean> => {
+    if (!actions.onMessage) return false
+    const outcome = await actions.onMessage({
+      text,
+      model: settings.model,
+      effort: settings.effort,
+    })
+    if (outcome.sent) {
+      settings.clearErrors()
+      return true
+    }
+    settings.showErrors(outcome.settingsErrors)
+    return false
+  }
 
   const sublabel = hasUnresolved
     ? counts.total === 1
@@ -566,13 +616,17 @@ function IntakeDock({
           // for the work, in words. Shared with the rail so the two surfaces
           // can't drift.
           completionGloss(conversation)
-        : conversation.Status === 'open'
-          ? 'open — idle, resumable'
-          : conversation.Status === 'failed'
-            ? conversation.FailureKind === 'memory_limit'
-              ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
-              : 'run failed'
-            : conversation.Status
+        : state.key === 'ready'
+          ? 'no messages yet — say what you want done'
+          : conversation.Status === 'open'
+            ? 'open — idle, resumable'
+            : conversation.Status === 'failed'
+              ? conversation.FailureKind === 'memory_limit'
+                ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
+                : 'run failed'
+              : conversation.Status === 'queued' && memoryWait
+                ? 'waiting on memory'
+                : conversation.Status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-line-1 px-4 py-2.5">
@@ -646,13 +700,39 @@ function IntakeDock({
         </div>
       </div>
 
+      {/* The memory wait, which holds the next turn back without refusing a
+          message: the composer below stays open through it. */}
+      {memoryWait && (
+        <p
+          role="status"
+          className="mt-2.5 rounded-[5px] border border-line-1 bg-tint-2 px-2.5 py-2 text-ui leading-relaxed text-ink-3"
+        >
+          {memoryWaitCopy(task)}
+        </p>
+      )}
+
       {/* Steering composer — live + resumable runs, hidden (not unmounted) behind
           a pending prompt so a draft in progress isn't lost. */}
       {steerable && canWrite && actions.onMessage && (
         <DockComposer
           state={state}
-          placeholder={active ? 'Steer the agent…' : 'Message to resume…'}
-          onSend={actions.onMessage}
+          placeholder={
+            active
+              ? 'Steer the agent…'
+              : conversation.has_run === false
+                ? 'Start the chat…'
+                : 'Message to resume…'
+          }
+          onSend={send}
+          canSend={settings.canSend}
+          settings={
+            <SettingsControl
+              settings={settings}
+              conversation={conversation}
+              active={active}
+              hidden={hasPrompt}
+            />
+          }
           hidden={hasPrompt}
         />
       )}
@@ -666,6 +746,14 @@ function IntakeDock({
           className="mt-2.5 rounded-[5px] border border-line-1 bg-tint-2 px-2.5 py-2 text-ui leading-relaxed text-ink-3"
         >
           {resumeBlockedCopy(conversation)}
+          {replacementHref && (
+            <>
+              {' '}
+              <Link to={replacementHref} className="font-medium text-warm hover:underline">
+                Open the new conversation →
+              </Link>
+            </>
+          )}
         </p>
       )}
     </div>
@@ -744,23 +832,33 @@ function ApprovalAffordance({
 }
 
 // DockComposer — the steering input. An auto-resizing textarea (Enter sends,
-// Shift+Enter inserts a newline), with a send key lit in the conversation's
-// state tone. State is local; the sent text round-trips back as an `message`
-// event, so there's no optimistic insert here. `hidden` collapses it out of
-// view and disables interaction (e.g. while a permission prompt is up) without
-// unmounting it — unmounting would drop whatever the user had drafted.
+// Shift+Enter inserts a newline), the settings control naming what the message
+// runs on, and a send key lit in the conversation's state tone. State is
+// local; the sent text round-trips back as a `message` event, so there's no
+// optimistic insert here. The draft is kept until the send lands: a refused
+// send leaves the words where they were, for the person to fix what was
+// refused and send again. `hidden` collapses it out of view and disables
+// interaction (e.g. while a permission prompt is up) without unmounting it —
+// unmounting would drop whatever the user had drafted.
 function DockComposer({
   state,
   placeholder,
   onSend,
+  canSend = true,
+  settings,
   hidden = false,
 }: {
   state: ReturnType<typeof stationState>
   placeholder: string
-  onSend: (text: string) => void
+  /** Resolves true once the message has landed. */
+  onSend: (text: string) => Promise<boolean>
+  /** False while the selected settings are ones the send would refuse. */
+  canSend?: boolean
+  settings?: ReactNode
   hidden?: boolean
 }) {
   const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
 
   // Measure on every change, clamp to ~5 rows so a long draft can't swallow the
@@ -772,19 +870,21 @@ function DockComposer({
     el.style.height = Math.min(el.scrollHeight, 120) + 'px'
   }, [draft])
 
-  const submit = () => {
-    if (hidden) return
+  const submit = async () => {
+    if (hidden || sending || !canSend) return
     const text = draft.trim()
     if (!text) return
-    onSend(text)
-    setDraft('')
+    setSending(true)
+    const sent = await onSend(text).finally(() => setSending(false))
+    // Typing carries on during the send; only the words that went are cleared.
+    if (sent) setDraft((d) => (d.trim() === text ? '' : d))
     ref.current?.focus()
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      submit()
+      void submit()
     }
   }
 
@@ -803,12 +903,13 @@ function DockComposer({
         tabIndex={hidden ? -1 : undefined}
         placeholder={placeholder}
         aria-label={placeholder.replace(/…$/, '')}
-        className="flex-1 resize-none bg-transparent py-1 text-body leading-relaxed text-ink-1 placeholder:text-ink-3/70 focus:outline-none"
+        className="min-w-0 flex-1 resize-none bg-transparent py-1 text-body leading-relaxed text-ink-1 placeholder:text-ink-3/70 focus:outline-none"
       />
+      {settings}
       <button
         type="button"
-        onClick={submit}
-        disabled={hidden || !draft.trim()}
+        onClick={() => void submit()}
+        disabled={hidden || sending || !canSend || !draft.trim()}
         tabIndex={hidden ? -1 : undefined}
         aria-label="Send message"
         className="mb-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] transition-opacity disabled:opacity-30"
@@ -822,6 +923,17 @@ function DockComposer({
       </button>
     </div>
   )
+}
+
+// memoryWaitCopy says what holds the next turn back: the memory the task's
+// previous conversation owes, and, once an attempt at it has failed, why.
+function memoryWaitCopy(task: Task | null): string {
+  const first = 'Waiting for the previous conversation’s memory.'
+  const attempt = task?.memory_attempt
+  if (attempt?.outcome === 'failed') {
+    return `${first} The last attempt failed: ${attempt.error_message ?? 'no reason was recorded.'}`
+  }
+  return `${first} Your message is queued and starts as soon as it lands.`
 }
 
 // IntakePort — a tiny socket glyph marking this as the machine's input.

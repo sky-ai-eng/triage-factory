@@ -73,12 +73,17 @@ export function lifecycleOf(conv: Conversation): RunLifecycle {
 }
 
 /** A working (or queued) row's one prose string. A queued run's prose names
- *  the work it will do — the wait itself is the hourglass mark's job. From
- *  the claim on it is the line every surface narrates a live conversation
- *  with (lib/conversationStatus activeProse): the setup phase, then the
- *  agent's own action, with the bare state word until it has one. */
+ *  the work it will do — the wait itself is the hourglass mark's job — unless
+ *  it waits on the memory its task's previous conversation owes, which no
+ *  slot frees and which the row names instead. From the claim on it is the
+ *  line every surface narrates a live conversation with
+ *  (lib/conversationStatus activeProse): the setup phase, then the agent's
+ *  own action, with the bare state word until it has one. */
 export function workingProse(conv: Conversation, task: Task | undefined): string {
-  if (conv.Status === 'queued') return task?.title || 'Waiting for a slot'
+  if (conv.Status === 'queued') {
+    if (task?.memory_pending) return 'Waiting on memory'
+    return task?.title || 'Waiting for a slot'
+  }
   return activeProse(conv) ?? 'Working'
 }
 

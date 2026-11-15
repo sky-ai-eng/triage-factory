@@ -7,13 +7,18 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { isActiveConversation, isTerminalStatus } from '../lib/conversationStatus'
 import RunStation, {
   type ChainStepLabel,
+  type OutgoingMessage,
+  type SendOutcome,
   type StationActions,
 } from '../components/runstation/RunStation'
+import { isSettingsFault } from '../components/runstation/composerSettings'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import { GlassBackdrop } from './setup/glass'
-import { toast } from '../components/Toast/toastStore'
-import { apiFetch, apiJSON } from '../lib/apiClient'
+import { backToOrigin, toast } from '../components/Toast/toastStore'
+import { apiErrors, apiFetch, apiJSON } from '../lib/apiClient'
+import { refreshModelCatalog } from '../hooks/useModelCatalog'
+import { useApiOrgId } from '../hooks/useApiOrgId'
 import { isVersionConflict, requeueTask } from '../lib/taskWrites'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
@@ -24,6 +29,7 @@ export default function RunDetail() {
   const { conversationID } = useParams<{ conversationID: string }>()
   const navigate = useNavigate()
   const orgHref = useOrgHref()
+  const orgId = useApiOrgId()
   const {
     conversation,
     task,
@@ -135,23 +141,38 @@ export default function RunDetail() {
   }, [conversation, stopPending, softRefresh])
 
   // Steer a conversation: a free-form message lands on the live process (or
-  // wakes an `open` conversation via resume). The backend records +
-  // broadcasts it as a `message` event, so useConversationDetail's append
-  // renders it — no optimistic insert.
+  // wakes an `open` conversation via resume), on the model and effort it
+  // names. The backend records + broadcasts it as a `message` event, so
+  // useConversationDetail's append renders it — no optimistic insert.
+  //
+  // A refused send hands its model and effort faults back to the composer,
+  // which shows them on its settings control; the catalog is re-read beside
+  // them, since a model refused as not enabled means the one held here is out
+  // of date. Every other fault is a toast, and the conversation is re-read so
+  // one that moved on shows why on the station.
   const handleMessage = useCallback(
-    async (text: string) => {
-      if (!conversation) return
+    async ({ text, model, effort }: OutgoingMessage): Promise<SendOutcome> => {
+      if (!conversation) return { sent: false, settingsErrors: [] }
       try {
         await apiFetch(`/api/agent/conversations/${conversation.ID}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify(effort ? { text, model, effort } : { text, model }),
         })
+        return { sent: true }
       } catch (err) {
-        toast.failed(err, 'Could not send the message.')
+        const items = apiErrors(err)
+        const settingsErrors = items.filter(isSettingsFault)
+        const others = items.filter((item) => !isSettingsFault(item))
+        if (settingsErrors.length > 0 && orgId) void refreshModelCatalog(orgId)
+        if (items.length === 0) toast.failed(err, 'Could not send the message.')
+        for (const item of others)
+          toast.error(item.message, undefined, { action: backToOrigin(err) })
+        if (others.length > 0 || items.length === 0) softRefresh()
+        return { sent: false, settingsErrors }
       }
     },
-    [conversation],
+    [conversation, orgId, softRefresh],
   )
 
   // handleRequeue returns the task to the queue. It cancels a live conversation

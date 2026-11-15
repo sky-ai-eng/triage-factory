@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { TaskCard } from './TaskCard'
 
@@ -249,6 +249,26 @@ describe('TaskCard, the task’s own asks', () => {
     expect(screen.getByRole('link', { name: 'Waiting on memory' })).toHaveAttribute(
       'href',
       '/runs/c0',
+    )
+  })
+
+  it('offers the holder a way into their chat, and lets the memory wait take its place', () => {
+    renderCard({ lifecycle: 'queued', age: '1h ago', href: '/runs/c0', chat: { href: '/runs/c9' } })
+    expect(screen.getByRole('link', { name: 'Start chat' })).toHaveAttribute('href', '/runs/c9')
+
+    cleanup()
+    renderCard({
+      lifecycle: 'queued',
+      age: '1h ago',
+      href: '/runs/c0',
+      chat: { href: '/runs/c9' },
+      waiting: true,
+    })
+    expect(screen.queryByRole('link', { name: 'Start chat' })).not.toBeInTheDocument()
+    // The wait leads where the holder's message will run once it lands.
+    expect(screen.getByRole('link', { name: 'Waiting on memory' })).toHaveAttribute(
+      'href',
+      '/runs/c9',
     )
   })
 

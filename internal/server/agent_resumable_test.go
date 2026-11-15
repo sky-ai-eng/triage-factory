@@ -148,6 +148,12 @@ func TestHandleAgentStatus_NextMessageSettingsAndCacheWarmth(t *testing.T) {
 		}
 	}
 
+	t.Run("the read names the conversation's runtime", func(t *testing.T) {
+		s, id := seed(t, "runtime")
+		if got := readConversation(t, s, id); got["runtime"] != domain.ConversationRuntimeNative {
+			t.Errorf("runtime = %v, want %s", got["runtime"], domain.ConversationRuntimeNative)
+		}
+	})
 	t.Run("no person row runs on the team default", func(t *testing.T) {
 		s, id := seed(t, "nextdefault")
 		got := readConversation(t, s, id)

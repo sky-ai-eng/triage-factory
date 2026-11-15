@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import RunDetail from './RunDetail'
 import type { Conversation, Task } from '../types'
 import { jsonBody } from '../test/apiResponse'
+import { resetModelCatalogForTest } from '../hooks/useModelCatalog'
 
 const stopping = {
   ID: 'c1',
@@ -125,5 +126,71 @@ describe('RunDetail return to queue', () => {
       ([path]) => path === '/api/tasks/t1/requeue',
     )
     expect(requeue && JSON.parse(String(requeue[1].body))).toEqual({ version: 3 })
+  })
+})
+
+describe('RunDetail send', () => {
+  beforeEach(() => resetModelCatalogForTest())
+
+  it('posts the text with the model and effort the composer names', async () => {
+    detail.conversation = {
+      ...stopping,
+      TaskID: 't1',
+      Status: 'open',
+      has_run: true,
+      stop_requested_at: undefined,
+      next_message_model: 'opus',
+      next_message_effort: 'high',
+    }
+    detail.task = { id: 't1', team_id: 'team1', memory_pending: false } as Task
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/models'))
+        return {
+          ok: true,
+          ...jsonBody({
+            items: [
+              {
+                key: 'opus',
+                display_name: 'Opus 5',
+                enabled: true,
+                effort_levels: ['low', 'high'],
+              },
+            ],
+          }),
+        }
+      if (url.endsWith('/settings'))
+        return {
+          ok: true,
+          ...jsonBody({ team_settings: { DefaultModel: 'opus', EnabledModels: null } }),
+        }
+      return { ok: true, status: 200, ...jsonBody({}) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderRunDetail()
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /message settings/i })).toHaveAccessibleName(
+        /Opus 5 · High/,
+      ),
+    )
+    fireEvent.change(screen.getByLabelText(/message to resume/i), {
+      target: { value: 'try the other fixture' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/agent/conversations/c1/message',
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    )
+    const sent = (fetchMock.mock.calls as unknown as [string, RequestInit][]).find(
+      ([path]) => path === '/api/agent/conversations/c1/message',
+    )
+    expect(JSON.parse(String(sent?.[1].body))).toEqual({
+      text: 'try the other fixture',
+      model: 'opus',
+      effort: 'high',
+    })
   })
 })

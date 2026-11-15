@@ -184,6 +184,13 @@ function isUnusedClaimConversation(c: Conversation): boolean {
   return c.type === 'interactive' && c.has_run === false
 }
 
+// isChatToStart reports the conversation a holder's "Start chat" leads to: a
+// claim's conversation nothing has run in, and still the task's. An ended one
+// (a failed chat its replacement stands in for, a claim handed back) is not.
+function isChatToStart(c: Conversation): boolean {
+  return isUnusedClaimConversation(c) && !c.ended_at
+}
+
 function collapseStorageKey(userID: string): string {
   return `${COLLAPSE_STORAGE_PREFIX}.${userID || 'anon'}`
 }
@@ -261,6 +268,27 @@ export default function Board() {
   useEffect(() => {
     chainStepConversationsRef.current = chainStepConversations
   }, [chainStepConversations])
+  // The task's newest interactive conversation, by id, while it has not run —
+  // what the holder's "Start chat" row is offered on. Kept apart from the
+  // card's conversation: a person who took a task over keeps the agent's run
+  // on the card, and still needs the way into their own conversation.
+  const [unrunChats, setUnrunChats] = useState<Record<string, string>>({})
+  const unrunChatsRef = useRef(unrunChats)
+  useEffect(() => {
+    unrunChatsRef.current = unrunChats
+  }, [unrunChats])
+  // noteChat records what a freshly read conversation says about its task's
+  // chat: one to start is the offer, and one that has run or ended retires
+  // the offer it held.
+  const noteChat = useCallback((c: Conversation) => {
+    setUnrunChats((prev) => {
+      if (isChatToStart(c)) return prev[c.TaskID] === c.ID ? prev : { ...prev, [c.TaskID]: c.ID }
+      if (prev[c.TaskID] !== c.ID) return prev
+      const next = { ...prev }
+      delete next[c.TaskID]
+      return next
+    })
+  }, [])
 
   // Tool-permission prompts for every conversation on the board, keyed by conversation ID. The
   // shared queue core (same one useConversationDetail uses) owns dedup + per-prompt TTL
@@ -489,10 +517,14 @@ export default function Board() {
       // Chains need a second per-chain fetch for their blueprint step
       // structure; resolve those concurrently rather than serially.
       const nextConversations: Record<string, Conversation> = {}
+      const nextChats: Record<string, string | undefined> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
       for (const taskID of taskIDs) {
         const taskConversations = conversationsByTask[taskID]
+        // A task the window did not reach keeps its offer, as it keeps its
+        // card's conversation, until a read that reaches it says otherwise.
+        if (taskConversations) nextChats[taskID] = taskConversations.find(isChatToStart)?.ID
         if (!taskConversations || taskConversations.length === 0) continue
         const latestConversation =
           taskConversations.find((c) => !isUnusedClaimConversation(c)) ?? taskConversations[0]
@@ -516,6 +548,14 @@ export default function Board() {
       }
 
       setConversations((prev) => ({ ...prev, ...nextConversations }))
+      setUnrunChats((prev) => {
+        const next = { ...prev }
+        for (const [taskID, id] of Object.entries(nextChats)) {
+          if (id) next[taskID] = id
+          else delete next[taskID]
+        }
+        return next
+      })
 
       // Apply all chain step rails in one batch once their blueprint fetches
       // settle (concurrent above), so the whole refresh costs ~2 renders, not
@@ -720,11 +760,13 @@ export default function Board() {
   const actionRefreshTimers = useRef<Map<string, number>>(new Map())
   const scheduleActionRefresh = useCallback(
     (conversationID: string) => {
-      const entry = Object.entries(conversationsRef.current).find(
-        ([, c]) => c.ID === conversationID,
-      )
-      if (!entry) return
-      const [taskID] = entry
+      // A chat that has not run yet is not the card's conversation on a task
+      // taken over from the agent, and its first row is what retires the
+      // card's "Start chat", so it refreshes the card too.
+      const taskID =
+        Object.entries(conversationsRef.current).find(([, c]) => c.ID === conversationID)?.[0] ??
+        Object.entries(unrunChatsRef.current).find(([, id]) => id === conversationID)?.[0]
+      if (!taskID) return
       const timers = actionRefreshTimers.current
       const pending = timers.get(taskID)
       if (pending != null) window.clearTimeout(pending)
@@ -787,6 +829,7 @@ export default function Board() {
           })
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((fullConversation) => {
+              noteChat(fullConversation)
               setConversations((p) => {
                 const existing = p[fullConversation.TaskID]
                 if (
@@ -844,6 +887,7 @@ export default function Board() {
             } else {
               apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
                 .then((fullConversation) => {
+                  noteChat(fullConversation)
                   setConversations((p) => {
                     const existing = p[fullConversation.TaskID]
                     if (
@@ -922,6 +966,7 @@ export default function Board() {
         seedChainStepConversations,
         refreshPermissions,
         dropPermissionConversation,
+        noteChat,
       ],
     ),
   )
@@ -1485,6 +1530,7 @@ export default function Board() {
                       narrowed={narrows(filters[colId])}
                       conversations={conversations}
                       chainStepConversations={chainStepConversations}
+                      unrunChats={unrunChats}
                       permQueues={permQueueMap}
                       onResolvePermission={resolvePermission}
                       currentUserID={currentUserID}
@@ -1597,6 +1643,7 @@ function ColumnContents({
   narrowed,
   conversations,
   chainStepConversations,
+  unrunChats,
   permQueues,
   onResolvePermission,
   currentUserID,
@@ -1617,6 +1664,7 @@ function ColumnContents({
   narrowed: boolean
   conversations: Record<string, Conversation>
   chainStepConversations: Record<string, Conversation[]>
+  unrunChats: Record<string, string>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
     conversationID: string,
@@ -1652,6 +1700,7 @@ function ColumnContents({
             task={task}
             conversation={conversation}
             chainSteps={chainStepConversations[task.id]}
+            unrunChatID={unrunChats[task.id]}
             pendingPermissions={conversation ? permQueues[conversation.ID] : undefined}
             onResolvePermission={onResolvePermission}
             delegateFailure={delegateFailures[task.id]}
@@ -1683,6 +1732,7 @@ const SortableCard = memo(function SortableCard({
   task,
   conversation,
   chainSteps,
+  unrunChatID,
   pendingPermissions,
   onResolvePermission,
   delegateFailure,
@@ -1692,6 +1742,8 @@ const SortableCard = memo(function SortableCard({
   task: Task
   conversation?: Conversation
   chainSteps?: Conversation[]
+  /** The task's interactive conversation that has not run, when it has one. */
+  unrunChatID?: string
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
     conversationID: string,
@@ -1732,6 +1784,16 @@ const SortableCard = memo(function SortableCard({
   }, [model.ticking])
 
   const href = conversation ? orgHref(`/runs/${conversation.ID}`) : undefined
+  // The holder's way into their own conversation, until it has run. Only the
+  // person who holds the task is offered it: a teammate reads the card as it
+  // is, since a conversation has one person in it.
+  const chat =
+    !!picker.currentUserID &&
+    task.claimed_by_user_id === picker.currentUserID &&
+    !!task.conversation_id &&
+    unrunChatID === task.conversation_id
+      ? { href: orgHref(`/runs/${task.conversation_id}`) }
+      : undefined
 
   // The head of the permission queue, as the card's plate: the real input the
   // agent wants to run, never its description. Single-flight — the first
@@ -1770,6 +1832,7 @@ const SortableCard = memo(function SortableCard({
         href={href}
         permission={permission}
         waiting={task.memory_pending}
+        chat={chat}
         retry={
           delegateFailure ? { message: delegateFailure, onRetry: () => onRetry(task) } : undefined
         }

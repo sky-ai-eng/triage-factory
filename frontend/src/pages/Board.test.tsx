@@ -47,8 +47,12 @@ vi.mock('@dnd-kit/core', async (importOriginal) => {
   }
 })
 
+/** The board's socket handler, so a test can deliver a push. */
+const ws = vi.hoisted(() => ({ handler: null as null | ((event: unknown) => void) }))
 vi.mock('../hooks/useWebSocket', () => ({
-  useWebSocket: () => {},
+  useWebSocket: (handler: (event: unknown) => void) => {
+    ws.handler = handler
+  },
   setPresenceView: () => {},
 }))
 const QUEUES = {
@@ -410,6 +414,96 @@ describe('the conversation a card shows', () => {
     await screen.findByText(HELD.title)
 
     expect(runLinks()).toEqual(['c-claim'])
+  })
+
+  it('offers "Start chat" only to the holder, and only while their conversation has not run', async () => {
+    // The holder took the task over: the card keeps the agent's run, and the
+    // row leads to the conversation the claim opened.
+    async function startChatHref(holder: string, hasRun: boolean): Promise<string | null> {
+      const task = { ...HELD, claimed_by_user_id: holder, conversation_id: 'c-claim' }
+      const claimed = {
+        ...conversation('open'),
+        ID: 'c-claim',
+        StartedAt: '2026-09-01T13:00:00Z',
+        type: 'interactive',
+        has_run: hasRun,
+      } as Conversation
+      api.apiList.mockImplementation(async (_path: string, body: Record<string, unknown>) => {
+        const statuses = (body.statuses as string[] | undefined) ?? []
+        const items = statuses.includes('in_progress') ? [task] : []
+        return { items, next_page_token: '', total_count: items.length }
+      })
+      api.apiJSON.mockImplementation(async (path: string) => {
+        if (path === '/api/me') return { id: 'u1' }
+        if (path === '/api/tasks/facets') return { event_types: [] }
+        if (path === '/api/agent/conversations/list') {
+          return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+        }
+        throw new Error('unexpected apiJSON ' + path)
+      })
+      const view = renderBoard()
+      await screen.findByText(HELD.title)
+      // The viewer's identity lands after the first paint.
+      await waitFor(() => expect(api.apiJSON).toHaveBeenCalledWith('/api/me'))
+      await act(async () => {})
+      const href = screen.queryByRole('link', { name: 'Start chat' })?.getAttribute('href') ?? null
+      view.unmount()
+      return href
+    }
+
+    expect(await startChatHref('u1', false)).toMatch(/\/runs\/c-claim$/)
+    expect(await startChatHref('u2', false)).toBeNull()
+    expect(await startChatHref('u1', true)).toBeNull()
+  })
+
+  it('keeps "Start chat" on the live chat when an ended one that never ran is pushed', async () => {
+    // A chat that failed before its model spoke, and the replacement opened
+    // for its holder: the failure's push must not take the offer from it.
+    const task = { ...HELD, conversation_id: 'c-new' }
+    const live = {
+      ...conversation('open'),
+      ID: 'c-new',
+      StartedAt: '2026-09-01T13:00:00Z',
+      type: 'interactive',
+      has_run: false,
+    } as Conversation
+    const failed = {
+      ...conversation('failed'),
+      ID: 'c-failed',
+      StartedAt: '2026-09-01T12:30:00Z',
+      type: 'interactive',
+      has_run: false,
+      ended_at: '2026-09-01T12:59:00Z',
+      ended_reason: 'failed',
+    } as Conversation
+    api.apiList.mockImplementation(async (_path: string, body: Record<string, unknown>) => {
+      const statuses = (body.statuses as string[] | undefined) ?? []
+      const items = statuses.includes('in_progress') ? [task] : []
+      return { items, next_page_token: '', total_count: items.length }
+    })
+    api.apiJSON.mockImplementation(async (path: string) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') return { event_types: [] }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [live, held] }, messages: {} }
+      }
+      if (path === '/api/agent/conversations/c-failed') return failed
+      throw new Error('unexpected apiJSON ' + path)
+    })
+    renderBoard()
+    await screen.findByRole('link', { name: 'Start chat' })
+
+    await act(async () => {
+      ws.handler?.({
+        type: 'conversation_update',
+        conversation_id: 'c-failed',
+        data: { status: 'failed' },
+      })
+    })
+    expect(screen.getByRole('link', { name: 'Start chat' })).toHaveAttribute(
+      'href',
+      expect.stringMatching(/\/runs\/c-new$/),
+    )
   })
 })
 
