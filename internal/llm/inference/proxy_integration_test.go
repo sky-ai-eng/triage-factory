@@ -1,24 +1,36 @@
 package inference
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/smithy-go/eventstream"
+	"github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // TestClient_ThroughRunProxy drives the hop a sandboxed run actually makes:
-// the client holds only the per-run placeholder token and a base URL pointing
-// at its own credential proxy, and the proxy is what attaches the real key on
-// the upstream leg.
+// the client holds only the per-run placeholder token, a base URL pointing at
+// its own credential proxy, and the certificate that proxy serves TLS with,
+// and the proxy is what attaches the real key on the upstream leg.
 //
 // Nothing else covers that seam. The client's own tests stop at the request it
 // builds and the proxy's stop at the request it forwards, so a mismatch
@@ -45,32 +57,21 @@ func TestClient_ThroughRunProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, err := llmproxy.New(llmproxy.Config{
+	proxyURL, certPEM := startRunProxy(t, llmproxy.Config{
 		Provider:      llmproxy.ProviderAnthropic,
 		APIKey:        realKey,
 		Upstream:      upstream.URL,
 		IncomingToken: runToken,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr, err := proxy.Start("127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = proxy.Shutdown(ctx)
-	}()
+	}, "127.0.0.1")
 
-	// The run's view: placeholder credential, proxy base URL. Property B — no
-	// real key is reachable from here.
+	// The run's view: placeholder credential, proxy base URL, the proxy's
+	// certificate. Property B — no real key is reachable from here.
 	acct, err := NewAccount(ProviderCredentials{
-		Provider: ProviderAnthropic,
-		APIKey:   runToken,
-		BaseURL:  "http://" + addr,
-		Models:   []string{model},
+		Provider:  ProviderAnthropic,
+		APIKey:    runToken,
+		BaseURL:   proxyURL,
+		Models:    []string{model},
+		CACertPEM: certPEM,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,30 +126,20 @@ func TestClient_ThroughRunProxy_WrongToken(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, err := llmproxy.New(llmproxy.Config{
+	proxyURL, certPEM := startRunProxy(t, llmproxy.Config{
 		Provider:      llmproxy.ProviderAnthropic,
 		APIKey:        "sk-ant-real",
 		Upstream:      upstream.URL,
 		IncomingToken: "the-right-token",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr, err := proxy.Start("127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = proxy.Shutdown(ctx)
-	}()
+	}, "127.0.0.1")
+	addr := strings.TrimPrefix(proxyURL, "https://")
 
 	acct, err := NewAccount(ProviderCredentials{
-		Provider: ProviderAnthropic,
-		APIKey:   "the-wrong-token",
-		BaseURL:  "http://" + addr,
-		Models:   []string{"claude-sonnet-5"},
+		Provider:  ProviderAnthropic,
+		APIKey:    "the-wrong-token",
+		BaseURL:   proxyURL,
+		Models:    []string{"claude-sonnet-5"},
+		CACertPEM: certPEM,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +239,7 @@ func TestClient_ThroughRunProxy_OnPrivateIP(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, err := llmproxy.New(llmproxy.Config{
+	proxyURL, certPEM := startRunProxy(t, llmproxy.Config{
 		Provider: llmproxy.ProviderAnthropic,
 		APIKey:   "sk-ant-real",
 		Upstream: upstream.URL,
@@ -256,19 +247,7 @@ func TestClient_ThroughRunProxy_OnPrivateIP(t *testing.T) {
 		// wants that acknowledged, exactly as the sandbox integration does.
 		AllowNonLoopback: true,
 		IncomingToken:    "per-run-placeholder",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr, err := proxy.Start(net.JoinHostPort(host, "0"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = proxy.Shutdown(ctx)
-	}()
+	}, host)
 
 	// The opt-in is what this case is about. That the delegate path actually
 	// sets it is the other half, pinned in internal/agentloop next to the
@@ -276,9 +255,10 @@ func TestClient_ThroughRunProxy_OnPrivateIP(t *testing.T) {
 	acct, err := NewAccount(ProviderCredentials{
 		Provider:            ProviderAnthropic,
 		APIKey:              "per-run-placeholder",
-		BaseURL:             "http://" + addr,
+		BaseURL:             proxyURL,
 		Models:              []string{model},
 		AllowPrivateNetwork: true,
+		CACertPEM:           certPEM,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -389,4 +369,307 @@ func anthropicStreamFixture(model string) []string {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 	}
+}
+
+// TestClient_BedrockThroughRunProxy is the Bedrock half of the run's hop, for
+// both shapes of Bedrock credential a run's sidecar holds: a Bedrock API key,
+// which the proxy swaps for the real bearer, and an access-key pair, whose
+// signature the proxy replaces with one under the real secret.
+//
+// bifrost's Bedrock provider dials its endpoint over https whatever scheme
+// the URL names, so a plain-http proxy fails this at the handshake. The client
+// is built from the env shape the sidecar hands the native engine, with the
+// proxy's certificate beside it, the way agentloop.EnvCredentials builds it.
+func TestClient_BedrockThroughRunProxy(t *testing.T) {
+	const (
+		model    = "us.anthropic.claude-sonnet-5"
+		region   = "us-west-2"
+		runToken = "AKIAPERRUNPLACEHOLDER"
+	)
+	realTriple := aws.Credentials{AccessKeyID: "AKIAREALORGKEY", SecretAccessKey: "the-real-secret"}
+
+	cases := []struct {
+		name  string
+		proxy llmproxy.Config
+		env   map[string]string
+		// check inspects what reached the provider and the body it carried.
+		check func(t *testing.T, r *http.Request, body []byte)
+	}{
+		{
+			name: "bedrock api key",
+			proxy: llmproxy.Config{
+				Provider:      llmproxy.ProviderBedrockBearer,
+				APIKey:        "the-real-bedrock-key",
+				IncomingToken: runToken,
+			},
+			env: map[string]string{
+				"AWS_BEARER_TOKEN_BEDROCK": runToken,
+				"CLAUDE_CODE_USE_BEDROCK":  "1",
+			},
+			check: func(t *testing.T, r *http.Request, _ []byte) {
+				if got := r.Header.Get("Authorization"); got != "Bearer the-real-bedrock-key" {
+					t.Errorf("upstream Authorization = %q, want the real Bedrock key", got)
+				}
+			},
+		},
+		{
+			name: "access-key pair",
+			proxy: llmproxy.Config{
+				Provider: llmproxy.ProviderBedrockSigV4,
+				SigV4Credentials: &llmproxy.SigV4Credentials{
+					AccessKeyID:     realTriple.AccessKeyID,
+					SecretAccessKey: realTriple.SecretAccessKey,
+					Region:          region,
+				},
+				IncomingToken: runToken,
+			},
+			env: map[string]string{
+				"AWS_ACCESS_KEY_ID":       runToken,
+				"AWS_SECRET_ACCESS_KEY":   "tf-proxy-placeholder-not-a-credential",
+				"AWS_REGION":              region,
+				"CLAUDE_CODE_USE_BEDROCK": "1",
+			},
+			check: func(t *testing.T, r *http.Request, body []byte) {
+				if err := sigV4Matches(r, body, realTriple, region); err != nil {
+					t.Errorf("the request that reached the provider is not signed under the real secret: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu   sync.Mutex
+				seen []string
+			)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read the forwarded body: %v", err)
+				}
+				mu.Lock()
+				seen = append(seen, r.URL.Path)
+				mu.Unlock()
+				tc.check(t, r, body)
+				writeConverseStream(t, w)
+			}))
+			defer upstream.Close()
+
+			cfg := tc.proxy
+			cfg.Upstream = upstream.URL
+			proxyURL, certPEM := startRunProxy(t, cfg, "127.0.0.1")
+
+			env := maps.Clone(tc.env)
+			env["ANTHROPIC_BEDROCK_BASE_URL"] = proxyURL
+			creds, err := ProviderCredentialsFromEnv(env, []string{model})
+			if err != nil {
+				t.Fatal(err)
+			}
+			creds.CACertPEM = certPEM
+			acct, err := NewAccount(creds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := New(acct)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			got, err := client.Stream(ctx, Request{
+				Provider: ProviderBedrock,
+				Model:    model,
+				Rows:     []domain.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("stream through the run proxy: %v", err)
+			}
+			if got.Message.Content == nil || got.Message.Content.ContentStr == nil ||
+				*got.Message.Content.ContentStr != "hello" {
+				t.Errorf("reassembled content = %+v, want %q", got.Message.Content, "hello")
+			}
+			if got.Usage.PromptTokens != 10 || got.Usage.OutputTokens != 5 {
+				t.Errorf("usage = %+v, want 10 in / 5 out", got.Usage)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			want := "/model/" + model + "/converse-stream"
+			if len(seen) != 1 || seen[0] != want {
+				t.Errorf("upstream paths = %v, want one call to %s", seen, want)
+			}
+		})
+	}
+}
+
+// TestClient_ThroughRunProxy_UntrustedCertificate pins that the hop to the
+// run's proxy is verified: a client not given the proxy's certificate fails
+// the handshake, and nothing reaches the provider.
+func TestClient_ThroughRunProxy_UntrustedCertificate(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider schemas.ModelProvider
+		model    string
+		proxy    llmproxy.Config
+		creds    func(baseURL string) ProviderCredentials
+	}{
+		{
+			name:     "anthropic",
+			provider: ProviderAnthropic,
+			model:    "claude-sonnet-5",
+			proxy:    llmproxy.Config{Provider: llmproxy.ProviderAnthropic, APIKey: "sk-ant-real", IncomingToken: "run-token"},
+			creds: func(baseURL string) ProviderCredentials {
+				return ProviderCredentials{Provider: ProviderAnthropic, APIKey: "run-token", BaseURL: baseURL, Models: []string{"claude-sonnet-5"}}
+			},
+		},
+		{
+			name:     "bedrock",
+			provider: ProviderBedrock,
+			model:    "us.anthropic.claude-sonnet-5",
+			proxy:    llmproxy.Config{Provider: llmproxy.ProviderBedrockBearer, APIKey: "real-bearer", IncomingToken: "run-token"},
+			creds: func(baseURL string) ProviderCredentials {
+				return ProviderCredentials{
+					Provider: ProviderBedrock, APIKey: "run-token", BaseURL: baseURL,
+					Models: []string{"us.anthropic.claude-sonnet-5"}, Bedrock: &BedrockCredentials{Region: "us-east-1"},
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("a call over an unverified hop reached the provider")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			cfg := tc.proxy
+			cfg.Upstream = upstream.URL
+			proxyURL, _ := startRunProxy(t, cfg, "127.0.0.1")
+
+			acct, err := NewAccount(tc.creds(proxyURL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := New(acct)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, err = client.Stream(ctx, Request{
+				Provider: tc.provider,
+				Model:    tc.model,
+				Rows:     []domain.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("a client that does not trust the proxy's certificate completed a call")
+			}
+			if !strings.Contains(err.Error(), "certificate") {
+				t.Errorf("the error must name the certificate the client refused: %v", err)
+			}
+		})
+	}
+}
+
+// startRunProxy starts cfg's proxy the way a run's sidecar does: TLS on host,
+// under a certificate minted for that address. It returns the https base URL
+// and the certificate the run's client is given to trust.
+func startRunProxy(t *testing.T, cfg llmproxy.Config, host string) (string, []byte) {
+	t.Helper()
+	cert, certPEM, err := proxycert.Generate("llm proxy", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cert = &cert
+	proxy, err := llmproxy.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, err := proxy.Start(net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = proxy.Shutdown(ctx)
+	})
+	return "https://" + addr, certPEM
+}
+
+// writeConverseStream answers with a minimal well-formed Bedrock
+// ConverseStream response: one text block, a stop reason, and usage, each an
+// AWS event-stream frame.
+func writeConverseStream(t *testing.T, w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+	w.WriteHeader(http.StatusOK)
+	enc := eventstream.NewEncoder()
+	for _, ev := range []struct{ typ, payload string }{
+		{"messageStart", `{"role":"assistant"}`},
+		{"contentBlockDelta", `{"contentBlockIndex":0,"delta":{"text":"hello"}}`},
+		{"contentBlockStop", `{"contentBlockIndex":0}`},
+		{"messageStop", `{"stopReason":"end_turn"}`},
+		{"metadata", `{"usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15},"metrics":{"latencyMs":1}}`},
+	} {
+		msg := eventstream.Message{
+			Headers: eventstream.Headers{
+				{Name: ":message-type", Value: eventstream.StringValue("event")},
+				{Name: ":event-type", Value: eventstream.StringValue(ev.typ)},
+				{Name: ":content-type", Value: eventstream.StringValue("application/json")},
+			},
+			Payload: []byte(ev.payload),
+		}
+		if err := enc.Encode(w, msg); err != nil {
+			t.Errorf("encode the %s frame: %v", ev.typ, err)
+			return
+		}
+		w.(http.Flusher).Flush()
+	}
+}
+
+// sigV4Matches reports whether r, as it arrived, carries the signature creds
+// give it: it rebuilds the request from the method, host, path, body, and the
+// headers the Authorization header names as signed, signs that at the same
+// time and scope, and compares the two Authorization headers. The signer
+// itself is checked against AWS's published test vector in llmproxy; what
+// this checks is that the request the proxy signed is the one that reached the
+// provider, on the path bifrost calls.
+func sigV4Matches(r *http.Request, body []byte, creds aws.Credentials, region string) error {
+	authz := r.Header.Get("Authorization")
+	_, signed, ok := strings.Cut(authz, "SignedHeaders=")
+	if !ok {
+		return fmt.Errorf("Authorization %q names no signed headers", authz)
+	}
+	signed, _, _ = strings.Cut(signed, ",")
+	at, err := time.Parse("20060102T150405Z", r.Header.Get("X-Amz-Date"))
+	if err != nil {
+		return fmt.Errorf("parse X-Amz-Date: %w", err)
+	}
+	target := "http://" + r.Host + r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	rebuilt, err := http.NewRequest(r.Method, target, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	for _, name := range strings.Split(signed, ";") {
+		if name == "host" || name == "content-length" {
+			continue
+		}
+		rebuilt.Header[http.CanonicalHeaderKey(name)] = r.Header.Values(name)
+	}
+	sum := sha256.Sum256(body)
+	if err := v4.NewSigner().SignHTTP(context.Background(), creds, rebuilt, hex.EncodeToString(sum[:]), "bedrock", region, at); err != nil {
+		return err
+	}
+	if want := rebuilt.Header.Get("Authorization"); want != authz {
+		return fmt.Errorf("Authorization\n got %s\nwant %s", authz, want)
+	}
+	return nil
 }

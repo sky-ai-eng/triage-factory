@@ -76,11 +76,21 @@
 // place; this token makes it useless even if a packet gets through.
 // Empty IncomingToken disables the check — the loopback/test path and
 // any single-tenant direct usage where the local hop is already trusted.
+//
+// # TLS on the local hop
+//
+// With Config.Cert set, the proxy serves TLS under a per-run self-signed
+// certificate that its one client is given to trust. It is there because a
+// client may dial nothing else: bifrost's Bedrock provider dials https
+// whatever scheme its endpoint names, so a plain-http proxy is unreachable to
+// it. The certificate is public and its key stays with the proxy, so handing
+// the certificate to the client gives it no credential.
 package llmproxy
 
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -183,6 +193,13 @@ type Config struct {
 	// Empty disables the check (loopback/test usage, or single-tenant
 	// direct paths where the local hop is already trusted).
 	IncomingToken string
+
+	// Cert, when non-nil, is the certificate Start serves TLS with; nil
+	// serves plain http. The caller mints it per run for the address it
+	// binds (proxycert.Generate) and gives the public certificate to the
+	// client that dials this proxy, which trusts it for this hop alone. See
+	// the package doc's TLS section.
+	Cert *tls.Certificate
 }
 
 // Server is a single per-run proxy instance. Not safe to share
@@ -242,6 +259,9 @@ func New(cfg Config) (*Server, error) {
 		}
 	default:
 		return nil, fmt.Errorf("llmproxy: unsupported provider %q", cfg.Provider)
+	}
+	if cfg.Cert != nil && len(cfg.Cert.Certificate) == 0 {
+		return nil, errors.New("llmproxy: Cert holds no certificate")
 	}
 	if cfg.Upstream == "" {
 		return nil, errors.New("llmproxy: Upstream is required")
@@ -454,7 +474,7 @@ func (s *Server) Handler() http.Handler { return s.handler }
 
 // Start binds a TCP port and serves until Shutdown is called. Returns
 // the bound address so the caller can construct the agent's BASE_URL
-// env var.
+// env var: https with Config.Cert, http without.
 //
 // Defaults to 127.0.0.1:0 (random loopback port) when addr is "". A
 // non-loopback bind requires Config.AllowNonLoopback=true — an
@@ -491,11 +511,20 @@ func (s *Server) Start(addr string) (string, error) {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	if s.cfg.Cert != nil {
+		s.httpSrv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{*s.cfg.Cert}}
+	}
 	// No recover: net/http recovers a handler panic per connection, so nothing
 	// a request does reaches this frame; Serve itself only accepts, and the
 	// buffered send + close cannot panic (one sender, one close).
 	go func() {
-		err := s.httpSrv.Serve(ln)
+		var err error
+		if s.httpSrv.TLSConfig != nil {
+			// The certificate is already in TLSConfig, so ServeTLS takes no files.
+			err = s.httpSrv.ServeTLS(ln, "", "")
+		} else {
+			err = s.httpSrv.Serve(ln)
+		}
 		// ErrServerClosed is the normal return from Serve after
 		// Shutdown; anything else is an unexpected accept/listener
 		// failure that the caller may want to react to.

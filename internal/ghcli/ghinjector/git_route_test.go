@@ -11,15 +11,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // newRoutedInjector starts an injector whose listener also fronts gitHandler,
 // returning a client that trusts the per-run cert and the bound host:port.
 func newRoutedInjector(t *testing.T, upstream, incoming string, gitHandler http.Handler) (*http.Client, string) {
 	t.Helper()
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	srv, err := New(Config{
 		Upstream:      upstream,
@@ -214,9 +216,9 @@ func TestInjector_ServePreBoundListener(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	srv, err := New(Config{
 		Upstream:    upstream.URL,

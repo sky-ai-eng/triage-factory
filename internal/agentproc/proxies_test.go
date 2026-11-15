@@ -2,6 +2,8 @@ package agentproc
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -497,6 +499,9 @@ func TestStartProxiesForSandbox_AnthropicEndToEnd(t *testing.T) {
 	if proxyURL == "" {
 		t.Fatalf("ANTHROPIC_BASE_URL missing from LLMEnv: %v", llm)
 	}
+	if !strings.HasPrefix(proxyURL, "https://") {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want https: the proxy serves TLS", proxyURL)
+	}
 	sdkKey := envValue(llm, "ANTHROPIC_API_KEY")
 	if sdkKey == realKey {
 		t.Fatalf("PROPERTY B VIOLATED: LLMEnv ANTHROPIC_API_KEY is the real key")
@@ -507,7 +512,7 @@ func TestStartProxiesForSandbox_AnthropicEndToEnd(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader(`{}`))
 	req.Header.Set("x-api-key", sdkKey) // what the SDK forwards (the per-run token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := llmProxyClient(t, handle).Do(req)
 	if err != nil {
 		t.Fatalf("proxy roundtrip: %v", err)
 	}
@@ -704,7 +709,7 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 		if wrong != "" {
 			req.Header.Set("x-api-key", wrong)
 		}
-		resp, derr := http.DefaultClient.Do(req)
+		resp, derr := llmProxyClient(t, &RunProxyHandle{p: bundle}).Do(req)
 		if derr != nil {
 			t.Fatalf("wrong-token roundtrip (%q): %v", wrong, derr)
 		}
@@ -720,7 +725,7 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 	// The exact injected token is accepted and forwarded.
 	req, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
 	req.Header.Set("x-api-key", sdkKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := llmProxyClient(t, &RunProxyHandle{p: bundle}).Do(req)
 	if err != nil {
 		t.Fatalf("good-token roundtrip: %v", err)
 	}
@@ -762,6 +767,9 @@ func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
 	if proxyURL == "" {
 		t.Fatalf("ANTHROPIC_BEDROCK_BASE_URL missing from LLMEnv: %v", llm)
 	}
+	if !strings.HasPrefix(proxyURL, "https://") {
+		t.Errorf("ANTHROPIC_BEDROCK_BASE_URL = %q, want https: bifrost dials Bedrock over https only", proxyURL)
+	}
 	token := envValue(llm, "AWS_ACCESS_KEY_ID")
 	if !strings.HasPrefix(token, "AKIA") {
 		t.Errorf("LLMEnv AWS_ACCESS_KEY_ID = %q, want the AKIA-shaped per-run token", token)
@@ -777,7 +785,7 @@ func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
 
 	// No credential header at all → 401 at the gate.
 	reqBare, _ := http.NewRequest("POST", proxyURL+"/model/m/invoke", strings.NewReader("{}"))
-	respBare, err := http.DefaultClient.Do(reqBare)
+	respBare, err := llmProxyClient(t, &RunProxyHandle{p: bundle}).Do(reqBare)
 	if err != nil {
 		t.Fatalf("bare roundtrip: %v", err)
 	}
@@ -792,7 +800,7 @@ func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
 	reqSibling, _ := http.NewRequest("POST", proxyURL+"/model/m/invoke", strings.NewReader("{}"))
 	reqSibling.Header.Set("Authorization",
 		"AWS4-HMAC-SHA256 Credential=AKIAOTHERRUNSTOKEN/20260707/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef")
-	respSibling, err := http.DefaultClient.Do(reqSibling)
+	respSibling, err := llmProxyClient(t, &RunProxyHandle{p: bundle}).Do(reqSibling)
 	if err != nil {
 		t.Fatalf("sibling roundtrip: %v", err)
 	}
@@ -860,7 +868,7 @@ func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 	// Live before Shutdown — sanity check.
 	proxyURL := envValue((&RunProxyHandle{p: bundle}).LLMEnv(), "ANTHROPIC_BASE_URL")
 	req, _ := http.NewRequest("POST", proxyURL, strings.NewReader("{}"))
-	if resp, err := http.DefaultClient.Do(req); err != nil {
+	if resp, err := llmProxyClient(t, &RunProxyHandle{p: bundle}).Do(req); err != nil {
 		t.Fatalf("pre-shutdown roundtrip: %v", err)
 	} else {
 		_ = resp.Body.Close()
@@ -874,8 +882,11 @@ func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 	}
 
 	// Tight per-request timeout — a dead listener should fail fast
-	// with a connection-refused, not hang waiting on the bound port.
-	client := &http.Client{Timeout: 1 * time.Second}
+	// with a connection-refused, not hang waiting on the bound port. The
+	// client trusts the run's certificate, so only a closed listener can
+	// fail it.
+	client := llmProxyClient(t, &RunProxyHandle{p: bundle})
+	client.Timeout = 1 * time.Second
 	if _, err := client.Post(proxyURL, "application/json", strings.NewReader("{}")); err == nil {
 		t.Error("proxy still accepting connections after Shutdown")
 	}
@@ -1480,6 +1491,17 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// llmProxyClient is an http.Client that trusts the certificate h's LLM proxy
+// serves, and nothing else: what the native engine is given for that hop.
+func llmProxyClient(t *testing.T, h *RunProxyHandle) *http.Client {
+	t.Helper()
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(h.LLMCertPEM()) {
+		t.Fatalf("the LLM proxy's certificate does not parse: %q", h.LLMCertPEM())
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 }
 
 // TestStartProxiesForSandbox_EgressProxyEnv pins the TFAC-567 wiring:

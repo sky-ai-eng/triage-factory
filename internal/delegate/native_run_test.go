@@ -8,10 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
 // TestAskedAboutArtifactAlready pins when the artifact-contract question
@@ -477,5 +479,31 @@ func TestColdCompactionModelFor(t *testing.T) {
 		} else if got != c.model && !u.Offers(got) {
 			t.Errorf("cold model %q is not offered by the native universe", got)
 		}
+	}
+}
+
+// TestNativeCredentials_TrustTheSidecarsCertificate pins that the native
+// engine's credentials carry the certificate the sidecar's LLM proxy serves,
+// beside the address and placeholder: without it the engine cannot verify
+// the TLS hop to its own sidecar.
+func TestNativeCredentials_TrustTheSidecarsCertificate(t *testing.T) {
+	pem := []byte("-----BEGIN CERTIFICATE-----\nthe sidecar's leaf\n-----END CERTIFICATE-----\n")
+	cfg := runConfig{sidecar: &runSidecar{res: &sidecarproto.StartProxiesResult{
+		LLMEnv:     []string{"ANTHROPIC_BASE_URL=https://10.42.7.1:53312", "ANTHROPIC_API_KEY=sk-ant-run"},
+		LLMCertPEM: pem,
+	}}}
+	creds, ok := (&Spawner{}).nativeCredentials(cfg, []string{"claude-sonnet-5"}, "claude-haiku-5-5").(*agentloop.EnvCredentials)
+	if !ok {
+		t.Fatal("nativeCredentials is not an EnvCredentials")
+	}
+	if string(creds.CACertPEM) != string(pem) {
+		t.Errorf("CACertPEM = %q, want the sidecar's certificate", creds.CACertPEM)
+	}
+	env, err := creds.Resolve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["ANTHROPIC_BASE_URL"] != "https://10.42.7.1:53312" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want the sidecar's address", env["ANTHROPIC_BASE_URL"])
 	}
 }

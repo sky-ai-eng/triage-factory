@@ -99,9 +99,10 @@
 // # TLS, but no interception
 //
 // gh forces https to any GH_HOST and rejects scheme prefixes, so the injector
-// serves TLS with a per-run self-signed certificate (GenerateCert), published
-// through the trust file SSL_CERT_FILE points at (cabundle.WithSystemRoots —
-// the system roots plus this run's leaf, since that env var is process-global).
+// serves TLS with a per-run self-signed certificate (proxycert.Generate),
+// published through the trust file SSL_CERT_FILE points at
+// (cabundle.WithSystemRoots — the system roots plus this run's leaf, since that
+// env var is process-global).
 // There is no TLS interception of GitHub anywhere — the
 // injector terminates gh's connection with its own per-run cert and opens its
 // own TLS connection to the real upstream.
@@ -324,7 +325,7 @@ type Config struct {
 	IncomingToken string
 
 	// Cert is the per-run self-signed certificate the injector serves TLS with
-	// (from GenerateCert). Required — gh forces https.
+	// (from proxycert.Generate). Required — gh forces https.
 	Cert tls.Certificate
 
 	// ObserveWrite, when non-nil, is called for every mutating REST request the

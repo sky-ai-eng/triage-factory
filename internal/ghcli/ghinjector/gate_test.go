@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // gatedRun is one injector wired the way production wires it: the refusal
@@ -60,9 +61,9 @@ func newGatedRun(t *testing.T, respond func(w http.ResponseWriter, r *http.Reque
 	}))
 	t.Cleanup(g.upstream.Close)
 
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	srv, err := New(Config{
 		Upstream:     g.upstream.URL,
@@ -580,7 +581,7 @@ func TestGate_FailsClosedWithoutADecisionSource(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cert, certPEM, _ := GenerateCert("127.0.0.1")
+	cert, certPEM, _ := proxycert.Generate("gh injector", "127.0.0.1")
 	srv, err := New(Config{
 		Upstream: upstream.URL, Cert: cert,
 		TokenSource: func(context.Context) (string, error) { return "ghs_x", nil },
@@ -622,7 +623,7 @@ func TestGate_FailsClosedWithoutADecisionSource(t *testing.T) {
 // call — let alone reach GitHub holding one.
 func TestGate_RefusedRequestNeverTouchesTheCredential(t *testing.T) {
 	resolved := 0
-	cert, certPEM, _ := GenerateCert("127.0.0.1")
+	cert, certPEM, _ := proxycert.Generate("gh injector", "127.0.0.1")
 	srv, err := New(Config{
 		Upstream: "https://api.github.com", Cert: cert,
 		TokenSource: func(context.Context) (string, error) {

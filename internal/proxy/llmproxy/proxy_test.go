@@ -2,6 +2,8 @@ package llmproxy_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // upstreamRecord captures what the fake upstream observed so tests
@@ -679,5 +682,79 @@ func TestProxyNoTokenDisablesGate(t *testing.T) {
 	}
 	if rec.hits.Load() != 1 {
 		t.Errorf("upstream hits = %d, want 1", rec.hits.Load())
+	}
+}
+
+// TestProxyServesTLSWithCert pins the Cert contract: with a certificate the
+// proxy serves TLS, a client that trusts that one certificate gets through
+// and sees the real key attached upstream, and a client that trusts only the
+// system roots is refused at the handshake rather than talked to in the clear.
+func TestProxyServesTLSWithCert(t *testing.T) {
+	rec := &upstreamRecord{}
+	upstream := fakeUpstream(rec, false)
+	defer upstream.Close()
+
+	cert, certPEM, err := proxycert.Generate("llm proxy", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("proxycert.Generate: %v", err)
+	}
+	srv, err := llmproxy.New(llmproxy.Config{
+		Provider:      llmproxy.ProviderAnthropic,
+		APIKey:        "sk-ant-real",
+		Upstream:      upstream.URL,
+		IncomingToken: "per-run-token",
+		Cert:          &cert,
+	})
+	if err != nil {
+		t.Fatalf("llmproxy.New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("the PEM Generate returned does not parse")
+	}
+	trusting := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	req, _ := http.NewRequest("POST", "https://"+addr+"/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("x-api-key", "per-run-token")
+	resp, err := trusting.Do(req)
+	if err != nil {
+		t.Fatalf("roundtrip with the run's certificate trusted: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if rec.xAPIKey != "sk-ant-real" {
+		t.Errorf("upstream x-api-key = %q, want the real key", rec.xAPIKey)
+	}
+
+	if _, err := http.Post("https://"+addr+"/v1/messages", "application/json", strings.NewReader(`{}`)); err == nil {
+		t.Error("a client that does not trust the run's certificate completed a request")
+	}
+	if rec.hits.Load() != 1 {
+		t.Errorf("upstream hits = %d, want 1", rec.hits.Load())
+	}
+}
+
+// TestProxyRejectsEmptyCert pins that a Cert with no certificate in it is a
+// construction error, not a listener that fails every handshake.
+func TestProxyRejectsEmptyCert(t *testing.T) {
+	_, err := llmproxy.New(llmproxy.Config{
+		Provider: llmproxy.ProviderAnthropic,
+		APIKey:   "sk-ant-real",
+		Upstream: "https://api.anthropic.com",
+		Cert:     &tls.Certificate{},
+	})
+	if err == nil {
+		t.Fatal("New accepted a Cert with no certificate")
 	}
 }

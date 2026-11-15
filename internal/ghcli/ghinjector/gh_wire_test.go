@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // These tests drive the REAL pinned gh binary against a fake GitHub Enterprise
@@ -176,9 +177,9 @@ func ghEnvWithConfig(t testing.TB, upstream string, callbacks Config) []string {
 	t.Helper()
 	const placeholder = "placeholder-wire-token"
 
-	cert, certPEM, err := GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	srv, err := New(Config{
 		Upstream:       upstream + "/api/v3",

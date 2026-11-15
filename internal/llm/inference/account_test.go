@@ -18,6 +18,7 @@ func TestNewAccount_Validation(t *testing.T) {
 		// A bearer alone would build a key with no Bedrock config, where a base
 		// URL has nowhere to go.
 		"bedrock no bedrock credentials": {{Provider: ProviderBedrock, APIKey: "bearer", Models: []string{"m"}}},
+		"ca not a certificate":           {{Provider: ProviderAnthropic, APIKey: "k", Models: []string{"m"}, CACertPEM: []byte("not a certificate")}},
 	}
 	for name, creds := range cases {
 		t.Run(name, func(t *testing.T) {

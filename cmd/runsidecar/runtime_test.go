@@ -29,6 +29,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -472,9 +473,9 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 			rt.githubBase = "https://github.com"
 			rt.mu.Unlock()
 
-			cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+			cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 			if err != nil {
-				t.Fatalf("GenerateCert: %v", err)
+				t.Fatalf("proxycert.Generate: %v", err)
 			}
 			const placeholder = "per-run-placeholder"
 			srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, "run-under-test", nil))
@@ -601,9 +602,9 @@ func TestRuntime_GHInjectorRelaysAddressedRead(t *testing.T) {
 	rt.githubBase = "https://github.com"
 	rt.mu.Unlock()
 
-	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	const placeholder = "per-run-placeholder"
 	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, "run-under-test", nil))
@@ -810,6 +811,9 @@ func TestRuntime_SandboxNeverGetsLLMChannel(t *testing.T) {
 	}
 	if !has(res.LLMEnv, "ANTHROPIC_BASE_URL") {
 		t.Errorf("the executor got no provider address to dial: %v", res.LLMEnv)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(res.LLMCertPEM) {
+		t.Errorf("the executor got no certificate to trust the LLM proxy's TLS by: %q", res.LLMCertPEM)
 	}
 }
 
