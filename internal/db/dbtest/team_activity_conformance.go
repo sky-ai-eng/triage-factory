@@ -22,14 +22,12 @@ type TeamActivityStoreFactory func(t *testing.T) (store db.TeamActivityStore, or
 // regardless of traffic, the tracked-set cut carries a row per tracked unit
 // and no other, and system events (NULL entity) never count.
 //
-// What it deliberately does NOT pin: whether a source's event count is
-// defined (github and jira are defined everywhere; slack diverges by design
-// — defined at N=1 where the team is the org, undefined under the
-// tracked-set rule), nor the scoping of the merged and failed cuts, which
-// only multi-mode has a second team to scope against, nor what the
-// by-source cut counts for a unit outside the tracked set, which the two
-// dialects scope differently. Each backend's test file asserts its own side
-// of all three.
+// What it deliberately does NOT pin: slack's tracked set, which only
+// multi-mode has (local mode has no Slack), nor the scoping of the merged
+// and failed cuts, which only multi-mode has a second team to scope against,
+// nor what the by-source cut counts for a unit outside the tracked set, which
+// the two dialects scope differently. Each backend's test file asserts its
+// own side of all three.
 func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -204,12 +202,6 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		// by-source figures exactly.
 		for _, src := range got.BySource {
 			sum := bySource[src.Source]
-			if src.Source == "slack" {
-				if sum != (sums{}) {
-					t.Errorf("by_tracked carries slack rows; slack has no tracked set")
-				}
-				continue
-			}
 			if src.Events == nil || *src.Events != sum.events || src.Tasks != sum.tasks || src.Runs != sum.runs {
 				t.Errorf("%s by_source = %+v, disagrees with its by_tracked rows' sum %+v", src.Source, src, sum)
 			}

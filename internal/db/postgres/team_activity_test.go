@@ -172,28 +172,53 @@ func TestTeamActivityStore_Postgres(t *testing.T) {
 		}
 	})
 
-	// The tracked-set rule's side of the slack divergence: with no tracked
-	// set there is no team-scoped definition of a slack event, so its count
-	// is nil (undefined) while the pollable sources answer a defined zero.
-	t.Run("slack_events_are_undefined_not_zero", func(t *testing.T) {
+	// A team's Slack flow is the channels it watches, whoever is primary
+	// there: the subject team watches one channel another team is primary
+	// in, and that channel's events are the subject's. A channel only the
+	// other team watches, and one nobody watches, are not.
+	t.Run("slack_counts_the_channels_the_team_watches", func(t *testing.T) {
 		h.Reset(t)
-		orgID, _ := seedPgFactoryOrg(t, h)
-		now := time.Now().UTC()
-		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, teamOf(t, orgID), now.Add(-time.Hour), now)
+		orgID, userID := seedPgFactoryOrg(t, h)
+		promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+		seed := newPgTeamActivitySeeder(h, orgID, userID, promptID)
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		subject := teamOf(t, orgID)
+
+		thread, watched := seed.TrackedEntity(t, "slack")
+		seed.Event(t, thread, domain.EventSlackMessage, "", now.Add(-time.Hour), time.Time{})
+		last := now.Add(-30 * time.Minute)
+		seed.Event(t, thread, domain.EventSlackMessage, "", last, time.Time{})
+
+		other := seedPgDefaultTeam(t, h, orgID, userID)
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id, is_primary)
+			VALUES ($1, $2, $3, true)`, orgID, other, watched)
+		theirs := seedPgSlackChannel(t, h, orgID, "C-THEIRS")
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id) VALUES ($1, $2, $3)`,
+			orgID, other, theirs)
+		seedPgEvent(t, h, orgID, seedPgSlackThread(t, h, orgID, theirs, "C-THEIRS"), domain.EventSlackMessage, now.Add(-time.Hour))
+		nobodys := seedPgSlackChannel(t, h, orgID, "C-NOBODY")
+		seedPgEvent(t, h, orgID, seedPgSlackThread(t, h, orgID, nobodys, "C-NOBODY"), domain.EventSlackMessage, now.Add(-time.Hour))
+
+		got, err := stores.TeamActivity.TeamActivity(context.Background(), orgID, subject, now.Add(-2*time.Hour), now)
 		if err != nil {
 			t.Fatalf("TeamActivity: %v", err)
 		}
 		for _, row := range got.BySource {
-			switch row.Source {
-			case "github", "jira", "linear":
-				if row.Events == nil {
-					t.Errorf("%s events undefined, want a defined zero", row.Source)
-				}
-			case "slack":
-				if row.Events != nil {
-					t.Errorf("slack events = %d, want undefined (nil)", *row.Events)
-				}
+			if row.Source == "slack" && (row.Events == nil || *row.Events != 2) {
+				t.Errorf("slack by_source events = %v, want 2 — the watched channel's events only", row.Events)
 			}
+		}
+		if len(got.ByTracked) != 1 {
+			t.Fatalf("by_tracked = %+v, want only the watched channel", got.ByTracked)
+		}
+		unit := got.ByTracked[0]
+		if unit.Source != "slack" || unit.UnitID != watched || unit.Events != 2 {
+			t.Errorf("by_tracked = %+v, want slack %s with 2 events", unit, watched)
+		}
+		if unit.LastEventAt == nil || !unit.LastEventAt.Equal(last) {
+			t.Errorf("last_event_at = %v, want %v", unit.LastEventAt, last)
 		}
 	})
 }
@@ -228,6 +253,13 @@ func newPgTeamActivitySeeder(h *pgtest.Harness, orgID, userID, promptID string) 
 				VALUES ($1, $2, 'linear', $3, $4, 'issue', $3, '', '{}'::jsonb, $5, 'ws-test', $6)`,
 				id, orgID, key+"-1", "uuid-"+id, time.Now().UTC(), unit)
 			return id, unit
+		case "slack":
+			channel := "C" + key
+			unit := seedPgSlackChannel(t, h, orgID, channel)
+			pgtest.MustExec(t, h.AdminDB, `
+				INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id) VALUES ($1, $2, $3)`,
+				orgID, teamID, unit)
+			return seedPgSlackThread(t, h, orgID, unit, channel), unit
 		}
 		t.Fatalf("TrackedEntity: no tracked set for source %q", source)
 		return "", ""
@@ -249,6 +281,31 @@ func seedPgUntrackedEntity(t *testing.T, h *pgtest.Harness, orgID, suffix string
 	`, id, orgID, sourceID, "Untracked "+suffix, "https://example/"+sourceID, repositoryID); err != nil {
 		t.Fatalf("seed untracked entity %s: %v", suffix, err)
 	}
+	return id
+}
+
+// seedPgSlackChannel inserts a channel's registry row and returns its id.
+func seedPgSlackChannel(t *testing.T, h *pgtest.Harness, orgID, channel string) string {
+	t.Helper()
+	var id string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO slack_channels (org_id, channel_id, workspace_id) VALUES ($1, $2, 'T-test')
+		RETURNING id::text`, orgID, channel).Scan(&id); err != nil {
+		t.Fatalf("seed slack channel %s: %v", channel, err)
+	}
+	return id
+}
+
+// seedPgSlackThread inserts an active thread entity in the channel whose
+// registry row is channelRow, and returns its id.
+func seedPgSlackThread(t *testing.T, h *pgtest.Harness, orgID, channelRow, channel string) string {
+	t.Helper()
+	id := uuid.New().String()
+	ts := "1700000000.000100"
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope, slack_channel_id, slack_thread_ts)
+		VALUES ($1, $2, 'slack', $3, 'thread', 'test thread', $4, $5, $6)`,
+		id, orgID, domain.SlackSourceID(channel, ts), domain.SlackScope, channelRow, ts)
 	return id
 }
 

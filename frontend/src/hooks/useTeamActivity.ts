@@ -20,7 +20,7 @@ export type ActivityDay = {
 export type ActivityDaySource = { date: string; source: string; events: number; tasks: number }
 export type ActivitySourceRow = {
   source: string
-  /** null when the count is undefined for this source (Slack has no tracked
+  /** null when the count is undefined for this source (one with no tracked
    * set), which renders as a dash — never as a zero claiming a quiet week. */
   events: number | null
   tasks: number
@@ -29,7 +29,8 @@ export type ActivitySourceRow = {
 }
 /** One unit of the team's tracked set and its flow over the window. unit_id
  * is the id the unit's source page keys its row on — a repository's registry
- * id, a Jira project's registry row id, a Linear team's id. A quiet unit
+ * id, a Jira project's registry row id, a Linear team's id, a Slack channel's
+ * registry row id. A quiet unit
  * answers zeros; a unit the team does not track has no row at all.
  * last_event_at is not windowed: null only for a unit that never sent one. */
 export type ActivityTrackedRow = {

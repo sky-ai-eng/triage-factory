@@ -690,7 +690,7 @@ export default function TeamSettings() {
                     falls through to the cell, which opens the panel where
                     the card says why the source is off. */}
                 {sources.map((s) => {
-                  // A null count is undefined for the source (Slack has no
+                  // A null count is undefined for the source (one with no
                   // tracked set), so its row keeps the dash and draws no
                   // share — a zero would claim a quiet week.
                   const events = activitySource(activity, s)?.events ?? null

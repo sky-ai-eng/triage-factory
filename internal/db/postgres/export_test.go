@@ -23,3 +23,33 @@ var (
 	PauseNoticesDueQueryForTest   = pauseNoticesDueQuery
 	FailureNoticesDueQueryForTest = failureNoticesDueQuery
 )
+
+// TrackedEntityIDsForTest returns the ids of the org's entities the
+// tracked-set predicate admits, read through q (so under q's RLS, if any):
+// every viewer team's when teamIDs is empty, else those teams'. The belt
+// reads only db.FactoryBeltSource, so the predicate's other arms, which the
+// station counters and the team activity node read, are held to their rules
+// through this.
+func TrackedEntityIDsForTest(ctx context.Context, q queryer, orgID string, teamIDs []string) (map[string]bool, error) {
+	membership := factoryEntityTrackedExists
+	args := []any{orgID}
+	if len(teamIDs) > 0 {
+		ph, ids := teamPlaceholders(2, teamIDs)
+		membership = factoryEntityTrackedForTeams(ph)
+		args = append(args, ids...)
+	}
+	rows, err := q.QueryContext(ctx, `SELECT e.id FROM entities e WHERE e.org_id = $1 AND `+membership, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = true
+	}
+	return ids, rows.Err()
+}

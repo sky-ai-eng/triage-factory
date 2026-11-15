@@ -12,9 +12,8 @@ import { jsonBody } from '../../test/apiResponse'
 // screenshot cannot check and the thing most likely to be "fixed" later by
 // somebody filling a dash with a zero: EVERY FIGURE IS EITHER REAL OR AN EM
 // DASH. A figure is a dash until the team activity node answers, and stays
-// one where the node cannot define the measurement at all — Slack's mention
-// count has no tracked set to scope it. A zero would be a claim about a
-// team's week.
+// one where the node has no count for it — a repository or a channel the
+// team does not watch. A zero would be a claim about a team's week.
 //
 // The rest is the wiring a member must never see, and the set-replace each
 // verb resolves to.
@@ -57,14 +56,12 @@ const BODY = {
 const day = (n: number) => new Date(Date.now() - n * 86400_000).toISOString().slice(0, 10)
 
 // The team activity node's answer, where a test wants the figures filled.
-// Slack's null events is the payload's point: the count is undefined (no
-// tracked set), which must render as a dash and an unanswered chart.
 const ACTIVITY = {
   team_id: 't1',
   by_day: [{ date: day(1), events: 6, tasks: 2 }],
   by_day_source: [
     { date: day(1), source: 'github', events: 6, tasks: 2 },
-    { date: day(3), source: 'slack', events: 0, tasks: 1 },
+    { date: day(3), source: 'slack', events: 3, tasks: 1 },
   ],
   by_source: [
     {
@@ -75,11 +72,12 @@ const ACTIVITY = {
       last_poll_at: new Date(Date.now() - 40_000).toISOString(),
     },
     { source: 'jira', events: 0, tasks: 0, runs: 0, last_poll_at: null },
-    { source: 'slack', events: null, tasks: 1, runs: 0, last_poll_at: null },
+    { source: 'slack', events: 3, tasks: 1, runs: 0, last_poll_at: null },
   ],
   // Per unit, keyed by the id each page holds: the GitHub page's registry
-  // ids, the Jira page's registry rows, the Linear page's team ids. A quiet
-  // watched unit is a row of zeros, never absent.
+  // ids, the Jira page's registry rows, the Linear page's team ids, the Slack
+  // page's channel registry rows. A quiet watched unit is a row of zeros,
+  // never absent.
   by_tracked: [
     {
       source: 'github',
@@ -93,6 +91,8 @@ const ACTIVITY = {
     { source: 'jira', unit_id: 'reg-PLAT', events: 7, tasks: 0, runs: 0, last_event_at: null },
     { source: 'jira', unit_id: 'reg-SKY', events: 0, tasks: 0, runs: 0, last_event_at: null },
     { source: 'linear', unit_id: 'team-eng', events: 4, tasks: 0, runs: 0, last_event_at: null },
+    { source: 'slack', unit_id: 'sc-1', events: 3, tasks: 1, runs: 0, last_event_at: null },
+    { source: 'slack', unit_id: 'sc-2', events: 0, tasks: 0, runs: 0, last_event_at: null },
   ],
 }
 
@@ -1010,6 +1010,7 @@ describe('Slack source page', () => {
   const FACETS = '/api/slack/teams/t1/channels/facets'
   const ROWS = [
     {
+      id: 'sc-1',
       channel_id: 'C1',
       name: 'deploys',
       workspace_id: 'W',
@@ -1022,6 +1023,7 @@ describe('Slack source page', () => {
       source: 'tracked',
     },
     {
+      id: 'sc-2',
       channel_id: 'C2',
       name: 'oncall-platform',
       workspace_id: 'W',
@@ -1035,6 +1037,7 @@ describe('Slack source page', () => {
       source: 'tracked',
     },
     {
+      id: 'sc-3',
       channel_id: 'C3',
       name: 'eng-general',
       workspace_id: 'W',
@@ -1130,19 +1133,44 @@ describe('Slack source page', () => {
     expect(row('mentions in 7 days').textContent).toContain('—')
   })
 
-  it('keeps the dash where the node answers that the count is undefined', async () => {
+  it('reads the mention counts the node answers, and dashes a channel it does not watch', async () => {
     stubSlack(undefined, undefined, { '/api/teams/t1/activity': ACTIVITY })
     render(<SlackSource {...BODY} />)
-    await waitFor(() => expect(screen.getByText('watched of 3 visible')).toBeInTheDocument())
+    const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="row"]')!
+    await waitFor(() => expect(within(rowOf('#deploys')).getByText('3')).toBeInTheDocument())
 
-    // The node answered — became-tasks is real — but the mention count is
-    // null: undefined for a source with no tracked set, so the figure and
-    // the chart whose outer line it is both stay unanswered.
+    expect(row('mentions in 7 days').textContent).toContain('3')
     expect(screen.getByText('became tasks · 7 days').parentElement?.textContent).toContain('1')
-    expect(row('mentions in 7 days').textContent).toContain('—')
-    expect(screen.getByText('no daily series yet')).toBeInTheDocument()
+    expect(screen.queryByText('no daily series yet')).not.toBeInTheDocument()
+    // Watched and quiet: a real zero.
+    expect(within(rowOf('#oncall-platform')).getByText('0')).toBeInTheDocument()
+    // Not watched, so the node has no count for it; its last event is a dash
+    // too, having none.
+    expect(within(rowOf('#eng-general')).getAllByText('—')).toHaveLength(3)
     // No poller behind Slack: the dash is by construction, not a gap.
     expect(row('since the last poll').textContent).toContain('—')
+  })
+
+  it('dashes the count of a channel just unwatched, and of one the app is not in', async () => {
+    // The node still holds both channels' rows: #deploys was unwatched since
+    // it was read, and #oncall-platform is watched but the app never joined.
+    stubSlack(
+      () => [
+        { ...ROWS[0], tracked: false, is_primary: false, tracked_by: [] },
+        { ...ROWS[1], bot_is_member: false },
+      ],
+      undefined,
+      {
+        '/api/teams/t1/activity': ACTIVITY,
+      },
+    )
+    render(<SlackSource {...BODY} />)
+    const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="row"]')!
+    await waitFor(() => expect(row('mentions in 7 days').textContent).toContain('3'))
+
+    expect(within(rowOf('#deploys')).queryByText('3')).not.toBeInTheDocument()
+    expect(within(rowOf('#deploys')).getAllByText('—').length).toBeGreaterThan(0)
+    expect(within(rowOf('#oncall-platform')).queryByText('0')).not.toBeInTheDocument()
   })
 
   it('marks the primary channels and only those', async () => {

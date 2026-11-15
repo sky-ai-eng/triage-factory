@@ -14,6 +14,7 @@ import {
   useTeamActivity,
   activitySource,
   activitySeries,
+  activityTracked,
   sinceParts,
   sinceLabel,
 } from '../../hooks/useTeamActivity'
@@ -38,13 +39,14 @@ import type { SlackChannelView } from '../../types'
 // is not a member of delivers nothing and shows a dash in both columns rather
 // than a zero.
 //
-// The flow figures come from the team activity node, and Slack is the source
-// it cannot always count: a team's events are defined by its tracked set,
-// which Slack does not have, so under multi mode the mention count — and the
-// chart, whose outer series it is — reads `—` rather than a zero. Local mode
-// is N=1, where the org-wide count is the team's and both render. Became
-// tasks is task-scoped and always real. Nothing polls Slack (push), so
-// `since last poll` is a dash by construction, not by omission.
+// The flow figures come from the team activity node, which counts the
+// messages in the channels this team watches, primary or not, in total and
+// per channel. A channel the team does not watch, or one the app is not a
+// member of, has no count of its own, so its MENTIONS · 7D reads `—` rather
+// than a zero; the gate is the row's own state, so a channel just unwatched
+// drops its count before the node is read again. Became tasks is
+// task-scoped. Nothing polls Slack (push), so `since last poll` is a dash by
+// construction, not by omission.
 //
 // The table reads the channel list a page at a time, searched and ordered by
 // the server, and the watched / primary figures come from the list's facets
@@ -126,6 +128,7 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
   const activity7 = useTeamActivity(teamId, 7)
   const activity14 = useTeamActivity(teamId, 14)
   const flow = activitySource(activity7, 'slack')
+  const perChannel = useMemo(() => activityTracked(activity7, 'slack'), [activity7])
   const poll = sinceParts(flow?.last_poll_at ?? null)
 
   // 404 is the honest answer here as well as an error: Slack is an EE surface
@@ -183,12 +186,13 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
           watched: c.tracked,
           owner: owner.text,
           ownerKind: owner.kind,
-          mentions: null,
+          mentions:
+            c.tracked && c.bot_is_member && c.id ? (perChannel.get(c.id)?.events ?? null) : null,
           last: min === null ? null : ago(min),
           lastMin: min,
         }
       }),
-    [paged.items],
+    [paged.items, perChannel],
   )
 
   const columns: TableColumn[] = useMemo(
@@ -226,13 +230,12 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         align: 'end',
         drop: 2,
         render: (r) => r.mentions ?? '—',
-        // A dash means not applicable; a zero means zero. Nothing counts these
-        // in a window today, so every row is the first — but the rule is written
-        // out so the column is right the moment one does.
+        // A dash is a channel with no count of its own, or a count not read
+        // yet; a zero is a watched channel that was quiet, and reads as one.
         color: (r) =>
-          r.mentions
-            ? 'var(--color-ink-2)'
-            : 'color-mix(in srgb, var(--color-ink-4) 29%, var(--color-line-2))',
+          r.mentions == null
+            ? 'color-mix(in srgb, var(--color-ink-4) 29%, var(--color-line-2))'
+            : 'var(--color-ink-2)',
       },
       {
         key: 'last',
@@ -379,10 +382,10 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
               columns={columns}
               rows={rows}
               pageSize="auto"
-              // The design opens on MENTIONS · 7D. Nothing counts them yet, so
-              // the list has no key to order them by; the star's own ranking —
-              // ours, nobody's, theirs, untracked — is the page's argument and
-              // has data behind it. Open on the count when it ships.
+              // The design opens on MENTIONS · 7D, but the count comes from the
+              // activity node rather than the channel list, so the list has no
+              // key to order by it. The star's own ranking — ours, nobody's,
+              // theirs, untracked — is the page's argument instead.
               sort={sort}
               onSortChange={setSort}
               barPosition="absolute"

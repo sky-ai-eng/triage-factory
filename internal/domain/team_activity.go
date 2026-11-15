@@ -44,10 +44,9 @@ type TeamActivityDaySource struct {
 
 // TeamActivitySource is one source's totals over the window. Events is a
 // pointer because a count can be undefined rather than zero: a team's
-// events are defined by its tracked set, and a source with no tracked-set
-// notion (Slack — push-delivered, no repo/project attachment) has no
-// team-scoped event count to report. Nil means "not defined", which a UI
-// renders as a dash, never as 0.
+// events are defined by its tracked set, and a source with no tracked set
+// has no team-scoped event count to report. Nil means "not defined", which a
+// UI renders as a dash, never as 0.
 //
 // LastPollAt is the source's poller's last completed cycle — instantaneous
 // state riding the windowed node the way /proc files mix series and now.
@@ -64,10 +63,10 @@ type TeamActivitySource struct {
 
 // TeamActivityTracked is one unit of the team's tracked set and its flow over
 // the window: a GitHub repository (UnitID is its registry row id), a Jira
-// project (its jira_projects row id) or a Linear team (its Linear UUID) —
-// the ids the source pages key their rows on. A tracked unit that was quiet
-// in the window is a row of zeros; a unit the team does not track has no row.
-// Slack has no tracked set, so it has no rows.
+// project (its jira_projects row id), a Linear team (its Linear UUID) or a
+// Slack channel the team watches (its slack_channels row id) — the ids the
+// source pages key their rows on. A tracked unit that was quiet in the window
+// is a row of zeros; a unit the team does not track has no row.
 //
 // Events, Tasks and Runs are counted the way the by-source cut counts them,
 // so a source's rows sum to its TeamActivitySource. The two part only on

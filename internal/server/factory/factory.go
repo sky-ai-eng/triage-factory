@@ -34,9 +34,7 @@ func New(tx db.TxRunner, taskJSON func(domain.Task) any) *Handler {
 // factoryEntityLimit caps how many active entities we ship per snapshot.
 // The factory view renders each entity as an item on the belt network;
 // at some point the canvas gets visually swamped, but 500 comfortably
-// covers an enterprise Jira stock plus tracked GitHub repos without
-// churning the displayed set when pollers from different sources
-// alternate their last_polled_at updates.
+// covers the open pull requests of a team's tracked repositories.
 const factoryEntityLimit = 500
 
 // factoryStationJSON is the per-event-type payload for the factory view.
@@ -120,10 +118,9 @@ func toFactoryRunSummary(r domain.Conversation) factoryRunSummaryJSON {
 	}
 }
 
-// factoryEntityJSON is the per-entity payload. PR-specific fields (number,
-// repo, author, additions, deletions) are populated from snapshot_json for
-// github entities; jira entities get status/priority/assignee instead. The
-// frontend decides how to render each kind.
+// factoryEntityJSON is the per-entity payload: a pull request, the one kind
+// the belt carries (db.FactoryBeltKind), with its fields (number, repo,
+// author, additions, deletions) read from snapshot_json.
 type factoryEntityJSON struct {
 	ID               string `json:"id"`
 	Source           string `json:"source"`
@@ -141,13 +138,10 @@ type factoryEntityJSON struct {
 	// latest. Bounded per-entity by factoryRecentEventsPerEntity.
 	RecentEvents []factoryRecentEventJSON `json:"recent_events,omitempty"`
 
-	// The registry row the entity belongs to: a pull request's repository,
-	// a Jira issue's project, a Linear issue's team. Only the one for the
-	// entity's source is set. The belt colors chips by it, so two chips
-	// share a hue when they share the row, whatever their keys spell.
-	RepositoryID  string `json:"repository_id,omitempty"`
-	JiraProjectID string `json:"jira_project_id,omitempty"`
-	LinearTeamID  string `json:"linear_team_id,omitempty"`
+	// The pull request's repository registry row. The belt colors chips by
+	// it, so two chips share a hue when they share the row, whatever their
+	// keys spell.
+	RepositoryID string `json:"repository_id,omitempty"`
 
 	// GitHub PR fields.
 	Number    int    `json:"number,omitempty"`
@@ -155,11 +149,6 @@ type factoryEntityJSON struct {
 	Author    string `json:"author,omitempty"`
 	Additions int    `json:"additions,omitempty"`
 	Deletions int    `json:"deletions,omitempty"`
-
-	// Jira fields.
-	Status   string `json:"status,omitempty"`
-	Priority string `json:"priority,omitempty"`
-	Assignee string `json:"assignee,omitempty"`
 
 	// PendingTasks groups active tasks for this entity by event_type.
 	// Drives the station drawer's drag-to-delegate flow: the frontend
@@ -243,10 +232,8 @@ func (fh *Handler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request)
 	// user_github_identities, host-scoped — resolve the org's
 	// GitHub host from org_settings, then look up (user, host). Missing
 	// identity (fresh install, no GitHub configured) degrades to
-	// everyone-is-other rather than failing the whole endpoint — the
-	// factory should still render for a user who's only set up Jira.
+	// everyone-is-other rather than failing the whole endpoint.
 	var me domain.GitHubAccount
-	var jiraAccountID string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
 	var activeConversations []domain.FactoryActiveConversation
 	var entityRows []domain.FactoryEntityRow
@@ -258,9 +245,6 @@ func (fh *Handler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request)
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		identity, _ := tx.Users.GetGitHubIdentity(r.Context(), userID, orgSet.GitHubBaseURL)
 		me = domain.GitHubAccountOf(identity)
-		// The Jira identity is keyed by the org's Jira site, and degrades the
-		// same way: none stored means no Jira ticket is "mine".
-		jiraAccountID, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 
 		// --- Throughput counters --------------------------------------
 		var e error
@@ -393,8 +377,6 @@ func (fh *Handler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request)
 			Title:            row.Entity.Title,
 			URL:              row.Entity.URL,
 			RepositoryID:     row.Entity.RepositoryID,
-			JiraProjectID:    row.Entity.JiraProjectID,
-			LinearTeamID:     row.Entity.LinearTeamID,
 			CurrentEventType: row.LatestEventType,
 		}
 		if row.LatestEventAt != nil {
@@ -416,44 +398,19 @@ func (fh *Handler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request)
 		if _, ok := openRunsByEntity[row.Entity.ID]; ok {
 			ej.HasOpenRun = true
 		}
-		switch row.Entity.Source {
-		case "github":
-			var snap domain.PRSnapshot
-			if row.Entity.SnapshotJSON != "" {
-				if err := json.Unmarshal([]byte(row.Entity.SnapshotJSON), &snap); err == nil {
-					ej.Number = snap.Number
-					ej.Repo = snap.Repo
-					ej.Author = snap.Author
-					ej.Additions = snap.Additions
-					ej.Deletions = snap.Deletions
-				} else {
-					factoryLog.Warn("entity has malformed snapshot_json", "entity", row.Entity.ID, "error", err)
-				}
-			}
-			ej.Mine = me.Is(snap.Author, snap.AuthorID)
-		case "jira":
-			var snap domain.JiraSnapshot
-			if row.Entity.SnapshotJSON != "" {
-				if err := json.Unmarshal([]byte(row.Entity.SnapshotJSON), &snap); err == nil {
-					ej.Status = snap.Status
-					ej.Priority = snap.Priority
-					ej.Assignee = snap.Assignee
-				}
-			}
-			// Jira "mine" = assigned to the session user, compared by the
-			// stable account id their identity on the org's site carries,
-			// never by display name.
-			ej.Mine = snap.AssignedTo(jiraAccountID)
-		case "linear":
-			var snap domain.LinearSnapshot
-			if row.Entity.SnapshotJSON != "" {
-				if err := json.Unmarshal([]byte(row.Entity.SnapshotJSON), &snap); err == nil {
-					ej.Status = snap.State.Name
-					ej.Priority = snap.PriorityLabel
-					ej.Assignee = snap.Assignee
-				}
+		var snap domain.PRSnapshot
+		if row.Entity.SnapshotJSON != "" {
+			if err := json.Unmarshal([]byte(row.Entity.SnapshotJSON), &snap); err == nil {
+				ej.Number = snap.Number
+				ej.Repo = snap.Repo
+				ej.Author = snap.Author
+				ej.Additions = snap.Additions
+				ej.Deletions = snap.Deletions
+			} else {
+				factoryLog.Warn("entity has malformed snapshot_json", "entity", row.Entity.ID, "error", err)
 			}
 		}
+		ej.Mine = me.Is(snap.Author, snap.AuthorID)
 		entities = append(entities, ej)
 	}
 

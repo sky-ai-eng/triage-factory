@@ -1360,23 +1360,16 @@ export interface FactoryEntity {
    * events in sequence (new_commits → ci_passed) shows both transitions
    * rather than teleporting to the latest. */
   recent_events?: FactoryRecentEvent[]
-  /** The registry row the entity belongs to: a pull request's repository, a
-   *  Jira issue's project, a Linear issue's team. Only the one for the
-   *  entity's source is set. The belt groups chips by it rather than by a
-   *  name, so a renamed repository or project keeps its chips' hue. */
+  /** The pull request's repository registry row. The belt groups chips by
+   *  it rather than by a name, so a renamed repository keeps its chips'
+   *  hue. */
   repository_id?: string
-  jira_project_id?: string
-  linear_team_id?: string
   // GitHub PR fields.
   number?: number
   repo?: string
   author?: string
   additions?: number
   deletions?: number
-  // Jira fields.
-  status?: string
-  priority?: string
-  assignee?: string
   /** Active tasks for this entity, grouped by event_type. Drives the
    *  station drawer's drag-to-delegate flow: dropping on the runs tray
    *  reads the matching event_type's first dedup_key and forwards it

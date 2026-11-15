@@ -798,25 +798,18 @@ function QueuedEntityRow({ entity }: { entity: FactoryEntity }) {
 }
 
 // Hover popup for a queued entity row. Shows the full title (no
-// truncation) plus source-specific metadata so the user can read the
+// truncation) plus the pull request's metadata so the user can read the
 // long context without having to click through. Mirrors the columns
 // the old factory's StationDetailOverlay surfaced.
 function entityMeta(entity: FactoryEntity): { k: string; v: string }[] {
   const meta: { k: string; v: string }[] = []
-  if (entity.source === 'github') {
-    if (entity.repo) meta.push({ k: 'repo', v: entity.repo })
-    if (entity.number != null) meta.push({ k: 'number', v: `#${entity.number}` })
-    if (entity.author) meta.push({ k: 'author', v: `@${entity.author}` })
-    if (entity.additions != null || entity.deletions != null) {
-      const add = entity.additions ?? 0
-      const del = entity.deletions ?? 0
-      meta.push({ k: 'diff', v: `+${add} −${del}` })
-    }
-  } else if (entity.source === 'jira' || entity.source === 'linear') {
-    if (entity.source_id) meta.push({ k: 'key', v: entity.source_id })
-    if (entity.status) meta.push({ k: 'status', v: entity.status })
-    if (entity.priority) meta.push({ k: 'priority', v: entity.priority })
-    if (entity.assignee) meta.push({ k: 'assignee', v: entity.assignee })
+  if (entity.repo) meta.push({ k: 'repo', v: entity.repo })
+  if (entity.number != null) meta.push({ k: 'number', v: `#${entity.number}` })
+  if (entity.author) meta.push({ k: 'author', v: `@${entity.author}` })
+  if (entity.additions != null || entity.deletions != null) {
+    const add = entity.additions ?? 0
+    const del = entity.deletions ?? 0
+    meta.push({ k: 'diff', v: `+${add} −${del}` })
   }
   return meta
 }
@@ -885,7 +878,7 @@ function ConversationRow({ conversation, task }: { conversation: Conversation; t
 }
 
 function entityLabel(e: FactoryEntity): string {
-  if (e.source === 'github' && e.number != null) return `#${e.number}`
+  if (e.number != null) return `#${e.number}`
   return e.source_id || e.id.slice(0, 8)
 }
 
