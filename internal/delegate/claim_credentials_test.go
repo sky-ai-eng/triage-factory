@@ -188,12 +188,12 @@ func (recordingSecrets) Get(ctx context.Context, orgID, key string) (string, err
 
 var _ agentproc.SecretsReader = recordingSecrets{}
 
-// TestResolveRunCredentials_MultiSeam pins the contract: when the
-// per-org seam is wired (the production path in both modes), a run's GitHub
-// client resolves per (org, owner) through the resolver — NOT the
-// process-global ghClient — and the org's default model comes from modelFor.
-// A regression that reverted to the global client/model would fail this.
-func TestResolveRunCredentials_MultiSeam(t *testing.T) {
+// TestRunCredentialSeams_MultiSeam pins the contract: when the per-org seam
+// is wired (the production path in both modes), a run's GitHub client resolves
+// per (org, owner) through the resolver — NOT the process-global ghClient —
+// and the team's default model comes from modelFor. A regression that
+// reverted to the global client/model would fail this.
+func TestRunCredentialSeams_MultiSeam(t *testing.T) {
 	const orgID = "11111111-2222-3333-4444-555555555555"
 	const owner = "acme"
 	const teamID = "team-abc"
@@ -217,13 +217,17 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 		return domain.NewTeamModels("claude-resolved-model", domain.ModelSet{}), nil
 	})
 
-	gotClient, gotModels, err := s.resolveRunCredentials(context.Background(), orgID, owner, "widgets", teamID)
+	gotClient, err := s.resolveGHClient(context.Background(), orgID, owner, "widgets")
 	if err != nil {
-		t.Fatalf("resolveRunCredentials: %v", err)
+		t.Fatalf("resolveGHClient: %v", err)
+	}
+	gotModels, err := s.resolveModel(context.Background(), orgID, teamID)
+	if err != nil {
+		t.Fatalf("resolveModel: %v", err)
 	}
 
 	if gotClient != wantClient {
-		t.Errorf("resolveRunCredentials returned the wrong GitHub client (got the fallback, not the resolver's per-org client)")
+		t.Errorf("resolveGHClient returned the wrong GitHub client (got the fallback, not the resolver's per-org client)")
 	}
 	gotModel, err := gotModels.RequireDefault()
 	if err != nil {
@@ -248,17 +252,21 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 	}
 }
 
-// TestResolveRunCredentials_FallbackWithoutSeam pins the test/no-seam path:
+// TestRunCredentialSeams_FallbackWithoutSeam pins the test/no-seam path:
 // with no resolver wired, the spawner falls back to the constructor-supplied
 // client + model (the 20-odd existing test fixtures rely on this), and the
 // secrets reader is nil → the local ambient-subscription fallback.
-func TestResolveRunCredentials_FallbackWithoutSeam(t *testing.T) {
+func TestRunCredentialSeams_FallbackWithoutSeam(t *testing.T) {
 	fallbackClient := ghclient.NewClient("https://fallback", "fallback-tok")
 	s := NewSpawner(nil, db.Stores{}, fallbackClient, nil, "fallback-model")
 
-	gotClient, gotModels, err := s.resolveRunCredentials(context.Background(), "org", "owner", "repo", "team")
+	gotClient, err := s.resolveGHClient(context.Background(), "org", "owner", "repo")
 	if err != nil {
-		t.Fatalf("resolveRunCredentials: %v", err)
+		t.Fatalf("resolveGHClient: %v", err)
+	}
+	gotModels, err := s.resolveModel(context.Background(), "org", "team")
+	if err != nil {
+		t.Fatalf("resolveModel: %v", err)
 	}
 	if gotClient != fallbackClient {
 		t.Errorf("without a resolver, expected the constructor client")

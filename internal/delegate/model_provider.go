@@ -10,8 +10,8 @@ import (
 
 // checkModelProviders is the credential admission gate for the models a
 // delegation would actually run on: the team's default and every step pin in
-// the blueprint about to fire. Delegate calls it once the plan is resolved and
-// before the firing's commit point.
+// the blueprint about to fire. PlanDelegation calls it once the steps' pins are
+// resolved.
 //
 // It refuses when a model's provider is one the org never connected. That is a
 // dispatch-time check because it describes state that can change after a model
@@ -26,9 +26,10 @@ import (
 // page.
 //
 // It refuses BEFORE any write — no blueprint_run is minted, no conversation is
-// enqueued — so there is nothing to retry and nothing to reap. That is the
-// point: TF ships no fallback model, so the alternative to refusing is spending
-// the org's money on a model nobody chose.
+// enqueued, and a person's delegation has not yet claimed the task — so there
+// is nothing to retry and nothing to reap. That is the point: TF ships no
+// fallback model, so the alternative to refusing is spending the org's money
+// on a model nobody chose.
 //
 // Fails OPEN on a read error, matching the cost caps: a transient settings read
 // must not wedge all delegation, and the credential resolver is the backstop —

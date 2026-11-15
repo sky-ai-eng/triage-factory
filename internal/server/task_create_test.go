@@ -106,8 +106,9 @@ func TestTaskCreate_400OnBadBody(t *testing.T) {
 }
 
 // TestFactoryDropGesture_CreateThenDelegate walks the drop as the frontend does,
-// POST /api/tasks then /delegate: when the spawn fails, the claim still lands,
-// and SPAWN_FAILED tells the client to retry on the same task.
+// POST /api/tasks then /delegate: a delegate refused for a bad blueprint
+// reference is a 422 on blueprint_id that writes nothing, so the created task
+// stays queued and unclaimed.
 func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
@@ -129,19 +130,12 @@ func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 		"blueprint_id": "no-such-prompt",
 	}))
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("delegate = %d, want 422 (bad blueprint reference; claim stamped, run didn't fire); body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("delegate = %d, want 422 (bad blueprint reference); body=%s", rec.Code, rec.Body.String())
 	}
-	// SPAWN_FAILED is the claim-survived marker the FE keys the retry
-	// affordance on — a plain INTERNAL here would read as "nothing landed".
-	httpxtest.AssertFirstError(t, rec, "SPAWN_FAILED", "blueprint_id")
-
-	stored, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
-	if err != nil || stored == nil {
-		t.Fatalf("read task back: task=%v err=%v", stored, err)
-	}
-	if stored.ClaimedByAgentID == "" {
-		t.Errorf("task.ClaimedByAgentID empty; the claim should survive a failed spawn")
-	}
+	// Not SPAWN_FAILED: that reason tells the client a claim landed, and this
+	// refusal came before the claim.
+	httpxtest.AssertFirstError(t, rec, "INVALID_FIELD", "blueprint_id")
+	assertNoClaimLanded(t, s.db, task.ID)
 }
 
 // TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed: with the agent
