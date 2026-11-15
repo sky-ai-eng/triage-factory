@@ -2184,8 +2184,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
-		// exactly what this step needs to see.
-		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(orgID, gh, sidecar), owner, repo, prNumber)
+		// exactly what this step needs to see. Started here, ahead of
+		// ensureWorkspace, so a restore runs while the fetch does.
+		cfg.prSkeleton = startPRSkeleton(ctx, prReadClient(orgID, gh, sidecar), owner, repo, prNumber)
 	case task.EntitySource == "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)

@@ -431,7 +431,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(cfg.surface, systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
+	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.wait(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the

@@ -79,11 +79,13 @@ type runConfig struct {
 	// step whose tree no longer holds it.
 	baseCheckout string
 
-	// prSkeleton is the rendered PR history block folded into the run's
-	// static task context. Empty for a non-PR run, and empty (never fatal)
-	// when the fetch fails — the run proceeds with the point-in-time event
-	// context it has always had.
-	prSkeleton string
+	// prSkeleton is the fetch of the PR history block folded into the run's
+	// static task context, started during setup so it runs beside the clone or
+	// the workspace restore, and waited on by the launch that puts the block in
+	// front of the agent. Nil for a non-PR run, whose wait answers "" at once;
+	// a fetch that fails answers "" too, never an error, and the run proceeds
+	// with the point-in-time event context it has always had.
+	prSkeleton *prSkeletonFetch
 
 	// workspace is how runRoot came to be — warm from the previous engagement,
 	// rehydrated from the durable snapshot, or built fresh. Resolved by the
@@ -759,6 +761,8 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}
+	// Started now so it runs beside the clone below rather than after it.
+	skeleton := startPRSkeleton(ctx, ghClient, owner, repo, prNumber)
 
 	// pr.BaseCloneURL / pr.BaseSSHURL: the upstream (the repo where
 	// /pulls/<n> lives, which is always the canonical repo by
@@ -898,7 +902,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		repo:       repo,
 		prNumber:   prNumber,
 		prCheckout: prCheckout,
-		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
+		prSkeleton: skeleton,
 	}, nil
 }
 
@@ -1120,6 +1124,48 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 		return ""
 	}
 	return prskeleton.Render(*sk, prskeleton.Options{Now: time.Now()})
+}
+
+// prSkeletonFetch is one renderPRSkeleton call running in the background.
+// Setup starts it ahead of its slow step, and a launch waits on it only where
+// the block goes into the prompt, so the two GETs overlap the clone or the
+// workspace restore instead of following them.
+type prSkeletonFetch struct {
+	done  chan struct{}
+	block string // written before done is closed, read only after
+}
+
+// startPRSkeleton starts renderPRSkeleton in a goroutine under ctx. Setup
+// passes its own context, so the fetch's spans sit under engagement.setup and
+// a stop cancels the fetch.
+func startPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, repo string, prNumber int) *prSkeletonFetch {
+	f := &prSkeletonFetch{done: make(chan struct{})}
+	go func() {
+		defer close(f.done)
+		f.block = renderPRSkeleton(ctx, ghClient, owner, repo, prNumber)
+	}()
+	return f
+}
+
+// wait returns the rendered block, or "" if ctx ends before the fetch does. A
+// nil fetch, a run with no pull request, answers "" at once. A fetch that has
+// already finished answers its block whatever ctx says, so a caller whose
+// context ends at the same moment the block lands still gets it.
+func (f *prSkeletonFetch) wait(ctx context.Context) string {
+	if f == nil {
+		return ""
+	}
+	select {
+	case <-f.done:
+		return f.block
+	default:
+	}
+	select {
+	case <-f.done:
+		return f.block
+	case <-ctx.Done():
+		return ""
+	}
 }
 
 // setupJira prepares the run-root for a Jira delegation. No repo is

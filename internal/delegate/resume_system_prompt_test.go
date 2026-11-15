@@ -231,7 +231,7 @@ func TestNativeLaunch_ToolsAreTheNativeComposition(t *testing.T) {
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: kinds},
-	}, "", "")
+	}, "", "", "")
 	if want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, kinds); !strings.Contains(text.systemBlock, want) {
 		t.Errorf("the native block does not carry the native tools section;\n%s", text.systemBlock)
 	}
@@ -495,7 +495,7 @@ func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge, repla
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: []string{"github"}},
-	}, knowledge, replayed)
+	}, knowledge, replayed, "")
 }
 
 func (f *launchFixture) task(t *testing.T) domain.Task {

@@ -165,7 +165,16 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// into the memory tree the launch is about to mount read-only. Block 1 is the
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
-	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay.block)
+	//
+	// Only a launch waits for the PR history: its task context becomes the
+	// opening row. An opened conversation is given no opening row, so its block
+	// reaches the agent only through the task-context file, which is written
+	// without it here and replaced once the fetch lands (below, after agent-live).
+	skeleton := ""
+	if !replay.opened {
+		skeleton = cfg.prSkeleton.wait(ctx)
+	}
+	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay.block, skeleton)
 	systemPrompt := nativeSystemPrompt(cfg.surface)
 
 	// The task context's retention. Nothing is pinned through a compaction, so
@@ -269,6 +278,15 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	engagementSpan := s.engagementSpanContext(conversationID)
 	ctx = detachEngagement(ctx)
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
+
+	// The agent reads the task-context file only to recover from a compaction,
+	// and only through a tool call, which cannot come before its first model
+	// response. So the history block is added to the file while the engagement
+	// runs rather than awaited ahead of it, and a read that beats the refresh
+	// sees what a failed fetch leaves.
+	if replay.opened {
+		defer refreshTaskContextFile(ctx, cfg.prSkeleton, memoryDir, launchText.taskInputs)()
+	}
 
 	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID).actFor(creatorUserID)
 	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, taskMemories, launchText.taskContext); err != nil {
@@ -462,6 +480,53 @@ type nativeLaunchText struct {
 	// taskContext is the opening user row: the rendered <task_context>, and
 	// the same bytes the launch retains as a file.
 	taskContext string
+	// taskInputs is what taskContext was composed from, so it can be composed
+	// again with the PR history block without reading anything twice.
+	taskInputs taskContextInputs
+}
+
+// taskContextInputs is everything BuildTaskContext renders except the PR
+// history block, as one claim read it.
+type taskContextInputs struct {
+	task         domain.Task
+	container    string
+	metadataJSON string
+	pkg          *domain.VulnerablePackageSnapshot
+	artifacts    []domain.Artifact
+	deliverables []domain.Deliverable
+}
+
+// render composes the task context with skeleton as its history block.
+func (in taskContextInputs) render(skeleton string) string {
+	return BuildTaskContext(in.task, in.container, in.metadataJSON, skeleton, in.pkg, in.artifacts, in.deliverables)
+}
+
+// refreshTaskContextFile waits on fetch in the background and, once it returns
+// a block, replaces the task-context file in dir with the task context composed
+// again with that block in it. A fetch that fails, or a ctx that ends first,
+// leaves the file as it is: the task context without the history block, which
+// is what a failed fetch produces at a launch.
+//
+// It returns a stop that ends the wait and returns once nothing more will be
+// written. The caller runs it when the engagement ends, so no write of this
+// engagement's lands after that, when the file belongs to the conversation's
+// next claim or the staging directory is being removed.
+func refreshTaskContextFile(ctx context.Context, fetch *prSkeletonFetch, dir string, inputs taskContextInputs) (stop func()) {
+	if fetch == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if block := fetch.wait(ctx); block != "" {
+			replaceTaskContextFile(dir, inputs.render(block))
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // buildNativeLaunchText resolves this claim's inputs and produces both halves.
@@ -480,9 +545,12 @@ type nativeLaunchText struct {
 // event fields and PR history it renders are read fresh, and it is a transcript
 // row, where the opening gate decides whether it is written at all.
 //
+// skeleton is the PR history block the task context carries, which the caller
+// decides whether to wait for.
+//
 // Nothing in it fails: the one read it makes degrades to a task context with no
 // event fields rather than refusing the launch.
-func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
+func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge, replayed, skeleton string) nativeLaunchText {
 	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
 	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 
@@ -514,6 +582,14 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		)
 	}
 
+	inputs := taskContextInputs{
+		task:         task,
+		container:    cfg.container(),
+		metadataJSON: metadataJSON,
+		pkg:          s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task),
+		artifacts:    artifacts,
+		deliverables: deliverables,
+	}
 	return nativeLaunchText{
 		systemBlock: systemBlock,
 		// The task context is the one section that stays a transcript row.
@@ -521,7 +597,8 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
+		taskContext: inputs.render(skeleton),
+		taskInputs:  inputs,
 	}
 }
 
