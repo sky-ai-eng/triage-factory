@@ -205,11 +205,9 @@ export default function RunDetail() {
   }, [])
 
   // Keyboard: Esc → back, but only for a press no other layer took. A layer
-  // that dismissed on it marked it: the shell's, and the composer's settings
-  // popover. An open deliverable overlay closes on it from a window listener of
-  // its own, which can run after this one and so has not marked it yet; the
-  // page knows it is open from its own state instead. Marking the press when it
-  // navigates keeps the toast log off it too.
+  // above the page marks the press it consumes. The page's own deliverable
+  // overlays are read from its state instead, because a mark from a listener
+  // that runs after this one would come too late.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented || activeDeliverable) return

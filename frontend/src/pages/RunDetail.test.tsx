@@ -211,7 +211,9 @@ describe('RunDetail Escape', () => {
     detail.task = { id: 't1', team_id: 'team1', memory_pending: false } as Task
   }
 
-  const escape = () => fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+  // Pressed outside any field, wherever focus is, so the page's skip for a
+  // press typed in a field never decides a test.
+  const escape = () => fireEvent.keyDown(document.body, { key: 'Escape' })
 
   it('closes the message-settings popover and stays on the page', async () => {
     parked()
@@ -251,8 +253,8 @@ describe('RunDetail Escape', () => {
     parked()
     renderRunDetail()
 
-    fireEvent.keyDown(document.body, { key: 'Escape' })
-
+    // Marked, so nothing beneath the page acts on the same press.
+    expect(escape()).toBe(false)
     expect(screen.getByText('The board')).toBeInTheDocument()
   })
 })
