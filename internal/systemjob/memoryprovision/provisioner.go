@@ -109,6 +109,7 @@ type Manager struct {
 	secrets  agentproc.SecretsReader
 	llm      func(ctx context.Context, orgID, model string) (map[string]string, error)
 	notify   func(orgID, taskID, taskStatus string)
+	filed    func(orgID string)
 
 	// attemptTimeout is AttemptTimeout, held as a field so a test can watch
 	// the bound fire without waiting out the real one.
@@ -144,6 +145,13 @@ type Manager struct {
 // task after every write to its memory attempts, an attempt opening and every
 // way one closes; nil is a Manager that generates memory and tells nobody,
 // which is only ever a test.
+//
+// filed reports each memory row this Manager writes, generated or empty, with
+// the row's org. The claim filter holds a task's queued conversation while an
+// ended conversation on that task has no memory row, so a filed row is the
+// moment that conversation becomes claimable, and a caller that wakes the
+// dispatcher on the report has it claimed before the next scan. The report
+// follows the row's entity link as well as the row. nil reports nothing.
 func NewManager(
 	stores db.Stores,
 	recorder *systemllm.Recorder,
@@ -151,6 +159,7 @@ func NewManager(
 	secrets agentproc.SecretsReader,
 	llm func(ctx context.Context, orgID, model string) (map[string]string, error),
 	notify func(orgID, taskID, taskStatus string),
+	filed func(orgID string),
 ) *Manager {
 	m := &Manager{
 		stores:         stores,
@@ -158,6 +167,7 @@ func NewManager(
 		secrets:        secrets,
 		llm:            llm,
 		notify:         notify,
+		filed:          filed,
 		attemptTimeout: AttemptTimeout,
 		syncEvery:      failingSyncEvery,
 		inflight:       make(map[string]struct{}),
@@ -401,10 +411,16 @@ func (m *Manager) file(ctx context.Context, orgID string, conv *domain.Conversat
 	if _, err := m.stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv.ID, conv.BlueprintRunID, content, source); err != nil {
 		return fmt.Errorf("memoryprovision: file the memory of conversation %s: %w", conv.ID, err)
 	}
-	if primaryEntityID == "" {
-		return nil
+	if primaryEntityID != "" {
+		memoryentities.Attach(ctx, m.stores.TaskMemory, orgID, conv.ID, primaryEntityID)
 	}
-	memoryentities.Attach(ctx, m.stores.TaskMemory, orgID, conv.ID, primaryEntityID)
+	// After the attach, never between the two writes: the row makes the
+	// task's next conversation claimable, and the entity link is how that
+	// conversation finds the row, so a wake sent before the link could start
+	// it without the memory it was held for.
+	if m.filed != nil {
+		m.filed(orgID)
+	}
 	return nil
 }
 
