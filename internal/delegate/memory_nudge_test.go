@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -131,9 +132,7 @@ func TestMemoryUpdateNudge_AChatThatNeverWroteItsMemory(t *testing.T) {
 // same notes again does not count as changing them; writing new ones resets
 // the count.
 func TestMemoryUpdateNudge_AChatWhoseMemoryFellBehind(t *testing.T) {
-	if memoryNudgeAfterPersonMessages != 3 {
-		t.Fatalf("the test walks a threshold of 3; memoryNudgeAfterPersonMessages = %d", memoryNudgeAfterPersonMessages)
-	}
+	n := memoryNudgeAfterPersonMessages
 	c := newMemoryChat(t, "1450-behind")
 
 	c.person("fix the flaky upload")
@@ -141,19 +140,14 @@ func TestMemoryUpdateNudge_AChatWhoseMemoryFellBehind(t *testing.T) {
 	c.remember("added a retry to the upload", domain.MemorySourceAgent)
 	c.wantQuiet("the memory was written this turn")
 
-	c.person("also log the attempts")
-	c.work("logging added")
-	c.wantQuiet("one message since the memory changed")
-	c.person("and cap them at five")
-	c.work("capped")
-	c.wantQuiet("two messages since the memory changed")
-
-	c.person("run the whole suite")
-	c.answer("I'll need you to confirm the suite's runtime first")
-	c.wantQuiet("three messages since, but the turn made no tool calls")
-	c.person("go ahead")
-	c.work("the suite passes")
-	c.wantAsked("four messages since the memory changed")
+	for i := 1; i < n; i++ {
+		c.person(fmt.Sprintf("follow-up %d", i))
+		c.work("done")
+		c.wantQuiet(fmt.Sprintf("%d of %d messages since the memory changed", i, n))
+	}
+	c.person(fmt.Sprintf("follow-up %d", n))
+	c.work("done")
+	c.wantAsked(fmt.Sprintf("%d messages since the memory changed", n))
 
 	c.nudged()
 	c.work("updated")
@@ -161,9 +155,12 @@ func TestMemoryUpdateNudge_AChatWhoseMemoryFellBehind(t *testing.T) {
 	c.remember("added a retry to the upload", domain.MemorySourceAgent)
 	c.wantQuiet("asked since the person last wrote")
 
+	c.person("what's left?")
+	c.answer("only the PR")
+	c.wantQuiet("the person wrote again, but the turn made no tool calls")
 	c.person("open the PR")
 	c.work("opened")
-	c.wantAsked("the person wrote again, and the notes still have not changed")
+	c.wantAsked("the next turn that made tool calls, with the notes still unchanged")
 
 	c.nudged()
 	c.work("updated")

@@ -27,7 +27,7 @@ const memoryNudgeNote = memoryNudgeTag + "\n" +
 // it. It counts the person's messages and not model turns: one message can
 // drive dozens of model calls, so a count of calls would pass any threshold
 // within a single request and ask after nearly every turn.
-const memoryNudgeAfterPersonMessages = 3
+const memoryNudgeAfterPersonMessages = 5
 
 // memoryUpdateNudge builds the would-stop hook that asks a conversation a
 // person works in to bring its memory file up to date: the agent is asked
