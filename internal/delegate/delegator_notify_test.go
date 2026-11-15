@@ -3,17 +3,22 @@ package delegate
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // A run's toasts are for the person who delegated it, and nothing a run says
@@ -40,6 +45,57 @@ func TestTurnIncompletePark_ToastsOnlyTheDelegator(t *testing.T) {
 	}
 	if len(users) != 1 || users[0] != runmode.LocalDefaultUserID {
 		t.Errorf("toast recipients = %q, want only the delegator %s", users, runmode.LocalDefaultUserID)
+	}
+}
+
+// A native park the spend guard caused toasts when a message continues it:
+// once the cap resets or is raised, since a message before then parks it
+// again. Any other turn_incomplete park toasts that the next message resumes
+// it.
+func TestRecordNativeResult_ASpendCappedParkToastsWhenAMessageContinuesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		guard agentloop.Guard
+		want  string
+	}{
+		{"the spend guard", &spendGuard{}, "once the cap resets or is raised"},
+		{"no guard", nil, "resumes on the next message"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			setupGitTestEnv(t)
+			s, database, conversationID, taskID := setupAdvanceFixture(t, "native-park-toast")
+			blobs, err := storage.NewWorkspace()
+			if err != nil {
+				t.Fatalf("storage.NewWorkspace: %v", err)
+			}
+			s.SetStorage(blobs)
+			hub, captured := capturingHub(t)
+			s.wsHub = hub
+			markNative(t, database, conversationID)
+			claimID := markEngaged(t, database, conversationID)
+			namespace := blueprintRunIDForConversation(t, database, conversationID)
+
+			if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+				loadTask(t, s, taskID),
+				runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
+				namespace, t.TempDir(), runmode.LocalDefaultUserID, time.Now(),
+				agentloop.Result{Kind: agentloop.ResultParked, ParkNotice: "paused", ParkGuard: tc.guard}, nil).fenced; fenced {
+				t.Fatal("the park reported a fence trip while holding the claim")
+			}
+
+			captured.mu.Lock()
+			defer captured.mu.Unlock()
+			var bodies []string
+			for _, e := range captured.events {
+				if p, ok := e.Data.(toast.Payload); ok && e.Type == "toast" {
+					bodies = append(bodies, p.Body)
+				}
+			}
+			if len(bodies) != 1 || !strings.Contains(bodies[0], tc.want) {
+				t.Errorf("toasts = %q, want one saying %q", bodies, tc.want)
+			}
+		})
 	}
 }
 

@@ -29,10 +29,12 @@ import (
 // in the store, so a turn that ends while the stall watchdog stops it parks
 // stalled.
 //
-// Only a turn_incomplete park toasts. A deliberate stop terminates the
-// blueprint behind it, so "resumes on the next message" would be a promise
-// this build cannot keep: the claim gate refuses a parked step under a
-// finished blueprint until the resume work lands.
+// Only a park that is not a deliberate stop toasts. A deliberate stop
+// terminates the blueprint behind it, so "resumes on the next message" would
+// be a promise this build cannot keep: the claim gate refuses a parked step
+// under a finished blueprint until the resume work lands. A spend-capped park
+// would not keep that promise either, because a message sent while the cap is
+// still reached parks it again, so its toast says when a message continues it.
 func (s *Spawner) announcePark(park liveParkContext) {
 	conv := s.readConversation(park.orgID, park.conversationID)
 	if conv == nil {
@@ -41,10 +43,15 @@ func (s *Spawner) announcePark(park liveParkContext) {
 	if waitsOnDelegator(conv) {
 		s.kickDelegatorNotice(park.orgID)
 	}
-	if !park.reason.Deliberate {
-		toast.FireUser(s.wsHub, park.orgID, conv.CreatorUserID, toast.LevelInfo, "",
-			fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
+	if park.reason.Deliberate {
+		return
 	}
+	text := fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID))
+	if park.spendCapped {
+		text = fmt.Sprintf("Run %s is paused at the daily spend cap — send it a message once the cap resets or is raised",
+			shortConversationID(park.conversationID))
+	}
+	toast.FireUser(s.wsHub, park.orgID, conv.CreatorUserID, toast.LevelInfo, "", text)
 }
 
 // waitsOnDelegator is ListAwaitingPersonSystem's test on a row already read,

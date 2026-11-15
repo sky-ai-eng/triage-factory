@@ -76,6 +76,10 @@ type liveParkContext struct {
 	// it finished, db.ParkStopped(...) for a cancel. See
 	// ConversationStore.ParkOpenForClaimSystem.
 	reason db.Park
+	// spendCapped says the spend guard parked the conversation, so a message
+	// continues it only once the cap resets or is raised, and the park's toast
+	// says so (announcePark).
+	spendCapped bool
 	// costUSD is the spend this engagement's process reported — the SDK's
 	// running total for the process, which is this claim's own figure since a
 	// fresh process starts at zero — settled on the claim's rows before the

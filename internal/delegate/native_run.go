@@ -1124,6 +1124,7 @@ func (s *Spawner) recordNativeResult(
 			return engagementDisposition{fenced: true}
 		}
 		terminal = "open"
+		_, spendCapped := result.ParkGuard.(*spendGuard)
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -1131,6 +1132,7 @@ func (s *Spawner) recordNativeResult(
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
 			reason:         db.ParkTurnIncomplete(),
+			spendCapped:    spendCapped,
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),
