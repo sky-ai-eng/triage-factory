@@ -6,13 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -449,106 +445,5 @@ func TestColdCompactionModelFor(t *testing.T) {
 		} else if got != c.model && !u.Offers(got) {
 			t.Errorf("cold model %q is not offered by the native universe", got)
 		}
-	}
-}
-
-// agentLiveGate is the conversation store with the agent-live write watched: it
-// closes live when the engagement clears its claim's phase, and holds every
-// transcript read from then on until release is closed, which keeps the
-// engagement running past agent-live for as long as a test needs it to.
-type agentLiveGate struct {
-	db.ConversationStore
-	live, release chan struct{}
-	liveOnce      sync.Once
-	releaseOnce   sync.Once
-}
-
-func (g *agentLiveGate) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error) {
-	if phase == "" {
-		g.liveOnce.Do(func() { close(g.live) })
-	}
-	return g.ConversationStore.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, phase)
-}
-
-func (g *agentLiveGate) ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	select {
-	case <-g.live:
-		<-g.release
-	default:
-	}
-	return g.ConversationStore.ListForAssemblySystem(ctx, orgID, conversationID)
-}
-
-func (g *agentLiveGate) letGo() { g.releaseOnce.Do(func() { close(g.release) }) }
-
-// TestNativeReclaim_ReachesAgentLiveWithoutThePRHistory: a person's follow-up
-// re-claims a conversation that has already run, whose PR history reaches the
-// agent only through the task-context file. The launch goes live with the fetch
-// still out, and the file gains the history block once the fetch returns.
-func TestNativeReclaim_ReachesAgentLiveWithoutThePRHistory(t *testing.T) {
-	f := newLaunchFixture(t, "native-history")
-	f.open(t)
-	gate := &agentLiveGate{ConversationStore: f.s.conversations, live: make(chan struct{}), release: make(chan struct{})}
-	f.s.conversations = gate
-	fetch := &prSkeletonFetch{done: make(chan struct{})}
-	var finishOnce sync.Once
-	finish := func(block string) {
-		finishOnce.Do(func() {
-			fetch.block = block
-			close(fetch.done)
-		})
-	}
-	const history = "Pull request owner/repo#native-history: 3 commits, 1 review"
-
-	disp := make(chan engagementDisposition, 1)
-	go func() {
-		disp <- f.s.runNativeAgent(context.Background(), f.conv.ID, f.task(t), "have another look", runConfig{
-			orgID:          runmode.LocalDefaultOrgID,
-			teamID:         runmode.LocalDefaultTeamID,
-			claimID:        f.conv.ClaimID,
-			blueprintRunID: f.br.ID,
-			surface:        agentprompt.SurfaceMachinist,
-			runRoot:        f.worktree,
-			sources:        sourceDocs{kinds: []string{"github"}},
-			sidecar:        &runSidecar{cell: &fakeCell{}},
-			prSkeleton:     fetch,
-		}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)
-	}()
-	// A launch that waits on the fetch, which is the failure this test is for,
-	// would otherwise never return.
-	t.Cleanup(func() {
-		finish("")
-		gate.letGo()
-		<-disp
-	})
-
-	select {
-	case <-gate.live:
-	case d := <-disp:
-		disp <- d
-		t.Fatalf("the engagement ended before agent-live: %+v", d)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the launch did not reach agent-live while the PR history fetch was out")
-	}
-
-	file := filepath.Join(entityMemoryTarget(&runConfig{}, f.conv.ID, f.worktree), taskContextFileName)
-	read := func() string {
-		b, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("read the task-context file: %v", err)
-		}
-		return string(b)
-	}
-	if got := read(); strings.Contains(got, history) {
-		t.Fatalf("the task-context file carries the history before the fetch returned;\n%s", got)
-	}
-
-	finish(history)
-	deadline := time.Now().Add(10 * time.Second)
-	for !strings.Contains(read(), history) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the task-context file did not gain the history block after the fetch returned;\n%s", read())
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -109,41 +108,5 @@ func TestRenderPRSkeletonNoClient(t *testing.T) {
 	srv := prSkeletonServer(t, nil)
 	if got := renderPRSkeleton(context.Background(), ghclient.NewClient(srv.URL, "t"), "", "", 0); got != "" {
 		t.Errorf("want empty with no PR coordinates, got %q", got)
-	}
-}
-
-// A launch stopped while the history is still being fetched must not sit out
-// the fetch, whose GETs are bounded by the client rather than by the stop.
-func TestPRSkeletonFetch_WaitReturnsOnceItsContextEnds(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	// Cleanups run last-in first-out. The fetch is ended and waited for first,
-	// so it cannot log after the test returns, where a later test may have
-	// swapped delegateLog; then the held requests are let go before Close
-	// waits for them.
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { close(release) })
-	fetchCtx, endFetch := context.WithCancel(context.Background())
-	fetch := startPRSkeleton(fetchCtx, ghclient.NewClient(srv.URL, "t"), "octo", "repo", 18)
-	t.Cleanup(func() {
-		endFetch()
-		<-fetch.done
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	got := make(chan string, 1)
-	go func() { got <- fetch.wait(ctx) }()
-	select {
-	case block := <-got:
-		if block != "" {
-			t.Errorf("wait on an ended context = %q, want no block", block)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("wait on an ended context is still waiting for the fetch")
 	}
 }

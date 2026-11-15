@@ -1,11 +1,16 @@
 package delegate
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // hostileRun is a run whose external fields all read like instructions — a PR
@@ -157,6 +162,32 @@ func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing
 	}
 	if strings.Contains(opening, mission) {
 		t.Error("the mission is still in the opening row; it belongs in block 2")
+	}
+}
+
+// TestNativeLaunchText_AnOpenedConversationKeepsItsOpeningRow: a claim of a
+// conversation that has already been opened sends no opening row, so it is
+// handed the task context the opening sent and fetches no PR history.
+func TestNativeLaunchText_AnOpenedConversationKeepsItsOpeningRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a claim of an opened conversation fetched %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newLaunchFixture(t, "native-opened")
+	const opening = "<task_context>\nPull request owner/repo#7, as the opening rendered it\n</task_context>"
+	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, opening)
+
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	got := f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), "have another look", runConfig{
+		orgID:      runmode.LocalDefaultOrgID,
+		teamID:     runmode.LocalDefaultTeamID,
+		sources:    sourceDocs{kinds: []string{"github"}},
+		prSkeleton: prSkeletonSource{client: ghclient.NewClient(srv.URL, "t"), owner: "owner", repo: "repo", prNumber: 7},
+	}, "", replay).taskContext
+	if got != opening {
+		t.Errorf("task context = %q, want the opening row's %q", got, opening)
 	}
 }
 

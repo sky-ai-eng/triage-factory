@@ -231,7 +231,7 @@ func TestNativeLaunch_ToolsAreTheNativeComposition(t *testing.T) {
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: kinds},
-	}, "", "", "")
+	}, "", claimReplay{})
 	if want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, kinds); !strings.Contains(text.systemBlock, want) {
 		t.Errorf("the native block does not carry the native tools section;\n%s", text.systemBlock)
 	}
@@ -271,7 +271,7 @@ func TestNativeReclaim_ReplaysTheStampedBlockByteForByte(t *testing.T) {
 	if replay.stampable {
 		t.Error("a wake with the launch's block in hand reported the row as writable")
 	}
-	woke := f.nativeLaunchText(t, "review the failing check", "", replay.block)
+	woke := f.nativeLaunchText(t, "review the failing check", "", replay)
 	if woke.systemBlock != launched {
 		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", woke.systemBlock, launched)
 	}
@@ -301,7 +301,7 @@ func TestNativeReclaim_KeepsTheManifestOnAHandedOffTree(t *testing.T) {
 	const manifest = "Team knowledge is staged at _tfac/knowledge/team/private/runbook.md"
 
 	// The launch's staging pass, which returns the manifest it rendered.
-	launched := f.nativeLaunchText(t, "review the failing check", manifest, "").systemBlock
+	launched := f.nativeLaunchText(t, "review the failing check", manifest, claimReplay{}).systemBlock
 	if !strings.Contains(launched, manifest) {
 		t.Fatalf("the launch composed no manifest;\n%s", launched)
 	}
@@ -313,12 +313,12 @@ func TestNativeReclaim_KeepsTheManifestOnAHandedOffTree(t *testing.T) {
 	// The wake, on a tree handed off: nothing is staged, so the manifest this
 	// claim could render is empty. The replay is what keeps the section.
 	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if got := f.nativeLaunchText(t, "review the failing check", "", replay.block).systemBlock; got != launched {
+	if got := f.nativeLaunchText(t, "review the failing check", "", replay).systemBlock; got != launched {
 		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", got, launched)
 	}
 	// The control: composing on that same empty manifest is what the wake used
 	// to do, and it is what loses the section.
-	if got := f.nativeLaunchText(t, "review the failing check", "", "").systemBlock; strings.Contains(got, manifest) {
+	if got := f.nativeLaunchText(t, "review the failing check", "", claimReplay{}).systemBlock; strings.Contains(got, manifest) {
 		t.Error("a composition on an empty manifest still named the staged tree; this test proves nothing")
 	}
 }
@@ -460,7 +460,7 @@ func TestNativeNextStep_ComposesItsOwnBlock(t *testing.T) {
 	if replay.opened || replay.block != "" || !replay.stampable {
 		t.Fatalf("nativeClaimReplay for a new step = %+v, want a fresh conversation with a block of its own to stamp", replay)
 	}
-	composed := f.nativeLaunchText(t, "open the pull request", "", replay.block).systemBlock
+	composed := f.nativeLaunchText(t, "open the pull request", "", replay).systemBlock
 	if !strings.Contains(composed, "step-two/<ticket-id>") {
 		t.Errorf("the new step did not compose against today's inputs;\n%s", composed)
 	}
@@ -488,14 +488,14 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 
 // nativeLaunchText resolves one claim's launch text the way runNativeAgent does,
 // with the two inputs a test varies handed in: the manifest this claim's staging
-// pass rendered, and the block a previous launch stamped.
-func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge, replayed string) nativeLaunchText {
+// pass rendered, and what the claim inherited (nativeClaimReplay).
+func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge string, replay claimReplay) nativeLaunchText {
 	t.Helper()
 	return f.s.buildNativeLaunchText(context.Background(), "", f.task(t), mission, runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: []string{"github"}},
-	}, knowledge, replayed, "")
+	}, knowledge, replay)
 }
 
 func (f *launchFixture) task(t *testing.T) domain.Task {

@@ -501,41 +501,6 @@ func writeTaskContextFile(root, taskContext string) {
 	}
 }
 
-// replaceTaskContextFile is writeTaskContextFile for a file a running jail may
-// be reading. The bytes go to a temporary file in the same directory, which is
-// renamed over the task-context file, so a read sees the old file or the new
-// one and never a partial write. The temporary file is made 0644 before the
-// rename because the jail reads it as an identity other than its owner, and
-// os.CreateTemp makes it 0600.
-//
-// Best-effort like the write it replaces: a failure leaves the file that is
-// there.
-func replaceTaskContextFile(root, taskContext string) {
-	if root == "" || strings.TrimSpace(taskContext) == "" {
-		return
-	}
-	file := filepath.Join(root, taskContextFileName)
-	tmp, err := os.CreateTemp(root, "."+taskContextFileName+".*")
-	if err != nil {
-		delegateLog.Warn("create the replacement task-context file failed; the task context on disk keeps no PR history", "path", file, "error", err)
-		return
-	}
-	_, err = tmp.Write([]byte(taskContext + "\n"))
-	if err == nil {
-		err = tmp.Chmod(0644)
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), file)
-	}
-	if err != nil {
-		_ = os.Remove(tmp.Name())
-		delegateLog.Warn("replace the task-context file failed; the task context on disk keeps no PR history", "path", file, "error", err)
-	}
-}
-
 // entityMemoryTarget resolves where THIS launch's prior-memory tree is
 // rendered, and records the staging path on cfg when the launch will mount it.
 //

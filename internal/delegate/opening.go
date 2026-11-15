@@ -199,12 +199,20 @@ func selectInjectedMemories(memories []domain.TaskMemory) []domain.TaskMemory {
 // with no task context, and keeping its predecessor's memory file credits this
 // run with work it did not do.
 func conversationOpened(rows []domain.Message) bool {
+	_, opened := openingTaskContext(rows)
+	return opened
+}
+
+// openingTaskContext is the content of the row conversationOpened finds: the
+// task context the conversation's opening sent (mintOpeningRows). ok is false
+// for a conversation that has not been opened.
+func openingTaskContext(rows []domain.Message) (taskContext string, ok bool) {
 	for _, r := range rows {
 		if r.Subtype == domain.MessageSubtypeInjectionTaskContext {
-			return true
+			return r.Content, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // conversationHasWork reports whether a transcript holds anything a failure

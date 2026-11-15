@@ -381,14 +381,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		return engagementDisposition{fenced: fail("failed to resolve own binary path: "+err.Error(), domain.ConversationFailureUnclassified)}
 	}
 
-	// Load the metadata of the newest event that spawned or bumped the task so
-	// the task context can carry its fields (workflow run id, head sha, check
-	// name, ...). A DB failure here is non-fatal: the block just renders
-	// without them. FKs guarantee the event exists, so a real miss would be a
-	// DB-level problem we want to log and continue through rather than
-	// aborting the run.
-	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
-
 	// Resolve the paths the agent will actually observe, which differ from the
 	// host paths under the sandbox: the run-root is presented at cell.WorkDir
 	// and the TF binary at cell.TFBinaryPath. The prompt states both concretely,
@@ -405,7 +397,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
-	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+
+	// Whether this launch sends the conversation's opening: it has no session to
+	// resume, so it starts a model that knows nothing. A launch resuming a
+	// session sends a continuation note instead (composeLaunchTurn), and the
+	// session already holds everything this launch would compose for a first
+	// turn.
+	opens := priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID)
 
 	// The two channels this launch composes, split by who authored what. TF's
 	// own words — the framework blocks, the mission, this run's facts, the verb
@@ -420,7 +418,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// The overlapping work is a launch's on the same terms: a resumed session
 	// was told of each assignment since by a note.
 	taskState, siblingWork := "", ""
-	if priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID) {
+	if opens {
 		taskState = s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID)
 		siblingWork = s.siblingWorkContext(context.WithoutCancel(ctx), orgID, conversationID)
 	}
@@ -431,7 +429,25 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(cfg.surface, systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.wait(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
+
+	// Only a launch that sends the opening composes a task context, because the
+	// opening is the one place it reaches the model. A resumed session is handed
+	// its conversation's own task-context row instead, and nothing that feeds a
+	// task context is read or fetched for it.
+	var taskContext string
+	if opens {
+		// The metadata of the newest event that spawned or bumped the task, so
+		// the task context can carry its fields (workflow run id, head sha,
+		// check name, ...). A DB failure here is non-fatal: the block just
+		// renders without them. FKs guarantee the event exists, so a real miss
+		// would be a DB-level problem we want to log and continue through
+		// rather than aborting the run.
+		metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
+		artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+		taskContext = BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.render(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
+	} else {
+		taskContext = s.openedTaskContext(ctx, orgID, conversationID)
+	}
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the
@@ -517,7 +533,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// present exactly when it's safe to resume; otherwise we fall back to a
 	// fresh session, which is correct, just re-does the step's work.
 	resumeSession := ""
-	if priorSessionID != "" && sessionTranscriptExists(claudeCwd, priorSessionID) {
+	if !opens {
 		resumeSession = priorSessionID
 		delegateLog.Info("conversation re-claimed mid-flight; resuming session", "conversation", conversationID, "session", priorSessionID)
 	}
@@ -866,6 +882,22 @@ func (s *Spawner) firstTurnPersonInput(ctx context.Context, orgID, conversationI
 		}
 	}
 	return strings.Join(asked, db.PendingInputSeparator)
+}
+
+// openedTaskContext is the content of the conversation's task-context row, the
+// task context its opening sent, or "" when the transcript holds none: older
+// builds opened conversations without one. A read that fails answers "" too,
+// and the launch then retains no task-context file rather than one that is not
+// a copy of the row.
+func (s *Spawner) openedTaskContext(ctx context.Context, orgID, conversationID string) string {
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read the transcript for its task-context row failed; this launch retains no task-context file",
+			"conversation", conversationID, "error", err)
+		return ""
+	}
+	taskContext, _ := openingTaskContext(rows)
+	return taskContext
 }
 
 // continuationNote is the note a launch resuming a session sends, by how the

@@ -165,16 +165,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// into the memory tree the launch is about to mount read-only. Block 1 is the
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
-	//
-	// Only a launch waits for the PR history: its task context becomes the
-	// opening row. An opened conversation is given no opening row, so its block
-	// reaches the agent only through the task-context file, which is written
-	// without it here and replaced once the fetch lands (below, after agent-live).
-	skeleton := ""
-	if !replay.opened {
-		skeleton = cfg.prSkeleton.wait(ctx)
-	}
-	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay.block, skeleton)
+	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay)
 	systemPrompt := nativeSystemPrompt(cfg.surface)
 
 	// The task context's retention. Nothing is pinned through a compaction, so
@@ -278,15 +269,6 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	engagementSpan := s.engagementSpanContext(conversationID)
 	ctx = detachEngagement(ctx)
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
-
-	// The agent reads the task-context file only to recover from a compaction,
-	// and only through a tool call, which cannot come before its first model
-	// response. So the history block is added to the file while the engagement
-	// runs rather than awaited ahead of it, and a read that beats the refresh
-	// sees what a failed fetch leaves.
-	if replay.opened {
-		defer refreshTaskContextFile(ctx, cfg.prSkeleton, memoryDir, launchText.taskInputs)()
-	}
 
 	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID).actFor(creatorUserID)
 	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, taskMemories, launchText.taskContext); err != nil {
@@ -477,84 +459,37 @@ type nativeLaunchText struct {
 	// Composed by the claim that opens the conversation and replayed verbatim by
 	// every claim after it, so it is the same string for the life of the row.
 	systemBlock string
-	// taskContext is the opening user row: the rendered <task_context>, and
-	// the same bytes the launch retains as a file.
+	// taskContext is the opening user row's content: the <task_context> the
+	// launch renders, and on every later claim the bytes that row holds. It is
+	// what the claim retains as the task-context file.
 	taskContext string
-	// taskInputs is what taskContext was composed from, so it can be composed
-	// again with the PR history block without reading anything twice.
-	taskInputs taskContextInputs
-}
-
-// taskContextInputs is everything BuildTaskContext renders except the PR
-// history block, as one claim read it.
-type taskContextInputs struct {
-	task         domain.Task
-	container    string
-	metadataJSON string
-	pkg          *domain.VulnerablePackageSnapshot
-	artifacts    []domain.Artifact
-	deliverables []domain.Deliverable
-}
-
-// render composes the task context with skeleton as its history block.
-func (in taskContextInputs) render(skeleton string) string {
-	return BuildTaskContext(in.task, in.container, in.metadataJSON, skeleton, in.pkg, in.artifacts, in.deliverables)
-}
-
-// refreshTaskContextFile waits on fetch in the background and, once it returns
-// a block, replaces the task-context file in dir with the task context composed
-// again with that block in it. A fetch that fails, or a ctx that ends first,
-// leaves the file as it is: the task context without the history block, which
-// is what a failed fetch produces at a launch.
-//
-// It returns a stop that ends the wait and returns once nothing more will be
-// written. The caller runs it when the engagement ends, so no write of this
-// engagement's lands after that, when the file belongs to the conversation's
-// next claim or the staging directory is being removed.
-func refreshTaskContextFile(ctx context.Context, fetch *prSkeletonFetch, dir string, inputs taskContextInputs) (stop func()) {
-	if fetch == nil {
-		return func() {}
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if block := fetch.wait(ctx); block != "" {
-			replaceTaskContextFile(dir, inputs.render(block))
-		}
-	}()
-	return func() {
-		cancel()
-		<-done
-	}
 }
 
 // buildNativeLaunchText resolves this claim's inputs and produces both halves.
 // The compositions themselves are composeConversationSystemBlock and
 // BuildTaskContext; what lives here is the reads they need.
 //
-// replayed is the block 2 the conversation was launched with, empty when this
-// claim IS that launch. Given one, block 2 is neither composed nor read for:
-// the stored bytes are the answer, and every live input a fresh composition
-// would reach for is one that may have moved since — a team's branch
-// convention, and the knowledge manifest, which is empty on a run tree this
-// process no longer owns. Recomposing would change the model's own instructions
-// mid-conversation and miss the cache entry those bytes were warmed on.
+// replay.block is the block 2 the conversation was launched with, empty when
+// this claim IS that launch. Given one, block 2 is neither composed nor read
+// for: the stored bytes are the answer, and every live input a fresh
+// composition would reach for is one that may have moved since — a team's
+// branch convention, and the knowledge manifest, which is empty on a run tree
+// this process no longer owns. Recomposing would change the model's own
+// instructions mid-conversation and miss the cache entry those bytes were
+// warmed on.
 //
-// The task context is built either way. It is per claim by construction: the
-// event fields and PR history it renders are read fresh, and it is a transcript
-// row, where the opening gate decides whether it is written at all.
-//
-// skeleton is the PR history block the task context carries, which the caller
-// decides whether to wait for.
+// The task context follows the same rule on the opening row. A conversation
+// that has been opened is handed its row's content (replay.taskContext), and
+// nothing that feeds a task context is read or fetched: no opening row is
+// minted again, so a new composition would reach only the task-context file,
+// where it would stop being a copy of the row the conversation actually opened
+// with. Only the launch composes one, from the event fields, artifacts and PR
+// history it reads.
 //
 // Nothing in it fails: the one read it makes degrades to a task context with no
 // event fields rather than refusing the launch.
-func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge, replayed, skeleton string) nativeLaunchText {
-	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
-	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
-
-	systemBlock := replayed
+func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge string, replay claimReplay) nativeLaunchText {
+	systemBlock := replay.block
 	if systemBlock == "" {
 		// The handoff addendum is this step's, not this spec's, so it rides
 		// block 2 rather than the shared prompt. appendSysPrompt is the same
@@ -582,14 +517,11 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		)
 	}
 
-	inputs := taskContextInputs{
-		task:         task,
-		container:    cfg.container(),
-		metadataJSON: metadataJSON,
-		pkg:          s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task),
-		artifacts:    artifacts,
-		deliverables: deliverables,
+	if replay.opened {
+		return nativeLaunchText{systemBlock: systemBlock, taskContext: replay.taskContext}
 	}
+	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
+	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 	return nativeLaunchText{
 		systemBlock: systemBlock,
 		// The task context is the one section that stays a transcript row.
@@ -597,8 +529,7 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: inputs.render(skeleton),
-		taskInputs:  inputs,
+		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.render(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
 	}
 }
 
@@ -614,6 +545,11 @@ type claimReplay struct {
 	// block is the block 2 to run under, verbatim: what the launch stamped on an
 	// opened conversation. Empty when this claim must compose its own.
 	block string
+	// taskContext is the content of an opened conversation's task-context row,
+	// the task context its opening sent, and what this claim retains as the
+	// task-context file. Set whenever opened is, whichever read failed after the
+	// transcript's.
+	taskContext string
 	// stampable is whether this claim may put what it composes on the row, and
 	// it is true only when the row is KNOWN to hold nothing. A read that failed
 	// is not that: an opened conversation's row may already carry the launch's
@@ -644,7 +580,8 @@ func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID s
 			"conversation", conversationID, "error", err)
 		return claimReplay{}
 	}
-	if !conversationOpened(rows) {
+	taskContext, opened := openingTaskContext(rows)
+	if !opened {
 		// This claim IS the launch, so the block it composes is the one the row
 		// owes every claim after it.
 		return claimReplay{stampable: true}
@@ -653,11 +590,11 @@ func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID s
 	if err != nil {
 		delegateLog.Warn("read the launch's system block failed; this engagement composes its own block 2 and leaves the row's to the next claim",
 			"conversation", conversationID, "org_id", orgID, "error", err)
-		return claimReplay{opened: true}
+		return claimReplay{opened: true, taskContext: taskContext}
 	}
 	// An empty block on an opened conversation is a row from before this runtime
 	// stamped one. It composes live, once, and stamps what it composed.
-	return claimReplay{opened: true, block: block, stampable: block == ""}
+	return claimReplay{opened: true, block: block, taskContext: taskContext, stampable: block == ""}
 }
 
 // nativeSpec is the prompt selector for every native engagement.
