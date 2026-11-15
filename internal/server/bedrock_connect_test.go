@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -357,5 +358,58 @@ func TestBedrockPut_ValidationErrors(t *testing.T) {
 	}
 	if view := getOrgBedrockView(t, s); view.Has {
 		t.Errorf("view = %+v, want unconfigured after only-rejected requests", view)
+	}
+}
+
+// TestBedrockPut_Multi_EndpointIsAnHTTPSHost: in multi mode every Bedrock call
+// is native, and the native client dials an endpoint as https://<host>, so the
+// connect route refuses whatever that would drop, naming base_url, and stores
+// nothing. A plain https host is still accepted.
+func TestBedrockPut_Multi_EndpointIsAnHTTPSHost(t *testing.T) {
+	rig := newAuthRig(t)
+	admin := rig.seedUser()
+	orgID, _ := rig.seedOrg(admin, "bedrock-org")
+	sid := rig.signIn(admin)
+	path := "/api/orgs/" + orgID.String() + "/llm/bedrock/bearer"
+	body := func(baseURL string) map[string]any {
+		return map[string]any{"bearer_token": "b", "region": "us-west-2", "base_url": baseURL}
+	}
+
+	refused := []struct{ name, baseURL string }{
+		// Allowed in local mode, where the SDK path's proxy dials it as given.
+		{"loopback http", "http://127.0.0.1:8080"},
+		{"http", "http://vpce.example.com"},
+		{"path", "https://gw.example.com/bedrock"},
+		{"user and password", "https://admin:hunter2@vpce.example.com"},
+		{"user and password with a path", "https://admin:hunter2@vpce.example.com/bedrock"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := rig.tokensJSON(http.MethodPut, path, body(tc.baseURL), sid, "")
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			e := firstError(t, rec)
+			if e.Field != "base_url" || e.Reason != httpx.ReasonInvalidField {
+				t.Errorf("error = %+v, want INVALID_FIELD on base_url", e)
+			}
+			if strings.Contains(rec.Body.String(), "hunter2") {
+				t.Errorf("the refusal echoes the password: %s", rec.Body.String())
+			}
+		})
+	}
+	var stored int
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT count(*) FROM org_secrets WHERE org_id = $1`, orgID.String()).Scan(&stored); err != nil {
+		t.Fatalf("count secrets: %v", err)
+	}
+	if stored != 0 {
+		t.Errorf("%d secrets stored by refused binds, want none", stored)
+	}
+
+	rec := rig.tokensJSON(http.MethodPut, path,
+		body("https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com:443/"), sid, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("an https host must be accepted: %d %s", rec.Code, rec.Body.String())
 	}
 }

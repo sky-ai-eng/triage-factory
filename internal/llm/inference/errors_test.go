@@ -123,6 +123,40 @@ func TestEndpointsOf(t *testing.T) {
 	}
 }
 
+// TestEndpointsOf_Bedrock reports the host bifrost dials for a Bedrock call,
+// which comes from the key's runtime endpoint, reduced to https and its host,
+// or from the region when there is none.
+func TestEndpointsOf_Bedrock(t *testing.T) {
+	cases := []struct {
+		name, baseURL, want string
+	}{
+		{"regional", "", "https://bedrock-runtime.eu-west-1.amazonaws.com"},
+		{"override", "https://vpce-0abc.bedrock-runtime.eu-west-1.vpce.amazonaws.com",
+			"https://vpce-0abc.bedrock-runtime.eu-west-1.vpce.amazonaws.com"},
+		// Not a value the connect route stores in multi mode, but what bifrost
+		// would dial for it if one arrived: https, and the host alone.
+		{"override reduced", "http://gw.example.com:8443/bedrock",
+			"https://gw.example.com:8443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			acct, err := NewAccount(ProviderCredentials{
+				Provider: ProviderBedrock,
+				APIKey:   "bearer",
+				BaseURL:  tc.baseURL,
+				Models:   []string{"us.anthropic.claude-sonnet-5"},
+				Bedrock:  &BedrockCredentials{Region: "eu-west-1"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := endpointsOf(acct)[ProviderBedrock]; got != tc.want {
+				t.Fatalf("endpoint = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBifrostError_ClassifiesContextOverflow pins the overflow class across
 // the real provider spellings, and pins what must NOT classify: a non-400
 // status (a 500 whose body happens to echo a marker) and a plain 400 with no
