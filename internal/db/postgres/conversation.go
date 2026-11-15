@@ -981,13 +981,15 @@ func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID stri
 	if limit <= 0 {
 		return nil, nil
 	}
-	// The owing condition is taskMemoryOwedRowSQL — the same words the task
-	// read's memory_pending flag and the claim scan's gate are written in, so
-	// the sweep cannot come to a different conclusion about what is owed than
-	// the two readers waiting on it. Correlating it against the tasks row
-	// makes the join: `owed.org_id = t.org_id AND owed.task_id = t.id` is the
-	// join condition, which is why the FROM lists both relations and the WHERE
-	// carries the whole predicate.
+	// The owing condition is taskMemoryOwedRowSQL — the same words
+	// tf.task_memory_wait holds, which the task read's memory_pending flag and
+	// the claim scan's gate call, so the sweep cannot come to a different
+	// conclusion about what is owed than the readers waiting on it. The sweep
+	// lists every owing conversation, not only a task's newest, so it
+	// interpolates the predicate rather than calling the function. Correlating
+	// it against the tasks row makes the join: `owed.org_id = t.org_id AND
+	// owed.task_id = t.id` is the join condition, which is why the FROM lists
+	// both relations and the WHERE carries the whole predicate.
 	//
 	// The backoff arm is the sweep's own: an attempt that started inside the
 	// window is either running right now or too recent to repeat, and an

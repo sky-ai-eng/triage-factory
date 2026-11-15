@@ -1938,12 +1938,10 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 // nothing: the task's next conversation does not wait, and the memory sweep
 // does not list it.
 //
-// orgExpr / taskExpr are the asking query's own aliases — `t.org_id`/`t.id` on
-// the task read, `r.org_id`/`r.task_id` on the claim scan — so the two readers
-// share the predicate rather than each spelling it. Both are needed: the org
-// is redundant for correctness (conversations.task_id FKs the composite
-// (id, org_id)) and is bound anyway, as every other statement in this package
-// binds it.
+// orgExpr / taskExpr are the asking query's own aliases (`t.org_id`/`t.id`).
+// Both are needed: the org is redundant for correctness
+// (conversations.task_id FKs the composite (id, org_id)) and is bound anyway,
+// as every other statement in this package binds it.
 //
 // parent_conversation_id IS NULL is not noise filtering. A subagent row is
 // part of its spawner's engagement and owes no handoff of its own, which is
@@ -1952,17 +1950,12 @@ func (s *taskStore) ListTrippedBreakersSystem(ctx context.Context, orgID string)
 // Served by idx_conversations_task_ended — the (task_id) WHERE ended_at IS NOT
 // NULL partial index, which exists for this read.
 //
-// Under the app pool the two inner relations are RLS-filtered, and they agree:
-// conversation_memory's policy grants exactly what the conversations policy
-// grants for the same row, so a reader can never see the boundary while the
-// memory that settles it is hidden. A reader who can see neither reads "not
-// pending". The gate the dispatcher enforces runs on the admin pool regardless.
-//
-// TODO(TFAC-1452): a task reassigned to another team keeps its earlier
-// conversations on the team that had them, so its new holder can read the task
-// but not the conversation that owes its memory, and reads memory_pending
-// false and no attempt while the claim gate holds their conversation. The run
-// station's memory-wait line depends on this read.
+// tf.task_memory_wait holds this predicate rendered over its own parameters
+// and answers the wait for one task past RLS; taskMemoryPendingSQL and
+// taskMemoryAttemptSQL call it. TestTaskMemoryWaitHoldsTheOwedPredicate keeps
+// the two the same text. The memory sweep and the failing-memory read's
+// failure history list every owing conversation on the admin pool, where no
+// policy filters what they see, so they interpolate the predicate here.
 func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 	return `owed.org_id = ` + orgExpr + ` AND owed.task_id = ` + taskExpr + `
 		  AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
@@ -1973,42 +1966,37 @@ func taskMemoryOwedRowSQL(orgExpr, taskExpr string) string {
 }
 
 // taskMemoryPendingSQL is the derived `memory_pending`: does this task hold a
-// conversation that ended owing a memory nobody has filed? Two readers ask it
-// — the task read, which shows the wait, and the claim scan, which enforces it
-// by declining to claim the task's next delegation — and they ask it of the
-// same rows in the same words.
+// conversation that ended owing a memory nobody has filed? Three readers ask
+// it: the task read, which shows the wait; the claim scan, which enforces it
+// by declining to claim the task's conversations; and the failing-memory
+// read, which counts the tasks it holds. All three call tf.task_memory_wait,
+// so they cannot disagree, and the task read answers for a conversation its
+// reader's RLS hides.
 func taskMemoryPendingSQL(orgExpr, taskExpr string) string {
-	return `EXISTS (SELECT 1 FROM conversations owed WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `)`
+	return `(tf.task_memory_wait(` + taskExpr + `, ` + orgExpr + `)).pending`
 }
 
 // taskMemoryAttemptSQL projects one column of the newest attempt on the task's
-// newest owing conversation — NULL when the task owes nothing, and NULL when
-// the debt that is blocking has never been tried.
+// newest owing conversation (outcome, error_kind, error_message, or
+// started_at): NULL when the task owes nothing, and NULL when the debt that is
+// blocking has never been tried.
 //
-// The nesting is the whole point and is not a join in disguise. Which
-// conversation the summary speaks for is settled FIRST, by boundary alone, and
-// only then is that one conversation's latest attempt read. Choosing both at
-// once — ranking attempts joined to their conversations — silently narrows the
-// field to owing conversations that HAVE attempts, so a task whose newest debt
-// is untried answers with an older debt's attempt instead of with nothing. That
-// reads as "tried, and it failed" over a conversation nothing has touched, and
-// it sends a person to wait for a retry nobody owes them.
+// tf.task_memory_wait settles which conversation the summary speaks for
+// FIRST, by boundary alone, and only then reads that one conversation's latest
+// attempt. Choosing both at once — ranking attempts joined to their
+// conversations — silently narrows the field to owing conversations that HAVE
+// attempts, so a task whose newest debt is untried answers with an older
+// debt's attempt instead of with nothing. That reads as "tried, and it failed"
+// over a conversation nothing has touched, and it sends a person to wait for a
+// retry nobody owes them.
 //
-// One correlated subquery per column, rather than one LATERAL: the column list
-// this belongs to is SELECTed by every task query in the package, each with
-// its own FROM clause, and a join injected into each of them is one more
-// chance per query to get the correlation wrong — for a fact that is four
-// narrow columns off a partial index.
+// One call per column, rather than one LATERAL: the column list this belongs
+// to is SELECTed by every task query in the package, each with its own FROM
+// clause, and a join injected into each of them is one more chance per query
+// to get the correlation wrong — for a fact that is four narrow columns off a
+// partial index.
 func taskMemoryAttemptSQL(orgExpr, taskExpr, col string) string {
-	return `(SELECT att.` + col + `
-		FROM conversation_memory_attempts att
-		WHERE att.conversation_id = (
-		    SELECT owed.id FROM conversations owed
-		    WHERE ` + taskMemoryOwedRowSQL(orgExpr, taskExpr) + `
-		    ORDER BY owed.ended_at DESC, owed.id DESC
-		    LIMIT 1)
-		ORDER BY att.started_at DESC, att.id DESC
-		LIMIT 1)`
+	return `(tf.task_memory_wait(` + taskExpr + `, ` + orgExpr + `)).attempt_` + col
 }
 
 // pgTaskColumnsWithEntity is the canonical column list for every task

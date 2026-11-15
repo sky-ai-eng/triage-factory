@@ -1,6 +1,6 @@
 // Package wakebus is the tf_wake NOTIFY doorbell (the spec's
 // coordination-fabric table): control (any enqueue) → executors. A
-// {kind: run|event, org} publish nudges idle executors to claim within
+// {kind: run|event|memory, org} publish nudges idle executors to claim within
 // milliseconds instead of the dispatcher's scan-interval backstop, which
 // remains the guarantee — this is purely a latency win, never the only
 // path (the one rule that governs every NOTIFY channel in the fabric, spec
@@ -25,10 +25,13 @@ const Channel = "tf_wake"
 // loop): "run" is a freshly minted blueprint step (BlueprintStore's firing
 // and advance doors); "event" is ConversationStore.MarkQueuedForResume
 // (resume-by-enqueue — a parked/terminal-resumable conversation woken by an
-// external message).
+// external message); "memory" is the memory provisioner filing the row an
+// ended conversation owed, which is what the claim filter held the task's
+// next conversation for.
 const (
-	KindRun   = "run"
-	KindEvent = "event"
+	KindRun    = "run"
+	KindEvent  = "event"
+	KindMemory = "memory"
 )
 
 // Message is the wake payload.

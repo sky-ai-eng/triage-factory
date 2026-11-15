@@ -52,8 +52,8 @@ export type EntityPlacement =
 /** Project an entity to its current factory position.
  *
  *  Returns null when the entity has no station-mapped event to anchor
- *  on (e.g., a Jira ticket on a GitHub-only floor) so the caller can
- *  filter it out cleanly. */
+ *  on (e.g., a pull request whose only events are system ones) so the
+ *  caller can filter it out cleanly. */
 export function placeEntity(
   entity: FactoryEntity,
   knownStations: Set<string>,

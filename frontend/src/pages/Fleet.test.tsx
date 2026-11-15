@@ -1,19 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, Route, Routes } from 'react-router'
 
 import type { FleetInstances, FleetSandboxes, FleetSandboxSeries } from '../types'
 
-// The console is operator + FeatureFleet gated; both are mocked on so the page
-// renders instead of bouncing home. The gate itself is covered server-side
-// (ee/fleet's denial-parity test) — these tests are about the breakdown.
+// The console is operator + FeatureFleet gated. Both inputs are mocked from
+// `viewer`, which beforeEach resets to an operator whose entitlements probe has
+// answered with the feature, so the page renders instead of bouncing home. The
+// gate tests change it before they render; the server's own gate is covered by
+// ee/fleet's denial-parity test.
+const viewer = vi.hoisted(() => ({ operator: true, entLoaded: true }))
 vi.mock('../hooks/useEntitlements', () => ({
   FeatureFleet: 'fleet',
-  useEntitlements: () => ({ has: (f: string) => f === 'fleet', loaded: true }),
+  useEntitlements: () => ({
+    has: (f: string) => viewer.entLoaded && f === 'fleet',
+    loaded: viewer.entLoaded,
+  }),
 }))
 vi.mock('../contexts/AuthContext', () => ({
-  useOptionalAuth: () => ({ me: { is_operator: true } }),
+  useOptionalAuth: () => ({ me: { is_operator: viewer.operator } }),
 }))
 
 import Fleet from './Fleet'
@@ -196,13 +202,65 @@ function sandboxRow(conversationId: string) {
 
 const sandboxUrls = () => requests.filter((u) => u.includes('/sandboxes'))
 const seriesUrls = () => requests.filter((u) => u.includes('/series'))
+const fleetUrls = () => requests.filter((u) => u.includes('/api/fleet/'))
 
 beforeEach(() => {
   requests = []
+  viewer.operator = true
+  viewer.entLoaded = true
   vi.stubGlobal('fetch', stubFetch())
 })
 
 // --- tests ----------------------------------------------------------------
+
+describe('Fleet gate', () => {
+  // routedFleet mounts the page at /fleet beside a home route, so a redirect is
+  // visible as the home route rendering.
+  const routedFleet = () => (
+    <MemoryRouter initialEntries={['/fleet']}>
+      <Routes>
+        <Route path="/" element={<p>home</p>} />
+        <Route path="/fleet" element={<Fleet />} />
+      </Routes>
+    </MemoryRouter>
+  )
+
+  it('sends a viewer who is not an operator home without a fleet request', async () => {
+    viewer.operator = false
+    // The probe has not answered: the operator flag alone decides.
+    viewer.entLoaded = false
+    render(routedFleet())
+
+    expect(await screen.findByText('home')).toBeInTheDocument()
+    expect(fleetUrls()).toEqual([])
+  })
+
+  it('holds an operator’s reads until the entitlements probe answers', async () => {
+    viewer.entLoaded = false
+    const { rerender } = render(routedFleet())
+
+    // The page stays mounted in its loading state and asks for nothing.
+    expect(await screen.findByText('Fleet')).toBeInTheDocument()
+    expect(screen.queryByText('home')).not.toBeInTheDocument()
+    expect(fleetUrls()).toEqual([])
+
+    viewer.entLoaded = true
+    rerender(routedFleet())
+
+    await waitFor(() =>
+      expect(
+        fleetUrls()
+          .map((u) => new URL(u, 'http://x').pathname)
+          .sort(),
+      ).toEqual([
+        '/api/fleet/backlog',
+        '/api/fleet/instances',
+        '/api/fleet/overview',
+        '/api/fleet/timeseries',
+      ]),
+    )
+  })
+})
 
 describe('Fleet sandbox breakdown', () => {
   it('fetches nothing for collapsed rows', async () => {

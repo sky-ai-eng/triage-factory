@@ -819,8 +819,8 @@ project id on the org's Jira site, and so does every Jira entity
 else: discovery asks for the project by id, and the rule lookups (completion,
 claim and requeue, the board mirror, the stock deck, the terminal-state
 checker), the router's team gate and the multi-mode read scoping (the deck,
-the factory belt, team activity) all meet the issue and the team's rule on
-that row. Every Jira cycle reads each tracked project by its id before
+the factory's station counts, team activity) all meet the issue and the
+team's rule on that row. Every Jira cycle reads each tracked project by its id before
 discovery, a watched project as well as an armed one, and registers the
 project of every issue it reads, refreshing the row's key and name from the
 read; that is what keeps the team's settings and the task context showing
@@ -1283,8 +1283,8 @@ they were recorded, until its next refresh.
 
 Turning Jira off for an org clears these snapshots and leaves the entity's
 `jira_project_id`, which everything that needs an issue's project reads, so
-while Jira is off its issues stay on their teams' belts and one that goes
-unreachable still reaches its project's teams.
+while Jira is off its issues still count toward their teams' activity and one
+that goes unreachable still reaches its project's teams.
 
 ### Linear Issue Snapshot
 
@@ -1311,11 +1311,12 @@ move to another team.
 
 Turning Linear off for an org clears these snapshots, as it does for any
 source, and leaves the entity's `linear_team_id`. Everything that needs an
-issue's team reads that column: the factory belt and team activity, the claim
-and requeue rules, the terminal-state checker, and the tracker, which takes an
-unreachable issue's `linear_team_id` from it and compares it with a fresh read
-to tell a move. So while Linear is off its issues stay on their teams' belts,
-and one that goes unreachable still reaches its team's handlers. On the first
+issue's team reads that column: the factory's station counts and team
+activity, the claim and requeue rules, the terminal-state checker, and the
+tracker, which takes an unreachable issue's `linear_team_id` from it and
+compares it with a fresh read to tell a move. So while Linear is off its
+issues still count toward their teams' activity, and one that goes
+unreachable still reaches its team's handlers. On the first
 cycle after Linear is turned back on, an entity with no snapshot is read by
 UUID in the same batches as the rest and seeded without events.
 

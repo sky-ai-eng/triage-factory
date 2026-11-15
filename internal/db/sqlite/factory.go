@@ -303,7 +303,7 @@ const sqliteFactoryEntitySelectColumns = `
 	COALESCE(e.title, ''), COALESCE(e.url, ''),
 	COALESCE(e.snapshot_json, ''), COALESCE(e.description, ''),
 	e.state, e.created_at, e.last_polled_at, e.closed_at,
-	COALESCE(e.repository_id, ''), COALESCE(e.jira_project_id, ''), COALESCE(e.linear_team_id, ''),
+	COALESCE(e.repository_id, ''),
 	(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1),
 	(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
@@ -336,7 +336,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	active, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
-		WHERE e.state = 'active'
+		WHERE e.state = 'active' AND e.kind = '`+db.FactoryBeltKind+`'
 		ORDER BY e.created_at DESC
 		LIMIT ?
 	`, limit)
@@ -348,7 +348,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	closed, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
-		WHERE e.closed_at IS NOT NULL AND e.closed_at > ?
+		WHERE e.closed_at IS NOT NULL AND e.closed_at > ? AND e.kind = '`+db.FactoryBeltKind+`'
 		ORDER BY e.closed_at DESC
 		LIMIT ?
 	`, graceCutoff, db.FactoryClosedGraceLimit)
@@ -379,7 +379,7 @@ func queryFactoryEntities(ctx context.Context, q queryer, query string, args ...
 			&row.Entity.Title, &row.Entity.URL,
 			&row.Entity.SnapshotJSON, &row.Entity.Description,
 			&row.Entity.State, &row.Entity.CreatedAt, &row.Entity.LastPolledAt, &row.Entity.ClosedAt,
-			&row.Entity.RepositoryID, &row.Entity.JiraProjectID, &row.Entity.LinearTeamID,
+			&row.Entity.RepositoryID,
 			&latestType, &latestAt,
 		); err != nil {
 			return nil, err

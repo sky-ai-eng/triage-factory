@@ -203,6 +203,12 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
 		},
+		SetEntityKind: func(t *testing.T, entityID, kind string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE entities SET kind = ? WHERE id = ?`, kind, entityID); err != nil {
+				t.Fatalf("set entity %s kind: %v", entityID, err)
+			}
+		},
 		SetConversationMemory: func(t *testing.T, conversationID, content string, source domain.MemorySource) {
 			t.Helper()
 			memID := uuid.New().String()

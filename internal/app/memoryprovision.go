@@ -1,7 +1,10 @@
 package app
 
 import (
+	"context"
+
 	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/memoryprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -40,5 +43,28 @@ func (a *App) buildMemoryProvisioner() {
 				Data:  map[string]any{},
 			})
 		},
+		a.memoryFiled,
 	)
+}
+
+// memoryFiled wakes the dispatchers when the provisioner files a memory row in
+// orgID. The claim filter holds a task's queued conversation while an ended
+// conversation on that task has no memory row, so the row landing is what
+// makes that conversation claimable, and no enqueue's wake can stand in for
+// it: each of those is sent while the filter still refuses the row.
+//
+// The provisioner runs on the brain. Where the brain also runs the dispatcher
+// (local), the wake is in-process; a control pod has no dispatcher and
+// publishes on tf_wake, which every executor's dispatcher listens on.
+// Best-effort either way: a wake that is lost costs the conversation one scan
+// interval, never its claim.
+func (a *App) memoryFiled(orgID string) {
+	if a.plan.dispatcher {
+		a.spawner.WakeDispatcher()
+		return
+	}
+	if err := wakebus.Publish(context.Background(), a.database, wakebus.KindMemory, orgID); err != nil {
+		appLog.Warn("tf_wake publish failed after a memory was filed; the queued conversation waits for the dispatcher's next scan",
+			"org", orgID, "error", err)
+	}
 }
