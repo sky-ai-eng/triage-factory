@@ -303,9 +303,9 @@ func TestNewDirectCommand_ComposesLocalGitProxyPairs(t *testing.T) {
 	}
 	cfg := gitConfigMap(t, cmd.Env)
 	for key, want := range map[string]string{
-		"user.name":                                "TF Bot",
-		"user.email":                               "bot@example.com",
-		"url.https://127.0.0.1:4443/.insteadOf":    "https://github.com/",
+		"user.name":                             "TF Bot",
+		"user.email":                            "bot@example.com",
+		"url.https://127.0.0.1:4443/.insteadOf": "https://github.com/",
 		"http.https://127.0.0.1:4443/.extraHeader": "Authorization: Basic placeholder",
 	} {
 		if got := cfg[key]; got != want {

@@ -185,7 +185,7 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	cfg := &schemas.ProviderConfig{
 		NetworkConfig: schemas.NetworkConfig{
 			BaseURL:             c.BaseURL,
-			ExtraHeaders:        c.ExtraHeaders,
+			ExtraHeaders:        plainHeaders(c.ExtraHeaders),
 			AllowPrivateNetwork: c.AllowPrivateNetwork,
 		},
 		ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
@@ -199,6 +199,19 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 
 func plainSecret(v string) schemas.SecretVar {
 	return schemas.SecretVar{Val: v, SecretType: schemas.SecretTypePlainText}
+}
+
+// plainHeaders carries extra headers as bifrost's plain-text secret values.
+// nil stays nil, so an account with none sends none.
+func plainHeaders(h map[string]string) map[string]schemas.SecretVar {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string]schemas.SecretVar, len(h))
+	for k, v := range h {
+		out[k] = plainSecret(v)
+	}
+	return out
 }
 
 func optionalSecret(v string) *schemas.SecretVar {

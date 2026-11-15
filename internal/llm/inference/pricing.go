@@ -257,21 +257,29 @@ func isPriceableMode(mode string) bool {
 	}
 }
 
-// lookupPrice resolves a model id to its price entry: exact match first, then a
-// single Bedrock region-prefix strip so an inference-profile id like
-// "us.anthropic.claude-..." finds the "anthropic.claude-..." row.
+// lookupPrice resolves a model id to its price entry (lookupDatasheetRow).
 func lookupPrice(table map[string]modelPrice, model string) (modelPrice, bool) {
-	if p, ok := table[model]; ok {
-		return p, true
+	return lookupDatasheetRow(table, model)
+}
+
+// lookupDatasheetRow resolves a model id to its datasheet row: exact match
+// first, then a single Bedrock region-prefix strip so an inference-profile id
+// like "us.anthropic.claude-..." finds the "anthropic.claude-..." row. Every
+// reader of the datasheet resolves through it, so the row a model is priced
+// by and the row bifrost shapes its requests by are the same row.
+func lookupDatasheetRow[T any](table map[string]T, model string) (T, bool) {
+	if row, ok := table[model]; ok {
+		return row, true
 	}
 	for _, pfx := range []string{"us.", "eu.", "apac.", "global."} {
 		if strings.HasPrefix(model, pfx) {
-			if p, ok := table[strings.TrimPrefix(model, pfx)]; ok {
-				return p, true
+			if row, ok := table[strings.TrimPrefix(model, pfx)]; ok {
+				return row, true
 			}
 		}
 	}
-	return modelPrice{}, false
+	var zero T
+	return zero, false
 }
 
 // computeTextCost is the pricing FORMULA — the one part of this package the

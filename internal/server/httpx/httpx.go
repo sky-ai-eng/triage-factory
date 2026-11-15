@@ -337,45 +337,52 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 }
 
 // jsonFieldPath rewrites the dotted path encoding/json reports for a type
-// fault (UnmarshalTypeError.Field) into the payload's own field names. The
-// decoder puts the Go name of every embedded struct it passes through ahead
-// of the field's JSON name, so a page_size fault on a list body arrives as
-// "PageRequest.page_size". The path is resolved against the decode target's
-// type, and a segment is dropped only where it names an embedded struct at
-// that point in the type, never by its spelling: a JSON key may be
-// capitalized too. Every other segment is already a JSON name. A JSON key
-// spelled like a sibling embedded struct's Go name gives the same path as a
-// field of that struct; the last segment is read as the key, since the path
-// ends in one, and an earlier segment as the embedded struct. It also
-// returns the type of the field the path names. A path that stops resolving
-// keeps the rest of its segments as reported, and its type is nil.
+// fault (UnmarshalTypeError.Field) into the payload field a client fixes,
+// and returns that field's type. The path names each JSON key on the way to
+// the fault, an array element's index and an object member's key included,
+// and goes on into a value an interface holds. A fault in an element of an
+// array or object, at any depth, or anywhere in an interface's value, is
+// reported on the field holding it, whose type is what the caller has to
+// send; a fault in a field of an element's struct is reported as that field,
+// under its parent's path with the index or key left out ("items.when"). A
+// field promoted from an embedded struct is found by its own JSON name, as
+// encoding/json finds it. A path that names no field of the payload keeps the
+// rest of its segments as reported, and its type is nil.
 func jsonFieldPath(target reflect.Type, path string) (string, reflect.Type) {
 	segs := strings.Split(path, ".")
 	out := make([]string, 0, len(segs))
 	t := target
-	for i, seg := range segs {
-		// The path names no array index or map key, so a segment after a
-		// slice, array or map field is a field of its element.
-		for t != nil && (t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map) {
+	var fieldType reflect.Type
+	for i := 0; i < len(segs); i++ {
+		for t != nil && t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
-		if t == nil || t.Kind() != reflect.Struct {
+		if t == nil {
 			return strings.Join(append(out, segs[i:]...), "."), nil
 		}
-		// The decoder's path ends in a JSON name, so only an earlier segment
-		// can be an embedded struct.
-		if f, ok := embeddedStructField(t, seg); ok && i < len(segs)-1 {
-			t = f.Type
+		switch t.Kind() {
+		case reflect.Slice, reflect.Array, reflect.Map:
+			// This segment is the element's index or key.
+			t = t.Elem()
 			continue
+		case reflect.Struct:
+		default:
+			// The rest of the path is inside one value: what an interface
+			// holds, or an object key that itself contained a dot.
+			if len(out) == 0 {
+				return path, nil
+			}
+			return strings.Join(out, "."), fieldType
 		}
-		f, ok := jsonNamedField(t, seg)
+		f, ok := jsonFieldByName(t, segs[i])
 		if !ok {
 			return strings.Join(append(out, segs[i:]...), "."), nil
 		}
-		out = append(out, seg)
+		out = append(out, segs[i])
 		t = f.Type
+		fieldType = f.Type
 	}
-	return strings.Join(out, "."), t
+	return strings.Join(out, "."), fieldType
 }
 
 var textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
@@ -505,14 +512,33 @@ func isDigits(s string) bool {
 	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
-// embeddedStructField finds the embedded struct field of t whose Go name is
-// name.
-func embeddedStructField(t reflect.Type, name string) (reflect.StructField, bool) {
-	for i := range t.NumField() {
-		sf := t.Field(i)
-		if sf.Name == name && isEmbeddedStruct(sf) {
-			return sf, true
+// jsonFieldByName finds the field of struct t that encoding/json decodes the
+// JSON name into: t's own field, else one promoted from an embedded struct,
+// the shallowest first, as encoding/json prefers it.
+func jsonFieldByName(t reflect.Type, name string) (reflect.StructField, bool) {
+	level := []reflect.Type{t}
+	seen := map[reflect.Type]bool{}
+	for len(level) > 0 {
+		var next []reflect.Type
+		for _, st := range level {
+			if seen[st] {
+				continue
+			}
+			seen[st] = true
+			if f, ok := jsonNamedField(st, name); ok {
+				return f, true
+			}
+			for i := range st.NumField() {
+				if sf := st.Field(i); isEmbeddedStruct(sf) {
+					et := sf.Type
+					if et.Kind() == reflect.Pointer {
+						et = et.Elem()
+					}
+					next = append(next, et)
+				}
+			}
 		}
+		level = next
 	}
 	return reflect.StructField{}, false
 }

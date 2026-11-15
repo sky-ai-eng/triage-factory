@@ -33,25 +33,25 @@ func TestSettingsStores_SQLite(t *testing.T) {
 		}
 		stores := sqlitestore.New(conn)
 		return dbtest.SettingsStores{
-				MultiMode:        false,
-				Orgs:             stores.Orgs,
-				Teams:            stores.Teams,
-				Users:            stores.Users,
-				JiraStatusRules:  stores.JiraStatusRules,
-				JiraProjects:     stores.JiraProjects,
-				TeamGitHubGroups: stores.TeamGitHubGroups,
-				TeamGitHubRepos:  stores.TeamGitHubRepos,
-				Repos:            stores.Repos,
-				OrgEventSources:  stores.OrgEventSources,
-				SeedTeam: func(t *testing.T, slug string) string {
-					id := uuid.NewString()
-					seedExtraTeam(t, conn, id, slug)
-					return id
-				},
-			}, dbtest.SettingsIDs{
-				OrgID:  runmode.LocalDefaultOrgID,
-				TeamID: runmode.LocalDefaultTeamID,
-				UserID: runmode.LocalDefaultUserID,
-			}
+			MultiMode:        false,
+			Orgs:             stores.Orgs,
+			Teams:            stores.Teams,
+			Users:            stores.Users,
+			JiraStatusRules:  stores.JiraStatusRules,
+			JiraProjects:     stores.JiraProjects,
+			TeamGitHubGroups: stores.TeamGitHubGroups,
+			TeamGitHubRepos:  stores.TeamGitHubRepos,
+			Repos:            stores.Repos,
+			OrgEventSources:  stores.OrgEventSources,
+			SeedTeam: func(t *testing.T, slug string) string {
+				id := uuid.NewString()
+				seedExtraTeam(t, conn, id, slug)
+				return id
+			},
+		}, dbtest.SettingsIDs{
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
+			UserID: runmode.LocalDefaultUserID,
+		}
 	})
 }
