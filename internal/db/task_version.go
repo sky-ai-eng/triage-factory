@@ -85,6 +85,14 @@ var RequeueTaskAssigns = []TaskAssign{
 	{Col: "close_deferred_at", Expr: "NULL"},
 }
 
+// CloseTaskAssigns is what every write that makes a task terminal adds to its
+// own assignments, in both dialects: no held close, because a closed task
+// holds no close. Every value is a literal, so it binds nothing.
+var CloseTaskAssigns = []TaskAssign{
+	{Col: "close_deferred_event_id", Expr: "NULL"},
+	{Col: "close_deferred_at", Expr: "NULL"},
+}
+
 // ReopenTaskAssigns is what reopening a closed task writes, in both dialects:
 // the status its claim implies (a claimed task is in progress, and the queue
 // holds only unclaimed ones), no wake time, no close, and no held close. The

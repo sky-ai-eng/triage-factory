@@ -202,5 +202,20 @@ func newPgCloseDeferralSeeder(conn *sql.DB, orgID, userID string) dbtest.TaskClo
 				UPDATE deliverables SET state = 'open' WHERE org_id = $1 AND conversation_id = $2 AND state = 'draft'
 			`, orgID, conversationID)
 		},
+		StoredHold: func(t *testing.T, taskID string) (bool, bool) {
+			t.Helper()
+			var eventIDSet, heldAtSet bool
+			if err := conn.QueryRow(`
+				SELECT close_deferred_event_id IS NOT NULL, close_deferred_at IS NOT NULL FROM tasks WHERE org_id = $1 AND id = $2
+			`, orgID, taskID).Scan(&eventIDSet, &heldAtSet); err != nil {
+				t.Fatalf("read hold columns: %v", err)
+			}
+			return eventIDSet, heldAtSet
+		},
+		HoldRaw: func(t *testing.T, taskID, eventID string) {
+			exec(t, "hold raw", `
+				UPDATE tasks SET close_deferred_event_id = $3, close_deferred_at = now() WHERE org_id = $1 AND id = $2
+			`, orgID, taskID, eventID)
+		},
 	}
 }
