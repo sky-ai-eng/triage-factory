@@ -65,6 +65,12 @@ type FactorySeeder struct {
 	// backdate closures into / out of the grace window.
 	CloseEntity func(t *testing.T, entityID string, closedAt time.Time)
 
+	// SetEntityKind rewrites an entity's kind, so a subtest can hold an
+	// entity of a kind the seeder has no constructor for (a GitHub issue
+	// stub, a vulnerable package) in the same tracked repository as a pull
+	// request.
+	SetEntityKind func(t *testing.T, entityID, kind string)
+
 	// FinishConversation stamps a terminal status and completed_at on an
 	// already-seeded conversation — the shape the team activity node's
 	// failed cut reads, which windows on when a run ended rather than on
@@ -459,7 +465,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 	})
 
-	t.Run("Entities_CarryOnlyTheBeltSource", func(t *testing.T) {
+	t.Run("Entities_CarryOnlyTheBeltKind", func(t *testing.T) {
 		// A Jira issue and a Linear issue in the team's tracked set have no
 		// station on the floor, so the belt leaves them out, and the pull
 		// request carries the repository the belt groups it by.
@@ -473,6 +479,12 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		// Closed inside the grace window, so the closed half is held to the
 		// same rule as the active half.
 		seed.CloseEntity(t, linear, time.Now().Add(-5*time.Second))
+		// GitHub entities in a tracked repository that are not pull
+		// requests: the floor has no station for them either.
+		stub := visible(t, seed, "issue-stub")
+		seed.SetEntityKind(t, stub, domain.EntityKindIssue)
+		pkg := visible(t, seed, "vulnerable-package")
+		seed.SetEntityKind(t, pkg, domain.EntityKindVulnerablePackage)
 
 		rows, err := store.Entities(context.Background(), orgID, 100, nil)
 		if err != nil {
@@ -486,8 +498,8 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 				if r.Entity.RepositoryID != repo {
 					t.Errorf("pull request repository = %q, want %q", r.Entity.RepositoryID, repo)
 				}
-			case issue, linear:
-				t.Errorf("belt carries %s %s, a source the floor has no station for", r.Entity.Source, r.Entity.SourceID)
+			case issue, linear, stub, pkg:
+				t.Errorf("belt carries %s %s %s, a kind the floor has no station for", r.Entity.Source, r.Entity.Kind, r.Entity.SourceID)
 			}
 		}
 		if !sawPR {

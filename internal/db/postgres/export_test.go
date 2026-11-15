@@ -3,8 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"strings"
 )
 
 // AssertClaimActiveInTx exposes the claim fence to the external test package,
@@ -36,12 +34,9 @@ func TrackedEntityIDsForTest(ctx context.Context, q queryer, orgID string, teamI
 	membership := factoryEntityTrackedExists
 	args := []any{orgID}
 	if len(teamIDs) > 0 {
-		ph := make([]string, len(teamIDs))
-		for i, id := range teamIDs {
-			ph[i] = fmt.Sprintf("$%d", 2+i)
-			args = append(args, id)
-		}
-		membership = factoryEntityTrackedForTeams(strings.Join(ph, ", "))
+		ph, ids := teamPlaceholders(2, teamIDs)
+		membership = factoryEntityTrackedForTeams(ph)
+		args = append(args, ids...)
 	}
 	rows, err := q.QueryContext(ctx, `SELECT e.id FROM entities e WHERE e.org_id = $1 AND `+membership, args...)
 	if err != nil {

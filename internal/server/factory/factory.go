@@ -119,7 +119,7 @@ func toFactoryRunSummary(r domain.Conversation) factoryRunSummaryJSON {
 }
 
 // factoryEntityJSON is the per-entity payload: a pull request, the one kind
-// the belt carries (db.FactoryBeltSource), with its fields (number, repo,
+// the belt carries (db.FactoryBeltKind), with its fields (number, repo,
 // author, additions, deletions) read from snapshot_json.
 type factoryEntityJSON struct {
 	ID               string `json:"id"`

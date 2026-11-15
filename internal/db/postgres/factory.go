@@ -29,20 +29,18 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
-	// Scoped to the viewer's teams by the same tracked-set semi-join the
-	// entity belt uses (factoryEventTrackedExists). The station header's
-	// other counters — Triggered24h (tasks) and ActiveConversations — are
-	// team-scoped because tasks/conversations RLS is team-bound; events RLS is
-	// org-wide (events_all keys on org_id only), so without this an event
-	// on a PR outside the viewer's tracked set would inflate this team's
-	// "items at station" count even though that PR never appears on the
-	// belt. The semi-join keeps the counters consistent with the entity
-	// set the belt renders.
+	// Scoped to what the belt can carry (factoryEventOnBelt). The station
+	// header's other counters — Triggered24h (tasks) and ActiveConversations
+	// — are team-scoped because tasks/conversations RLS is team-bound;
+	// events RLS is org-wide (events_all keys on org_id only), so without
+	// this an event on a PR outside the viewer's tracked set would inflate
+	// this team's "items at station" count even though that PR never
+	// appears on the belt.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT ev.event_type, COUNT(*)
 		FROM events ev
 		WHERE ev.org_id = $1 AND ev.created_at > $2
-		  AND `+factoryEventTrackedExists+`
+		  AND `+factoryEventOnBelt+`
 		GROUP BY ev.event_type
 	`, orgID, since)
 	if err != nil {
@@ -63,18 +61,17 @@ func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, s
 }
 
 func (s *factoryReadStore) LifetimeDistinctByEventType(ctx context.Context, orgID string) (map[string]int, error) {
-	// Team-scoped via the tracked-set semi-join, same as EventCountsSince
-	// and the entity belt — a lifetime distinct-entity count must not
-	// include entities outside the viewer's tracked set, or the station's
-	// lifetime readout reports PRs absent from the belt. The semi-join
-	// inherently drops system events too (a NULL entity_id joins to no
-	// entity), so the explicit entity_id IS NOT NULL guard is redundant
-	// but kept for clarity / plan stability.
+	// Scoped to what the belt can carry, same as EventCountsSince — a
+	// lifetime distinct-entity count must not include entities outside the
+	// viewer's tracked set, or the station's lifetime readout reports PRs
+	// absent from the belt. The semi-join inherently drops system events too
+	// (a NULL entity_id joins to no entity), so the explicit entity_id IS NOT
+	// NULL guard is redundant but kept for clarity / plan stability.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT ev.event_type, COUNT(DISTINCT ev.entity_id)
 		FROM events ev
 		WHERE ev.org_id = $1 AND ev.entity_id IS NOT NULL
-		  AND `+factoryEventTrackedExists+`
+		  AND `+factoryEventOnBelt+`
 		GROUP BY ev.event_type
 	`, orgID)
 	if err != nil {
@@ -95,8 +92,8 @@ func (s *factoryReadStore) LifetimeDistinctByEventType(ctx context.Context, orgI
 }
 
 func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
-	// Re-scoped to the tracked set (factoryTaskTrackedExists), matching
-	// the belt and the event counters. Tasks RLS already bounds the count
+	// Scoped to what the belt can carry (factoryTaskOnBelt), matching the
+	// event counters. Tasks RLS already bounds the count
 	// to the viewer's teams, but a task minted while a repo was tracked
 	// survives an untrack (tracking changes are forward-only), so without
 	// the semi-join the "Triggered24h" header would count a task whose
@@ -106,7 +103,7 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 		SELECT t.event_type, COUNT(*)
 		FROM tasks t
 		WHERE t.org_id = $1 AND t.created_at > $2
-		  AND `+factoryTaskTrackedExists+`
+		  AND `+factoryTaskOnBelt+`
 		GROUP BY t.event_type
 	`, orgID, since)
 	if err != nil {
@@ -277,33 +274,28 @@ const pgFactoryEntitySelectColumns = `
 	(SELECT created_at FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
 
-// --- Tracked-set membership (TFAC-516) --------------------------------
+// --- Tracked-set membership ------------------------------------------
 //
-// The multi-mode factory sources entity visibility from each team's
-// *tracked set*, not from task existence. An entity belongs to a team's
-// flow iff it sits in that team's tracked set — a GitHub entity whose
-// repository is one of the team's tracked repos (team_github_repos), a
-// Jira entity whose project is attached to the team
-// (jira_project_status_rules), a Linear entity whose Linear team the team
-// tracks (linear_team_rules), or a Slack thread in a channel the team
-// watches (team_slack_channels). This decouples the belt from task
-// creation: an untasked PR on a tracked repo now appears, where the prior
-// task-existence semi-join hid it until a rule minted a task. The station
-// counters and the team activity node share the same predicate; the belt's
-// own entity read keeps further to db.FactoryBeltSource. SQLite/local is N=1
-// and stays unscoped (sqlite/factory.go).
+// In multi mode an entity belongs to a team's flow iff it sits in that
+// team's tracked set: a GitHub entity whose repository is one of the team's
+// tracked repos (team_github_repos), a Jira entity whose project is attached
+// to the team (jira_project_status_rules), a Linear entity whose Linear team
+// the team tracks (linear_team_rules), or a Slack thread in a channel the
+// team watches (team_slack_channels). Whether a task was ever minted on the
+// entity does not enter it. The belt, the station counters and the team
+// activity node all read it. SQLite/local is N=1 and stays unscoped
+// (sqlite/factory.go).
 //
 // The team scoping is free under the app pool (tf_app, RLS active): the
 // team_github_repos_select, jira_rules_select, linear_rules_select and
 // team_slack_channels_select policies already constrain visible rows to the
-// viewer's team memberships, so each EXISTS
-// auto-scopes to the viewer's teams with no explicit team_id — the same
-// RLS-does-the-scoping pattern ListActiveJiraTeamScoped uses
-// for the Jira discovery deck. The org bind (via e.org_id) is
-// defense-in-depth so the filter still holds on the admin pool where RLS
-// is bypassed: team_github_repos, jira_project_status_rules and
-// team_slack_channels bind it on their own org_id, linear_team_rules through
-// the teams join.
+// viewer's team memberships, so each EXISTS auto-scopes to the viewer's
+// teams with no explicit team_id — the same RLS-does-the-scoping pattern
+// ListActiveJiraTeamScoped uses for the Jira discovery deck. The org bind
+// (via e.org_id) is defense-in-depth so the filter still holds on the admin
+// pool where RLS is bypassed: team_github_repos, jira_project_status_rules
+// and team_slack_channels bind it on their own org_id, linear_team_rules
+// through the teams join.
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
@@ -360,28 +352,15 @@ const factorySlackChannelTrackedExists = `EXISTS (
 	  AND sc.slack_channel_id = e.slack_channel_id
 )`
 
-// factoryEntityTrackedExists is the combined tracked-set membership
-// predicate correlated against an entities row (alias e): a github entity
-// in a tracked repo, a jira entity in a tracked project, a linear entity in
-// a tracked Linear team, or a slack thread in a watched channel. An entity
-// of any other source has no tracked set and never matches.
-const factoryEntityTrackedExists = `(
-	(e.source = 'github' AND ` + factoryGitHubRepoTrackedExists + `)
-	OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedExists + `)
-	OR (e.source = 'linear' AND ` + factoryLinearTeamTrackedExists + `)
-	OR (e.source = 'slack' AND ` + factorySlackChannelTrackedExists + `)
-)`
-
 // factoryGitHubRepoTrackedForTeams / factoryJiraProjectTrackedForTeams /
 // factoryLinearTeamTrackedForTeams / factorySlackChannelTrackedForTeams are
-// the team-narrowed variants used by the per-page read filter and the team
-// activity node: the
-// correlated tracked-set row must additionally belong to one of the teams
-// in placeholders (the comma-joined "$3, $4" list bound to team ids).
-// Each branch stays RLS-scoped to the viewer under tf_app (a forged team
-// id the caller isn't on is filtered by the SELECT policy) and org-bound
-// for the admin pool the way its unnarrowed twin is — the same shape as
-// jiraTeamProjectMembershipForTeam, widened to an IN list.
+// the team-narrowed variants: the correlated tracked-set row must
+// additionally belong to one of the teams in placeholders (the comma-joined
+// "$3, $4" list bound to team ids). Each branch stays RLS-scoped to the
+// viewer under tf_app (a forged team id the caller isn't on is filtered by
+// the SELECT policy) and org-bound for the admin pool the way its unnarrowed
+// twin is — the same shape as jiraTeamProjectMembershipForTeam, widened to
+// an IN list.
 func factoryGitHubRepoTrackedForTeams(placeholders string) string {
 	return `EXISTS (
 		SELECT 1 FROM team_github_repos g
@@ -420,66 +399,144 @@ func factorySlackChannelTrackedForTeams(placeholders string) string {
 	)`
 }
 
-func factoryEntityTrackedForTeams(placeholders string) string {
-	return `(
-		(e.source = 'github' AND ` + factoryGitHubRepoTrackedForTeams(placeholders) + `)
-		OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedForTeams(placeholders) + `)
-		OR (e.source = 'linear' AND ` + factoryLinearTeamTrackedForTeams(placeholders) + `)
-		OR (e.source = 'slack' AND ` + factorySlackChannelTrackedForTeams(placeholders) + `)
-	)`
+// factoryTrackedArm is one source's arm of the tracked set. Every read
+// scoped by the tracked set builds its SQL from factoryTrackedArms, so a
+// source gains a tracked set by gaining a row there.
+type factoryTrackedArm struct {
+	source   string
+	exists   string
+	forTeams func(placeholders string) string
+	// unitKey is the entities column naming the row's unit, the column the
+	// source's tracking rows reference.
+	unitKey string
+	// units selects a team's unit ids, bound at $1 (org) and $2 (team), with
+	// the same filters as exists, so a unit listed is exactly a unit whose
+	// entities exists admits.
+	units string
 }
 
-// factoryEventTrackedExists / factoryTaskTrackedExists lift the
-// entity-correlated predicate onto an events row (alias ev) / tasks row
-// (alias t) for the station-throughput aggregates, so the header counters
-// report the same tracked-set population the belt renders. A system event
-// (NULL entity_id) or a task whose entity falls outside the tracked set
-// joins to no qualifying entity and is excluded.
-const factoryEventTrackedExists = `EXISTS (
+var factoryTrackedArms = []factoryTrackedArm{
+	{
+		source:   "github",
+		exists:   factoryGitHubRepoTrackedExists,
+		forTeams: factoryGitHubRepoTrackedForTeams,
+		unitKey:  `e.repository_id::text`,
+		units:    `g.repository_id::text FROM team_github_repos g WHERE g.org_id = $1 AND g.team_id = $2`,
+	},
+	{
+		source:   "jira",
+		exists:   factoryJiraProjectTrackedExists,
+		forTeams: factoryJiraProjectTrackedForTeams,
+		unitKey:  `e.jira_project_id::text`,
+		units:    `jr.jira_project_id::text FROM jira_project_status_rules jr WHERE jr.org_id = $1 AND jr.team_id = $2`,
+	},
+	{
+		source:   "linear",
+		exists:   factoryLinearTeamTrackedExists,
+		forTeams: factoryLinearTeamTrackedForTeams,
+		unitKey:  `e.linear_team_id`,
+		units: `lr.linear_team_id FROM linear_team_rules lr
+	JOIN teams tm ON tm.id = lr.team_id
+	WHERE tm.org_id = $1 AND lr.team_id = $2
+	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = $1)`,
+	},
+	{
+		source:   "slack",
+		exists:   factorySlackChannelTrackedExists,
+		forTeams: factorySlackChannelTrackedForTeams,
+		unitKey:  `e.slack_channel_id::text`,
+		units:    `sc.slack_channel_id::text FROM team_slack_channels sc WHERE sc.org_id = $1 AND sc.team_id = $2`,
+	},
+}
+
+// factoryTrackedSQL ORs one SQL fragment per arm, each behind its source.
+// An entity of a source with no arm never matches.
+func factoryTrackedSQL(fragment func(factoryTrackedArm) string) string {
+	arms := make([]string, len(factoryTrackedArms))
+	for i, a := range factoryTrackedArms {
+		arms[i] = "(e.source = '" + a.source + "' AND " + fragment(a) + ")"
+	}
+	return "(" + strings.Join(arms, " OR ") + ")"
+}
+
+// factoryEntityTrackedExists matches an entities row (alias e) that any of
+// the viewer's teams tracks.
+var factoryEntityTrackedExists = factoryTrackedSQL(func(a factoryTrackedArm) string { return a.exists })
+
+// factoryEntityTrackedForTeams matches an entities row (alias e) that one of
+// the teams in placeholders tracks.
+func factoryEntityTrackedForTeams(placeholders string) string {
+	return factoryTrackedSQL(func(a factoryTrackedArm) string { return a.forTeams(placeholders) })
+}
+
+// factoryTrackedSources names the sources that have a tracked set.
+func factoryTrackedSources() []string {
+	out := make([]string, len(factoryTrackedArms))
+	for i, a := range factoryTrackedArms {
+		out[i] = a.source
+	}
+	return out
+}
+
+// teamPlaceholders numbers one bind placeholder per team id from start
+// ("$3, $4, …") and returns them with the ids as bind arguments.
+func teamPlaceholders(start int, teamIDs []string) (string, []any) {
+	ph := make([]string, len(teamIDs))
+	args := make([]any, len(teamIDs))
+	for i, id := range teamIDs {
+		ph[i] = fmt.Sprintf("$%d", start+i)
+		args[i] = id
+	}
+	return strings.Join(ph, ", "), args
+}
+
+// factoryOnBelt matches an entities row (alias e) the belt can carry: one of
+// db.FactoryBeltKind in the viewer's tracked set. The station counters read
+// it too, so a station's numbers count only what its chips can be.
+var factoryOnBelt = `e.kind = '` + db.FactoryBeltKind + `' AND ` + factoryEntityTrackedExists
+
+// factoryEventOnBelt / factoryTaskOnBelt lift factoryOnBelt onto an events
+// row (alias ev) / tasks row (alias t) for the station counters. A system
+// event (NULL entity_id) or a task whose entity is off the belt joins to no
+// qualifying entity and is excluded.
+var factoryEventOnBelt = `EXISTS (
 	SELECT 1 FROM entities e
 	WHERE e.id = ev.entity_id AND e.org_id = ev.org_id
-	  AND ` + factoryEntityTrackedExists + `
+	  AND ` + factoryOnBelt + `
 )`
 
-const factoryTaskTrackedExists = `EXISTS (
+var factoryTaskOnBelt = `EXISTS (
 	SELECT 1 FROM entities e
 	WHERE e.id = t.entity_id AND e.org_id = t.org_id
-	  AND ` + factoryEntityTrackedExists + `
+	  AND ` + factoryOnBelt + `
 )`
 
 func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, teamIDs []string) ([]domain.FactoryEntityRow, error) {
-	// The tracked-set semi-join scopes the belt to the viewer's teams (via
-	// team_github_repos / jira_project_status_rules RLS). The optional
-	// per-page filter narrows it further to a set of teams by tightening
-	// that same semi-join's correlated tracked-set row to one any selected
-	// team tracks. The team placeholders appear before LIMIT in the text
-	// but bind by number, which Postgres resolves regardless of order —
-	// active args start the teams at $3 (after orgID, limit), closed at $4
-	// (after orgID, cutoff, FactoryClosedGraceLimit).
+	// The tracked set scopes the belt to the viewer's teams through its
+	// tracking tables' RLS. The optional per-page filter narrows it further
+	// to a set of teams by tightening each arm's correlated tracking row to
+	// one any selected team holds. The team placeholders appear before LIMIT
+	// in the text but bind by number, which Postgres resolves regardless of
+	// order — active args start the teams at $3 (after orgID, limit), closed
+	// at $4 (after orgID, cutoff, FactoryClosedGraceLimit).
 	activeMembership := factoryEntityTrackedExists
 	closedMembership := factoryEntityTrackedExists
 	activeArgs := []any{orgID, limit}
 	closedArgs := []any{orgID, time.Now().UTC().Add(-db.FactoryClosedGracePeriod), db.FactoryClosedGraceLimit}
 	if len(teamIDs) > 0 {
-		activePH := make([]string, len(teamIDs))
-		for i, id := range teamIDs {
-			activePH[i] = fmt.Sprintf("$%d", 3+i)
-			activeArgs = append(activeArgs, id)
-		}
-		activeMembership = factoryEntityTrackedForTeams(strings.Join(activePH, ", "))
-		closedPH := make([]string, len(teamIDs))
-		for i, id := range teamIDs {
-			closedPH[i] = fmt.Sprintf("$%d", 4+i)
-			closedArgs = append(closedArgs, id)
-		}
-		closedMembership = factoryEntityTrackedForTeams(strings.Join(closedPH, ", "))
+		ph, ids := teamPlaceholders(3, teamIDs)
+		activeMembership = factoryEntityTrackedForTeams(ph)
+		activeArgs = append(activeArgs, ids...)
+		ph, ids = teamPlaceholders(4, teamIDs)
+		closedMembership = factoryEntityTrackedForTeams(ph)
+		closedArgs = append(closedArgs, ids...)
 	}
 
 	active, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.state = 'active'
-		  AND e.source = '`+db.FactoryBeltSource+`'
+		  AND e.kind = '`+db.FactoryBeltKind+`'
 		  AND `+activeMembership+`
 		ORDER BY e.created_at DESC
 		LIMIT $2
@@ -492,7 +549,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.closed_at IS NOT NULL AND e.closed_at > $2
-		  AND e.source = '`+db.FactoryBeltSource+`'
+		  AND e.kind = '`+db.FactoryBeltKind+`'
 		  AND `+closedMembership+`
 		ORDER BY e.closed_at DESC
 		LIMIT $3

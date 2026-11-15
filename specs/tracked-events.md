@@ -1283,8 +1283,8 @@ they were recorded, until its next refresh.
 
 Turning Jira off for an org clears these snapshots and leaves the entity's
 `jira_project_id`, which everything that needs an issue's project reads, so
-while Jira is off its issues stay on their teams' belts and one that goes
-unreachable still reaches its project's teams.
+while Jira is off its issues still count toward their teams' activity and one
+that goes unreachable still reaches its project's teams.
 
 ### Linear Issue Snapshot
 

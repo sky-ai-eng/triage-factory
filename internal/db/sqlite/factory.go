@@ -336,7 +336,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	active, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
-		WHERE e.state = 'active' AND e.source = '`+db.FactoryBeltSource+`'
+		WHERE e.state = 'active' AND e.kind = '`+db.FactoryBeltKind+`'
 		ORDER BY e.created_at DESC
 		LIMIT ?
 	`, limit)
@@ -348,7 +348,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	closed, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
-		WHERE e.closed_at IS NOT NULL AND e.closed_at > ? AND e.source = '`+db.FactoryBeltSource+`'
+		WHERE e.closed_at IS NOT NULL AND e.closed_at > ? AND e.kind = '`+db.FactoryBeltKind+`'
 		ORDER BY e.closed_at DESC
 		LIMIT ?
 	`, graceCutoff, db.FactoryClosedGraceLimit)

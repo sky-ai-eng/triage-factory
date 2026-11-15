@@ -1151,6 +1151,28 @@ describe('Slack source page', () => {
     expect(row('since the last poll').textContent).toContain('—')
   })
 
+  it('dashes the count of a channel just unwatched, and of one the app is not in', async () => {
+    // The node still holds both channels' rows: #deploys was unwatched since
+    // it was read, and #oncall-platform is watched but the app never joined.
+    stubSlack(
+      () => [
+        { ...ROWS[0], tracked: false, is_primary: false, tracked_by: [] },
+        { ...ROWS[1], bot_is_member: false },
+      ],
+      undefined,
+      {
+        '/api/teams/t1/activity': ACTIVITY,
+      },
+    )
+    render(<SlackSource {...BODY} />)
+    const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="row"]')!
+    await waitFor(() => expect(row('mentions in 7 days').textContent).toContain('3'))
+
+    expect(within(rowOf('#deploys')).queryByText('3')).not.toBeInTheDocument()
+    expect(within(rowOf('#deploys')).getAllByText('—').length).toBeGreaterThan(0)
+    expect(within(rowOf('#oncall-platform')).queryByText('0')).not.toBeInTheDocument()
+  })
+
   it('marks the primary channels and only those', async () => {
     stubSlack()
     render(<SlackSource {...BODY} />)

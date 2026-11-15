@@ -41,8 +41,10 @@ import type { SlackChannelView } from '../../types'
 //
 // The flow figures come from the team activity node, which counts the
 // messages in the channels this team watches, primary or not, in total and
-// per channel. A channel the team does not watch has no count of its own, so
-// its MENTIONS · 7D reads `—` rather than a zero. Became tasks is
+// per channel. A channel the team does not watch, or one the app is not a
+// member of, has no count of its own, so its MENTIONS · 7D reads `—` rather
+// than a zero; the gate is the row's own state, so a channel just unwatched
+// drops its count before the node is read again. Became tasks is
 // task-scoped. Nothing polls Slack (push), so `since last poll` is a dash by
 // construction, not by omission.
 //
@@ -184,7 +186,8 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
           watched: c.tracked,
           owner: owner.text,
           ownerKind: owner.kind,
-          mentions: c.id ? (perChannel.get(c.id)?.events ?? null) : null,
+          mentions:
+            c.tracked && c.bot_is_member && c.id ? (perChannel.get(c.id)?.events ?? null) : null,
           last: min === null ? null : ago(min),
           lastMin: min,
         }
@@ -227,12 +230,12 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
         align: 'end',
         drop: 2,
         render: (r) => r.mentions ?? '—',
-        // A dash is a channel this team does not watch, or a count not read
-        // yet; a zero is a watched channel that was quiet.
+        // A dash is a channel with no count of its own, or a count not read
+        // yet; a zero is a watched channel that was quiet, and reads as one.
         color: (r) =>
-          r.mentions
-            ? 'var(--color-ink-2)'
-            : 'color-mix(in srgb, var(--color-ink-4) 29%, var(--color-line-2))',
+          r.mentions == null
+            ? 'color-mix(in srgb, var(--color-ink-4) 29%, var(--color-line-2))'
+            : 'var(--color-ink-2)',
       },
       {
         key: 'last',

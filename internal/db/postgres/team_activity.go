@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -31,10 +32,9 @@ func newTeamActivityStore(q queryer) db.TeamActivityStore {
 
 var _ db.TeamActivityStore = (*teamActivityStore)(nil)
 
-// teamActivityEventSources mirrors factoryEntityTrackedExists's arms: the
-// sources for which a tracked set — and therefore a team event count —
-// exists.
-var teamActivityEventSources = []string{"github", "jira", "linear", "slack"}
+// teamActivityEventSources are the sources for which a tracked set — and
+// therefore a team event count — exists.
+var teamActivityEventSources = factoryTrackedSources()
 
 // teamActivityTaskTeamPredicate scopes a tasks row (alias t) to the subject
 // team, bound at $4: owned by it, or visible to it through task_teams while
@@ -51,40 +51,29 @@ const teamActivityTaskTeamPredicate = ` AND (
 	)`
 
 // pgTeamActivityUnitKey is an entities row's (alias e) unit in its source's
-// tracked set: the column that source's tracking rows reference — the
-// repository's registry row, the Jira project's registry row, the Linear
-// team's UUID, the Slack channel's registry row. Empty for a source with no
+// tracked set (factoryTrackedArm.unitKey). Empty for a source with no
 // tracked set, which names no unit.
-const pgTeamActivityUnitKey = `COALESCE(CASE e.source
-		WHEN 'github' THEN e.repository_id::text
-		WHEN 'jira' THEN e.jira_project_id::text
-		WHEN 'linear' THEN e.linear_team_id
-		WHEN 'slack' THEN e.slack_channel_id::text
-	END, '')`
+var pgTeamActivityUnitKey = func() string {
+	var b strings.Builder
+	b.WriteString("COALESCE(CASE e.source")
+	for _, a := range factoryTrackedArms {
+		b.WriteString(" WHEN '" + a.source + "' THEN " + a.unitKey)
+	}
+	b.WriteString(" END, '')")
+	return b.String()
+}()
 
-// pgTeamActivityTrackedSet lists the subject team's tracked set, bound at $1
-// (org) and $2 (team) — one arm per arm of factoryEntityTrackedForTeams, with
-// the same filters, so a unit listed here is exactly a unit whose entities
-// that predicate admits. A unit the team tracks on a retired repository is
-// still listed: the team still tracks it, and its page still shows the row.
-const pgTeamActivityTrackedSet = `
-	SELECT 'github', g.repository_id::text
-	FROM team_github_repos g
-	WHERE g.org_id = $1 AND g.team_id = $2
-	UNION ALL
-	SELECT 'jira', jr.jira_project_id::text
-	FROM jira_project_status_rules jr
-	WHERE jr.org_id = $1 AND jr.team_id = $2
-	UNION ALL
-	SELECT 'linear', lr.linear_team_id
-	FROM linear_team_rules lr
-	JOIN teams tm ON tm.id = lr.team_id
-	WHERE tm.org_id = $1 AND lr.team_id = $2
-	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = $1)
-	UNION ALL
-	SELECT 'slack', sc.slack_channel_id::text
-	FROM team_slack_channels sc
-	WHERE sc.org_id = $1 AND sc.team_id = $2`
+// pgTeamActivityTrackedSet lists the subject team's tracked set as (source,
+// unit id) rows, bound at $1 (org) and $2 (team), one arm per
+// factoryTrackedArm. A unit the team tracks on a retired repository is still
+// listed: the team still tracks it, and its page still shows the row.
+var pgTeamActivityTrackedSet = func() string {
+	arms := make([]string, len(factoryTrackedArms))
+	for i, a := range factoryTrackedArms {
+		arms[i] = "SELECT '" + a.source + "', " + a.units
+	}
+	return strings.Join(arms, "\n\tUNION ALL\n\t")
+}()
 
 func (s *teamActivityStore) TeamActivity(ctx context.Context, orgID, teamID string, since, until time.Time) (domain.TeamActivity, error) {
 	sinceArg, untilArg := since.UTC(), until.UTC()

@@ -61,7 +61,8 @@ type teamActivitySourceJSON struct {
 
 // teamActivityTrackedJSON is one unit of the team's tracked set. unit_id is
 // the id the unit's source page keys its row on — a repository's registry
-// id, a jira_projects row id, a Linear team's UUID — so a client joins with
+// id, a jira_projects row id, a Linear team's UUID, a slack_channels row id —
+// so a client joins with
 // no name lookup. A quiet unit answers zeros; last_event_at is null only for
 // a unit that has never sent an event, since it is bounded by the window's
 // end alone.

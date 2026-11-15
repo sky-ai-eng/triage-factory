@@ -285,6 +285,14 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
+		SetEntityKind: func(t *testing.T, entityID, kind string) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE entities SET kind = $1 WHERE id = $2 AND org_id = $3`, kind, entityID, orgID,
+			); err != nil {
+				t.Fatalf("set entity kind: %v", err)
+			}
+		},
 		SetConversationMemory: func(t *testing.T, conversationID, content string, source domain.MemorySource) {
 			t.Helper()
 			memID := uuid.New().String()
@@ -785,6 +793,12 @@ func TestFactoryReadStore_Postgres_CountersScopedToTrackedSet(t *testing.T) {
 	tracked := seed.Entity(t, "ctr-tracked")
 	evT := seed.Event(t, tracked, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
 	seed.Task(t, tracked, "github:pr:opened", "", evT, "queued", now.Add(-10*time.Minute))
+
+	// A vulnerable package in a tracked repository: GitHub's, tracked, and
+	// still no chip the floor can draw, so its event counts nowhere either.
+	pkg := seed.Entity(t, "ctr-package")
+	seed.SetEntityKind(t, pkg, domain.EntityKindVulnerablePackage)
+	seed.Event(t, pkg, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
 
 	// Untracked entity: its events AND its task must NOT contribute to any
 	// counter — it's off the belt.

@@ -27,19 +27,18 @@ type FactoryReadStore interface {
 	// `since`. Used to compute station throughput; keys with zero
 	// counts are absent.
 	//
-	// In multi-mode (Postgres) the count is scoped to the viewer's
-	// teams by the same tracked-set semi-join the entity belt uses, so
-	// the station header agrees with the belt and doesn't report
-	// activity on entities outside the team's tracked repos/projects
-	// (events RLS is org-wide, unlike tasks/conversations). Local mode (SQLite)
-	// is unscoped — see Entities.
+	// In multi-mode (Postgres) the count is scoped to what the belt can
+	// carry — a FactoryBeltKind entity in the viewer's teams' tracked set —
+	// so the station header agrees with the belt and doesn't report
+	// activity on entities outside the team's tracked repositories (events
+	// RLS is org-wide, unlike tasks/conversations). Local mode (SQLite) is
+	// unscoped — see Entities.
 	EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
 	// LifetimeDistinctByEventType counts the distinct entities that
 	// have ever produced an event of each event_type. In multi-mode
-	// (Postgres) it is additionally scoped to the viewer's teams via
-	// the tracked-set semi-join, matching EventCountsSince and the
-	// entity belt; local mode (SQLite) is org-only. Read per snapshot
+	// (Postgres) it is scoped to what the belt can carry, matching
+	// EventCountsSince; local mode (SQLite) is org-only. Read per snapshot
 	// request — the factory endpoint is
 	// not a hot path. In Postgres the partial index
 	// idx_events_org_type_entity (org_id, event_type, entity_id) WHERE
@@ -55,12 +54,12 @@ type FactoryReadStore interface {
 	// TaskCountsSince counts tasks per event_type created after
 	// `since`. Combined with EventCountsSince to compute the
 	// "triggered / seen" ratio displayed in the station overlay. In
-	// multi-mode (Postgres) it is scoped to the same tracked set as the
-	// belt and the event counters — tasks RLS bounds it to the viewer's
-	// teams, and the tracked-set semi-join additionally drops a task
-	// whose entity has since left the tracked set (tracking is
-	// forward-only), keeping the header population consistent with the
-	// belt. Local mode (SQLite) is unscoped.
+	// multi-mode (Postgres) it is scoped to what the belt can carry,
+	// matching the event counters — tasks RLS bounds it to the viewer's
+	// teams, and the semi-join additionally drops a task whose entity has
+	// since left the tracked set (tracking is forward-only), keeping the
+	// header population consistent with the belt. Local mode (SQLite) is
+	// unscoped.
 	TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
 	// ActiveConversations returns every conversation currently in-flight
@@ -87,7 +86,7 @@ type FactoryReadStore interface {
 	// FactoryClosedGraceLimit) so the chip can finish animating to
 	// its terminal station before disappearing.
 	//
-	// Only entities of FactoryBeltSource are returned, in both backends.
+	// Only entities of FactoryBeltKind are returned, in both backends.
 	//
 	// Each row's Entity carries its repository's registry id
 	// (RepositoryID), which the belt groups chips by, beside the display
@@ -103,9 +102,7 @@ type FactoryReadStore interface {
 	// is derived through the tracked set, which the SELECT-policy RLS on
 	// those tables auto-scopes to the viewer's teams under tf_app — no
 	// explicit team_id needed. An entity in no team's tracked set
-	// belongs to no team's factory and is excluded. (TFAC-516 replaced
-	// the prior task-existence semi-join, which coupled belt density to
-	// task creation.)
+	// belongs to no team's factory and is excluded.
 	//
 	// Local mode (SQLite, N=1) applies NO membership filter: the local
 	// tracker already scopes discovery to the user's own involvement
@@ -132,12 +129,12 @@ type FactoryReadStore interface {
 	Entities(ctx context.Context, orgID string, limit int, teamIDs []string) ([]domain.FactoryEntityRow, error)
 }
 
-// FactoryBeltSource is the source the factory floor has stations for, and
-// so the only one Entities returns. An entity of another source has no
+// FactoryBeltKind is the entity kind the factory floor has stations for,
+// and so the only one Entities returns. An entity of another kind has no
 // station to stand at and is dropped before it is drawn, but it would still
 // take a slot under the active limit, pushing out an entity the floor can
-// draw. A source joins here when the floor gains stations for it.
-const FactoryBeltSource = "github"
+// draw: a GitHub issue stub or vulnerable package as much as a Jira issue.
+const FactoryBeltKind = domain.EntityKindPullRequest
 
 // FactoryClosedGracePeriod is the window during which a freshly-closed
 // entity remains in the factory snapshot so the chip can ride the final
