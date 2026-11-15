@@ -131,20 +131,26 @@ type TaskMemoryStore interface {
 	// which fires inside the runAgent goroutine with no JWT-claims
 	// context. org_id stays in the WHERE clause as defense in depth.
 	//
-	// teamID is the materializing conversation's owning team
-	// (conversations.team_id). The admin pool bypasses RLS, so the
-	// app-pool variant's team scoping (conversation_memory_all →
-	// conversations_select) is hand-rolled here: the result is restricted
-	// to memory whose parent conversation that team can see — team-visible
-	// conversations owned by teamID plus any org-visible conversation —
-	// matching what a member of that team sees in the UI (TFAC-506).
-	// Without this, the System path returned ALL of the org's memory for
-	// the entity, leaking other teams' conversation narratives into a
-	// conversation they don't own. Private-visibility conversations are
-	// excluded: they're creator-scoped and the System path carries no user
-	// to match. SQLite (N=1, single team) ignores teamID — no cross-team
-	// bleed is possible locally.
-	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error)
+	// teamID and taskID are the reading conversation's owning team
+	// (conversations.team_id) and task. The admin pool bypasses RLS, so the
+	// result is scoped by hand to what that conversation may read:
+	//
+	//   - every memory written by a conversation on taskID, whatever team that
+	//     conversation belongs to. A task's own memories are its handoff, and
+	//     they move with the task when it is reassigned to another team. The
+	//     task's memory wait (memory_pending) holds its next conversation for
+	//     its earlier conversations' memory with no team filter, so the read
+	//     sees what the wait waited for.
+	//   - on the entity's other tasks, memory whose parent conversation the
+	//     team can see: team-visible conversations owned by teamID plus any
+	//     org-visible conversation, matching what a member of that team sees
+	//     in the UI. Another team's work on a shared entity stays with that
+	//     team. Private-visibility conversations are excluded: they are
+	//     creator-scoped and the System path carries no user to match.
+	//
+	// An empty taskID reads the team's view alone. SQLite (N=1, single team)
+	// ignores both — no cross-team bleed is possible locally.
+	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) ([]domain.TaskMemory, error)
 
 	// GetRecentMemoriesForEntitySystem is GetMemoriesForEntitySystem capped to
 	// the most recent `limit` rows, with the cap pushed INTO the query (ORDER BY
@@ -152,12 +158,12 @@ type TaskMemoryStore interface {
 	// on-demand read on an entity with a long conversation history doesn't
 	// transfer and materialize its entire memory just to keep the tail. Returns
 	// oldest-first (ASC), identical to the unbounded read's ordering, so
-	// callers compose the same way. Same team-visibility scope as
+	// callers compose the same way. Same reader scope as
 	// GetMemoriesForEntitySystem. limit must be positive — a non-positive limit
 	// returns no rows (the store never treats it as unbounded, and Postgres
 	// rejects a negative LIMIT); callers resolve a non-positive request to a
 	// default before calling.
-	GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error)
+	GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string, limit int) ([]domain.TaskMemory, error)
 
 	// RecordEntityTouchSystem upserts a (conversation_id, entity_id) row in
 	// conversation_memory_entities with role-precedence upgrade: insert if
@@ -177,8 +183,8 @@ type TaskMemoryStore interface {
 
 	// CountMemoriesForEntitySystem returns the number of conversation_memory
 	// rows reachable for entityID through conversation_memory_entities, under
-	// the same team-visibility filter and the same "has content" filter as
+	// the same reader scope and the same "has content" filter as
 	// GetMemoriesForEntitySystem — it counts what a reader would get, not what
 	// the table holds.
-	CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error)
+	CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) (int, error)
 }

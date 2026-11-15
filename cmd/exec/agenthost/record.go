@@ -937,8 +937,15 @@ func actionMemoryRole(act domain.ExternalAction) string {
 // externalID, the provider id the entity is identified by, when the caller has
 // one, else by its natural key — LOOKUP ONLY, never
 // FindOrCreate, so a load of something unknown is a miss, not a stub mint — and
-// on a hit returns that entity's prior conversation memory scoped to the conversation's team,
-// plus records a best-effort conversation→entity 'touched' row (loading IS an address).
+// on a hit returns that entity's prior conversation memory as the spawn-time
+// materializer scopes it — the conversation's own task's memory whatever team
+// wrote it, and the rest as the conversation's team sees it — plus records a
+// best-effort conversation→entity 'touched' row (loading IS an address).
+//
+// ConversationInfo carries no task id, so the task is resolved from the
+// conversation row, as IsTaskOwnRepository resolves it, rather than trusted
+// from a field a caller stamped. A conversation that cannot be found reads as
+// one with no task: the load still answers for its team.
 //
 // Unlike recordEntityTouch's resolve-or-create, a miss here records NOTHING and
 // returns an empty result with an empty EntityID — the deliberate asymmetry the
@@ -979,7 +986,11 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 	res.Title = entity.Title
 
 	if stores.TaskMemory != nil {
-		count, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID)
+		taskID, err := conversationTaskID(ctx, stores, info)
+		if err != nil {
+			return nil, err
+		}
+		count, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID, taskID)
 		if err != nil {
 			return nil, err
 		}
@@ -991,7 +1002,7 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 		if limit <= 0 {
 			limit = defaultMemoryLoadLimit
 		}
-		mems, err := stores.TaskMemory.GetRecentMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID, limit)
+		mems, err := stores.TaskMemory.GetRecentMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID, taskID, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -1013,6 +1024,22 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 		}
 	}
 	return res, nil
+}
+
+// conversationTaskID returns the task the conversation info names is on, or ""
+// when it is on none or cannot be found.
+func conversationTaskID(ctx context.Context, stores db.Stores, info ConversationInfo) (string, error) {
+	if stores.Conversations == nil || info.ConversationID == "" {
+		return "", nil
+	}
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil {
+		return "", err
+	}
+	if conv == nil {
+		return "", nil
+	}
+	return conv.TaskID, nil
 }
 
 // defaultMemoryLoadLimit is the cap loadEntityMemory applies when a caller

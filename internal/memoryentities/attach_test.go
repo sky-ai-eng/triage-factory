@@ -158,7 +158,7 @@ func roleFor(t *testing.T, database *sql.DB, conversationID, entityID string) st
 // creates.
 func memoryConversationIDs(t *testing.T, database *sql.DB, entityID string) map[string]bool {
 	t.Helper()
-	mems, err := sqlitestore.New(database).TaskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID)
+	mems, err := sqlitestore.New(database).TaskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID, "")
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem(%s): %v", entityID, err)
 	}
@@ -299,7 +299,7 @@ func TestAttach_MotivatingCase(t *testing.T) {
 	attachAll(t, database, org, "r-507", entA.ID)
 
 	for name, id := range map[string]string{"A": entA.ID, "B": entB.ID, "C": entC.ID} {
-		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, org, id, runmode.LocalDefaultTeamID)
+		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, org, id, runmode.LocalDefaultTeamID, "")
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntitySystem(%s): %v", name, err)
 		}

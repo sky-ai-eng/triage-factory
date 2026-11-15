@@ -89,25 +89,24 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 	return getMemoriesForEntity(ctx, s.q, entityID)
 }
 
-// GetMemoriesForEntitySystem ignores teamID: local mode is single-tenant
-// (N=1, one team), so there is no cross-team memory to scope out — every
-// conversation on the entity belongs to the lone team. The param exists for
-// parity with the Postgres store, where the admin pool bypasses RLS and must
-// hand-roll the team filter off the materializing conversation's team_id
-// (TFAC-506).
-func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
-	_ = teamID
+// GetMemoriesForEntitySystem ignores teamID and taskID: local mode is
+// single-tenant (N=1, one team), so every conversation on the entity belongs to
+// the lone team and the reader may see all of them. The params exist for parity
+// with the Postgres store, where the admin pool bypasses RLS and must hand-roll
+// the reading conversation's scope off them.
+func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) ([]domain.TaskMemory, error) {
+	_, _ = teamID, taskID
 	return s.GetMemoriesForEntity(ctx, orgID, entityID)
 }
 
-// GetRecentMemoriesForEntitySystem ignores teamID like its unbounded sibling
-// (local mode is single-team) and pushes the cap into the query so a
+// GetRecentMemoriesForEntitySystem ignores teamID and taskID like its unbounded
+// sibling (local mode is single-team) and pushes the cap into the query so a
 // long-history entity isn't fully fetched to keep only the tail. A non-positive
 // limit returns no rows (never unbounded); the host resolves it to a default
 // first. The query orders DESC LIMIT (the most recent N) and the result is
 // reversed to ASC so the composition matches the unbounded read.
-func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error) {
-	_ = teamID
+func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string, limit int) ([]domain.TaskMemory, error) {
+	_, _ = teamID, taskID
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -243,8 +242,8 @@ func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, co
 	return err
 }
 
-func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error) {
-	_ = teamID
+func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) (int, error) {
+	_, _ = teamID, taskID
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
