@@ -293,7 +293,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) e
 		Provider:     provider,
 		Model:        model,
 		SystemPrompt: coldCompactionSystemPrompt,
-		Rows:         rows,
+		Rows:         withoutReasoning(rows),
 		Tools:        []schemas.ChatTool{compactionTool()},
 		ToolChoice:   forcedCompactionChoice(),
 		// The cap is resolved for the SUMMARIZE model, not the
@@ -343,6 +343,23 @@ func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) e
 	spent.add(replyRow.CostUSD)
 	markCompacted(ctx, compactedCold)
 	return nil
+}
+
+// withoutReasoning copies rows with every thinking block removed, for the
+// forced-shape call. That call sends the transcript under a system prompt and
+// a tool of its own, and the Anthropic API refuses a thinking block replayed
+// under a context other than the one that produced it when the block's own
+// model receives it, as the cold model does on an engagement that runs on it.
+// Any other model drops the blocks unread, so removing all of them costs the
+// summary nothing. A row the model produced nothing but reasoning for is never
+// replayed (unreplayableTurn), so none is left empty here.
+func withoutReasoning(rows []domain.Message) []domain.Message {
+	out := make([]domain.Message, len(rows))
+	copy(out, rows)
+	for i := range out {
+		out[i].Reasoning = nil
+	}
+	return out
 }
 
 // commitCompaction composes the result row and commits the whole compaction
