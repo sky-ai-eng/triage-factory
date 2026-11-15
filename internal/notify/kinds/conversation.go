@@ -125,6 +125,12 @@ var ConversationPaused = notify.Condition(notify.ConditionSpec[PausedConversatio
 			cause = "It stopped making progress, so Triage Factory stopped it."
 		case domain.ParkReasonUpstreamUnavailable:
 			cause = "The model provider or GitHub stayed unavailable through every retry."
+		case domain.ParkReasonTurnIncomplete:
+			// The causes differ in what continues the run: a message, or for
+			// a spend cap, the cap resetting or being raised first. Its stop
+			// note names which.
+			cause = "Its last reply stopped before it finished."
+			next = "The run's transcript says why and what continues it."
 		default:
 			cause = "It stopped and nothing will restart it on its own."
 		}

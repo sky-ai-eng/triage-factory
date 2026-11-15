@@ -52,7 +52,7 @@ func (s *Spawner) announcePark(park liveParkContext) {
 // it, which is when the sweep it wakes may have a notice to open.
 func waitsOnDelegator(conv *domain.Conversation) bool {
 	return conv.CreatorUserID != "" && conv.Status == domain.StatusOpen && conv.EndedAt == nil &&
-		conv.ArchivedAt == nil && conv.ParkReason.AwaitsPerson()
+		conv.ArchivedAt == nil && conv.ParkReason.AwaitsPerson(conv.Type)
 }
 
 // notifyReadTimeout bounds announcePark's read, so a slow database delays a

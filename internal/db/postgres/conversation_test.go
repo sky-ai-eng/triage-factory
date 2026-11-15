@@ -1010,13 +1010,14 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, visibility, creator_user_id,
-		                           blueprint_run_id, blueprint_step_index, completed_at, origin)
+		                           blueprint_run_id, blueprint_step_index, completed_at, origin, type)
 		VALUES ($1, $2, $3,
 		        COALESCE(NULLIF($12, '')::uuid,
 		                 (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)),
-		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, NULLIF($10, '')::uuid, $11, $13, $14)
+		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, NULLIF($10, '')::uuid, $11, $13, $14,
+		        COALESCE(NULLIF($15, ''), 'delegation'))
 	`, id, orgID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
-		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID, completedAt, origin); err != nil {
+		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID, completedAt, origin, conv.Type); err != nil {
 		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id

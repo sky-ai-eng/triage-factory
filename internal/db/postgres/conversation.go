@@ -961,6 +961,7 @@ func parkedForPersonSQL(reasons string) string {
 		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
 		WHERE c.status = 'open'
 		  AND c.park_reason = ANY(` + reasons + `::text[])
+		  AND ` + db.AwaitsPersonTypeSQL("c") + `
 		  AND c.creator_user_id IS NOT NULL
 		  AND c.ended_at IS NULL
 		  AND c.archived_at IS NULL`

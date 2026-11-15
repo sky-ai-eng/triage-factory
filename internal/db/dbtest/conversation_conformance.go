@@ -78,10 +78,10 @@ type ConversationSeeder struct {
 	// BlueprintStore door; the conformance suite stages rows in arbitrary
 	// status without staging a whole firing for each. Fields honored: ID, TaskID, TeamID
 	// (default: the org's first team), PromptID, Status, Model, TriggerType
-	// (default manual), TriggerID, BlueprintRunID. An empty Status inserts
-	// SQL NULL — the mid-flight state a fresh mint carries, which the
-	// display ladder reads as `queued` — not an empty string, which is not
-	// a status at all.
+	// (default manual), TriggerID, BlueprintRunID, Type (default delegation).
+	// An empty Status inserts SQL NULL — the mid-flight state a fresh mint
+	// carries, which the display ladder reads as `queued` — not an empty
+	// string, which is not a status at all.
 	Conversation func(t *testing.T, conv domain.Conversation) string
 
 	// BackdateStartedAt rewrites the conversation's started_at to `age` ago,
@@ -5585,10 +5585,19 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Stopped by a person: they know, and nothing waits on them.
 		stopped := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		park(stopped, domain.ParkReasonUserCancelled)
-		// A turn that did not finish is not one of the reasons.
+		// A delegation's turn that did not finish waits on its delegator…
 		incomplete := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		if ok, err := HolderPark(store, ctx, orgID, incomplete, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park turn_incomplete: ok=%v err=%v", ok, err)
+		}
+		// …and a chat's does not: its person sent the message the reply was
+		// answering.
+		chat := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			Type: domain.ConversationTypeInteractive,
+		})
+		if ok, err := HolderPark(store, ctx, orgID, chat, db.ParkTurnIncomplete()); err != nil || !ok {
+			t.Fatalf("park the chat turn_incomplete: ok=%v err=%v", ok, err)
 		}
 		// Ended after it parked: nothing resumes it.
 		ended := seedConversationForTaskTest(t, orgID, taskID, "", seed)
@@ -5609,7 +5618,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("ListAwaitingPersonSystem: %v", err)
 		}
-		want := map[string]domain.ParkReason{lost: domain.ParkReasonSandboxLost, stalled: domain.ParkReasonStalled}
+		want := map[string]domain.ParkReason{
+			lost: domain.ParkReasonSandboxLost, stalled: domain.ParkReasonStalled, incomplete: domain.ParkReasonTurnIncomplete,
+		}
 		if len(got) != len(want) {
 			t.Fatalf("awaiting = %+v, want exactly %v", got, want)
 		}
@@ -5637,8 +5648,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("ListAwaitingPersonSystem after a resume: %v", err)
 		}
-		if len(got) != 1 || got[0].ConversationID != stalled {
-			t.Errorf("awaiting after %s was resumed = %+v, want only %s", lost, got, stalled)
+		delete(want, lost)
+		if len(got) != len(want) {
+			t.Errorf("awaiting after %s was resumed = %+v, want exactly %v", lost, got, want)
+		}
+		for _, a := range got {
+			if _, ok := want[a.ConversationID]; !ok {
+				t.Errorf("awaiting after %s was resumed holds %s, want only %v", lost, a.ConversationID, want)
+			}
 		}
 
 		if other, err := store.ListAwaitingPersonSystem(ctx, uuid.NewString()); err == nil && len(other) != 0 {

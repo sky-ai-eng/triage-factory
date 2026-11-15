@@ -497,6 +497,29 @@ func TestDispatchClaimedRun_FinishedBlueprintWithoutAMessageParks(t *testing.T) 
 	if gotStatus, gotStep := blueprintState(t, database, bpr); gotStatus != "completed" || gotStep != 0 {
 		t.Errorf("blueprint = (%q, %d), want it untouched at (completed, 0)", gotStatus, gotStep)
 	}
+	// The follow-up's reply never finished, and the transcript says so.
+	var parkReason string
+	if err := database.QueryRow(`SELECT COALESCE(park_reason, '') FROM conversations WHERE id = 'r-nomsg'`).Scan(&parkReason); err != nil {
+		t.Fatalf("read park_reason: %v", err)
+	}
+	if parkReason != string(domain.ParkReasonTurnIncomplete) {
+		t.Errorf("park_reason = %q, want %q", parkReason, domain.ParkReasonTurnIncomplete)
+	}
+	if n := noMessageParkNotes(t, database, "r-nomsg"); n != 1 {
+		t.Errorf("%d no-message stop notes on the transcript, want one", n)
+	}
+}
+
+// noMessageParkNotes counts conversationID's stop notes that record a
+// follow-up claim parking with no message to send.
+func noMessageParkNotes(t *testing.T, database *sql.DB, conversationID string) int {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ? AND content = ?`,
+		conversationID, domain.MessageSubtypeStopNote, noMessageParkNotice).Scan(&n); err != nil {
+		t.Fatalf("count stop notes: %v", err)
+	}
+	return n
 }
 
 // A team that may no longer run the model its concluded work would continue on

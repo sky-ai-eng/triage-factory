@@ -526,6 +526,15 @@ func stopReasonParkNotice(stopReason string) string {
 		"</system-note>", cause, stopReason)
 }
 
+// noMessageParkNotice is the transcript's record of a follow-up claim that
+// parks because it found no message it could send. That is a claim whose
+// predecessor took the last message and ended before its reply finished, or
+// one whose read of the waiting message failed, so the note claims only what
+// holds for both.
+const noMessageParkNotice = "<system-note>\nThis run paused: the reply to the last message did not finish, " +
+	"and this engagement could not resume it. The work so far is intact; send a message to pick it back up.\n" +
+	"</system-note>"
+
 func parseOwnerRepo(s string) (string, string) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 {

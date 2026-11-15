@@ -108,6 +108,17 @@ func (p Park) ClaimOutcome() string {
 	return "parked"
 }
 
+// AwaitsPersonTypeSQL is the conversation-type half of
+// domain.ParkReason.AwaitsPerson as SQL, against the conversation alias the
+// caller names: a turn_incomplete park waits on a person only on a delegation.
+// The reads that select on domain.ParkReasonsAwaitingPerson add it beside
+// their reason match rather than inside it, so that match stays the plain
+// one the partial notice index is planned from.
+func AwaitsPersonTypeSQL(alias string) string {
+	return `(` + alias + `.park_reason <> '` + string(domain.ParkReasonTurnIncomplete) + `' OR ` +
+		alias + `.type = '` + domain.ConversationTypeDelegation + `')`
+}
+
 // ConversationStore owns the conversations / messages tables — agent
 // conversation lifecycle, transcript messages, and the derived queries the
 // delegate spawner + agent handler + chains depend on. All methods take

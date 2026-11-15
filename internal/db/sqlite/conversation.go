@@ -1853,6 +1853,7 @@ var parkedForPersonSQL = `
 		LEFT JOIN entities e ON e.id = t.entity_id
 		WHERE c.status = 'open'
 		  AND c.park_reason IN (` + strings.TrimRight(strings.Repeat("?, ", len(domain.ParkReasonsAwaitingPerson())), ", ") + `)
+		  AND ` + db.AwaitsPersonTypeSQL("c") + `
 		  AND c.creator_user_id IS NOT NULL
 		  AND c.ended_at IS NULL
 		  AND c.archived_at IS NULL`

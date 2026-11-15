@@ -296,18 +296,28 @@ func IsParkReason(reason string) bool {
 	return false
 }
 
-// AwaitsPerson reports whether a conversation parked for r is waiting on a
-// person: nothing retries it, and it moves again only when someone sends it a
-// message or fixes what stopped it. A stop or a blueprint's end is a park
-// somebody, or something, meant.
-func (r ParkReason) AwaitsPerson() bool {
+// AwaitsPerson reports whether a conversation of conversationType parked for r
+// is waiting on a person: nothing retries it, and it moves again only when
+// someone sends it a message or fixes what stopped it. A stop or a blueprint's
+// end is a park somebody, or something, meant.
+//
+// A turn that did not finish waits on a person only on a delegation. The
+// person who delegated one handed the work off, so nobody is reading it when
+// the turn stops. A person in a chat sent the message the reply was answering,
+// and its stop note lands where they are reading.
+func (r ParkReason) AwaitsPerson(conversationType string) bool {
+	if r == ParkReasonTurnIncomplete {
+		return conversationType == ConversationTypeDelegation
+	}
 	return slices.Contains(ParkReasonsAwaitingPerson(), r)
 }
 
-// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits, for the store
-// reads that select on it.
+// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits for some
+// conversation type, for the store reads that select on it. Those reads test
+// turn_incomplete's type beside the reason (db.AwaitsPersonTypeSQL).
 func ParkReasonsAwaitingPerson() []ParkReason {
 	return []ParkReason{
+		ParkReasonTurnIncomplete,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
 		ParkReasonStalled,

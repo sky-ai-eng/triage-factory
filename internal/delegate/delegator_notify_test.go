@@ -354,24 +354,46 @@ func TestPausedConversation_OpensFromTheRowsAndResolvesWhenWoken(t *testing.T) {
 	rec.Inactive(t, org, kinds.ConversationPaused)
 }
 
-// A turn_incomplete park is not one of the reasons that wait on a person: it
-// rings nothing and the sweep opens nothing for it.
-func TestPausedConversation_ATurnIncompleteParkOpensNothing(t *testing.T) {
-	f := newStallFixture(t, "r-idle", activityTimings{idle: time.Hour})
-	rec := notifytest.Record(t)
-	rings := ringOn(f.s)
+// A turn_incomplete park waits on the person who delegated a delegation, so it
+// rings and the sweep opens its notice. On a chat it rings nothing and opens
+// nothing: the person sent the message the reply was answering.
+func TestPausedConversation_ATurnIncompleteParkWaitsOnADelegationsDelegator(t *testing.T) {
+	for _, tc := range []struct {
+		convType string
+		wantOpen bool
+	}{
+		{domain.ConversationTypeDelegation, true},
+		{domain.ConversationTypeInteractive, false},
+	} {
+		t.Run(tc.convType, func(t *testing.T) {
+			f := newStallFixture(t, "r-incomplete-"+tc.convType, activityTimings{idle: time.Hour})
+			rec := notifytest.Record(t)
+			rings := ringOn(f.s)
+			org := runmode.LocalDefaultOrgID
+			if _, err := f.database.Exec(`UPDATE conversations SET type = ? WHERE id = ?`, tc.convType, f.conversationID); err != nil {
+				t.Fatalf("stage the conversation type: %v", err)
+			}
 
-	if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: f.conversationID, claimID: f.claimID,
-		reason: db.ParkTurnIncomplete(),
-	}); fenced || !flipped {
-		t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
+			if fenced, flipped := f.s.markConversationOpenFlipped(f.claimCtx, liveParkContext{
+				orgID: org, conversationID: f.conversationID, claimID: f.claimID,
+				reason: db.ParkTurnIncomplete(),
+			}); fenced || !flipped {
+				t.Fatalf("park: fenced=%v flipped=%v, want a park that landed", fenced, flipped)
+			}
+			passOnce(t, f.s)
+			if !tc.wantOpen {
+				if got := rings.rang(); len(got) != 0 {
+					t.Errorf("doorbell rang %v for a chat's turn_incomplete park, want no ring", got)
+				}
+				rec.Inactive(t, org, kinds.ConversationPaused)
+				return
+			}
+			if got := rings.rang(); len(got) != 1 || got[0] != org {
+				t.Errorf("doorbell rang %v, want once for %s", got, org)
+			}
+			rec.Active(t, org, kinds.ConversationPaused, f.conversationID)
+		})
 	}
-	if got := rings.rang(); len(got) != 0 {
-		t.Errorf("doorbell rang %v for a turn_incomplete park, want no ring", got)
-	}
-	passOnce(t, f.s)
-	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.ConversationPaused)
 }
 
 // A turn that stops while the stall watchdog's stop is pending parks stalled,
