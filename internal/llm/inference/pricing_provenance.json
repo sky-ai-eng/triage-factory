@@ -1,6 +1,6 @@
 {
  "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
- "commit": "baddc67041e0888b8bcdc32d43e86c946c867c76",
- "fetched": "2026-11-03",
+ "commit": "26807a99254580b06fd91231428412460f9ecfb6",
+ "fetched": "2026-11-15",
  "filter": "mode in {chat, responses, completion}"
 }
