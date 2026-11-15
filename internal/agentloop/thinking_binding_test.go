@@ -264,6 +264,28 @@ func TestThinkingBinding_AFollowUpThatLandsWhileATurnStreams(t *testing.T) {
 	p.assertBound(t)
 }
 
+// The final turn's input reaches the model through the would-stop recheck and
+// a bare drain, not the drain between tool calls.
+func TestThinkingBinding_AFollowUpThatLandsWhileTheFinalTurnStreams(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{
+			text: "done",
+			onCall: func() {
+				_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+					ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+				})
+			},
+		}),
+		thinking(scriptedTurn{text: "done again"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	if len(p.requests) != 2 {
+		t.Fatalf("staging failed: %d calls, want the follow-up to keep the run going for a second", len(p.requests))
+	}
+	p.assertBound(t)
+}
+
 func TestThinkingBinding_ASystemNoteThatLandsWhileATurnStreams(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	p := newBindingProvider(

@@ -24,7 +24,9 @@ import (
 
 // memTranscript is an in-memory Transcript with the same semantics the store
 // has: ids ascend from 1, assembly order is COALESCE(seq, id), and
-// MarkDelivered flips only the named ids and stamps subtype when non-empty.
+// MarkDelivered flips only the named ids, stamps subtype when non-empty, and
+// moves a batch that would sit ahead of the newest reply behind every
+// delivered row (domain.DeliveryPositions).
 type memTranscript struct {
 	mu   sync.Mutex
 	rows []domain.Message
@@ -90,8 +92,6 @@ func (t *memTranscript) MarkDelivered(_ context.Context, _, _ string, ids []int,
 	for _, id := range ids {
 		want[id] = struct{}{}
 	}
-	// The store moves a batch that would sit ahead of the model's newest
-	// reply behind every delivered row, in its assembly order.
 	answered, tail := 0.0, 0.0
 	var pending []int
 	for i := range t.rows {
