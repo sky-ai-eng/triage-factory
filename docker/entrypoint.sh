@@ -230,6 +230,13 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # and waits for it exactly as before — this branch is the only
     # difference, so those paths stay byte-identical.
     if ! control_role; then
+        # A container stop ends the broker with the container, before it can
+        # remove its socket, and the container's filesystem outlives the
+        # stop. A socket left by the previous start would end the wait below
+        # before this broker has bound its own.
+        if [ -S "$TF_CAPBROKER_SOCKET" ]; then
+            rm -f "$TF_CAPBROKER_SOCKET"
+        fi
         triagefactory cap-broker --socket "$TF_CAPBROKER_SOCKET" --orchestrator-uid "$TF_ORCHESTRATOR_UID" --orchestrator-gid "$TF_ORCHESTRATOR_GID" &
         BROKER_PID=$!
 

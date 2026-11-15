@@ -200,7 +200,12 @@ func TestServe_ParentExitEndsTheRuntimesAndTheBroker(t *testing.T) {
 	}
 	defer r.Close()
 
-	cmd := exec.Command(os.Args[0])
+	// Bounded, so a broker helper that never comes up fails the test. Killing
+	// the intermediate is also what ends that helper: it is the parent the
+	// helper watches.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0])
 	cmd.Env = append(os.Environ(), parentWatchHelperEnv+"="+parentWatchIntermediate)
 	cmd.ExtraFiles = []*os.File{w}
 	cmd.Stderr = os.Stderr
@@ -233,5 +238,36 @@ func TestServe_ParentExitEndsTheRuntimesAndTheBroker(t *testing.T) {
 			t.Fatal("5s after its parent exited, the broker or its runtime still holds the pipe")
 		}
 		t.Fatalf("read the pipe: %v", err)
+	}
+}
+
+// Shutdown signals every runtime the server supervises before it returns. A
+// runtime started without the server's context stands in for one whose
+// context watcher has not run by the time the broker exits.
+func TestShutdown_KillsSupervisedRuntimes(t *testing.T) {
+	cmd := exec.Command("sleep", "600")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	srv := NewServer(&fakeOps{})
+	srv.runsMu.Lock()
+	srv.runs["c-shutdown"] = &runEntry{rt: &stubRuntime{cmd: cmd}, done: make(chan struct{})}
+	srv.runsMu.Unlock()
+
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case err := <-exited:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+			t.Errorf("the runtime ended with %v, want killed by SIGKILL", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("5s after Shutdown returned, the supervised runtime is still running")
 	}
 }
