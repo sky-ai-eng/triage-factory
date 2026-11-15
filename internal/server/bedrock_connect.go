@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 // The Bedrock vocabulary and validators shared by the three flavor routes in
@@ -54,7 +55,13 @@ var awsRegionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d+$`)
 // with a host and no path / query / fragment, because the proxy forwards
 // the incoming request path verbatim. Loopback http is allowed for tests.
 // A trailing "/" is the caller's to strip before calling.
-func validateBedrockBaseURL(raw string) error {
+//
+// multi narrows that to exactly what the native client dials. In multi mode
+// every Bedrock call is native, and bifrost's Bedrock provider keeps only the
+// host of an endpoint and dials https://<host>: a value it would change first
+// (loopback http, an upper-case scheme, a user name or password) is refused, so
+// the admin learns at connect time rather than at the first call.
+func validateBedrockBaseURL(raw string, multi bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("endpoint URL: %v", err)
@@ -62,11 +69,22 @@ func validateBedrockBaseURL(raw string) error {
 	if u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("endpoint URL must include scheme and host: %q", raw)
 	}
+	if multi && u.User != nil {
+		// Before the checks below, which echo the value: it carries what may
+		// be a password.
+		return fmt.Errorf("endpoint URL must not include a user name or password")
+	}
 	if u.Path != "" && u.Path != "/" {
 		return fmt.Errorf("endpoint URL must not include a path: %q", raw)
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("endpoint URL must not include query or fragment: %q", raw)
+	}
+	if multi {
+		if u.Hostname() == "" || inference.BedrockEndpointURL(raw) != raw {
+			return fmt.Errorf("endpoint URL must be \"https://\" followed by a host and an optional port: %q", raw)
+		}
+		return nil
 	}
 	if u.Scheme != "https" {
 		host, _, _ := net.SplitHostPort(u.Host)

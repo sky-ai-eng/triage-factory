@@ -36,8 +36,12 @@ type ProviderCredentials struct {
 	// APIKey is the Anthropic API key (or gateway bearer). Empty for a Bedrock
 	// role/SigV4 config that authenticates through Bedrock instead.
 	APIKey string
-	// BaseURL overrides the provider endpoint (a customer gateway or a Bedrock
-	// VPC endpoint). Optional.
+	// BaseURL overrides the provider endpoint: a gateway in front of
+	// Anthropic, or a Bedrock runtime endpoint (a VPC interface endpoint, or a
+	// host the regional formula can't produce). Optional.
+	//
+	// bifrost dials a Bedrock endpoint as https://<host>: it keeps only the
+	// host, and drops a scheme, a path, or credentials in the URL.
 	BaseURL string
 	// ExtraHeaders are attached to every request to this provider (e.g. a
 	// gateway Authorization bearer, a beta header override). Optional.
@@ -148,6 +152,9 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 		Weight: 1,
 	}
 
+	if c.Provider == ProviderBedrock && c.Bedrock == nil {
+		return schemas.Key{}, fmt.Errorf("a Bedrock provider requires Bedrock credentials")
+	}
 	if c.Bedrock != nil {
 		if c.Bedrock.Region == "" {
 			return schemas.Key{}, fmt.Errorf("bedrock credentials require a region")
@@ -161,6 +168,7 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 			RoleARN:         optionalSecret(c.Bedrock.RoleARN),
 			ExternalID:      optionalSecret(c.Bedrock.ExternalID),
 			RoleSessionName: optionalSecret(c.Bedrock.RoleSessionName),
+			Endpoints:       bedrockEndpoints(c.BaseURL),
 		}
 		return key, nil
 	}
@@ -171,8 +179,36 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 	return key, nil
 }
 
+// bedrockEndpoints carries a Bedrock base URL where bifrost's Bedrock provider
+// reads a host: the key's endpoint for each AWS service, never
+// NetworkConfig.BaseURL. Runtime is the only service a chat call uses; the
+// region still sets the SigV4 signing scope, whatever host is dialled.
+func bedrockEndpoints(baseURL string) *schemas.BedrockEndpoints {
+	if baseURL == "" {
+		return nil
+	}
+	return &schemas.BedrockEndpoints{Runtime: optionalSecret(baseURL)}
+}
+
+// BedrockEndpointURL is the address bifrost dials for a Bedrock endpoint
+// override: https and the host it keeps (schemas.NormalizeEndpointHost). A
+// value that is not already this would be changed before it was dialled.
+// Empty for an empty value.
+func BedrockEndpointURL(baseURL string) string {
+	return bedrockDialURL(optionalSecret(baseURL))
+}
+
+func bedrockDialURL(v *schemas.SecretVar) string {
+	host := schemas.NormalizeEndpointHost(v)
+	if host == "" {
+		return ""
+	}
+	return "https://" + host
+}
+
 // buildProviderConfig sizes the worker pool modestly and lets bifrost fill the
-// remaining network defaults (timeouts, retries) via CheckAndSetDefaults.
+// remaining network defaults (timeouts, retries) via CheckAndSetDefaults. A
+// Bedrock base URL is not set here: it rides the key (bedrockEndpoints).
 func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	concurrency := c.Concurrency
 	if concurrency <= 0 {
@@ -182,9 +218,13 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	if bufSize <= 0 {
 		bufSize = defaultBufferSize
 	}
+	baseURL := c.BaseURL
+	if c.Provider == ProviderBedrock {
+		baseURL = ""
+	}
 	cfg := &schemas.ProviderConfig{
 		NetworkConfig: schemas.NetworkConfig{
-			BaseURL:             c.BaseURL,
+			BaseURL:             baseURL,
 			ExtraHeaders:        plainHeaders(c.ExtraHeaders),
 			AllowPrivateNetwork: c.AllowPrivateNetwork,
 		},
