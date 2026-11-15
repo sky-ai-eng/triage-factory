@@ -144,6 +144,10 @@ const (
 	// engagement's tools ran in died under it and could not be restarted in
 	// place.
 	HandBackJailLost = "requeued_jail_lost"
+	// HandBackProviderSwitch is a claim handed back because a person's
+	// message moved the conversation to a model another provider serves,
+	// which the engagement's sealed credentials cannot call.
+	HandBackProviderSwitch = "requeued_provider_switch"
 )
 
 // HandBackBudget names the budget a hand-back outcome spends.
@@ -192,6 +196,10 @@ type HandBackPolicy struct {
 //     the jail kept dying with no call completing between restarts. Every
 //     call the engagement had in flight was answered, so the next claim
 //     continues the transcript at once, in a new cell.
+//   - requeued_provider_switch: a person's message named a model another
+//     provider serves, and the engagement's credentials were sealed for its
+//     own provider alone. The next claim seals the new one and runs on that
+//     model at once; a person's choice is not a loss.
 //
 // The upstream budget counts attempts, not time: next_attempt_at is database
 // time, and a machine that sleeps advances it while nobody retries, so a time
@@ -204,6 +212,7 @@ var HandBackPolicies = []HandBackPolicy{
 	{Outcome: HandBackUpstream, Budget: BudgetUpstream,
 		Schedule: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}},
 	{Outcome: HandBackJailLost, Budget: BudgetJail},
+	{Outcome: HandBackProviderSwitch, Budget: BudgetNone},
 }
 
 // HandBackPolicyFor returns outcome's policy, and false for an outcome that is

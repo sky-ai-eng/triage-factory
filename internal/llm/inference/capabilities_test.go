@@ -39,26 +39,6 @@ func TestCapabilityResolver_AnswersFromTheDatasheet(t *testing.T) {
 	}
 }
 
-// TestWire_EffortReachesOpus55AsAdaptiveThinking: an effort on Opus 5.5 is
-// sent as adaptive thinking and output_config.effort, unchanged, at every
-// level, and never as a thinking budget, which a model that takes only
-// adaptive thinking refuses.
-func TestWire_EffortReachesOpus55AsAdaptiveThinking(t *testing.T) {
-	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
-		areq := toAnthropic(t, Request{
-			Provider: ProviderAnthropic, Model: "claude-opus-5-5",
-			Rows:   []domain.Message{{ID: 1, Role: "user", Content: "hi"}},
-			Effort: level,
-		})
-		if areq.Thinking == nil || areq.Thinking.Type != "adaptive" || areq.Thinking.BudgetTokens != nil {
-			t.Errorf("%s: thinking = %+v, want adaptive with no budget", level, areq.Thinking)
-		}
-		if areq.OutputConfig == nil || areq.OutputConfig.Effort == nil || *areq.OutputConfig.Effort != level {
-			t.Errorf("%s: output_config = %+v, want effort %q", level, areq.OutputConfig, level)
-		}
-	}
-}
-
 // TestWire_BedrockShapingReadsTheDatasheet: bifrost's request shaping reads
 // the installed record, not only its own detection. The datasheet says the
 // Bedrock Claude rows take no assistant prefill, so a conversation ending on

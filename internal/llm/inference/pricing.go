@@ -93,6 +93,15 @@ type modelPrice struct {
 	// read as a refusal.
 	SupportsSamplingParams *bool `json:"supports_sampling_params"`
 
+	// The reasoning-effort facts, read by ModelInfo for the catalog's
+	// effort_levels. supports_reasoning covers low, medium and high, and the
+	// next two the levels above them. EffortCeiling is the highest level a
+	// Bedrock row takes, empty on a row with no ceiling.
+	SupportsReasoning   bool   `json:"supports_reasoning"`
+	SupportsXHighEffort bool   `json:"supports_xhigh_reasoning_effort"`
+	SupportsMaxEffort   bool   `json:"supports_max_reasoning_effort"`
+	EffortCeiling       string `json:"bedrock_output_config_effort_ceiling"`
+
 	// MaxOutputTokens is the model's maximum completion length, read by
 	// ModelMaxOutput for the same reason MaxInputTokens is read by
 	// ModelWindow: the datasheet is already the vendored source of per-model

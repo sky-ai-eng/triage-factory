@@ -317,10 +317,7 @@ export function resumeBlockedCopy(conversation: Conversation): string {
       return 'This step just handed off — follow up on the blueprint’s latest step.'
     case 'session_missing':
     case 'worktree_missing':
-    case 'model_missing':
       return 'This run didn’t record the state a resume needs, so it can’t be continued.'
-    case 'model_not_enabled':
-      return 'This run’s model is no longer one this team can pick — choose one from the team’s enabled models in Settings, then continue.'
     // The boundary rungs. Each says the same thing — this conversation is no
     // longer the one its task is about — and then the part that differs: who
     // or what carries the work now, since that is what the reader does next.

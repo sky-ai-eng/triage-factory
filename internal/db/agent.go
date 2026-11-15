@@ -764,6 +764,28 @@ type ConversationStore interface {
 	// nil.
 	NewestAssistantToolCallsForConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string][]domain.ToolCall, error)
 
+	// NewestPersonMessageSystem returns the conversation's newest person row
+	// by id: a person's own message (role 'user', an author, and a blank
+	// subtype or the steer stamp a mid-turn drain gives one), delivered or
+	// still waiting, in any window state but withdrawn (delivered=false AND
+	// window_state='inactive'). A compacted row still counts, so a compaction
+	// never resets the settings a person last picked. Every person row
+	// records the model and effort it runs on, so this row holds the
+	// conversation's current settings; a row written before rows recorded
+	// them carries no model. nil when the conversation has none. Admin pool,
+	// org bound by argument: its readers are the send path, the claim and the
+	// credential seal, none of which carries a request identity.
+	NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
+	// NewestAssistant returns the conversation's newest assistant row by id
+	// whose window_state is 'active': the last call the model answered that
+	// the next call reads, whose usage says how full the window is and whose
+	// time says whether the provider cache is still warm. nil when the
+	// conversation has none. Read under the caller's claims; the System twin
+	// is the admin-pool read for the send path.
+	NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+	NewestAssistantSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
 	// conversation's exact LLM context, ordered by the effective assembly key
 	// COALESCE(seq, id). window_state='inactive' rows are excluded

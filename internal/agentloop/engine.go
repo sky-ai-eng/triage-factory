@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -120,11 +121,19 @@ type Params struct {
 	// (see loopSpan). The zero value links nothing.
 	EngagementSpan trace.SpanContext
 
-	// Model is the provider model id. SystemPrompt is the fully assembled
-	// envelope (see envelope.go) — the loop never composes prompt text
-	// itself beyond the drain/repair notices.
+	// Model is the provider model id the engagement starts on. SystemPrompt
+	// is the fully assembled envelope (see envelope.go) — the loop never
+	// composes prompt text itself beyond the drain/repair notices.
 	Model        string
 	SystemPrompt string
+
+	// SwitchableModels are the models this engagement may move to without a
+	// new credential: the ones its provider serves. A person's message
+	// recording one of them moves every call after it onto that model and its
+	// effort; one recording any other model ends the engagement with
+	// ResultProviderSwitch, since its credentials are for Model's provider
+	// alone. Model itself is always switchable.
+	SwitchableModels []string
 
 	// SystemAddendum is this conversation's own system text, sent as a
 	// second system block behind SystemPrompt's cache breakpoint. The driver
@@ -165,7 +174,10 @@ type Params struct {
 	BashDefaultTimeout time.Duration
 	BashMaxTimeout     time.Duration
 
-	// Effort rides through to the provider call unchanged.
+	// Effort is the reasoning effort the engagement starts at, which rides
+	// through to the provider call unchanged. Empty leaves reasoning at the
+	// provider default. A person's message moves it with the model (see
+	// SwitchableModels).
 	Effort string
 
 	// MaxTokens pins the completion cap for every call this engagement
@@ -262,6 +274,12 @@ const (
 	// caller continues it in a new cell. Err is the *ToolHostLostError, whose
 	// Reason says what ended the tool host.
 	ResultToolHostLost
+	// ResultProviderSwitch — a person's message recorded a model outside
+	// Params.SwitchableModels, which this engagement's credentials cannot
+	// call. The loop returns before making a call on it: the transcript is
+	// whole, the message is in it, and the caller hands the claim back for
+	// one sealed for that model's provider. Model names the model.
+	ResultProviderSwitch
 )
 
 // Result is the engagement's terminal report, returned to the in-process
@@ -286,6 +304,8 @@ type Result struct {
 	CostUSD float64
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
+	// Model is the model a ResultProviderSwitch is for.
+	Model string
 	// Err carries the underlying cause on ResultFailed,
 	// ResultUpstreamUnavailable and ResultToolHostLost.
 	Err error
@@ -460,6 +480,12 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	// cross-claim state, so the derived-state discipline does not apply.
 	reactiveCompacted := false
 
+	// settingsFrom is the id of the person row whose model and effort the
+	// engagement now runs on, 0 before any. params is this frame's copy, so
+	// adopting a row's settings writes them onto it and every call after
+	// reads them; a compaction that later drops the row reverts nothing.
+	settingsFrom := 0
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return e.cancelled(ctx, started, turn)
@@ -511,6 +537,21 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("list rows for assembly: %w", err))
+		}
+
+		// 2c. Settings. A person's message newer than the one the engagement
+		// runs on, recording a model, moves every call from here onto that
+		// model and effort, a message steering a running turn included,
+		// since the drain runs before every call. A model this engagement's
+		// credentials cannot call ends it here, before the call.
+		if row, ok := newerSettingsRow(rows, settingsFrom); ok {
+			if row.Model != params.Model && !slices.Contains(params.SwitchableModels, row.Model) {
+				e.info("a person's message moved the conversation to another provider's model; handing it back",
+					"conversation", params.ConversationID, "model", params.Model, "to", row.Model)
+				return Result{Kind: ResultProviderSwitch, Model: row.Model, NumTurns: turn, DurationMs: e.msSince(started)}
+			}
+			settingsFrom = row.ID
+			params.Model, params.Effort = row.Model, row.Effort
 		}
 
 		// 3. Guards, before every call. Each sees the engagement's own call

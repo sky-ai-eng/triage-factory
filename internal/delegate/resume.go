@@ -238,14 +238,16 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 // start, so a resume reuses the exact model / repo / tool context the run
 // began with rather than re-resolving live state mid-run.
 type ResumeOptions struct {
-	// Model is the model the run started with. **Required** — a resume
-	// must reuse the model captured at run start (conv.Model, captured by
-	// dispatchResumeClaim), never a freshly-resolved one, or a config change
-	// the initial invocation and the resume would silently switch models
-	// mid-run. ResumeWithMessage rejects an empty Model with an error
-	// rather than falling back to a live per-(org, team) resolve, which
-	// would reintroduce exactly that mid-run drift.
+	// Model is the claim's model (modelForClaim): the model the newest
+	// person message runs on, or else the step's or the team's.
+	// **Required** — the claim decided it, and ResumeWithMessage rejects an
+	// empty Model rather than resolving one of its own, which could disagree
+	// with the model the claim's credentials were sealed for.
 	Model string
+
+	// Effort is the effort the resumed turn runs at (claimEffort), passed to
+	// the harness beside Model. Empty leaves it at the harness's default.
+	Effort string
 
 	// GitHubOwner is the owner of the GitHub repo the run started on — the
 	// owner the initial invocation keyed its local gh channel's credential
@@ -385,14 +387,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	if cwd == "" {
 		return nil, fmt.Errorf("resume: missing cwd")
 	}
-	// A resume MUST reuse the model the run started with. Requiring it
-	// here — rather than falling back to a live per-(org,
-	// team) resolve — is what closes the mid-run model-drift gap: a config
-	// change between the initial invocation and this resume must never
-	// switch models underneath a single logical run. The resume claim captures
-	// and passes it (conv.Model); an empty value is a wiring bug, surfaced loudly.
+	// A resume runs on the claim's model, which is what its credentials were
+	// sealed for. The resume claim passes it (conv.Model, set from
+	// modelForClaim); an empty value is a wiring bug, surfaced loudly.
 	if opts.Model == "" {
-		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")
+		return nil, fmt.Errorf("resume: missing model (caller must pass the claim's model)")
 	}
 	model := opts.Model
 
@@ -493,6 +492,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	baseOpts := agentproc.RunOptions{
 		Cwd:                cwd,
 		Model:              model,
+		Effort:             opts.Effort,
 		PermissionMode:     teamOpts.permissionMode,
 		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
 		SessionID:          sessionID,

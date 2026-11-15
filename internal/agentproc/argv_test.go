@@ -217,9 +217,18 @@ func TestBuildArgs_ResumeAddsResumeFlagBeforeModel(t *testing.T) {
 	}
 }
 
+// The effort travels beside the model, as its own flag.
+func TestBuildArgs_PassesEffort(t *testing.T) {
+	got := BuildArgs(RunOptions{Message: "hi", Model: "sonnet", Effort: "xhigh"})
+	i := slices.Index(got, "--effort")
+	if i < 0 || i+1 >= len(got) || got[i+1] != "xhigh" {
+		t.Fatalf("--effort = %v, want xhigh", got)
+	}
+}
+
 func TestBuildArgs_OmitsZeroValueFlags(t *testing.T) {
 	got := BuildArgs(RunOptions{Message: "hi"})
-	for _, flag := range []string{"--model", "--resume", "--allowedTools", "--max-turns", "--add-dir"} {
+	for _, flag := range []string{"--model", "--effort", "--resume", "--allowedTools", "--max-turns", "--add-dir"} {
 		if slices.Contains(got, flag) {
 			t.Errorf("expected %q to be omitted, got %v", flag, got)
 		}

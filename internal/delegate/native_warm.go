@@ -16,6 +16,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
@@ -368,11 +369,12 @@ func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitSta
 
 // warmResumeModelHolds asks the model question a claim asks (modelForClaim)
 // before a warm resume, and returns the conversation it read when the answer
-// is the model the engagement was built with. Otherwise it returns nil and
+// is a model the engagement can call: its own, or one in its SwitchableModels,
+// which the engine moves to at its next call. Otherwise it returns nil and
 // the claim is let go: the resumed conversation is left queued with no claim,
 // and the cold claim that drives it makes the decision as every claim does,
-// switching models or refusing the one the team no longer enables. A failed
-// read answers nil too, so the cold claim decides.
+// sealing another provider's credentials or refusing the model the team no
+// longer enables. A failed read answers nil too, so the cold claim decides.
 func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domain.Conversation {
 	conv, err := s.conversations.GetSystem(ctx, n.orgID, n.conversationID)
 	if err != nil || conv == nil {
@@ -394,8 +396,8 @@ func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domai
 			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "error", err)
 		return nil
 	}
-	if model != n.params.Model {
-		delegateLog.Info("a claim would now run on another model than the warm engagement's; letting the claim go",
+	if model != n.params.Model && !slices.Contains(n.params.SwitchableModels, model) {
+		delegateLog.Info("a claim would now run on a model the warm engagement's credentials cannot call; letting the claim go",
 			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "model", model)
 		return nil
 	}

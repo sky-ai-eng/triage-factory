@@ -52,6 +52,10 @@ type liveProc interface {
 	Stderr() string
 	Err() error
 	Send(ctx context.Context, text string) error
+	// SetSettings moves the process's next turn onto a model and an
+	// effort, and Settings reports what its next turn runs on.
+	SetSettings(ctx context.Context, model, effort string) error
+	Settings() (model, effort string)
 	Close() error
 }
 
@@ -363,10 +367,12 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// this turn was about to conclude or park on, the model has not
 			// seen it.
 			starts := startsATurn
+			deferred := false
 			if r.Terminal != nil {
 				starts = nil
 			} else {
-				sent, fenced := s.sendWaitingInput(ctx, park, proc, starts)
+				var sent, fenced bool
+				sent, fenced, deferred = s.sendWaitingInput(ctx, park, proc, starts)
 				if fenced {
 					s.handOnOrLetGo(ctx, park, proc, nil)
 					return liveOutcome{fenced: true, costUSD: processSpend(proc)}
@@ -376,7 +382,9 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					continue
 				}
 			}
-			if r.Terminal == nil && sdkTurnFinished(r.StopReason) && nudge != nil && !nudged {
+			// Input this process will not take is waiting for the next
+			// engagement, and a nudge would run a turn here ahead of it.
+			if r.Terminal == nil && !deferred && sdkTurnFinished(r.StopReason) && nudge != nil && !nudged {
 				if note := nudge(ctx); note != "" {
 					sent, fenced := s.sendNudge(ctx, park, proc, note)
 					if fenced {
@@ -394,7 +402,11 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// process is let go of before the result is handed back, so the
 			// row never reads open while a process that could still write to
 			// it is alive. Input that arrived since the check above keeps the
-			// turn going after all.
+			// turn going after all, unless the check found input this
+			// process will not take: then it is let go without asking again.
+			if deferred {
+				starts = nil
+			}
 			next, fenced := s.handOnOrLetGo(ctx, park, proc, starts)
 			if fenced {
 				return liveOutcome{fenced: true, costUSD: processSpend(proc)}
@@ -437,14 +449,21 @@ func startsATurnAfterAPause(r domain.Message) bool {
 // holds while it writes a person's message, so a message queued before the
 // decision is seen by it and one queued after finds the process gone. The
 // process is closed after the lock is released, so a send waiting on the lock
-// is not held for the close.
+// is not held for the close. For the same reason the process is moved onto the
+// newest message's settings before the lock is taken (moveLiveSettings), since
+// the move waits on the wrapper's answer; under the lock the process is
+// already on them, unless a message naming others landed in between. A
+// process that cannot take them is let go without looking.
 func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (next, fenced bool) {
+	if starts != nil && !s.moveLiveSettings(ctx, park, proc) {
+		starts = nil
+	}
 	h := s.getProc(park.conversationID)
 	if h != nil {
 		h.input.Lock()
 	}
 	if starts != nil {
-		next, fenced = s.sendWaitingInput(ctx, park, proc, starts)
+		next, fenced, _ = s.sendWaitingInput(ctx, park, proc, starts)
 	}
 	if !next && h != nil {
 		h.lettingGo = true
@@ -467,19 +486,32 @@ func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc 
 // The rows are flushed, marked delivered, before the send, and put back if
 // the send fails, as notesAtToolBatch does. sent reports that the turn
 // started. fenced reports that the claim fence refused the flush: a successor
-// owns the conversation and nothing was sent.
-func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (sent, fenced bool) {
+// owns the conversation and nothing was sent. deferred reports input waiting
+// that this process will not take, which waits for the next engagement.
+//
+// The turn runs on the settings the newest person message records. When they
+// differ from the process's, they are written to it first (SetSettings), so
+// the turn starts on them. A model another provider serves takes nothing and
+// sends nothing: the engagement's credentials are its own provider's, so the
+// process is let go of with the messages still waiting, and the claim the
+// queue makes for them seals that provider. A message folded into a running
+// turn at a tool boundary leaves that turn as it is; its settings apply from
+// the process's next turn.
+func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (sent, fenced, deferred bool) {
 	rows, ok := s.waitingRows(ctx, park.orgID, park.conversationID)
 	if !ok || !slices.ContainsFunc(rows, starts) {
-		return false, false
+		return false, false, false
+	}
+	if !s.moveLiveSettings(ctx, park, proc) {
+		return false, false, true
 	}
 	messages, fenced := s.takeWaitingMessages(ctx, park.orgID, park.conversationID, park.claimID, rows)
 	if fenced {
-		return false, true
+		return false, true, false
 	}
 	notes := s.flushStagedInjections(ctx, park.orgID, park.conversationID)
 	if len(messages) == 0 && len(notes) == 0 {
-		return false, false
+		return false, false, false
 	}
 	var parts []string
 	if len(notes) > 0 {
@@ -492,9 +524,41 @@ func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, pr
 		delegateLog.Warn("send the input waiting for the live process failed; it waits for the next engagement", "conversation", park.conversationID, "error", err)
 		s.restoreStagedInjections(park.orgID, park.conversationID, notes)
 		s.requeueMessages(park.orgID, park.conversationID, park.claimID, messages)
-		return false, false
+		return false, false, false
 	}
-	return true, false
+	return true, false, false
+}
+
+// moveLiveSettings puts the live process on the newest person message's
+// settings before a turn starts, and reports whether the turn may start on
+// this process. It may not when the message names a model another provider
+// serves, or when the process did not confirm the move (SetSettings), which
+// leaves the input waiting for the next engagement: its cold resume starts on
+// the message's settings. A person row that recorded no settings, or
+// a read that fails, leaves the process as it is.
+func (s *Spawner) moveLiveSettings(ctx context.Context, park liveParkContext, proc liveProc) bool {
+	last, err := s.newestStampedPersonRow(ctx, park.orgID, park.conversationID)
+	if err != nil {
+		delegateLog.Warn("read the newest person message's settings failed; the turn runs on the process's", "conversation", park.conversationID, "error", err)
+		return true
+	}
+	if last == nil {
+		return true
+	}
+	model, effort := proc.Settings()
+	if last.Model == model && last.Effort == effort {
+		return true
+	}
+	if !sameProvider(last.Model, model) {
+		delegateLog.Info("a person's message moved the conversation to another provider's model; letting the process go for a claim on it",
+			"conversation", park.conversationID, "model", model, "to", last.Model)
+		return false
+	}
+	if err := proc.SetSettings(ctx, last.Model, last.Effort); err != nil {
+		delegateLog.Warn("move the live process onto the message's settings failed; it waits for the next engagement", "conversation", park.conversationID, "error", err)
+		return false
+	}
+	return true
 }
 
 // sendNudge sends the would-stop hook's note into the live process and records
@@ -668,6 +732,20 @@ func (s *Spawner) handBackOnUpstream(ctx context.Context, park liveParkContext, 
 func (s *Spawner) handBackOnLostJail(ctx context.Context, park liveParkContext, reason string) (fenced bool) {
 	return s.leaveConversation(ctx, park, "", snapshotReasonJailLost, func(ctx context.Context, park liveParkContext) bool {
 		return s.handBackClaim(ctx, park, db.HandBackJailLost, 0, reason)
+	})
+}
+
+// handBackOnProviderSwitch is the hand-back for an engagement a person's
+// message moved onto another provider's model: the same ordered ending, a
+// snapshot of the tree included, except that the claim is released
+// 'requeued_provider_switch', claimable at once and spending no budget. The
+// next claim seals model's provider and runs on it. model is kept on the row
+// so a person looking at the queued run sees why it is starting over.
+//
+// Nothing is written to the transcript: the person's message is already in it.
+func (s *Spawner) handBackOnProviderSwitch(ctx context.Context, park liveParkContext, model string) (fenced bool) {
+	return s.leaveConversation(ctx, park, "", snapshotReasonProviderSwitch, func(ctx context.Context, park liveParkContext) bool {
+		return s.handBackClaim(ctx, park, db.HandBackProviderSwitch, 0, "a message moved the conversation to "+model)
 	})
 }
 

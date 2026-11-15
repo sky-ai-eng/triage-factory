@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // SDKClaudeCode is the Claude Code SDK, the one agent harness TF drives as a
@@ -38,13 +41,16 @@ func init() {
 
 // SDKModels returns the models sdk names, in display order, and an empty slice
 // for an SDK this build carries no list for — never nil, so a caller ranging
-// over the result and one checking its length read the same thing. The slice is
-// freshly copied per call, for the same reason Entries is: it is read on an API
-// request path.
+// over the result and one checking its length read the same thing. The slice,
+// and each row's EffortLevels, are freshly copied per call, for the same reason
+// Entries is: it is read on an API request path.
 func SDKModels(sdk string) []Model {
 	src := sdkModels[sdk]
 	out := make([]Model, len(src))
-	copy(out, src)
+	for i, m := range src {
+		m.EffortLevels = slices.Clone(m.EffortLevels)
+		out[i] = m
+	}
 	return out
 }
 
@@ -112,6 +118,9 @@ func loadSDKModels(fileJSON []byte) (map[string][]Model, error) {
 				// Position in the built slice, not in the file: a dropped row
 				// must not leave a hole in the ordering the API publishes.
 				DisplayOrder: len(models),
+				// The harness takes every level for every alias it offers,
+				// and there is no datasheet row to say otherwise.
+				EffortLevels: slices.Clone(domain.EffortLevels),
 			})
 		}
 		if len(models) == 0 {

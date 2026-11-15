@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -79,7 +80,7 @@ func TestDispatchResumeClaim_FailedCommitIdentityReadHandsBack(t *testing.T) {
 	readErr := errors.New("keychain: item could not be read")
 	s.SetRunCredentialResolvers(&fakeResolver{orgLogin: "acme-bot", orgIdentityErr: readErr}, nil, nil)
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, convID, runmode.LocalDefaultUserID, "the answer"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, convID, runmode.LocalDefaultUserID, "the answer", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	claimAndDispatch(t, s, database)

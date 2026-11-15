@@ -436,3 +436,85 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 		t.Fatal("handler did not receive the decision after resolve")
 	}
 }
+
+// TestHandleMessage_BodyValidation is the message body's contract. The
+// fields are checked before anything is looked up, and every failing field is
+// reported. An accepted body runs the send, whose row records the settings.
+func TestHandleMessage_BodyValidation(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	type item struct{ reason, field string }
+	cases := []struct {
+		name   string
+		body   string
+		status int
+		errs   []item
+		effort string
+	}{
+		{"an unknown field", `{"text":"go","temperature":0.2}`, http.StatusBadRequest, nil, ""},
+		{"a model the deployment does not offer", `{"text":"go","model":"gpt-9"}`, http.StatusBadRequest,
+			[]item{{"INVALID_FIELD", "model"}}, ""},
+		{"an effort outside the five", `{"text":"go","model":"sonnet","effort":"minimal"}`, http.StatusBadRequest,
+			[]item{{"INVALID_FIELD", "effort"}}, ""},
+		{"a body bad in model and effort", `{"text":"go","model":"gpt-9","effort":"minimal"}`, http.StatusBadRequest,
+			[]item{{"INVALID_FIELD", "model"}, {"INVALID_FIELD", "effort"}}, ""},
+		{"blank text with a bad model", `{"text":" ","model":"gpt-9"}`, http.StatusBadRequest,
+			[]item{{"MISSING_FIELD", "text"}, {"INVALID_FIELD", "model"}}, ""},
+	}
+	for _, level := range domain.EffortLevels {
+		cases = append(cases, struct {
+			name   string
+			body   string
+			status int
+			errs   []item
+			effort string
+		}{"effort " + level, `{"text":"go","model":"sonnet","effort":"` + level + `"}`, http.StatusOK, nil, level})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			withEmptyBlobStore(t, s)
+			conversationID := seedSteerConversation(t, s.db, "body", "open")
+			execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-body', worktree_path=?, model='sonnet' WHERE id=?`, t.TempDir(), conversationID)
+			// A follow-up on finished work, which a message's settings may change.
+			execSQL(t, s.db, `UPDATE blueprint_runs SET status='completed' WHERE id=(SELECT blueprint_run_id FROM conversations WHERE id=?)`, conversationID)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/agent/conversations/"+conversationID+"/message", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.status != http.StatusOK {
+				if n := messageRowCount(t, s.db, conversationID); n != 0 {
+					t.Errorf("a refused body recorded %d message(s)", n)
+				}
+				if tc.errs == nil {
+					return
+				}
+				var env struct {
+					Errors []struct{ Reason, Field string } `json:"errors"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+					t.Fatalf("decode errors: %v", err)
+				}
+				if len(env.Errors) != len(tc.errs) {
+					t.Fatalf("errors = %+v, want %+v", env.Errors, tc.errs)
+				}
+				for i, want := range tc.errs {
+					if env.Errors[i].Reason != want.reason || env.Errors[i].Field != want.field {
+						t.Errorf("error %d = %+v, want %+v", i, env.Errors[i], want)
+					}
+				}
+				return
+			}
+			var model, effort string
+			if err := s.db.QueryRow(`SELECT COALESCE(model, ''), COALESCE(effort, '') FROM messages WHERE conversation_id=?`, conversationID).Scan(&model, &effort); err != nil {
+				t.Fatalf("read the queued row: %v", err)
+			}
+			if model != "sonnet" || effort != tc.effort {
+				t.Errorf("queued row settings = (%q, %q), want (sonnet, %q)", model, effort, tc.effort)
+			}
+		})
+	}
+}

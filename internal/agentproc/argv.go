@@ -95,6 +95,9 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	if opts.Effort != "" {
+		args = append(args, "--effort", opts.Effort)
+	}
 	// Always sent. The SDK leaves an omitted mode to Claude Code, which
 	// applies a settings defaultMode and, with telemetry off or a
 	// third-party provider, starts in auto — where a classifier, not the

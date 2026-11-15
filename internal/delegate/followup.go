@@ -47,16 +47,12 @@ var ErrConversationNotFound = errors.New("conversation not found")
 
 // The SDK-only resume preconditions, as errors rather than formatted strings so
 // the one ladder can hand them back by name. Each is a row that cannot be
-// resumed at all — no session to re-invoke, no tree to re-invoke it in, no
-// model to re-invoke it on — so they read as internal faults (500) rather than
-// as a state the client should re-read.
+// resumed at all — no session to re-invoke, no tree to re-invoke it in — so
+// they read as internal faults (500) rather than as a state the client should
+// re-read.
 var (
-	errResumeNoSessionID     = errors.New("conversation has no session id; cannot resume")
-	errResumeNoWorktreePath  = errors.New("conversation has no worktree path; cannot resume")
-	errResumeNoModel         = errors.New("conversation has no model; cannot resume")
-	errResumeModelNotEnabled = fmt.Errorf(
-		"%w: this conversation would continue on a model its team can no longer pick — choose one from the team's enabled models in Settings",
-		domain.ErrModelNotEnabled)
+	errResumeNoSessionID    = errors.New("conversation has no session id; cannot resume")
+	errResumeNoWorktreePath = errors.New("conversation has no worktree path; cannot resume")
 )
 
 // The refusal ladder's rungs, named. A rung travels two ways from the single
@@ -72,12 +68,11 @@ const (
 	// ResumeBlockedNotSteerable — the conversation is resting somewhere no wake
 	// reaches and nothing is draining its queue (a failed run).
 	ResumeBlockedNotSteerable = "not_steerable"
-	// ResumeBlockedSessionMissing / WorktreeMissing / ModelMissing — an SDK row
-	// missing one of the three fields its resume re-invokes a Claude session
-	// with. Never a native conversation: its messages ARE its resume state.
+	// ResumeBlockedSessionMissing / WorktreeMissing — an SDK row missing one
+	// of the two fields its resume re-invokes a Claude session with. Never a
+	// native conversation: its messages ARE its resume state.
 	ResumeBlockedSessionMissing  = "session_missing"
 	ResumeBlockedWorktreeMissing = "worktree_missing"
-	ResumeBlockedModelMissing    = "model_missing"
 	// ResumeBlockedWorkspaceExpired — no warm worktree and no snapshot. Gone for
 	// good; no later release brings it back.
 	ResumeBlockedWorkspaceExpired = "workspace_expired"
@@ -93,11 +88,6 @@ const (
 	// was ended, and the stop note on the transcript names the lifecycle event
 	// that ended it.
 	ResumeBlockedBlueprintCancelled = "blueprint_cancelled"
-	// ResumeBlockedModelNotEnabled — the model a resume would run on is one the
-	// team's enable-set no longer includes: its default, or the model the step
-	// this follows ran on. The least permanent rung on the ladder — an admin
-	// re-enables it in a click — which is why it is asked last.
-	ResumeBlockedModelNotEnabled = "model_not_enabled"
 	// ResumeBlockedStepHandedOff — the step gave its blueprint its verdict and
 	// the blueprint has not reacted yet. The one rung about TIMING rather than
 	// about the conversation: a beat later the answer changes.
@@ -255,35 +245,7 @@ func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv
 	if br != nil && br.Status == domain.BlueprintRunStatusRunning && conv.Concluded() {
 		return ResumeBlockedStepHandedOff, br
 	}
-	// The run travels back so the model rung can ask modelForClaim without a
-	// second read of the row this one already has.
 	return "", br
-}
-
-// modelFollowUpBlock is the ladder's last rung: would the claim this wake
-// creates have a model to run on?
-//
-// It asks modelForClaim — the same call the dispatch makes — rather than
-// re-deriving the answer, because the ladder's whole contract is that a
-// composer the server leaves live and a send the server accepts are one
-// decision. A second copy here would be the copy that drifts, and it would
-// drift into the worst direction: a composer that accepts a message no claim
-// will ever deliver.
-//
-// An inconclusive resolve leaves the composer live, matching the blueprint
-// rung above. A settings read that failed is not evidence a model is
-// disabled, and greying out every composer in the org on a transient database
-// hiccup would be a worse answer than letting the dispatch gate refuse — which
-// it does, fail-closed, on the same reads a moment later.
-func (s *Spawner) modelFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation, br *domain.BlueprintRun) string {
-	if _, err := s.modelForClaim(ctx, orgID, br, *conv); err != nil {
-		if errors.Is(err, domain.ErrModelNotEnabled) {
-			return ResumeBlockedModelNotEnabled
-		}
-		delegateLog.Warn("resume: model lookup inconclusive; treating as resumable",
-			"conversation", conv.ID, "team", conv.TeamID, "error", err)
-	}
-	return ""
 }
 
 // blueprintDrivableForClaim is the Go mirror of blueprintDrivableSQL's
@@ -364,11 +326,16 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 //   - everything else → queueFollowUp: write the undelivered row, and (if the
 //     conversation is parked) wake a claim for it.
 //
+// settings are the model and effort the message names, empty for a field it
+// leaves out. Every arm stamps the row with the settings resolveTurnSettings
+// decides, which runs after the arm's own refusals and can refuse the message
+// before anything is written.
+//
 // userID is the actor sending the message; the follow-up's writes route under
 // that user's synthetic claims regardless of the conversation's original
 // trigger (a follow-up is user-initiated even when the run that earned it was
 // not).
-func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID, text string) error {
+func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID, text string, settings domain.TurnSettings) error {
 	// One validation gate for every arm, ahead of the routing: a message for a
 	// live process must refuse exactly the inputs a queued follow-up refuses.
 	// Checked here rather than in queueFollowUp so the live arm can't queue a
@@ -380,21 +347,11 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	if userID == "" {
 		return fmt.Errorf("send: empty user id")
 	}
-	// Fast path: the run's process is in THIS pod's registry, with no
-	// conversation read.
-	//
-	// Load-bearing precondition, and it is what makes skipping the runtime read
-	// safe: the registry is written in exactly one place, the SDK live driver
-	// (registerProc, called only from runLiveAndDrive in live.go). A native
-	// conversation therefore CANNOT be in it, so this can never hand a native
-	// conversation's message to the SDK's delivery. Anything that starts
-	// registering handles from a second driver has to re-read the runtime here
-	// first.
-	if h := s.getProc(conversationID); h != nil {
-		if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text); queued || err != nil {
-			return err
-		}
-	}
+	// The conversation is read once, ahead of every arm, because its team and
+	// its blueprint decide the settings the message runs on. Each arm resolves
+	// them just before it writes the row (resolveTurnSettings), after its own
+	// refusals, so a send that cannot be delivered at all says so rather than
+	// asking first for a model it would never run on.
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return fmt.Errorf("load conversation: %w", err)
@@ -402,23 +359,48 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	if conv == nil {
 		return ErrConversationNotFound
 	}
+	// The run's process is in THIS pod's registry.
+	//
+	// Load-bearing precondition, and it is what makes routing here without
+	// reading the runtime safe: the registry is written in exactly one place,
+	// the SDK live driver (registerProc, called only from runLiveAndDrive in
+	// live.go). A native conversation therefore CANNOT be in it, so this can
+	// never hand a native conversation's message to the SDK's delivery.
+	// Anything that starts registering handles from a second driver has to
+	// read the runtime here first.
+	if h := s.getProc(conversationID); h != nil {
+		if queued, err := s.queueForLiveProcessWith(ctx, h, orgID, *conv, userID, text, settings); queued || err != nil {
+			return err
+		}
+	}
 	// An SDK conversation in flight (claimed, setting up or running) with no
 	// process taking input: one still being set up, whose undelivered rows a
 	// failed setup would hand to a resume it never had, or one the driver has
 	// just let go of, which is about to park. Neither can take a queued row
 	// safely, so the send is refused (ErrNoLiveProcess, a 409) and the person
 	// sends the message again once the conversation has settled. The registry
-	// is read once more first, for a process that registered since the fast
-	// path missed.
+	// is read once more first, for a process that registered since the read
+	// above.
 	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
 		if h := s.getProc(conversationID); h != nil {
-			if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text); queued || err != nil {
+			if queued, err := s.queueForLiveProcessWith(ctx, h, orgID, *conv, userID, text, settings); queued || err != nil {
 				return err
 			}
 		}
 		return fmt.Errorf("send to conversation %s: %w", conversationID, ErrNoLiveProcess)
 	}
-	return s.queueFollowUp(ctx, orgID, *conv, userID, text)
+	return s.queueFollowUp(ctx, orgID, *conv, userID, text, settings)
+}
+
+// queueForLiveProcessWith resolves the settings a message for the live
+// process runs on, then queues it there (queueForLiveProcess). explicit is
+// what the message named.
+func (s *Spawner) queueForLiveProcessWith(ctx context.Context, h *liveRunHandle, orgID string, conv domain.Conversation, userID, text string, explicit domain.TurnSettings) (bool, error) {
+	settings, err := s.resolveTurnSettings(ctx, orgID, conv, explicit)
+	if err != nil {
+		return false, err
+	}
+	return s.queueForLiveProcess(ctx, h, orgID, conv.ID, userID, text, settings)
 }
 
 // queueForLiveProcess queues a person's message for a conversation whose SDK
@@ -436,7 +418,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 // already let go of the process, and the caller routes the message as if
 // there were no process. A failed write is returned: the row is the
 // delivery, so a message without one was not sent.
-func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, orgID, conversationID, userID, text string) (queued bool, err error) {
+func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, orgID, conversationID, userID, text string, settings domain.TurnSettings) (queued bool, err error) {
 	if s.tx == nil {
 		return false, fmt.Errorf("queue message for conversation %s: no transaction runner", conversationID)
 	}
@@ -445,7 +427,7 @@ func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, org
 	if h.lettingGo {
 		return false, nil
 	}
-	msg := pendingUserInput(conversationID, userID, text)
+	msg := pendingUserInput(conversationID, userID, text, settings)
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
@@ -483,16 +465,22 @@ func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, org
 // flush the staged-injection queue at enqueue time, losing anything staged in
 // the gap before the claim; Spawner.dispatchResumeClaim composes it immediately
 // before delivery instead.
-func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.Conversation, userID, text string) error {
+func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.Conversation, userID, text string, explicit domain.TurnSettings) error {
 	// text and userID arrive validated: SendMessage, the sole caller, refuses
 	// both empties at its entry so every arm answers them identically.
 
 	// The gate, refused BEFORE the row is written: a queued message nothing will
 	// ever deliver is worse than a refusal. followUpBlock is the same walk the
 	// run read serves `resumable` from, so a composer the server left live and a
-	// send the server accepts are the same decision made once.
+	// send the server accepts are the same decision made once. It comes before
+	// the settings, whose refusals a person can fix by picking again, because
+	// its own mostly cannot be fixed.
 	if block := s.followUpBlock(ctx, orgID, &conv); block != "" {
 		return blockedFollowUpError(block)
+	}
+	settings, err := s.resolveTurnSettings(ctx, orgID, conv, explicit)
+	if err != nil {
+		return err
 	}
 	// Past the gate, the only question left is which half accepted it: a
 	// conversation resting somewhere a wake reaches needs the flip below, and
@@ -525,10 +513,10 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// conversation, so a member who may read the conversation but not write
 	// it finds no row to clear. Their message still lands, and the
 	// conversation is claimed when its wait is over, as it was going to be.
-	msg := pendingUserInput(conv.ID, userID, text)
+	msg := pendingUserInput(conv.ID, userID, text, settings)
 	var cleared *domain.Conversation
 	var flipped bool
-	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		if wake {
 			var wErr error
 			if flipped, wErr = s.wakeParked(ctx, ts, orgID, conv); wErr != nil {
@@ -784,7 +772,7 @@ func (s *Spawner) forwardToCurrentStep(ctx context.Context, orgID string, conv *
 		if !waitingMessage(r) {
 			continue
 		}
-		if err := s.SendMessage(ctx, orgID, nextID, r.UserID, r.Content); err != nil {
+		if err := s.SendMessage(ctx, orgID, nextID, r.UserID, r.Content, domain.TurnSettings{}); err != nil {
 			delegateLog.Warn("the step now running refused a message left on the step before it; it stays there",
 				"conversation", conv.ID, "next", nextID, "org_id", orgID, "error", err)
 			return false
@@ -810,13 +798,18 @@ func (s *Spawner) forwardToCurrentStep(ctx context.Context, orgID string, conv *
 // what a person is still waiting to have read; an opening is context the first
 // call assembles, and writing it here would have every re-claim replay it as
 // new input.
-func pendingUserInput(conversationID, userID, text string) *domain.Message {
+//
+// The row is stamped with the settings the message runs on, which is what
+// makes the newest person row the conversation's current settings.
+func pendingUserInput(conversationID, userID, text string, settings domain.TurnSettings) *domain.Message {
 	pending := false
 	return &domain.Message{
 		ConversationID: conversationID,
 		UserID:         userID,
 		Role:           "user",
 		Content:        text,
+		Model:          settings.Model,
+		Effort:         settings.Effort,
 		Delivered:      &pending,
 	}
 }
@@ -888,10 +881,6 @@ func blockedFollowUpError(block string) error {
 		return errResumeNoSessionID
 	case ResumeBlockedWorktreeMissing:
 		return errResumeNoWorktreePath
-	case ResumeBlockedModelMissing:
-		return errResumeNoModel
-	case ResumeBlockedModelNotEnabled:
-		return errResumeModelNotEnabled
 	case ResumeBlockedWorkspaceExpired:
 		return ErrWorkspaceExpired
 	case ResumeBlockedBlueprintConcluded:
@@ -947,26 +936,27 @@ func (s *Spawner) ResumabilityFor(ctx context.Context, orgID string, conv *domai
 // exception, and they are named rather than implied.
 //
 // A conversation a person works in that has never run skips the rungs about
-// what a resume continues from: the session, the tree, the model and the
-// workspace. It has none of them to have lost, and its wake launches its
-// first turn rather than resuming one (startsFresh).
+// what a resume continues from: the session, the tree and the workspace. It
+// has none of them to have lost, and its wake launches its first turn rather
+// than resuming one (startsFresh).
+//
+// Which model the wake runs on is not asked here. The send decides it and
+// refuses a model the team may not run (resolveTurnSettings), and the claim
+// refuses one disabled since (modelForClaim), so a team whose default is
+// disabled still offers the composer: the person can pick another model.
 func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) string {
 	fresh := startsFresh(conv)
-	// The SDK's resume re-invokes a Claude session BY ID, in the tree it ran in,
-	// on the model it started with — a config change between the original
-	// invocation and this wake must not switch models underneath one logical
-	// conversation — so all three have to be on the row before a wake means
-	// anything. A native conversation needs none of them: its message rows ARE
-	// the resume state, replayed into a fresh invocation by the loop itself.
+	// The SDK's resume re-invokes a Claude session BY ID, in the tree it ran
+	// in, so both have to be on the row before a wake means anything; the
+	// model it runs on is the claim's. A native conversation needs neither:
+	// its message rows ARE the resume state, replayed into a fresh invocation
+	// by the loop itself.
 	if resumeSourceFor(conv.Runtime) == resumeSourceSession && !fresh {
 		if conv.SessionID == "" {
 			return ResumeBlockedSessionMissing
 		}
 		if conv.WorktreePath == "" {
 			return ResumeBlockedWorktreeMissing
-		}
-		if conv.Model == "" {
-			return ResumeBlockedModelMissing
 		}
 	}
 	// A workspace reaped by the retention TTL is gone for good: no warm
@@ -984,15 +974,8 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 	// drive this conversation, or nothing would drive it yet. Asked here because
 	// both are about the sequence rather than the workspace, and a person whose
 	// workspace is gone is better served by hearing that.
-	block, br := s.blueprintFollowUpBlock(ctx, orgID, conv)
-	if block != "" {
-		return block
-	}
-	// And last, the least permanent refusal of all: everything about this
-	// conversation is fine and its team simply may not run the model it would
-	// continue on. Bottom of the ladder because it is the one rung that a person
-	// clears by changing a setting rather than by giving up on this run.
-	return s.modelFollowUpBlock(ctx, orgID, conv, br)
+	block, _ := s.blueprintFollowUpBlock(ctx, orgID, conv)
+	return block
 }
 
 // startsFresh reports whether waking conv launches its first turn rather than

@@ -173,7 +173,7 @@ func TestResumeSystemBlockRead_WritesNothing(t *testing.T) {
 		t.Fatal("persistSystemBlock reported the fence on a live claim")
 	}
 	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
-		pendingUserInput("r-readonly", runmode.LocalDefaultUserID, "also update the README")); err != nil {
+		pendingUserInput("r-readonly", runmode.LocalDefaultUserID, "also update the README", domain.TurnSettings{})); err != nil {
 		t.Fatalf("queue the follow-up: %v", err)
 	}
 	before := len(allRows(t, s, "r-readonly"))

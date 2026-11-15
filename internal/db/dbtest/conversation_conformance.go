@@ -2348,6 +2348,153 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("InsertMessage_RoundTripsEffort", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+
+		pending := false
+		msg := domain.Message{ConversationID: conversationID, UserID: userID, Role: "user",
+			Content: "think hard", Model: "m-person", Effort: domain.EffortXHigh, Delivered: &pending}
+		if _, err := store.InsertMessage(ctx, orgID, &msg); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		plain := domain.Message{ConversationID: conversationID, Role: "assistant", Content: "ok", Model: "m-reply"}
+		if _, err := store.InsertMessage(ctx, orgID, &plain); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		got, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
+		if err != nil {
+			t.Fatalf("MessagesWindow: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("rows = %d, want 2", len(got))
+		}
+		if got[0].Model != "m-person" || got[0].Effort != domain.EffortXHigh {
+			t.Errorf("person row settings = (%q, %q), want (m-person, xhigh)", got[0].Model, got[0].Effort)
+		}
+		if got[1].Effort != "" {
+			t.Errorf("a row written with no effort reads %q, want empty", got[1].Effort)
+		}
+	})
+
+	t.Run("NewestPersonMessageSystem_CountsACompactedRowAndSkipsWithdrawnAndInjected", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		newest := func() *domain.Message {
+			t.Helper()
+			got, err := store.NewestPersonMessageSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("NewestPersonMessageSystem: %v", err)
+			}
+			return got
+		}
+
+		if got := newest(); got != nil {
+			t.Fatalf("a conversation with no person row answered row %d, want nil", got.ID)
+		}
+
+		asked := insert(domain.Message{UserID: userID, Role: "user", Content: "first", Model: "m-a", Effort: domain.EffortLow})
+		insert(domain.Message{Role: "assistant", Content: "reply", Model: "m-a"})
+		// The compaction takes the person row out of the window: delivered
+		// and inactive is compacted history, still the person's message.
+		if _, err := store.SetWindowStateSystem(ctx, orgID, conversationID, float64(asked)+0.5,
+			domain.MessageWindowActive, domain.MessageWindowInactive); err != nil {
+			t.Fatalf("SetWindowStateSystem: %v", err)
+		}
+		insert(domain.Message{UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note"})
+		pending := false
+		withdrawn := insert(domain.Message{UserID: userID, Role: "user", Content: "never mind", Model: "m-b", Delivered: &pending})
+		if err := store.WithdrawPendingInputSystem(ctx, orgID, conversationID, []int{withdrawn}); err != nil {
+			t.Fatalf("WithdrawPendingInputSystem: %v", err)
+		}
+
+		got := newest()
+		if got == nil || got.ID != asked {
+			t.Fatalf("newest person row = %+v, want the compacted row %d", got, asked)
+		}
+		if got.Model != "m-a" || got.Effort != domain.EffortLow {
+			t.Errorf("newest person row settings = (%q, %q), want (m-a, low)", got.Model, got.Effort)
+		}
+
+		// A message a mid-turn drain stamped as a steer is still the person's.
+		steered := insert(domain.Message{UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer,
+			Content: "and this", Model: "m-c"})
+		if got := newest(); got == nil || got.ID != steered {
+			t.Fatalf("newest person row = %+v, want the steered row %d", got, steered)
+		}
+		// One still waiting counts too.
+		waiting := insert(domain.Message{UserID: userID, Role: "user", Content: "next", Model: "m-d", Delivered: &pending})
+		if got := newest(); got == nil || got.ID != waiting {
+			t.Fatalf("newest person row = %+v, want the waiting row %d", got, waiting)
+		}
+	})
+
+	t.Run("NewestAssistant_ReadsTheNewestActiveAssistantRow", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		both := func() (*domain.Message, *domain.Message) {
+			t.Helper()
+			app, err := store.NewestAssistant(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("NewestAssistant: %v", err)
+			}
+			sys, err := store.NewestAssistantSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("NewestAssistantSystem: %v", err)
+			}
+			return app, sys
+		}
+
+		if app, sys := both(); app != nil || sys != nil {
+			t.Fatalf("a conversation with no assistant row answered (%+v, %+v), want nil", app, sys)
+		}
+		insert(domain.Message{UserID: userID, Role: "user", Content: "go"})
+		insert(domain.Message{Role: "assistant", Content: "one", Model: "m-a"})
+		compacted := insert(domain.Message{Role: "assistant", Content: "two", Model: "m-a"})
+		if _, err := store.SetWindowStateSystem(ctx, orgID, conversationID, float64(compacted)+0.5,
+			domain.MessageWindowActive, domain.MessageWindowInactive); err != nil {
+			t.Fatalf("SetWindowStateSystem: %v", err)
+		}
+		if app, sys := both(); app != nil || sys != nil {
+			t.Fatalf("a conversation whose assistant rows are all compacted answered (%+v, %+v), want nil", app, sys)
+		}
+
+		input, cacheRead := 1200, 300
+		active := insert(domain.Message{Role: "assistant", Content: "three", Model: "m-b",
+			InputTokens: &input, CacheReadTokens: &cacheRead})
+		insert(domain.Message{UserID: userID, Role: "user", Content: "after"})
+		app, sys := both()
+		for name, got := range map[string]*domain.Message{"NewestAssistant": app, "NewestAssistantSystem": sys} {
+			if got == nil || got.ID != active {
+				t.Fatalf("%s = %+v, want row %d", name, got, active)
+			}
+			if got.Model != "m-b" || domain.PromptOccupancy(*got) != 1500 {
+				t.Errorf("%s = (model %q, occupancy %d), want (m-b, 1500)", name, got.Model, domain.PromptOccupancy(*got))
+			}
+		}
+	})
+
 	t.Run("CompactForClaimSystem_CommitsResultFlipsSpanAndReseqsQueue", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

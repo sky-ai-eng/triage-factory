@@ -942,3 +942,46 @@ func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
 		})
 	}
 }
+
+// modelConversations is a conversation whose stored model is convModel and
+// whose newest person row, when person is set, ran on it.
+type modelConversations struct {
+	db.ConversationStore
+	convModel string
+	person    *domain.Message
+}
+
+func (f modelConversations) GetSystem(_ context.Context, _, conversationID string) (*domain.Conversation, error) {
+	return &domain.Conversation{ID: conversationID, Model: f.convModel}, nil
+}
+
+func (f modelConversations) NewestPersonMessageSystem(context.Context, string, string) (*domain.Message, error) {
+	return f.person, nil
+}
+
+// The seal chooses its provider from the model the claim runs on: the newest
+// person message's when one recorded a model, and the conversation's own
+// otherwise. A follow-up a person moved onto a Bedrock model is sealed Bedrock
+// material even though its step ran on an Anthropic key.
+func TestManager_conversationModel_FollowsTheNewestPersonRow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		person *domain.Message
+		want   string
+	}{
+		{"a person row's model", &domain.Message{Role: "user", Model: "us.anthropic.claude-sonnet-5-5"}, "us.anthropic.claude-sonnet-5-5"},
+		{"no person row", nil, domain.ModelSonnet},
+		{"a person row that recorded no model", &domain.Message{Role: "user"}, domain.ModelSonnet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Manager{stores: db.Stores{Conversations: modelConversations{convModel: domain.ModelSonnet, person: tc.person}}}
+			got, err := m.conversationModel(context.Background(), "org", "conv")
+			if err != nil {
+				t.Fatalf("conversationModel: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("sealed for %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
