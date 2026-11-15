@@ -1003,14 +1003,20 @@ export default function Fleet() {
     })
   }, [])
 
-  const gated = entLoaded && !(operator && has(FeatureFleet))
+  // The operator flag is known before any page renders; the entitlement is not
+  // known until its probe answers. The reads wait for both, so a viewer who is
+  // not an operator sends none, and neither does an operator before the probe.
+  const allowed = operator && entLoaded && has(FeatureFleet)
+  const denied = !operator || (entLoaded && !has(FeatureFleet))
 
-  const overview = useFleetFetch<FleetOverview>(gated ? null : `/api/fleet/overview?hours=${hours}`)
-  const instances = useFleetFetch<FleetInstances>(gated ? null : `/api/fleet/instances?_r=${rev}`)
-  const timeseries = useFleetFetch<FleetTimeseries>(
-    gated ? null : `/api/fleet/timeseries?hours=${hours}`,
+  const overview = useFleetFetch<FleetOverview>(
+    allowed ? `/api/fleet/overview?hours=${hours}` : null,
   )
-  const queue = useFleetFetch<FleetBacklog>(gated ? null : `/api/fleet/backlog?_r=${rev}`)
+  const instances = useFleetFetch<FleetInstances>(allowed ? `/api/fleet/instances?_r=${rev}` : null)
+  const timeseries = useFleetFetch<FleetTimeseries>(
+    allowed ? `/api/fleet/timeseries?hours=${hours}` : null,
+  )
+  const queue = useFleetFetch<FleetBacklog>(allowed ? `/api/fleet/backlog?_r=${rev}` : null)
 
   const series = useMemo(() => aggregateSeries(timeseries.data), [timeseries.data])
 
@@ -1031,9 +1037,10 @@ export default function Fleet() {
   }, [])
 
   // Non-operator / unlicensed: the console does not exist for them. The nav item
-  // is already hidden; a direct navigation bounces home (non-disclosure) once
-  // the entitlement probe has resolved (avoid a redirect flash before it does).
-  if (gated) return <Navigate to="/" replace />
+  // is already hidden; a direct navigation bounces home (non-disclosure). A
+  // viewer who is not an operator bounces on the first render; an operator
+  // waits for the entitlement probe, so a licensed one sees no redirect flash.
+  if (denied) return <Navigate to="/" replace />
 
   const err = overview.error ?? instances.error ?? timeseries.error ?? queue.error
 
