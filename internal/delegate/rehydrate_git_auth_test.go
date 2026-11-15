@@ -161,7 +161,7 @@ func TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential(t *testing.T) {
 func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) {
 	f := newSnapshotFixture(t, "task-proxy-auth")
 	f.addCheckout(t, "acme/widgets", "default")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	const cloneURL = "https://github.com/acme/widgets.git"
@@ -200,7 +200,7 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 func TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest(t *testing.T) {
 	f := newSnapshotFixture(t, "task-pr-read")
 	f.addCheckout(t, "acme/app", "pr-7")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	// An HTTPS origin, so push tracking takes the pull request's clone_url.
@@ -245,7 +245,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	f := newSnapshotFixture(t, "task-seed-bare")
 	co := f.addCheckout(t, "acme/widgets", "default")
 	dirtyCheckout(t, co)
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 
 	// Fresh executor: no run root, and no bare either.
 	f.loseRoot(t)
@@ -272,7 +272,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 func TestEnsureWorkspace_ColdRehydrate_MovesThePhaseToCloning(t *testing.T) {
 	f := newSnapshotFixture(t, "task-cloning-phase")
 	f.addCheckout(t, "acme/widgets", "default")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 	phases := &claimPhaseLog{}
 	f.s.conversations = phases

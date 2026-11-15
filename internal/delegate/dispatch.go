@@ -1526,16 +1526,42 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 	defer func() { _ = localGit.Close() }()
 
-	// No fresh-workspace builder: the session file this resume reconnects to
-	// lives in the snapshot, so a tree built without one has nothing to
-	// reconnect to. The provenance is kept for the turn's workspace note.
-	resumeCwd, prov, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit), nil)
+	// With no workspace to restore, the tree is built from nothing, the way
+	// the task's first claim built it: the session this resume reconnects to
+	// has a blob of its own, so the tree holds only the work, and the turn's
+	// workspace note tells the agent what it lost. The GitHub client the build
+	// reads a pull request through is resolved only if the build runs, as the
+	// claim path resolves it.
+	fresh := func(ctx context.Context) (string, error) {
+		var (
+			gh         *ghclient.Client
+			resolveErr error
+		)
+		if sidecar == nil {
+			var ghOwner, ghRepo string
+			if ghOwner, ghRepo, resolveErr = s.taskOwnerRepo(ctx, orgID, *task); resolveErr == nil {
+				gh, resolveErr = s.resolveGHClient(ctx, orgID, ghOwner, ghRepo)
+			}
+		}
+		root, err := s.freshStepWorkspace(ctx, orgID, *task, *conv, gh, sidecar, localGit)
+		return root, withGitHubResolveCause(err, resolveErr)
+	}
+	resumeCwd, prov, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit), fresh)
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
 		// does. Hand the claim back rather than ending a conversation that
 		// has been running perfectly well until now.
 		handBack(fmt.Errorf("ensure workspace before resume failed: %w", werr))
+		return
+	}
+
+	// The session goes back where --resume reads it when the tree came without
+	// it: rehydrated, built fresh, or warm with its session file removed. A
+	// store that cannot answer is the runtime failing to come up, and the
+	// claim is handed back with the message still queued.
+	if err := s.restoreSession(stepCtx, orgID, conv.ID, resumeCwd, conv.SessionID); err != nil {
+		handBack(fmt.Errorf("restore the session before resume failed: %w", err))
 		return
 	}
 
@@ -1558,16 +1584,15 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	mirror := s.newMemoryMirror(orgID, conv.ID, blueprintRunID, task.EntityID, resumeCwd, nil)
 
 	// A resume can only continue the conversation if the Claude session
-	// transcript survived into the rehydrated workspace. When it didn't — the
-	// parking executor snapshotted without it, or nothing restored it (a wiped
-	// ephemeral run-root after a rebuild) — passing --resume anyway makes the
-	// SDK fail with an opaque "No conversation found", 8 seconds in, with no
-	// surfaced reason. Mirror the crash-reclaim guard (runAgent) and stop here
-	// with an actionable failure instead. A silent fresh session is deliberately
-	// NOT the fallback on this path: a message-resume means "keep going from
-	// where we were", and an amnesiac session that only sees the new steering
-	// line would confuse the agent (or re-do already-done work) worse than a
-	// clear "start over" would.
+	// transcript is where --resume reads it. When it isn't — no ending saved
+	// the session's blob, and the file did not survive beside the tree —
+	// passing --resume anyway makes the SDK fail with an opaque "No
+	// conversation found", 8 seconds in, with no surfaced reason. Mirror the
+	// crash-reclaim guard (runAgent) and stop here with an actionable failure
+	// instead. A silent fresh session is deliberately NOT the fallback on this
+	// path: a message-resume means "keep going from where we were", and an
+	// amnesiac session that only sees the new steering line would confuse the
+	// agent (or re-do already-done work) worse than a clear "start over" would.
 	//
 	// The one exit here that is a real terminal rather than a hand-back: a
 	// lost session file is a diagnosis, not a hiccup, and retrying it four
@@ -2070,9 +2095,10 @@ func (s *Spawner) inheritedWorktreePath(ctx context.Context, orgID, taskID strin
 	return path
 }
 
-// freshStepWorkspace rebuilds a step's run tree from nothing by running the
-// same source setup its blueprint's FIRST claim ran — the ensureWorkspace
-// ladder's last resort, when the warm tree is gone and no snapshot is coming.
+// freshStepWorkspace rebuilds a conversation's run tree from nothing by
+// running the same source setup the task's FIRST claim ran — the
+// ensureWorkspace ladder's last resort, when the warm tree is gone and no
+// snapshot is coming, for a step's launch and an SDK resume alike.
 //
 // Re-running the setup, rather than assembling a checkout here, keeps "fresh"
 // one thing: each shape's construction is specific (a GitHub PR run fetches
@@ -2084,7 +2110,7 @@ func (s *Spawner) inheritedWorktreePath(ctx context.Context, orgID, taskID strin
 //
 // Only the path is taken from the result — the caller has already
 // reconstructed the rest of the step's config from the task.
-func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (string, error) {
+func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (string, error) {
 	var (
 		cfg runConfig
 		err error
@@ -2178,10 +2204,10 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	}
 	// Runtime travels with it because the ladder's LAST rung reads it: a
 	// workspace that no persist is going to deliver is rebuilt from nothing for
-	// a native conversation, whose continuity is its transcript, and refused as
-	// expired for an SDK one, whose continuity was the session file inside the
-	// blob. Synthesizing this row without the column answers "unknown", which
-	// takes the refusal for both.
+	// a native conversation, whose continuity is its transcript, and for an SDK
+	// one only when its session has a blob (continuesOnFreshTree).
+	// Synthesizing this row without the column answers "unknown", which takes
+	// the refusal for both.
 	convForWS := &domain.Conversation{
 		ID: conv.ID, ClaimID: conv.ClaimID, TaskID: task.ID,
 		Runtime: conv.Runtime, WorktreePath: warm, BlueprintRunID: conv.BlueprintRunID,
@@ -2232,7 +2258,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// rebuild fetches.
 	root, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit),
 		func(ctx context.Context) (string, error) {
-			return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
+			return s.freshStepWorkspace(ctx, orgID, task, conv, gh, sidecar, localGit)
 		})
 	if err != nil {
 		return runConfig{}, err

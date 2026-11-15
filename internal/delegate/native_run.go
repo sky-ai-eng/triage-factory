@@ -1173,7 +1173,7 @@ func (s *Spawner) recordNativeResult(
 	// The claim is still held, so the snapshot is one of the engagement's
 	// operations: bounded, and the idle limit does not apply while it runs.
 	snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
-	err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, "", domain.ConversationRuntimeNative)
+	err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, domain.ConversationRuntimeNative)
 	endSnap()
 	if err != nil {
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "conversation", conversationID, "error", err)

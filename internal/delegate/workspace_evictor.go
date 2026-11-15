@@ -14,7 +14,10 @@
 // tree alone. It evicts only where the snapshot state row says the blob was
 // `written` AND the blob store confirms the object is there; a tree whose
 // snapshot is pending, failed, or absent is the one copy of the agent's
-// uncommitted work and is never touched.
+// uncommitted work and is never touched. The SDK session files removed with a
+// tree are held the same way, by each session's own blob (session_blob.go): a
+// tree holding a session that a conversation can still resume and no blob
+// does is never touched either.
 //
 // This is the warm copy's bound; the durable copy's is the retention reaper
 // beside it (snapshot_reaper.go), and the two are deliberately different
@@ -198,10 +201,10 @@ func (s *Spawner) RunDiskPressureEvictor(ctx context.Context, interval time.Dura
 // EvictWorkspacesForSpace reclaims this host's parked trees, inside their idle
 // window or not, while free space is below the dispatch disk floor, and stops
 // as soon as it is not. Every other gate of evictWorkspace holds: a tree goes
-// only when its snapshot is recorded written and present in the blob store and
-// no conversation on its key holds a claim, so each one evicted resumes by
-// rehydrating. The candidates come in no order of idleness; any of them costs
-// one cold rehydrate.
+// only when its snapshot is recorded written and present in the blob store, its
+// resumable sessions have their blobs, and no conversation on its key holds a
+// claim, so each one evicted resumes by rehydrating. The candidates come in no
+// order of idleness; any of them costs one cold rehydrate.
 //
 // A run filling the disk while it runs holds a claim, so its tree is never a
 // candidate. Eviction frees what parked trees hold; the floor's gate is what
@@ -288,6 +291,22 @@ func (s *Spawner) evictWorkspace(ctx context.Context, key domain.EvictableWorksp
 
 	removed := 0
 	for _, path := range local {
+		// The project directory removed with the tree below holds the session
+		// files of the task's SDK conversations, and the snapshot carries none
+		// of them: a session that a conversation can still resume goes only
+		// when its own blob holds it. Otherwise the tree in hand keeps the only
+		// copy, as it does when the snapshot is missing.
+		saved, err := s.liveSessionsSaved(ctx, key.OrgID, key.TaskID, path)
+		if err != nil {
+			delegateLog.Warn("workspace evictor: session blob check failed; keeping the warm tree",
+				"org", key.OrgID, "key_id", keyID, "path", path, "error", err)
+			continue
+		}
+		if !saved {
+			delegateLog.Warn("workspace evictor: a resumable session in the tree's project directory has no blob; keeping the warm tree as its only copy",
+				"org", key.OrgID, "key_id", keyID, "path", path)
+			continue
+		}
 		// The session ghost the agent's runtime left in ~/.claude/projects,
 		// keyed by the cwd about to disappear. A no-op wherever the sandbox
 		// wrote that tree INSIDE the run root instead (RemoveClaudeProjectDir

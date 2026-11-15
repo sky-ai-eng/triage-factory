@@ -235,7 +235,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	// Scratch content that DOES ride the snapshot, so the rehydrate takes the
 	// rename branch — the one that collides with an already-planted link.
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), "scratch note")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	// Host loss: the tree is gone and comes back from the blob.
@@ -317,7 +317,7 @@ func TestRehydrate_RestoredScratchKeepsItsCapturedModes(t *testing.T) {
 					t.Fatalf("chmod %s: %v", path, err)
 				}
 			}
-			if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+			if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, domain.ConversationRuntimeSDK); err != nil {
 				t.Fatalf("snapshotWorkspace: %v", err)
 			}
 			if err := os.RemoveAll(wtPath); err != nil {
