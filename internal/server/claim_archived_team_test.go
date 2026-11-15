@@ -79,9 +79,8 @@ func TestTaskClaim_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo(t *testing.T)
 }
 
 // TestTaskDelegate_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo: the same
-// refusal on the delegate route, before the bot claim. Answering after it
-// would leave a bot claim with no run behind a SPAWN_FAILED the client offers
-// to retry.
+// refusal on the delegate route, from the reads that come before the run's
+// plan and the bot claim, so it writes nothing and starts no run.
 func TestTaskDelegate_RefusedOnAnArchivedTeamWithNoActiveTeamToMoveTo(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))

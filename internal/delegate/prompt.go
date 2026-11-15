@@ -20,27 +20,29 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
 
-// Sentinel errors the delegate HTTP handler uses to map prompt-resolution
-// failures to 4xx instead of 5xx.
+// PlanDelegation's refusals about the blueprint a caller named. Each is the
+// request's fault rather than the server's, so the delegate route answers them
+// as 422 INVALID_FIELD on blueprint_id.
 var (
-	// ErrPromptNotFound — Delegate's caller passed a prompt id that
-	// doesn't resolve to any row. Race-correctable (the prompt was
-	// deleted between snapshot fetch and drop, or the id was simply
-	// wrong) — 400 Bad Request, not 5xx.
+	// ErrPromptNotFound — a step names a prompt id that doesn't resolve to
+	// any row the caller can see. Race-correctable: the prompt was deleted
+	// between the picker's read and the delegation, or the id was wrong.
 	ErrPromptNotFound = errors.New("delegate: prompt not found")
 
-	// ErrPromptUnspecified — Delegate's caller passed an empty prompt
-	// id. The picker should have prevented this; 400 Bad Request when
-	// the contract is violated.
+	// ErrPromptUnspecified — a step names no prompt.
 	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
 
-	// ErrBlueprintNotFound — Delegate's caller passed a blueprint id that
-	// doesn't resolve to any row. Race-correctable — 400 Bad Request.
+	// ErrBlueprintNotFound — the caller passed a blueprint id that doesn't
+	// resolve to any row it can see. Race-correctable.
 	ErrBlueprintNotFound = errors.New("delegate: blueprint not found")
 
-	// ErrBlueprintUnspecified — Delegate's caller passed an empty blueprint
-	// id. The picker / trigger should have prevented this; 400 Bad Request.
+	// ErrBlueprintUnspecified — the caller passed an empty blueprint id. The
+	// picker and the trigger always name one.
 	ErrBlueprintUnspecified = errors.New("delegate: no blueprint specified")
+
+	// ErrBlueprintNoSteps — the blueprint the caller named has no steps, so
+	// a firing of it would mint a run with nothing to drive.
+	ErrBlueprintNoSteps = errors.New("delegate: blueprint has no steps")
 )
 
 // resolveBlueprint finds the blueprint to fire from an explicit blueprint ID.

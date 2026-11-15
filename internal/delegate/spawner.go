@@ -150,9 +150,9 @@ type Spawner struct {
 	// deletion; every per-org read goes through OrgsStore.GetSettingsSystem
 	// (no JWT claims context on the run goroutine).
 	orgs db.OrgsStore
-	// spend reads the org's settled LLM spend for the TFAC-477 daily-cost-cap
-	// admission check at Delegate entry. Read via SpendByCategorySystem — the
-	// admin-pool variant — because Delegate runs under context.Background()
+	// spend reads the org's settled LLM spend for the daily-cost-cap
+	// admission check in PlanDelegation. Read via SpendByCategorySystem — the
+	// admin-pool variant — because the plan runs under context.Background()
 	// with no JWT claims, so an app-pool/RLS read would see nothing and the cap
 	// would never trip. Read-only; a plain store ref like s.orgs.
 	spend db.SpendStore
@@ -1160,28 +1160,6 @@ func (s *Spawner) Storage() storage.Storage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.blobs
-}
-
-// resolveRunCredentials resolves the per-(org, owner) GitHub client and the
-// run's team model configuration. Both modes call this identically;
-// mode-awareness lives inside the resolver (App token vs PAT) and the
-// secrets reader (system door vs nil), not at the call site. owner is the
-// GitHub account the run targets — empty for Jira runs, which don't
-// pre-clone. repo disambiguates a bundle-backed lookup (TFAC-614) when the
-// run's authorized set covers more than one repo under owner; empty when
-// the caller has none in view. teamID is the task's owning team, so a
-// multi-team org honors each team's model choice; empty falls back to the
-// org default team.
-//
-// A model that cannot be resolved is an error rather than a substitution, so
-// the caller refuses the delegation instead of buying a model nobody chose.
-func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo, teamID string) (*ghclient.Client, domain.TeamModels, error) {
-	models, err := s.resolveModel(ctx, orgID, teamID)
-	if err != nil {
-		return nil, domain.TeamModels{}, err
-	}
-	gh, _ := s.resolveGHClient(ctx, orgID, owner, repo)
-	return gh, models, nil
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
