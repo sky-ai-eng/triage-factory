@@ -297,8 +297,8 @@ func (s *conversationStore) parkAndRelease(ctx context.Context, orgID, conversat
 // write, so the stop columns cleared below are still the pending intent where
 // the reason reads them.
 func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Park) (bool, error) {
-	// A deliberate stop re-parks an already-parked row; an idle turn-end does
-	// not. Spelled as an extra clause rather than two queries.
+	// A deliberate stop re-parks an already-parked row; a turn_incomplete park
+	// does not. Spelled as an extra clause rather than two queries.
 	reparkGuard := ` AND (status IS NULL OR status <> 'open')`
 	if park.Deliberate {
 		reparkGuard = ``
@@ -1853,6 +1853,7 @@ var parkedForPersonSQL = `
 		LEFT JOIN entities e ON e.id = t.entity_id
 		WHERE c.status = 'open'
 		  AND c.park_reason IN (` + strings.TrimRight(strings.Repeat("?, ", len(domain.ParkReasonsAwaitingPerson())), ", ") + `)
+		  AND ` + db.AwaitsPersonTypeSQL("c") + `
 		  AND c.creator_user_id IS NOT NULL
 		  AND c.ended_at IS NULL
 		  AND c.archived_at IS NULL`

@@ -240,8 +240,8 @@ func TestOpenUnreadAtConclusionSeries_CreatesEachReasonAtZero(t *testing.T) {
 // finished blueprint parks with no verdict, since its resume cleared the
 // earlier one, so this wake, which is a concluded conversation's, writes
 // nothing to it. Its unread message makes it the queue's to drive, as for any
-// conversation parked with no verdict, whether the turn parked idle with a
-// message that landed during it or a person stopped it before the message was
+// conversation parked with no verdict, whether the turn parked unfinished
+// with a message that landed during it or a person stopped it before the message was
 // delivered.
 func TestWakeForUnreadInput_LeavesAFollowUpsParkToTheQueue(t *testing.T) {
 	for _, tc := range []struct {
@@ -252,7 +252,7 @@ func TestWakeForUnreadInput_LeavesAFollowUpsParkToTheQueue(t *testing.T) {
 		deliverFirst bool
 		wantUnread   string
 	}{
-		{"parked idle with a message that landed during the turn", db.ParkIdle(), true, "and another"},
+		{"parked turn_incomplete with a message that landed during the turn", db.ParkTurnIncomplete(), true, "and another"},
 		{"stopped before the follow-up was delivered", db.ParkStopped(domain.ParkReasonUserCancelled, ""), false, "one more thing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -332,7 +332,7 @@ func liveInputFixture(t *testing.T, convID string) (*Spawner, *sql.DB, *fakeLive
 	s.registerProc(org, convID, &agentproc.LiveRun{})
 	park := liveParkContext{
 		orgID: org, conversationID: convID, namespace: "seedbpr-" + convID, claudeCwd: "/tmp/wt-" + convID,
-		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
+		claimID: claimID, reason: db.ParkTurnIncomplete(), runtime: domain.ConversationRuntimeSDK,
 	}
 	// The process runs on the conversation's model, as a launch starts it.
 	proc := newFakeLiveProc("sess-" + convID)

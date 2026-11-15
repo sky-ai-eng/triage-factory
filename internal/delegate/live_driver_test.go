@@ -443,7 +443,7 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none",
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
-		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
+		claimID: claimID, reason: db.ParkTurnIncomplete(), runtime: domain.ConversationRuntimeSDK,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
@@ -496,7 +496,7 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause",
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
-		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
+		claimID: claimID, reason: db.ParkTurnIncomplete(), runtime: domain.ConversationRuntimeSDK,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)

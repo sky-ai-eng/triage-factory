@@ -732,7 +732,7 @@ func TestClaimFence_ZombieCannotCorruptTheSuccessorsResumeCoordinate(t *testing.
 
 	// And the coordinate the successor left behind is what a resume actually
 	// reads: the un-terminal flip keeps it, so the next claim wakes on s2.
-	if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.conversationID, successorClaim, db.ParkIdle()); err != nil {
+	if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.conversationID, successorClaim, db.ParkTurnIncomplete()); err != nil {
 		t.Fatalf("successor park: %v", err)
 	}
 	if ok, err := fx.store.MarkQueuedForResume(ctx, fx.orgID, fx.conversationID); err != nil || !ok {

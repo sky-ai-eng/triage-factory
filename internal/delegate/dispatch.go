@@ -902,6 +902,13 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// session that survived is resumed by the launch below, with the
 		// continuation note, as a running step's is. With no session file
 		// left there is nothing to resume, and it parks.
+		//
+		// Either kind parks turn_incomplete, with a stop note saying why: the
+		// person's last message has no finished reply, and nothing else on the
+		// transcript says so. A delegation cannot keep the reason it parked
+		// with before the follow-up, because the claim that took it off that
+		// park cleared the reason, and parking with none would read as a turn
+		// that finished.
 		resumesCutOffTurn := interactive && conv.SessionID != "" && conv.WorktreePath != "" &&
 			sessionTranscriptExists(conv.WorktreePath, conv.SessionID)
 		if !resumesCutOffTurn && (br == nil || br.Status != domain.BlueprintRunStatusRunning) {
@@ -910,8 +917,17 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			}
 			closeGate(engagementNoMessage, nil)
 			s.endEngagement(conv.ID, engagementNoMessage)
-			if _, mErr := s.conversations.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, db.ParkIdle()); mErr != nil {
+			if s.insertClaimStopNote(ctx, orgID, conv.ID, conv.ClaimID, conv.CreatorUserID, noMessageParkNotice) {
+				return
+			}
+			park := db.ParkTurnIncomplete()
+			if parked, mErr := s.conversations.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, park); mErr != nil {
 				dispatchLog.Warn("park message-less follow-up claim failed", "conversation", conv.ID, "error", mErr)
+			} else if parked {
+				s.announcePark(liveParkContext{
+					orgID: orgID, conversationID: conv.ID, claimID: conv.ClaimID, reason: park,
+					runtime: domain.ConversationRuntimeSDK,
+				})
 			}
 			dispatchLog.Warn("follow-up claim with no running blueprint carried no message; parked without running the step",
 				"conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "org_id", orgID)

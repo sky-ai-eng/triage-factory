@@ -144,7 +144,7 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 		namespace:      namespace,
 		claudeCwd:      wt,
 		claimID:        claimID,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}, ""); fenced {
 		t.Fatal("parkConversationOpen reported a fence trip on a live claim")
 	}
@@ -184,7 +184,7 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 		namespace:      namespace,
 		claudeCwd:      wt,
 		claimID:        claimID,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}, ""); fenced {
 		t.Fatal("parkConversationOpen reported a fence trip on a live claim")
 	}

@@ -432,7 +432,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 
 		// An engagement that got somewhere ends the episode: a park, then a
 		// resume, starts the next claim at zero.
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
 		}
 		if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !ok {
@@ -467,7 +467,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 
 		// A park, then a resume, starts the next claim at zero.
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
 		}
 		if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !ok {
@@ -545,7 +545,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if c.LastHandBackOutcome != db.HandBackShutdown {
 			t.Errorf("claim after a shutdown hand-back: LastHandBackOutcome = %q, want %s", c.LastHandBackOutcome, db.HandBackShutdown)
 		}
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
 		}
 		if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !ok {
@@ -604,7 +604,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 	t.Run("MarkQueuedForResume_ClearsTheWait", func(t *testing.T) {
 		f := mk(t)
 		c := stageClaimed(t, f)
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
 		}
 		// A stale wait on a parked row, which no writer leaves but a resume

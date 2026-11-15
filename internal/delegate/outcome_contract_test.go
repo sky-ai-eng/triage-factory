@@ -168,8 +168,8 @@ func TestProcessCompletion_AnUnfinishedTurnParksOpenWithANote(t *testing.T) {
 	if conv.Status != domain.StatusOpen || conv.Concluded() || conv.Outcome != "" {
 		t.Errorf("conv = (status %q, outcome %q, completed_at %v), want open with no verdict", conv.Status, conv.Outcome, conv.CompletedAt)
 	}
-	if conv.ParkReason != domain.ParkReasonIdle {
-		t.Errorf("conv.park_reason = %q, want %q", conv.ParkReason, domain.ParkReasonIdle)
+	if conv.ParkReason != domain.ParkReasonTurnIncomplete {
+		t.Errorf("conv.park_reason = %q, want %q", conv.ParkReason, domain.ParkReasonTurnIncomplete)
 	}
 	var note string
 	if err := database.QueryRow(`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ? ORDER BY id DESC LIMIT 1`,

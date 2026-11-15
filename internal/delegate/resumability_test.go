@@ -207,14 +207,14 @@ func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T
 	}
 }
 
-// TestParkConversationOpen_FencedIdleParkAnnouncesNothing pins the silence of a
+// TestParkConversationOpen_FencedTurnIncompleteParkAnnouncesNothing pins the silence of a
 // refused park that did capture its workspace.
 //
 // A refusal means the claim is gone from under this engagement — a successor
 // may be running the conversation right now. Repeating `open` there would be a torn-down engagement
 // reporting a status the row does not have — and the board writes a frame's
 // status onto its card optimistically.
-func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
+func TestParkConversationOpen_FencedTurnIncompleteParkAnnouncesNothing(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-idle")
@@ -239,7 +239,7 @@ func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 		claudeCwd:      wt,
 		namespace:      namespace,
 		claimID:        "claim-1",
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}, "")
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")

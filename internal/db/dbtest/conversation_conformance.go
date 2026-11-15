@@ -78,10 +78,10 @@ type ConversationSeeder struct {
 	// BlueprintStore door; the conformance suite stages rows in arbitrary
 	// status without staging a whole firing for each. Fields honored: ID, TaskID, TeamID
 	// (default: the org's first team), PromptID, Status, Model, TriggerType
-	// (default manual), TriggerID, BlueprintRunID. An empty Status inserts
-	// SQL NULL — the mid-flight state a fresh mint carries, which the
-	// display ladder reads as `queued` — not an empty string, which is not
-	// a status at all.
+	// (default manual), TriggerID, BlueprintRunID, Type (default delegation).
+	// An empty Status inserts SQL NULL — the mid-flight state a fresh mint
+	// carries, which the display ladder reads as `queued` — not an empty
+	// string, which is not a status at all.
 	Conversation func(t *testing.T, conv domain.Conversation) string
 
 	// BackdateStartedAt rewrites the conversation's started_at to `age` ago,
@@ -1161,7 +1161,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// the claim for whichever executor actually claims it. (The advisory
 		// placement stamp it DOES write is a preference, not ownership — see
 		// MarkQueuedForResume_StampsTheLastEngagementsExecutor.)
-		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("open: %v", err)
 		}
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
@@ -1379,7 +1379,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// durable snapshot, so an infra error reaching failConversation must
 		// terminate it).
 		openConversation := seedConversationForTest(t, orgID, seed, "running")
-		if _, err := HolderPark(store, ctx, orgID, openConversation, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, openConversation, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("open: %v", err)
 		}
 		ok, err := HolderMarkFailed(store, ctx, orgID, openConversation, "")
@@ -1438,28 +1438,27 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// An idle park is the other half of the same method, and its two
+	// A turn_incomplete park is the other half of the same method, and its two
 	// differences from a stop are both load-bearing: the claim releases
 	// 'parked' rather than 'cancelled', and an already-parked row is left
-	// alone (the live driver parks on every no-conclusion turn, so a flip
-	// there would re-broadcast on every one).
-	t.Run("ParkOpen_Idle_DoesNotRepark", func(t *testing.T) {
+	// alone, so a second park is not broadcast again.
+	t.Run("ParkOpen_TurnIncomplete_DoesNotRepark", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
-			t.Fatalf("idle park: ok=%v err=%v", ok, err)
+		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil || !ok {
+			t.Fatalf("turn_incomplete park: ok=%v err=%v", ok, err)
 		}
 		if got, _ := store.Get(ctx, orgID, conversationID); got.Status != "open" {
-			t.Errorf("status after an idle park = %q, want open", got.Status)
+			t.Errorf("status after a turn_incomplete park = %q, want open", got.Status)
 		}
-		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || ok {
-			t.Errorf("second idle park: ok=%v err=%v, want false/nil — a re-park must not re-broadcast", ok, err)
+		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil || ok {
+			t.Errorf("second turn_incomplete park: ok=%v err=%v, want false/nil — a re-park must not re-broadcast", ok, err)
 		}
 		done := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		if ok, err := HolderPark(store, ctx, orgID, done, db.ParkIdle()); err != nil || ok {
-			t.Errorf("idle park on a concluded conversation: ok=%v err=%v, want false/nil", ok, err)
+		if ok, err := HolderPark(store, ctx, orgID, done, db.ParkTurnIncomplete()); err != nil || ok {
+			t.Errorf("turn_incomplete park on a concluded conversation: ok=%v err=%v, want false/nil", ok, err)
 		}
 		// A deliberate stop DOES land on the same parked row: the caller has
 		// to learn it took so it can finalize the blueprint behind it.
@@ -1470,14 +1469,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.ParkReason != domain.ParkReasonUserCancelled {
 			t.Errorf("park_reason = %q, want user_cancelled", got.ParkReason)
 		}
-		// …and an idle park after it must not overwrite the reason it
-		// recorded. An idle park carries `idle`, so this is a real write that
-		// the already-parked guard is what stops.
-		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
-			t.Fatalf("idle park after stop: %v", err)
+		// …and a turn_incomplete park after it must not overwrite the reason
+		// it recorded. That park carries a reason of its own, so this is a
+		// real write that the already-parked guard is what stops.
+		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
+			t.Fatalf("turn_incomplete park after stop: %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, conversationID); got.ParkReason != domain.ParkReasonUserCancelled {
-			t.Errorf("park_reason = %q after an idle park, want it preserved", got.ParkReason)
+			t.Errorf("park_reason = %q after a turn_incomplete park, want it preserved", got.ParkReason)
 		}
 	})
 
@@ -1602,7 +1601,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			})
 		}
 		parked, live := mkStep(), mkStep()
-		if _, err := HolderPark(store, ctx, orgID, parked, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, parked, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("park: %v", err)
 		}
 		if _, err := store.SetExecutorSystem(ctx, orgID, live, "exec-reap-live", 1); err != nil {
@@ -1733,7 +1732,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, wtPath); err != nil {
 			t.Fatalf("SetWorktreePathSystem: %v", err)
 		}
-		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("park: %v", err)
 		}
 		seed.SetSnapshotState(t, wsTask, domain.WorkspaceSnapshotWritten)
@@ -1794,7 +1793,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetWorktreePathSystem(ctx, orgID, parked, "/tmp/triagefactory-runs/"+taskID); err != nil {
 			t.Fatalf("SetWorktreePathSystem: %v", err)
 		}
-		if _, err := HolderPark(store, ctx, orgID, parked, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, parked, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("park: %v", err)
 		}
 		seed.SetSnapshotState(t, taskID, domain.WorkspaceSnapshotWritten)
@@ -1861,7 +1860,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID, _, wsTask := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("park: %v", err)
 		}
 		seed.SetSnapshotState(t, wsTask, domain.WorkspaceSnapshotWritten)
@@ -1998,21 +1997,21 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			assertReleased(t, conversationID, "failed")
 		})
-		// An idle park records why it parked and still releases as parked,
-		// never as a cancellation.
-		t.Run("ParkOpen_idle_parks", func(t *testing.T) {
+		// A turn_incomplete park records why it parked and still releases as
+		// parked, never as a cancellation.
+		t.Run("ParkOpen_turn_incomplete_parks", func(t *testing.T) {
 			conversationID := stage(t)
-			if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
+			if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil || !ok {
 				t.Fatalf("park: ok=%v err=%v", ok, err)
 			}
 			assertReleased(t, conversationID, "parked")
-			if got, _ := store.Get(ctx, orgID, conversationID); got.ParkReason != domain.ParkReasonIdle {
-				t.Errorf("park_reason = %q, want idle", got.ParkReason)
+			if got, _ := store.Get(ctx, orgID, conversationID); got.ParkReason != domain.ParkReasonTurnIncomplete {
+				t.Errorf("park_reason = %q, want turn_incomplete", got.ParkReason)
 			}
 		})
 		t.Run("MarkQueuedForResume_requeues", func(t *testing.T) {
 			conversationID := stage(t)
-			if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
+			if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil || !ok {
 				t.Fatalf("park: ok=%v err=%v", ok, err)
 			}
 			// ParkOpen already released as 'parked'; re-mint so the requeue
@@ -2260,7 +2259,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		refuse("CompleteForClaimSystem", err)
 		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash), "")
 		refuse("MarkFailedIfActiveForClaimSystem", err)
-		_, err = store.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, db.ParkIdle())
+		_, err = store.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, db.ParkTurnIncomplete())
 		refuse("ParkOpenForClaimSystem", err)
 		_, err = store.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, "exec-zombie", 2)
 		refuse("SetExecutorForClaimSystem", err)
@@ -3048,7 +3047,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Park (releases), then a second engagement — ClaimedAt advances to
 		// the newest claim, Attempts counts both, ExecutorID is the live one.
-		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park: ok=%v err=%v", ok, err)
 		}
 		seed.BackdateClaimedAt(t, conversationID, time.Hour)
@@ -3364,7 +3363,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// and the stored column says nothing at all — which is the whole
 		// reason this filter cannot read it.
 		queued := seedConversationForTaskTest(t, orgID, task, "running", seed)
-		if _, err := HolderPark(store, ctx, orgID, queued, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, queued, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("park: %v", err)
 		}
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, queued); err != nil || !ok {
@@ -3596,7 +3595,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// undelivered input puts the row back — the display ladder's own
 		// `queued` rung, which is why the position has to read the ladder and
 		// not the stored column.
-		if _, err := HolderPark(store, ctx, orgID, second, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, second, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("park: %v", err)
 		}
 		got = positions()
@@ -4419,7 +4418,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// A has an open conversation; B has only a running one.
 		convA := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
-		if _, err := HolderPark(store, ctx, orgID, convA, db.ParkIdle()); err != nil {
+		if _, err := HolderPark(store, ctx, orgID, convA, db.ParkTurnIncomplete()); err != nil {
 			t.Fatalf("open A: %v", err)
 		}
 		_ = seedConversationForTaskTest(t, orgID, taskB, "running", seed)
@@ -5647,10 +5646,19 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Stopped by a person: they know, and nothing waits on them.
 		stopped := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		park(stopped, domain.ParkReasonUserCancelled)
-		// A turn that ended is not a wait.
-		idle := seedConversationForTaskTest(t, orgID, taskID, "", seed)
-		if ok, err := HolderPark(store, ctx, orgID, idle, db.ParkIdle()); err != nil || !ok {
-			t.Fatalf("park idle: ok=%v err=%v", ok, err)
+		// A delegation's turn that did not finish waits on its delegator…
+		incomplete := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		if ok, err := HolderPark(store, ctx, orgID, incomplete, db.ParkTurnIncomplete()); err != nil || !ok {
+			t.Fatalf("park turn_incomplete: ok=%v err=%v", ok, err)
+		}
+		// …and a chat's does not: its person sent the message the reply was
+		// answering.
+		chat := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			Type: domain.ConversationTypeInteractive,
+		})
+		if ok, err := HolderPark(store, ctx, orgID, chat, db.ParkTurnIncomplete()); err != nil || !ok {
+			t.Fatalf("park the chat turn_incomplete: ok=%v err=%v", ok, err)
 		}
 		// Ended after it parked: nothing resumes it.
 		ended := seedConversationForTaskTest(t, orgID, taskID, "", seed)
@@ -5671,7 +5679,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("ListAwaitingPersonSystem: %v", err)
 		}
-		want := map[string]domain.ParkReason{lost: domain.ParkReasonSandboxLost, stalled: domain.ParkReasonStalled}
+		want := map[string]domain.ParkReason{
+			lost: domain.ParkReasonSandboxLost, stalled: domain.ParkReasonStalled, incomplete: domain.ParkReasonTurnIncomplete,
+		}
 		if len(got) != len(want) {
 			t.Fatalf("awaiting = %+v, want exactly %v", got, want)
 		}
@@ -5699,8 +5709,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("ListAwaitingPersonSystem after a resume: %v", err)
 		}
-		if len(got) != 1 || got[0].ConversationID != stalled {
-			t.Errorf("awaiting after %s was resumed = %+v, want only %s", lost, got, stalled)
+		delete(want, lost)
+		if len(got) != len(want) {
+			t.Errorf("awaiting after %s was resumed = %+v, want exactly %v", lost, got, want)
+		}
+		for _, a := range got {
+			if _, ok := want[a.ConversationID]; !ok {
+				t.Errorf("awaiting after %s was resumed holds %s, want only %v", lost, a.ConversationID, want)
+			}
 		}
 
 		if other, err := store.ListAwaitingPersonSystem(ctx, uuid.NewString()); err == nil && len(other) != 0 {
@@ -6140,7 +6156,7 @@ func parkedEvictionCandidate(t *testing.T, store db.ConversationStore, ctx conte
 	if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/"+suffix); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
-	if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+	if _, err := HolderPark(store, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 		t.Fatalf("park: %v", err)
 	}
 	return taskID

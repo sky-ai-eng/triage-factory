@@ -334,7 +334,7 @@ func TestParkConversationOpen_FilesTheAgentsMemoryFile(t *testing.T) {
 		conversationID: conversationID,
 		claimID:        holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
 		claudeCwd:      cwd,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 		runtime:        domain.ConversationRuntimeSDK,
 		mirror:         mirror,
 	}, ""); fenced {

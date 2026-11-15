@@ -204,9 +204,15 @@ func (c *Conversation) Settled() bool {
 type ParkReason string
 
 const (
-	// ParkReasonIdle — the turn simply ended and nothing more arrived. The
-	// live driver's no-conclusion turn and its idle close.
-	ParkReasonIdle ParkReason = "idle"
+	// ParkReasonTurnIncomplete — the model's turn stopped before it finished.
+	// The SDK runtime's reply hit its output limit, ran out of context, was
+	// refused, or ended on a tool call; a native runtime guard stopped the
+	// turn before a model call, or the model stopped for a reason only a
+	// person can resolve; or a follow-up claim found no message to send,
+	// because the engagement that took it died before replying. The specific
+	// cause is recorded per turn, on messages.stop_reason and in the stop note
+	// on the transcript. A turn that finishes parks with no reason at all.
+	ParkReasonTurnIncomplete ParkReason = "turn_incomplete"
 	// ParkReasonUserCancelled — a person stopped this conversation.
 	ParkReasonUserCancelled ParkReason = "user_cancelled"
 	// ParkReasonSystemCancelled — TF stopped it with no user asking: a team
@@ -262,7 +268,7 @@ const (
 // exists to stop.
 func AllParkReasons() []ParkReason {
 	return []ParkReason{
-		ParkReasonIdle,
+		ParkReasonTurnIncomplete,
 		ParkReasonUserCancelled,
 		ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled,
@@ -281,7 +287,7 @@ func AllParkReasons() []ParkReason {
 // sitting in the renamed column and clear it.
 func IsParkReason(reason string) bool {
 	switch ParkReason(reason) {
-	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
+	case ParkReasonTurnIncomplete, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
 		ParkReasonUpstreamUnavailable, ParkReasonSandboxLost:
@@ -290,19 +296,28 @@ func IsParkReason(reason string) bool {
 	return false
 }
 
-// AwaitsPerson reports whether a conversation parked for r is waiting on a
-// person: nothing retries it, and it moves again only when someone sends it a
-// message or fixes what stopped it. An idle park is a turn that ended, not a
-// wait, and a stop or a blueprint's end is a park somebody, or something,
-// meant.
-func (r ParkReason) AwaitsPerson() bool {
+// AwaitsPerson reports whether a conversation of conversationType parked for r
+// is waiting on a person: nothing retries it, and it moves again only when
+// someone sends it a message or fixes what stopped it. A stop or a blueprint's
+// end is a park somebody, or something, meant.
+//
+// A turn that did not finish waits on a person only on a delegation. The
+// person who delegated one handed the work off, so nobody is reading it when
+// the turn stops. A person in a chat sent the message the reply was answering,
+// and its stop note lands where they are reading.
+func (r ParkReason) AwaitsPerson(conversationType string) bool {
+	if r == ParkReasonTurnIncomplete {
+		return conversationType == ConversationTypeDelegation
+	}
 	return slices.Contains(ParkReasonsAwaitingPerson(), r)
 }
 
-// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits, for the store
-// reads that select on it.
+// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits for some
+// conversation type, for the store reads that select on it. Those reads test
+// turn_incomplete's type beside the reason (db.AwaitsPersonTypeSQL).
 func ParkReasonsAwaitingPerson() []ParkReason {
 	return []ParkReason{
+		ParkReasonTurnIncomplete,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
 		ParkReasonStalled,

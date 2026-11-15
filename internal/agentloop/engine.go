@@ -305,6 +305,10 @@ type Result struct {
 	CostUSD float64
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
+	// ParkGuard is the guard that parked the engagement, nil for any other
+	// ending. The caller configured its guards, so it is the one that can say
+	// what continues a park each of them causes.
+	ParkGuard Guard
 	// Model is the model a ResultProviderSwitch is for.
 	Model string
 	// Err carries the underlying cause on ResultFailed,
@@ -557,7 +561,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 
 		// 3. Guards, before every call. Each sees the engagement's own call
 		// count.
-		if notice := e.checkGuards(ctx, params, turn); notice != "" {
+		if notice, guard := e.checkGuards(ctx, params, turn); notice != "" {
 			it.parked(parkGuard)
 			if !HasNoticeSince(rows, notice) {
 				e.insertNotice(ctx, params, notice)
@@ -565,6 +569,7 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 			return Result{
 				Kind:       ResultParked,
 				ParkNotice: notice,
+				ParkGuard:  guard,
 				NumTurns:   turn,
 				DurationMs: e.msSince(started),
 			}
@@ -1013,8 +1018,8 @@ func (e *Engine) toolSchemas(params Params) []schemas.ChatTool {
 }
 
 // checkGuards runs every configured guard against the engagement's own call
-// count, returning the first notice that says stop.
-func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) string {
+// count, returning the first notice that says stop and the guard that said it.
+func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) (string, Guard) {
 	for _, g := range e.Guards {
 		notice, err := g.Check(ctx, turn)
 		if err != nil {
@@ -1025,10 +1030,10 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) strin
 			continue
 		}
 		if notice != "" {
-			return notice
+			return notice, g
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // answerUndispatchedCalls writes an is_error result for every call in a

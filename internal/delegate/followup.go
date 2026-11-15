@@ -649,11 +649,11 @@ func (s *Spawner) ringWarmWait(ctx context.Context, orgID string, conv *domain.C
 // is the queue's to drive.
 //
 // A concluded row that also carries a park reason is a stored row, which no
-// write produces: a park on top of a verdict. For those rows an idle park is
-// woken for like a verdict, and every other reason is left alone: a stop is a
-// person's or TF's decision the wake must not undo, and a park that waits for
-// a person after its retries are spent would only be retried into the same
-// park.
+// write produces: a park on top of a verdict. For those rows a turn_incomplete
+// park is woken for like a verdict, and every other reason is left alone: a
+// stop is a person's or TF's decision the wake must not undo, and a park that
+// waits for a person after its retries are spent would only be retried into
+// the same park.
 //
 // A step the reactor's advance ended is not woken but forwarded: its messages
 // go to the step now running (forwardToCurrentStep). A conversation the wake
@@ -672,7 +672,7 @@ func (s *Spawner) wakeForUnreadInput(ctx context.Context, orgID, conversationID 
 		}
 		return
 	}
-	if !conv.Concluded() || (conv.ParkReason != "" && conv.ParkReason != domain.ParkReasonIdle) {
+	if !conv.Concluded() || (conv.ParkReason != "" && conv.ParkReason != domain.ParkReasonTurnIncomplete) {
 		return
 	}
 	_, userID, ok, err := s.pendingInput.Peek(ctx, orgID, conversationID)

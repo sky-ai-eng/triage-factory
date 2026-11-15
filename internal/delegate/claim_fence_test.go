@@ -296,13 +296,13 @@ func (e *executorFencedStore) SetExecutorSystem(context.Context, string, string,
 	return nil, nil
 }
 
-// TestProcessCompletion_IdleParkFenceTripReportsFenced: a turn the model did
+// TestProcessCompletion_TurnIncompleteParkFenceTripReportsFenced: a turn the model did
 // not finish parks the run with a note saying why, and both writes carry the
 // claim. When the note is refused the disposition is fenced — the caller must
 // not advance the blueprint behind a run somebody else is driving, and no park
 // follows.
-func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-idle-park")
+func TestProcessCompletion_TurnIncompleteParkFenceTripReportsFenced(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-turn-incomplete-park")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 

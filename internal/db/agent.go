@@ -59,7 +59,7 @@ type Park struct {
 	// "someone deliberately stopped this" and "there is a string to display"
 	// the same bit: a park recording why it happened without being a
 	// cancellation would release its claim 'cancelled', and nothing would
-	// fail. `idle` is exactly such a reason.
+	// fail. `turn_incomplete` is exactly such a reason.
 	Deliberate bool
 	// Reason is recorded on conversations.park_reason — the closed
 	// domain.ParkReason vocabulary, never free text and never the model's
@@ -78,15 +78,16 @@ type Park struct {
 	ResultSummary string
 }
 
-// ParkIdle is the turn simply ending — the live driver's no-conclusion turn or
-// its idle close. Claim released 'parked', an already-parked row left alone.
+// ParkTurnIncomplete is a turn that stopped before it finished
+// (domain.ParkReasonTurnIncomplete). Claim released 'parked', an already-parked
+// row left alone.
 //
-// It carries a reason like any other park. "The turn ended and nothing more
-// arrived" IS what happened to this conversation, and saying so is what makes
-// the column readable at a glance; it is not a deliberate stop, and the field
-// above is what says so.
-func ParkIdle() Park {
-	return Park{Reason: domain.ParkReasonIdle}
+// It carries a reason like any other park, because a turn that did not finish
+// is what happened to this conversation and saying so is what makes the column
+// readable at a glance; it is not a deliberate stop, and Park.Deliberate is
+// what says so.
+func ParkTurnIncomplete() Park {
+	return Park{Reason: domain.ParkReasonTurnIncomplete}
 }
 
 // ParkStopped is a deliberate stop: someone or something ended this conversation.
@@ -105,6 +106,17 @@ func (p Park) ClaimOutcome() string {
 		return "cancelled"
 	}
 	return "parked"
+}
+
+// AwaitsPersonTypeSQL is the conversation-type half of
+// domain.ParkReason.AwaitsPerson as SQL, against the conversation alias the
+// caller names: a turn_incomplete park waits on a person only on a delegation.
+// The reads that select on domain.ParkReasonsAwaitingPerson add it beside
+// their reason match rather than inside it, so that match stays the plain
+// one the partial notice index is planned from.
+func AwaitsPersonTypeSQL(alias string) string {
+	return `(` + alias + `.park_reason <> '` + string(domain.ParkReasonTurnIncomplete) + `' OR ` +
+		alias + `.type = '` + domain.ConversationTypeDelegation + `')`
 }
 
 // ConversationStore owns the conversations / messages tables — agent
@@ -1378,33 +1390,33 @@ type ConversationStore interface {
 	// Returns ok=false (no error) if the row already reached a terminal state.
 	//
 	// park says WHY, and that is the one input the two callers differ on. It
-	// decides three things at once, so the difference between "the turn ended"
-	// and "someone stopped this" is stated once rather than forked into two
-	// methods that drifted:
+	// decides three things at once, so the difference between "the turn did
+	// not finish" and "someone stopped this" is stated once rather than forked
+	// into two methods that drifted:
 	//
 	//   - the park_reason / result_summary recorded on the row (a Park with no
 	//     reason leaves both untouched rather than blanking them),
-	//   - the outcome the claim releases with — 'parked' for an idle turn-end,
-	//     'cancelled' for a deliberate stop, which is now the ONLY place the
-	//     cancellation of an engagement is recorded,
+	//   - the outcome the claim releases with — 'parked' for a turn that did
+	//     not finish, 'cancelled' for a deliberate stop, which is now the ONLY
+	//     place the cancellation of an engagement is recorded,
 	//   - whether an already-parked row counts as a flip. A deliberate stop
 	//     re-parks (the caller has to learn it landed, so it can finalize the
-	//     blueprint); an idle park does not, because the live driver parks on
-	//     every no-conclusion turn and each one would otherwise re-broadcast.
+	//     blueprint); a turn_incomplete park does not, so a second one on a row
+	//     already parked is not broadcast again.
 	//
 	// A pending stop intent overrides the reason: the row records
 	// user_cancelled when a person asked and system_cancelled when the system
-	// did, and the intent is cleared in the same write. An idle park that lands
-	// while a stop is pending records the stop, which is right — someone asked
-	// for it, and the turn ending is how it was honored.
+	// did, and the intent is cleared in the same write. A turn_incomplete park
+	// that lands while a stop is pending records the stop, which is right —
+	// someone asked for it, and the turn stopping is how it was honored.
 	//
 	// Refused (ErrClaimReleased) once the engagement has been fenced out.
 	// Every park comes through here, deliberate or not: the self-park on the
-	// engagement's own cancelled context, and the idle park a turn that simply
-	// ended produces. The idle one still needs the fence — a zombie
-	// idle-parking a conversation a successor is mid-turn on flips a running
-	// conversation to `open` and hands the queue a row somebody is already
-	// driving.
+	// engagement's own cancelled context, and the turn_incomplete park a turn
+	// that stopped before finishing produces. That one still needs the fence —
+	// a zombie parking a conversation a successor is mid-turn on flips a
+	// running conversation to `open` and hands the queue a row somebody is
+	// already driving.
 	ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park Park) (bool, error)
 
 	// SettleClaimCostSystem lands the spend one engagement reports onto the

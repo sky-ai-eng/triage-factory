@@ -330,7 +330,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
-		if _, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+		if _, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 			t.Errorf("holder park: %v", err)
 		}
 		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{

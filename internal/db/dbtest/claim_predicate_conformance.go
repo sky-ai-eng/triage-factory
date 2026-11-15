@@ -167,7 +167,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		case "reaped":
 			_, err = h.Stores.ConversationQueue.ResetProcessingConversations(ctx, predicateExecutorID, predicateBootEpoch+1)
 		case "parked":
-			_, err = HolderPark(h.Stores.Conversations, ctx, orgID, convID, db.ParkIdle())
+			_, err = HolderPark(h.Stores.Conversations, ctx, orgID, convID, db.ParkTurnIncomplete())
 		case "completed":
 			// The engagement recorded its step's verdict: the conversation
 			// parks open with the conclusion stamped, the claim releases
@@ -1243,7 +1243,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
 		}
 		mustClaim(t, h, convID)
-		if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park = (%v, %v), want (true, nil)", ok, err)
 		}
 
@@ -1251,8 +1251,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v conv=%v", err, got)
 		}
-		if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
-			t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, domain.ParkReasonIdle)
+		if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonTurnIncomplete {
+			t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, domain.ParkReasonTurnIncomplete)
 		}
 		if got.Concluded() || got.Outcome != "" || got.OutcomeReason != "" {
 			t.Errorf("verdict = (concluded %v, outcome %q, reason %q), want none: the wake cleared the earlier one", got.Concluded(), got.Outcome, got.OutcomeReason)

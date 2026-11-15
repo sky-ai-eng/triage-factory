@@ -79,7 +79,7 @@ func TestMarkConversationOpen_ParkLeavesTheColumnAlone(t *testing.T) {
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
 		claimID:        holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}); fenced {
 		t.Fatal("the park was fenced out; the fixture's run holds no successor claim")
 	}

@@ -506,6 +506,18 @@ func TestDispatch_InteractiveSDKCutOffTurnResumesItsSession(t *testing.T) {
 			if conv.Status != domain.StatusOpen || conv.EndedAt != nil {
 				t.Errorf("after the re-claim: (status %q, ended %v), want open and un-ended", conv.Status, conv.EndedAt)
 			}
+			// Only the park says, on the transcript, that the reply did not
+			// finish.
+			wantNotes := 0
+			if tc.loseSession {
+				wantNotes = 1
+				if conv.ParkReason != domain.ParkReasonTurnIncomplete {
+					t.Errorf("park_reason = %q, want %q", conv.ParkReason, domain.ParkReasonTurnIncomplete)
+				}
+			}
+			if n := noMessageParkNotes(t, f.database, f.conv.ID); n != wantNotes {
+				t.Errorf("%d no-message stop notes on the transcript, want %d", n, wantNotes)
+			}
 		})
 	}
 }
