@@ -231,6 +231,36 @@ func TestFrontendMirrorsExternalActionVocabulary(t *testing.T) {
 	}
 }
 
+// TestFrontendMirrorsEventTypes asserts that every non-system event type in
+// domain.AllEventTypes() has a display entry in the frontend's EVENT_DISPLAY,
+// and that EVENT_DISPLAY names no type the catalog lacks.
+//
+// A type missing from the map renders through FALLBACK_EVENT, so a task it
+// creates wears the generic "EVENT" tag on the board, and the lane's
+// event-type filter chip for it reads the same. A key the catalog lacks is a
+// label for an event that can never arrive. System types are left out: the
+// catalog marks them never user-visible, and the fallback serves them.
+//
+// It lives at the composition root, the one process that sees every
+// registered type.
+func TestFrontendMirrorsEventTypes(t *testing.T) {
+	var want []string
+	for _, et := range domain.AllEventTypes() {
+		if et.Source != "system" {
+			want = append(want, et.ID)
+		}
+	}
+
+	src, err := os.ReadFile("frontend/src/lib/eventDisplay.ts")
+	if err != nil {
+		t.Fatalf("read eventDisplay.ts: %v", err)
+	}
+	got := tsObjectKeys(t, string(src), "EVENT_DISPLAY: Record<string, EventInfo>")
+	if diff := vocabularyDiff(want, got); diff != "" {
+		t.Errorf("frontend EVENT_DISPLAY has drifted from internal/domain/event.go:\n%s", diff)
+	}
+}
+
 // TestNotifyRoutesAreSPARoutes asserts that every page a notification's link
 // can address is a route frontend/src/main.tsx mounts, in each mode the table
 // gives it a page: under /orgs/:org_id in multi mode, and in local mode's flat
@@ -309,18 +339,19 @@ var (
 	// tab so a doc comment quoting a value can't be mistaken for a declaration.
 	goActionConst = regexp.MustCompile(`(?m)^\tAction\w+\s+=\s+"([a-z_]+)"$`)
 	// A top-level key of a TS object literal, at the one indent level the
-	// formatter gives it.
-	tsObjectKey = regexp.MustCompile(`(?m)^  ([a-z_]+): `)
+	// formatter gives it: bare, or single-quoted where the key needs quoting (an
+	// event type's colons).
+	tsObjectKey = regexp.MustCompile(`(?m)^  (?:([a-z_]+)|'([a-z_:]+)'): `)
 )
 
-// tsObjectKeys pulls the top-level keys out of an `export const <decl> = { … }`
-// object literal, reading to the closing brace at column 0. A textual parser for
-// the same reason tsArrayDecl is one: the declarations are plain literals by
-// convention, and shelling out to a TS toolchain would make this test skip
-// wherever the frontend isn't installed.
+// tsObjectKeys pulls the top-level keys out of a `const <decl> = { … }` object
+// literal, exported or not, reading to the closing brace at column 0. A textual
+// parser for the same reason tsArrayDecl is one: the declarations are plain
+// literals by convention, and shelling out to a TS toolchain would make this
+// test skip wherever the frontend isn't installed.
 func tsObjectKeys(t *testing.T, src, decl string) []string {
 	t.Helper()
-	open := "export const " + decl + " = {"
+	open := "const " + decl + " = {"
 	start := strings.Index(src, open)
 	if start < 0 {
 		t.Fatalf("no `%s…}` declaration found — the Go vocabulary needs a frontend mirror to check against", open)
@@ -332,7 +363,7 @@ func tsObjectKeys(t *testing.T, src, decl string) []string {
 	}
 	var keys []string
 	for _, m := range tsObjectKey.FindAllStringSubmatch(body[:end], -1) {
-		keys = append(keys, m[1])
+		keys = append(keys, m[1]+m[2])
 	}
 	return keys
 }
