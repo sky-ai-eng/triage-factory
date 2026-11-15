@@ -125,6 +125,19 @@ func RegisterToolsReference(source, text string) {
 // applet its blocks teach, so its section spells them that way; an SDK run's
 // `triagefactory exec` is resolved to a binary path by the caller.
 func ToolsReferenceForSources(runtime Runtime, kinds []string) string {
+	parts := ToolsReferenceParts(runtime, kinds)
+	texts := make([]string, len(parts))
+	for i, p := range parts {
+		texts[i] = p.Text
+	}
+	return strings.Join(texts, "\n\n")
+}
+
+// ToolsReferenceParts is ToolsReferenceForSources one block per part, in the
+// same canonical order: one part per source that documents verbs, keyed
+// "tools/<source>", and the shared workspace block keyed "tools/workspace".
+// Their texts joined by a blank line are ToolsReferenceForSources' result.
+func ToolsReferenceParts(runtime Runtime, kinds []string) []Part {
 	seen := make(map[string]bool, len(kinds))
 	var core, registered []string
 	for _, k := range kinds {
@@ -142,33 +155,34 @@ func ToolsReferenceForSources(runtime Runtime, kinds []string) string {
 	slices.Sort(core) // "github", then "jira", then "linear"
 	slices.Sort(registered)
 
-	parts := make([]string, 0, len(core)+1+len(registered))
+	parts := make([]Part, 0, len(core)+1+len(registered))
 	tracker := false
 	for _, k := range core {
 		switch k {
 		case "github":
 			if runtime != RuntimeNative {
-				parts = append(parts, githubTools)
+				parts = append(parts, Part{Key: "tools/github", Name: "the GitHub verbs", Text: githubTools})
 			}
 		case "jira":
-			parts = append(parts, jiraTools)
+			parts = append(parts, Part{Key: "tools/jira", Name: "the Jira verbs", Text: jiraTools})
 			tracker = true
 		case "linear":
-			parts = append(parts, linearTools)
+			parts = append(parts, Part{Key: "tools/linear", Name: "the Linear verbs", Text: linearTools})
 			tracker = true
 		}
 	}
 	if tracker {
-		parts = append(parts, workspaceTools)
+		parts = append(parts, Part{Key: "tools/workspace", Name: "the workspace verbs", Text: workspaceTools})
 	}
 	for _, k := range registered {
-		parts = append(parts, strings.TrimSpace(toolsReferenceRegistry[k]))
+		parts = append(parts, Part{Key: "tools/" + k, Name: "the " + k + " verbs", Text: strings.TrimSpace(toolsReferenceRegistry[k])})
 	}
-	out := strings.Join(parts, "\n\n")
 	if runtime == RuntimeNative {
-		out = strings.ReplaceAll(out, "triagefactory exec", prog.AppletName)
+		for i := range parts {
+			parts[i].Text = strings.ReplaceAll(parts[i].Text, "triagefactory exec", prog.AppletName)
+		}
 	}
-	return out
+	return parts
 }
 
 // ToolsReferenceFor returns the registered tools-reference text for source

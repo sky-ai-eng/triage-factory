@@ -265,21 +265,6 @@ type ResumeOptions struct {
 	// runs that never had a repo context.
 	GitHubOwner string
 
-	// SystemBlock is this conversation's own system block as its launch
-	// composed it — conversations.system_block, read back by the claim
-	// (launchedSystemBlock). The append this resume hands the harness is the
-	// framework blocks in front of it, which is byte-for-byte what the launch
-	// sent.
-	//
-	// It is a captured value rather than something composed here for the same
-	// reason Model is: recomposing would read the prompt row, the team settings
-	// and the knowledge base as they are today, and a conversation woken a week
-	// after it parked would be told to do something nobody asked it to do. Empty
-	// is a legal value — a conversation whose block really was empty, and a
-	// conversation launched before the column existed both resume on the
-	// framework blocks alone.
-	SystemBlock string
-
 	// ExtraAllowedTools carries the prompt/agent-derived tool extensions
 	// so a resumed session has the same --allowedTools as the initial
 	// invocation. Without this, MCP tools allowed on the first run
@@ -342,11 +327,9 @@ type ResumeOptions struct {
 	// nil is refused rather than read as an org with no identity.
 	commitSigner *commitsigner.Identity
 
-	// conversationType is the resumed conversation's stored type, which picks
-	// the framework prompt's surface (surfaceFor). Read off the row rather than
-	// decided here, so a resume composes the surface its conversation opened
-	// with.
-	conversationType string
+	// system is the system text this resume sends and the update it carries
+	// (resumeSystemClaim), composed by the dispatcher, which holds the task.
+	system systemClaim
 
 	// hasBlueprint is whether the resumed conversation belongs to a blueprint
 	// run, which decides whether its process is offered stop_blueprint
@@ -414,6 +397,17 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	selfBin, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("resolve own binary path: %w", err)
+	}
+	agentBin := agentproc.AgentVisibleBinary(selfBin)
+
+	// What changed in the conversation's instructions since it last heard
+	// ends this turn's message, and its row is what the next claim compares
+	// against. Recorded here rather than by the dispatcher because the text
+	// names this process's binary. A fence refusal leaves it out with its row,
+	// and the resume meets the same fence at its first write.
+	if update := resolveCLIPath(opts.system.update, agentBin); update != "" &&
+		!s.insertClaimNote(ctx, orgID, opts.claimID, systemUpdateRow(conversationID, update, opts.system.current.Parts)) {
+		message = joinTurnText(message, update)
 	}
 
 	runURL := s.publishedRunURLFor(orgID, conversationID)
@@ -508,13 +502,13 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		SessionID:          sessionID,
 		Message:            message,
 		OnOpeningUnsent:    opts.openingUnsent,
-		// The append the launch gave this conversation, through the composer the
-		// launch used. The harness replays the session's own history but not the
-		// prompt that was appended to it, so a turn sent without this one wakes
-		// on Claude Code's defaults — no framework blocks, no mission, no step
-		// addendum. The CLI path resolves against THIS process's binary, which
-		// is why the stored half stops at the block.
-		SystemPrompt: sdkSystemPrompt(surfaceFor(opts.conversationType), opts.SystemBlock, agentproc.AgentVisibleBinary(selfBin)),
+		// The append the conversation was frozen with. The harness replays the
+		// session's own history but not the prompt that was appended to it, so
+		// a turn sent without this one wakes on Claude Code's defaults — no
+		// framework blocks, no mission, no step addendum. The CLI path resolves
+		// against THIS process's binary, which is why the stored text stops
+		// short of it.
+		SystemPrompt: sdkAppend(opts.system.send, agentBin),
 
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{

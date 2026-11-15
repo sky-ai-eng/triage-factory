@@ -33,8 +33,9 @@ type Transcript interface {
 	// artifact), insert resultRow, flip inactiveIDs out of the window, and
 	// re-seq undelivered rows to fractional positions after the result row,
 	// preserving their relative order. Assigned IDs are written back onto
-	// the row pointers.
-	Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error
+	// the row pointers. A non-nil system becomes the conversation's system
+	// text in the same commit, and system updates still queued are withdrawn.
+	Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int, system *domain.SystemText) error
 	// SettleCompactionRequest records a discarded warm compaction attempt on
 	// the request row: the failed call's usage and cost (its reply is never
 	// inserted, but its dollars are real and the ledger is messages alone),
@@ -141,7 +142,32 @@ type Params struct {
 	// composes it, for the same reason it composes SystemPrompt: the loop
 	// never writes prompt text it did not receive. Empty sends a
 	// single-block system message.
+	//
+	// Both are the text the conversation was frozen with, not this claim's
+	// composition: the provider binds each thinking block to the system
+	// prompt it was produced under and refuses a request that replays one
+	// after the prompt changed.
 	SystemAddendum string
+
+	// SystemUpdate tells the conversation which parts of its system text
+	// changed since it last heard, composed by the driver. The engagement
+	// appends it as a system row after the claim's repair and before its
+	// first drain, unless a compaction at resume has already made
+	// CurrentSystem the conversation's text. Empty appends nothing.
+	SystemUpdate string
+
+	// CurrentSystem is the system text this claim composed. A compaction
+	// makes it the conversation's text, and the engagement sends it from then
+	// on: nothing from before a summary is sent back after it, so the text
+	// may change there. A system update records its parts as the comparison
+	// point for the next claim. Nil leaves the text as it is through a
+	// compaction.
+	CurrentSystem *domain.SystemText
+
+	// sent is the system text this engagement's requests carry, shared by
+	// every copy of its Params so a compaction anywhere in the loop changes
+	// it for every call after. Run sets it.
+	sent *sentSystem
 
 	// HasBlueprint offers the flow-control tool. True for a delegation,
 	// where the conversation executes a blueprint against a task; false for
@@ -412,6 +438,7 @@ type Logger interface {
 // stream → persist → stop-reason handling → tool dispatch → would-stop.
 func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	started := e.now()
+	params.sent = &sentSystem{prompt: params.SystemPrompt, addendum: params.SystemAddendum}
 
 	// The engagement's spend, in this frame because the Engine is shared
 	// across engagements. Stamped by one deferred assignment so every exit
@@ -448,6 +475,15 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		}
 		e.insertNotice(pctx, params, "Compacting this conversation on resume failed: "+err.Error())
 		return e.failed(ctx, started, 0, fmt.Errorf("compact on resume: %w", err))
+	}
+	// After the resume compaction, which may already have replaced the
+	// system text the update describes, and before the first drain, which
+	// delivers it behind the claim's input.
+	if err := e.appendSystemUpdate(pctx, params); err != nil {
+		if ctx.Err() != nil {
+			return e.cancelled(ctx, started, 0)
+		}
+		return e.failed(ctx, started, 0, fmt.Errorf("append system update: %w", err))
 	}
 	current.next(prepareOK)
 
@@ -955,11 +991,12 @@ func wholeSeconds(d time.Duration) int {
 // costs nothing, while tool_choice (which does invalidate) stays absent on
 // both.
 func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message, maxTokens int) inference.Request {
+	prompt, addendum := params.systemText()
 	return inference.Request{
 		Provider:       provider,
 		Model:          params.Model,
-		SystemPrompt:   params.SystemPrompt,
-		SystemAddendum: params.SystemAddendum,
+		SystemPrompt:   prompt,
+		SystemAddendum: addendum,
 		Rows:           rows,
 		Tools:          e.toolSchemas(params),
 		Effort:         params.Effort,

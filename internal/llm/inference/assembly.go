@@ -193,6 +193,14 @@ func rowToMessage(r domain.Message) (schemas.ChatMessage, error) {
 	case "user":
 		return schemas.ChatMessage{Role: schemas.ChatMessageRoleUser, Content: wrapSteer(r, content)}, nil
 
+	case "system":
+		// A system row mid-conversation, which bifrost sends as a
+		// mid-conversation system message where the provider and model take
+		// one and as a user turn where they don't. It never joins the
+		// top-level system blocks: those are bound to every thinking block the
+		// conversation holds.
+		return schemas.ChatMessage{Role: schemas.ChatMessageRoleSystem, Content: content}, nil
+
 	case "tool":
 		return schemas.ChatMessage{
 			Role:    schemas.ChatMessageRoleTool,
@@ -248,7 +256,7 @@ func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 	}
 
 	switch msg.Role {
-	case schemas.ChatMessageRoleUser:
+	case schemas.ChatMessageRoleUser, schemas.ChatMessageRoleSystem:
 
 	case schemas.ChatMessageRoleTool:
 		if msg.ChatToolMessage != nil {
@@ -434,6 +442,8 @@ func elidedStub(r domain.Message) schemas.ChatMessage {
 			msg.ChatAssistantMessage = &schemas.ChatAssistantMessage{ToolCalls: calls}
 		}
 		return msg
+	case "system":
+		return schemas.ChatMessage{Role: schemas.ChatMessageRoleSystem, Content: content}
 	default:
 		return schemas.ChatMessage{Role: schemas.ChatMessageRoleUser, Content: content}
 	}

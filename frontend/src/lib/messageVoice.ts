@@ -19,10 +19,14 @@ import type { Message } from '../types'
 // Rendering the system half as operator speech is not a cosmetic slip. It
 // tells the reader they said something they never said, and it puts words in
 // their mouth at exactly the moments the machine is explaining itself.
+//
+// A role=system row is the system by its role alone: it tells a conversation
+// that its instructions changed since it began.
 
 const HUMAN_SUBTYPES = new Set(['', 'injection:steer'])
 
-/** True when a role=user row records something the system did, not something a person said. */
+/** True when a row records something the system did or said, not something a person said. */
 export function isSystemNotice(msg: Message): boolean {
+  if (msg.role === 'system') return true
   return msg.role === 'user' && !HUMAN_SUBTYPES.has(msg.subtype ?? '')
 }

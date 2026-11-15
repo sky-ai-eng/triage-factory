@@ -159,10 +159,11 @@ func TestDispatch_InteractiveConversationRunsWithNoBlueprintRun(t *testing.T) {
 
 	// No mission: the conversation's own block holds the run's facts and its
 	// verb reference and nothing after them.
-	block, err := f.stores.Conversations.SystemBlockSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	text, err := f.stores.Conversations.SystemTextSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
 	if err != nil {
-		t.Fatalf("SystemBlockSystem: %v", err)
+		t.Fatalf("SystemTextSystem: %v", err)
 	}
+	block := text.Block
 	if block == "" {
 		t.Fatal("the launch stamped no system block")
 	}

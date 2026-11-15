@@ -304,6 +304,12 @@ const (
 	// loop about to conclude does not continue for it; a note still pending
 	// then waits for the conversation's next resume.
 	MessageSubtypeInjectionSystemNote = "injection:system-note"
+	// MessageSubtypeInjectionSystemUpdate marks a role=system row telling a
+	// conversation which parts of its system text changed since it began.
+	// Its metadata carries every part as the claim that wrote it composed
+	// them (SystemUpdateMetadataKey), which is what the next claim compares
+	// against.
+	MessageSubtypeInjectionSystemUpdate = "injection:system-update"
 	// MessageSubtypeStopNote marks a delivered row recording why an
 	// engagement stopped — a guard park, an unrecoverable provider error.
 	// A statement of fact written into history, not input awaiting

@@ -366,9 +366,10 @@ func withoutReasoning(rows []domain.Message) []domain.Message {
 // through the transcript's single fenced transaction.
 func (e *Engine) commitCompaction(ctx context.Context, params Params, replyRow *domain.Message, summary string, span []int) error {
 	resultRow := composeResultRow(params, summary)
-	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span); err != nil {
+	if err := e.Transcript.Compact(ctx, params.OrgID, params.ConversationID, replyRow, resultRow, span, params.CurrentSystem); err != nil {
 		return fmt.Errorf("commit compaction: %w", err)
 	}
+	params.adoptCurrentSystem()
 	e.info("conversation compacted",
 		"conversation", params.ConversationID, "rows_compacted", len(span), "result_row", resultRow.ID)
 	return nil

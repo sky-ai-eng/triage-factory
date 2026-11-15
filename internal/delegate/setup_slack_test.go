@@ -154,8 +154,8 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	if !slices.Contains(cfg.sources.kinds, "github") || !slices.Contains(cfg.sources.kinds, "slack") {
 		t.Errorf("sources = %q, want both github and slack", cfg.sources.kinds)
 	}
-	if !strings.Contains(cfg.sources.tools(agentprompt.RuntimeSDK), "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want the registered slack reference composed in", cfg.sources.tools(agentprompt.RuntimeSDK))
+	if !strings.Contains(agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, cfg.sources.kinds), "SLACK VERB DOCS") {
+		t.Errorf("toolsRef = %q, want the registered slack reference composed in", agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, cfg.sources.kinds))
 	}
 }
 

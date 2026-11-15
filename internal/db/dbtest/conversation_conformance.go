@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -2247,8 +2248,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		refuse("SetSessionForClaimSystem", err)
 		_, err = store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/zombie")
 		refuse("SetWorktreePathForClaimSystem", err)
-		_, err = store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, "<run_context>zombie</run_context>")
-		refuse("SetSystemBlockForClaimSystem", err)
+		_, err = store.SetSystemTextForClaimSystem(ctx, orgID, conversationID, claimID, domain.SystemText{Block: "<run_context>zombie</run_context>"})
+		refuse("SetSystemTextForClaimSystem", err)
 		_, err = store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
 			ConversationID: conversationID, Role: "assistant", Content: "zombie", Delivered: &pending,
 		})
@@ -2266,7 +2267,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		_, err = store.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, "agent_starting")
 		refuse("SetClaimPhaseSystem", err)
 		refuse("CompactForClaimSystem", store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, nil,
-			&domain.Message{Role: "user", Content: "summary"}, []int{int(ownedID)}))
+			&domain.Message{Role: "user", Content: "summary"}, []int{int(ownedID)}, nil))
 		_, err = store.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, claimID, int(ownedID), 1, 1, 0, 0, nil, "zombie")
 		refuse("SettleCompactionRequestForClaimSystem", err)
 
@@ -2588,7 +2589,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
 		span := []int{assistantID, toolID, requestID}
-		if err := store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, span); err != nil {
+		if err := store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, span, nil); err != nil {
 			t.Fatalf("CompactForClaimSystem: %v", err)
 		}
 		if replyRow.ID == 0 || resultRow.ID == 0 {
@@ -2795,18 +2796,16 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	// The fourth resume coordinate, which unlike the other three is read back
 	// through a door of its own rather than off the conversation projection —
 	// so the round trip is the contract, and both halves of it are here.
-	t.Run("SystemBlockRoundTrips_AndTheDefaultIsEmptyRatherThanNull", func(t *testing.T) {
+	t.Run("SystemTextRoundTrips_AndTheDefaultIsEmptyRatherThanNull", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		// Never written: the column answers with the empty string, not NULL and
-		// not an error. This is the pre-launch read and the read of a
-		// conversation whose block really was empty, and the resume cannot tell
-		// them apart because it does not need to — both send the framework
-		// blocks alone.
-		if got, err := store.SystemBlockSystem(ctx, orgID, conversationID); err != nil || got != "" {
-			t.Fatalf("SystemBlockSystem before any launch = (%q, %v), want (\"\", nil)", got, err)
+		// Never written: empty strings and no parts, not NULL strings and not an
+		// error. This is the pre-launch read and the read of a conversation
+		// launched before its text was recorded.
+		if got, err := store.SystemTextSystem(ctx, orgID, conversationID); err != nil || got.Prompt != "" || got.Block != "" || got.Parts != nil {
+			t.Fatalf("SystemTextSystem before any launch = (%+v, %v), want empty with nil parts", got, err)
 		}
 
 		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-block", 1); err != nil {
@@ -2816,30 +2815,92 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Multi-line text with the markup a real block carries, so a backend
 		// that mangles or truncates it fails here rather than in a prompt.
-		const block = "<run_context>\nRun root: /work\n</run_context>\n\n<tools>\ngh pr view\n</tools>\n\nreview the pull request"
-		written, err := store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
-		if err != nil {
-			t.Fatalf("SetSystemBlockForClaimSystem: %v", err)
+		text := domain.SystemText{
+			Prompt: "<identity>\nyou are an agent\n</identity>\n",
+			Block:  "<run_context>\nRun root: /work\n</run_context>\n\n<tools>\ngh pr view\n</tools>\n\nreview the pull request",
+			Parts: []domain.SystemPart{
+				{Key: "framework/identity.txt", Name: "identity", Text: "<identity>\nyou are an agent\n</identity>"},
+				{Key: "run_context/run_root", Name: "the run root", Text: "Run root: /work"},
+				{Key: "mission", Name: "the mission", Text: "review the pull request \"now\" — é"},
+			},
 		}
-		AssertWriteReturnedStoredRow(t, "SetSystemBlockForClaimSystem", *written, func() (*domain.Conversation, error) {
+		written, err := store.SetSystemTextForClaimSystem(ctx, orgID, conversationID, claimID, text)
+		if err != nil {
+			t.Fatalf("SetSystemTextForClaimSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSystemTextForClaimSystem", *written, func() (*domain.Conversation, error) {
 			return store.Get(ctx, orgID, conversationID)
 		})
-		if got, err := store.SystemBlockSystem(ctx, orgID, conversationID); err != nil || got != block {
-			t.Fatalf("SystemBlockSystem = (%q, %v), want the block back verbatim", got, err)
+		if got, err := store.SystemTextSystem(ctx, orgID, conversationID); err != nil || !reflect.DeepEqual(got, text) {
+			t.Fatalf("SystemTextSystem = (%+v, %v), want the text back verbatim", got, err)
 		}
 
-		// A crash re-claim composes the append again and overwrites: the column
-		// is what the harness was LAST handed, which is what its next resume
-		// has to replay.
-		if _, err := store.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, "recomposed"); err != nil {
-			t.Fatalf("re-stamp the system block: %v", err)
+		// Nil parts store NULL rather than an empty list: a conversation whose
+		// parts were never recorded is told apart from one with none.
+		if _, err := store.SetSystemTextForClaimSystem(ctx, orgID, conversationID, claimID, domain.SystemText{Block: "recomposed"}); err != nil {
+			t.Fatalf("re-stamp the system text: %v", err)
 		}
-		if got, _ := store.SystemBlockSystem(ctx, orgID, conversationID); got != "recomposed" {
-			t.Errorf("system block after a re-launch = %q, want recomposed", got)
+		if got, _ := store.SystemTextSystem(ctx, orgID, conversationID); got.Block != "recomposed" || got.Prompt != "" || got.Parts != nil {
+			t.Errorf("system text after a re-stamp = %+v, want only the recomposed block", got)
 		}
 
-		if _, err := store.SystemBlockSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000ff"); !errors.Is(err, db.ErrNoSuchConversation) {
-			t.Errorf("SystemBlockSystem for an unknown id = %v, want ErrNoSuchConversation", err)
+		if _, err := store.SystemTextSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000ff"); !errors.Is(err, db.ErrNoSuchConversation) {
+			t.Errorf("SystemTextSystem for an unknown id = %v, want ErrNoSuchConversation", err)
+		}
+	})
+
+	// After a summary-only compaction nothing from before the summary is sent
+	// back, so the conversation's system text may change there, and an update
+	// still queued against the text it replaces would only restate it.
+	t.Run("Compact_ReplacesTheSystemTextAndWithdrawsQueuedUpdates", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-refreeze", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+		if _, err := store.SetSystemTextForClaimSystem(ctx, orgID, conversationID, claimID, domain.SystemText{Prompt: "old prompt", Block: "old block",
+			Parts: []domain.SystemPart{{Key: "k", Name: "k", Text: "old"}}}); err != nil {
+			t.Fatalf("SetSystemTextForClaimSystem: %v", err)
+		}
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		pending := false
+		turn := insert(domain.Message{Role: "assistant", Content: "worked"})
+		queuedUpdate := insert(domain.Message{Role: "system", Subtype: domain.MessageSubtypeInjectionSystemUpdate, Content: "an update", Delivered: &pending})
+		queuedInput := insert(domain.Message{Role: "user", Content: "keep going", Delivered: &pending})
+
+		next := domain.SystemText{Prompt: "new prompt", Block: "new block", Parts: []domain.SystemPart{{Key: "k", Name: "k", Text: "new"}}}
+		resultRow := &domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
+		if err := store.CompactForClaimSystem(ctx, orgID, conversationID, claimID, nil, resultRow, []int{turn}, &next); err != nil {
+			t.Fatalf("CompactForClaimSystem: %v", err)
+		}
+		if got, err := store.SystemTextSystem(ctx, orgID, conversationID); err != nil || !reflect.DeepEqual(got, next) {
+			t.Fatalf("system text after the compaction = (%+v, %v), want this claim's composition", got, err)
+		}
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+		if err != nil {
+			t.Fatalf("MessagesForConversations: %v", err)
+		}
+		for _, m := range msgs {
+			switch m.ID {
+			case queuedUpdate:
+				if m.WindowState != domain.MessageWindowInactive || (m.Delivered != nil && *m.Delivered) {
+					t.Errorf("queued update = %s delivered=%v, want withdrawn (inactive, undelivered)", m.WindowState, m.Delivered)
+				}
+			case queuedInput:
+				if m.WindowState == domain.MessageWindowInactive {
+					t.Errorf("a person's queued input was withdrawn with the update")
+				}
+			}
 		}
 	})
 

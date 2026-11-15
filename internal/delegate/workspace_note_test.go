@@ -38,7 +38,7 @@ func TestComposeLaunchTurn_ResumedSessionOnARebuiltTreeOpensWithTheWorkspaceNote
 			note := workspaceNote("/tmp/wt-sdk-note", tc.prov)
 			resumed := agentproc.RunOptions{SessionID: "sess-survived"}
 			if err := s.composeLaunchTurn(ctx, &resumed, sink, runmode.LocalDefaultOrgID, "r-sdk-note",
-				runmode.LocalDefaultUserID, "", note, false, openingTestMemories(), openingTestTaskContext); err != nil {
+				runmode.LocalDefaultUserID, "", note, launchUpdate{}, false, openingTestMemories(), openingTestTaskContext); err != nil {
 				t.Fatalf("the resuming launch: %v", err)
 			}
 

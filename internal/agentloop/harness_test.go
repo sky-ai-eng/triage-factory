@@ -51,6 +51,9 @@ type memTranscript struct {
 	// context inside the commit, which is how a shutdown or a stop is really
 	// observed by a commit that was already in flight.
 	failCompact func() error
+	// system is the system text the last compaction that carried one made
+	// the conversation's.
+	system *domain.SystemText
 }
 
 func newMemTranscript(seed ...domain.Message) *memTranscript {
@@ -157,7 +160,7 @@ func (t *memTranscript) Insert(_ context.Context, _ string, msg *domain.Message)
 // Compact mirrors the store op: insert the optional reply row (forced
 // inactive), insert the result row, flip the span, re-seq undelivered rows
 // to fractions after the result row in their existing relative order.
-func (t *memTranscript) Compact(_ context.Context, _, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+func (t *memTranscript) Compact(_ context.Context, _, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int, system *domain.SystemText) error {
 	if t.failCompact != nil {
 		fail := t.failCompact
 		t.failCompact = nil
@@ -209,6 +212,16 @@ func (t *memTranscript) Compact(_ context.Context, _, conversationID string, rep
 	for n, i := range queued {
 		seq := float64(resultRow.ID) + float64(n+1)/float64(len(queued)+1)
 		t.rows[i].Seq = &seq
+	}
+	if system != nil {
+		for i := range t.rows {
+			r := &t.rows[i]
+			if !isDelivered(*r) && r.Subtype == domain.MessageSubtypeInjectionSystemUpdate {
+				r.WindowState = domain.MessageWindowInactive
+			}
+		}
+		text := *system
+		t.system = &text
 	}
 	return nil
 }

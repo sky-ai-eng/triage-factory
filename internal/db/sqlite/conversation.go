@@ -570,30 +570,49 @@ func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversa
 	return scanConversationReturning(row)
 }
 
-// setSystemBlock is the write behind SetSystemBlockForClaimSystem, split out so
-// the fenced door can run it inside the fence's own transaction. No unfenced
-// door exposes it: only the engagement that composed the append writes it.
-func (s *conversationStore) setSystemBlock(ctx context.Context, orgID, conversationID, block string) (*domain.Conversation, error) {
+// setSystemText is the write behind SetSystemTextForClaimSystem and a
+// compaction's re-freeze, split out so the fenced doors can run it inside the
+// fence's own transaction. No unfenced door exposes it: only the engagement
+// that composed the text writes it.
+func (s *conversationStore) setSystemText(ctx context.Context, orgID, conversationID string, text domain.SystemText) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	parts, err := db.EncodeSystemParts(text.Parts)
+	if err != nil {
+		return nil, err
+	}
+	var partsArg any
+	if parts != nil {
+		partsArg = string(parts)
+	}
 	row := s.q.QueryRowContext(ctx, `
-		UPDATE conversations SET system_block = ? WHERE id = ?
-		RETURNING `+sqliteConversationReturningColumns, block, conversationID)
+		UPDATE conversations SET system_prompt = ?, system_block = ?, system_parts = ? WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, text.Prompt, text.Block, partsArg, conversationID)
 	return scanConversationReturning(row)
 }
 
-func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
+func (s *conversationStore) SystemTextSystem(ctx context.Context, orgID, conversationID string) (domain.SystemText, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return domain.SystemText{}, err
 	}
-	var block string
+	var text domain.SystemText
+	var parts sql.NullString
 	err := s.q.QueryRowContext(ctx,
-		`SELECT system_block FROM conversations WHERE id = ?`, conversationID).Scan(&block)
+		`SELECT system_prompt, system_block, system_parts FROM conversations WHERE id = ?`, conversationID).
+		Scan(&text.Prompt, &text.Block, &parts)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", db.ErrNoSuchConversation
+		return domain.SystemText{}, db.ErrNoSuchConversation
 	}
-	return block, err
+	if err != nil {
+		return domain.SystemText{}, err
+	}
+	if parts.Valid {
+		if text.Parts, err = db.DecodeSystemParts([]byte(parts.String)); err != nil {
+			return domain.SystemText{}, err
+		}
+	}
+	return text, nil
 }
 
 func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
@@ -1952,13 +1971,13 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 	return result, nil
 }
 
-func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
+func (s *conversationStore) SetSystemTextForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, text domain.SystemText) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.q, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		r, err := (&conversationStore{q: q}).setSystemBlock(ctx, orgID, conversationID, block)
+		r, err := (&conversationStore{q: q}).setSystemText(ctx, orgID, conversationID, text)
 		result = r
 		return err
 	})
@@ -2956,7 +2975,7 @@ func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversati
 // row ahead of the result — no single row a return value could name.
 // replyRow/resultRow's assigned IDs are written back to the caller's own
 // pointers, which stands in for "the row it persisted" here.
-func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, system *domain.SystemText) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -3018,6 +3037,19 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 			`, seq, conversationID, id); err != nil {
 				return fmt.Errorf("re-seq queued row %d: %w", id, err)
 			}
+		}
+
+		if system == nil {
+			return nil
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE messages SET window_state = 'inactive'
+			WHERE conversation_id = ? AND delivered = 0 AND subtype = ?
+		`, conversationID, domain.MessageSubtypeInjectionSystemUpdate); err != nil {
+			return fmt.Errorf("withdraw queued system updates: %w", err)
+		}
+		if _, err := txStore.setSystemText(ctx, orgID, conversationID, *system); err != nil {
+			return fmt.Errorf("replace system text: %w", err)
 		}
 		return nil
 	})

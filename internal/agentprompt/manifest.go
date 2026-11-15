@@ -78,6 +78,9 @@ const (
 	blockToolsJira      = "tools/jira.txt"
 	blockToolsLinear    = "tools/linear.txt"
 	blockToolsWorkspace = "tools/workspace.txt"
+
+	// per-conversation injected, not manifest-composed (see parts.go)
+	blockInstructionsUpdate = "update/instructions.txt"
 )
 
 // gitAccessFor and isolationFor are the two mode arms. They are separate

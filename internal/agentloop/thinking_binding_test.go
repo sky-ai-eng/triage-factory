@@ -397,3 +397,133 @@ func TestThinkingBinding_ColdCompactionOnResume(t *testing.T) {
 		})
 	}
 }
+
+// changedSystem is a claim's composition that differs from fableParams' frozen
+// text, as a release or a team setting would make it.
+func changedSystem() *domain.SystemText {
+	return &domain.SystemText{
+		Prompt: "system (next release)",
+		Block:  "conversation block (recomposed)",
+		Parts:  []domain.SystemPart{{Key: "run_context/branch", Name: "the branch naming convention", Text: "Branch naming convention for this team: fix/{slug}"}},
+	}
+}
+
+const systemUpdateText = "<instructions_update>the branch naming convention changed</instructions_update>"
+
+// A re-claim whose composition changed keeps sending the text the
+// conversation was frozen with, and tells it what changed in a system row
+// after the claim's input, so every block it replays keeps its context.
+func TestThinkingBinding_AResumeWithAChangedSystemTextAppendsAnUpdate(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}}),
+		thinking(scriptedTurn{text: "done"}),
+		thinking(scriptedTurn{text: "done again"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+	})
+	params := fableParams()
+	params.SystemUpdate = systemUpdateText
+	params.CurrentSystem = changedSystem()
+	runEngagement(t, tr, p, newScriptedToolHost(), params)
+	p.assertBound(t)
+
+	resumed := p.requests[2]
+	if resumed.SystemPrompt != fableParams().SystemPrompt || resumed.SystemAddendum != fableParams().SystemAddendum {
+		t.Fatalf("the resume sent system %q / %q, want the frozen text", resumed.SystemPrompt, resumed.SystemAddendum)
+	}
+	last := resumed.Rows[len(resumed.Rows)-1]
+	if last.Role != "system" || last.Content != systemUpdateText || last.Subtype != domain.MessageSubtypeInjectionSystemUpdate {
+		t.Fatalf("the resume's last row = %s %q %q, want the system update after the follow-up", last.Role, last.Subtype, last.Content)
+	}
+	if !isDelivered(last) {
+		t.Errorf("the update reached the request undelivered")
+	}
+	if parts, ok := last.Metadata[domain.SystemUpdateMetadataKey].([]domain.SystemPart); !ok || len(parts) != 1 {
+		t.Errorf("the update carries %#v as its parts, want this claim's composition", last.Metadata[domain.SystemUpdateMetadataKey])
+	}
+}
+
+// A re-claim whose composition matches what the conversation last heard adds
+// no row: the driver passes no update.
+func TestThinkingBinding_AResumeWithNoUpdateAddsNoSystemRow(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(thinking(scriptedTurn{text: "done"}), thinking(scriptedTurn{text: "done again"}))
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+	})
+	params := fableParams()
+	params.CurrentSystem = changedSystem()
+	runEngagement(t, tr, p, newScriptedToolHost(), params)
+	if tr.find(func(m domain.Message) bool { return m.Role == "system" }) != nil {
+		t.Fatal("a claim with no update wrote a system row")
+	}
+	p.assertBound(t)
+}
+
+// A compaction replaces the history with a summary, so no block from before
+// it is sent again and the system text may change there: the engagement adopts
+// this claim's composition, and the transcript records it in the same commit.
+func TestThinkingBinding_CompactionAdoptsTheCurrentSystemText(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	full := overThresholdFor(t, fableParams().Model)
+	p := newBindingProvider(
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}, usage: inference.Usage{PromptTokens: full}}),
+		thinking(summaryReply("everything that happened")),
+		thinking(scriptedTurn{calls: []domain.ToolCall{{ID: "c2", Name: "bash"}}}),
+		thinking(scriptedTurn{text: "done"}),
+	)
+	params := fableParams()
+	params.CurrentSystem = changedSystem()
+	runEngagement(t, tr, p, newScriptedToolHost(), params)
+	p.assertBound(t)
+
+	if tr.system == nil || tr.system.Prompt != params.CurrentSystem.Prompt || tr.system.Block != params.CurrentSystem.Block {
+		t.Fatalf("the compaction recorded system text %+v, want this claim's composition", tr.system)
+	}
+	// The summarize call rides the conversation's cache, so it is the frozen
+	// text; every call after the commit is the new one.
+	for i, req := range p.requests {
+		want := fableParams().SystemPrompt
+		if i >= 2 {
+			want = params.CurrentSystem.Prompt
+		}
+		if req.SystemPrompt != want {
+			t.Errorf("call %d sent system %q, want %q", i+1, req.SystemPrompt, want)
+		}
+	}
+}
+
+// A resume that compacts before its first call has already made this claim's
+// composition the conversation's text, so there is nothing left to tell.
+func TestThinkingBinding_AResumeCompactionLeavesNoUpdate(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := newBindingProvider(
+		thinking(scriptedTurn{text: "done", usage: inference.Usage{PromptTokens: overThresholdFor(t, fableParams().Model)}}),
+		forcedReply("resume analysis", "resume summary"),
+		thinking(scriptedTurn{text: "done again"}),
+	)
+	runEngagement(t, tr, p, newScriptedToolHost(), fableParams())
+	tr.ageRows(time.Hour)
+	_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+		ConversationID: "conv", Role: "user", Content: "one more thing", Delivered: boolPtr(false),
+	})
+	params := fableParams()
+	params.SystemUpdate = systemUpdateText
+	params.CurrentSystem = changedSystem()
+	runEngagement(t, tr, p, newScriptedToolHost(), params)
+	p.assertBound(t)
+
+	if p.requests[1].SystemPrompt != coldCompactionSystemPrompt {
+		t.Fatalf("staging failed: the resume's first call has system prompt %.40q…, want the forced-shape call", p.requests[1].SystemPrompt)
+	}
+	if tr.find(func(m domain.Message) bool { return m.Role == "system" }) != nil {
+		t.Error("a resume that compacted first still appended the update")
+	}
+	if got := p.requests[2].SystemPrompt; got != params.CurrentSystem.Prompt {
+		t.Errorf("the call after the resume compaction sent system %q, want this claim's composition", got)
+	}
+}

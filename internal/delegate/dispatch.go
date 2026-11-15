@@ -1664,7 +1664,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,
 		Effort:            s.claimEffort(stepCtx, orgID, conv.ID, conv.Model),
-		SystemBlock:       s.launchedSystemBlock(stepCtx, orgID, conv.ID),
+		system:            s.resumeSystemClaim(stepCtx, orgID, conv, *task),
 		GitHubOwner:       owner,
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,
@@ -1675,7 +1675,6 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		mirror:            mirror,
 		openingUnsent:     prependsUnsent,
 		nudge:             nudge,
-		conversationType:  conv.Type,
 		hasBlueprint:      blueprintRunID != "",
 		commitSigner:      &commitSigner,
 	}, "manual", userID)

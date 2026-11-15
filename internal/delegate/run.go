@@ -23,7 +23,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -348,13 +347,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// own two roots plus every other team's published one, resolved from
 	// cfg.teamID alone. Still an in-tree write, so a warm step keeps whatever
 	// the first step's copy left there — a knowledge base edited mid-blueprint
-	// does not reach later steps, and the manifest describes what THIS launch
-	// staged rather than what the tree happens to hold.
-	knowledge := ""
+	// does not reach later steps.
 	if handedOff {
 		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
 	} else {
-		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd)
+		s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd)
 	}
 
 	// A blueprint's steps share one tree and all write the same memory filename,
@@ -423,24 +420,37 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// task context is externally-authored text and stays a transcript row, which
 	// is what the model reads as the conversation's first turn.
 	//
-	// The task-state line is a launch's: a session this claim resumes
-	// mid-flight began before it, so the line would misdate a close that came
-	// since, and the note tells that session of it.
-	//
-	// The overlapping work is a launch's on the same terms: a resumed session
-	// was told of each assignment since by a note.
-	taskState, siblingWork := "", ""
+	// A launch that resumes a session sends the append the conversation was
+	// frozen with, and what changed since reaches it in this turn's message
+	// (resolveSystemClaim). A read of the frozen text that fails sends this
+	// launch's composition and records nothing, so a transient error cannot
+	// replace what the conversation was launched with.
+	composed := composeSystemParts(systemInputs{
+		spec:           sdkSpec(cfg.surface),
+		mission:        mission,
+		scope:          cfg.scope,
+		taskState:      s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID),
+		siblingWork:    s.siblingWorkContext(context.WithoutCancel(ctx), orgID, conversationID),
+		runRoot:        agentRunRoot,
+		prCheckout:     agentPRCheckout,
+		baseCheckout:   agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout),
+		branchTemplate: branchTemplate,
+		runURL:         runURL,
+		sources:        cfg.sources,
+		stepEnd:        cfg.appendSysPrompt,
+	})
+	var system systemClaim
 	if opens {
-		taskState = s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID)
-		siblingWork = s.siblingWorkContext(context.WithoutCancel(ctx), orgID, conversationID)
+		system = resolveSystemClaim(false, domain.SystemText{}, nil, composed)
+	} else if frozen, lastTold, err := s.readSystemState(context.WithoutCancel(ctx), orgID, conversationID); err != nil {
+		delegateLog.Warn("read the system text this conversation was launched with failed; this launch sends its own and records nothing",
+			"conversation", conversationID, "error", err)
+		current := renderSystem(composed)
+		system = systemClaim{send: current, current: current}
+	} else {
+		system = resolveSystemClaim(true, frozen, lastTold, composed)
 	}
-	systemBlock := composeConversationSystemBlock(
-		mission,
-		runContext(cfg.scope, taskState, siblingWork, agentRunRoot, agentPRCheckout, agentVisibleCheckout(cfg.runRoot, cfg.baseCheckout), branchTemplate, runURL, cfg.sources.notes, knowledge),
-		cfg.sources.tools(agentprompt.RuntimeSDK),
-		cfg.appendSysPrompt,
-	)
-	systemPrompt := sdkSystemPrompt(cfg.surface, systemBlock, agentBin)
+	systemPrompt := sdkAppend(system.send, agentBin)
 
 	// Only a launch that sends the opening composes a task context, because the
 	// opening is the one place it reaches the model. A resumed session is handed
@@ -495,18 +505,18 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	if ctx.Err() != nil {
 		return cancelled("", 0)
 	}
-	// Block 2 goes on the row before the agent gets it. The harness is handed
-	// its append once, at launch, and replays only the session transcript
-	// afterwards, so this is the copy a resume of this conversation sends back —
-	// and the inputs it was composed from are gone by then: the mission comes
-	// from a prompt row the org may edit, the run context from team settings and
-	// a knowledge base that move. Recomposing at the wake would be a different
-	// prompt wearing this conversation's id.
+	// The system text goes on the row before the agent gets it. The harness is
+	// handed its append once, at launch, and replays only the session transcript
+	// afterwards, so this is the copy every later claim of this conversation
+	// sends back — and the inputs it was composed from move: the mission comes
+	// from a prompt row the org may edit, the run context from team settings.
+	// Only the launch that opens the conversation, or one picking up a
+	// conversation whose parts were never recorded, writes.
 	//
 	// Below the stop read for the same reason the phase write is: a fence
 	// refusal here means a successor owns the conversation, which is not what a
 	// user cancel is, and only one of the two parks with a cancel recorded.
-	if s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, systemBlock) {
+	if system.stamp && s.persistSystemText(ctx, orgID, conversationID, cfg.claimID, system.send) {
 		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
@@ -656,7 +666,8 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// recorded through the sink's own insert door. Last before the launch, so
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
 	// that really was about to speak.
-	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, workspaceNote(cfg.runRoot, cfg.workspace), cfg.interactive, taskMemories, taskContext); err != nil {
+	update := launchUpdate{text: resolveCLIPath(system.update, agentBin), parts: system.current.Parts}
+	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, workspaceNote(cfg.runRoot, cfg.workspace), update, cfg.interactive, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the
 			// conversation, and every row this engagement still wrote would
@@ -818,6 +829,7 @@ func (s *Spawner) composeLaunchTurn(
 	opts *agentproc.RunOptions,
 	sink *conversationSink,
 	orgID, conversationID, creatorUserID, lastHandBackOutcome, workspaceNote string,
+	update launchUpdate,
 	interactive bool,
 	memories []domain.TaskMemory,
 	taskContext string,
@@ -832,10 +844,15 @@ func (s *Spawner) composeLaunchTurn(
 		if err := s.recordLaunchNote(sink, conversationID, creatorUserID, domain.MessageSubtypeInjectionNudge, note); err != nil {
 			return err
 		}
+		if update.text != "" {
+			if err := sink.OnMessage(systemUpdateRow(conversationID, update.text, update.parts)); err != nil {
+				return err
+			}
+		}
 		notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
 		opts.OnOpeningUnsent = unsent
 		opts.OpeningBlocks = nil
-		opts.Message = joinTurnText(workspaceNote, notes, note)
+		opts.Message = joinTurnText(workspaceNote, notes, note, update.text)
 		return nil
 	}
 	blocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, memories, taskContext)
@@ -855,6 +872,13 @@ func (s *Spawner) composeLaunchTurn(
 	opts.Message = ""
 	opts.OpeningBlocks = blocks
 	return nil
+}
+
+// launchUpdate is the system update a launch resuming a session carries in its
+// turn, with the parts it records for the next claim to compare against.
+type launchUpdate struct {
+	text  string
+	parts []domain.SystemPart
 }
 
 // firstTurnPersonInput is everything a person has asked a conversation that

@@ -190,6 +190,7 @@ func TestBlocks_NoOrphans(t *testing.T) {
 		}
 	}
 	referenced[blockCompletionNonTerminal] = true
+	referenced[blockInstructionsUpdate] = true
 	for _, p := range walkBlocks(t) {
 		if !referenced[p] {
 			t.Errorf("block %s is not referenced by any manifest arm or accessor", p)

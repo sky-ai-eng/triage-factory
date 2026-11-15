@@ -42,6 +42,20 @@ func hostileStrings(task domain.Task, metadataJSON, skeleton string) []string {
 	}
 }
 
+// nativeBlocks is a native run's two system blocks composed the way every claim
+// composes them, with every per-run input set.
+func nativeBlocks(mission, stepEnd string) domain.SystemText {
+	return renderSystem(composeSystemParts(systemInputs{
+		spec:           nativeSpec(agentprompt.SurfaceMachinist),
+		mission:        mission,
+		scope:          "Repository: owner/repo\nPR: #7",
+		prCheckout:     "/work/owner/repo/pr-7",
+		branchTemplate: "tfac/SKY-9",
+		sources:        sourceDocs{kinds: []string{"jira"}, notes: "Linear is not configured for this organization."},
+		stepEnd:        stepEnd,
+	}))
+}
+
 // TestNativeSystemPrompt_IsBlockOneAlone pins what block 1 is and what it is
 // for. It carries the composed framework blocks and nothing else — not the
 // mission, not the run's facts, not the handoff addendum a non-terminal step
@@ -49,14 +63,15 @@ func hostileStrings(task domain.Task, metadataJSON, skeleton string) []string {
 // conversation in the org reads. A per-run section added here later fails this
 // instead of quietly forking the fleet's cached prefix per run.
 func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
-	if got, want := nativeSystemPrompt(agentprompt.SurfaceMachinist), agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)); got != want {
-		t.Errorf("block 1 is not the composed blocks alone;\ngot  %.200q\nwant %.200q", got, want)
-	}
 	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
 	if addendum == "" {
 		t.Fatal("the native handoff addendum is empty; this test would pass vacuously")
 	}
-	if strings.Contains(nativeSystemPrompt(agentprompt.SurfaceMachinist), addendum) {
+	text := nativeBlocks("Review the pull request.", agentprompt.NonTerminalCompletion())
+	if got, want := text.Prompt, agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)); got != want {
+		t.Errorf("block 1 is not the composed blocks alone;\ngot  %.200q\nwant %.200q", got, want)
+	}
+	if strings.Contains(text.Prompt, addendum) {
 		t.Error("block 1 carries the handoff addendum, which is per step and belongs in block 2")
 	}
 }
@@ -66,19 +81,31 @@ func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
 // step position, the task behind them — still compose the same block 1, so the
 // entry written at its breakpoint is one the whole fleet reads.
 func TestNativeSystemPrompt_IsByteIdenticalAcrossRuns(t *testing.T) {
-	first := nativeSystemPrompt(agentprompt.SurfaceMachinist)
-	if second := nativeSystemPrompt(agentprompt.SurfaceMachinist); first != second {
-		t.Fatal("two runs of the same spec composed different block 1s")
+	first := nativeBlocks("Review the pull request.", agentprompt.NonTerminalCompletion()).Prompt
+	for _, mission := range []string{"Fix the failing check.", ""} {
+		text := nativeBlocks(mission, "")
+		if text.Prompt != first {
+			t.Fatalf("two runs of the same spec composed different block 1s")
+		}
+		if mission != "" && !strings.Contains(text.Block, mission) {
+			t.Errorf("mission %q did not reach block 2;\n%s", mission, text.Block)
+		}
 	}
-	// The missions differ; block 1 cannot, because no mission reaches it.
-	for _, mission := range []string{"Review the pull request.", "Fix the failing check.", ""} {
-		block2 := composeConversationSystemBlock(mission, "<run_context>\nBranch: x\n</run_context>", "", "")
-		if strings.Contains(first, mission) && mission != "" {
-			t.Errorf("mission %q reached block 1", mission)
-		}
-		if mission != "" && !strings.Contains(block2, mission) {
-			t.Errorf("mission %q did not reach block 2;\n%s", mission, block2)
-		}
+}
+
+// TestRenderSystem_IsTheBlockComposition: the parts are what a later claim
+// compares, and the blocks are what a request sends, so rendering the parts
+// has to give the blocks the sections compose to.
+func TestRenderSystem_IsTheBlockComposition(t *testing.T) {
+	const mission = "Review the pull request."
+	stepEnd := agentprompt.NonTerminalCompletion()
+	text := nativeBlocks(mission, stepEnd)
+	want := composeConversationSystemBlock(mission,
+		runContext("Repository: owner/repo\nPR: #7", "", "", "", "/work/owner/repo/pr-7", "", "tfac/SKY-9", "", "Linear is not configured for this organization."),
+		agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, []string{"jira"}),
+		stepEnd)
+	if text.Block != want {
+		t.Errorf("rendered block 2 differs from its sections;\ngot:\n%s\n\nwant:\n%s", text.Block, want)
 	}
 }
 
@@ -142,10 +169,10 @@ func TestComposeConversationSystemBlock_OmitsWhatIsAbsent(t *testing.T) {
 // instructions reads as instruction.
 func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing.T) {
 	task, metadataJSON, skeleton, mission := hostileRun()
-	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
+	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "", "tfac/SKY-9", "", ""), "verbs here", "")
 	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
-	for _, sys := range []string{nativeSystemPrompt(agentprompt.SurfaceMachinist), block2} {
+	for _, sys := range []string{agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)), block2} {
 		for _, bad := range hostileStrings(task, metadataJSON, skeleton) {
 			if strings.Contains(sys, bad) {
 				t.Errorf("externally-authored text reached a system block: %.60q", bad)
@@ -180,13 +207,17 @@ func TestNativeLaunchText_AnOpenedConversationKeepsItsOpeningRow(t *testing.T) {
 	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, opening)
 
 	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	got := f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), "have another look", runConfig{
+	text, err := f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), "have another look", runConfig{
 		orgID:      runmode.LocalDefaultOrgID,
 		teamID:     runmode.LocalDefaultTeamID,
+		surface:    agentprompt.SurfaceMachinist,
 		sources:    sourceDocs{kinds: []string{"github"}},
 		prSkeleton: prSkeletonSource{client: ghclient.NewClient(srv.URL, "t"), owner: "owner", repo: "repo", prNumber: 7},
-	}, "", replay).taskContext
-	if got != opening {
+	}, replay)
+	if err != nil {
+		t.Fatalf("compose the launch text: %v", err)
+	}
+	if got := text.taskContext; got != opening {
 		t.Errorf("task context = %q, want the opening row's %q", got, opening)
 	}
 }

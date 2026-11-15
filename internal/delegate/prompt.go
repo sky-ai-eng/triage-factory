@@ -176,80 +176,65 @@ func surfaceFor(convType string) agentprompt.Surface {
 	return agentprompt.SurfaceMachinist
 }
 
-// sdkSystemPrompt is the whole of what the SDK harness is appended: the
-// framework blocks, then this conversation's own block.
+// sdkAppend is the whole of what the SDK harness is appended: the framework
+// blocks, then this conversation's own block, as the conversation was frozen
+// with (or, on its launch, as composed).
 //
 // The SDK takes one appended string where the native engine takes two system
 // blocks, so the parity between the runtimes is the bytes rather than the
-// shape — block 1 is agentprompt.Build over the spec every SDK run shares,
-// block 2 is composeConversationSystemBlock over this run's facts, and a
-// native and an SDK conversation on one task are told the same things in the
-// same order. What the harness does with them is its own: the append lands
-// inside Claude Code's third system block, which is a divergence in framing
-// and not in content.
-//
-// It takes block 2 already composed rather than composing it, because two
-// launches of one conversation call this: the first, which composes the block
-// from the run's live inputs and stores it, and every resume after that, which
-// reads that stored block back. Both then reach the same bytes through the same
-// function, which is what makes a woken conversation's append the one it opened
-// with rather than a second composition that agrees with the first by care.
+// shape: a native and an SDK conversation on one task are told the same things
+// in the same order. What the harness does with them is its own: the append
+// lands inside Claude Code's third system block, which is a divergence in
+// framing and not in content.
 //
 // resolveCLIPath runs here, over the composed string and nothing else, and at
 // each launch rather than once — the run's binary is where THIS process can
-// execute it, which a stored block cannot know. Every `triagefactory exec` in
-// it was written by TF, by the org in its own prompt row, or by a team in its
-// own knowledge base; the two things the rewrite must never touch — the task
-// context and the injected memories, the only externally-authored text a run
-// reads — are transcript rows and never part of this string.
-func sdkSystemPrompt(surface agentprompt.Surface, conversationBlock, binaryPath string) string {
-	return resolveCLIPath(joinSections(
-		agentprompt.Build(sdkSpec(surface)),
-		conversationBlock,
-	), binaryPath)
+// execute it, which a stored text cannot know. Every `triagefactory exec` in
+// it was written by TF or by the org in its own prompt row; the two things the
+// rewrite must never touch — the task context and the injected memories, the
+// only externally-authored text a run reads — are transcript rows and never
+// part of this string.
+func sdkAppend(text domain.SystemText, binaryPath string) string {
+	return resolveCLIPath(joinSections(text.Prompt, text.Block), binaryPath)
 }
 
-// persistSystemBlock records the block the SDK harness is about to be launched
-// with, so a resume of this conversation can be handed the same one. Reports
-// whether the claim fence refused it, on which the caller parks — the same
-// disposition the phase write's refusal takes, and for the same reason: a
-// refusal means a successor owns the conversation, and this engagement's append
-// is not the one its next turn should replay.
+// persistSystemText records the system text the harness or loop is about to be
+// launched with, so every later claim of this conversation sends the same
+// bytes. Reports whether the claim fence refused it, on which the caller parks
+// — the same disposition the phase write's refusal takes, and for the same
+// reason: a refusal means a successor owns the conversation.
 //
-// Any other failure is a warning and the launch proceeds. The agent in front of
-// us has the append in hand and runs correctly without the row; what a lost
-// write costs is a later wake, which composes the framework blocks alone.
-func (s *Spawner) persistSystemBlock(ctx context.Context, orgID, conversationID, claimID, block string) (fenced bool) {
+// Any other failure is a warning and the launch proceeds. The agent in front
+// of us has the text in hand and runs correctly without the row; what a lost
+// write costs is a later claim, which records its own composition then.
+func (s *Spawner) persistSystemText(ctx context.Context, orgID, conversationID, claimID string, text domain.SystemText) (fenced bool) {
 	// Detached from cancellation for the reason updatePhase is: a shutdown
 	// landing mid-launch must not drop a coordinate the row already owes.
 	ctx = context.WithoutCancel(ctx)
-	if _, err := s.conversations.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block); errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Error("claim fence refused the system-block write — this executor no longer owns the conversation",
+	if _, err := s.conversations.SetSystemTextForClaimSystem(ctx, orgID, conversationID, claimID, text); errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused the system-text write — this executor no longer owns the conversation",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
 		return true
 	} else if err != nil {
-		delegateLog.Warn("record the launch's system block failed; a resume of this conversation will wake without its mission",
+		delegateLog.Warn("record the launch's system text failed; the next claim of this conversation records its own",
 			"conversation", conversationID, "org_id", orgID, "error", err)
 	}
 	return false
 }
 
-// launchedSystemBlock reads that block back for a resume.
-//
-// A read failure degrades to the empty block rather than refusing the turn, and
-// the asymmetry is deliberate. Resuming on the framework blocks alone costs one
-// turn its mission and nothing more — the agent keeps its session history.
-// Handing the claim back instead would spend an attempt against
-// TF_MAX_CLAIM_ATTEMPTS on a read that is transient, and running out of those
-// ends the conversation outright.
-func (s *Spawner) launchedSystemBlock(ctx context.Context, orgID, conversationID string) string {
-	block, err := s.conversations.SystemBlockSystem(ctx, orgID, conversationID)
-	if err != nil {
-		delegateLog.Warn("read the launch's system block failed; this turn resumes on the framework blocks alone",
-			"conversation", conversationID, "org_id", orgID, "error", err)
-		return ""
+// systemUpdateRow is the transcript row recording a system update an SDK turn
+// carries, delivered because the turn's message is what delivers it. Its
+// parts are the comparison point for the conversation's next claim.
+func systemUpdateRow(conversationID, update string, parts []domain.SystemPart) *domain.Message {
+	delivered := true
+	return &domain.Message{
+		ConversationID: conversationID,
+		Role:           "system",
+		Subtype:        domain.MessageSubtypeInjectionSystemUpdate,
+		Content:        update,
+		Delivered:      &delivered,
+		Metadata:       map[string]any{domain.SystemUpdateMetadataKey: parts},
 	}
-	return block
 }
 
 // composeConversationSystemBlock assembles the conversation's own system block —
@@ -320,51 +305,53 @@ func resolveCLIPath(text, binaryPath string) string {
 // fact about one engagement (its source manifest), so a line per source that
 // is not sealed goes here and never into an agentprompt block. A run whose
 // every source is sealed says nothing about sources at all.
-//
-// The knowledge manifest arrives here for exactly that reason: WHICH documents
-// this org happens to hold today is a fact about one run, and the framework
-// blocks that tell the agent knowledge exists have to stay byte-identical
-// across runs to remain a cacheable prefix. It renders last and as its own
-// block, because it is a listing rather than a line — and only when something
-// was actually staged, so a run with no knowledge behind it says nothing about
-// knowledge at all.
-func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
-	var lines []string
-	if s := strings.TrimSpace(scope); s != "" {
-		lines = append(lines, s)
+func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes string) string {
+	parts := runContextParts(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes)
+	lines := make([]string, len(parts))
+	for i, p := range parts {
+		lines[i] = p.Text
 	}
-	if taskState != "" {
-		lines = append(lines, taskState)
+	return renderRunContext(lines)
+}
+
+// runContextParts is runContext one line per part, in render order, keyed so a
+// later claim can tell the conversation which line changed.
+func runContextParts(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes string) []domain.SystemPart {
+	var parts []domain.SystemPart
+	add := func(key, name, text string) {
+		if text != "" {
+			parts = append(parts, domain.SystemPart{Key: key, Name: name, Text: text})
+		}
 	}
-	if w := strings.TrimSpace(siblingWork); w != "" {
-		lines = append(lines, w)
-	}
+	add(partScope, "the run's scope", strings.TrimSpace(scope))
+	add(partTaskState, "the task state", taskState)
+	add(partSiblingWork, "the overlapping work", strings.TrimSpace(siblingWork))
 	if runRoot != "" {
-		lines = append(lines, "Run root: "+runRoot+
+		add(partRunRoot, "the run root", "Run root: "+runRoot+
 			" — every `_tfac/...` path in your instructions sits directly under this directory."+
 			" Reach it by the absolute path, so it resolves from whatever directory you have cd'd into.")
 	}
 	if prCheckout != "" {
-		lines = append(lines, "PR checkout: "+prCheckout+
+		add(partPRCheckout, "the PR checkout", "PR checkout: "+prCheckout+
 			" — the pull request's checkout, already on its branch. `cd` into it before reading or changing the code.")
 	}
 	if baseCheckout != "" {
-		lines = append(lines, "Base-branch checkout: "+baseCheckout+
+		add(partBaseCheckout, "the base-branch checkout", "Base-branch checkout: "+baseCheckout+
 			" — the repository's checkout of its base branch, detached, as `workspace add` makes one."+
 			" `cd` into it before reading or changing the code, and create your own branch before committing.")
 	}
 	if branchTemplate != "" {
-		lines = append(lines, "Branch naming convention for this team: "+branchTemplate)
+		add(partBranch, "the branch naming convention", "Branch naming convention for this team: "+branchTemplate)
 	}
 	if runURL != "" {
-		lines = append(lines, "Run URL: "+runURL)
+		add(partRunURL, "the run URL", "Run URL: "+runURL)
 	}
-	if n := strings.TrimSpace(sourceNotes); n != "" {
-		lines = append(lines, n)
-	}
-	if k := strings.TrimSpace(knowledge); k != "" {
-		lines = append(lines, k)
-	}
+	add(partSources, "the source notes", strings.TrimSpace(sourceNotes))
+	return parts
+}
+
+// renderRunContext wraps <run_context>'s lines, "" when there are none.
+func renderRunContext(lines []string) string {
 	if len(lines) == 0 {
 		return ""
 	}

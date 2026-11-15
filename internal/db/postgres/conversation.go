@@ -1301,19 +1301,24 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 	return setConversationWorktreePath(ctx, s.admin, orgID, conversationID, path)
 }
 
-// SetSystemBlockForClaimSystem stamps the system append this engagement
-// launched with, refused once a successor holds the conversation. Fenced-only:
-// nothing without a claim composes an append.
-func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
+// SetSystemTextForClaimSystem stamps the system text this engagement launched
+// with, refused once a successor holds the conversation. Fenced-only: nothing
+// without a claim composes system text.
+func (s *conversationStore) SetSystemTextForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, text domain.SystemText) (*domain.Conversation, error) {
+	parts, err := db.EncodeSystemParts(text.Parts)
+	if err != nil {
+		return nil, err
+	}
 	var result *domain.Conversation
-	err := inTx(ctx, s.admin, func(q queryer) error {
+	err = inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := writeConversationReturning(ctx, q, `
-			UPDATE conversations SET system_block = $1 WHERE org_id = $2 AND id = $3
+			UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
+			WHERE org_id = $4 AND id = $5
 			RETURNING *
-		`, block, orgID, conversationID)
+		`, text.Prompt, text.Block, nullableJSONB(parts), orgID, conversationID)
 		if err != nil {
 			return err
 		}
@@ -1326,17 +1331,27 @@ func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, or
 	return result, nil
 }
 
-// SystemBlockSystem reads that stamp back for the engagement picking the
+// SystemTextSystem reads that stamp back for the engagement picking the
 // conversation back up — the admin pool, like every other engagement-facing
 // read: the dispatcher holds no JWT claims.
-func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
-	var block string
+func (s *conversationStore) SystemTextSystem(ctx context.Context, orgID, conversationID string) (domain.SystemText, error) {
+	var text domain.SystemText
+	var parts sql.NullString
 	err := s.admin.QueryRowContext(ctx,
-		`SELECT system_block FROM conversations WHERE org_id = $1 AND id = $2`, orgID, conversationID).Scan(&block)
+		`SELECT system_prompt, system_block, system_parts::text FROM conversations WHERE org_id = $1 AND id = $2`,
+		orgID, conversationID).Scan(&text.Prompt, &text.Block, &parts)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", db.ErrNoSuchConversation
+		return domain.SystemText{}, db.ErrNoSuchConversation
 	}
-	return block, err
+	if err != nil {
+		return domain.SystemText{}, err
+	}
+	if parts.Valid {
+		if text.Parts, err = db.DecodeSystemParts([]byte(parts.String)); err != nil {
+			return domain.SystemText{}, err
+		}
+	}
+	return text, nil
 }
 
 // SetWorktreePathForClaimSystem is SetWorktreePathSystem behind the fence — the
@@ -3099,7 +3114,14 @@ func (s *conversationStore) WithdrawPendingInputSystem(ctx context.Context, orgI
 // row ahead of the result — no single row a return value could name.
 // replyRow/resultRow's assigned IDs are written back to the caller's own
 // pointers, which stands in for "the row it persisted" here.
-func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, system *domain.SystemText) error {
+	var systemParts []byte
+	if system != nil {
+		var err error
+		if systemParts, err = db.EncodeSystemParts(system.Parts); err != nil {
+			return err
+		}
+	}
 	return inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
@@ -3152,6 +3174,22 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 			`, seq, orgID, conversationID, id); err != nil {
 				return fmt.Errorf("re-seq queued row %d: %w", id, err)
 			}
+		}
+
+		if system == nil {
+			return nil
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE messages SET window_state = 'inactive'
+			WHERE org_id = $1 AND conversation_id = $2 AND delivered = false AND subtype = $3
+		`, orgID, conversationID, domain.MessageSubtypeInjectionSystemUpdate); err != nil {
+			return fmt.Errorf("withdraw queued system updates: %w", err)
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE conversations SET system_prompt = $1, system_block = $2, system_parts = $3::jsonb
+			WHERE org_id = $4 AND id = $5
+		`, system.Prompt, system.Block, nullableJSONB(systemParts), orgID, conversationID); err != nil {
+			return fmt.Errorf("replace system text: %w", err)
 		}
 		return nil
 	})

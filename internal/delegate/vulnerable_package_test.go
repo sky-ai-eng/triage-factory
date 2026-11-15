@@ -236,11 +236,11 @@ func TestTaskVulnerablePackage_ReadsTheEntitysSnapshot(t *testing.T) {
 // is not the PR checkout's.
 func TestRunContext_NamesTheBaseCheckout(t *testing.T) {
 	const path = "/work/octo/api/ref-main"
-	got := runContext("", "", "", "/work", "", path, "", "", "", "")
+	got := runContext("", "", "", "/work", "", path, "", "", "")
 	if !strings.Contains(got, path) {
 		t.Errorf("the run context does not name the base checkout;\n%s", got)
 	}
-	if asPR := runContext("", "", "", "/work", path, "", "", "", "", ""); asPR == got {
+	if asPR := runContext("", "", "", "/work", path, "", "", "", ""); asPR == got {
 		t.Errorf("the base checkout renders as the PR checkout does;\n%s", got)
 	}
 }

@@ -185,7 +185,7 @@ type PRCoherenceTargetQuery struct {
 // table they land on, and the split decides what each returns:
 //
 //   - conversations writes (CompleteForClaimSystem, SetSession, SetWorktreePath,
-//     SetSystemBlockForClaimSystem and their System/ForClaimSystem twins)
+//     SetSystemTextForClaimSystem and their System/ForClaimSystem twins)
 //     return (*domain.Conversation, error),
 //     sharing Get's column list and scanner. A miss (no row with that id in
 //     the org) is ErrNoSuchConversation — reachable only on the unfenced
@@ -1005,16 +1005,17 @@ type ConversationStore interface {
 	// Return shape and miss semantics match SetWorktreePath.
 	SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error)
 
-	// SystemBlockSystem reads back what SetSystemBlockForClaimSystem stored —
-	// the only read of that column, made by the engagement picking the
+	// SystemTextSystem reads back what SetSystemTextForClaimSystem stored —
+	// the only read of those columns, made by the engagement picking the
 	// conversation back up.
 	//
-	// Its own narrow read rather than a column on the conversation projection:
+	// Its own narrow read rather than columns on the conversation projection:
 	// the value is kilobytes of composed prompt text that exactly one code path
 	// wants, and the projection it would join is the one every list, dashboard
 	// and belt read goes through. ErrNoSuchConversation if conversationID names
-	// no row in the org; the empty string is a stored value (see the write).
-	SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error)
+	// no row in the org; empty strings and nil Parts are stored values (see the
+	// write).
+	SystemTextSystem(ctx context.Context, orgID, conversationID string) (domain.SystemText, error)
 
 	// EndConversationSystem is EndConversation on the admin pool — see the
 	// app-pool door for the predicate, the return shape and the miss
@@ -1154,27 +1155,26 @@ type ConversationStore interface {
 	// Return shape matches SetSessionForClaimSystem.
 	SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error)
 
-	// SetSystemBlockForClaimSystem records the system append this engagement
-	// launched with — conversations.system_block, the conversation's own block:
-	// the run's facts, its verb reference, its mission and its step addendum,
-	// exactly as composed. The framework blocks in front of it are not stored;
-	// agentprompt.Build reproduces them from a fixed spec.
+	// SetSystemTextForClaimSystem records the system text this engagement
+	// launched with: the shared framework prompt (system_prompt), the
+	// conversation's own block (system_block: the run's facts, its verb
+	// reference, its mission and its step addendum), and the parts both were
+	// composed from (system_parts), all exactly as composed.
 	//
 	// Written by the claim that launches the conversation, on either runtime,
-	// and read by every claim after it — so the bytes a later turn is sent are
+	// and read by every claim after it, so the bytes a later turn is sent are
 	// the launch's rather than a second composition from inputs that have since
-	// moved. Fenced for the reason the other two coordinates are: a zombie
-	// engagement's late write would hand the successor's next turn the mission
-	// the zombie was launched with. There is no unfenced door because there is
-	// no claimless writer: only the engagement that composes the append knows
-	// it.
+	// moved. The provider binds each thinking block to the system prompt it was
+	// produced under. Fenced for the reason the other coordinates are: a zombie
+	// engagement's late write would hand the successor's next turn the text the
+	// zombie was launched with. There is no unfenced door because there is no
+	// claimless writer: only the engagement that composes the text knows it.
 	//
-	// The empty string is a value, not a clear — every section of the block is
-	// optional, so a conversation with nothing to say in any of them stores
-	// nothing and continues on the framework blocks alone.
+	// Empty strings are values, not clears: every section is optional. Nil
+	// Parts store NULL.
 	//
 	// Return shape matches SetSessionForClaimSystem.
-	SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error)
+	SetSystemTextForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, text domain.SystemText) (*domain.Conversation, error)
 
 	// MarkDeliveredForClaimSystem is the engagement's drain flush: the
 	// pending rows it folded into an assembly are only its to consume while
@@ -1253,13 +1253,19 @@ type ConversationStore interface {
 	// written back. Refused with ErrClaimReleased when claimID no longer
 	// holds the conversation — zombie executors don't compact.
 	//
+	// A non-nil system replaces the conversation's system text in the same
+	// transaction (SetSystemTextForClaimSystem's columns), and every system
+	// update still queued is withdrawn: nothing from before the summary is
+	// sent back after it, so the text may change here, and an update composed
+	// against the text being replaced would only restate or contradict it.
+	//
 	// Exempt from the returned-row rule: this writes up to two inserted rows,
 	// a batch flip of an arbitrary span to window_state='inactive', and a
 	// re-seq of every queued row ahead of the result — there is no single row
 	// a return value could name. Both replyRow/resultRow's assigned IDs are
 	// already written back to the caller's own pointers, which is the
 	// equivalent of "the row it persisted" for a write with more than one row.
-	CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error
+	CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, system *domain.SystemText) error
 
 	// SettleCompactionRequestForClaimSystem records a discarded warm
 	// compaction attempt on the request row that asked for it: the failed

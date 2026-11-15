@@ -160,7 +160,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"}
-		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)})
+		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)}, nil)
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("compact after reap = %v, want ErrClaimReleased", err)
 		}
@@ -525,8 +525,8 @@ func TestClaimFence_ConversationWritersTakeTheReleaseOrder(t *testing.T) {
 			_, err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "sess-racing")
 			return err
 		}},
-		{"SetSystemBlock", func(fx fenceFixture) error {
-			_, err := fx.store.SetSystemBlockForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "block")
+		{"SetSystemText", func(fx fenceFixture) error {
+			_, err := fx.store.SetSystemTextForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, domain.SystemText{Prompt: "prompt", Block: "block"})
 			return err
 		}},
 		{"SetWorktreePath", func(fx fenceFixture) error {

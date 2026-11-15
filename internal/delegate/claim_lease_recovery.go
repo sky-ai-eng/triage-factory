@@ -400,9 +400,9 @@ func (c *leaseRecoveringConversations) SetWorktreePathForClaimSystem(ctx context
 	return conv, err
 }
 
-func (c *leaseRecoveringConversations) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (conv *domain.Conversation, err error) {
+func (c *leaseRecoveringConversations) SetSystemTextForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, text domain.SystemText) (conv *domain.Conversation, err error) {
 	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
-		conv, e = c.ConversationStore.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
+		conv, e = c.ConversationStore.SetSystemTextForClaimSystem(ctx, orgID, conversationID, claimID, text)
 		return e
 	})
 	return conv, err
@@ -420,9 +420,9 @@ func (c *leaseRecoveringConversations) RequeueInputForClaimSystem(ctx context.Co
 	})
 }
 
-func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int, system *domain.SystemText) error {
 	return c.s.retryAfterRecovery(ctx, claimID, func() error {
-		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs)
+		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs, system)
 	})
 }
 

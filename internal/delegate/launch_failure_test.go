@@ -154,7 +154,7 @@ func (f *launchFixture) compact(t *testing.T) {
 	tokens := 190_000
 	reply := &domain.Message{Role: "assistant", Content: "<summary>the work so far</summary>", InputTokens: &tokens}
 	summary := &domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "<summary>the work so far</summary>"}
-	if err := f.stores.Conversations.CompactForClaimSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, reply, summary, span); err != nil {
+	if err := f.stores.Conversations.CompactForClaimSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, reply, summary, span, nil); err != nil {
 		t.Fatalf("CompactForClaimSystem: %v", err)
 	}
 	for _, m := range f.transcript(t) {

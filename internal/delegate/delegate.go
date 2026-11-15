@@ -616,10 +616,11 @@ type sourceDocs struct {
 	notes string
 }
 
-// tools renders the <tools> section for the runtime that reads it, which
-// decides how the verbs are spelled and whether GitHub's are repeated there.
-func (d sourceDocs) tools(runtime agentprompt.Runtime) string {
-	return agentprompt.ToolsReferenceForSources(runtime, d.kinds)
+// toolsParts is the <tools> section one source per part, for the runtime that
+// reads it, which decides how the verbs are spelled and whether GitHub's are
+// repeated there. A later claim compares them part by part.
+func (d sourceDocs) toolsParts(runtime agentprompt.Runtime) []agentprompt.Part {
+	return agentprompt.ToolsReferenceParts(runtime, d.kinds)
 }
 
 // sourceDocsFor composes a run's sourceDocs from its source manifest: the
