@@ -8,22 +8,51 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 )
 
+// checkModelProvider reports whether orgID can authenticate model, as the
+// modelaccess refusal itself: ErrNoCredentials for an org that can reach no
+// provider at all, asked first, then ErrProviderUnconfigured for a model whose
+// provider the org never connected.
+//
+// It is asked wherever work is about to start on a model, because it describes
+// state that can change after the model was stored: a credential can be
+// disconnected, and disconnecting one rewrites none of the defaults, pins, and
+// message rows already saved. A firing asks it of every model in its plan
+// (checkModelProviders), a person's message of the model it would run on
+// (resolveTurnSettings), and a claim of the model it resolved (modelForClaim).
+//
+// Whether a model is one this TEAM may pick is a separate question with its own
+// gate (the enable-set). Kept apart because the remedies differ: one is a
+// credential nobody bound, the other a decision somebody made, and a caller
+// told the wrong one goes to the wrong settings page.
+//
+// Fails OPEN on a read error, matching the cost caps: a transient settings read
+// must not stop every firing, message, and claim, and the credential resolver
+// is the backstop — it refuses the same work by name a moment later.
+func (s *Spawner) checkModelProvider(ctx context.Context, orgID, model string) error {
+	if s.orgs == nil {
+		return nil // no stores wired (test fixtures) → nothing to check against
+	}
+	orgSet, err := s.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		delegateLog.Warn("model provider check: read org settings failed; allowing the model", "org", orgID, "model", model, "error", err)
+		return nil
+	}
+
+	// Whether the org can authenticate anything at all, asked before the
+	// per-model question. A local org that has bound nothing and did not choose
+	// to run on the machine's credentials would otherwise start work and quietly
+	// spend against whatever the operator's shell holds.
+	creds := modelaccess.ForOrg(orgSet)
+	if err := creds.Ready(); err != nil {
+		return err
+	}
+	return creds.Check(model)
+}
+
 // checkModelProviders is the credential admission gate for the models a
 // delegation would actually run on: the team's default and every step pin in
 // the blueprint about to fire. PlanDelegation calls it once the steps' pins are
 // resolved.
-//
-// It refuses when a model's provider is one the org never connected. That is a
-// dispatch-time check because it describes state that can change after a model
-// was stored — a credential can be disconnected, and disconnecting one rewrites
-// none of the defaults and pins already saved. The save-time check in the
-// settings handler catches new selections; this one catches everything else.
-//
-// Whether a model is one this TEAM may pick is a separate question with its own
-// gate (the enable-set, resolved alongside the default). Kept apart because the
-// remedies differ: one is a credential nobody bound, the other a decision
-// somebody made, and a caller told the wrong one goes to the wrong settings
-// page.
 //
 // It refuses BEFORE any write — no blueprint_run is minted, no conversation is
 // enqueued, and a person's delegation has not yet claimed the task — so there
@@ -31,35 +60,16 @@ import (
 // fallback model, so the alternative to refusing is spending the org's money
 // on a model nobody chose.
 //
-// Fails OPEN on a read error, matching the cost caps: a transient settings read
-// must not wedge all delegation, and the credential resolver is the backstop —
-// it refuses the same run by name a moment later.
+// An unset step is asked as the empty model, which passes the per-model
+// question and still asks the org-level one.
 func (s *Spawner) checkModelProviders(ctx context.Context, orgID string, models []string) error {
-	if s.orgs == nil {
-		return nil // no stores wired (test fixtures) → nothing to check against
-	}
-	orgSet, err := s.orgs.GetSettingsSystem(ctx, orgID)
-	if err != nil {
-		delegateLog.Warn("model provider check: read org settings failed; allowing delegation", "org", orgID, "error", err)
-		return nil
-	}
-
-	// Whether the org can authenticate anything at all, asked once before the
-	// per-model questions. A local org that has bound nothing and did not choose
-	// to run on the machine's credentials would otherwise dispatch and quietly
-	// spend against whatever the operator's shell holds.
-	creds := modelaccess.ForOrg(orgSet)
-	if err := creds.Ready(); err != nil {
-		return fmt.Errorf("cannot dispatch: %w", err)
-	}
-
 	seen := make(map[string]bool, len(models))
 	for _, m := range models {
-		if m == "" || seen[m] {
+		if seen[m] {
 			continue
 		}
 		seen[m] = true
-		if err := creds.Check(m); err != nil {
+		if err := s.checkModelProvider(ctx, orgID, m); err != nil {
 			return fmt.Errorf("cannot dispatch: %w", err)
 		}
 	}

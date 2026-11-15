@@ -111,6 +111,7 @@ func TestResolveTurnSettings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeMulti)
 			database := newDelegateTestDB(t)
+			connectProviders(t, database, true, true)
 			seedConversation(t, database, "r-settings", "sess", t.TempDir())
 			if _, err := database.Exec(`UPDATE conversations SET model=? WHERE id='r-settings'`, stepModel); err != nil {
 				t.Fatalf("set the step's model: %v", err)

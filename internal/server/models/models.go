@@ -89,7 +89,11 @@ type modelCatalogRow struct {
 	// the provider vocabulary — a second copy that can only ever fall behind
 	// this one. Absent exactly when Provider is.
 	ProviderDisplayName string `json:"provider_display_name,omitempty"`
-	Enabled             bool   `json:"enabled"`
+	// Enabled is the enable-set's answer and says nothing about credentials:
+	// whether the organization, or on the team read the team, may pick this
+	// model. It is true on every row of the team read, which omits rows
+	// outside the team's set.
+	Enabled bool `json:"enabled"`
 	// PricesPerMTok is absent where cost is harness-settled. See the type doc.
 	PricesPerMTok *modelPricesPerMTok `json:"prices_per_mtok,omitempty"`
 	ContextWindow int                 `json:"context_window,omitempty"`
@@ -102,7 +106,28 @@ type modelCatalogRow struct {
 	// Availability is the whole triple's presence gate: it is absent — with the
 	// two fields below — when this org's credentials are not TF-owned, because
 	// a verdict about the machine an agent happens to run on has no stable
-	// subject. See modelaccess.Credentials.BringsOwn.
+	// subject. See modelaccess.Credentials.BringsOwn. It is present on every
+	// row for an organization that brings its own credentials, which is every
+	// organization in multi mode.
+	//
+	// It is the one field a caller reads to learn whether work can start on
+	// this model:
+	//
+	//   - "unconfigured" is refused by the message route, with 409
+	//     NOT_CONFIGURED, by delegate, and at the claim, which parks the
+	//     conversation.
+	//   - Every other row is accepted by those doors: "verified",
+	//     "unverified", "red", and a row with no availability. "red" and
+	//     "unverified" are advisory, because a stored probe verdict can be
+	//     stale in either direction, and the server never refuses on one.
+	//   - The team-default and background-jobs saves refuse an
+	//     "unconfigured" model with the same status, except for an
+	//     organization that brings its own credentials and has connected
+	//     none: setup picks a model before it connects a provider, and
+	//     nothing runs for that organization until it connects one.
+	//   - The enabled-set writes and a prompt's model save do not consult
+	//     it. They store a choice for later, and the doors above decide when
+	//     the work starts.
 	Availability string `json:"availability,omitempty"`
 	// AvailabilityDetail is the provider's own refusal, present only on "red".
 	// It is what turns an unavailable badge into something an admin can act
@@ -350,15 +375,17 @@ func (h *Handler) resolveTeam(w http.ResponseWriter, r *http.Request) (orgID, us
 // returning false for anything else so the caller falls through to its own
 // error handling.
 //
-// 400 INVALID_FIELD on the named field: the value is well-formed and the write
-// is well-addressed, but it names a model this organization cannot
-// authenticate. The message carries the remedy — connect the provider.
+// 409 NOT_CONFIGURED on the named field, the status the message route gives
+// the same fault: the value is well-formed and the write is well-addressed,
+// and the organization's credentials as they stand refuse it.
+// The message carries the remedy — connect the provider. The item is written
+// directly because httpx.WriteNotConfigured carries no field.
 func WriteAccessError(w http.ResponseWriter, err error, field string) bool {
 	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
 		return false
 	}
-	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-		Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: field,
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason: httpx.ReasonNotConfigured, Message: err.Error(), Field: field,
 	})
 	return true
 }

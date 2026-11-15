@@ -941,9 +941,10 @@ func (s *Spawner) ResumabilityFor(ctx context.Context, orgID string, conv *domai
 // than resuming one (startsFresh).
 //
 // Which model the wake runs on is not asked here. The send decides it and
-// refuses a model the team may not run (resolveTurnSettings), and the claim
-// refuses one disabled since (modelForClaim), so a team whose default is
-// disabled still offers the composer: the person can pick another model.
+// refuses a model the team may not run or the org cannot authenticate
+// (resolveTurnSettings), and the claim refuses one disabled or disconnected
+// since (modelForClaim), so a team whose default is disabled still offers the
+// composer: the person can pick another model.
 func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) string {
 	fresh := startsFresh(conv)
 	// The SDK's resume re-invokes a Claude session BY ID, in the tree it ran

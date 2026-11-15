@@ -8,13 +8,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // The refusals a person's message settings can meet before anything is
 // written. Each reaches the client as a 409 naming the field it is about
-// (SettingsFieldError).
+// (SettingsFieldError). The send also returns modelaccess's two refusals:
+// ErrProviderUnconfigured naming the model field, and ErrNoCredentials naming
+// none.
 var (
 	// ErrStepSettingsFixed is a message to a step of a running blueprint that
 	// names a model or effort other than the step's: a step runs on the model
@@ -58,10 +61,14 @@ func refuseField(field string, err error) error {
 // effort, whatever the message says: a message naming different ones is
 // refused rather than ignored. That model is not held to the team's set
 // here, because the claim runs a step on it whatever the set says now
-// (modelForClaim): a step's work is not re-decided mid-flight.
+// (modelForClaim): a step's work is not re-decided mid-flight. Nor is it held
+// to the org's connected providers here; the claim asks that of every model.
 //
 // Otherwise the resolved model is held to the team's enabled set, which is the
-// only place a send checks it, and the effort to the levels the model's
+// only place a send checks it, then to the providers the org has connected
+// (checkModelProvider), whether the message named the model or inherited it:
+// a message accepted on a model the org cannot authenticate would queue a
+// conversation no claim can run. The effort is held to the levels the model's
 // catalog entry lists: an explicit effort it does not take is refused, and an
 // inherited one is dropped, since the person did not send it. Last, a switch
 // to a model whose window the conversation already fills past the compaction
@@ -114,6 +121,14 @@ func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv do
 			err = fmt.Errorf("%w: %s is not among this team's enabled models (%s) — pick one of those", domain.ErrModelNotEnabled, got.Model, models.Enabled())
 		}
 		return domain.TurnSettings{}, refuseField("model", err)
+	}
+	if err := s.checkModelProvider(ctx, orgID, got.Model); err != nil {
+		// Another model fixes an unconnected provider, so that refusal names
+		// the field. No choice of model fixes an org with no credentials.
+		if errors.Is(err, modelaccess.ErrProviderUnconfigured) {
+			return domain.TurnSettings{}, refuseField("model", err)
+		}
+		return domain.TurnSettings{}, err
 	}
 
 	if got.Effort != "" && !modelTakesEffort(got.Model, got.Effort) {

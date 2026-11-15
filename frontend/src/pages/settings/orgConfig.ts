@@ -5,7 +5,7 @@
 // PATCH below, naming only the fields it edited, so there is no parallel
 // persistence path to drift and no save that round-trips a whole form.
 
-import { apiJSON, httpErrorMessage, HttpError } from '../../lib/apiClient'
+import { apiErrors, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 
 export type CloneProtocol = 'ssh' | 'https'
 
@@ -395,9 +395,11 @@ export type OrgSettingsPatch = Partial<
 // and clearing one no longer destroys the matching credential.
 //
 // `version` is the token the caller's copy of the row was loaded (or last
-// saved) at. A write that lost a race makes this a 409, reported as `conflict`
-// so the caller can re-read rather than telling the user to retry a write that
-// will keep failing.
+// saved) at. A write that lost a race is refused with VERSION_CONFLICT,
+// reported as `conflict` so the caller can re-read rather than telling the user
+// to retry a write that will keep failing. Every other refusal, the route's
+// other 409s included, is about the values sent: the caller shows its message
+// and keeps the draft.
 //
 // Returns the post-save settings so the caller can refresh its baseline —
 // crucially including the new version, without which the next save would 409
@@ -450,7 +452,7 @@ export async function patchOrgSettings(
     return {
       ok: false,
       error: httpErrorMessage(e, 'Could not save the settings.'),
-      conflict: e instanceof HttpError && e.status === 409,
+      conflict: apiErrors(e).some((item) => item.reason === 'VERSION_CONFLICT'),
     }
   }
 }

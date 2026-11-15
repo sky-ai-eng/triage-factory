@@ -30,7 +30,34 @@ export type ModelAvailability = 'unconfigured' | 'unverified' | 'verified' | 're
 /** One offered model, exactly as the models read returns it. Optional fields
  *  are optional ON THE WIRE: absent means TF asserts nothing, and a client
  *  renders what is present rather than inventing a zero, a provider, or a
- *  badge. */
+ *  badge.
+ *
+ *  `availability` is the one field that says whether work can start on a model.
+ *  It is present on every row for an organization that brings its own
+ *  credentials, which is every organization in multi mode, and absent for a
+ *  local organization on the machine's credentials, where the server holds no
+ *  credential for a provider to be missing.
+ *
+ *    - `unconfigured` is refused by the message route, with 409
+ *      NOT_CONFIGURED, by delegate, and at the claim, which parks the
+ *      conversation. The team-default and background-jobs saves refuse it with
+ *      that status too, except for an organization that has connected no
+ *      provider at all, so setup can pick a model first.
+ *    - Every other row is accepted: `verified`, `unverified`, `red`, and a row
+ *      with no `availability`. `red` and `unverified` are advisory, because a
+ *      stored probe verdict can be stale in either direction, and the server
+ *      never refuses on one.
+ *    - The enabled-set writes and a prompt's model save do not consult it.
+ *      They store a choice for later.
+ *
+ *  `enabled` is the enabled-set's answer and says nothing about credentials.
+ *  It is true on every row of the team read, which omits rows outside the
+ *  team's set.
+ *
+ *  This client is stricter than the server before a save: it offers no `red`
+ *  or `unconfigured` model in a picker (selectable), and it tests an
+ *  `unverified` one first (gateModelSave). That is presentation; a headless
+ *  caller is held to the rules above only. */
 export interface ModelCatalogEntry {
   key: string
   display_name: string
@@ -147,10 +174,11 @@ export function lacksPromptCaching(m: ModelCatalogEntry): boolean {
 export const PROMPT_CACHING_WARNING =
   'Runs cost several times more without prompt caching — the whole prompt is re-sent on every turn.'
 
-/** selectable reports whether a row may be chosen. A model the org holds no
+/** selectable reports whether a picker offers a row. A model the org holds no
  *  credential for, or one a probe was refused for, is listed and not
  *  selectable: hiding it would leave a person hunting for a model they were
- *  shown yesterday, and the save would refuse it anyway. */
+ *  shown yesterday. The server refuses the first; holding back the second is
+ *  this client's own rule. */
 export function selectable(m: ModelCatalogEntry): boolean {
   return m.availability !== 'red' && m.availability !== 'unconfigured'
 }

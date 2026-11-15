@@ -11,8 +11,11 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -592,6 +595,186 @@ func TestFollowUp_ADisabledModelLeavesTheComposerAndRefusesTheSendThatWouldRunOn
 	}
 	if model != domain.ModelHaiku {
 		t.Errorf("queued row model = %q, want %q", model, domain.ModelHaiku)
+	}
+}
+
+// An organization that has connected one provider is refused a send naming a
+// model served by another, BEFORE the message is written. The control half
+// seals no credential for that provider, so a message accepted here would
+// queue a conversation no claim can run.
+func TestFollowUp_AModelOnAnUnconnectedProviderRefusesTheSendThatNamesIt(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-unconnected", "sess-unconnected", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish' WHERE id='r-unconnected'`,
+	); err != nil {
+		t.Fatalf("conclude conversation: %v", err)
+	}
+	finishBlueprint(t, database, blueprintRunIDForConversation(t, database, "r-unconnected"), "completed", 0)
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	// The team enables the model, so the only refusal left is the provider's.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelSonnet,
+			domain.TeamModelSet([]string{domain.ModelSonnet, bedrockModel}, orgUnrestricted())), nil
+	})
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-unconnected", runmode.LocalDefaultUserID, "one more thing",
+		domain.TurnSettings{Model: bedrockModel})
+	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
+		t.Fatalf("SendMessage err = %v, want ErrProviderUnconfigured", err)
+	}
+	var fe *SettingsFieldError
+	if !errors.As(err, &fe) || fe.Field != "model" {
+		t.Errorf("SendMessage err = %v, want it to name the model field", err)
+	}
+	if !strings.Contains(err.Error(), modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)) {
+		t.Errorf("refusal %q does not name the provider to connect", err)
+	}
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-unconnected'`).Scan(&rows); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a refused send wrote %d message row(s)", rows)
+	}
+	if !storedConcluded(t, database, "r-unconnected") {
+		t.Errorf("stored status = %q, want it still concluded — a refused send queues nothing", storedStatus(t, database, "r-unconnected"))
+	}
+}
+
+// A message accepted while its model's provider was connected, and claimed
+// after the provider was disconnected, parks on the first claim. Nothing
+// seals a credential for that provider, so a claim let through would wait in
+// awaiting_credentials until it timed out, hand the conversation back at no
+// cost to any budget, and be claimed again.
+func TestDispatch_AClaimOnAnUnconnectedProviderParksOnce(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, true)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-lost", "sess-lost", t.TempDir())
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-lost'`); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	finishBlueprint(t, database, blueprintRunIDForConversation(t, database, "r-lost"), "completed", 0)
+	// A minted opening and the turn it produced: work a failure would destroy,
+	// which is what makes the refusal a park.
+	if _, err := database.Exec(
+		`INSERT INTO messages (org_id, conversation_id, role, subtype, content)
+		 VALUES (?, 'r-lost', 'user', ?, '<task_context>x</task_context>'),
+		        (?, 'r-lost', 'assistant', '', 'work happened here')`,
+		runmode.LocalDefaultOrgID, domain.MessageSubtypeInjectionTaskContext, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelSonnet,
+			domain.TeamModelSet([]string{domain.ModelSonnet, bedrockModel}, orgUnrestricted())), nil
+	})
+	ctx := context.Background()
+	if err := s.SendMessage(ctx, runmode.LocalDefaultOrgID, "r-lost", runmode.LocalDefaultUserID, "carry on",
+		domain.TurnSettings{Model: bedrockModel}); err != nil {
+		t.Fatalf("SendMessage while the provider is connected: %v", err)
+	}
+	if _, err := sqlitestore.New(database).Orgs.SetBedrockCredentialsRef(ctx, runmode.LocalDefaultOrgID, ""); err != nil {
+		t.Fatalf("disconnect bedrock: %v", err)
+	}
+
+	claimAndDispatch(t, s, database)
+
+	var status, reason string
+	if err := database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(park_reason, '') FROM conversations WHERE id='r-lost'`,
+	).Scan(&status, &reason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "open" || reason != string(domain.ParkReasonProviderNotConnected) {
+		t.Errorf("parked as (%q, %q), want (open, %s)", status, reason, domain.ParkReasonProviderNotConnected)
+	}
+	var notes int
+	var note string
+	if err := database.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(content), '') FROM messages WHERE conversation_id='r-lost' AND subtype=?`,
+		domain.MessageSubtypeStopNote,
+	).Scan(&notes, &note); err != nil {
+		t.Fatalf("read stop note: %v", err)
+	}
+	if notes != 1 {
+		t.Fatalf("%d stop notes, want one", notes)
+	}
+	for _, want := range []string{bedrockModel, modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)} {
+		if !strings.Contains(note, want) {
+			t.Errorf("stop note %q does not name %s", note, want)
+		}
+	}
+	// The park settled the waiting message, so nothing claims the
+	// conversation again until a person sends another.
+	next, err := s.conversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil {
+		t.Fatalf("claim after the park: %v", err)
+	}
+	if next != nil {
+		t.Errorf("conversation %s was claimable again after the park", next.ID)
+	}
+	var claims, awaiting int
+	if err := database.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(phase = ?), 0) FROM claims WHERE conversation_id='r-lost'`,
+		domain.ClaimPhaseAwaitingCredentials,
+	).Scan(&claims, &awaiting); err != nil {
+		t.Fatalf("read claims: %v", err)
+	}
+	if claims != 1 || awaiting != 0 {
+		t.Errorf("claims = %d with %d awaiting credentials, want one claim that never waited for a bundle", claims, awaiting)
+	}
+}
+
+// A blueprint step runs on the model its plan froze, whatever the team's set
+// says now, and it still cannot run without a credential. A step that never
+// ran has no transcript to park, so it fails as unstarted, and its blueprint
+// with it, on the refusal that names the provider.
+func TestDispatch_AnUnstartedStepOnAnUnconnectedProviderFailsWithTheRefusal(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-pinned", "", "")
+	if _, err := database.Exec(`UPDATE conversations SET status=NULL, model=? WHERE id='r-pinned'`, bedrockModel); err != nil {
+		t.Fatalf("queue the step: %v", err)
+	}
+	bpr := blueprintRunIDForConversation(t, database, "r-pinned")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	claimAndDispatch(t, s, database)
+
+	var status, summary string
+	if err := database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(result_summary, '') FROM conversations WHERE id='r-pinned'`,
+	).Scan(&status, &summary); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != domain.StatusFailed {
+		t.Errorf("stored status = %q, want %s — a step that never ran has nothing to park", status, domain.StatusFailed)
+	}
+	var bpStatus, abortReason string
+	if err := database.QueryRow(
+		`SELECT status, COALESCE(abort_reason, '') FROM blueprint_runs WHERE id = ?`, bpr,
+	).Scan(&bpStatus, &abortReason); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	if bpStatus != string(domain.BlueprintRunStatusFailed) {
+		t.Errorf("blueprint status = %q, want failed", bpStatus)
+	}
+	provider := modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)
+	for name, got := range map[string]string{"conversation result_summary": summary, "blueprint abort_reason": abortReason} {
+		if !strings.Contains(got, bedrockModel) || !strings.Contains(got, provider) {
+			t.Errorf("%s = %q, want the refusal naming %s and %s", name, got, bedrockModel, provider)
+		}
 	}
 }
 

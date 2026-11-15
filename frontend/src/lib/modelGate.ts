@@ -98,8 +98,9 @@ function open(req: ModelGateRequest): Promise<boolean> {
  *   - verified → PROCEED. A single green is permanent; re-testing would spend
  *     to re-learn it.
  *   - red / unconfigured → REFUSE, naming the fix. The picker does not offer
- *     these, so reaching here is a stale catalog rather than a choice — the
- *     save would be refused by the server anyway, and this says why.
+ *     these, so reaching here is a stale catalog rather than a choice. The
+ *     server refuses unconfigured alone; refusing red as well is this
+ *     client's own, stricter rule.
  *   - unverified → ask, test, and proceed only on green.
  */
 export function gateModelSave(orgId: string, model: ModelCatalogEntry): Promise<boolean> {
