@@ -204,21 +204,23 @@ export default function RunDetail() {
     setActiveDeliverable({ kind, id: deliverableId })
   }, [])
 
-  // Keyboard: Esc → back.
+  // Keyboard: Esc → back, but only for a press no other layer took. A layer
+  // above the page marks the press it consumes. The page's own deliverable
+  // overlays are read from its state instead, because a mark from a listener
+  // that runs after this one would come too late.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || activeDeliverable) return
       if (e.target instanceof HTMLElement) {
         const tag = e.target.tagName
         if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return
       }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        navigate(orgHref('/board'))
-      }
+      e.preventDefault()
+      navigate(orgHref('/board'))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navigate, orgHref])
+  }, [navigate, orgHref, activeDeliverable])
 
   if (loading) return <FloorMessage tone="text-ink-3">Spinning up the station…</FloorMessage>
 
