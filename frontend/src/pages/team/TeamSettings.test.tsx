@@ -503,37 +503,53 @@ describe('the sources panel', () => {
     expect(screen.getByText('— sources connected · last event —')).toBeInTheDocument()
   })
 
-  it('dates the foot by the newest event among the connected sources', async () => {
-    sources.state = { ...SERVED, jira: 'disabled' }
-    const ago = (min: number) => new Date(Date.now() - min * 60000).toISOString()
-    const unit = (source: string, unit_id: string, last_event_at: string | null) => ({
-      source,
-      unit_id,
-      events: 0,
-      tasks: 0,
-      runs: 0,
-      last_event_at,
-    })
+  // The activity read with a tracked-set cut of the caller's, every other
+  // route answering as the suite's default does.
+  const minutesAgo = (min: number) => new Date(Date.now() - min * 60000).toISOString()
+  const unit = (source: string, unit_id: string, last_event_at: string | null) => ({
+    source,
+    unit_id,
+    events: 0,
+    tasks: 0,
+    runs: 0,
+    last_event_at,
+  })
+  const answerTracked = (by_tracked: ReturnType<typeof unit>[]) => {
     const base = api.apiJSON.getMockImplementation()!
     api.apiJSON.mockImplementation((path: string, init?: RequestInit) =>
-      path.includes('/activity?')
-        ? Promise.resolve({
-            ...ACTIVITY,
-            by_tracked: [
-              unit('github', 'r1', ago(90)),
-              unit('github', 'r2', ago(12)),
-              unit('github', 'r3', null),
-              // Newer than either, but Jira is turned off.
-              unit('jira', 'reg-PLAT', ago(2)),
-            ],
-          })
-        : base(path, init),
+      path.includes('/activity?') ? Promise.resolve({ ...ACTIVITY, by_tracked }) : base(path, init),
     )
+  }
+
+  it('dates the foot by the newest event among the connected sources', async () => {
+    sources.state = { ...SERVED, jira: 'disabled' }
+    answerTracked([
+      unit('github', 'r1', minutesAgo(90)),
+      unit('github', 'r2', minutesAgo(12)),
+      unit('github', 'r3', null),
+      // Newer than either, but Jira is turned off.
+      unit('jira', 'reg-PLAT', minutesAgo(2)),
+    ])
     renderPage()
     await waitFor(() => expect(bandHead()).not.toBeNull())
 
     fireEvent.click(bandHead()!)
     expect(await screen.findByText('3 sources connected · last event 12m ago')).toBeInTheDocument()
+  })
+
+  it('reads an event stamped ahead of this clock as just now, and counts one source as one', async () => {
+    sources.state = {
+      github: 'available',
+      jira: 'unconfigured',
+      linear: 'unconfigured',
+      slack: 'unconfigured',
+    }
+    answerTracked([unit('github', 'r1', minutesAgo(-0.5))])
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(bandHead()!)
+    expect(await screen.findByText('1 source connected · last event 1m ago')).toBeInTheDocument()
   })
 
   it('leaves out a source the read does not return, and opens no link to it', async () => {

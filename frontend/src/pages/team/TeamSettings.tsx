@@ -6,6 +6,8 @@ import SourceCard from '../../ui/sourcecard/SourceCard'
 import type { SourceStat } from '../../ui/sourcecard/SourceCard'
 import Dialog from '../../ui/dialog/Dialog'
 import type { DialogConsequence } from '../../ui/dialog/Dialog'
+import LiveText from '../../ui/shared/LiveText'
+import { ago } from '../../ui/table/cells'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import LinearSource from './LinearSource'
@@ -20,12 +22,7 @@ import { useTeamRole } from '../../hooks/useTeamRole'
 import { useOptionalAuth } from '../../contexts/AuthContext'
 import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
-import {
-  useTeamActivity,
-  activityLastEvent,
-  activitySource,
-  sinceLabel,
-} from '../../hooks/useTeamActivity'
+import { useTeamActivity, activityLastEvent, activitySource } from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
 import { sourceLabel, sourceUnavailableReason } from '../../lib/eventSources'
 import { useTeamUsage, fmtSpendUSD } from '../../hooks/useTeamUsage'
@@ -277,15 +274,16 @@ export default function TeamSettings() {
   const usage = useTeamUsage(teamId, 14)
   const flowEvents = activity ? activity.by_source.reduce((n, r) => n + (r.events ?? 0), 0) : null
   const flowTasks = activity ? activity.by_source.reduce((n, r) => n + r.tasks, 0) : null
-  // The sources panel's foot. Unlike the cards, which stay live on an
-  // unresolved read, a count of what is connected needs the answer: null
-  // until the read resolves. The last event is over the same set, so a
-  // source turned off an hour ago cannot make the connected ones look busy.
+  // The sources panel's foot. A count of what is connected is a claim about
+  // the availability read's answer, so it is null until there is one. The
+  // last event is over the same set, so a source turned off an hour ago
+  // cannot make the connected ones look busy.
   const connected = useMemo(
     () => (sourcesRead ? sources.filter((k) => stateOf(k) === 'available') : null),
     [sourcesRead, sources, stateOf],
   )
-  const sinceLastEvent = sinceLabel(activityLastEvent(activity, connected ?? []))
+  const lastEventAt = activityLastEvent(activity, connected ?? [])
+  const lastEventMs = lastEventAt === null ? null : Date.parse(lastEventAt)
   // Null while the read has not answered AND for a member, who is sent no
   // by_user cut at all — two states the roster renders the same way, because
   // both are "unknown" and neither is zero.
@@ -953,8 +951,17 @@ export default function TeamSettings() {
 
             <div className="ts-panelview-foot">
               <span>
-                {connected?.length ?? '—'} sources connected · last event{' '}
-                {sinceLastEvent ? `${sinceLastEvent} ago` : '—'}
+                {connected?.length ?? '—'} {connected?.length === 1 ? 'source' : 'sources'}{' '}
+                connected · last event{' '}
+                {lastEventMs === null ? (
+                  '—'
+                ) : (
+                  // Clamped at zero so an event stamped ahead of this clock
+                  // reads as just now rather than as no event.
+                  <LiveText
+                    compute={(now) => ago(Math.max(0, (now - lastEventMs) / 60_000)) + ' ago'}
+                  />
+                )}
               </span>
             </div>
           </div>
