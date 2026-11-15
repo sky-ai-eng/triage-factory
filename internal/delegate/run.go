@@ -886,13 +886,14 @@ func (s *Spawner) firstTurnPersonInput(ctx context.Context, orgID, conversationI
 
 // openedTaskContext is the content of the conversation's task-context row, the
 // task context its opening sent, or "" when the transcript holds none: older
-// builds opened conversations without one. A read that fails answers "" too,
-// and the launch then retains no task-context file rather than one that is not
-// a copy of the row.
+// builds opened conversations without one. A read that fails answers "" too.
+// Either way the launch writes no task-context file, and whatever an earlier
+// engagement wrote there stays, rather than being replaced by a file that is
+// not a copy of the row.
 func (s *Spawner) openedTaskContext(ctx context.Context, orgID, conversationID string) string {
 	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read the transcript for its task-context row failed; this launch retains no task-context file",
+		delegateLog.Warn("read the transcript for its task-context row failed; this launch writes no task-context file",
 			"conversation", conversationID, "error", err)
 		return ""
 	}

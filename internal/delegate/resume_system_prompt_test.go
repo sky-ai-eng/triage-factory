@@ -416,6 +416,11 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 			if replay.opened != tc.wantOpened {
 				t.Errorf("opened = %v, want %v", replay.opened, tc.wantOpened)
 			}
+			// A claim that knows the conversation is opened still has its opening
+			// row, whichever read failed after the transcript's.
+			if want := map[bool]string{true: fixtureTaskContextRow}[tc.wantOpened]; replay.taskContext != want {
+				t.Errorf("taskContext = %q, want %q", replay.taskContext, want)
+			}
 			if replay.block != "" {
 				t.Errorf("block = %q, want nothing to replay — the read failed", replay.block)
 			}

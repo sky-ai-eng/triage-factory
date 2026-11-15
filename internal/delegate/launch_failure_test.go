@@ -132,8 +132,11 @@ func (f *launchFixture) speak(t *testing.T, role, content string) {
 // and the row every "has this conversation started?" gate reads.
 func (f *launchFixture) open(t *testing.T) {
 	t.Helper()
-	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, "<task_context>\nPull request owner/repo#7\n</task_context>")
+	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, fixtureTaskContextRow)
 }
+
+// fixtureTaskContextRow is the content of the task-context row open writes.
+const fixtureTaskContextRow = "<task_context>\nPull request owner/repo#7\n</task_context>"
 
 func (f *launchFixture) say(t *testing.T, role, subtype, content string) {
 	t.Helper()

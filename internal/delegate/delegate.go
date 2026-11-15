@@ -1133,7 +1133,8 @@ type prSkeletonSource struct {
 	prNumber int
 }
 
-// render fetches and renders the skeleton (renderPRSkeleton).
+// render is renderPRSkeleton over the source: two GETs to GitHub, which is
+// why a launch calls it only when the block will reach the model.
 func (src prSkeletonSource) render(ctx context.Context) string {
 	return renderPRSkeleton(ctx, src.client, src.owner, src.repo, src.prNumber)
 }
