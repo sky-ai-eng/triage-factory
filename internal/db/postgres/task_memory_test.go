@@ -196,7 +196,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// though it bypasses RLS — the impl binds org_id in every WHERE
 	// clause as defense in depth. teamID is orgB's team; the org_id
 	// filter excludes orgA's row before the team branch matters.
-	memsBSystem, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgB, entA, firstTeamForOrg(t, h, orgB))
+	memsBSystem, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgB, entA, firstTeamForOrg(t, h, orgB), "")
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem orgB on orgA entity: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 
 	// A run owned by team1 materializes only team1's memory — team2's is
 	// NOT bled in (the bug: pre-fix the System read returned both).
-	mems1, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team1)
+	mems1, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team1, "")
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem team1: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	dbtest.AssertTaskMemoryNamingFacts(t, mems1[0], taskForPgConversation(t, h, conv1))
 
 	// Symmetric: a run owned by team2 sees only team2's memory.
-	mems2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team2)
+	mems2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team2, "")
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem team2: %v", err)
 	}
@@ -452,19 +452,122 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 
 	// CountMemoriesForEntitySystem must respect the identical team-visibility
 	// filter: each team counts only its own memory on the shared entity.
-	count1, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, team1)
+	count1, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, team1, "")
 	if err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem team1: %v", err)
 	}
 	if count1 != 1 {
 		t.Errorf("team1 Count = %d, want 1 (team2's must not bleed in)", count1)
 	}
-	count2, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, team2)
+	count2, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, team2, "")
 	if err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem team2: %v", err)
 	}
 	if count2 != 1 {
 		t.Errorf("team2 Count = %d, want 1", count2)
+	}
+}
+
+// TestTaskMemoryStore_Postgres_SystemReadCarriesTheTaskAcrossTeams pins the
+// task arm of the reader scope against the reassignment that needs it: a task
+// moves to another team, its earlier conversation stays with the team that had
+// it, and the task's next conversation is on the new team. That conversation
+// reads the earlier one's memory — the task's handoff — but still none of the
+// old team's memory on the entity's other tasks, and a new-team conversation
+// on another task of the entity reads none of the old team's at all. The
+// count answers for the same rows as both reads.
+func TestTaskMemoryStore_Postgres_SystemReadCarriesTheTaskAcrossTeams(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgTaskMemoryOrg(t, h)
+	promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
+	oldTeam := firstTeamForOrg(t, h, orgID)
+	newTeam := seedPgDefaultTeam(t, h, orgID, userID)
+	entityID := seedPgSharedEntity(t, h, orgID, "github", "octo/repo#1449", "pr")
+
+	write := func(conversationID, content string) {
+		t.Helper()
+		if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, "", content, domain.MemorySourceAgent); err != nil {
+			t.Fatalf("UpsertAgentMemorySystem %q: %v", content, err)
+		}
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
+			t.Fatalf("RecordEntityTouchSystem %q: %v", content, err)
+		}
+	}
+
+	// The reassigned task's earlier conversation, on the old team.
+	handoff := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, oldTeam, entityID, "reassigned")
+	write(handoff, "old team's handoff")
+	reassigned := taskForPgConversation(t, h, handoff)
+	// The old team's work on another task of the same entity.
+	oldOther := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, oldTeam, entityID, "old-other")
+	write(oldOther, "old team's other task")
+	// The new team's work on another task of the same entity.
+	newOther := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, newTeam, entityID, "new-other")
+	write(newOther, "new team's other task")
+	newOtherTask := taskForPgConversation(t, h, newOther)
+
+	// The reassignment moves the task, never a conversation.
+	if _, err := h.AdminDB.Exec(`UPDATE tasks SET team_id = $1 WHERE id = $2`, newTeam, reassigned); err != nil {
+		t.Fatalf("move the task to the new team: %v", err)
+	}
+
+	contents := func(mems []domain.TaskMemory) map[string]bool {
+		out := map[string]bool{}
+		for _, m := range mems {
+			out[m.Content] = true
+		}
+		return out
+	}
+	assertReads := func(name, taskID string, want ...string) {
+		t.Helper()
+		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, newTeam, taskID)
+		if err != nil {
+			t.Fatalf("%s: GetMemoriesForEntitySystem: %v", name, err)
+		}
+		recent, err := stores.TaskMemory.GetRecentMemoriesForEntitySystem(ctx, orgID, entityID, newTeam, taskID, 10)
+		if err != nil {
+			t.Fatalf("%s: GetRecentMemoriesForEntitySystem: %v", name, err)
+		}
+		count, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, newTeam, taskID)
+		if err != nil {
+			t.Fatalf("%s: CountMemoriesForEntitySystem: %v", name, err)
+		}
+		for read, got := range map[string][]domain.TaskMemory{"GetMemoriesForEntitySystem": mems, "GetRecentMemoriesForEntitySystem": recent} {
+			set := contents(got)
+			if len(got) != len(want) {
+				t.Errorf("%s: %s = %v, want exactly %v", name, read, set, want)
+				continue
+			}
+			for _, w := range want {
+				if !set[w] {
+					t.Errorf("%s: %s = %v, missing %q", name, read, set, w)
+				}
+			}
+		}
+		if count != len(want) {
+			t.Errorf("%s: CountMemoriesForEntitySystem = %d, want %d", name, count, len(want))
+		}
+	}
+
+	assertReads("the new holder's conversation on the reassigned task", reassigned,
+		"old team's handoff", "new team's other task")
+	assertReads("a new-team conversation on another task of the entity", newOtherTask,
+		"new team's other task")
+
+	// The carried memory splits into this-task by the task it ran on, so the
+	// materializer files it where the new holder's agent reads its handoff.
+	mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, newTeam, reassigned)
+	if err != nil {
+		t.Fatalf("GetMemoriesForEntitySystem: %v", err)
+	}
+	for _, m := range mems {
+		if m.ConversationID == handoff {
+			dbtest.AssertTaskMemoryNamingFacts(t, m, reassigned)
+		}
 	}
 }
 
@@ -526,7 +629,7 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 
 	// team1's memory is reachable from all three entities it engaged.
 	for name, id := range map[string]string{"primary A1": entA1, "produced B": entB, "touched C": entC} {
-		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, id, team1)
+		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, id, team1, "")
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntitySystem team1 %s: %v", name, err)
 		}
@@ -537,7 +640,7 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 
 	// The produced entity is shared, but the team-scoped read still separates
 	// the two teams' memory — team scoping is role-agnostic across the join.
-	memsB2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entB, team2)
+	memsB2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entB, team2, "")
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem team2 produced B: %v", err)
 	}

@@ -426,7 +426,7 @@ func TestMemoryFingerprint_IdentifiesByContent(t *testing.T) {
 // or "" when the row carries none (the NULL case).
 func memoryContentFor(t *testing.T, s *Spawner, entityID, conversationID string) string {
 	t.Helper()
-	mems, err := s.taskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID)
+	mems, err := s.taskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID, "")
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem: %v", err)
 	}

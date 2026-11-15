@@ -456,10 +456,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
 			t.Errorf("TaskMemory.RecordEntityTouchSystem: %v", err)
 		}
-		if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
+		if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, teamID, ""); err != nil {
 			t.Errorf("TaskMemory.GetMemoriesForEntitySystem: %v", err)
 		}
-		if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
+		if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, teamID, ""); err != nil {
 			t.Errorf("TaskMemory.CountMemoriesForEntitySystem: %v", err)
 		}
 	})
