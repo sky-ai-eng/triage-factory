@@ -4,8 +4,9 @@
 // Resume value decays fast — week-old WIP against a moved-on main is rarely
 // worth rehydrating — so the blobs are bounded by a retention TTL: the reaper
 // enumerates the keys whose last activity predates the TTL and drops their
-// snapshots, from the DB rather than the store (the blob store has no List),
-// and only once ALL of that task's conversations are past the TTL.
+// snapshots, from the DB rather than the store (a key's idleness is its
+// conversations' last activity, which only the DB records), and only once ALL
+// of that task's conversations are past the TTL.
 //
 // The enumeration is every top-level conversation on the task, not only the
 // states that write a snapshot: a key is collectable on its idleness alone,
@@ -94,7 +95,7 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 
 // ReapExpiredSnapshots drops the durable workspace snapshot of every task all
 // of whose top-level conversations last went idle before the retention TTL.
-// Enumerates the reapable keys from the DB (the blob store has no List) and
+// Enumerates the reapable keys from the DB, which records their idleness, and
 // discards each via the idempotent discardWorkspaceSnapshot, so a key already
 // gone is a no-op.
 // Best-effort: errors are logged, never fatal.

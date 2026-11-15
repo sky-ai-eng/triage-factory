@@ -320,9 +320,23 @@ func TestReapEndedSessions_DeletesTheBlobsOfEndedAndPurgedConversations(t *testi
 	if ended, err := f.stores.Conversations.EndConversationSystem(ctx, org, f.conv.ID, domain.EndedTakenOver); err != nil || ended == nil {
 		t.Fatalf("EndConversationSystem = (%v, %v)", ended, err)
 	}
-	f.s.ReapEndedSessions(ctx)
-	if exists(sessionBlobKey(org, f.conv.ID)) {
-		t.Error("the sweep kept the session of a conversation that has ended")
+	// Through the reaper the app starts, whose first pass runs at once.
+	reaperCtx, stopReaper := context.WithCancel(ctx)
+	reaped := make(chan struct{})
+	go func() {
+		defer close(reaped)
+		f.s.RunSnapshotReaper(reaperCtx, time.Hour)
+	}()
+	t.Cleanup(func() {
+		stopReaper()
+		<-reaped
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for exists(sessionBlobKey(org, f.conv.ID)) {
+		if time.Now().After(deadline) {
+			t.Fatal("the reaper kept the session of a conversation that has ended")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

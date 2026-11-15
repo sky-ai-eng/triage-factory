@@ -96,7 +96,7 @@ func (s *Spawner) saveSession(ctx context.Context, orgID, conversationID, cwd, s
 	if blobs == nil || sessionID == "" || cwd == "" {
 		return
 	}
-	ctx, span := tracer.Start(ctx, "session.save")
+	ctx, span := s.startPunctual(ctx, conversationID, "session.save")
 	defer span.End()
 	data, ok := worktree.ReadClaudeSessionTranscript(cwd, sessionID)
 	if !ok {
