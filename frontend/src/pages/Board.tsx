@@ -184,6 +184,13 @@ function isUnusedClaimConversation(c: Conversation): boolean {
   return c.type === 'interactive' && c.has_run === false
 }
 
+// isChatToStart reports the conversation a holder's "Start chat" leads to: a
+// claim's conversation nothing has run in, and still the task's. An ended one
+// (a failed chat its replacement stands in for, a claim handed back) is not.
+function isChatToStart(c: Conversation): boolean {
+  return isUnusedClaimConversation(c) && !c.ended_at
+}
+
 function collapseStorageKey(userID: string): string {
   return `${COLLAPSE_STORAGE_PREFIX}.${userID || 'anon'}`
 }
@@ -271,12 +278,11 @@ export default function Board() {
     unrunChatsRef.current = unrunChats
   }, [unrunChats])
   // noteChat records what a freshly read conversation says about its task's
-  // chat: an interactive conversation that has not run is the chat to offer,
-  // and one that has run retires the offer it held.
+  // chat: one to start is the offer, and one that has run or ended retires
+  // the offer it held.
   const noteChat = useCallback((c: Conversation) => {
-    if (c.type !== 'interactive') return
     setUnrunChats((prev) => {
-      if (c.has_run === false) return prev[c.TaskID] === c.ID ? prev : { ...prev, [c.TaskID]: c.ID }
+      if (isChatToStart(c)) return prev[c.TaskID] === c.ID ? prev : { ...prev, [c.TaskID]: c.ID }
       if (prev[c.TaskID] !== c.ID) return prev
       const next = { ...prev }
       delete next[c.TaskID]
@@ -516,8 +522,9 @@ export default function Board() {
 
       for (const taskID of taskIDs) {
         const taskConversations = conversationsByTask[taskID]
-        const chat = taskConversations?.find((c) => c.type === 'interactive')
-        nextChats[taskID] = chat?.has_run === false ? chat.ID : undefined
+        // A task the window did not reach keeps its offer, as it keeps its
+        // card's conversation, until a read that reaches it says otherwise.
+        if (taskConversations) nextChats[taskID] = taskConversations.find(isChatToStart)?.ID
         if (!taskConversations || taskConversations.length === 0) continue
         const latestConversation =
           taskConversations.find((c) => !isUnusedClaimConversation(c)) ?? taskConversations[0]

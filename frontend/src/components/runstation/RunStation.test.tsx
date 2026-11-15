@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within, cleanup, waitFor } from '@testing-li
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
 import type { Conversation, Task } from '../../types'
+import type { PendingPermission } from '../../lib/permissions'
 import { jsonBody, listBody } from '../../test/apiResponse'
 import { resetModelCatalogForTest } from '../../hooks/useModelCatalog'
 
@@ -308,7 +309,15 @@ describe('RunStation chat', () => {
 
   function chat(
     over: Partial<Conversation>,
-    { task = {}, actions = {} }: { task?: Partial<Task>; actions?: Partial<StationActions> } = {},
+    {
+      task = {},
+      actions = {},
+      pending = [],
+    }: {
+      task?: Partial<Task>
+      actions?: Partial<StationActions>
+      pending?: PendingPermission[]
+    } = {},
   ) {
     const conversation = {
       ID: 'c1',
@@ -323,22 +332,31 @@ describe('RunStation chat', () => {
       ResultSummary: '',
       ...over,
     } as Conversation
-    const ui = (c: Conversation) => (
+    const ui = (c: Conversation, prompts: PendingPermission[] = pending) => (
       <MemoryRouter>
         <RunStation
           conversation={c}
-          task={{ id: 't1', team_id: 'team1', memory_pending: false, ...task } as Task}
+          task={
+            {
+              id: 't1',
+              team_id: 'team1',
+              conversation_id: 'c1',
+              memory_pending: false,
+              ...task,
+            } as Task
+          }
           messages={[]}
           now={new Date('2026-07-30T00:01:00Z').getTime()}
           actions={{ onBack: () => {}, onMessage: async () => ({ sent: true }), ...actions }}
+          pendingPermissions={prompts}
         />
       </MemoryRouter>
     )
     const view = render(ui(conversation))
     return {
       ...view,
-      rerenderWith: (next: Partial<Conversation>) =>
-        view.rerender(ui({ ...conversation, ...next })),
+      rerenderWith: (next: Partial<Conversation>, prompts?: PendingPermission[]) =>
+        view.rerender(ui({ ...conversation, ...next }, prompts)),
     }
   }
 
@@ -379,6 +397,32 @@ describe('RunStation chat', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Waiting for the previous conversation’s memory. The last attempt failed: No background-jobs model is set.',
     )
+  })
+
+  it('shows no memory wait on an earlier conversation of the task', () => {
+    // The run a person took over: it owes the memory, and nothing waits on it.
+    chat(
+      {
+        type: 'delegation',
+        ended_at: '2026-07-30T00:00:40Z',
+        ended_reason: 'taken_over',
+        resumable: false,
+        resume_blocked_reason: 'ended_taken_over',
+      },
+      { task: { memory_pending: true, conversation_id: 'c2' } },
+    )
+    expect(screen.queryByText(/Waiting for the previous conversation’s memory/)).toBeNull()
+  })
+
+  it('closes the settings while a permission prompt hides the composer', async () => {
+    const view = chat({ Status: 'running' })
+    fireEvent.click(settingsButton())
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+
+    view.rerenderWith({}, [
+      { tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'ls' } },
+    ])
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
   it('holds the send while the starting model is one the team does not enable', async () => {

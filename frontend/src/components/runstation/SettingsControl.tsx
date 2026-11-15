@@ -17,11 +17,15 @@ export default function SettingsControl({
   settings,
   conversation,
   active,
+  hidden = false,
 }: {
   settings: ComposerSettings
   conversation: Conversation
   /** A turn is executing now, which is when a change has to say when it lands. */
   active: boolean
+  /** The composer is hidden behind a permission prompt. The popover is
+   *  portaled, so it would otherwise float on, anchored to nothing. */
+  hidden?: boolean
 }) {
   const s = settings
   const name = s.model ? modelDisplayName(s.model) : ''
@@ -32,7 +36,7 @@ export default function SettingsControl({
         .join(' · ')
 
   return (
-    <Popover.Root open={s.open} onOpenChange={s.setOpen}>
+    <Popover.Root open={s.open && !hidden} onOpenChange={s.setOpen}>
       <Popover.Trigger asChild>
         <button
           type="button"

@@ -243,6 +243,11 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       .catch(() => {})
   }, [conversationID])
 
+  // The newest task read issued. Pushes arrive in bursts and their reads can
+  // answer out of order, so only the newest read may write the task: an older
+  // answer landing last would bring back a memory wait that has cleared.
+  const taskReadSeq = useRef(0)
+
   // refreshTask re-reads the task, quietly, the same read the load makes. The
   // task carries the memory wait, which opens, fails and lands without the
   // conversation's own row moving, so the station re-reads it on every push
@@ -251,9 +256,10 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     const taskID = conversationRef.current?.TaskID
     if (!conversationID || !taskID) return
     const id = conversationID
+    const mine = ++taskReadSeq.current
     apiJSON<Task>(`/api/tasks/${taskID}`)
       .then((row) => {
-        if (id === lastConversationIDRef.current) setTask(row)
+        if (id === lastConversationIDRef.current && mine === taskReadSeq.current) setTask(row)
       })
       .catch(() => {})
   }, [conversationID])
@@ -376,6 +382,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         // than throwing it, because the two are independent — a conversation whose task
         // row has gone still has a transcript worth rendering, and letting the
         // task 404 reject the pair would blank it.
+        const taskRead = ++taskReadSeq.current
         const [transcript, taskRow] = await Promise.all([
           apiJSON<TranscriptPage>(`/api/agent/conversations/${conversationID}/messages`),
           conversationData.TaskID
@@ -427,7 +434,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         setMessages((prev) => mergeMessages(prev, msgs))
 
         if (taskRow && 'taskError' in taskRow) setError(taskRow.taskError)
-        else if (taskRow) setTask(taskRow)
+        else if (taskRow && taskRead === taskReadSeq.current) setTask(taskRow)
       } catch (err) {
         if (cancelled) return
         // A 404 is this conversation's own not-found state, not a failed read — the

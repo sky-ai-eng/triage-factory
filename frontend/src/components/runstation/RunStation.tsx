@@ -573,9 +573,11 @@ function IntakeDock({
   const canWrite = conversation.can_write !== false
   const orgHref = useOrgHref()
   const settings = useComposerSettings(conversation, task)
-  // The task waits on the memory its previous conversation owes, and nothing
-  // is running here: a message sent now is queued until the memory lands.
-  const memoryWait = !!task?.memory_pending && !active
+  // The task waits on the memory its previous conversation owes, and this is
+  // the conversation that waits, with nothing running: a message sent now is
+  // queued until the memory lands. An earlier conversation of the task,
+  // the one owing the memory among them, has nothing waiting on it.
+  const memoryWait = !!task?.memory_pending && task.conversation_id === conversation.ID && !active
   // A failed chat is replaced for the person who holds the task, so the line
   // that says so leads to the replacement.
   const replacementHref =
@@ -724,7 +726,12 @@ function IntakeDock({
           onSend={send}
           canSend={settings.canSend}
           settings={
-            <SettingsControl settings={settings} conversation={conversation} active={active} />
+            <SettingsControl
+              settings={settings}
+              conversation={conversation}
+              active={active}
+              hidden={hasPrompt}
+            />
           }
           hidden={hasPrompt}
         />
