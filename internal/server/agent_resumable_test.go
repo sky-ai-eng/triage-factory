@@ -132,15 +132,7 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 // composer opens with: the settings a message naming none would run on, and
 // when the provider cache from the newest assistant turn goes cold.
 func TestHandleAgentStatus_NextMessageSettingsAndCacheWarmth(t *testing.T) {
-	seed := func(t *testing.T, suffix string) (*Server, string) {
-		t.Helper()
-		s := newTestServer(t)
-		withEmptyBlobStore(t, s)
-		conversationID := seedSteerConversation(t, s.db, suffix, "open")
-		execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`, t.TempDir(), conversationID)
-		execSQL(t, s.db, `UPDATE blueprint_runs SET status='completed' WHERE id=(SELECT blueprint_run_id FROM conversations WHERE id=?)`, conversationID)
-		return s, conversationID
-	}
+	seed := seedFollowUpConversation
 	insert := func(t *testing.T, s *Server, msg domain.Message) {
 		t.Helper()
 		if _, err := sqlitestore.New(s.db).Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &msg); err != nil {

@@ -113,8 +113,8 @@ type modelCatalogRow struct {
 	// It is the one field a caller reads to learn whether work can start on
 	// this model:
 	//
-	//   - "unconfigured" is refused by the message route, with 409
-	//     NOT_CONFIGURED, by delegate, and at the claim, which parks the
+	//   - "unconfigured" is refused with 409 NOT_CONFIGURED by the message
+	//     route and by delegate, and at the claim, which parks the
 	//     conversation.
 	//   - Every other row is accepted by those doors: "verified",
 	//     "unverified", "red", and a row with no availability. "red" and
@@ -375,9 +375,9 @@ func (h *Handler) resolveTeam(w http.ResponseWriter, r *http.Request) (orgID, us
 // returning false for anything else so the caller falls through to its own
 // error handling.
 //
-// 409 NOT_CONFIGURED on the named field, the status the message route gives
-// the same fault: the value is well-formed and the write is well-addressed,
-// and the organization's credentials as they stand refuse it.
+// 409 NOT_CONFIGURED on the named field, the status the message route and
+// delegate give the same fault: the value is well-formed and the write is
+// well-addressed, and the organization's credentials as they stand refuse it.
 // The message carries the remedy — connect the provider. The item is written
 // directly because httpx.WriteNotConfigured carries no field.
 func WriteAccessError(w http.ResponseWriter, err error, field string) bool {

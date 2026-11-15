@@ -1206,11 +1206,11 @@ func steerErrorField(err error) string {
 // body was malformed.
 //
 // A model the organization cannot authenticate is 409 NOT_CONFIGURED, the
-// status the settings saves give it: a model whose provider is not connected
-// (modelaccess.ErrProviderUnconfigured), which names the model field, and an
-// organization that brings its own credentials and has connected none
-// (modelaccess.ErrNoCredentials), which names no field because no choice of
-// model fixes it.
+// status delegate and the settings saves give it: a model whose provider is
+// not connected (modelaccess.ErrProviderUnconfigured), which names the model
+// field, and an organization that brings its own credentials and has
+// connected none (modelaccess.ErrNoCredentials), which names no field because
+// no choice of model fixes it.
 //
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it

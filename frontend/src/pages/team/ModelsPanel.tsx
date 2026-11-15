@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import type { ModelCatalogEntry } from '../../lib/models'
-import { availabilityHelp, availabilityLabel, providerLabel } from '../../lib/models'
+import { availabilityHelp, providerLabel } from '../../lib/models'
 import ModelAvailabilityBadge from '../../components/ModelAvailabilityBadge'
 import type { TeamModelConfig, TeamModelPatch } from '../../hooks/useTeamModelConfig'
 import type { TeamUsage } from '../../hooks/useTeamUsage'
@@ -121,9 +121,9 @@ export default function ModelsPanel({
         label: 'MODEL',
         width: '268px',
         mono: false,
-        // Plain text unless the badge rides along: a text cell keeps the
-        // table's type, ink, ellipsis, and clipped-name hover, and a node cell
-        // owns its own, so the name then carries the cell's type itself.
+        // Plain text unless the cell also holds the badge: a text cell keeps
+        // the table's type, ink, ellipsis, and clipped-name hover, and a node
+        // cell owns its own, so the name then carries the cell's type itself.
         render: (r) =>
           r.unconnected ? (
             <>
@@ -135,8 +135,6 @@ export default function ModelsPanel({
           ) : (
             r.name
           ),
-        measure: (r) =>
-          r.unconnected ? `${r.name}  ${availabilityLabel('unconfigured')}` : String(r.name),
         color: nameInk,
       },
       // The id is the only thing that says what this row will put on the wire —

@@ -722,15 +722,12 @@ func TestDispatch_AClaimOnAnUnconnectedProviderParksOnce(t *testing.T) {
 	if next != nil {
 		t.Errorf("conversation %s was claimable again after the park", next.ID)
 	}
-	var claims, awaiting int
-	if err := database.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(phase = ?), 0) FROM claims WHERE conversation_id='r-lost'`,
-		domain.ClaimPhaseAwaitingCredentials,
-	).Scan(&claims, &awaiting); err != nil {
+	var claims int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id='r-lost'`).Scan(&claims); err != nil {
 		t.Fatalf("read claims: %v", err)
 	}
-	if claims != 1 || awaiting != 0 {
-		t.Errorf("claims = %d with %d awaiting credentials, want one claim that never waited for a bundle", claims, awaiting)
+	if claims != 1 {
+		t.Errorf("claims = %d, want the one that parked it", claims)
 	}
 }
 

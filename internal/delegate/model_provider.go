@@ -16,7 +16,7 @@ import (
 // It is asked wherever work is about to start on a model, because it describes
 // state that can change after the model was stored: a credential can be
 // disconnected, and disconnecting one rewrites none of the defaults, pins, and
-// message rows already saved. A firing asks it of every model in its plan
+// message rows already saved. A delegation asks it of every model in its plan
 // (checkModelProviders), a person's message of the model it would run on
 // (resolveTurnSettings), and a claim of the model it resolved (modelForClaim).
 //

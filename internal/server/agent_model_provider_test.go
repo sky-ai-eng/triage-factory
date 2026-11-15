@@ -28,9 +28,9 @@ func seedFollowUpConversation(t *testing.T, suffix string) (*Server, string) {
 
 // A message that names no model runs on the newest person message's. When the
 // organization has since disconnected that model's provider, the send is
-// refused with 409 NOT_CONFIGURED on the model field, the status the settings
-// saves give the fault, and writes nothing. The detail read stops offering
-// the model, so the composer asks for one.
+// refused with 409 NOT_CONFIGURED on the model field, the status delegate and
+// the settings saves give the fault, and writes nothing. The detail read stops
+// offering the model, so the composer asks for one.
 func TestHandleMessage_InheritedModelOnAnUnconnectedProviderIsNotConfigured(t *testing.T) {
 	s, conversationID := seedFollowUpConversation(t, "lostprovider")
 	bedrockModel := modelKeyOn(t, modelcatalog.ProviderBedrock)

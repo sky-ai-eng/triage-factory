@@ -38,11 +38,11 @@ export type ModelAvailability = 'unconfigured' | 'unverified' | 'verified' | 're
  *  local organization on the machine's credentials, where the server holds no
  *  credential for a provider to be missing.
  *
- *    - `unconfigured` is refused by the message route, with 409
- *      NOT_CONFIGURED, by delegate, and at the claim, which parks the
- *      conversation. The team-default and background-jobs saves refuse it with
- *      that status too, except for an organization that has connected no
- *      provider at all, so setup can pick a model first.
+ *    - `unconfigured` is refused with 409 NOT_CONFIGURED by the message route
+ *      and by delegate, and at the claim, which parks the conversation. The
+ *      team-default and background-jobs saves refuse it with the same status,
+ *      except for an organization that has connected no provider at all, so
+ *      setup can pick a model first.
  *    - Every other row is accepted: `verified`, `unverified`, `red`, and a row
  *      with no `availability`. `red` and `unverified` are advisory, because a
  *      stored probe verdict can be stale in either direction, and the server

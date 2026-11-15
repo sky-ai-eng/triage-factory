@@ -155,8 +155,8 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesTheOtherVocabulary
 
 // A background-jobs model whose provider the org has not connected is refused
 // with 409 NOT_CONFIGURED on the field, naming the provider: the status the
-// message route gives the fault. Postgres only: the gate reads the provider
-// off a wire id, and an SDK alias names none.
+// message route and delegate give the fault. Postgres only: the gate reads the
+// provider off a wire id, and an SDK alias names none.
 func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvider(t *testing.T) {
 	rig := newVocabularyRig(t)
 	rig.connect(t, true, false)
