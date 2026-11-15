@@ -29,3 +29,18 @@ proxy_set_header X-Forwarded-For $remote_addr;
 # HAProxy (option forwardfor already does this unless customized)
 http-request set-header X-Forwarded-For %[src]
 ```
+
+# Outbound proxy
+
+If executors reach the internet through a proxy set by `HTTPS_PROXY` or
+`HTTP_PROXY` (in the container's environment, or through Docker's own proxy
+settings), add the sandbox range to `NO_PROXY`:
+
+```sh
+NO_PROXY=localhost,127.0.0.1,10.42.0.0/16
+```
+
+Each agent run talks to a helper on a `10.42.x.1` address that exists only on
+the executor's machine, so your proxy cannot reach it. Without the exemption,
+Bedrock runs fail at their first model call with an error naming an endpoint
+like `https://10.42.3.1:41873`.
