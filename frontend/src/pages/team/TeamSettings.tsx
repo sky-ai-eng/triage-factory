@@ -20,7 +20,12 @@ import { useTeamRole } from '../../hooks/useTeamRole'
 import { useOptionalAuth } from '../../contexts/AuthContext'
 import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
-import { useTeamActivity, activitySource } from '../../hooks/useTeamActivity'
+import {
+  useTeamActivity,
+  activityLastEvent,
+  activitySource,
+  sinceLabel,
+} from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
 import { sourceLabel, sourceUnavailableReason } from '../../lib/eventSources'
 import { useTeamUsage, fmtSpendUSD } from '../../hooks/useTeamUsage'
@@ -272,6 +277,15 @@ export default function TeamSettings() {
   const usage = useTeamUsage(teamId, 14)
   const flowEvents = activity ? activity.by_source.reduce((n, r) => n + (r.events ?? 0), 0) : null
   const flowTasks = activity ? activity.by_source.reduce((n, r) => n + r.tasks, 0) : null
+  // The sources panel's foot. Unlike the cards, which stay live on an
+  // unresolved read, a count of what is connected needs the answer: null
+  // until the read resolves. The last event is over the same set, so a
+  // source turned off an hour ago cannot make the connected ones look busy.
+  const connected = useMemo(
+    () => (sourcesRead ? sources.filter((k) => stateOf(k) === 'available') : null),
+    [sourcesRead, sources, stateOf],
+  )
+  const sinceLastEvent = sinceLabel(activityLastEvent(activity, connected ?? []))
   // Null while the read has not answered AND for a member, who is sent no
   // by_user cut at all — two states the roster renders the same way, because
   // both are "unknown" and neither is zero.
@@ -939,7 +953,8 @@ export default function TeamSettings() {
 
             <div className="ts-panelview-foot">
               <span>
-                {sources.filter((k) => !sourceOff(k)).length} sources connected · last event —
+                {connected?.length ?? '—'} sources connected · last event{' '}
+                {sinceLastEvent ? `${sinceLastEvent} ago` : '—'}
               </span>
             </div>
           </div>

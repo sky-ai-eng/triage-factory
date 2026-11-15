@@ -499,6 +499,41 @@ describe('the sources panel', () => {
     expect(cardNames()).toEqual(['GitHub', 'Jira', 'Linear', 'Slack', 'Schedule'])
     const linear = screen.getByRole('link', { name: 'Linear' })
     expect(linear).toHaveAttribute('data-state', 'configured')
+    // The cards stay live, but the foot claims nothing it has not been told.
+    expect(screen.getByText('— sources connected · last event —')).toBeInTheDocument()
+  })
+
+  it('dates the foot by the newest event among the connected sources', async () => {
+    sources.state = { ...SERVED, jira: 'disabled' }
+    const ago = (min: number) => new Date(Date.now() - min * 60000).toISOString()
+    const unit = (source: string, unit_id: string, last_event_at: string | null) => ({
+      source,
+      unit_id,
+      events: 0,
+      tasks: 0,
+      runs: 0,
+      last_event_at,
+    })
+    const base = api.apiJSON.getMockImplementation()!
+    api.apiJSON.mockImplementation((path: string, init?: RequestInit) =>
+      path.includes('/activity?')
+        ? Promise.resolve({
+            ...ACTIVITY,
+            by_tracked: [
+              unit('github', 'r1', ago(90)),
+              unit('github', 'r2', ago(12)),
+              unit('github', 'r3', null),
+              // Newer than either, but Jira is turned off.
+              unit('jira', 'reg-PLAT', ago(2)),
+            ],
+          })
+        : base(path, init),
+    )
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(bandHead()!)
+    expect(await screen.findByText('3 sources connected · last event 12m ago')).toBeInTheDocument()
   })
 
   it('leaves out a source the read does not return, and opens no link to it', async () => {

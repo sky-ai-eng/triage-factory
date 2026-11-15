@@ -99,6 +99,25 @@ export function activityTracked(
   )
 }
 
+/** The newest last_event_at among the tracked units of `sources`. Null while
+ * the node hasn't answered, and when none of those units ever sent an event. */
+export function activityLastEvent(
+  a: TeamActivity | null,
+  sources: readonly string[],
+): string | null {
+  let latest: string | null = null
+  let latestMs = -Infinity
+  for (const r of a?.by_tracked ?? []) {
+    if (!r.last_event_at || !sources.includes(r.source)) continue
+    const ms = Date.parse(r.last_event_at)
+    if (ms > latestMs) {
+      latest = r.last_event_at
+      latestMs = ms
+    }
+  }
+  return latest
+}
+
 /**
  * The chart series for one source: `days` continuous UTC days ending today,
  * zero-filled where the node reported nothing — a day with no rows is a real
