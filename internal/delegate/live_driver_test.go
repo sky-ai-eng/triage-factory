@@ -721,3 +721,46 @@ func TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings(t *testing.T) {
 		})
 	}
 }
+
+// TestDriveLiveConversation_InputForAnotherProviderSkipsTheNudge: a turn that
+// ends with a person's message waiting on another provider's model lets the
+// process go with the message still waiting. It asks the would-stop nudge
+// nothing, since the nudge's turn would run on this process's model ahead
+// of the message.
+func TestDriveLiveConversation_InputForAnotherProviderSkipsTheNudge(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-live-switch", "sess", "/tmp/wt")
+	claimID := markEngaged(t, database, "r-live-switch")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
+	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
+		pendingUserInput("r-live-switch", runmode.LocalDefaultUserID, "on bedrock now",
+			domain.TurnSettings{Model: "us.anthropic.claude-sonnet-5-5"})); err != nil {
+		t.Fatalf("queue the person's message: %v", err)
+	}
+	proc := newFakeLiveProc("sess")
+	proc.model = "claude-sonnet-5-5"
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-switch",
+		claimID: claimID, runtime: domain.ConversationRuntimeSDK,
+	}
+	// A second result answers the turn a nudge would start, so a driver that
+	// nudges fails here rather than waiting on it.
+	results := make(chan *agentproc.Result, 2)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "done"}
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "nudged"}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
+
+	s.driveLiveConversation(context.Background(), park, proc, results, nudge)
+
+	if asked != 0 || proc.sends() != 0 {
+		t.Errorf("nudge asked %d times, %d sends; the waiting message is the next engagement's", asked, proc.sends())
+	}
+	if !proc.wasClosed() {
+		t.Error("the process was not let go")
+	}
+	if waiting := pendingRows(t, s, "r-live-switch"); len(waiting) != 1 {
+		t.Errorf("waiting rows = %d, want the message still waiting", len(waiting))
+	}
+}

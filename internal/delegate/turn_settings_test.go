@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -29,8 +30,13 @@ func TestResolveTurnSettings(t *testing.T) {
 		occupancyTokens int
 	}
 	cases := []struct {
-		name     string
-		running  bool
+		name    string
+		running bool
+		// blueprint, when set, is the blueprint's status in place of running
+		// or completed, or "unreadable" for a read of it that fails.
+		blueprint string
+		// enabled, when set, is the team's set in place of the default one.
+		enabled  []string
 		rows     []row
 		explicit domain.TurnSettings
 		want     domain.TurnSettings
@@ -64,6 +70,18 @@ func TestResolveTurnSettings(t *testing.T) {
 		{name: "a running step refuses an effort",
 			running: true, explicit: domain.TurnSettings{Effort: domain.EffortLow},
 			wantErr: ErrStepSettingsFixed, field: "effort"},
+		{name: "a running step runs on its model after the team stops enabling it",
+			running: true, enabled: []string{teamDefault, fable},
+			want: domain.TurnSettings{Model: stepModel}},
+		{name: "the step an aborted blueprint stopped on runs on its model",
+			blueprint: "aborted", rows: []row{{role: "user", model: fable, effort: domain.EffortLow}},
+			want: domain.TurnSettings{Model: stepModel}},
+		{name: "the step an aborted blueprint stopped on refuses another model",
+			blueprint: "aborted", explicit: domain.TurnSettings{Model: fable},
+			wantErr: ErrStepSettingsFixed, field: "model"},
+		{name: "a blueprint that cannot be read refuses the message",
+			blueprint: "unreadable", explicit: domain.TurnSettings{Model: fable},
+			wantErr: errBlueprintUnreadable},
 		{name: "a model outside the team's set is refused",
 			explicit: domain.TurnSettings{Model: disabled},
 			wantErr:  domain.ErrModelNotEnabled, field: "model"},
@@ -97,12 +115,23 @@ func TestResolveTurnSettings(t *testing.T) {
 			if _, err := database.Exec(`UPDATE conversations SET model=? WHERE id='r-settings'`, stepModel); err != nil {
 				t.Fatalf("set the step's model: %v", err)
 			}
-			if !tc.running {
+			switch {
+			case tc.blueprint == "aborted":
+				finishBlueprint(t, database, blueprintRunIDForConversation(t, database, "r-settings"), "aborted", 0)
+			case tc.blueprint == "" && !tc.running:
 				finishBlueprint(t, database, blueprintRunIDForConversation(t, database, "r-settings"), "completed", 0)
 			}
-			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+			stores := testSpawnerStores(database)
+			if tc.blueprint == "unreadable" {
+				stores.Blueprints = unreadableBlueprint{stores.Blueprints}
+			}
+			set := enabled
+			if tc.enabled != nil {
+				set = tc.enabled
+			}
+			s := NewSpawner(database, stores, nil, nil, "m")
 			s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
-				return domain.NewTeamModels(teamDefault, domain.TeamModelSet(enabled, orgUnrestricted())), nil
+				return domain.NewTeamModels(teamDefault, domain.TeamModelSet(set, orgUnrestricted())), nil
 			})
 			ctx := context.Background()
 			for _, r := range tc.rows {
@@ -129,7 +158,7 @@ func TestResolveTurnSettings(t *testing.T) {
 					t.Fatalf("err = %v, want %v", err, tc.wantErr)
 				}
 				var fe *SettingsFieldError
-				if !errors.As(err, &fe) || fe.Field != tc.field {
+				if named := errors.As(err, &fe); named != (tc.field != "") || (named && fe.Field != tc.field) {
 					t.Errorf("err = %v, want it to name %q", err, tc.field)
 				}
 				return
@@ -141,5 +170,41 @@ func TestResolveTurnSettings(t *testing.T) {
 				t.Errorf("settings = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+var errBlueprintUnreadable = errors.New("blueprint read failed")
+
+// unreadableBlueprint is a blueprint store whose run reads fail.
+type unreadableBlueprint struct {
+	db.BlueprintStore
+}
+
+func (unreadableBlueprint) GetRunSystem(context.Context, string, string) (*domain.BlueprintRun, error) {
+	return nil, errBlueprintUnreadable
+}
+
+// TestSendMessage_AnEndedConversationIsRefusedBeforeItsSettings: a send the
+// conversation's own state refuses is answered with that refusal, not with
+// the settings it named. A person told to pick another model, only to learn
+// the conversation has ended, did work for nothing.
+func TestSendMessage_AnEndedConversationIsRefusedBeforeItsSettings(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	database := newDelegateTestDB(t)
+	const conversationID = "r-ended-settings"
+	seedConversation(t, database, conversationID, "sess", t.TempDir())
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelSonnet, domain.TeamModelSet([]string{domain.ModelSonnet}, orgUnrestricted())), nil
+	})
+	if fenced := s.failConversation(org, conversationID, "", holderClaimFor(t, s, org, conversationID), "the runtime died", domain.ConversationFailureUnclassified); fenced {
+		t.Fatal("failConversation reported fenced")
+	}
+
+	err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "retry", domain.TurnSettings{Model: domain.ModelOpus})
+	if !errors.Is(err, ErrConversationEnded) {
+		t.Errorf("SendMessage = %v, want ErrConversationEnded ahead of the model it named", err)
 	}
 }

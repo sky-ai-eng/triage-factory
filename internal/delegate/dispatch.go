@@ -1889,23 +1889,29 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 
 // modelForClaim resolves the model one claim runs on.
 //
-// It answers first with the model the newest person message runs on, which
-// the send stamped on that message's row (resolveTurnSettings), held to the
-// team's enabled set. That is what makes a person's pick the model the claim
-// carrying their message runs on. Under a running blueprint the send keeps
-// that model and the step's the same, and a model disabled since the message
-// was sent refuses the claim by name (domain.ErrModelNotEnabled), which the
-// dispatch parks without spending retries.
+// A claim under a running blueprint is a step of a plan, and it runs on the
+// model frozen onto that step — the anti-drift rule the whole run path holds
+// to, so a config change mid-blueprint never switches models underneath work
+// already in progress. A person's message to the step was stamped with that
+// model (resolveTurnSettings), so the two never disagree.
 //
-// A conversation no person row has given a model to resolves as
-// claimModelWithoutPersonRow does.
+// Any other claim answers with the model the newest person message runs on,
+// which the send stamped on that message's row, held to the team's enabled
+// set. That is what makes a person's pick the model the claim carrying their
+// message runs on. A model disabled since the message was sent refuses the
+// claim by name (domain.ErrModelNotEnabled), which the dispatch parks without
+// spending retries. A conversation no person row has given a model to
+// resolves as claimModelWithoutPersonRow does.
 func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
+	if br != nil && br.Status == domain.BlueprintRunStatusRunning {
+		return conv.Model, nil
+	}
 	last, err := s.newestStampedPersonRow(ctx, orgID, conv.ID)
 	if err != nil {
 		return "", err
 	}
 	if last == nil {
-		return s.claimModelWithoutPersonRow(ctx, orgID, br, conv)
+		return s.claimModelWithoutPersonRow(ctx, orgID, conv)
 	}
 	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
 	if err != nil {
@@ -1917,17 +1923,12 @@ func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.Bl
 	return last.Model, nil
 }
 
-// claimModelWithoutPersonRow is the model a claim runs on when no person
-// message names one.
+// claimModelWithoutPersonRow is the model a claim that is no running
+// blueprint's step runs on when no person message names one.
 //
-// A claim under a running blueprint is a step of a plan, and it runs on the
-// model frozen onto that step — the anti-drift rule the whole run path holds
-// to, so a config change mid-blueprint never switches models underneath work
-// already in progress.
-//
-// Every other claim takes a fresh decision: the team's current default. That
-// is a follow-up on a blueprint that has finished, and a conversation with no
-// blueprint run, which is the one a person's claim mints with no model at all.
+// It takes a fresh decision: the team's current default. That is a follow-up
+// on a blueprint that has finished, and a conversation with no blueprint run,
+// which is the one a person's claim mints with no model at all.
 // Inheriting would be worse than it sounds — a blueprint's last step is often
 // its cheapest, a mechanical assembly step someone pinned down on purpose, so
 // inheriting would answer a person's first-ever follow-up with that step's
@@ -1941,13 +1942,8 @@ func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.Bl
 // one its enable-set no longer includes, this claim fails by name rather than
 // answering with the step's old model — the org disabled that model, and running
 // the follow-up on something the team can no longer pick would be the
-// substitution R6 forbids wearing an inheritance costume. A step of a RUNNING
-// blueprint never asks: its model was frozen at the firing and mid-blueprint
-// work is not re-decided.
-func (s *Spawner) claimModelWithoutPersonRow(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
-	if br != nil && br.Status == domain.BlueprintRunStatusRunning {
-		return conv.Model, nil
-	}
+// substitution R6 forbids wearing an inheritance costume.
+func (s *Spawner) claimModelWithoutPersonRow(ctx context.Context, orgID string, conv domain.Conversation) (string, error) {
 	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
 	if err != nil {
 		return "", err

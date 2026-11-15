@@ -41,13 +41,16 @@ func init() {
 
 // SDKModels returns the models sdk names, in display order, and an empty slice
 // for an SDK this build carries no list for — never nil, so a caller ranging
-// over the result and one checking its length read the same thing. The slice is
-// freshly copied per call, for the same reason Entries is: it is read on an API
-// request path.
+// over the result and one checking its length read the same thing. The slice,
+// and each row's EffortLevels, are freshly copied per call, for the same reason
+// Entries is: it is read on an API request path.
 func SDKModels(sdk string) []Model {
 	src := sdkModels[sdk]
 	out := make([]Model, len(src))
-	copy(out, src)
+	for i, m := range src {
+		m.EffortLevels = slices.Clone(m.EffortLevels)
+		out[i] = m
+	}
 	return out
 }
 

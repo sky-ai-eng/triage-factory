@@ -367,10 +367,12 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// this turn was about to conclude or park on, the model has not
 			// seen it.
 			starts := startsATurn
+			deferred := false
 			if r.Terminal != nil {
 				starts = nil
 			} else {
-				sent, fenced := s.sendWaitingInput(ctx, park, proc, starts)
+				var sent, fenced bool
+				sent, fenced, deferred = s.sendWaitingInput(ctx, park, proc, starts)
 				if fenced {
 					s.handOnOrLetGo(ctx, park, proc, nil)
 					return liveOutcome{fenced: true, costUSD: processSpend(proc)}
@@ -380,7 +382,9 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 					continue
 				}
 			}
-			if r.Terminal == nil && sdkTurnFinished(r.StopReason) && nudge != nil && !nudged {
+			// Input this process will not take is waiting for the next
+			// engagement, and a nudge would run a turn here ahead of it.
+			if r.Terminal == nil && !deferred && sdkTurnFinished(r.StopReason) && nudge != nil && !nudged {
 				if note := nudge(ctx); note != "" {
 					sent, fenced := s.sendNudge(ctx, park, proc, note)
 					if fenced {
@@ -448,7 +452,7 @@ func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc 
 		h.input.Lock()
 	}
 	if starts != nil {
-		next, fenced = s.sendWaitingInput(ctx, park, proc, starts)
+		next, fenced, _ = s.sendWaitingInput(ctx, park, proc, starts)
 	}
 	if !next && h != nil {
 		h.lettingGo = true
@@ -471,7 +475,8 @@ func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc 
 // The rows are flushed, marked delivered, before the send, and put back if
 // the send fails, as notesAtToolBatch does. sent reports that the turn
 // started. fenced reports that the claim fence refused the flush: a successor
-// owns the conversation and nothing was sent.
+// owns the conversation and nothing was sent. deferred reports input waiting
+// that this process will not take, which waits for the next engagement.
 //
 // The turn runs on the settings the newest person message records. When they
 // differ from the process's, they are written to it first (SetSettings), so
@@ -481,21 +486,21 @@ func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc 
 // queue makes for them seals that provider. A message folded into a running
 // turn at a tool boundary leaves that turn as it is; its settings apply from
 // the process's next turn.
-func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (sent, fenced bool) {
+func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (sent, fenced, deferred bool) {
 	rows, ok := s.waitingRows(ctx, park.orgID, park.conversationID)
 	if !ok || !slices.ContainsFunc(rows, starts) {
-		return false, false
+		return false, false, false
 	}
 	if !s.moveLiveSettings(ctx, park, proc) {
-		return false, false
+		return false, false, true
 	}
 	messages, fenced := s.takeWaitingMessages(ctx, park.orgID, park.conversationID, park.claimID, rows)
 	if fenced {
-		return false, true
+		return false, true, false
 	}
 	notes := s.flushStagedInjections(ctx, park.orgID, park.conversationID)
 	if len(messages) == 0 && len(notes) == 0 {
-		return false, false
+		return false, false, false
 	}
 	var parts []string
 	if len(notes) > 0 {
@@ -508,9 +513,9 @@ func (s *Spawner) sendWaitingInput(ctx context.Context, park liveParkContext, pr
 		delegateLog.Warn("send the input waiting for the live process failed; it waits for the next engagement", "conversation", park.conversationID, "error", err)
 		s.restoreStagedInjections(park.orgID, park.conversationID, notes)
 		s.requeueMessages(park.orgID, park.conversationID, park.claimID, messages)
-		return false, false
+		return false, false, false
 	}
-	return true, false
+	return true, false, false
 }
 
 // moveLiveSettings puts the live process on the newest person message's

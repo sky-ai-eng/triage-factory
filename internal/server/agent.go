@@ -127,14 +127,11 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 			}
 		}
 		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], actionCounts[conv.ID], progress, "")
-		// Read last, so a failure costs only cache_warm_until, the field it
-		// is for.
-		if a, lerr := tx.Conversations.NewestAssistant(r.Context(), orgID, conv.ID); lerr != nil {
-			serverLog.Warn("newest assistant message lookup failed; omitting cache_warm_until", "conversation", conv.ID, "error", lerr)
-		} else {
-			newestAssistant = a
-		}
-		return nil
+		// Not best-effort like the reads above: on Postgres a failed
+		// statement aborts the transaction, so its commit fails the read
+		// either way, and a SQLite read answers the same.
+		newestAssistant, e = tx.Conversations.NewestAssistant(r.Context(), orgID, conv.ID)
+		return e
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
@@ -165,16 +162,18 @@ func addCacheWarmUntil(resp map[string]any, newestAssistant *domain.Message) {
 // addNextMessageSettings puts on the detail read the settings a message that
 // names none would run on (Spawner.NextMessageSettings), which the composer
 // opens with: next_message_model, and next_message_effort when the effort is
-// not the provider's default. Best-effort like the read's other enrichment:
-// a resolution that fails omits both, which a team whose default model is no
-// longer enabled does, and the composer then asks for a model.
+// not the provider's default. Both are omitted when the send would refuse
+// such a message, as it does on a team whose default model is no longer
+// enabled, and the composer then asks for a model; and, best-effort like the
+// read's other enrichment, when a read fails.
 func addNextMessageSettings(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
 	if spawner == nil || conv == nil {
 		return
 	}
 	settings, err := spawner.NextMessageSettings(ctx, orgID, *conv)
 	if err != nil {
-		if !errors.Is(err, domain.ErrModelNotEnabled) {
+		var refusal *delegate.SettingsFieldError
+		if !errors.As(err, &refusal) {
 			serverLog.Warn("next message settings lookup failed; omitting next_message_model and next_message_effort", "conversation", conv.ID, "error", err)
 		}
 		return

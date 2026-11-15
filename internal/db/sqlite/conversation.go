@@ -2741,12 +2741,6 @@ func (s *conversationStore) NewestAssistantToolCallsForConversations(ctx context
 	return out, nil
 }
 
-// ListForAssemblySystem returns every row a native loop needs to rebuild this run's
-// exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
-// window_state='inactive' rows are excluded (superseded by compaction);
-// 'elided' and undelivered rows are included — see the interface doc for the
-// full contract. Pure read over messages; no other table or in-process
-// state feeds in.
 func (s *conversationStore) NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -2789,6 +2783,12 @@ func (s *conversationStore) newestMessage(ctx context.Context, query string, arg
 	return &m, nil
 }
 
+// ListForAssemblySystem returns every row a native loop needs to rebuild this run's
+// exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
+// window_state='inactive' rows are excluded (superseded by compaction);
+// 'elided' and undelivered rows are included — see the interface doc for the
+// full contract. Pure read over messages; no other table or in-process
+// state feeds in.
 func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

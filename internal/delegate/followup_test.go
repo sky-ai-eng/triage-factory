@@ -408,6 +408,12 @@ func TestModelForClaim_RunsOnTheNewestPersonRowsModel(t *testing.T) {
 	if got, err := s.modelForClaim(ctx, org, finished, *conv); !errors.Is(err, domain.ErrModelNotEnabled) || got != "" {
 		t.Errorf("a person row on a disabled model = (%q, %v), want a refusal", got, err)
 	}
+	// A step of a running blueprint runs on its own model whatever the person
+	// rows say or the set now holds: a step's work is not re-decided.
+	running := &domain.BlueprintRun{Status: domain.BlueprintRunStatusRunning}
+	if got, err := s.modelForClaim(ctx, org, running, *conv); err != nil || got != conv.Model {
+		t.Errorf("a running step = (%q, %v), want its own model %q", got, err, conv.Model)
+	}
 
 	// No blueprint run and no person row: the team's default, not the
 	// conversation's own model.
@@ -682,13 +688,13 @@ func TestFollowUp_WakeRefusedUnderARunCancelledSinceTheGateIsReportedAsTheCancel
 }
 
 // unreadableAfterGateBlueprint is staleLiveBlueprint whose every read after
-// the gate's fails.
+// the gate's and the send's settings read fails, the wake's re-read first.
 type unreadableAfterGateBlueprint struct {
 	staleLiveBlueprint
 }
 
 func (b unreadableAfterGateBlueprint) GetRunSystem(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
-	if *b.reads >= 1 {
+	if *b.reads >= 2 {
 		*b.reads++
 		return nil, errors.New("blueprint read failed")
 	}

@@ -328,8 +328,8 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 //
 // settings are the model and effort the message names, empty for a field it
 // leaves out. Every arm stamps the row with the settings resolveTurnSettings
-// decides, which runs first and can refuse the message before anything is
-// written.
+// decides, which runs after the arm's own refusals and can refuse the message
+// before anything is written.
 //
 // userID is the actor sending the message; the follow-up's writes route under
 // that user's synthetic claims regardless of the conversation's original
@@ -348,17 +348,16 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 		return fmt.Errorf("send: empty user id")
 	}
 	// The conversation is read once, ahead of every arm, because its team and
-	// its blueprint decide the settings the message runs on.
+	// its blueprint decide the settings the message runs on. Each arm resolves
+	// them just before it writes the row (resolveTurnSettings), after its own
+	// refusals, so a send that cannot be delivered at all says so rather than
+	// asking first for a model it would never run on.
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return fmt.Errorf("load conversation: %w", err)
 	}
 	if conv == nil {
 		return ErrConversationNotFound
-	}
-	settings, err = s.resolveTurnSettings(ctx, orgID, *conv, settings)
-	if err != nil {
-		return err
 	}
 	// The run's process is in THIS pod's registry.
 	//
@@ -370,7 +369,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// Anything that starts registering handles from a second driver has to
 	// read the runtime here first.
 	if h := s.getProc(conversationID); h != nil {
-		if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text, settings); queued || err != nil {
+		if queued, err := s.queueForLiveProcessWith(ctx, h, orgID, *conv, userID, text, settings); queued || err != nil {
 			return err
 		}
 	}
@@ -384,13 +383,24 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// above.
 	if undeliveredRowsFor(conv.Runtime) != inputRoleLiveQueue && domain.IsActiveConversationStatus(conv.Status) {
 		if h := s.getProc(conversationID); h != nil {
-			if queued, err := s.queueForLiveProcess(ctx, h, orgID, conversationID, userID, text, settings); queued || err != nil {
+			if queued, err := s.queueForLiveProcessWith(ctx, h, orgID, *conv, userID, text, settings); queued || err != nil {
 				return err
 			}
 		}
 		return fmt.Errorf("send to conversation %s: %w", conversationID, ErrNoLiveProcess)
 	}
 	return s.queueFollowUp(ctx, orgID, *conv, userID, text, settings)
+}
+
+// queueForLiveProcessWith resolves the settings a message for the live
+// process runs on, then queues it there (queueForLiveProcess). explicit is
+// what the message named.
+func (s *Spawner) queueForLiveProcessWith(ctx context.Context, h *liveRunHandle, orgID string, conv domain.Conversation, userID, text string, explicit domain.TurnSettings) (bool, error) {
+	settings, err := s.resolveTurnSettings(ctx, orgID, conv, explicit)
+	if err != nil {
+		return false, err
+	}
+	return s.queueForLiveProcess(ctx, h, orgID, conv.ID, userID, text, settings)
 }
 
 // queueForLiveProcess queues a person's message for a conversation whose SDK
@@ -455,16 +465,22 @@ func (s *Spawner) queueForLiveProcess(ctx context.Context, h *liveRunHandle, org
 // flush the staged-injection queue at enqueue time, losing anything staged in
 // the gap before the claim; Spawner.dispatchResumeClaim composes it immediately
 // before delivery instead.
-func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.Conversation, userID, text string, settings domain.TurnSettings) error {
+func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.Conversation, userID, text string, explicit domain.TurnSettings) error {
 	// text and userID arrive validated: SendMessage, the sole caller, refuses
 	// both empties at its entry so every arm answers them identically.
 
 	// The gate, refused BEFORE the row is written: a queued message nothing will
 	// ever deliver is worse than a refusal. followUpBlock is the same walk the
 	// run read serves `resumable` from, so a composer the server left live and a
-	// send the server accepts are the same decision made once.
+	// send the server accepts are the same decision made once. It comes before
+	// the settings, whose refusals a person can fix by picking again, because
+	// its own mostly cannot be fixed.
 	if block := s.followUpBlock(ctx, orgID, &conv); block != "" {
 		return blockedFollowUpError(block)
+	}
+	settings, err := s.resolveTurnSettings(ctx, orgID, conv, explicit)
+	if err != nil {
+		return err
 	}
 	// Past the gate, the only question left is which half accepted it: a
 	// conversation resting somewhere a wake reaches needs the flip below, and
@@ -500,7 +516,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	msg := pendingUserInput(conv.ID, userID, text, settings)
 	var cleared *domain.Conversation
 	var flipped bool
-	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		if wake {
 			var wErr error
 			if flipped, wErr = s.wakeParked(ctx, ts, orgID, conv); wErr != nil {

@@ -167,6 +167,21 @@ func TestHandleAgentStatus_NextMessageSettingsAndCacheWarmth(t *testing.T) {
 			t.Errorf("next message = (%v, %v), want (sonnet, high)", got["next_message_model"], got["next_message_effort"])
 		}
 	})
+	t.Run("a person row on a model the team does not enable opens with none", func(t *testing.T) {
+		s, id := seed(t, "nextdisabled")
+		spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "sonnet")
+		spawner.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+			return domain.NewTeamModels("sonnet", domain.OrgModelSet([]string{"sonnet"}, []string{"sonnet", "opus"})), nil
+		})
+		s.SetSpawner(spawner)
+		insert(t, s, domain.Message{ConversationID: id, UserID: runmode.LocalDefaultUserID, Role: "user", Content: "a", Model: "opus", Effort: domain.EffortHigh})
+		got := readConversation(t, s, id)
+		for _, field := range []string{"next_message_model", "next_message_effort"} {
+			if v, ok := got[field]; ok {
+				t.Errorf("%s = %v, want absent: a message naming no settings would be refused", field, v)
+			}
+		}
+	})
 	t.Run("cache_warm_until is the newest assistant turn plus the TTL", func(t *testing.T) {
 		s, id := seed(t, "warmuntil")
 		if got := readConversation(t, s, id); got["cache_warm_until"] != nil {

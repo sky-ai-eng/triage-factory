@@ -1,6 +1,8 @@
 package modelcatalog
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,9 +75,11 @@ func TestSDKs_NamesTheOneShippedHarness(t *testing.T) {
 func TestSDKModels_IsACopy(t *testing.T) {
 	first := SDKModels(SDKClaudeCode)
 	original := first[0]
+	original.EffortLevels = slices.Clone(original.EffortLevels)
+	first[0].EffortLevels[0] = "tampered"
 	first[0] = Model{Key: "tampered"}
-	if got := SDKModels(SDKClaudeCode)[0]; got.Key != original.Key || got.DisplayName != original.DisplayName {
-		t.Error("mutating the returned slice changed the registry")
+	if got := SDKModels(SDKClaudeCode)[0]; !reflect.DeepEqual(got, original) {
+		t.Errorf("mutating the returned slice changed the registry: %+v, want %+v", got, original)
 	}
 }
 

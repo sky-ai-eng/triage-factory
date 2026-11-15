@@ -53,52 +53,56 @@ func refuseField(field string, err error) error {
 // person row that recorded settings, the model is the claim's
 // (claimModelWithoutPersonRow) and the effort is the provider's default.
 //
-// A step of a running blueprint runs on the model its plan froze and no
+// A step of a running blueprint, and the step an aborted one stopped on,
+// which the message's wake reopens, runs on the model its plan froze and no
 // effort, whatever the message says: a message naming different ones is
-// refused rather than ignored.
+// refused rather than ignored. That model is not held to the team's set
+// here, because the claim runs a step on it whatever the set says now
+// (modelForClaim): a step's work is not re-decided mid-flight.
 //
-// The resolved model is then held to the team's enabled set, which is the
+// Otherwise the resolved model is held to the team's enabled set, which is the
 // only place a send checks it, and the effort to the levels the model's
 // catalog entry lists: an explicit effort it does not take is refused, and an
 // inherited one is dropped, since the person did not send it. Last, a switch
 // to a model whose window the conversation already fills past the compaction
 // threshold is refused, so the switch can never fail a call mid-turn.
 func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv domain.Conversation, explicit domain.TurnSettings) (domain.TurnSettings, error) {
-	br := s.blueprintRunForSettings(ctx, orgID, conv)
-	var got domain.TurnSettings
-	inheritedEffort := false
-	if br != nil && br.Status == domain.BlueprintRunStatusRunning {
+	br, err := s.blueprintRunForSettings(ctx, orgID, conv)
+	if err != nil {
+		return domain.TurnSettings{}, err
+	}
+	if stepSettingsFixed(br, conv) {
 		if explicit.Model != "" && explicit.Model != conv.Model {
-			return got, refuseField("model", fmt.Errorf("%w (its model is %s)", ErrStepSettingsFixed, conv.Model))
+			return domain.TurnSettings{}, refuseField("model", fmt.Errorf("%w (its model is %s)", ErrStepSettingsFixed, conv.Model))
 		}
 		if explicit.Effort != "" {
-			return got, refuseField("effort", fmt.Errorf("%w (it runs at the provider's default effort)", ErrStepSettingsFixed))
+			return domain.TurnSettings{}, refuseField("effort", fmt.Errorf("%w (it runs at the provider's default effort)", ErrStepSettingsFixed))
 		}
-		got.Model = conv.Model
-	} else {
-		var last *domain.Message
-		if explicit.Model == "" || explicit.Effort == "" {
-			var err error
-			if last, err = s.newestStampedPersonRow(ctx, orgID, conv.ID); err != nil {
-				return got, err
+		return domain.TurnSettings{Model: conv.Model}, nil
+	}
+
+	var last *domain.Message
+	if explicit.Model == "" || explicit.Effort == "" {
+		if last, err = s.newestStampedPersonRow(ctx, orgID, conv.ID); err != nil {
+			return domain.TurnSettings{}, err
+		}
+	}
+	got := explicit
+	if got.Model == "" {
+		if last != nil {
+			got.Model = last.Model
+		} else {
+			model, err := s.claimModelWithoutPersonRow(ctx, orgID, conv)
+			if err != nil {
+				return domain.TurnSettings{}, refuseField("model", err)
 			}
+			got.Model = model
 		}
-		got = explicit
-		if got.Model == "" {
-			if last != nil {
-				got.Model = last.Model
-			} else {
-				model, err := s.claimModelWithoutPersonRow(ctx, orgID, br, conv)
-				if err != nil {
-					return got, refuseField("model", err)
-				}
-				got.Model = model
-			}
-		}
-		if got.Effort == "" && last != nil {
-			got.Effort = last.Effort
-			inheritedEffort = got.Effort != ""
-		}
+	}
+	inheritedEffort := false
+	if got.Effort == "" && last != nil {
+		got.Effort = last.Effort
+		inheritedEffort = got.Effort != ""
 	}
 
 	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
@@ -126,24 +130,12 @@ func (s *Spawner) resolveTurnSettings(ctx context.Context, orgID string, conv do
 	return got, nil
 }
 
-// NextMessageSettings is what a message that names no settings would run on:
-// the newest person row's, or else the claim's model and the provider's
-// default effort. It is resolveTurnSettings' first step with none of its
-// refusals, for the composer to open with, so a failed read answers an
-// error rather than a guess.
+// NextMessageSettings is what a message that names no settings would run on,
+// for the composer to open with: resolveTurnSettings with nothing given. A
+// message the send would refuse runs on nothing, so the refusal is the
+// answer, and so is a failed read, rather than a guess.
 func (s *Spawner) NextMessageSettings(ctx context.Context, orgID string, conv domain.Conversation) (domain.TurnSettings, error) {
-	last, err := s.newestStampedPersonRow(ctx, orgID, conv.ID)
-	if err != nil {
-		return domain.TurnSettings{}, err
-	}
-	if last != nil {
-		return domain.TurnSettings{Model: last.Model, Effort: last.Effort}, nil
-	}
-	model, err := s.claimModelWithoutPersonRow(ctx, orgID, s.blueprintRunForSettings(ctx, orgID, conv), conv)
-	if err != nil {
-		return domain.TurnSettings{}, err
-	}
-	return domain.TurnSettings{Model: model}, nil
+	return s.resolveTurnSettings(ctx, orgID, conv, domain.TurnSettings{})
 }
 
 // newestStampedPersonRow is the conversation's newest person row when it
@@ -180,20 +172,36 @@ func (s *Spawner) claimEffort(ctx context.Context, orgID, conversationID, model 
 	return last.Effort
 }
 
-// blueprintRunForSettings is the conversation's blueprint run, read as
-// blueprintFollowUpBlock reads it: on the admin pool, and nil for a
-// conversation with none or a read that fails, which resolves the settings as
-// for a conversation with no blueprint.
-func (s *Spawner) blueprintRunForSettings(ctx context.Context, orgID string, conv domain.Conversation) *domain.BlueprintRun {
+// blueprintRunForSettings is the conversation's blueprint run, read on the
+// admin pool, and nil for a conversation with none. A read that fails is an
+// error rather than no blueprint: resolving as for none would let a message
+// move a running step off its model, through the person row the claim reads.
+func (s *Spawner) blueprintRunForSettings(ctx context.Context, orgID string, conv domain.Conversation) (*domain.BlueprintRun, error) {
 	if s.blueprints == nil || conv.BlueprintRunID == "" {
-		return nil
+		return nil, nil
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
 	if err != nil {
-		delegateLog.Warn("settings: blueprint state lookup failed; resolving as for no blueprint", "conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", err)
-		return nil
+		return nil, fmt.Errorf("read the conversation's blueprint run: %w", err)
 	}
-	return br
+	return br, nil
+}
+
+// stepSettingsFixed reports whether a message to conv drives a blueprint
+// step, which runs on the settings its plan set: a step of a running
+// blueprint, or the step an aborted one stopped on, which the message's wake
+// reopens to running (wakeParked).
+func stepSettingsFixed(br *domain.BlueprintRun, conv domain.Conversation) bool {
+	if br == nil {
+		return false
+	}
+	switch br.Status {
+	case domain.BlueprintRunStatusRunning:
+		return true
+	case domain.BlueprintRunStatusAborted:
+		return conv.BlueprintStepIndex != nil && *conv.BlueprintStepIndex == br.CurrentStepIndex
+	}
+	return false
 }
 
 // windowTakesConversation refuses a switch to model when the conversation's
