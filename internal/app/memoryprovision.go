@@ -55,8 +55,9 @@ func (a *App) buildMemoryProvisioner() {
 //
 // The provisioner runs on the brain. Where the brain also runs the dispatcher
 // (local), the wake is in-process; a control pod has no dispatcher and
-// publishes to the executors' instead. Best-effort either way: a wake that is
-// lost costs the conversation one scan interval, never its claim.
+// publishes on tf_wake, which every executor's dispatcher listens on.
+// Best-effort either way: a wake that is lost costs the conversation one scan
+// interval, never its claim.
 func (a *App) memoryFiled(orgID string) {
 	if a.plan.dispatcher {
 		a.spawner.WakeDispatcher()

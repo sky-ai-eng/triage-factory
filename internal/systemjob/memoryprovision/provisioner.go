@@ -149,8 +149,9 @@ type Manager struct {
 // filed reports each memory row this Manager writes, generated or empty, with
 // the row's org. The claim filter holds a task's queued conversation while an
 // ended conversation on that task has no memory row, so a filed row is the
-// moment that conversation becomes claimable, and the caller's wake is what
-// spares it the dispatcher's next scan. nil reports nothing.
+// moment that conversation becomes claimable, and a caller that wakes the
+// dispatcher on the report has it claimed before the next scan. The report
+// follows the row's entity link as well as the row. nil reports nothing.
 func NewManager(
 	stores db.Stores,
 	recorder *systemllm.Recorder,
@@ -410,17 +411,16 @@ func (m *Manager) file(ctx context.Context, orgID string, conv *domain.Conversat
 	if _, err := m.stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv.ID, conv.BlueprintRunID, content, source); err != nil {
 		return fmt.Errorf("memoryprovision: file the memory of conversation %s: %w", conv.ID, err)
 	}
-	// Reported here and not from the store's upsert, which a running
-	// conversation's own memory writes share: only a row filed for an ended
-	// conversation can make a queued one claimable. Ahead of the attach,
-	// because the row alone is what the claim filter reads.
+	if primaryEntityID != "" {
+		memoryentities.Attach(ctx, m.stores.TaskMemory, orgID, conv.ID, primaryEntityID)
+	}
+	// After the attach, never between the two writes: the row makes the
+	// task's next conversation claimable, and the entity link is how that
+	// conversation finds the row, so a wake sent before the link could start
+	// it without the memory it was held for.
 	if m.filed != nil {
 		m.filed(orgID)
 	}
-	if primaryEntityID == "" {
-		return nil
-	}
-	memoryentities.Attach(ctx, m.stores.TaskMemory, orgID, conv.ID, primaryEntityID)
 	return nil
 }
 

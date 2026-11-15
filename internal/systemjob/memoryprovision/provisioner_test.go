@@ -414,6 +414,9 @@ func TestFulfil_ReportsEachMemoryRowItFiles(t *testing.T) {
 				if f.memory() == nil {
 					t.Error("reported a filed row before the memory row was written")
 				}
+				if f.memoryEntityRoles()[f.entityID] != string(domain.MemoryRolePrimary) {
+					t.Error("reported a filed row before its entity link was written; a conversation woken now would not find the memory")
+				}
 				filed = append(filed, orgID)
 			}
 

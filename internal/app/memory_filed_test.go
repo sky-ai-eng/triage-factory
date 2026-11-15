@@ -12,11 +12,50 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// owedMemoryConversation is the ended conversation these tests have the
+// provisioner settle.
+const owedMemoryConversation = "conv-owing"
+
+// owedMemoryStores returns stores holding one ended conversation with no
+// memory row. It never reached an assistant turn, so settling it files the
+// empty row with no model call, which is the shortest path to a filed row
+// through the provisioner the app built.
+func owedMemoryStores(t *testing.T) db.Stores {
+	t.Helper()
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	stores := sqlitestore.New(conn)
+	dbtest.SeedConversation(t, conn, domain.Conversation{ID: owedMemoryConversation})
+	if _, err := stores.Conversations.EndConversationSystem(t.Context(), runmode.LocalDefaultOrgID, owedMemoryConversation, domain.EndedRequeued); err != nil {
+		t.Fatalf("end conversation: %v", err)
+	}
+	return stores
+}
+
+// fileOwedMemory has the provisioner a built settle that conversation. The
+// tests reach the wake this way, and not by calling memoryFiled, so they fail
+// if the provisioner is built without it.
+func fileOwedMemory(t *testing.T, a *App) {
+	t.Helper()
+	if err := a.memoryProvisioner.Fulfil(t.Context(), runmode.LocalDefaultOrgID, owedMemoryConversation); err != nil {
+		t.Fatalf("Fulfil: %v", err)
+	}
+}
 
 // claimCountingQueue is the queue a running dispatcher reads, answering every
 // pass with nothing to do and recording each claim attempt. A claim attempt is
@@ -63,6 +102,7 @@ func TestApp_MemoryFiled_DispatcherIsWokenInProcess(t *testing.T) {
 	queue := &claimCountingQueue{claims: make(chan struct{}, 8)}
 	a := &App{
 		plan:    subsystemPlan{role: runmode.RoleAll, brain: true, dispatcher: true},
+		stores:  owedMemoryStores(t),
 		spawner: delegate.NewSpawner(nil, db.Stores{ConversationQueue: queue}, nil, nil, ""),
 	}
 	a.buildMemoryProvisioner()
@@ -85,7 +125,7 @@ func TestApp_MemoryFiled_DispatcherIsWokenInProcess(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	a.memoryFiled("org-1")
+	fileOwedMemory(t, a)
 	waitClaim(t, queue, "a filed memory row did not wake the dispatcher")
 }
 
@@ -142,6 +182,7 @@ func newControlPodApp(t *testing.T, recorder *notifyRecorder) *App {
 	t.Cleanup(func() { database.Close() })
 	a := &App{
 		plan:     subsystemPlan{role: runmode.RoleControl, brain: true},
+		stores:   owedMemoryStores(t),
 		database: database,
 	}
 	a.buildMemoryProvisioner()
@@ -154,7 +195,7 @@ func TestApp_MemoryFiled_ControlPodPublishesOneMemoryWake(t *testing.T) {
 	recorder := &notifyRecorder{}
 	a := newControlPodApp(t, recorder)
 
-	a.memoryFiled("org-1")
+	fileOwedMemory(t, a)
 
 	execs := recorder.recorded()
 	if len(execs) != 1 {
@@ -172,7 +213,7 @@ func TestApp_MemoryFiled_ControlPodPublishesOneMemoryWake(t *testing.T) {
 	if err := json.Unmarshal([]byte(payload), &got); err != nil {
 		t.Fatalf("wake payload %q: %v", payload, err)
 	}
-	if want := (wakebus.Message{Kind: wakebus.KindMemory, OrgID: "org-1"}); got != want {
+	if want := (wakebus.Message{Kind: wakebus.KindMemory, OrgID: runmode.LocalDefaultOrgID}); got != want {
 		t.Errorf("published %+v, want %+v", got, want)
 	}
 }
@@ -183,7 +224,7 @@ func TestApp_MemoryFiled_ControlPodDropsAFailedPublish(t *testing.T) {
 	recorder := &notifyRecorder{fail: errors.New("the pool is closed")}
 	a := newControlPodApp(t, recorder)
 
-	a.memoryFiled("org-1")
+	fileOwedMemory(t, a)
 
 	if got := len(recorder.recorded()); got != 1 {
 		t.Errorf("statements executed = %d, want the one publish and no retry", got)
