@@ -125,6 +125,16 @@ func newSQLiteCloseDeferral() func(t *testing.T) (*sql.DB, dbtest.TaskCloseDefer
 			ResolveDeliverables: func(t *testing.T, conversationID string) {
 				exec(t, "resolve drafts", `UPDATE deliverables SET state = 'open' WHERE conversation_id = ? AND state = 'draft'`, conversationID)
 			},
+			StoredHold: func(t *testing.T, taskID string) (bool, bool) {
+				t.Helper()
+				var eventIDSet, heldAtSet bool
+				if err := conn.QueryRow(`
+					SELECT close_deferred_event_id IS NOT NULL, close_deferred_at IS NOT NULL FROM tasks WHERE id = ?
+				`, taskID).Scan(&eventIDSet, &heldAtSet); err != nil {
+					t.Fatalf("read hold columns: %v", err)
+				}
+				return eventIDSet, heldAtSet
+			},
 		}
 		return conn, dbtest.TaskCloseDeferralStores{
 			Tasks:            stores.Tasks,

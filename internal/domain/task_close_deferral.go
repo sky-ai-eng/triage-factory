@@ -11,7 +11,7 @@ import "time"
 // which a close leaves working.
 //
 // It is the tasks columns close_deferred_event_id and close_deferred_at
-// (when the hold began), read only while the task is active.
+// (when the hold began), set only on an active task: every close clears them.
 type TaskCloseDeferral struct {
 	OrgID  string `json:"org_id"`
 	TaskID string `json:"task_id"`

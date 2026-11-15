@@ -44,6 +44,9 @@ type TaskCloseDeferralSeeder struct {
 	// ResolveDeliverables marks the conversation's draft pull requests open,
 	// as a person marking one ready does.
 	ResolveDeliverables func(t *testing.T, conversationID string)
+	// StoredHold reads whether the task's close_deferred_event_id and
+	// close_deferred_at are set, whatever the task's status.
+	StoredHold func(t *testing.T, taskID string) (eventIDSet, heldAtSet bool)
 }
 
 // TaskCloseDeferralFactory hands the suite a fresh database per subtest: the
@@ -53,8 +56,8 @@ type TaskCloseDeferralFactory func(t *testing.T) (stores TaskCloseDeferralStores
 // RunTaskCloseDeferralConformance is the shared suite for a task's held
 // close: TaskStore.CloseOrHoldSystem, ApplyHeldCloseSystem,
 // CloseDeferralForTaskSystem, ListActiveCloseDeferralsSystem,
-// ClearCloseDeferralSystem, the clear a bump or a requeue makes, and the
-// hold arm of EntityStore.CloseTerminalSystem. One thing holds a close: a
+// ClearCloseDeferralSystem, the clear a bump, a requeue, or a close makes,
+// and the hold arm of EntityStore.CloseTerminalSystem. One thing holds a close: a
 // deliverable awaiting a person, on a pull request still open. A
 // conversation working on the task never does, and the suite pins both
 // halves.
@@ -396,8 +399,6 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		// Resolved, so the sweep's list would return either hold.
 		seed.ResolveDeliverables(t, holdingConv)
 		seed.ResolveDeliverables(t, closedConv)
-		// A close by any other path leaves the column as it is; the reads
-		// are what keep it from being read again.
 		if _, err := stores.Tasks.CloseSystem(ctx, orgID, closed, "run_completed", ""); err != nil {
 			t.Fatalf("CloseSystem: %v", err)
 		}
@@ -416,6 +417,85 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			if d := held(t, stores.Tasks, orgID, taskID); d != nil {
 				t.Errorf("CloseDeferralForTaskSystem(%s) = %+v, want none", taskID, *d)
 			}
+		}
+	})
+
+	t.Run("Every_close_clears_the_hold", func(t *testing.T) {
+		// Each path closes a task that holds a close and returns it with the
+		// status the close leaves. The columns are read off the stored row,
+		// since CloseDeferralForTaskSystem answers nothing for a closed task
+		// whatever they hold.
+		type closePath func(t *testing.T, stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder) (taskID, status string)
+		byUser := func(status string) closePath {
+			return func(t *testing.T, stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder) (string, string) {
+				t.Helper()
+				taskID, _, _ := awaiting(t, stores, orgID, seed)
+				if _, err := stores.Tasks.CloseByUser(ctx, orgID, taskID, status, TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil {
+					t.Fatalf("CloseByUser(%s): %v", status, err)
+				}
+				return taskID, status
+			}
+		}
+		paths := []struct {
+			name  string
+			close closePath
+		}{
+			{name: "CloseSystem_run_completed", close: func(t *testing.T, stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder) (string, string) {
+				t.Helper()
+				taskID, _, _ := awaiting(t, stores, orgID, seed)
+				if _, err := stores.Tasks.CloseSystem(ctx, orgID, taskID, db.RunCompletedCloseReason, ""); err != nil {
+					t.Fatalf("CloseSystem: %v", err)
+				}
+				return taskID, "done"
+			}},
+			{name: "CloseByUser_done", close: byUser("done")},
+			{name: "CloseByUser_dismissed", close: byUser("dismissed")},
+			{name: "CloseOnEventSystem", close: func(t *testing.T, stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder) (string, string) {
+				t.Helper()
+				taskID, _, _ := awaiting(t, stores, orgID, seed)
+				out, err := stores.Tasks.CloseOnEventSystem(ctx, orgID, taskID, db.ReassignedCloseReason, domain.EventJiraIssueAssigned, seed.Event(t, taskID))
+				if err != nil || !out.Closed {
+					t.Fatalf("CloseOnEventSystem = %+v (err %v), want closed", out, err)
+				}
+				return taskID, "done"
+			}},
+			{name: "ApplyHeldCloseSystem", close: func(t *testing.T, stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder) (string, string) {
+				t.Helper()
+				taskID, eventID, convID := awaiting(t, stores, orgID, seed)
+				seed.ResolveDeliverables(t, convID)
+				if out := apply(t, stores.Tasks, orgID, taskID, eventID); !out.Closed {
+					t.Fatalf("ApplyHeldCloseSystem = %+v, want closed", out)
+				}
+				return taskID, "done"
+			}},
+			{name: "duplicate_entity_merge", close: func(t *testing.T, stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder) (string, string) {
+				t.Helper()
+				// Both tasks hold a close in the slot the merge collides on, so
+				// whichever entity the merge keeps, the task on the other is
+				// dismissed while it holds one.
+				a, _, _ := awaiting(t, stores, orgID, seed)
+				b, _, _ := awaiting(t, stores, orgID, seed)
+				_, dismissed, err := stores.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, seed.EntityForTask(t, a), seed.EntityForTask(t, b))
+				if err != nil {
+					t.Fatalf("MergeDuplicateEntitiesSystem: %v", err)
+				}
+				if len(dismissed) != 1 || (dismissed[0] != a && dismissed[0] != b) {
+					t.Fatalf("dismissed tasks = %v, want one of %s and %s", dismissed, a, b)
+				}
+				return dismissed[0], "dismissed"
+			}},
+		}
+		for _, p := range paths {
+			t.Run(p.name, func(t *testing.T) {
+				stores, orgID, seed := mk(t)
+				taskID, status := p.close(t, stores, orgID, seed)
+				if s := seed.TaskStatus(t, taskID); s != status {
+					t.Errorf("task status = %q, want %s", s, status)
+				}
+				if eventIDSet, heldAtSet := seed.StoredHold(t, taskID); eventIDSet || heldAtSet {
+					t.Errorf("closed task's hold columns: close_deferred_event_id set %v, close_deferred_at set %v, want both NULL", eventIDSet, heldAtSet)
+				}
+			})
 		}
 	})
 
