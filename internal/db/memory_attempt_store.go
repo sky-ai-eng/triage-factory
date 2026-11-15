@@ -25,9 +25,9 @@ var ErrNoSuchMemoryAttempt = errors.New("db: no open memory attempt with that id
 //
 // Admin-pool-only in Postgres, hence the `...System` suffix on every
 // method: the writer is the brain's memory provisioner, a background
-// goroutine with no JWT-claims context, and the org-scoped RLS policy gates
-// the app-pool reads (tf_app holds SELECT alone). org_id is bound by
-// argument on every call as defense in depth. SQLite is N=1 and unscoped.
+// goroutine with no JWT-claims context. A task read reports the newest attempt
+// through tf.task_memory_wait rather than through this store. org_id is bound
+// by argument on every call as defense in depth. SQLite is N=1 and unscoped.
 type MemoryAttemptStore interface {
 	// BeginAttemptSystem opens an attempt on conversationID: one INSERT with
 	// started_at = now and every verdict column NULL. Returns the stored row,
