@@ -80,11 +80,12 @@ type runConfig struct {
 	baseCheckout string
 
 	// prSkeleton is where the PR history block folded into the run's static
-	// task context comes from. Setup records it and fetches nothing: only a
-	// launch that sends the conversation's opening renders it, since that row is
-	// the one place the block reaches the model. The zero value, a non-PR run's,
-	// renders "", and so does a failed fetch (never fatal) — the run proceeds
-	// with the point-in-time event context it has always had.
+	// task context comes from. Setup records it and fetches nothing; a launch
+	// renders it only when it composes a task context, which is a native claim
+	// of a conversation not yet opened, or an SDK launch with no session to
+	// resume. The zero value, a non-PR run's, renders "", and so does a failed
+	// fetch (never fatal) — the run proceeds with the point-in-time event
+	// context it has always had.
 	prSkeleton prSkeletonSource
 
 	// workspace is how runRoot came to be — warm from the previous engagement,

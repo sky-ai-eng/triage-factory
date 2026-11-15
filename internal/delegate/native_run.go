@@ -491,8 +491,8 @@ type nativeLaunchText struct {
 // with. Only the launch composes one, from the event fields, artifacts and PR
 // history it reads.
 //
-// Nothing in it fails: the one read it makes degrades to a task context with no
-// event fields rather than refusing the launch.
+// Nothing in it fails. A read or the PR history fetch that fails leaves its
+// part out of the task context rather than refusing the launch.
 func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge string, replay claimReplay) nativeLaunchText {
 	systemBlock := replay.block
 	if systemBlock == "" {
