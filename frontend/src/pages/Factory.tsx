@@ -365,7 +365,7 @@ export default function Factory() {
       //     task, a bad blueprint reference, a model the team can't run, a
       //     reached spend cap) as 400/403/404/409/422. Nothing landed on the
       //     claim axis, and a task the create made stays queued and
-      //     unclaimed; toast and stop.
+      //     unclaimed; refetch so it shows, and toast.
       //   - Post-claim spawn failure — reason SPAWN_FAILED (409 another run
       //     became active on the task in the gap or its team was archived,
       //     500 spawn/DB fault) AFTER the claim stamped. The task is
@@ -374,6 +374,9 @@ export default function Factory() {
       //     the discriminator — pre-claim faults answer 409 and 500 too, so
       //     status alone can't tell the two apart.
       const label = entityLabel(pd.entity)
+      // Whether the create landed. A delegate refused after it leaves the
+      // task it made or found on the floor, so the floor reloads either way.
+      let created = false
       try {
         const task = await apiJSON<Task>('/api/tasks', {
           method: 'POST',
@@ -387,13 +390,16 @@ export default function Factory() {
         })
         // The create's answer carries the version the delegate names: the
         // task as this gesture found or made it.
+        created = true
         await delegateTask(task, promptId)
       } catch (err) {
-        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
-        if (spawnFailed) {
+        if (created) {
           if (delegateTeam) noteWrittenTeam(delegateTeam)
           const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
           refetch?.()
+        }
+        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
+        if (spawnFailed) {
           toast.error(
             `${label} is bot-claimed but the run didn't start: ${httpErrorMessage(err, 'spawn failed')}. Retry from the Board.`,
             'Delegate run failed',

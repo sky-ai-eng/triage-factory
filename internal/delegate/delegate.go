@@ -316,7 +316,7 @@ type DelegateOpts struct {
 // own to make between the two, which a refused plan must never follow, calls
 // them itself.
 func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) {
-	// task.TeamID is the run's owning team — nullable now, but a task reaching
+	// task.TeamID is the run's owning team — nullable, but a task reaching
 	// Delegate always has a resolved owner (an unowned task gates auto-fire
 	// off, and a manual claim consolidates the owner first), so the nil deref
 	// to "" is purely defensive.
@@ -539,10 +539,12 @@ func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateO
 
 // FireDelegation commits a planned delegation's run and starts it: the
 // blueprint_run with its first step, in one transaction, and then what follows
-// that commit. It checks nothing the plan checked. What changed since the plan
-// was made is refused by the transaction itself, as ErrTaskBusy,
-// ErrTaskClosed, or ErrTeamArchived; a replay the event fence caught is
-// ErrAlreadyFired.
+// that commit. It checks nothing the plan checked: a blueprint, prompt, model,
+// credential, or spend cap that changed since the plan was made is not seen
+// here. What the transaction itself refuses is the task's state at the commit:
+// another active run (ErrTaskBusy), a closed task on the event path
+// (ErrTaskClosed), or an archived team (ErrTeamArchived). A replay the event
+// fence caught is ErrAlreadyFired.
 func (s *Spawner) FireDelegation(plan DelegationPlan) (string, error) {
 	if len(plan.stepPlan) == 0 {
 		return "", errors.New("delegate: fire of a delegation PlanDelegation did not plan")
@@ -550,12 +552,12 @@ func (s *Spawner) FireDelegation(plan DelegationPlan) (string, error) {
 	orgID := plan.orgID
 	bgCtx := context.Background()
 
-	// One dispatch path: mint the blueprint_run, then run the orchestrator
-	// (which loops once for a 1-step blueprint — N=1 is no longer a special
-	// path). The blueprint_run is the firing unit and the crash-consistent
-	// commit point of a delegation, so it's created synchronously here, before
-	// the orchestrator goroutine does any worktree setup — that's where the
-	// relocated replay fence lives. worktree_path is filled in after setup.
+	// One dispatch path: mint the blueprint_run, then run the orchestrator,
+	// which loops once for a 1-step blueprint. The blueprint_run is the firing
+	// unit and the crash-consistent commit point of a delegation, and the
+	// replay fence is on its row, so it's created synchronously here, before
+	// the orchestrator goroutine does any worktree setup. worktree_path is
+	// filled in after setup.
 	blueprintRunID := uuid.New().String()
 	brRow := domain.BlueprintRun{
 		ID:                blueprintRunID,

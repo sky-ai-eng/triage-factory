@@ -644,8 +644,8 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 
 // taskDelegateRequest is the body of POST /api/tasks/{id}/delegate.
 type taskDelegateRequest struct {
-	// BlueprintID names the blueprint the run executes. Absent lets the
-	// spawner resolve the team's default.
+	// BlueprintID names the blueprint the run executes. Required: an absent
+	// one is refused with the other blueprint refusals, 422 on blueprint_id.
 	BlueprintID string `json:"blueprint_id,omitempty"`
 	// Version is the task version the caller read (taskJSON.Version).
 	Version *int64 `json:"version"`
@@ -702,8 +702,9 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 
 	// The run is planned for the team the claim will consolidate onto, before
 	// the claim, so every refusal the spawner makes comes before anything is
-	// written. It is not planned again after the claim: what changes in
-	// between is refused by the firing transaction, as SPAWN_FAILED.
+	// written. It is not planned again after the claim: the firing
+	// transaction refuses what it can see of the task's state (another run,
+	// an archived team) as SPAWN_FAILED, and the rest of the plan stands.
 	var plan delegate.DelegationPlan
 	if s.spawner != nil {
 		var err error
