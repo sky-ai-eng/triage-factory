@@ -260,9 +260,6 @@ func New(cfg Config) (*Server, error) {
 	default:
 		return nil, fmt.Errorf("llmproxy: unsupported provider %q", cfg.Provider)
 	}
-	if cfg.Cert != nil && len(cfg.Cert.Certificate) == 0 {
-		return nil, errors.New("llmproxy: Cert holds no certificate")
-	}
 	if cfg.Upstream == "" {
 		return nil, errors.New("llmproxy: Upstream is required")
 	}

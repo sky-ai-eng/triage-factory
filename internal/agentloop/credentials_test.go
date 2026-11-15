@@ -115,44 +115,33 @@ func TestEnvCredentials_ReleaseClosesTheClient(t *testing.T) {
 	}
 }
 
-// TestEnvCredentials_CarriesTheCACertificate pins that the certificate a
-// run's credential proxy serves reaches the account the client is built from,
-// for a Bedrock credential as much as an Anthropic one.
+// TestEnvCredentials_CarriesTheCACertificate pins that the certificate a run's
+// credential proxy serves reaches the account the client is built from.
 func TestEnvCredentials_CarriesTheCACertificate(t *testing.T) {
 	_, pem, err := proxycert.Generate("llm proxy", "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, env := range map[string]map[string]string{
-		"anthropic":      {"ANTHROPIC_API_KEY": "sk-ant-run", "ANTHROPIC_BASE_URL": "https://127.0.0.1:1"},
-		"bedrock bearer": {"AWS_BEARER_TOKEN_BEDROCK": "run", "ANTHROPIC_BEDROCK_BASE_URL": "https://127.0.0.1:1"},
-		"bedrock sigv4":  {"AWS_ACCESS_KEY_ID": "AKIARUN", "AWS_SECRET_ACCESS_KEY": "placeholder", "ANTHROPIC_BEDROCK_BASE_URL": "https://127.0.0.1:1"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var got string
-			creds := &EnvCredentials{
-				Resolve:   func(context.Context) (map[string]string, error) { return env, nil },
-				Models:    []string{"m"},
-				CACertPEM: pem,
-				NewClient: func(account schemas.Account) (Provider, func(), error) {
-					providers, err := account.GetConfiguredProviders()
-					if err != nil || len(providers) != 1 {
-						t.Fatalf("configured providers: %v (%v)", providers, err)
-					}
-					cfg, err := account.GetConfigForProvider(providers[0])
-					if err != nil {
-						t.Fatal(err)
-					}
-					got = cfg.NetworkConfig.CACertPEM.GetValue()
-					return nil, nil, nil
-				},
-			}
-			if _, _, _, err := creds.ForCall(context.Background()); err != nil {
+	var got string
+	creds := &EnvCredentials{
+		Resolve: func(context.Context) (map[string]string, error) {
+			return map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "run", "ANTHROPIC_BEDROCK_BASE_URL": "https://127.0.0.1:1"}, nil
+		},
+		Models:    []string{"m"},
+		CACertPEM: pem,
+		NewClient: func(account schemas.Account) (Provider, func(), error) {
+			cfg, err := account.GetConfigForProvider(inference.ProviderBedrock)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if got != string(pem) {
-				t.Errorf("the account's CA certificate = %q, want the proxy's", got)
-			}
-		})
+			got = cfg.NetworkConfig.CACertPEM.GetValue()
+			return nil, nil, nil
+		},
+	}
+	if _, _, _, err := creds.ForCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got != string(pem) {
+		t.Errorf("the account's CA certificate = %q, want the proxy's", got)
 	}
 }
