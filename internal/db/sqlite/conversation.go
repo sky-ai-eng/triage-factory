@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // conversationStore is the SQLite impl of db.ConversationStore over the
@@ -646,7 +647,7 @@ func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conver
 
 // markFailedIfActive is the infra-failure terminal and its claim release on
 // one transaction; MarkFailedIfActiveForClaimSystem is its only door.
-func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
+func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conversationID, failureKind, summary string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -659,10 +660,11 @@ func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conve
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
 			    failure_kind = ?,
+			    result_summary = COALESCE(NULLIF(?, ''), result_summary),
 			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			WHERE id = ?
 			  AND `+db.UnsettledConversationSQL("conversations")+`
-		`, time.Now().UTC(), nullIfEmpty(failureKind), conversationID)
+		`, time.Now().UTC(), nullIfEmpty(failureKind), summary, conversationID)
 		if err != nil {
 			return err
 		}
@@ -683,6 +685,49 @@ func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conve
 
 func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
 	return endConversationsScoped(ctx, s.q, orgID, reason, "task_id = ?", taskID, "")
+}
+
+func (s *conversationStore) EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
+	return s.EndConversationsForTask(ctx, orgID, taskID, reason)
+}
+
+// MintForPersonClaim mirrors the Postgres statement of the same name, which
+// carries the model. runtime is stamped 'sdk' and team_id is the local team,
+// as insertConversation writes them here.
+func (s *conversationStore) MintForPersonClaim(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, model, worktree_path,
+		                  trigger_type, trigger_id, origin, team_id, visibility, creator_user_id,
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
+		                  status, parked_at, park_reason, completed_at, outcome, outcome_reason,
+		                  queued_at)
+		SELECT ?, '`+domain.ConversationTypeInteractive+`', '`+domain.ConversationRuntimeSDK+`', t.id, NULL, NULL, NULL,
+		       'manual', NULL, '`+domain.ConversationOriginInteractive+`', ?, 'team', ?,
+		       NULL, NULL, NULL, NULL,
+		       'open', ?, NULL, NULL, NULL, NULL,
+		       NULL
+		FROM tasks t
+		WHERE t.id = ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations live
+		      WHERE live.task_id = t.id
+		        AND `+liveTopLevelConversationSQL("live")+`)
+		RETURNING `+sqliteConversationReturningColumns,
+		uuid.New().String(), runmode.LocalDefaultTeamID, userID, time.Now().UTC(), taskID)
+	r, err := scanConversationReturning(row)
+	// The guard declining is the answer, not a miss: the task has its
+	// conversation already.
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
+}
+
+func (s *conversationStore) MintForPersonClaimSystem(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error) {
+	return s.MintForPersonClaim(ctx, orgID, taskID, userID)
 }
 
 func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
@@ -803,7 +848,7 @@ func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, co
 // budget's current-episode counter (episodeAttemptsSQL, conversation_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
-const sqliteConversationColumns = `
+var sqliteConversationColumns = `
 	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
 	` + sqliteDisplayStatusSQL + `,
 	r.model, r.started_at, r.queued_at,
@@ -830,7 +875,9 @@ const sqliteConversationColumns = `
 	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
 	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
 	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `'), '') AS current_op,
-	r.next_attempt_at
+	r.next_attempt_at,
+	` + db.ConversationHasRunSQL("r") + ` AS has_run,
+	r.type
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
@@ -934,7 +981,7 @@ const sqliteConversationAttentionSQL = `(
 // SetWorktreePath and their System/ForClaimSystem twins) as `RETURNING ` +
 // sqliteConversationReturningColumns, always as the LAST statement of its
 // transaction — see completeConversationReturning for why order matters here.
-const sqliteConversationReturningColumns = `
+var sqliteConversationReturningColumns = `
 	id, COALESCE(task_id, ''), COALESCE(runtime, ''),
 	` + sqliteReturningDisplayStatusSQL + `,
 	model, started_at, queued_at,
@@ -961,7 +1008,9 @@ const sqliteConversationReturningColumns = `
 	stop_requested_at, COALESCE(stop_requested_by, ''), COALESCE(stop_requested_reason, ''),
 	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `') AS last_activity_at,
 	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL AND cl.phase IS NOT '` + domain.ClaimPhaseWarm + `'), '') AS current_op,
-	next_attempt_at
+	next_attempt_at,
+	` + db.ConversationHasRunSQL("conversations") + ` AS has_run,
+	type
 `
 
 // sqliteReturningDisplayStatusSQL is sqliteDisplayStatusSQL rewritten against
@@ -1670,29 +1719,12 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	reasons := domain.ParkReasonsAwaitingPerson()
-	args := make([]any, 0, len(reasons)+1)
-	args = append(args, orgID)
-	for _, r := range reasons {
-		args = append(args, string(r))
-	}
-	// A claim clears park_reason as it takes a row off its park, so a
-	// conversation someone woke leaves the set at its claim. The entity is
-	// outer-joined: its key is display only, and a task that names none still
-	// leaves its delegator waiting.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
-		FROM conversations c
-		JOIN tasks t ON t.id = c.task_id
-		LEFT JOIN entities e ON e.id = t.entity_id
-		WHERE c.org_id = ?
-		  AND c.status = 'open'
-		  AND c.park_reason IN (`+strings.TrimRight(strings.Repeat("?, ", len(reasons)), ", ")+`)
-		  AND c.creator_user_id IS NOT NULL
-		  AND c.ended_at IS NULL
-		  AND c.archived_at IS NULL
+		`+parkedForPersonSQL+`
+		  AND c.org_id = ?
 		ORDER BY c.id
-	`, args...)
+	`, append(parkedForPersonReasons(), orgID)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1708,6 +1740,132 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, pauseNoticesDueQuery, append(parkedForPersonReasons(), limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PauseNoticeDue
+	for rows.Next() {
+		var d domain.PauseNoticeDue
+		var reason string
+		if err := rows.Scan(&d.OrgID, &d.ParkedAt, &d.ConversationID, &d.CreatorUserID, &reason, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.ParkReason = domain.ParkReason(reason)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	// parked_at is written in more than one layout (a bound time, SQLite's
+	// own CURRENT_TIMESTAMP), so the match normalizes both sides; the marker
+	// takes the column's own text, which is what the list compares it with.
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE conversations SET pause_noticed_parked_at = parked_at
+		WHERE id = ?
+		  AND strftime('%Y-%m-%d %H:%M:%f', parked_at) = strftime('%Y-%m-%d %H:%M:%f', ?)
+		  AND pause_noticed_parked_at IS NOT parked_at
+	`, conversationID, parkedAt.UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, failureNoticesDueQuery, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.FailureNoticeDue
+	for rows.Next() {
+		var d domain.FailureNoticeDue
+		var kind string
+		if err := rows.Scan(&d.OrgID, &d.ConversationID, &d.CreatorUserID, &kind, &d.ResultSummary, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.FailureKind = domain.ConversationFailureKind(kind)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE conversations SET failure_noticed_at = ?
+		WHERE id = ? AND failure_noticed_at IS NULL
+	`, time.Now().UTC(), conversationID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// pauseNoticesDueQuery is ListPauseNoticesDueSystem's statement; the Postgres
+// twin carries the reasoning. The marker is a copy of parked_at's own text
+// (MarkPauseNoticedSystem), so IS NOT compares one layout against itself.
+var pauseNoticesDueQuery = `
+		SELECT c.org_id, c.parked_at, c.id, c.creator_user_id, c.park_reason, COALESCE(e.source_id, '')
+		` + parkedForPersonSQL + `
+		  AND c.parked_at IS NOT NULL
+		  AND c.pause_noticed_parked_at IS NOT c.parked_at
+		ORDER BY c.parked_at, c.id
+		LIMIT ?`
+
+// failureNoticesDueQuery is ListFailureNoticesDueSystem's statement.
+const failureNoticesDueQuery = `
+		SELECT c.org_id, c.id, c.creator_user_id,
+		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
+		FROM conversations c
+		LEFT JOIN tasks t ON t.id = c.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE c.status = 'failed'
+		  AND c.failure_noticed_at IS NULL
+		  AND c.creator_user_id IS NOT NULL
+		ORDER BY c.completed_at, c.id
+		LIMIT ?`
+
+// parkedForPersonSQL is the Postgres twin's parkedForPersonSQL, with the reasons
+// as the leading placeholders parkedForPersonReasons binds.
+var parkedForPersonSQL = `
+		FROM conversations c
+		JOIN tasks t ON t.id = c.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE c.status = 'open'
+		  AND c.park_reason IN (` + strings.TrimRight(strings.Repeat("?, ", len(domain.ParkReasonsAwaitingPerson())), ", ") + `)
+		  AND c.creator_user_id IS NOT NULL
+		  AND c.ended_at IS NULL
+		  AND c.archived_at IS NULL`
+
+// parkedForPersonReasons is the bind for parkedForPersonSQL's reasons, as a
+// fresh slice a caller appends its own arguments to.
+func parkedForPersonReasons() []any {
+	reasons := domain.ParkReasonsAwaitingPerson()
+	args := make([]any, len(reasons))
+	for i, r := range reasons {
+		args[i] = string(r)
+	}
+	return args
 }
 
 func (s *conversationStore) HasActiveClaimForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
@@ -2000,13 +2158,13 @@ func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, c
 	return n > 0, err
 }
 
-func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
+func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		f, err := (&conversationStore{q: q}).markFailedIfActive(ctx, orgID, conversationID, failureKind)
+		f, err := (&conversationStore{q: q}).markFailedIfActive(ctx, orgID, conversationID, failureKind, summary)
 		flipped = f
 		return err
 	})
@@ -2282,18 +2440,18 @@ func (s *conversationStore) InsertMessage(ctx context.Context, orgID string, msg
 	// sequence + RETURNING — see postgres/conversation.go.
 	result, err := s.q.ExecContext(ctx, `
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
-		                      is_error, metadata, model,
+		                      is_error, metadata, model, effort,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms, stop_reason)
 		VALUES (?, ?,
 		        COALESCE(?, (SELECT id FROM claims
 		                     WHERE conversation_id = ? AND released_at IS NULL)),
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.ConversationID,
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
-		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
+		sqliteNullStr(msg.Model), sqliteNullStr(msg.Effort), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt,
 		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
@@ -2306,7 +2464,7 @@ func (s *conversationStore) InsertMessage(ctx context.Context, orgID string, msg
 }
 
 const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
+	model, effort, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning, content_blocks, delivered, window_state, seq, duration_ms, stop_reason`
 
 // scanMessageRows drains a messages result set selecting
@@ -2342,11 +2500,11 @@ func scanOneMessage(row messageScanner) (domain.Message, error) {
 	var windowState string
 	var seq sql.NullFloat64
 	var durationMs sql.NullInt64
-	var stopReason sql.NullString
+	var stopReason, effort sql.NullString
 
 	if err := row.Scan(
 		&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
-		&toolCallID, &m.IsError, &metadataStr, &model,
+		&toolCallID, &m.IsError, &metadataStr, &model, &effort,
 		&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 		&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &stopReason,
 	); err != nil {
@@ -2360,6 +2518,7 @@ func scanOneMessage(row messageScanner) (domain.Message, error) {
 	m.Subtype = subtype.String
 	m.ToolCallID = toolCallID.String
 	m.Model = model.String
+	m.Effort = effort.String
 
 	if toolCallsStr.Valid {
 		_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
@@ -2582,6 +2741,48 @@ func (s *conversationStore) NewestAssistantToolCallsForConversations(ctx context
 	return out, nil
 }
 
+func (s *conversationStore) NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.newestMessage(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM messages m_p
+		WHERE m_p.conversation_id = ? AND `+personMessageSQL+`
+		ORDER BY m_p.id DESC
+		LIMIT 1
+	`, conversationID)
+}
+
+func (s *conversationStore) NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.newestMessage(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM messages
+		WHERE conversation_id = ? AND role = 'assistant' AND window_state = 'active'
+		ORDER BY id DESC
+		LIMIT 1
+	`, conversationID)
+}
+
+func (s *conversationStore) NewestAssistantSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	return s.NewestAssistant(ctx, orgID, conversationID)
+}
+
+// newestMessage runs a single-row message read, answering nil for no row.
+func (s *conversationStore) newestMessage(ctx context.Context, query string, args ...any) (*domain.Message, error) {
+	m, err := scanOneMessage(s.q.QueryRowContext(ctx, query, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // ListForAssemblySystem returns every row a native loop needs to rebuild this run's
 // exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
 // window_state='inactive' rows are excluded (superseded by compaction);
@@ -2603,6 +2804,40 @@ func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, co
 	}
 	defer rows.Close()
 	return scanMessageRows(rows)
+}
+
+// OpeningTaskContextSystem — see the interface doc. Reads every window state.
+func (s *conversationStore) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	var content sql.NullString
+	err := s.q.QueryRowContext(ctx, `
+		SELECT content
+		FROM messages
+		WHERE conversation_id = ? AND subtype = ?
+		ORDER BY COALESCE(seq, id) ASC, id ASC
+		LIMIT 1
+	`, conversationID, domain.MessageSubtypeInjectionTaskContext).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return content.String, true, nil
+}
+
+// HasAssistantMessageSystem — see the interface doc. Reads every window state.
+func (s *conversationStore) HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var exists bool
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'assistant')
+	`, conversationID).Scan(&exists)
+	return exists, err
 }
 
 // markDelivered flips delivered=true on the given message ids, scoped to
@@ -2817,6 +3052,7 @@ func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,
 		&lastActivityAt, &r.ClaimCurrentOp,
 		&nextAttemptAt,
+		&r.HasRun, &r.Type,
 	); err != nil {
 		return err
 	}

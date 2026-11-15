@@ -49,6 +49,12 @@ const (
 	// at all), and the denial row is written by the handler before it answers,
 	// so the row is in the ledger by the time the agent sees the refusal.
 	OpAuthorizeGHWrite = "authorize_gh_write"
+	// OpRecordGHRepositoryDenial is the gh-channel injector's record of a
+	// request its repository gate refused, for a token org's run: the
+	// sidecar holds the run's authorized set and makes the decision, and the
+	// orchestrator, which holds the team's tracking, writes the denial row and
+	// the reason it gives.
+	OpRecordGHRepositoryDenial = "record_gh_repository_denial"
 	// OpSignDigest asks the control plane to sign one commit's digest as the
 	// run's signer. A Call: git waits on the signature to write the commit.
 	// The orchestrator queues the request for the control pods, which hold
@@ -198,6 +204,19 @@ type RecordGHWriteArgs struct {
 	RepositoryName string `json:"repository_name,omitempty"`
 	ObjectNodeID   string `json:"object_node_id,omitempty"`
 	ObjectKind     string `json:"object_kind,omitempty"`
+}
+
+// RecordGHRepositoryDenialArgs is record_gh_repository_denial's payload: the
+// repository refused, as the owner/repo GitHub answered the injector with or
+// else as the request spelled it ("" when the request named it in no
+// readable shape), GitHub's id for it when GitHub answered, whether the gate
+// refused because it could not tell rather than because the repository is
+// outside the run, and the request's path.
+type RecordGHRepositoryDenialArgs struct {
+	Repository   string `json:"repository,omitempty"`
+	RepositoryID string `json:"repository_id,omitempty"`
+	Unresolved   bool   `json:"unresolved,omitempty"`
+	Path         string `json:"path"`
 }
 
 // GraphQLWriteFacts mirrors ghwrite.GraphQLFacts across the wire. It is spelled

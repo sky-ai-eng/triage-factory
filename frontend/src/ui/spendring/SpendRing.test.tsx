@@ -92,7 +92,7 @@ describe('SpendRing', () => {
       <SpendRing
         models={[
           { name: 'claude-sonnet-5', v: 0 },
-          { name: 'claude-haiku-4-5', v: 0 },
+          { name: 'claude-haiku-5-5', v: 0 },
         ]}
       />,
     )

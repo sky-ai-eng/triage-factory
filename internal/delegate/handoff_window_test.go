@@ -54,7 +54,7 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 	}
 
 	// The send's half.
-	err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "actually, one more thing")
+	err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "actually, one more thing", domain.TurnSettings{})
 	if !errors.Is(err, ErrStepHandedOff) {
 		t.Fatalf("SendMessage = %v, want ErrStepHandedOff", err)
 	}
@@ -112,7 +112,7 @@ func TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands(t *testing.T) {
 	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); !ok {
 		t.Errorf("ResumabilityFor = (false, %q), want resumable once the blueprint finished", reason)
 	}
-	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up on a finished blueprint's final step: %v", err)
 	}
 	if st := storedStatus(t, database, step0ConversationID); st != "" {
@@ -133,7 +133,7 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff-stop", 2, "open", "")
 	giveConversationResumeState(t, database, step0ConversationID)
 
-	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "keep going", domain.TurnSettings{}); err != nil {
 		t.Fatalf("stop→resume of a mid-blueprint step: %v", err)
 	}
 	if st := storedStatus(t, database, step0ConversationID); st != "" {
@@ -196,12 +196,12 @@ func TestFollowUp_AnSDKResumeDecidesItsBlueprintLikeAFreshStep(t *testing.T) {
 			if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL WHERE id = ?`, convID); err != nil {
 				t.Fatalf("make the step event-triggered: %v", err)
 			}
-			if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+			if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "keep going", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage: %v", err)
 			}
 			claimID := holderClaimFor(t, s, org, convID)
 			conv := loadConversation(t, s, convID)
-			if _, fenced := s.processCompletion(ctx, org, convID, brID, claimID, loadTask(t, s, taskID), tc.turn,
+			if fenced := s.processCompletion(ctx, org, convID, brID, claimID, loadTask(t, s, taskID), tc.turn,
 				t.TempDir(), nil, "sess-"+convID, runmode.LocalDefaultUserID); fenced {
 				t.Fatal("processCompletion reported fenced under a live claim")
 			}
@@ -244,7 +244,7 @@ func TestDispatchResumeClaim_AnEarlyFailureEndsItsBlueprint(t *testing.T) {
 	ctx := context.Background()
 	s, database, brID, taskID, convID := reactorFixture(t, "sdk-resume-early", 3, "open", "")
 	giveConversationResumeState(t, database, convID)
-	if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+	if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "keep going", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	conv := loadConversation(t, s, convID)
@@ -345,7 +345,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 		res("done"), cwd, nil, sessionID, "")
 
 	// The wake a person can fire the instant the status flips.
-	if err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up immediately after the conclusion: %v", err)
 	}
 	if st := storedStatus(t, database, conversationID); st != "" {

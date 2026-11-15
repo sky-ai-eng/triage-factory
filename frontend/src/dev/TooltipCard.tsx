@@ -81,7 +81,7 @@ export function TooltipCard() {
                   borderRadius: 8,
                   background: 'var(--color-warm)',
                   color: 'var(--color-warm-ink)',
-                  font: '500 9.5px/1 var(--font-mono)',
+                  font: '500 9.5px/normal var(--font-mono)',
                 }}
               >
                 3

@@ -256,7 +256,7 @@ func (f *parkFleet) claim(t *testing.T, s *Spawner) *domain.Conversation {
 }
 
 func (f *parkFleet) followUp(text string) error {
-	return f.control.SendMessage(context.Background(), f.orgID, f.conversationID, f.userID, text)
+	return f.control.SendMessage(context.Background(), f.orgID, f.conversationID, f.userID, text, domain.TurnSettings{})
 }
 
 // read is the display read — the row as the board and the station see it.

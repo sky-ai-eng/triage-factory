@@ -4,8 +4,9 @@
 // message on Postgres' tf_ctl NOTIFY channel; the pod currently running
 // the brain dispatches it to its in-process manager.
 //
-// This package owns only the PUBLISH half (plus the channel name and the
-// Message wire shape). The LISTEN half is internal/app's unified tf_ctl
+// This package owns the PUBLISH half, the channel name, the Message wire
+// shape, and Doorbells, which routes a doorbell the listener hears to the wait
+// in this process it names. The LISTEN half is internal/app's unified tf_ctl
 // dispatcher (internal/app/ctl.go) — one dedicated connection per pod
 // serving every tf_ctl consumer (relay messages, conversation-signal
 // doorbells, session kicks), with the "only the brain acts on relay traffic"
@@ -32,8 +33,8 @@ import (
 // conversation-signal doorbells, and TFAC-614's cred_request doorbell —
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
-// ("kick", "new", "ack", "cred_request", "memory_owed", "sign_request",
-// "sign_done", "github_refresh_marked").
+// ("kick", "new", "ack", "cred_request", "cred_sealed", "memory_owed",
+// "sign_request", "sign_done", "github_refresh_marked", "delegator_notice").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -65,10 +66,23 @@ const Channel = "tf_ctl"
 // request up to a second and a half, until a control pod's sweep finds it, and
 // a dropped sign_done up to 250ms, until the waiting executor's next read of
 // the row.
+//
+// KindCredSealed uses OrgID/ConversationID: the brain sealed a bundle for the
+// conversation's claim, ringing the executor waiting on it to read
+// claim_credentials now. Not gated on the background-brain lease, since an
+// executor never holds it. Lossy like the rest: a dropped message costs the
+// wait up to one interval of its poll of claim_credentials.
+//
 // KindGitHubRefreshMarked uses OrgID: a GitHub webhook receiver on any control
 // pod whose delivery just wrote refresh marks for the org, nudging the brain to
 // read them now. Lossy like the rest: the marks are stored, so a dropped
 // message costs only the wait until the next pass that reads them.
+//
+// KindDelegatorNotice uses OrgID: a conversation in the org just failed, or
+// parked waiting on the person who delegated it, nudging the brain's
+// delegator-notice sweep (internal/delegate.DelegatorNotices) to tell them now.
+// Lossy like the rest: the sweep reads the conversation rows, so a dropped
+// message costs one sweep interval.
 type Message struct {
 	Kind           string `json:"kind"`
 	Manager        string `json:"manager,omitempty"`
@@ -79,9 +93,17 @@ type Message struct {
 	SignatureID    string `json:"signature_id,omitempty"`
 }
 
+// KindCredSealed is the Message kind the brain publishes after it writes a
+// bundle an executor's credential wait is waiting for.
+const KindCredSealed = "cred_sealed"
+
 // KindGitHubRefreshMarked is the Message kind a GitHub webhook receiver
 // publishes after a delivery's refresh marks commit.
 const KindGitHubRefreshMarked = "github_refresh_marked"
+
+// KindDelegatorNotice is the Message kind the spawner's delegator-notice
+// doorbell publishes after a run fails or parks waiting on its delegator.
+const KindDelegatorNotice = "delegator_notice"
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled
 // connection is fine, pg_notify() doesn't require a dedicated session

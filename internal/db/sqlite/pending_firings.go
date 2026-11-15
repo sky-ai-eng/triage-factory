@@ -378,6 +378,39 @@ func (s *pendingFiringsStore) WithdrawHandedNote(ctx context.Context, orgID, not
 	return newStagedInjectionStore(s.q).DeleteSystem(ctx, orgID, noteID)
 }
 
+func (s *pendingFiringsStore) RequestCancelForTask(ctx context.Context, orgID, taskID, by, reason string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id FROM pending_firings
+		WHERE task_id = ?
+		  AND status IN ('ready','leased') AND cancel_requested_at IS NULL
+		ORDER BY id
+	`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	// The ids are read out before the first write: a transaction's one
+	// connection cannot write while a result set is open on it.
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return workitem.RequestCancelEach(ctx, s.q, s.kind, orgID, ids, by, reason)
+}
+
 func (s *pendingFiringsStore) TaskRerouted(ctx context.Context, orgID, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err

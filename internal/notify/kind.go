@@ -292,7 +292,16 @@ func Kinds() []Kind {
 // corrects itself on the next one.
 func (c *ConditionKind[P]) Set(ctx context.Context, orgID string, p P, active bool) {
 	if s := sink.Load(); s != nil {
-		s.Set(ctx, c.k, orgID, p, active)
+		s.Set(ctx, c.k, orgID, p, active, nil)
+	}
+}
+
+// SetGuarded is Set with guard run first in the transaction that writes it:
+// the occurrence changes only when guard reports true, and together with the
+// guard's own write. See Guard.
+func (c *ConditionKind[P]) SetGuarded(ctx context.Context, orgID string, p P, active bool, guard Guard) {
+	if s := sink.Load(); s != nil {
+		s.Set(ctx, c.k, orgID, p, active, guard)
 	}
 }
 
@@ -335,9 +344,33 @@ func erased[P any](ps []P) []any {
 // extends its expiry.
 func (n *NoticeKind[P]) Post(ctx context.Context, orgID string, p P) {
 	if s := sink.Load(); s != nil {
-		s.Post(ctx, n.k, orgID, p)
+		s.Post(ctx, n.k, orgID, p, nil)
 	}
 }
+
+// PostGuarded is Post with guard run first in the transaction that writes it:
+// the notice is posted only when guard reports true, and together with the
+// guard's own write. See Guard.
+func (n *NoticeKind[P]) PostGuarded(ctx context.Context, orgID string, p P, guard Guard) {
+	if s := sink.Load(); s != nil {
+		s.Post(ctx, n.k, orgID, p, guard)
+	}
+}
+
+// Guard is a producer's own write that must commit with a notification, such
+// as the mark that says the notification was sent. A guarded verb runs it
+// first, in the transaction that writes the notification. When it reports
+// true, the notification is written and the two commit or roll back together,
+// so a failed notification write leaves the guard's write undone. When it
+// reports false, the guard wrote nothing and neither is written. When it
+// fails, nothing is written and the failure is logged and counted like any
+// other.
+//
+// It writes through tx and nothing else: local mode's database has one
+// connection, and the transaction holds it. It runs only when a write is
+// attempted, so a verb that fails before the transaction, such as an audience
+// it cannot resolve, never runs it.
+type Guard = sink.Guard
 
 // ClearSource resolves the org's open conditions of every kind whose Source is
 // source: the source was turned off or its credential disconnected, so

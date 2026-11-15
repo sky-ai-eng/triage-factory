@@ -381,6 +381,17 @@ func (c *Client) UserID(ctx context.Context, login string) (int64, error) {
 // don't use; it shares the newRequest build prefix but keeps the 304
 // short-circuit and ETag return that the unified core doesn't model.
 func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []byte, newEtag string, notModified bool, err error) {
+	body, header, notModified, err := c.getConditional(ctx, path, etag)
+	if err != nil || notModified {
+		return nil, "", notModified, err
+	}
+	return body, header.Get("ETag"), false, nil
+}
+
+// getConditional is GetConditional answering with the response's headers, for
+// a caller that reads more of them than the ETag (a listing that pages by
+// the Link header). A 304 answers (nil, nil, true, nil).
+func (c *Client) getConditional(ctx context.Context, path, etag string) (body []byte, header http.Header, notModified bool, err error) {
 	build := func() (*http.Request, error) {
 		req, err := c.newRequest(ctx, "GET", c.baseURL+path, nil, acceptJSON)
 		if err != nil {
@@ -394,15 +405,15 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 
 	resp, data, err := c.doIdempotent(ctx, build)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("request %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("request %s: %w", path, err)
 	}
 	if resp.StatusCode == http.StatusNotModified {
-		return nil, "", true, nil
+		return nil, nil, true, nil
 	}
 	if resp.StatusCode >= 300 {
-		return nil, "", false, newStatusError("GET "+path, resp, data)
+		return nil, nil, false, newStatusError("GET "+path, resp, data)
 	}
-	return data, resp.Header.Get("ETag"), false, nil
+	return data, resp.Header, false, nil
 }
 
 // Post performs a context-aware authenticated POST request with a JSON body.

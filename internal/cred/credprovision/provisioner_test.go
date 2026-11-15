@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,8 +58,10 @@ type fakeScopedResolver struct {
 	identity    ghclient.Identity // the tier TokenForRepoScoped reports
 	identityErr error             // what the org's commit identity read fails with
 	errFor      map[string]error  // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
-	calls       []scopedCall
-	reposCalls  []reposScopedCall
+	// mu guards the call records: a seal mints its tokens concurrently.
+	mu         sync.Mutex
+	calls      []scopedCall
+	reposCalls []reposScopedCall
 }
 
 func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error) {
@@ -95,7 +98,9 @@ func (f *fakeScopedResolver) HasAnyCredential(context.Context, string) (bool, er
 }
 
 func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, repo string, perms map[string]string) (githubapp.Token, ghclient.Identity, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, scopedCall{owner: owner, repo: repo, perms: perms})
+	f.mu.Unlock()
 	if err := f.errFor[owner+"/"+repo]; err != nil {
 		return githubapp.Token{}, ghclient.IdentityUnknown, err
 	}
@@ -103,7 +108,9 @@ func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, rep
 }
 
 func (f *fakeScopedResolver) TokenForReposScoped(_ context.Context, _, owner string, repos []string, perms map[string]string) (githubapp.Token, error) {
+	f.mu.Lock()
 	f.reposCalls = append(f.reposCalls, reposScopedCall{owner: owner, repos: repos, perms: perms})
+	f.mu.Unlock()
 	if err := f.errFor[owner]; err != nil {
 		return githubapp.Token{}, err
 	}
@@ -931,6 +938,49 @@ func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
 			// token are untouched, so the conversation is fully operable.
 			if _, ok := gh.RepoTokens["acme/widgets"]; !ok {
 				t.Errorf("RepoTokens lost the authorized repo; got %v", gh.RepoTokens)
+			}
+		})
+	}
+}
+
+// modelConversations is a conversation whose stored model is convModel and
+// whose newest person row, when person is set, ran on it.
+type modelConversations struct {
+	db.ConversationStore
+	convModel string
+	person    *domain.Message
+}
+
+func (f modelConversations) GetSystem(_ context.Context, _, conversationID string) (*domain.Conversation, error) {
+	return &domain.Conversation{ID: conversationID, Model: f.convModel}, nil
+}
+
+func (f modelConversations) NewestPersonMessageSystem(context.Context, string, string) (*domain.Message, error) {
+	return f.person, nil
+}
+
+// The seal chooses its provider from the model the claim runs on: the newest
+// person message's when one recorded a model, and the conversation's own
+// otherwise. A follow-up a person moved onto a Bedrock model is sealed Bedrock
+// material even though its step ran on an Anthropic key.
+func TestManager_conversationModel_FollowsTheNewestPersonRow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		person *domain.Message
+		want   string
+	}{
+		{"a person row's model", &domain.Message{Role: "user", Model: "us.anthropic.claude-sonnet-5-5"}, "us.anthropic.claude-sonnet-5-5"},
+		{"no person row", nil, domain.ModelSonnet},
+		{"a person row that recorded no model", &domain.Message{Role: "user"}, domain.ModelSonnet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Manager{stores: db.Stores{Conversations: modelConversations{convModel: domain.ModelSonnet, person: tc.person}}}
+			got, err := m.conversationModel(context.Background(), "org", "conv")
+			if err != nil {
+				t.Fatalf("conversationModel: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("sealed for %q, want %q", got, tc.want)
 			}
 		})
 	}

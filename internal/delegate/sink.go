@@ -137,9 +137,17 @@ func (k *conversationSink) OnSession(sessionID string) error {
 // its own bound: a statement that blocks would otherwise hold the stream, and
 // a stall stop could not cancel it. A write that runs out of time is one more
 // per-row failure, not a fence trip.
+//
+// A row the stream hands over unattributed (the model's turns and its tool
+// results) is the person's the engagement acts for, since a turn belongs to
+// whoever asked for it (domain.Message.UserID). An event-triggered run acts
+// for nobody, and its rows stay unattributed.
 func (k *conversationSink) OnMessage(msg *domain.Message) error {
 	bgCtx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
 	defer cancel()
+	if msg.UserID == "" {
+		msg.UserID = k.creatorUserID
+	}
 	var id int64
 	switch {
 	case k.claimID != "":

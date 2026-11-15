@@ -270,8 +270,8 @@ type EventHandlerStore interface {
 	//     or is itself soft-deleted) — never wire a trigger to a blueprint
 	//     that isn't there.
 	//   - Insert if the team has no row for the shipped system_slug, honoring
-	//     the shipped convention (rules enabled=true, triggers enabled=false)
-	//     and initial sort_order — matching Seed.
+	//     the shipped convention (rules enabled=true unless marked Disabled,
+	//     triggers enabled=false) and initial sort_order — matching Seed.
 	//   - No-op if already equal to shipped content (no updated_at churn).
 	//   - Otherwise update only the content fields (scope_predicate_json,
 	//     name, default_priority for rules; blueprint_id, breaker_threshold,
@@ -318,10 +318,12 @@ type ShippedEventHandler struct {
 	EventType string
 	Predicate string // "" → NULL (match-all)
 
-	// Rule-only.
+	// Rule-only. Disabled ships the team's copy disabled; every other rule
+	// ships enabled.
 	Name            string
 	DefaultPriority float64
 	SortOrder       int
+	Disabled        bool
 
 	// Trigger-only. BlueprintID is the referenced blueprint's system_slug
 	// (which reuses the wrapped prompt's slug).
@@ -332,7 +334,8 @@ type ShippedEventHandler struct {
 
 // ShippedEventHandlers is the v1 default set of task rules and prompt
 // triggers. Rules ship with Enabled=true (the post-Seed default in the
-// Create path); triggers ship with Enabled=false per project convention.
+// Create path) unless marked Disabled; triggers ship with Enabled=false per
+// project convention.
 //
 // BlueprintID values on trigger entries reference shipped blueprints seeded
 // by ShippedDefaultsStore.SeedShippedIntoTeam. Its phase order is prompts →
@@ -428,6 +431,15 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		DefaultPriority: 0.60,
 		SortOrder:       7,
 	},
+	{
+		ID:              "system-rule-vulnerability-alert-opened",
+		Kind:            domain.EventHandlerKindRule,
+		EventType:       domain.EventGitHubVulnerabilityAlertOpened,
+		Predicate:       "",
+		Name:            "Vulnerable package in a tracked repository",
+		DefaultPriority: 0.60,
+		SortOrder:       8,
+	},
 
 	// ----- triggers ---------------------------------------------------------
 	{
@@ -492,6 +504,19 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		EventType:              domain.EventGitHubPRReviewChangesRequested,
 		Predicate:              `{"author_id_in":[]}`,
 		BreakerThreshold:       3,
+		MinAutonomySuitability: 0.0,
+	},
+	{
+		// Match-all: a package none of whose alerts has a patched version
+		// still delegates, and the prompt tells the run to stop with no pull
+		// request, so the task stays open for a person. A later alert on a
+		// package with a run working on it folds into that run.
+		ID:                     "system-trigger-vulnerability-remediate",
+		Kind:                   domain.EventHandlerKindTrigger,
+		BlueprintID:            "system-vulnerability-remediate",
+		EventType:              domain.EventGitHubVulnerabilityAlertOpened,
+		Predicate:              "",
+		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
 }

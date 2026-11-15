@@ -46,12 +46,37 @@ const DependabotAccessRecheck = 24 * time.Hour
 const DependabotAccessStaleAfter = 2 * DependabotAccessRecheck
 
 // RepositoryDependabotAccess is the stored answer for one repository: its
-// registry row, the answer, and when GitHub gave it.
+// registry row, the answer, and when GitHub gave it. Beside it is the state of
+// the poll's listing of the repository's open alerts, which runs only where
+// the answer is readable.
 type RepositoryDependabotAccess struct {
 	RepositoryID string
 	OrgID        string
 	Access       DependabotAlertsAccess
 	CheckedAt    time.Time
+
+	// AlertsETag is the ETag GitHub answered the poll's last listing of the
+	// repository's open alerts with, sent back as the next listing's
+	// condition. "" when there is none to send: the repository has not been
+	// listed since a team last tracked it on the org's host, some of the
+	// listing's writes did not land, or the listing took more than one page
+	// (GitHub orders the open alerts newest first, so an alert closing past
+	// the first page leaves the first page, and its ETag, unchanged).
+	AlertsETag string
+
+	// UpdatesReadAt is when the poll last read what Dependabot did about the
+	// repository's open alerts and stored what that read changed, zero when
+	// it has not. The listing does not carry it, so its schedule is its own.
+	UpdatesReadAt time.Time
+}
+
+// Listed reports whether the poll lists the repository's open alerts, which
+// it does when the answer says they can be read. A repository with no answer
+// (a nil a) is not listed. A webhook delivery marks a repository's alerts
+// only when this holds, and a pass clears a mark on alerts for which it does
+// not.
+func (a *RepositoryDependabotAccess) Listed() bool {
+	return a != nil && a.Access == DependabotAlertsReadable
 }
 
 // DependabotAccessCounts counts an org's tracked repositories on one GitHub

@@ -348,7 +348,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	result.GitHubCredential = bundle.GitHub.Credential()
 
 	// The GitHub/Jira/Linear API credential proxies the orchestrator's own
-	// GetPR + agenthost verbs route through: the orchestrator holds only the
+	// PR read + agenthost verbs route through: the orchestrator holds only the
 	// placeholder, the sidecar injects the real token on the upstream hop. The
 	// GitHub one is requested; Jira and Linear start for exactly the sources
 	// the bundle's source manifest names usable — sealed, or unresolved and
@@ -705,8 +705,9 @@ func (r *credRuntime) ghInjectorEndpoint(host string) string {
 // ghInjectorConfig builds the gh channel's per-run wiring, the sibling of
 // gitProxyConfig: the TokenSource reads the held bundle's single
 // team-set-scoped CLIToken live (so a mid-run re-seal is picked up), and the
-// two callbacks relay to the orchestrator, which holds the DB: the observed
-// write as a queued audit record, the authorization as a call.
+// three callbacks relay to the orchestrator, which holds the DB: the observed
+// write as a queued audit record, the object a read addressed as a queued
+// record of the run's touch, the authorization as a call.
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
@@ -759,6 +760,25 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			args.GraphQL = ghWriteFactsToWire(w.GraphQL)
 			r.recordAudit(agentproc.OpRecordGHWrite, args)
 		},
+		ObserveRead: func(_ context.Context, read ghinjector.ObservedRead) {
+			// Queued like a write's record: the read already returned, and the
+			// orchestrator holds the DB the run's touched entities live in.
+			op, args := agenthost.GHChannelReadRecord(read)
+			r.recordAudit(op, args)
+		},
+		// Read from the held bundle per request, so the set a `workspace add`
+		// re-seals is in force on the next one.
+		Repositories: r.ghChannelRepositories,
+		DenyRepository: func(_ context.Context, d ghinjector.DeniedRepository) {
+			// Queued, not awaited: the gate decided here, and the row is a
+			// record of that decision the orchestrator writes.
+			r.recordAudit(agentproc.OpRecordGHRepositoryDenial, agentproc.RecordGHRepositoryDenialArgs{
+				Repository:   d.Name(),
+				RepositoryID: d.Identity.RepositoryID,
+				Unresolved:   d.Unresolved,
+				Path:         d.Path,
+			})
+		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
 			// A Call, not a record: the agent's request is held until the
 			// orchestrator answers, because a refusal that raced the forward
@@ -782,6 +802,34 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			return reply.Allowed
 		},
 	}
+}
+
+// ghChannelRepositories is the gh channel's repository gate's source: the
+// held bundle's authorized set, gated only for a token org. An App org's
+// CLIToken is minted for that set, so GitHub refuses what the gate would; a
+// token reaches every repository it can. No bundle yet is an error, which
+// refuses; a bundle with no GitHub half for this run's host carries no
+// credential to gate.
+func (r *credRuntime) ghChannelRepositories(context.Context) ([]ghinjector.AuthorizedRepository, bool, error) {
+	gh, ok := r.heldGitHub()
+	if !ok {
+		return nil, false, fmt.Errorf("runsidecar: gh channel: %w", credbundle.ErrNoBundle)
+	}
+	if gh == nil || gh.Mode != credbundle.GitHubModePAT {
+		return nil, false, nil
+	}
+	repos := make([]ghinjector.AuthorizedRepository, 0, len(gh.RepoIDs)+len(gh.RepoTokens))
+	for name, id := range gh.RepoIDs {
+		repos = append(repos, ghinjector.AuthorizedRepository{Name: name, ID: id})
+	}
+	// Every repository a token was minted for is in the set, so a bundle
+	// sealed without RepoIDs still names its repositories.
+	for name := range gh.RepoTokens {
+		if _, named := gh.RepoIDs[name]; !named {
+			repos = append(repos, ghinjector.AuthorizedRepository{Name: name})
+		}
+	}
+	return repos, true, nil
 }
 
 // ghWriteFactsToWire projects the classifier's GraphQL facts onto the relay

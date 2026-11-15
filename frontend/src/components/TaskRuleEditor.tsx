@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
+import EventTypeOptions from './EventTypeOptions'
 import Slider from './Slider'
 import TeamPicker from './TeamPicker'
 import type { RuleHandler, EventType } from '../types'
@@ -174,7 +175,10 @@ export default function TaskRuleEditor({
         if (priority !== rule.default_priority) body.default_priority = priority
         if (sortOrder !== rule.sort_order) body.sort_order = sortOrder
         if (enabled !== rule.enabled) body.enabled = enabled
-        if (appliesToUnowned !== rule.applies_to_unowned) body.applies_to_unowned = appliesToUnowned
+        // The watch flag is sent only where the control is shown: the route
+        // refuses true on an event type it cannot widen.
+        if (!eventWatchInert && appliesToUnowned !== rule.applies_to_unowned)
+          body.applies_to_unowned = appliesToUnowned
 
         // Predicate: compare serialised forms, send the object.
         if (predicateJSON !== originalPredicateJSON) {
@@ -197,9 +201,9 @@ export default function TaskRuleEditor({
           default_priority: priority,
           sort_order: sortOrder,
           enabled,
-          applies_to_unowned: appliesToUnowned,
           team_id: effectiveTeam,
         }
+        if (!eventWatchInert) body.applies_to_unowned = appliesToUnowned
         if (hasPredicate) {
           body.scope_predicate = predicate
         }
@@ -231,6 +235,7 @@ export default function TaskRuleEditor({
     sortOrder,
     enabled,
     appliesToUnowned,
+    eventWatchInert,
     effectiveTeam,
     base,
     isEdit,
@@ -318,23 +323,19 @@ export default function TaskRuleEditor({
                     className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <option value="">Select event type…</option>
-                    {eventTypes
-                      // system: is bus-only and never routed. An
-                      // unavailable source is hidden for a different reason:
-                      // its events cannot reach this org at all, so a rule
-                      // bound to one would wait forever. The row being
-                      // EDITED is kept regardless — event_type is immutable,
-                      // so dropping it would blank the control on exactly
-                      // the rule the reader opened to fix.
-                      .filter(
+                    {/* system: is bus-only and never routed. An unavailable
+                        source is hidden for a different reason: its events
+                        cannot reach this org at all, so a rule bound to one
+                        would wait forever. The row being EDITED is kept
+                        regardless — event_type is immutable, so dropping it
+                        would blank the control on exactly the rule the reader
+                        opened to fix. */}
+                    <EventTypeOptions
+                      eventTypes={eventTypes.filter(
                         (et) =>
                           et.source !== 'system' && (et.id === eventType || canProduce(et.source)),
-                      )
-                      .map((et) => (
-                        <option key={et.id} value={et.id}>
-                          {et.label} ({et.id})
-                        </option>
-                      ))}
+                      )}
+                    />
                   </select>
                   {eventType && !canProduce(sourceKindOf(eventType)) && (
                     <p className="text-[11px] text-ink-3 mt-1.5 italic">

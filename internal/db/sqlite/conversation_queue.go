@@ -201,7 +201,7 @@ const deferredSQL = awaitingDrivingSQL + `
 const eligibleForDrivingSQL = needsDrivingSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied over a LEFT
-// JOIN so a conversation with no blueprint parent (interactive, tomorrow)
+// JOIN so a conversation with no blueprint parent (an interactive one)
 // is not filtered out by the join itself. The rest — why a called-off
 // blueprint drives nothing and is checked on both of its columns, why
 // a blueprint drives only the one conversation its `current_step_index`
@@ -302,11 +302,12 @@ func EpisodeJailLossesSQL(convAlias string) string {
 // conversation carries the owning team for the capture writers. The claim
 // identity fields (ExecutorID/ClaimedAt) and the episode counts are hydrated from the
 // freshly minted claims row, not this projection.
-const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
+var conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
 	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
 	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
-	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index`
+	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index,
+	` + db.ConversationHasRunSQL("r")
 
 // insertConversation is the mint a delegation conversation is written by. It
 // takes the queryer because it always runs on the transaction that also
@@ -583,7 +584,7 @@ func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, or
 // them in COALESCE strips the declared column type the driver needs to
 // hand back a time.Time, so the scan would see a raw string.
 const awaitingCredentialsCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.team_id, ''), COALESCE(r.task_id, ''),
-	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
+	COALESCE(cl.id, ''), COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
 	COALESCE(cl.cred_pubkey, '')`
 
 func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversationID string) (db.AwaitingCredentialsConversation, bool, error) {
@@ -600,7 +601,7 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = ? AND r.id = ?
-	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
+	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
 	if err == sql.ErrNoRows {
 		return db.AwaitingCredentialsConversation{}, false, nil
 	}
@@ -688,7 +689,7 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 			claimedAt sql.NullTime
 			startedAt time.Time
 		)
-		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		r.ClaimedAt = startedAt
@@ -1784,7 +1785,7 @@ func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

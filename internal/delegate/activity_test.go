@@ -51,8 +51,8 @@ func TestActivityTimings(t *testing.T) {
 	if sidecarOpDeadline <= 60*time.Second {
 		t.Errorf("sidecar operation deadline %s is not above the broker's 60s call timeout", sidecarOpDeadline)
 	}
-	if fetchPROpDeadline <= 30*time.Second {
-		t.Errorf("fetch_pr operation deadline %s is not above the GitHub client's 30s timeout", fetchPROpDeadline)
+	if setupFetchOpDeadline <= 30*time.Second {
+		t.Errorf("setup fetch operation deadline %s is not above the GitHub client's 30s timeout", setupFetchOpDeadline)
 	}
 	// An injected tool bound keeps the socket above it.
 	if got := (activityTimings{toolCall: time.Second}).toolSocket(); got <= time.Second {
@@ -476,7 +476,7 @@ func (p *silentProvider) Stream(ctx context.Context, _ inference.Request) (*infe
 func (f stallFixture) runNative(t *testing.T, provider agentloop.Provider, tools agentloop.ToolHost) agentloop.Result {
 	t.Helper()
 	transcript := newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conversationID, f.claimID)
-	if _, err := transcript.Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "do the work")); err != nil {
+	if _, err := transcript.Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "do the work", domain.TurnSettings{})); err != nil {
 		t.Fatalf("seed the mission: %v", err)
 	}
 	timings := f.s.resolvedActivityTimings()

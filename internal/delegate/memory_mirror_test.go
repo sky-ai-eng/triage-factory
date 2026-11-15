@@ -378,10 +378,9 @@ func TestProcessCompletion_ConclusionFilesWhatTheLastTurnWrote(t *testing.T) {
 	// The last turn revises the file and concludes without calling another tool.
 	writeAgentMemory(t, cwd, "what the run actually concluded")
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", "")
-	if parked || fenced {
-		t.Fatalf("processCompletion(finish) = (parked %v, fenced %v), want (false, false)", parked, fenced)
+	if fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", ""); fenced {
+		t.Fatal("processCompletion(finish) reported fenced, want a recorded conclusion")
 	}
 
 	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "what the run actually concluded" {

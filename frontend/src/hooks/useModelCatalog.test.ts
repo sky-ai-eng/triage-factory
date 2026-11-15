@@ -25,8 +25,8 @@ function stubModels(read: () => ModelCatalogEntry[] | 'fail') {
 
 const catalog: ModelCatalogEntry[] = [
   {
-    key: 'claude-haiku-4-5-20251001',
-    display_name: 'Claude Haiku 4.5',
+    key: 'claude-haiku-5-5',
+    display_name: 'Claude Haiku 5.5',
     provider: 'anthropic',
     enabled: true,
   },
@@ -46,10 +46,7 @@ describe('useModelCatalog', () => {
     await waitFor(() => expect(result.current.loaded).toBe(true))
     // The org's enable-set is what a picker may offer — a disabled model is
     // not a choice, so it never reaches the options.
-    expect(result.current.models.map((m) => m.key)).toEqual([
-      'claude-haiku-4-5-20251001',
-      'claude-sonnet-5',
-    ])
+    expect(result.current.models.map((m) => m.key)).toEqual(['claude-haiku-5-5', 'claude-sonnet-5'])
   })
 
   it('shares one read across every mounted picker', async () => {

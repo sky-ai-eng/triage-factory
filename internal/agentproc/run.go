@@ -57,6 +57,11 @@ type RunOptions struct {
 	// Model is passed via --model. Empty omits the flag.
 	Model string
 
+	// Effort is the reasoning effort, one of domain.EffortLevels, passed via
+	// --effort. Empty omits the flag, which leaves it at Claude Code's
+	// default.
+	Effort string
+
 	// PermissionMode is the Claude Code permission posture used when the query
 	// starts. Empty means "default" — the allowlist decides, and an
 	// off-allowlist call is prompted or denied (see BuildArgs for why it is

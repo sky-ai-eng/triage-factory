@@ -46,7 +46,7 @@ type StartProxiesBody struct {
 	GitEnabled bool `json:"git_enabled"`
 
 	// GitHubAPIEnabled requests the GitHub REST credential proxy — the one
-	// the orchestrator's own GetPR + agenthost gh verbs route through so they
+	// the orchestrator's own PR read + agenthost gh verbs route through so they
 	// hold only a placeholder, never the real token. The REST mount is derived
 	// sidecar-side from the bundle's BaseURL.
 	GitHubAPIEnabled bool `json:"github_api_enabled,omitempty"`
@@ -86,7 +86,7 @@ type AgentHostInfo struct {
 // sandbox env entries the orchestrator stamps into the OCI spec so the agent
 // reaches the sidecar's proxies (proxy URLs + per-run placeholder tokens),
 // exactly the slice startProxiesForSandbox used to return in-process, plus
-// the coordinates the orchestrator needs to route its OWN GetPR/agenthost
+// the coordinates the orchestrator needs to route its OWN PR read/agenthost
 // REST calls through the sidecar's API proxies (empty when not requested).
 type StartProxiesResult struct {
 	Env []string `json:"env"`
@@ -126,9 +126,9 @@ type StartProxiesResult struct {
 
 	// GitProxyURL / GitProxyToken are the sidecar's git-over-HTTPS proxy
 	// address and the per-run placeholder the orchestrator presents to it, so
-	// the orchestrator's OWN pre-sandbox clone (GetPR's worktree materialize)
-	// routes through the same proxy the jailed agent uses — holding only the
-	// placeholder while the real GitHub token stays in the sidecar. Empty when
+	// the orchestrator's OWN pre-sandbox clone routes through the same proxy
+	// the jailed agent uses — holding only the placeholder while the real
+	// GitHub token stays in the sidecar. Empty when
 	// GitEnabled was false (a prompt-only / Jira-only run pre-clones nothing).
 	GitProxyURL   string `json:"git_proxy_url,omitempty"`
 	GitProxyToken string `json:"git_proxy_token,omitempty"`

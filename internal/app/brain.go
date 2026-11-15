@@ -218,10 +218,11 @@ func (a *App) startBrain(term int64) {
 	// deck, a retired repository): no close relation runs for those, so one
 	// sweeper resolves them.
 	go notify.RunClosedEntitySweep(brainCtx, a.stores.Notifications, notify.ClosedEntitySweepInterval)
-	// A delegated run's paused notification opens where the run parks, on
-	// whichever process parked it, and resolves here once the run leaves the
-	// park by any door.
-	go delegate.RunPausedConversationSync(brainCtx, a.stores.Conversations, delegate.DefaultPausedConversationSyncInterval)
+	// A delegated run's failure and paused notifications, posted from the
+	// conversation rows wherever the run failed or parked, and the paused one
+	// resolved once the run leaves the park by any door. The process the run
+	// ends on rings delegatorNoticeOwed; this is what answers it.
+	go a.delegatorNotices.Run(brainCtx)
 	// Orphan park: mid-flight conversations the claim gate will never drive
 	// again, under a run that was called off or on a step their run moved
 	// past. One sweeper across every org; the dispatchers, which start on

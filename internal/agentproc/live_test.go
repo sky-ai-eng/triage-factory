@@ -255,3 +255,86 @@ func TestLiveRun_SendBlocksRefusesEmpty(t *testing.T) {
 		t.Errorf("refused send still wrote %q", stdin.String())
 	}
 }
+
+// TestLiveRun_SetSettingsWaitsForTheWrapper: SetSettings returns only once
+// the wrapper answers its set_settings, and the process reports the new
+// settings only when the answer says they applied. A refused move, a process
+// that ends first, a caller that gives up, and a wrapper that never answers
+// are each an error and leave the old settings.
+func TestLiveRun_SetSettingsWaitsForTheWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		timeout            time.Duration
+		answer             func(l *LiveRun, id string, cancel context.CancelFunc)
+		wantErr            bool
+		wantModel, wantEff string
+	}{
+		{"applied", 0, func(l *LiveRun, id string, _ context.CancelFunc) {
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":true}`)
+		}, false, "opus", "max"},
+		{"refused", 0, func(l *LiveRun, id string, _ context.CancelFunc) {
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":false,"error":"no such model"}`)
+		}, true, "haiku", "low"},
+		{"the process ended first", 0, func(l *LiveRun, _ string, _ context.CancelFunc) { close(l.done) }, true, "haiku", "low"},
+		{"the caller gave up", 0, func(_ *LiveRun, _ string, cancel context.CancelFunc) { cancel() }, true, "haiku", "low"},
+		{"no answer in time", 250 * time.Millisecond, func(*LiveRun, string, context.CancelFunc) {}, true, "haiku", "low"},
+		{"an answer after the wait is over", 250 * time.Millisecond, func(l *LiveRun, id string, _ context.CancelFunc) {
+			time.Sleep(400 * time.Millisecond)
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":true}`)
+		}, true, "haiku", "low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := newSyncBuffer()
+			l := &LiveRun{
+				stdin:           captureWriteCloser{stdin},
+				ready:           make(chan struct{}),
+				done:            make(chan struct{}),
+				model:           "haiku",
+				effort:          "low",
+				settingsTimeout: tc.timeout,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errc := make(chan error, 1)
+			go func() { errc <- l.SetSettings(ctx, "opus", "max") }()
+
+			var sent struct {
+				Kind, ID, Model, Effort string
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for sent.ID == "" {
+				if time.Now().After(deadline) {
+					t.Fatal("no set_settings was written")
+				}
+				_ = json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &sent)
+				time.Sleep(time.Millisecond)
+			}
+			if sent.Kind != "set_settings" || sent.Model != "opus" || sent.Effort != "max" {
+				t.Fatalf("control = %+v, want set_settings opus max", sent)
+			}
+			select {
+			case err := <-errc:
+				t.Fatalf("SetSettings returned %v before the wrapper answered", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			tc.answer(l, sent.ID, cancel)
+			if err := <-errc; (err != nil) != tc.wantErr {
+				t.Fatalf("SetSettings = %v, want error %v", err, tc.wantErr)
+			}
+			if model, effort := l.Settings(); model != tc.wantModel || effort != tc.wantEff {
+				t.Errorf("settings = (%s, %s), want (%s, %s)", model, effort, tc.wantModel, tc.wantEff)
+			}
+		})
+	}
+}
+
+// settleAnswer hands line to the run as the reader would: parsed as a
+// control line, then settled.
+func (l *LiveRun) settleAnswer(t *testing.T, line string) {
+	t.Helper()
+	ctl, ok := parseControlLine([]byte(line))
+	if !ok || ctl.Subtype != "settings_result" {
+		t.Fatalf("%s is not a settings_result", line)
+	}
+	l.settleSettings(ctl)
+}

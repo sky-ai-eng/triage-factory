@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,10 +28,18 @@ import (
 //	{"kind":"user_message","blocks":[{"type":"text","text":"..."}, ...]}
 //	{"kind":"interrupt"}
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
+//	{"kind":"set_settings","id":"<id>","model":"...","effort":"low|medium|high|xhigh|max|"}
 //	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
 //	{"kind":"tool_batch_reply","id":"<id>","context":"...","stop":true|false}
 //	{"kind":"tool_call_reply","id":"<id>","content":"...","is_error":true|false}
 //	{"kind":"end"}
+//
+// A set_settings moves the process's next turn onto a model and an effort,
+// an empty effort being Claude Code's default, and is answered by a
+// settings_result with the same id saying whether both applied. The wrapper
+// handles control lines one at a time, so a set_settings written before a
+// user_message is in effect for the turn that message starts. A turn already
+// running keeps the settings it started with.
 //
 // A user_message spells its content one way or the other — text is a plain
 // string turn, blocks a block-content one — and either is one turn. Nothing
@@ -47,6 +56,7 @@ import (
 //	{"type":"control","subtype":"ready"}
 //	{"type":"control","subtype":"permission_request","tool_call_id":"<id>","tool_name":"...","input":{...},"title":"...","display_name":"...","description":"..."}
 //	{"type":"control","subtype":"interrupted"}
+//	{"type":"control","subtype":"settings_result","id":"<id>","applied":true|false,"error":"..."}
 //	{"type":"control","subtype":"tool_batch","id":"<id>","tool_call_ids":["<tool_use id>", ...]}
 //	{"type":"control","subtype":"tool_batch_result","id":"<id>","delivered":true|false}
 //	{"type":"control","subtype":"tool_call","id":"<id>","tool_call_id":"<tool_use id>","tool_name":"...","input":{...}}
@@ -125,6 +135,10 @@ const (
 	// (both run on it) where SIGKILL'ing the subprocess won't free it — so
 	// Close returns rather than blocking the caller forever.
 	closeKillTimeout = 5 * time.Second
+	// settingsAckTimeout bounds SetSettings' wait for the wrapper's
+	// settings_result. Both calls it answers are control requests to the
+	// Claude Code child, so a wait this long means the process is stuck.
+	settingsAckTimeout = 30 * time.Second
 )
 
 // ErrRunClosing is what Send returns once Close has begun. The wrapper's
@@ -225,6 +239,17 @@ type LiveRun struct {
 	result    *Result
 	sessionID string
 	stderr    string
+	// model and effort are what the process's next turn runs on: the
+	// launch's, until a SetSettings the wrapper confirms moves them.
+	model, effort string
+
+	// settingsWaits holds, by control id, the channel each SetSettings waits
+	// on for its settings_result. settingsSeq numbers the ids, and
+	// settingsTimeout bounds the wait (settingsAckTimeout when zero).
+	settingsMu      sync.Mutex
+	settingsWaits   map[string]chan error
+	settingsSeq     atomic.Uint64
+	settingsTimeout time.Duration
 }
 
 // RunInteractive spawns the agent in streaming-input mode and returns a
@@ -317,6 +342,8 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		tfTools:   tfToolsByName(opts.TFTools),
 		tfRun:     tooldefs.Run{OrgID: opts.OrgID, ConversationID: opts.ConversationID, ClaimID: opts.ClaimID},
 		runCtx:    runCtx,
+		model:     opts.Model,
+		effort:    opts.Effort,
 	}
 
 	// opts travels whole because the teardown stamp at the end of the loop
@@ -410,6 +437,83 @@ func (l *LiveRun) SetMode(ctx context.Context, mode string) error {
 		return err
 	}
 	return l.writeControl(map[string]any{"kind": "set_mode", "mode": mode})
+}
+
+// SetSettings moves the process's next turn onto model and effort ("" for
+// Claude Code's default effort), and returns once the wrapper reports that
+// both applied, so a message sent after it starts a turn on them. An error
+// means the process may still be on its old settings or partly moved: the
+// caller sends it no turn and lets it go. Settings reports the new ones only
+// after a confirmed move.
+func (l *LiveRun) SetSettings(ctx context.Context, model, effort string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	id := strconv.FormatUint(l.settingsSeq.Add(1), 10)
+	ack := make(chan error, 1)
+	l.settingsMu.Lock()
+	if l.settingsWaits == nil {
+		l.settingsWaits = map[string]chan error{}
+	}
+	l.settingsWaits[id] = ack
+	l.settingsMu.Unlock()
+	defer func() {
+		l.settingsMu.Lock()
+		delete(l.settingsWaits, id)
+		l.settingsMu.Unlock()
+	}()
+
+	if err := l.writeControl(map[string]any{"kind": "set_settings", "id": id, "model": model, "effort": effort}); err != nil {
+		return err
+	}
+	timeout := l.settingsTimeout
+	if timeout <= 0 {
+		timeout = settingsAckTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-ack:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.done:
+		return errors.New("live run finished before it confirmed the settings")
+	case <-timer.C:
+		return fmt.Errorf("the wrapper did not confirm the settings within %s", timeout)
+	}
+	l.mu.Lock()
+	l.model, l.effort = model, effort
+	l.mu.Unlock()
+	return nil
+}
+
+// settleSettings hands a settings_result to the SetSettings waiting on its id.
+// One no SetSettings waits on any more, after a timeout, is dropped.
+func (l *LiveRun) settleSettings(ctl controlLine) {
+	l.settingsMu.Lock()
+	ack, ok := l.settingsWaits[ctl.ID]
+	l.settingsMu.Unlock()
+	if !ok {
+		return
+	}
+	var err error
+	if !ctl.Applied {
+		err = fmt.Errorf("the wrapper could not apply the settings: %s", ctl.Error)
+	}
+	select {
+	case ack <- err:
+	default:
+	}
+}
+
+// Settings is the model and effort the process's next turn runs on.
+func (l *LiveRun) Settings() (model, effort string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.model, l.effort
 }
 
 // Close ends the run gracefully: it tells the wrapper to end its input
@@ -625,6 +729,8 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				switch ctl.Subtype {
 				case "ready":
 					l.markReady()
+				case "settings_result":
+					l.settleSettings(ctl)
 				case "interrupted":
 					// The next result closes out the interrupted turn;
 					// label it so callers can tell an interrupt apart
@@ -854,6 +960,9 @@ type controlLine struct {
 	OK      *bool
 	Plugins []domain.LoadedPlugin
 	Failed  []domain.PluginFailure
+	// Applied and Error are a settings_result's answer.
+	Applied bool
+	Error   string
 }
 
 // parseControlLine reports whether line is a control envelope and, if
@@ -875,6 +984,8 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		OK          *bool                  `json:"ok"`
 		Plugins     []domain.LoadedPlugin  `json:"plugins"`
 		Failed      []domain.PluginFailure `json:"failed"`
+		Applied     bool                   `json:"applied"`
+		Error       string                 `json:"error"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return controlLine{}, false
@@ -896,6 +1007,8 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		OK:          raw.OK,
 		Plugins:     raw.Plugins,
 		Failed:      raw.Failed,
+		Applied:     raw.Applied,
+		Error:       raw.Error,
 	}, true
 }
 

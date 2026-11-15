@@ -11,7 +11,9 @@ import (
 // pending refresh marks as the poller read them: a pull request a mark names is
 // refreshed whatever the refresh gate says, and a base branch a mark names is
 // checked by the branch watch. A mark names a pull request by its number or by
-// a head SHA its stored snapshot is at, in the repository the mark is on.
+// a head SHA its stored snapshot is at, in the repository the mark is on. A
+// mark naming a repository's Dependabot alerts names nothing these passes
+// refresh; the poller hands it to the alert listing (AlertListing.Marked).
 //
 // The poller clears the marks after the passes that honored them return; the
 // tracker never clears one.

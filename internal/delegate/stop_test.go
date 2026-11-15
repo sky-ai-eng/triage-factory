@@ -416,7 +416,7 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 	}
 	s.settleUnclaimedStops(context.Background())
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{}); err != nil {
 		t.Fatalf("resume after stop: %v (a stopped step must stay resumable)", err)
 	}
 
@@ -594,7 +594,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 
 	// 3. The user's follow-up, a minute later. It has to be accepted off the
 	// snapshot alone, and it has to be claimable.
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up after a cross-pod stop: %v", err)
 	}
 	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -642,7 +642,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	}
 	var content string
 	if err := database.QueryRow(
-		`SELECT content FROM messages WHERE conversation_id = ? AND is_error = 1`, conversationID,
+		`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ?`, conversationID, domain.MessageSubtypeStopNote,
 	).Scan(&content); err != nil {
 		t.Fatalf("read the failure row: %v", err)
 	}

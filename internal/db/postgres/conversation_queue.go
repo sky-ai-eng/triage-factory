@@ -342,8 +342,8 @@ const deferredSQL = awaitingDrivingSQL + `
 const eligibleForDrivingSQL = needsDrivingSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied as a LEFT JOIN
-// rather than an inner one: a conversation with no blueprint parent —
-// interactive, tomorrow — must not be filtered out by the join at all.
+// rather than an inner one: a conversation with no blueprint parent, an
+// interactive one, must not be filtered out by the join at all.
 //
 // A blueprint that was CALLED OFF drives nothing, ever. That is the
 // `cancel_requested`/`cancelled` pair: the signal a cancel raises while the
@@ -586,7 +586,8 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	COALESCE((SELECT prior.outcome FROM claims prior
 	          WHERE prior.conversation_id = candidate.id AND prior.released_at IS NOT NULL
 	          ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.id DESC
-	          LIMIT 1), '') AS last_hand_back_outcome`
+	          LIMIT 1), '') AS last_hand_back_outcome,
+	` + db.ConversationHasRunSQL("candidate") + ` AS has_run`
 
 // orgActiveCTE counts each org's engagements rather than its stored
 // statuses: an unreleased claim is an occupied slot, a warm one included.
@@ -1561,10 +1562,10 @@ func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, or
 
 // awaitingCredentialsCols is the shared claim-identity projection: the
 // conversation joined to its active (unreleased) claim, with the claim's
-// executor/boot/pubkey and claimed_at falling back to started_at for a
+// id/executor/boot/pubkey and claimed_at falling back to started_at for a
 // never-claimed row.
 const awaitingCredentialsCols = `r.id::text, r.org_id::text, COALESCE(r.type, ''), COALESCE(r.team_id::text, ''), COALESCE(r.task_id::text, ''),
-	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
+	COALESCE(cl.id::text, ''), COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
 
 func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversationID string) (db.AwaitingCredentialsConversation, bool, error) {
 	var r db.AwaitingCredentialsConversation
@@ -1573,7 +1574,7 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = $1 AND r.id = $2
-	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
+	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.AwaitingCredentialsConversation{}, false, nil
 	}
@@ -1625,11 +1626,17 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	// property of the engagement, not the surface, so this one scan is the
 	// whole provisioner's input and the caller routes on the type it
 	// returns.
+	//
+	// A parked claim that already holds a bundle is left out: a claim
+	// publishes its sidecar key once and its bundle row is sealed to that key,
+	// so the bundle is the one the claim is waiting on, and sealing again
+	// would overwrite it and mint installation tokens nothing revokes.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
 		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE cl.phase = 'awaiting_credentials'
+		  AND NOT EXISTS (SELECT 1 FROM claim_credentials cc WHERE cc.claim_id = cl.id)
 		ORDER BY cl.claimed_at ASC, cl.id ASC
 	`)
 	if err != nil {
@@ -1674,7 +1681,7 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 	var out []db.AwaitingCredentialsConversation
 	for rows.Next() {
 		var r db.AwaitingCredentialsConversation
-		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -2243,7 +2250,7 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
 		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks,
-		&r.JailLosses, &r.LastHandBackOutcome)
+		&r.JailLosses, &r.LastHandBackOutcome, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

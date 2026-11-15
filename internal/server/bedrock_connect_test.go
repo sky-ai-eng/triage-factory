@@ -203,7 +203,7 @@ func TestBedrockDelete(t *testing.T) {
 	rec := putBedrock(t, s, "bearer", map[string]any{
 		"bearer_token": "  bdrk-token-1  ",
 		"region":       "us-west-2",
-		"model_id":     "us.anthropic.claude-haiku-4-5",
+		"model_id":     "us.anthropic.claude-haiku-5-5",
 		"base_url":     "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com/",
 	})
 	if rec.Code != http.StatusOK {
@@ -215,7 +215,7 @@ func TestBedrockDelete(t *testing.T) {
 	for k, want := range map[string]string{
 		integrations.KeyAWSBearerTokenBedrock: "bdrk-token-1",
 		integrations.KeyAWSRegion:             "us-west-2",
-		integrations.KeyBedrockModelID:        "us.anthropic.claude-haiku-4-5",
+		integrations.KeyBedrockModelID:        "us.anthropic.claude-haiku-5-5",
 		// The trailing slash is stripped: the proxy's upstream validation
 		// rejects a path component.
 		integrations.KeyBedrockBaseURL: "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com",
@@ -224,7 +224,7 @@ func TestBedrockDelete(t *testing.T) {
 			t.Errorf("stored %s = %q, want %q", k, got, want)
 		}
 	}
-	if view := getOrgBedrockView(t, s); !view.Has || view.Method != "bearer" || view.Region != "us-west-2" || view.ModelID != "us.anthropic.claude-haiku-4-5" {
+	if view := getOrgBedrockView(t, s); !view.Has || view.Method != "bearer" || view.Region != "us-west-2" || view.ModelID != "us.anthropic.claude-haiku-5-5" {
 		t.Errorf("view = %+v, want bearer with the stored region and model echoed", view)
 	}
 

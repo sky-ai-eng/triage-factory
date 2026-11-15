@@ -104,8 +104,9 @@ type Request struct {
 	// shares. Empty sends one block.
 	SystemAddendum string
 
-	// Effort is the reasoning effort ("minimal" | "low" | "medium" | "high" |
-	// "none"). Empty leaves reasoning at the provider default.
+	// Effort is the reasoning effort, one of TF's five levels
+	// (domain.EffortLevels: low, medium, high, xhigh and max). Empty leaves
+	// reasoning at the provider default.
 	Effort string
 	// MaxTokens caps the completion. Zero resolves the per-provider budget
 	// policy (MaxOutputTokens) against this request's provider and model —
@@ -295,7 +296,8 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 		mt = MaxOutputTokens(req.Provider, req.Model)
 	}
 	params.MaxCompletionTokens = &mt
-	if req.Temperature != nil {
+	// A model that refuses sampling parameters answers any temperature with a 400.
+	if req.Temperature != nil && acceptsSampling(req.Model) {
 		temp := *req.Temperature
 		params.Temperature = &temp
 	}

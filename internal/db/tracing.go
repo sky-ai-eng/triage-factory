@@ -9,6 +9,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // PoolAdmin, PoolApp, and PoolLocal name the connection pools a TF process
@@ -60,6 +62,12 @@ func RegisterPoolMetrics(handle *sql.DB, driverName, pool string) error {
 // gauges can't end up labelled differently.
 func tracedDriverOptions(driverName, pool string) []otelsql.Option {
 	return []otelsql.Option{
+		// A failed statement records the driver's error as an exception
+		// event, and a Postgres error message can repeat an input value.
+		// otelsql's RecordError hook can only skip the event and the error
+		// status together, so the scrubbed provider drops the text and
+		// keeps the status.
+		otelsql.WithTracerProvider(telemetry.ScrubbedTracerProvider()),
 		otelsql.WithAttributes(append(dbSystemAttrs(driverName), poolKey.String(pool))...),
 		// The four flags below are all "this would drown out the real
 		// spans, or mislead": a span per /readyz ping, an event per result

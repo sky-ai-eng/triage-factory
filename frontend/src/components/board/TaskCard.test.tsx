@@ -263,3 +263,20 @@ describe('TaskCard, the task’s own asks', () => {
     expect(onRetry).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('TaskCard, facts', () => {
+  it('states the facts on one readout line, a severity in its tone', () => {
+    renderCard({
+      title: 'lodash (npm)',
+      facts: [{ text: 'octo/api' }, { text: 'High', tone: 'problem' }, { text: '2 open alerts' }],
+    })
+    const line = document.querySelector('.tc-facts')
+    expect(line).toHaveTextContent('octo/apiHigh2 open alerts')
+    expect(screen.getByText('High')).toHaveAttribute('data-tone', 'problem')
+  })
+
+  it('draws no facts line without facts', () => {
+    renderCard()
+    expect(document.querySelector('.tc-facts')).toBeNull()
+  })
+})

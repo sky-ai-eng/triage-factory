@@ -590,10 +590,10 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	var err error
 	defer func() {
 		span.SetAttributes(telemetry.Outcome(res.outcome))
-		telemetry.RecordSpanError(span, err)
+		telemetry.RecordSpanError(span, err, "writing the workspace checkpoint failed")
 		span.End()
 		if err != nil {
-			delegateLog.Warn("workspace checkpoint failed; the last one written stands",
+			delegateLog.WarnContext(ctx, "workspace checkpoint failed; the last one written stands",
 				"conversation", w.conversationID, "key_id", w.keyID, "error", err)
 		}
 	}()

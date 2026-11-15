@@ -338,3 +338,42 @@ describe('deriveCard artifacts', () => {
     expect(m.pending).toEqual({ review: 1 })
   })
 })
+
+describe('deriveCard facts', () => {
+  const pkg = {
+    repo: 'octo/api',
+    ecosystem: 'npm',
+    package: 'lodash',
+    highest_severity: 'high' as const,
+    open_alert_count: 2,
+    alerts: [],
+  }
+
+  it("states a vulnerable package's repository, highest severity and alert count", () => {
+    const m = deriveCard(
+      task({ title: 'lodash (npm)', entity_kind: 'vulnerable_package', vulnerable_package: pkg }),
+      undefined,
+      undefined,
+      NOW,
+    )
+    expect(m.facts?.map((f) => f.text)).toEqual(['octo/api', 'High', '2 open alerts'])
+    expect(m.facts?.[1].tone).toBe('problem')
+  })
+
+  it('says a package whose last alert closed has none, with no severity', () => {
+    const m = deriveCard(
+      task({
+        entity_kind: 'vulnerable_package',
+        vulnerable_package: { ...pkg, highest_severity: undefined, open_alert_count: 0 },
+      }),
+      undefined,
+      undefined,
+      NOW,
+    )
+    expect(m.facts?.map((f) => f.text)).toEqual(['octo/api', 'No open alerts'])
+  })
+
+  it('gives a pull request no facts line', () => {
+    expect(deriveCard(task({ entity_kind: 'pr' }), undefined, undefined, NOW).facts).toBeUndefined()
+  })
+})

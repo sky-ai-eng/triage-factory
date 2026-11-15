@@ -582,7 +582,7 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
-			deliverablesLog.Warn("GetPR for partial-edit baseline failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+			deliverablesLog.Warn("reading the PR for a partial-edit baseline failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 			httpx.WriteUpstreamUnavailable(w, "couldn't read the current PR to apply a partial edit", err)
 			return
 		}

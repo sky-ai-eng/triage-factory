@@ -86,6 +86,14 @@ func PatchJSON[T any](v *Validation, raw json.RawMessage, field string) ([]T, Pa
 	var out []T
 	if err := dec.Decode(&out); err != nil {
 		var typeErr *json.UnmarshalTypeError
+		// A fault in an element itself, rather than in a field of it, maps to
+		// an empty path and is the list's: the list holds the wrong kind of
+		// value.
+		var path string
+		var fieldType reflect.Type
+		if errors.As(err, &typeErr) {
+			path, fieldType = jsonFieldPath(reflect.TypeFor[[]T](), typeErr.Field)
+		}
 		switch name, unknown := unknownFieldName(err); {
 		case unknown:
 			v.Add(ErrorItem{
@@ -93,8 +101,7 @@ func PatchJSON[T any](v *Validation, raw json.RawMessage, field string) ([]T, Pa
 				Message: field + " entries have no field " + strconv.Quote(name),
 				Field:   field + "[]." + name,
 			})
-		case errors.As(err, &typeErr) && typeErr.Field != "":
-			path, fieldType := jsonFieldPath(reflect.TypeFor[[]T](), typeErr.Field)
+		case typeErr != nil && path != "":
 			if fieldType == nil {
 				fieldType = typeErr.Type
 			}

@@ -189,6 +189,15 @@ func entityByKey(ctx context.Context, q queryer, orgID, source, scope, sourceID,
 		orgID, source, scope, sourceID, externalID))
 }
 
+// activeEntityByKey is the active row holding the key, or nil. Keys are unique
+// among active rows, so there is at most one.
+func activeEntityByKey(ctx context.Context, q queryer, orgID, source, scope, sourceID string) (*domain.Entity, error) {
+	return scanEntityRow(q.QueryRowContext(ctx, `
+		SELECT `+pgEntitySelectCols+` FROM entities
+		WHERE org_id = $1 AND source = $2 AND scope = $3 AND source_id = $4 AND state = 'active'`,
+		orgID, source, scope, sourceID))
+}
+
 func entityByExternalID(ctx context.Context, q queryer, orgID, source, scope, externalID string) (*domain.Entity, error) {
 	return scanEntityRow(q.QueryRowContext(ctx, `
 		SELECT `+pgEntitySelectCols+` FROM entities
@@ -332,6 +341,20 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 	return listActiveEntities(ctx, s.admin, orgID, source)
 }
 
+func (s *entityStore) ListActiveKindSystem(ctx context.Context, orgID, source, scope, kind string) ([]domain.Entity, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgEntitySelectCols+`
+		FROM entities
+		WHERE org_id = $1 AND source = $2 AND scope = $3 AND kind = $4 AND state = 'active'
+		ORDER BY last_polled_at ASC
+	`, orgID, source, scope, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntityList(rows)
+}
+
 // ListActiveTerminalCandidatesSystem selects active entities whose stored
 // snapshot already reads terminal, unpolled for at least unpolledFor, with
 // no terminating close ready, leased or parked in the queue — a parked one
@@ -400,6 +423,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		    (source = 'github' AND (
 		       snapshot_json->>'merged' = 'true'
 		       OR upper(COALESCE(snapshot_json->>'state', '')) IN ('CLOSED', 'MERGED')
+		       OR (kind = 'vulnerable_package' AND snapshot_json->'alerts' = '[]'::jsonb)
 		    ))`+jiraArm+linearArm+`
 		  )
 		ORDER BY created_at ASC, id ASC`+limitClause, args...)
@@ -489,25 +513,32 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, teamI
 // --- Mutation ---
 
 func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
-	return findOrCreateEntity(ctx, s.q, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url)
+	return findOrCreateEntity(ctx, s.q, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url, false)
 }
 
 func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
-	return findOrCreateEntity(ctx, s.admin, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url)
+	return findOrCreateEntity(ctx, s.admin, orgID, source, scope, sourceID, externalID, domain.EntityContainer{}, kind, title, url, false)
+}
+
+func (s *entityStore) FindOrCreateVulnerablePackageSystem(ctx context.Context, orgID, scope, key, title, url string) (*domain.Entity, bool, error) {
+	if err := db.ValidateVulnerablePackageEntityCreate(key); err != nil {
+		return nil, false, err
+	}
+	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderGitHub, scope, key, "", domain.EntityContainer{}, domain.EntityKindVulnerablePackage, title, url, true)
 }
 
 func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope, identifier, issueID, linearTeamID, title, url string) (*domain.Entity, bool, error) {
 	if err := db.ValidateLinearEntityCreate(identifier, issueID, linearTeamID); err != nil {
 		return nil, false, err
 	}
-	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url)
+	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url, false)
 }
 
 func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error) {
 	if err := db.ValidateJiraEntityCreate(key, issueID, project); err != nil {
 		return nil, false, err
 	}
-	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url)
+	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url, false)
 }
 
 // findOrCreateEntity is the identity rule's find-or-create. container is what
@@ -515,12 +546,16 @@ func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, 
 // Jira row's project. With it empty, such a row is found but not created. A
 // new GitHub row is created referencing its repository's registry row, and a
 // new Jira row its project's, each got or created in the same transaction as
-// the insert (db.GitHubEntityRepoRef names the repository).
-func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID string, container domain.EntityContainer, kind, title, url string) (*domain.Entity, bool, error) {
+// the insert (db.GitHubEntityRepoRef names the repository). activeOnly finds
+// only an active row by the key, so a key whose row closed gets a new one.
+func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID string, container domain.EntityContainer, kind, title, url string, activeOnly bool) (*domain.Entity, bool, error) {
 	if scope == "" {
 		return nil, false, fmt.Errorf("%w: %s %s", db.ErrEntityScopeRequired, source, sourceID)
 	}
 	find := func(q queryer) (*domain.Entity, error) {
+		if activeOnly {
+			return activeEntityByKey(ctx, q, orgID, source, scope, sourceID)
+		}
 		if externalID != "" {
 			if e, err := entityByExternalID(ctx, q, orgID, source, scope, externalID); err != nil || e != nil {
 				return e, err

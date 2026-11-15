@@ -99,13 +99,13 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 					 created_at, updated_at)
 				VALUES (
 					$1, $2, $3::uuid, NULL, 'rule', $4,
-					$5, $6::jsonb, TRUE, 'system',
+					$5, $6::jsonb, $11, 'system',
 					$7, $8, $9,
 					$10, $10
 				)
 				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
 			`, uuid.New().String(), orgID, teamID, h.EventType,
-				h.ID, pred, h.Name, h.DefaultPriority, h.SortOrder, now)
+				h.ID, pred, h.Name, h.DefaultPriority, h.SortOrder, now, !h.Disabled)
 			if err != nil {
 				return fmt.Errorf("seed event_handler rule %s: %w", h.ID, err)
 			}
@@ -665,8 +665,8 @@ func loadTeamHandlerRowPG(ctx context.Context, q queryer, orgID, teamID, slug st
 }
 
 // insertHandlerPG inserts a brand-new team copy of a shipped handler,
-// honoring the shipped enabled convention (rules enabled, triggers disabled)
-// — matches Seed.
+// honoring the shipped enabled convention (rules enabled unless marked
+// Disabled, triggers disabled) — matches Seed.
 func insertHandlerPG(ctx context.Context, q queryer, orgID, teamID string, h db.ShippedEventHandler, plan db.HandlerSyncPlan) error {
 	now := time.Now().UTC()
 	var pred any
@@ -683,11 +683,11 @@ func insertHandlerPG(ctx context.Context, q queryer, orgID, teamID string, h db.
 				 created_at, updated_at)
 			VALUES (
 				$1, $2, $3::uuid, NULL, 'rule', $4,
-				$5, $6::jsonb, TRUE, 'system',
+				$5, $6::jsonb, $11, 'system',
 				$7, $8, $9,
 				$10, $10
 			)
-		`, uuid.New().String(), orgID, teamID, h.EventType, h.ID, pred, plan.Name, plan.DefaultPriority, plan.SortOrder, now)
+		`, uuid.New().String(), orgID, teamID, h.EventType, h.ID, pred, plan.Name, plan.DefaultPriority, plan.SortOrder, now, !h.Disabled)
 		return err
 	case domain.EventHandlerKindTrigger:
 		_, err := q.ExecContext(ctx, `

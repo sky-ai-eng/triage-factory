@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 )
@@ -162,5 +163,41 @@ func TestGHChannel_WritesLeaveNoDeliverable(t *testing.T) {
 				t.Errorf("audit rows = %+v, want the write's one row", acts)
 			}
 		})
+	}
+}
+
+// TestGHChannel_CommentIsARowAnArtifactAndALink follows one `gh pr comment`
+// through everything a write through the real gh leaves: its audit row, the
+// run's artifact for the comment, and the run's link to the pull request the
+// comment is on, recorded as produced. The observation is gh's own form: the
+// request names the pull request by node id, and the response's url locates
+// the comment.
+func TestGHChannel_CommentIsARowAnArtifactAndALink(t *testing.T) {
+	conn, stores, info := newCaptureStoresConn(t, true)
+	ctx := context.Background()
+	obs := graphQLWrite("addComment", "PR_kw42", "7", "", "https://github.com/octo/repo/pull/42#issuecomment-7")
+	obs.Identity = domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_kw42", Kind: domain.EntityKindPullRequest}
+
+	RecordGHChannelWrite(ctx, stores, info, obs, domain.CredentialGitHubApp)
+
+	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", testScope("github"), "octo/repo#42")
+	if err != nil || ent == nil {
+		t.Fatalf("the comment's pull request has no entity: ent=%v err=%v", ent, err)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 || acts[0].Action != domain.ActionCommentPosted || acts[0].EntityID != ent.ID ||
+		acts[0].ObjectKind != domain.ObjectKindComment ||
+		acts[0].ObjectKey != domain.GitHubCommentKey(domain.GitHubIssueComment, 7) {
+		t.Fatalf("audit rows = %+v, want the one comment_posted row naming the comment on the pull request", acts)
+	}
+	arts, total, err := stores.Artifacts.ListByConversationSystem(ctx, info.OrgID, info.ConversationID, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	if total != 1 || len(arts) != 1 || arts[0].ObjectKind != domain.ObjectKindComment || arts[0].EntityID != ent.ID {
+		t.Errorf("artifacts = %+v (total %d), want the comment, on the pull request", arts, total)
+	}
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleProduced {
+		t.Errorf("link role = %q, want %q", role, domain.MemoryRoleProduced)
 	}
 }

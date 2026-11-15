@@ -30,11 +30,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 )
 
 // llmResolver is the narrow slice of internal/cred/llmcred the provisioner mints
@@ -45,6 +46,11 @@ type llmResolver interface {
 }
 
 var log = slog.Default().With("component", "credprovision")
+
+// sealMintConcurrency is how many of one seal's GitHub token requests are in
+// flight at once, so a conversation authorized over many repositories does not
+// open a request per repository against the org's installation all at once.
+const sealMintConcurrency = 4
 
 // DefaultAwaitingSweepInterval is the backstop-sweep cadence for
 // conversations whose active claim is parked in phase='awaiting_credentials'
@@ -89,6 +95,9 @@ type Manager struct {
 	// deploymentSigner is the deployment's commit signer, from this control
 	// pod's config; nil seals none. Only its public half reaches a bundle.
 	deploymentSigner *commitsigner.DeploymentSigner
+	// onSealed is told of each seal an executor's credential wait may be
+	// waiting on, once its bundle is written. nil tells nothing.
+	onSealed func(ctx context.Context, orgID, conversationID string)
 
 	// sources overrides the availability resolve (availability) for a test
 	// that drives a whole provision over fake stores. nil in production.
@@ -124,11 +133,29 @@ func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolve
 	}
 }
 
+// Reason names what ran a seal. A cold resume can be sealed by more than one
+// of them within seconds, and the span is how a trace tells them apart.
+type Reason string
+
+const (
+	// ReasonCredRequest is a cred_request notification, rung when a claim
+	// parks awaiting credentials and when a running conversation records a
+	// worktree in a repository it held none in.
+	ReasonCredRequest Reason = "cred_request"
+	// ReasonAwaitingSweep is the backstop sweep over claims parked in
+	// awaiting_credentials, which seals every one of them, including a claim
+	// whose cred_request seal is still running or not yet picked up.
+	ReasonAwaitingSweep Reason = "awaiting_sweep"
+	// ReasonRefreshSweep is the sweep that re-seals an active claim's aging
+	// or unresolved bundle.
+	ReasonRefreshSweep Reason = "refresh_sweep"
+)
+
 // ProvisionForConversation resolves conversationID's credentials and seals them to its
 // current claimant's published pubkey, writing claim_credentials. Called
-// synchronously off the executor's cred_request notification (the fast
-// path) and by both sweeps (the backstop / refresh paths) — idempotent and
-// safe to call repeatedly for the same conversation.
+// synchronously off a cred_request notification (the fast path) and by both
+// sweeps (the backstop / refresh paths), each naming itself as reason —
+// idempotent and safe to call repeatedly for the same conversation.
 //
 // A no-op (nil error, no write) when the conversation isn't currently claimed by
 // anyone, or the claiming instance hasn't published a pubkey — there is
@@ -136,7 +163,7 @@ func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolve
 // (reaped, requeued) between the notification firing and this handler
 // running; the executor's own timeout/requeue path is what recovers that
 // window, not this function surfacing an error.
-func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversationID string) (err error) {
+func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversationID string, reason Reason) (err error) {
 	// The brain's half of the credential handshake, as its OWN root. It is
 	// deliberately not joined to the executor's awaiting-credentials span:
 	// the tf_ctl doorbell that usually triggers this is lossy by design (the
@@ -145,11 +172,12 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	// with no requester at all. conversation.id is the join; put the same id
 	// in a Tempo query and both sides come back.
 	ctx, span := tracer.Start(ctx, "credentials.provision", trace.WithNewRoot(),
-		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
+		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID), telemetry.Reason(string(reason))))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "sealing the credentials failed")
+			log.WarnContext(ctx, "sealing the claim's credentials failed",
+				"conversation", conversationID, "org", orgID, "reason", reason, "error", err)
 		}
 		span.End()
 	}()
@@ -258,10 +286,18 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	if err != nil {
 		return fmt.Errorf("credprovision: seal bundle for conversation %s: %w", conversationID, err)
 	}
-	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed, sources); err != nil {
+	// By claim rather than by conversation: the key sealed to belongs to the
+	// claim read above, and the conversation can hold another claim by now.
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, claim.ClaimID, claim.ExecutorID, inst.BootEpoch, sealed, sources); err != nil {
 		return fmt.Errorf("credprovision: write bundle for conversation %s: %w", conversationID, err)
 	}
 	log.Debug("provisioned claim credential bundle", "conversation", conversationID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
+	// A refresh sweep re-seals an engagement already running: nothing waits
+	// on that bundle, and the sidecar takes it up through its own refresh
+	// relay.
+	if m.onSealed != nil && (reason == ReasonCredRequest || reason == ReasonAwaitingSweep) {
+		m.onSealed(ctx, orgID, conversationID)
+	}
 	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
 }
@@ -448,10 +484,21 @@ func githubEntry(gh *credbundle.GitHubCreds) domain.SourceEntry {
 // on an Anthropic key seals the Anthropic key — never both, and never the org's
 // preferred provider over the conversation's own.
 //
+// It chooses the way the claim does: the newest person message's model when a
+// person row recorded one, since that is what the claim runs on, and the
+// conversation's own model otherwise.
+//
 // A read failure is propagated rather than degraded to "no model". Resolving
 // without one falls back to the org's configured provider, which for an org
 // holding both would seal material this conversation may not be able to use.
 func (m *Manager) conversationModel(ctx context.Context, orgID, conversationID string) (string, error) {
+	last, err := m.stores.Conversations.NewestPersonMessageSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("credprovision: read conversation %s's newest person message: %w", conversationID, err)
+	}
+	if last != nil && last.Model != "" {
+		return last.Model, nil
+	}
 	conv, err := m.stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return "", fmt.Errorf("credprovision: read conversation %s: %w", conversationID, err)
@@ -495,12 +542,12 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 		return nil, fmt.Errorf("resolve github host: org %s resolved an empty GitHub URL", orgID)
 	}
 
-	authorized, err := m.authorizedRepos(ctx, orgID, teamID, taskID, conversationID)
+	authorized, err := agenthost.AuthorizedRepositories(ctx, m.stores, orgID, teamID, taskID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
 
-	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}}
+	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}, RepoIDs: map[string]string{}}
 	id, err := m.commitIdentity(ctx, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve commit identity: %w", err)
@@ -524,20 +571,8 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	// names the repository the way GitHub does now.
 	repoIDs := make([]string, 0, len(authorized))
 	for _, row := range authorized {
-		owner, repo, repoID := row.Owner, row.Repo, row.Slug()
-		repoIDs = append(repoIDs, repoID)
-		tok, identity, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
-		if err != nil {
-			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				continue
-			}
-			return nil, fmt.Errorf("mint token for %s: %w", repoID, err)
-		}
-		if identity == ghclient.IdentityPAT {
-			gh.Mode = credbundle.GitHubModePAT
-			gh.PAT = tok.Value
-		}
-		gh.RepoTokens[repoID] = credbundle.RepoToken{Token: tok.Value, ExpiresAt: tok.ExpiresAt}
+		repoIDs = append(repoIDs, row.Slug())
+		gh.RepoIDs[row.Slug()] = row.ExternalID
 	}
 
 	// The real-gh channel's single team-set-scoped token: ONE installation
@@ -547,34 +582,93 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	// parsing. Minting is per-installation, so a conversation whose authorized set spans
 	// multiple owners gets gh-channel coverage for the primary owner only;
 	// repos under other owners surface GitHub's standard 404 on this channel
-	// (the per-repo RepoTokens above still cover them for the exec/git channels
+	// (the per-repo RepoTokens still cover them for the exec/git channels
 	// until P4).
-	//
-	// EVERY failure here is non-fatal, deliberately unlike the per-repo loop
-	// above: this token is additive: a bundle without it still serves the
-	// exec-verb channel and the git proxy from RepoTokens, so the conversation works with
-	// only the gh channel degraded. Hard-failing would turn "gh unavailable"
-	// into "conversation cannot start" — and the failure is reachable in normal
-	// operation, not just on a blip: a "selected repositories" App install 422s
-	// a mint naming a repo outside its grant, which would otherwise abort every
-	// conversation for that org. The next refresh sweep re-mints.
 	primary := ""
 	if host, err := db.OrgGitHubHostSystem(ctx, m.stores.Orgs, orgID); err == nil {
 		primary = m.taskPrimaryRepo(ctx, orgID, taskID, host)
 	}
-	if owner, names := cliChannelScope(primary, repoIDs); owner != "" {
-		cliTok, err := scoped.TokenForReposScoped(ctx, orgID, owner, names, nil)
-		switch {
-		case err != nil:
-			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Warn("gh-channel token mint failed; conversation continues without the gh channel",
-					"org", orgID, "owner", owner, "repos", len(names), "error", err)
+	cliOwner, cliNames := cliChannelScope(primary, repoIDs)
+
+	// Every mint is a round trip to GitHub and none needs another's answer, so
+	// they run together: a cold engagement waits on this seal. Each result
+	// lands in its own slot and is applied below in the authorized set's
+	// order, so the bundle is the one a mint at a time would build.
+	type repoMint struct {
+		tok      githubapp.Token
+		identity ghclient.Identity
+		minted   bool
+	}
+	mints := make([]repoMint, len(authorized))
+	var cliTok githubapp.Token
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(sealMintConcurrency)
+	for i, row := range authorized {
+		g.Go(func() error {
+			tok, identity, err := ghclient.TokenForManagedGit(gctx, scoped, orgID, row.Owner, row.Repo)
+			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				return nil
 			}
-		case cliTok.Value != "":
-			gh.CLIToken = &credbundle.RepoToken{Token: cliTok.Value, ExpiresAt: cliTok.ExpiresAt}
+			if err != nil {
+				return fmt.Errorf("mint token for %s: %w", row.Slug(), err)
+			}
+			mints[i] = repoMint{tok: tok, identity: identity, minted: true}
+			return nil
+		})
+	}
+	if cliOwner != "" {
+		// EVERY failure here is non-fatal, deliberately unlike the per-repo
+		// mints: this token is additive: a bundle without it still serves the
+		// exec-verb channel and the git proxy from RepoTokens, so the conversation works with
+		// only the gh channel degraded. Hard-failing would turn "gh unavailable"
+		// into "conversation cannot start" — and the failure is reachable in normal
+		// operation, not just on a blip: a "selected repositories" App install 422s
+		// a mint naming a repo outside its grant, which would otherwise abort every
+		// conversation for that org. The next refresh sweep re-mints.
+		g.Go(func() error {
+			tok, err := scoped.TokenForReposScoped(gctx, orgID, cliOwner, cliNames, nil)
+			if err == nil {
+				cliTok = tok
+				return nil
+			}
+			// A cancelled group means a per-repo mint already failed the seal,
+			// or the seal itself was cancelled: no conversation continues on
+			// this bundle for the warning to describe.
+			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) && gctx.Err() == nil {
+				log.Warn("gh-channel token mint failed; conversation continues without the gh channel",
+					"org", orgID, "owner", cliOwner, "repos", len(cliNames), "error", err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	for i, row := range authorized {
+		mint := mints[i]
+		if !mint.minted {
+			continue
 		}
+		if mint.identity == ghclient.IdentityPAT {
+			gh.Mode = credbundle.GitHubModePAT
+			gh.PAT = mint.tok.Value
+		}
+		gh.RepoTokens[row.Slug()] = credbundle.RepoToken{Token: mint.tok.Value, ExpiresAt: mint.tok.ExpiresAt}
+	}
+	if cliTok.Value != "" {
+		gh.CLIToken = &credbundle.RepoToken{Token: cliTok.Value, ExpiresAt: cliTok.ExpiresAt}
 	}
 	return gh, nil
+}
+
+// SetOnSealed sets the function told, once a seal's bundle is written, that
+// conversationID's claim has one to read, so the executor waiting on it can
+// read it at once rather than on its next poll. fn runs inside the seal, under
+// its context: the awaiting sweep seals one claim at a time, so fn must return
+// promptly. Call it before the first seal.
+func (m *Manager) SetOnSealed(fn func(ctx context.Context, orgID, conversationID string)) {
+	m.onSealed = fn
 }
 
 // SetDeploymentSigner gives the provisioner the deployment's commit signer, so
@@ -651,159 +745,15 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 	return best, byOwner[best]
 }
 
-// authorizedRepos returns the conversation's authorized repository set as
-// registry rows: every distinct repository in the conversation_worktrees ledger
-// of the conversation and of the rest of its task's conversations, PLUS the
-// task's own primary repository — all filtered to what the team tracks. The
-// conversation_worktrees half is the credential-minting mirror of
-// gitAuthorizeDecision (internal/delegate/spawner.go), which enforces the
-// same intersection live at the git proxy; minting outside that set would
-// be pointless (the proxy would 403 it anyway). The task-repo half exists
-// because provisioning happens BEFORE the conversation's very first clone —
-// conversation_worktrees has no rows yet for a fresh claim, only for a resumed
-// conversation or one that already cloned before a refresh — so without it, a
-// fresh conversation's initial host-side clone (setupGitHub's clone auth,
-// before any worktree exists) would get no token at all.
-//
-// Every input already names its repository by registry id — the task's entity
-// (entities.repository_id), each ledger row (repository_id) — so the set is
-// built, deduplicated and checked against the team's tracking
-// (TracksRepositorySystem) by id. A row's name is read only where a token is
-// minted for it, which is the name it carries now.
-//
-// A conversation with no GitHub anchor — a Slack mention, a Jira issue, a taskless
-// conversation — has neither a GitHub task-repo nor any worktree, so the set above is
-// empty and its bundle would carry no GitHub credential at all: it couldn't
-// read a PR diff, check a CI status, or `workspace add` a repo. Such a conversation
-// falls back to the team's whole tracked set so it can reach the repos its
-// team operates on. This widens READ/API reach, not push authority: the
-// tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
-// conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
-// own tracked repos — never another team's, never another org's.
-//
-// Every repository is checked against the team's tracking on the org's
-// current GitHub host, the host the bundle's tokens are minted on: a
-// repository the team tracked on a host the org has left is not one this
-// bundle can reach. A task or checkout on another host is dropped, and it
-// still anchors the conversation, so a conversation anchored only on another
-// host gets no repositories rather than the team's whole tracked set. A
-// retired repository is dropped the same way: a token minted for its name
-// would reach the repository GitHub serves under that name now.
-func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]domain.Repository, error) {
-	if m.stores.TeamGitHubRepos == nil {
-		return nil, nil
-	}
-	host, err := db.OrgGitHubHostSystem(ctx, m.stores.Orgs, orgID)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	var out []domain.Repository
-	// anchoredElsewhere records an anchor this bundle cannot reach: a row on
-	// another host, a retired row, or a row that cannot be read.
-	anchoredElsewhere := false
-	add := func(row *domain.Repository) {
-		if row == nil || row.Host != host || row.RetiredAt != nil {
-			anchoredElsewhere = true
-			return
-		}
-		if seen[row.ID] {
-			return
-		}
-		tracks, err := m.stores.TeamGitHubRepos.TracksRepositorySystem(ctx, teamID, row.ID)
-		if err != nil || !tracks {
-			return
-		}
-		seen[row.ID] = true
-		out = append(out, *row)
-	}
-
-	if row := m.taskGitHubRepo(ctx, orgID, taskID); row != nil {
-		add(row)
-	}
-	if m.stores.ConversationWorktrees != nil {
-		rows, err := m.stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
-		if err != nil {
-			return nil, err
-		}
-		// The rest of the task's conversations' checkouts too: they share one
-		// run tree, so this conversation can be the one that restores them from
-		// the task's snapshot — whose rebuild runs through this bundle — and the
-		// bundle is sealed before it records them as its own.
-		if taskID != "" {
-			taskRows, err := m.stores.ConversationWorktrees.ListForTaskSystem(ctx, orgID, taskID)
-			if err != nil {
-				return nil, err
-			}
-			rows = append(rows, taskRows...)
-		}
-		for _, w := range rows {
-			add(m.repositoryRow(ctx, orgID, w.RepositoryID))
-		}
-	}
-
-	// Unanchored conversation: no task-repo, no worktree. Grant the team's tracked set
-	// (already the tracking source of truth, so no per-repo TracksRepositorySystem
-	// re-check) rather than shipping a bundle with no GitHub credential at all.
-	if len(out) == 0 && !anchoredElsewhere {
-		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID, host)
-		if err != nil {
-			return nil, fmt.Errorf("list team tracked repos: %w", err)
-		}
-		for _, t := range tracked {
-			// A retired row's name belongs to another repository now, one the
-			// team never chose to track.
-			if t.RetiredAt != nil {
-				continue
-			}
-			out = append(out, domain.Repository{ID: t.RepositoryID, ExternalID: t.ExternalID, Source: domain.RepoSourceGitHub, Host: host, Owner: t.Owner, Repo: t.Repo})
-		}
-	}
-	return out, nil
-}
-
-// repositoryRow is the registry row id names, or nil when there is no id or
-// the read fails: the caller treats an unreadable row as one it cannot reach.
-func (m *Manager) repositoryRow(ctx context.Context, orgID, id string) *domain.Repository {
-	if m.stores.Repos == nil || id == "" {
-		return nil
-	}
-	row, err := m.stores.Repos.GetSystem(ctx, orgID, id)
-	if err != nil {
-		return nil
-	}
-	return row
-}
-
 // taskPrimaryRepo is the "owner/repo" of the task's own repository when its
 // registry row is on host and not retired — a pull request from another GitHub
 // host is about another repository, whatever its name — and "" otherwise.
 func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID, host string) string {
-	row := m.taskGitHubRepo(ctx, orgID, taskID)
+	row := agenthost.TaskGitHubRepository(ctx, m.stores, orgID, taskID)
 	if row == nil || row.Host != host || row.RetiredAt != nil {
 		return ""
 	}
 	return row.Slug()
-}
-
-// taskGitHubRepo resolves a GitHub task's own repository: the registry row the
-// task's entity references (entities.repository_id), read by that id, so the
-// name is the repository's now whatever the entity's key still spells. nil for
-// a non-GitHub task, whose entity references no repository, or when any read
-// fails.
-func (m *Manager) taskGitHubRepo(ctx context.Context, orgID, taskID string) *domain.Repository {
-	if m.stores.Tasks == nil || m.stores.Entities == nil || taskID == "" {
-		return nil
-	}
-	task, err := m.stores.Tasks.GetSystem(ctx, orgID, taskID)
-	if err != nil || task == nil || task.EntitySource != "github" {
-		return nil
-	}
-	entity, err := m.stores.Entities.GetSystem(ctx, orgID, task.EntityID)
-	if err != nil || entity == nil {
-		return nil
-	}
-	return m.repositoryRow(ctx, orgID, entity.RepositoryID)
 }
 
 // resolveJira resolves the org's Jira service credential to its raw,

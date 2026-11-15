@@ -157,15 +157,20 @@ func (provisionConversations) GetSystem(_ context.Context, _, conversationID str
 	return &domain.Conversation{ID: conversationID}, nil
 }
 
+func (provisionConversations) NewestPersonMessageSystem(context.Context, string, string) (*domain.Message, error) {
+	return nil, nil
+}
+
 type provisionClaimCredentials struct {
 	db.ClaimCredentialsStore
+	claimID string
 	sealed  []byte
 	sources domain.SourceManifest
 	puts    int
 }
 
-func (f *provisionClaimCredentials) Put(_ context.Context, _, _, _ string, _ int64, sealed []byte, sources domain.SourceManifest) error {
-	f.sealed, f.sources = sealed, sources
+func (f *provisionClaimCredentials) Put(_ context.Context, _, claimID, _ string, _ int64, sealed []byte, sources domain.SourceManifest) error {
+	f.claimID, f.sealed, f.sources = claimID, sealed, sources
 	f.puts++
 	return nil
 }
@@ -240,7 +245,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 				stores: db.Stores{
 					Secrets: secrets,
 					ConversationQueue: &provisionQueue{claim: db.AwaitingCredentialsConversation{
-						ConversationID: "conv-1", OrgID: "org-1", ExecutorID: "exec-1", BootEpoch: 4,
+						ConversationID: "conv-1", OrgID: "org-1", ClaimID: "claim-1", ExecutorID: "exec-1", BootEpoch: 4,
 						CredPubKey: base64.StdEncoding.EncodeToString(kp.Public[:]),
 					}},
 					Instances:        &provisionInstances{inst: &domain.Instance{ID: "exec-1", BootEpoch: 4}},
@@ -253,7 +258,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 				sources:        coreSourcesAvailable,
 			}
 
-			if err := m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); err != nil {
+			if err := m.ProvisionForConversation(context.Background(), "org-1", "conv-1", ReasonCredRequest); err != nil {
 				t.Fatalf("ProvisionForConversation: %v", err)
 			}
 			if claims.sealed == nil {

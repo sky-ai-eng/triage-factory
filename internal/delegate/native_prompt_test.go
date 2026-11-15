@@ -1,11 +1,16 @@
 package delegate
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // hostileRun is a run whose external fields all read like instructions — a PR
@@ -44,14 +49,14 @@ func hostileStrings(task domain.Task, metadataJSON, skeleton string) []string {
 // conversation in the org reads. A per-run section added here later fails this
 // instead of quietly forking the fleet's cached prefix per run.
 func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
-	if got, want := nativeSystemPrompt(), agentprompt.Build(nativeSpec()); got != want {
+	if got, want := nativeSystemPrompt(agentprompt.SurfaceMachinist), agentprompt.Build(nativeSpec(agentprompt.SurfaceMachinist)); got != want {
 		t.Errorf("block 1 is not the composed blocks alone;\ngot  %.200q\nwant %.200q", got, want)
 	}
 	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion())
 	if addendum == "" {
 		t.Fatal("the native handoff addendum is empty; this test would pass vacuously")
 	}
-	if strings.Contains(nativeSystemPrompt(), addendum) {
+	if strings.Contains(nativeSystemPrompt(agentprompt.SurfaceMachinist), addendum) {
 		t.Error("block 1 carries the handoff addendum, which is per step and belongs in block 2")
 	}
 }
@@ -61,8 +66,8 @@ func TestNativeSystemPrompt_IsBlockOneAlone(t *testing.T) {
 // step position, the task behind them — still compose the same block 1, so the
 // entry written at its breakpoint is one the whole fleet reads.
 func TestNativeSystemPrompt_IsByteIdenticalAcrossRuns(t *testing.T) {
-	first := nativeSystemPrompt()
-	if second := nativeSystemPrompt(); first != second {
+	first := nativeSystemPrompt(agentprompt.SurfaceMachinist)
+	if second := nativeSystemPrompt(agentprompt.SurfaceMachinist); first != second {
 		t.Fatal("two runs of the same spec composed different block 1s")
 	}
 	// The missions differ; block 1 cannot, because no mission reaches it.
@@ -137,10 +142,10 @@ func TestComposeConversationSystemBlock_OmitsWhatIsAbsent(t *testing.T) {
 // instructions reads as instruction.
 func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing.T) {
 	task, metadataJSON, skeleton, mission := hostileRun()
-	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
-	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil)
+	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "", "", "", "tfac/SKY-9", "", "", ""), "verbs here", "")
+	opening := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
-	for _, sys := range []string{nativeSystemPrompt(), block2} {
+	for _, sys := range []string{nativeSystemPrompt(agentprompt.SurfaceMachinist), block2} {
 		for _, bad := range hostileStrings(task, metadataJSON, skeleton) {
 			if strings.Contains(sys, bad) {
 				t.Errorf("externally-authored text reached a system block: %.60q", bad)
@@ -160,12 +165,38 @@ func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing
 	}
 }
 
+// TestNativeLaunchText_AnOpenedConversationKeepsItsOpeningRow: a claim of a
+// conversation that has already been opened sends no opening row, so it is
+// handed the task context the opening sent and fetches no PR history.
+func TestNativeLaunchText_AnOpenedConversationKeepsItsOpeningRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a claim of an opened conversation fetched %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newLaunchFixture(t, "native-opened")
+	const opening = "<task_context>\nPull request owner/repo#7, as the opening rendered it\n</task_context>"
+	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, opening)
+
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	got := f.s.buildNativeLaunchText(context.Background(), f.conv.ID, f.task(t), "have another look", runConfig{
+		orgID:      runmode.LocalDefaultOrgID,
+		teamID:     runmode.LocalDefaultTeamID,
+		sources:    sourceDocs{kinds: []string{"github"}},
+		prSkeleton: prSkeletonSource{client: ghclient.NewClient(srv.URL, "t"), owner: "owner", repo: "repo", prNumber: 7},
+	}, "", replay).taskContext
+	if got != opening {
+		t.Errorf("task context = %q, want the opening row's %q", got, opening)
+	}
+}
+
 // TestNativeOpeningRow_IsTheTaskContextAlone pins what the opening row shrank
 // to. Everything else a run is told is TF's own words and rides block 2, so a
 // section reappearing here is a trust-posture change, not a layout one.
 func TestNativeOpeningRow_IsTheTaskContextAlone(t *testing.T) {
 	task, metadataJSON, skeleton, _ := hostileRun()
-	got := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil)
+	got := BuildTaskContext(task, "", metadataJSON, skeleton, nil, nil, nil)
 
 	for _, unwanted := range []string{"<run_context>", "<tools>"} {
 		if strings.Contains(got, unwanted) {

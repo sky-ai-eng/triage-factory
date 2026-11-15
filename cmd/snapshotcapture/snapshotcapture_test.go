@@ -66,7 +66,7 @@ func readStream(t *testing.T, stream []byte) map[string]string {
 	got := map[string]string{}
 	r := sandbox.NewCaptureStreamReader(bytes.NewReader(stream))
 	for {
-		name, body, err := r.Next()
+		name, _, body, err := r.Next()
 		if errors.Is(err, io.EOF) {
 			return got
 		}

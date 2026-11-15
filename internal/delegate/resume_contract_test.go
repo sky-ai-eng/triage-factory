@@ -54,15 +54,20 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		sourceID, entityKind, eventType = "SKY-7", "issue", domain.EventJiraIssueAssigned
 	case "slack":
 		sourceID, entityKind, eventType = "C1/1700000000.000100", "message", domain.EventSlackMessage
+	case domain.EntityKindVulnerablePackage:
+		sourceID, eventType = "owner/repo#npm:lodash", domain.EventGitHubVulnerabilityAlertOpened
 	default:
 		t.Fatalf("unknown task source %q", source)
 	}
 
 	var entity *domain.Entity
 	var err error
-	if source == "jira" {
+	switch source {
+	case "jira":
 		entity, _, err = stores.Entities.FindOrCreateJiraSystem(ctx, org, testScope(source), sourceID, dbseed.JiraIssueID(sourceID), dbseed.JiraIssueProject(sourceID), "T", "https://example.com/"+suffix)
-	} else {
+	case domain.EntityKindVulnerablePackage:
+		entity, _, err = stores.Entities.FindOrCreateVulnerablePackageSystem(ctx, org, testScope("github"), sourceID, "T", "https://example.com/"+suffix)
+	default:
 		entity, _, err = stores.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", entityKind, "T", "https://example.com/"+suffix)
 	}
 	if err != nil {
@@ -373,7 +378,7 @@ func TestFinishedThreeStepBlueprint_RefusesEarlierStepsHonestlyAndResumesTheLast
 	// delivery fails fast on a session transcript this bare worktree never
 	// held; reaching a terminal at all is the proof it was driven.
 	final := f.conversationIDs[len(f.conversationIDs)-1]
-	if err := f.s.SendMessage(ctx, org, final, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := f.s.SendMessage(ctx, org, final, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage to the final step of a finished blueprint: %v", err)
 	}
 	claimAndDispatch(t, f.s, f.database)
@@ -469,16 +474,17 @@ func TestAssertResumeCoordinates_NamesEveryMissingField(t *testing.T) {
 			want:   []string{"worktree_path"},
 		},
 		{
-			name:   "missing model",
+			// The model is the claim's, so a row without one is no finding.
+			name:   "no model is not a finding",
 			mutate: `UPDATE conversations SET model=NULL WHERE id=?`,
 			at:     resumeCheckClaim,
-			want:   []string{"model"},
+			want:   nil,
 		},
 		{
 			name:   "both, each named",
-			mutate: `UPDATE conversations SET worktree_path=NULL, model=NULL WHERE id=?`,
-			at:     resumeCheckClaim,
-			want:   []string{"worktree_path", "model"},
+			mutate: `UPDATE conversations SET sdk_session_id=NULL, worktree_path=NULL WHERE id=?`,
+			at:     resumeCheckRest,
+			want:   []string{"sdk_session_id", "worktree_path"},
 		},
 		{
 			// The session id is legitimately absent until the stream's first

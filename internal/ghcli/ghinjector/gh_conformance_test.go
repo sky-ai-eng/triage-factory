@@ -66,6 +66,8 @@ const (
 	// The repository the archive fixture reports as already archived, so
 	// `repo archive` and `repo unarchive` can both reach their mutation.
 	confArchivedRepo = "archived"
+	// The repository `issue transfer` moves an issue to.
+	confTransferRepo = "other"
 )
 
 // fixtureObject is one pull request or issue the fake serves, in the state its
@@ -663,6 +665,14 @@ func (r *wireRecords) authorize(_ context.Context, req ghwrite.Request, ref ghwr
 	return false
 }
 
+// denyRepository records a refusal of the repository gate, which no command
+// in the battery expects.
+func (r *wireRecords) denyRepository(_ context.Context, d DeniedRepository) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rows = append(r.rows, "refused(repository) "+d.Method+" "+d.Path+" "+d.Name())
+}
+
 func (r *wireRecords) snapshot() ([]string, []string, []ghwrite.GraphQLFacts) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -894,7 +904,7 @@ func porcelainWriteCases() []wireCase {
 		},
 		{
 			name: "issue transfer",
-			args: ghArgs("issue", "transfer", "7", confOwner+"/other"),
+			args: ghArgs("issue", "transfer", "7", confOwner+"/"+confTransferRepo),
 			want: []wireExpect{{mutation: "transferIssue", action: domain.ActionIssueTransferred}},
 		},
 		{
@@ -1176,9 +1186,28 @@ func handWrittenWriteCases() []wireCase {
 // fixture, with both record sinks wired, and returns what gh printed and how it
 // exited. Exit status is part of the evidence: a refusal the agent's tool
 // reports as success is a gate the run has no reason to believe.
+//
+// The repository gate is wired too, over the fixture's repositories named
+// without their ids, so a command that named any other repository would reach
+// the gate's lookup, which the fixture cannot answer, and leave a refusal row:
+// every command here is one a run makes against the repositories it works in,
+// and none of them may be refused for it. Those are the fixture's own, the one
+// the archive commands act on, and the one `issue transfer` moves an issue to,
+// which the command names too.
 func driveGH(t *testing.T, upstream *fakeUpstream, records *wireRecords, args []string) ([]byte, error) {
 	t.Helper()
-	env := ghEnvWithGate(t, upstream.server.URL, records.audit, records.authorize)
+	env := ghEnvWithConfig(t, upstream.server.URL, Config{
+		ObserveWrite:   records.audit,
+		AuthorizeWrite: records.authorize,
+		Repositories: func(context.Context) ([]AuthorizedRepository, bool, error) {
+			return []AuthorizedRepository{
+				{Name: confOwner + "/" + confRepo},
+				{Name: confOwner + "/" + confArchivedRepo},
+				{Name: confOwner + "/" + confTransferRepo},
+			}, true, nil
+		},
+		DenyRepository: records.denyRepository,
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ghBinary(t), args...)
@@ -1575,27 +1604,38 @@ func TestGHConformance_BinaryMatchesPin(t *testing.T) {
 // document of the right shape; this one screens the real thing, and the real
 // thing is several times larger — a finder query drags a comments connection
 // and a reviewer list behind it. Reads are what this number is for: every
-// porcelain command runs one or more before it writes, and they never reach the
-// parser, so the cost is a copy and a scan.
+// porcelain command runs one or more before it writes. With only the write
+// audit wired they never reach a parser, so the cost is a copy and a scan;
+// with the read touch wired the document is walked once for the object it
+// addresses, which is the "addressed read" case.
 func BenchmarkGraphQLCapturePinnedRead(b *testing.B) {
 	read, mutation := capturePinnedDocuments(b)
-	srv := &Server{cfg: Config{ObserveWrite: func(context.Context, ObservedWrite) {}}}
+	writes := Config{ObserveWrite: func(context.Context, ObservedWrite) {}}
+	touches := Config{ObserveRead: func(context.Context, ObservedRead) {}}
 	for _, tc := range []struct {
-		name  string
-		body  []byte
-		write bool
+		name      string
+		cfg       Config
+		body      []byte
+		write     bool
+		addressed int
 	}{
-		{name: "read", body: read},
-		{name: "mutation", body: mutation, write: true},
+		{name: "read", cfg: writes, body: read},
+		{name: "addressed read", cfg: touches, body: read, addressed: 1},
+		{name: "mutation", cfg: writes, body: mutation, write: true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
+			srv := &Server{cfg: tc.cfg}
 			b.SetBytes(int64(len(tc.body)))
 			b.ReportAllocs()
 			for b.Loop() {
 				req, _ := http.NewRequest(http.MethodPost, "https://example.test"+graphqlPath,
 					bytes.NewReader(tc.body))
-				if got := srv.captureGraphQLWrite(req) != nil; got != tc.write {
+				facts, addressed := srv.captureGraphQL(req)
+				if got := facts != nil; got != tc.write {
 					b.Fatalf("captured write = %v, want %v", got, tc.write)
+				}
+				if len(addressed.Objects) != tc.addressed {
+					b.Fatalf("addressed %v, want %d object(s)", addressed, tc.addressed)
 				}
 			}
 		})

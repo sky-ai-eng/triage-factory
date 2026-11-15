@@ -9,12 +9,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 )
 
-// The injector's one traffic policy: three families of write are refused
-// before they are forwarded, and so is any GraphQL request whose act could not
-// be established. What is refused and why lives in internal/ghcli/ghwrite — the same
-// table the audit builder reads — so a shape cannot be named one thing by the
-// log and another by the gate. This file is only the enforcement: recognize,
-// ask, refuse.
+// The injector's write policy: three families of write are refused before
+// they are forwarded, and so is any GraphQL request whose act could not be
+// established. The repository gate beside it (repos.go) is about which
+// repository a request names, not what it does there. What is refused and why
+// lives in internal/ghcli/ghwrite — the same table the audit builder reads — so
+// a shape cannot be named one thing by the log and another by the gate. This
+// file is only the enforcement: recognize, ask, refuse.
 //
 // It sits here rather than in the command-level matcher the delegated runtime
 // applies because this is the choke point. The matcher sees what a model typed;
@@ -104,13 +105,20 @@ func (s *Server) refused(w http.ResponseWriter, r *http.Request, facts *ghwrite.
 // vocabulary as every other gh-channel audit row's, so the two can be read side
 // by side.
 func gateRequest(r *http.Request, facts *ghwrite.GraphQLFacts) (ghwrite.Request, bool) {
-	if isGraphQLPath(r.URL.Path) {
-		if facts == nil {
-			return ghwrite.Request{}, false
-		}
-		return ghwrite.Request{Method: r.Method, Path: r.URL.Path, GraphQL: facts}, true
+	if isGraphQLPath(r.URL.Path) && facts == nil {
+		return ghwrite.Request{}, false
 	}
-	return ghwrite.Request{Method: r.Method, Path: strings.TrimPrefix(r.URL.Path, restPrefix)}, true
+	return ghwrite.Request{Method: r.Method, Path: auditPath(r), GraphQL: facts}, true
+}
+
+// auditPath is an inbound request's path as a denial row names it: a REST
+// path with the GHE prefix `gh` emits stripped, exactly as rewrite strips it,
+// and the GraphQL endpoint's as it arrived.
+func auditPath(r *http.Request) string {
+	if isGraphQLPath(r.URL.Path) {
+		return r.URL.Path
+	}
+	return strings.TrimPrefix(r.URL.Path, restPrefix)
 }
 
 // AuthorizeWrite is the gate's decision hook: the injector has recognized a

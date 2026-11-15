@@ -1,0 +1,49 @@
+name: sandbox-rootfs
+
+# Builds the sandbox root filesystem from cold and runs a package from it
+# (TestIntegration_RootfsBuilds, internal/sandbox). Every executor builds this
+# rootfs on its first sandbox launch, and a build that fails fails every
+# launch, while the rest of the integration suite needs runsc and runs by hand.
+#
+# The build downloads about 500 MB, so it runs only when the package list, the
+# Alpine and toolchain pins, the build code, or the test changes. This is not a
+# required check, so the workflow-level path filter cannot leave a required
+# check pending.
+
+on:
+  pull_request:
+    paths:
+      - 'internal/sandbox/rootfs*.go'
+      - '.github/workflows/sandbox-rootfs.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/sandbox/rootfs*.go'
+      - '.github/workflows/sandbox-rootfs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rootfs-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The test binary is built as the runner user so Go itself never runs as
+      # root; only the built binary does, because the build chroots and makes a
+      # device node. The toolchain root starts empty, so the build is cold.
+      - name: Build the test binary
+        run: go test -c -tags integration -o "$RUNNER_TEMP/sandbox.test" ./internal/sandbox
+
+      - name: Build the rootfs
+        run: sudo env TF_TOOLCHAIN_ROOT="$RUNNER_TEMP/toolchain" "$RUNNER_TEMP/sandbox.test" -test.run '^TestIntegration_RootfsBuilds$' -test.v -test.timeout 20m

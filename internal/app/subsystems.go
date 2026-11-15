@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -210,10 +211,17 @@ func (a *App) buildExecution() error {
 	// Multi only: scope the transcript, status, and permission frames to each
 	// conversation's REST audience, resolved per frame — the hub has no team
 	// axis, so an org-scoped broadcast would stream every team's transcripts
-	// to the whole org. Local keeps the org-wide broadcast: N=1, no team
-	// boundary.
+	// to the whole org. A pod that serves HTTP reads the audience at emit. An
+	// executor's database role cannot read memberships, so its frames name
+	// their conversation and the control pods that deliver them read it
+	// (startWorkers wires their backplane). Local keeps the org-wide
+	// broadcast: N=1, no team boundary.
 	if !a.local() {
-		a.spawner.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+		if a.plan.serveHTTP {
+			a.spawner.SetConversationFrameAudience(a.stores.Conversations.ConversationFrameRecipientsSystem)
+		} else {
+			a.spawner.DeferConversationFrameAudience()
+		}
 	}
 	a.hookReconcilerToSpawner()
 	// Mirror run status/activity onto the bus (TFAC-592) so an EE
@@ -226,6 +234,9 @@ func (a *App) buildExecution() error {
 	// brain would otherwise only learn about from its next sweep, and
 	// memoryOwed relays over tf_ctl for it.
 	a.spawner.SetOnMemoryOwed(a.memoryOwed)
+	// The delegator-notice doorbell a failure or a park that waits on a person
+	// rings, wired on every role for the same reason.
+	a.spawner.SetOnDelegatorNotice(a.delegatorNoticeOwed)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
 	// claims.executor_id on claimed rows must equal the registry id, and
@@ -400,6 +411,12 @@ func (a *App) buildExecution() error {
 	// executor just as much as an executor needs it to apply signals
 	// targeting itself.
 	if runmode.Current() == runmode.ModeMulti {
+		// The brain's cred_sealed ring wakes an engagement's credential wait,
+		// so only a process that runs engagements listens for it.
+		if a.plan.dispatcher {
+			a.credDoorbells = ctlbus.NewDoorbells()
+			a.spawner.SetCredentialDoorbells(a.credDoorbells)
+		}
 		a.spawner.SetConversationSignals(a.stores.ConversationSignals, a.database)
 		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
 			appLog.Warn("signal ack timeout", "error", terr)

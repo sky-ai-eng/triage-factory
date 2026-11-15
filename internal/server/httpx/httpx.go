@@ -301,23 +301,26 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 		return
 	}
 	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) && typeErr.Field != "" {
+	if errors.As(err, &typeErr) {
 		// The field's own type, not the fault's: a bad element of a list
-		// reports the list's type, which is what the caller has to send.
-		field, fieldType := jsonFieldPath(target, typeErr.Field)
-		if fieldType == nil {
-			fieldType = typeErr.Type
+		// reports the list's type, which is what the caller has to send. A
+		// fault in an element of a body that is itself an array or object
+		// names no field, and is the body's.
+		if field, fieldType := jsonFieldPath(target, typeErr.Field); field != "" {
+			if fieldType == nil {
+				fieldType = typeErr.Type
+			}
+			message := field + " has the wrong type"
+			if want, _ := jsonType(fieldType, typeErr); want != "" {
+				message = field + " must be " + want
+			}
+			WriteErrors(w, http.StatusBadRequest, ErrorItem{
+				Reason:  ReasonInvalidField,
+				Message: message,
+				Field:   field,
+			})
+			return
 		}
-		message := field + " has the wrong type"
-		if want, _ := jsonType(fieldType, typeErr); want != "" {
-			message = field + " must be " + want
-		}
-		WriteErrors(w, http.StatusBadRequest, ErrorItem{
-			Reason:  ReasonInvalidField,
-			Message: message,
-			Field:   field,
-		})
-		return
 	}
 	if field, ok := unknownFieldName(err); ok {
 		WriteErrors(w, http.StatusBadRequest, ErrorItem{
@@ -337,45 +340,65 @@ func writeDecodeError(w http.ResponseWriter, err error, target reflect.Type) {
 }
 
 // jsonFieldPath rewrites the dotted path encoding/json reports for a type
-// fault (UnmarshalTypeError.Field) into the payload's own field names. The
-// decoder puts the Go name of every embedded struct it passes through ahead
-// of the field's JSON name, so a page_size fault on a list body arrives as
-// "PageRequest.page_size". The path is resolved against the decode target's
-// type, and a segment is dropped only where it names an embedded struct at
-// that point in the type, never by its spelling: a JSON key may be
-// capitalized too. Every other segment is already a JSON name. A JSON key
-// spelled like a sibling embedded struct's Go name gives the same path as a
-// field of that struct; the last segment is read as the key, since the path
-// ends in one, and an earlier segment as the embedded struct. It also
-// returns the type of the field the path names. A path that stops resolving
-// keeps the rest of its segments as reported, and its type is nil.
+// fault (UnmarshalTypeError.Field) into the payload field a client fixes,
+// and returns that field's type. The path names each JSON key on the way to
+// the fault as the client spelled it, an array element's index and an object
+// member's key included, and goes on into a value an interface holds. A fault
+// in an element of an array or object, at any depth, or anywhere in an
+// interface's value, is reported on the field holding it, whose type is what
+// the caller has to send; a fault in a field of an element's struct is
+// reported as that field, under its parent's path with the index or key left
+// out ("items.when"). Each field is found as encoding/json finds it,
+// promoted from an embedded struct or matched ignoring case, and is reported
+// under its own JSON name. A path that names no field of the payload keeps
+// the rest of its segments as reported, and its type is nil.
 func jsonFieldPath(target reflect.Type, path string) (string, reflect.Type) {
 	segs := strings.Split(path, ".")
 	out := make([]string, 0, len(segs))
 	t := target
-	for i, seg := range segs {
-		// The path names no array index or map key, so a segment after a
-		// slice, array or map field is a field of its element.
-		for t != nil && (t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map) {
+	var fieldType reflect.Type
+	// inKey is set while the segments may still be an object member's key,
+	// which can itself contain dots the path splits on.
+	inKey := false
+	for i := 0; i < len(segs); i++ {
+		for t != nil && t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
-		if t == nil || t.Kind() != reflect.Struct {
+		if t == nil {
 			return strings.Join(append(out, segs[i:]...), "."), nil
 		}
-		// The decoder's path ends in a JSON name, so only an earlier segment
-		// can be an embedded struct.
-		if f, ok := embeddedStructField(t, seg); ok && i < len(segs)-1 {
-			t = f.Type
+		switch t.Kind() {
+		case reflect.Map:
+			// This segment starts the member's key.
+			t = t.Elem()
+			inKey = true
 			continue
+		case reflect.Slice, reflect.Array:
+			// This segment is the element's index.
+			t = t.Elem()
+			continue
+		case reflect.Struct:
+		default:
+			// The rest of the path is inside one value: what an interface
+			// holds, or an object key that itself contained a dot.
+			if len(out) == 0 {
+				return path, nil
+			}
+			return strings.Join(out, "."), fieldType
 		}
-		f, ok := jsonNamedField(t, seg)
+		f, name, ok := jsonFieldByName(t, segs[i])
 		if !ok {
+			if inKey {
+				continue
+			}
 			return strings.Join(append(out, segs[i:]...), "."), nil
 		}
-		out = append(out, seg)
+		inKey = false
+		out = append(out, name)
 		t = f.Type
+		fieldType = f.Type
 	}
-	return strings.Join(out, "."), t
+	return strings.Join(out, "."), fieldType
 }
 
 var textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
@@ -505,21 +528,52 @@ func isDigits(s string) bool {
 	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
-// embeddedStructField finds the embedded struct field of t whose Go name is
+// jsonFieldByName finds the field of struct t that encoding/json decodes the
+// JSON key into, and that field's JSON name. encoding/json takes a field
+// named the key exactly, else one whose name matches it ignoring case, so a
+// client's "Statuses" fills "statuses" and is reported under the field's own
 // name.
-func embeddedStructField(t reflect.Type, name string) (reflect.StructField, bool) {
-	for i := range t.NumField() {
-		sf := t.Field(i)
-		if sf.Name == name && isEmbeddedStruct(sf) {
-			return sf, true
-		}
+func jsonFieldByName(t reflect.Type, key string) (reflect.StructField, string, bool) {
+	if f, name, ok := jsonFieldMatching(t, func(name string) bool { return name == key }); ok {
+		return f, name, true
 	}
-	return reflect.StructField{}, false
+	return jsonFieldMatching(t, func(name string) bool { return strings.EqualFold(name, key) })
 }
 
-// jsonNamedField finds t's own field whose JSON name is name: its json tag's
-// name, or its Go name when the tag gives none.
-func jsonNamedField(t reflect.Type, name string) (reflect.StructField, bool) {
+// jsonFieldMatching finds the field of struct t whose JSON name match
+// accepts: t's own field, else one promoted from an embedded struct, the
+// shallowest first, as encoding/json prefers it.
+func jsonFieldMatching(t reflect.Type, match func(string) bool) (reflect.StructField, string, bool) {
+	level := []reflect.Type{t}
+	seen := map[reflect.Type]bool{}
+	for len(level) > 0 {
+		var next []reflect.Type
+		for _, st := range level {
+			if seen[st] {
+				continue
+			}
+			seen[st] = true
+			if f, name, ok := jsonNamedField(st, match); ok {
+				return f, name, true
+			}
+			for i := range st.NumField() {
+				if sf := st.Field(i); isEmbeddedStruct(sf) {
+					et := sf.Type
+					if et.Kind() == reflect.Pointer {
+						et = et.Elem()
+					}
+					next = append(next, et)
+				}
+			}
+		}
+		level = next
+	}
+	return reflect.StructField{}, "", false
+}
+
+// jsonNamedField finds t's own field whose JSON name match accepts, and that
+// name: its json tag's name, or its Go name when the tag gives none.
+func jsonNamedField(t reflect.Type, match func(string) bool) (reflect.StructField, string, bool) {
 	for i := range t.NumField() {
 		sf := t.Field(i)
 		tag := sf.Tag.Get("json")
@@ -535,11 +589,11 @@ func jsonNamedField(t reflect.Type, name string) (reflect.StructField, bool) {
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
-		if jsonName == name {
-			return sf, true
+		if match(jsonName) {
+			return sf, jsonName, true
 		}
 	}
-	return reflect.StructField{}, false
+	return reflect.StructField{}, "", false
 }
 
 // isEmbeddedStruct reports whether encoding/json reads sf's fields as its

@@ -21,6 +21,13 @@ default) the entrypoint skips it: no uid switch, no capability drop, no
 | `tf-sidecar`, one per run | None | Per run, `20000+` | One run's credentials, from the sealed per-run bundle | That run's `exec`-verb socket and proxies, on the run's own veth address |
 | The sandbox (agent) | None | Per run, `40000+` | None | Nothing; outbound only, through its sidecar |
 
+The broker also keeps Docker's default capabilities, and it needs two of them,
+`CAP_MKNOD` and `CAP_SYS_CHROOT`, to build the sandbox root filesystem on an
+executor's first launch. A deployment that drops Docker's defaults must keep
+both, or every launch fails. Without `CAP_MKNOD` the error contains
+`create /dev/null in the chroot (the cap broker needs CAP_MKNOD)`, and without
+`CAP_SYS_CHROOT` it contains `chroot: cannot change root directory`.
+
 The broker starts a run's sidecar at a uid derived from the run's subnet index,
 and the sandbox at a uid derived from the same index. Two runs never share
 either uid, so one run's sidecar cannot trace or read another's memory. A
@@ -64,7 +71,8 @@ fallback that runs git on the host. A restore imports the snapshot with
 - `docker compose exec executor ps aux` shows `tf-cap-broker` and
   `tf-orchestrator`, plus one `tf-sidecar` per run in flight.
 - `grep ^Cap /proc/<pid>/status`: the broker's `CapEff` decodes (with
-  `capsh --decode=<hex>`) to `cap_net_admin,cap_sys_admin,cap_sys_resource`.
+  `capsh --decode=<hex>`) to `cap_net_admin,cap_sys_admin,cap_sys_resource`
+  and Docker's default capabilities.
   The orchestrator's `CapEff` and `CapBnd` are all zeroes, so it cannot regain
   a capability even through a setuid-root binary. A `tf-sidecar` has an
   all-zero `CapEff`.
@@ -79,7 +87,7 @@ fallback that runs git on the host. A restore imports the snapshot with
 Each process logs one boot line with its uid and effective capabilities:
 
 ```
-level=INFO msg=boot component=cap-broker uid=0 CapEff=cap_net_admin,cap_sys_admin,cap_sys_resource socket=/run/tf/cap-broker.sock proc=cap-broker
+level=INFO msg=boot component=cap-broker uid=0 CapEff=cap_audit_write,cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_mknod,cap_net_admin,cap_net_bind_service,cap_net_raw,cap_setfcap,cap_setgid,cap_setpcap,cap_setuid,cap_sys_admin,cap_sys_chroot,cap_sys_resource socket=/run/tf/cap-broker.sock proc=cap-broker
 level=INFO msg=boot component=boot uid=10001 CapEff=(empty) proc=orchestrator
 level=INFO msg=boot component=sidecar uid=20007 CapEff=(empty) container_id=tf-<run>-7-sc proc=sidecar
 ```

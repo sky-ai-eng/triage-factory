@@ -253,11 +253,34 @@ type ConversationSeeder struct {
 	// names rather than on whichever claim happens to be live.
 	PendingPermission func(t *testing.T, conversationID, claimID, toolCallID string) string
 
+	// StoredShape reads the conversation's stored columns that no store read
+	// projects, so the suite can assert what a mint writes column by column.
+	StoredShape func(t *testing.T, conversationID string) StoredConversationShape
+
 	// AgentID returns an identifier suitable for the
 	// StampAgentClaim agentID and the conversation row's actor_agent_id.
 	// Backends use this to thread their own seeded agent row (the
 	// Postgres path needs a real FK; SQLite is more relaxed).
 	AgentID string
+}
+
+// StoredConversationShape is a conversations row as stored, for the columns
+// the suite asserts a mint by. Status is the stored column, "" for SQL NULL,
+// where every store read answers the derived display status. NonNull names
+// which of MintNullColumns hold a value.
+type StoredConversationShape struct {
+	Type, Origin, Visibility, Status string
+	NonNull                          []string
+}
+
+// MintNullColumns is the conversations columns a person's claim leaves NULL
+// (ConversationStore.MintForPersonClaim). Each backend's StoredShape reads
+// them by this list, so the two cannot check different columns.
+var MintNullColumns = []string{
+	"prompt_id", "model", "worktree_path", "trigger_id", "actor_agent_id",
+	"blueprint_run_id", "blueprint_step_index", "preferred_executor_id",
+	"park_reason", "completed_at", "outcome", "outcome_reason", "queued_at",
+	"sdk_session_id", "ended_at", "parent_conversation_id",
 }
 
 // RunConversationStoreConformance covers the ConversationStore contract every
@@ -2236,7 +2259,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		refuse("RequeueInputForClaimSystem", store.RequeueInputForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(ownedID)}))
 		_, err = store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", "")
 		refuse("CompleteForClaimSystem", err)
-		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
+		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash), "")
 		refuse("MarkFailedIfActiveForClaimSystem", err)
 		_, err = store.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, db.ParkIdle())
 		refuse("ParkOpenForClaimSystem", err)
@@ -2326,6 +2349,153 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("InsertMessage_RoundTripsEffort", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+
+		pending := false
+		msg := domain.Message{ConversationID: conversationID, UserID: userID, Role: "user",
+			Content: "think hard", Model: "m-person", Effort: domain.EffortXHigh, Delivered: &pending}
+		if _, err := store.InsertMessage(ctx, orgID, &msg); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		plain := domain.Message{ConversationID: conversationID, Role: "assistant", Content: "ok", Model: "m-reply"}
+		if _, err := store.InsertMessage(ctx, orgID, &plain); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		got, err := store.MessagesWindow(ctx, orgID, conversationID, db.MessageWindow{})
+		if err != nil {
+			t.Fatalf("MessagesWindow: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("rows = %d, want 2", len(got))
+		}
+		if got[0].Model != "m-person" || got[0].Effort != domain.EffortXHigh {
+			t.Errorf("person row settings = (%q, %q), want (m-person, xhigh)", got[0].Model, got[0].Effort)
+		}
+		if got[1].Effort != "" {
+			t.Errorf("a row written with no effort reads %q, want empty", got[1].Effort)
+		}
+	})
+
+	t.Run("NewestPersonMessageSystem_CountsACompactedRowAndSkipsWithdrawnAndInjected", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		newest := func() *domain.Message {
+			t.Helper()
+			got, err := store.NewestPersonMessageSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("NewestPersonMessageSystem: %v", err)
+			}
+			return got
+		}
+
+		if got := newest(); got != nil {
+			t.Fatalf("a conversation with no person row answered row %d, want nil", got.ID)
+		}
+
+		asked := insert(domain.Message{UserID: userID, Role: "user", Content: "first", Model: "m-a", Effort: domain.EffortLow})
+		insert(domain.Message{Role: "assistant", Content: "reply", Model: "m-a"})
+		// The compaction takes the person row out of the window: delivered
+		// and inactive is compacted history, still the person's message.
+		if _, err := store.SetWindowStateSystem(ctx, orgID, conversationID, float64(asked)+0.5,
+			domain.MessageWindowActive, domain.MessageWindowInactive); err != nil {
+			t.Fatalf("SetWindowStateSystem: %v", err)
+		}
+		insert(domain.Message{UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note"})
+		pending := false
+		withdrawn := insert(domain.Message{UserID: userID, Role: "user", Content: "never mind", Model: "m-b", Delivered: &pending})
+		if err := store.WithdrawPendingInputSystem(ctx, orgID, conversationID, []int{withdrawn}); err != nil {
+			t.Fatalf("WithdrawPendingInputSystem: %v", err)
+		}
+
+		got := newest()
+		if got == nil || got.ID != asked {
+			t.Fatalf("newest person row = %+v, want the compacted row %d", got, asked)
+		}
+		if got.Model != "m-a" || got.Effort != domain.EffortLow {
+			t.Errorf("newest person row settings = (%q, %q), want (m-a, low)", got.Model, got.Effort)
+		}
+
+		// A message a mid-turn drain stamped as a steer is still the person's.
+		steered := insert(domain.Message{UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer,
+			Content: "and this", Model: "m-c"})
+		if got := newest(); got == nil || got.ID != steered {
+			t.Fatalf("newest person row = %+v, want the steered row %d", got, steered)
+		}
+		// One still waiting counts too.
+		waiting := insert(domain.Message{UserID: userID, Role: "user", Content: "next", Model: "m-d", Delivered: &pending})
+		if got := newest(); got == nil || got.ID != waiting {
+			t.Fatalf("newest person row = %+v, want the waiting row %d", got, waiting)
+		}
+	})
+
+	t.Run("NewestAssistant_ReadsTheNewestActiveAssistantRow", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		both := func() (*domain.Message, *domain.Message) {
+			t.Helper()
+			app, err := store.NewestAssistant(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("NewestAssistant: %v", err)
+			}
+			sys, err := store.NewestAssistantSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("NewestAssistantSystem: %v", err)
+			}
+			return app, sys
+		}
+
+		if app, sys := both(); app != nil || sys != nil {
+			t.Fatalf("a conversation with no assistant row answered (%+v, %+v), want nil", app, sys)
+		}
+		insert(domain.Message{UserID: userID, Role: "user", Content: "go"})
+		insert(domain.Message{Role: "assistant", Content: "one", Model: "m-a"})
+		compacted := insert(domain.Message{Role: "assistant", Content: "two", Model: "m-a"})
+		if _, err := store.SetWindowStateSystem(ctx, orgID, conversationID, float64(compacted)+0.5,
+			domain.MessageWindowActive, domain.MessageWindowInactive); err != nil {
+			t.Fatalf("SetWindowStateSystem: %v", err)
+		}
+		if app, sys := both(); app != nil || sys != nil {
+			t.Fatalf("a conversation whose assistant rows are all compacted answered (%+v, %+v), want nil", app, sys)
+		}
+
+		input, cacheRead := 1200, 300
+		active := insert(domain.Message{Role: "assistant", Content: "three", Model: "m-b",
+			InputTokens: &input, CacheReadTokens: &cacheRead})
+		insert(domain.Message{UserID: userID, Role: "user", Content: "after"})
+		app, sys := both()
+		for name, got := range map[string]*domain.Message{"NewestAssistant": app, "NewestAssistantSystem": sys} {
+			if got == nil || got.ID != active {
+				t.Fatalf("%s = %+v, want row %d", name, got, active)
+			}
+			if got.Model != "m-b" || domain.PromptOccupancy(*got) != 1500 {
+				t.Errorf("%s = (model %q, occupancy %d), want (m-b, 1500)", name, got.Model, domain.PromptOccupancy(*got))
+			}
+		}
+	})
+
 	t.Run("CompactForClaimSystem_CommitsResultFlipsSpanAndReseqsQueue", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -2355,7 +2525,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		queuedA := insert(domain.Message{ConversationID: conversationID, Role: "user", Content: "queued first", Delivered: &pending})
 		queuedB := insert(domain.Message{ConversationID: conversationID, Role: "user", Content: "queued second", Delivered: &pending})
 
-		replyRow := &domain.Message{Role: "assistant", Content: "<analysis>a</analysis>\n\n<summary>s</summary>", Model: "claude-haiku-4-5"}
+		replyRow := &domain.Message{Role: "assistant", Content: "<analysis>a</analysis>\n\n<summary>s</summary>", Model: "claude-haiku-5-5"}
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
 		span := []int{assistantID, toolID, requestID}
@@ -2415,7 +2585,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				if m.WindowState != domain.MessageWindowInactive {
 					t.Errorf("reply row window_state = %q, want inactive", m.WindowState)
 				}
-				if m.Model != "claude-haiku-4-5" {
+				if m.Model != "claude-haiku-5-5" {
 					t.Errorf("reply row model = %q, want the cheap model attribution", m.Model)
 				}
 			}
@@ -2684,7 +2854,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
 
-		ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
+		ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash), "")
 		if err != nil {
 			t.Fatalf("MarkFailedIfActiveForClaimSystem: %v", err)
 		}
@@ -2701,6 +2871,28 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		claims := seed.ClaimRows(t, conversationID)
 		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "failed" {
 			t.Fatalf("claims = %+v, want the engagement released as failed", claims)
+		}
+	})
+
+	// The failure notice reports result_summary, so the infra-failure terminal
+	// stores the text it was given.
+	t.Run("MarkFailedIfActiveForClaimSystem_StoresTheSummary", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		claimID, _, err := holderClaim(ctx, store, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureUnclassified), "its blueprint run vanished"); err != nil || !ok {
+			t.Fatalf("MarkFailedIfActiveForClaimSystem: ok=%v err=%v", ok, err)
+		}
+		got, err := store.GetSystem(ctx, orgID, conversationID)
+		if err != nil || got == nil {
+			t.Fatalf("GetSystem: err=%v got=%v", err, got)
+		}
+		if got.ResultSummary != "its blueprint run vanished" {
+			t.Errorf("result_summary = %q, want the summary the failure was given", got.ResultSummary)
 		}
 	})
 
@@ -3574,54 +3766,66 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	runPersonClaimMintConformance(t, mk)
+
 	// --- Boundaries ---
 	//
 	// A task owns its conversations, and ended_at/ended_reason record the
 	// moment one stopped being the live one. The stamp is about the task
 	// moving on, so none of these assertions is conditioned on status.
 
-	t.Run("EndConversationsForTask_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "end-all")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	// Both doors: the request's, and its admin-pool twin a transaction with no
+	// claims uses.
+	for _, door := range []struct {
+		name string
+		end  func(db.ConversationStore, context.Context, string, string, domain.EndedReason) ([]domain.Conversation, error)
+	}{
+		{"EndConversationsForTask", db.ConversationStore.EndConversationsForTask},
+		{"EndConversationsForTaskSystem", db.ConversationStore.EndConversationsForTaskSystem},
+	} {
+		t.Run(door.name+"_StampsEveryNonEndedTopLevelRowWhateverItsStatus", func(t *testing.T) {
+			store, orgID, _, seed := mk(t)
+			ctx := context.Background()
+			ent := seed.Entity(t, "end-all")
+			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// One per rung of the status ladder the stamp is NOT conditioned on:
-		// mid-flight, parked, cleanly concluded, failed. The `completed` row
-		// is the one a conditioned predicate would miss — a requeued task's
-		// abort row is exactly what the boundary has to end.
-		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
-		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
-		concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
+			// One per rung of the status ladder the stamp is NOT conditioned on:
+			// mid-flight, parked, cleanly concluded, failed. The `completed` row
+			// is the one a conditioned predicate would miss — a requeued task's
+			// abort row is exactly what the boundary has to end.
+			live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+			parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
+			concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
+			failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
 
-		before := time.Now().UTC().Add(-time.Second)
-		stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
-		if err != nil {
-			t.Fatalf("EndConversationsForTask: %v", err)
-		}
-		want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
-		if len(stamped) != len(want) {
-			t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
-		}
-		for _, c := range stamped {
-			if _, ok := want[c.ID]; !ok {
-				t.Errorf("stamped an unexpected conversation %s", c.ID)
+			before := time.Now().UTC().Add(-time.Second)
+			stamped, err := door.end(store, ctx, orgID, taskID, domain.EndedRequeued)
+			if err != nil {
+				t.Fatalf("%s: %v", door.name, err)
 			}
-			if c.EndedReason != domain.EndedRequeued {
-				t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+			want := map[string]struct{}{live: {}, parked: {}, concluded: {}, failed: {}}
+			if len(stamped) != len(want) {
+				t.Fatalf("stamped %d rows, want %d — the boundary is the task moving on, not a status filter", len(stamped), len(want))
 			}
-			if c.EndedAt == nil || c.EndedAt.Before(before) {
-				t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+			for _, c := range stamped {
+				if _, ok := want[c.ID]; !ok {
+					t.Errorf("stamped an unexpected conversation %s", c.ID)
+				}
+				if c.EndedReason != domain.EndedRequeued {
+					t.Errorf("%s ended_reason = %q, want requeued", c.ID, c.EndedReason)
+				}
+				if c.EndedAt == nil || c.EndedAt.Before(before) {
+					t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
+				}
+				// The returned row IS the stored row, laterals and all — nobody
+				// should re-read to broadcast what the write handed back.
+				AssertWriteReturnedStoredRow(t, door.name+" "+c.ID, c, func() (*domain.Conversation, error) {
+					return store.Get(ctx, orgID, c.ID)
+				})
 			}
-			// The returned row IS the stored row, laterals and all — nobody
-			// should re-read to broadcast what the write handed back.
-			AssertWriteReturnedStoredRow(t, "EndConversationsForTask "+c.ID, c, func() (*domain.Conversation, error) {
-				return store.Get(ctx, orgID, c.ID)
-			})
-		}
-	})
+		})
+	}
 
 	t.Run("EndConversationsForTask_SkipsSubagentAndAlreadyEndedRows", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
@@ -3721,6 +3925,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			if _, err := store.EndConversationsForTask(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
 				t.Errorf("EndConversationsForTask(%q) err = %v, want ErrInvalidEndedReason", reason, err)
+			}
+			if _, err := store.EndConversationsForTaskSystem(ctx, orgID, taskID, reason); !errors.Is(err, db.ErrInvalidEndedReason) {
+				t.Errorf("EndConversationsForTaskSystem(%q) err = %v, want ErrInvalidEndedReason", reason, err)
 			}
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -4699,6 +4906,95 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The opening is read across every window state, and only the task-context
+	// row is one: a compaction marks it inactive without un-opening the
+	// conversation, and the control plane's own rows land before any opening.
+	t.Run("OpeningTaskContext_FindsTheTaskContextRowInAnyWindowState", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		delivered, undelivered := true, false
+		insert := func(conversationID string, m domain.Message) {
+			t.Helper()
+			m.ConversationID = conversationID
+			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+		}
+		opening := func(conversationID string) (string, bool) {
+			t.Helper()
+			content, ok, err := store.OpeningTaskContextSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("OpeningTaskContextSystem: %v", err)
+			}
+			return content, ok
+		}
+
+		unopened := seedConversationForTest(t, orgID, seed, "queued")
+		if _, ok := opening(unopened); ok {
+			t.Error("an empty transcript reads as opened")
+		}
+		insert(unopened, domain.Message{Role: "user", Content: "and update the README", Delivered: &undelivered})
+		insert(unopened, domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "would not start", Delivered: &delivered})
+		insert(unopened, domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "restored", Delivered: &delivered})
+		insert(unopened, domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionMemory, Content: "prior", Delivered: &delivered})
+		if _, ok := opening(unopened); ok {
+			t.Error("a follow-up, a stop note, a claim-time notice and a memory read as an opening")
+		}
+
+		for _, state := range []domain.MessageWindowState{domain.MessageWindowActive, domain.MessageWindowInactive} {
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			const want = "<task_context>\nas the opening rendered it\n</task_context>"
+			insert(conversationID, domain.Message{
+				Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: want,
+				Delivered: &delivered, WindowState: state,
+			})
+			insert(conversationID, domain.Message{Role: "assistant", Content: "on it", WindowState: state})
+			if got, ok := opening(conversationID); !ok || got != want {
+				t.Errorf("window state %q: opening = (%q, %v), want (%q, true)", state, got, ok, want)
+			}
+		}
+	})
+
+	t.Run("HasAssistantMessage_CountsAnAssistantRowInAnyWindowState", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		delivered := true
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		has := func() bool {
+			t.Helper()
+			got, err := store.HasAssistantMessageSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("HasAssistantMessageSystem: %v", err)
+			}
+			return got
+		}
+
+		if has() {
+			t.Error("an empty transcript holds an assistant message")
+		}
+		for _, m := range []domain.Message{
+			{Role: "user", Content: "the person's ask", Delivered: &delivered},
+			{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "would not start", Delivered: &delivered},
+			{Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "<task_context/>", Delivered: &delivered},
+		} {
+			m.ConversationID = conversationID
+			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+		}
+		if has() {
+			t.Error("user rows read as an assistant message")
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: conversationID, Role: "assistant", Content: "compacted", WindowState: domain.MessageWindowInactive,
+		}); err != nil {
+			t.Fatalf("InsertMessage assistant: %v", err)
+		}
+		if !has() {
+			t.Error("an inactive assistant message is not counted; a compacted conversation would read as one the model never answered")
+		}
+	})
+
 	t.Run("DisplayReads_HideWithdrawnPendingRows", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -5346,7 +5642,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		settled := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		for _, id := range []string{owing, settled} {
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 		}
@@ -5400,7 +5696,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Ended after it parked: nothing resumes it.
 		ended := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		park(ended, domain.ParkReasonLaunchFailed)
-		if _, err := store.EndConversationSystem(ctx, orgID, ended, domain.EndedRequeued); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, ended, domain.EndedRequeued); err != nil {
 			t.Fatalf("end: %v", err)
 		}
 		// A trigger fired it: nobody delegated it to wait on.
@@ -5453,6 +5749,138 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// --- The delegator's notices ---
+	//
+	// The brain's sweep tells a delegator from these two due sets and marks
+	// each row it told. A row a set wrongly keeps is a notice sent on every
+	// pass; a row it wrongly drops is a notice never sent.
+
+	t.Run("ListFailureNoticesDue_ListsADelegatedFailureUntilMarked", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "failure-notice")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		fail := func(id string) {
+			t.Helper()
+			claimID, _, err := holderClaim(ctx, store, orgID, id)
+			if err != nil {
+				t.Fatalf("claim %s: %v", id, err)
+			}
+			if ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, id, claimID, string(domain.ConversationFailureCrash), "exit 1"); err != nil || !ok {
+				t.Fatalf("fail %s: ok=%v err=%v", id, ok, err)
+			}
+		}
+		delegated := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		fail(delegated)
+		// A trigger fired it: nobody delegated it to tell.
+		fired := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			TriggerType: "event", BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		fail(fired)
+
+		due, err := store.ListFailureNoticesDueSystem(ctx, 100)
+		if err != nil {
+			t.Fatalf("ListFailureNoticesDueSystem: %v", err)
+		}
+		if len(due) != 1 {
+			t.Fatalf("due = %+v, want only %s", due, delegated)
+		}
+		want := domain.FailureNoticeDue{
+			OrgID: orgID, ConversationID: delegated, CreatorUserID: userID,
+			FailureKind: domain.ConversationFailureCrash, ResultSummary: "exit 1",
+			EntitySourceID: due[0].EntitySourceID,
+		}
+		if due[0] != want || !strings.Contains(due[0].EntitySourceID, "failure-notice") {
+			t.Errorf("due row = %+v, want %+v with the seeded entity's key", due[0], want)
+		}
+
+		if marked, err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil || !marked {
+			t.Fatalf("MarkFailureNoticedSystem = (%v, %v), want it marked", marked, err)
+		}
+		if due, err := store.ListFailureNoticesDueSystem(ctx, 100); err != nil || len(due) != 0 {
+			t.Errorf("due after the mark = %+v (err %v), want none", due, err)
+		}
+		// A second pass that read the row before the mark finds nothing to
+		// mark, which is what keeps it from posting the notice again.
+		if marked, err := store.MarkFailureNoticedSystem(ctx, orgID, delegated); err != nil || marked {
+			t.Errorf("a second MarkFailureNoticedSystem = (%v, %v), want nothing marked", marked, err)
+		}
+	})
+
+	t.Run("ListPauseNoticesDue_ListsEachParkUntilMarked", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "pause-notice")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		park := func(id string) {
+			t.Helper()
+			if ok, err := HolderPark(store, ctx, orgID, id, db.ParkStopped(domain.ParkReasonStalled, "")); err != nil || !ok {
+				t.Fatalf("park %s: ok=%v err=%v", id, ok, err)
+			}
+		}
+		due := func() []domain.PauseNoticeDue {
+			t.Helper()
+			got, err := store.ListPauseNoticesDueSystem(ctx, 100)
+			if err != nil {
+				t.Fatalf("ListPauseNoticesDueSystem: %v", err)
+			}
+			return got
+		}
+		conversationID := seedConversationForTaskTest(t, orgID, taskID, "", seed)
+		park(conversationID)
+		// The awaiting-person test applies: a trigger fired this one.
+		fired := seed.Conversation(t, domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Model: "m",
+			TriggerType: "event", BlueprintRunID: seed.BlueprintRun(t, taskID),
+		})
+		park(fired)
+
+		first := due()
+		if len(first) != 1 || first[0].ConversationID != conversationID {
+			t.Fatalf("due = %+v, want only %s", first, conversationID)
+		}
+		if got := first[0]; got.OrgID != orgID || got.CreatorUserID != userID ||
+			got.ParkReason != domain.ParkReasonStalled || got.ParkedAt.IsZero() ||
+			!strings.Contains(got.EntitySourceID, "pause-notice") {
+			t.Errorf("due row = %+v, want the stalled park in org %s by %s, with its parked_at and entity key", got, orgID, userID)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || !marked {
+			t.Fatalf("MarkPauseNoticedSystem = (%v, %v), want it marked", marked, err)
+		}
+		if got := due(); len(got) != 0 {
+			t.Fatalf("due after the mark = %+v, want none", got)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || marked {
+			t.Errorf("a second MarkPauseNoticedSystem = (%v, %v), want nothing marked", marked, err)
+		}
+
+		// Woken and parked again: a new park, owed its own notice.
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
+			t.Fatalf("resume: ok=%v err=%v", ok, err)
+		}
+		park(conversationID)
+		again := due()
+		if len(again) != 1 || again[0].ConversationID != conversationID || again[0].ParkedAt.Equal(first[0].ParkedAt) {
+			t.Fatalf("due after parking anew = %+v, want %s at a parked_at other than %v", again, conversationID, first[0].ParkedAt)
+		}
+		// A mark naming the park that ended marks nothing.
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, first[0].ParkedAt); err != nil || marked {
+			t.Fatalf("MarkPauseNoticedSystem(stale) = (%v, %v), want nothing marked", marked, err)
+		}
+		if got := due(); len(got) != 1 {
+			t.Fatalf("due after a stale mark = %+v, want the new park still due", got)
+		}
+		if marked, err := store.MarkPauseNoticedSystem(ctx, orgID, conversationID, again[0].ParkedAt); err != nil || !marked {
+			t.Fatalf("MarkPauseNoticedSystem = (%v, %v), want it marked", marked, err)
+		}
+		if got := due(); len(got) != 0 {
+			t.Errorf("due after marking the new park = %+v, want none", got)
+		}
+	})
+
 	// The org scope narrows the scan, and it has to do so in the read: the page
 	// is capped, so an org's rows picked out of a fleet-wide page are not that
 	// org's page. This is what the doorbell a configuration save rings asks
@@ -5461,7 +5889,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
 			t.Fatalf("end: %v", err)
 		}
 
@@ -5492,7 +5920,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedFailed); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, conversationID, domain.EndedFailed); err != nil {
 			t.Fatalf("end: %v", err)
 		}
 		seed.SetConversationMemory(t, conversationID, NullMemorySentinel, domain.MemorySourceNone)
@@ -5520,7 +5948,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		end := func(suffix string) string {
 			t.Helper()
 			id := seedConversationForTest(t, orgID, seed, SeedConcluded)
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %s: %v", suffix, err)
 			}
 			return id
@@ -5568,7 +5996,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 			taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 			id := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedStepAdvanced); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedStepAdvanced); err != nil {
 				t.Fatalf("end %s: %v", id, err)
 			}
 			seed.BackdateEndedAt(t, id, age)
@@ -5603,7 +6031,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		for i := range 3 {
 			id := seedConversationForTest(t, orgID, seed, SeedConcluded)
-			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
+			if _, err := endRanConversation(t, store, ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %d: %v", i, err)
 			}
 		}
@@ -5626,6 +6054,45 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// A conversation that never ran has no turn to remember, so its boundary
+	// owes nothing: a person who claims a task and hands it back without
+	// typing leaves no debt for the sweep to work.
+	t.Run("ListMemoryOwed_SkipsAConversationThatNeverRan", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "owed-never-ran")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		untouched, err := store.MintForPersonClaim(ctx, orgID, taskID, userID)
+		if err != nil || untouched == nil {
+			t.Fatalf("MintForPersonClaim = (%v, %v)", untouched, err)
+		}
+		// A staged note is a user row. It is not a turn.
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: untouched.ID, Role: "user", Subtype: domain.MessageSubtypeInjectionSystemNote, Content: "a note",
+		}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		if _, err := store.EndConversationSystem(ctx, orgID, untouched.ID, domain.EndedRequeued); err != nil {
+			t.Fatalf("end the untouched conversation: %v", err)
+		}
+		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 0 {
+			t.Fatalf("owed = %v, want none — the conversation never ran", ids)
+		}
+
+		// The same boundary on one that ran does owe.
+		ran, err := store.MintForPersonClaim(ctx, orgID, taskID, userID)
+		if err != nil || ran == nil {
+			t.Fatalf("second MintForPersonClaim = (%v, %v)", ran, err)
+		}
+		if _, err := endRanConversation(t, store, ctx, orgID, ran.ID, domain.EndedRequeued); err != nil {
+			t.Fatalf("end the conversation that ran: %v", err)
+		}
+		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 1 || ids[0] != ran.ID {
+			t.Errorf("owed = %v, want [%s]", ids, ran.ID)
+		}
+	})
+
 	// A subagent row belongs to its spawner's engagement, so its boundary owes
 	// no handoff — the same rule that keeps the task's stamp off it.
 	t.Run("ListMemoryOwed_SkipsSubagentRows", func(t *testing.T) {
@@ -5634,13 +6101,33 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		parent := seedConversationForTest(t, orgID, seed, "running")
 		sub := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		seed.SetParentConversation(t, sub, parent)
-		if _, err := store.EndConversationSystem(ctx, orgID, sub, domain.EndedFailed); err != nil {
+		if _, err := endRanConversation(t, store, ctx, orgID, sub, domain.EndedFailed); err != nil {
 			t.Fatalf("end the subagent conversation: %v", err)
 		}
 		if ids := memoryOwedIDs(mustListMemoryOwed(t, store, ctx)); len(ids) != 0 {
 			t.Errorf("owed = %v, want none — a subagent's boundary is its spawner's business", ids)
 		}
 	})
+}
+
+// seedAssistantTurn gives a conversation an assistant message, which is what
+// makes it one that has run (db.ConversationHasRunSQL). An ended conversation
+// owes a memory only if it has, so a fixture staging a debt stages a turn.
+func seedAssistantTurn(t *testing.T, store db.ConversationStore, ctx context.Context, orgID, conversationID string) {
+	t.Helper()
+	if _, err := store.InsertMessageSystem(ctx, orgID, &domain.Message{
+		ConversationID: conversationID, Role: "assistant", Content: "a turn",
+	}); err != nil {
+		t.Fatalf("seed an assistant turn on %s: %v", conversationID, err)
+	}
+}
+
+// endRanConversation ends a conversation that has run: it stages the turn,
+// then stamps the boundary on the admin pool.
+func endRanConversation(t *testing.T, store db.ConversationStore, ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
+	t.Helper()
+	seedAssistantTurn(t, store, ctx, orgID, conversationID)
+	return store.EndConversationSystem(ctx, orgID, conversationID, reason)
 }
 
 // mustListMemoryOwed runs the sweep read with the suite's standard backoff and

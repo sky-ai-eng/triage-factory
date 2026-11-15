@@ -649,6 +649,12 @@ func resetTimer(t *time.Timer, d time.Duration) {
 // is the failure) or names nobody, and that reads as absent, the direction
 // the fast-deny already fails in.
 //
+// With the frames deferred (DeferConversationFrameAudience) this process
+// cannot read who may read the conversation, and an audience it did not read
+// must not stand for the whole org, so it answers absent without looking. Permission prompts come
+// only from the SDK runtime, which multi mode never runs, so nothing reaches
+// this today; it fails closed all the same.
+//
 // In multi mode, once SetPresenceChecker has wired a fleet-wide checker,
 // this consults it — local Hub state OR the ws_presence table — so a
 // reviewer connected to a different pod than the one running this run
@@ -656,6 +662,9 @@ func resetTimer(t *time.Timer, d time.Duration) {
 // the hub directly, which is nil-receiver-safe (the hub-less test spawner
 // reads as "nobody present").
 func (s *Spawner) presentFor(orgID, conversationID string) (bool, error) {
+	if s.framesDeferred {
+		return false, nil
+	}
 	userIDs, ok, err := s.frameAudience.Readers(context.Background(), orgID, conversationID)
 	if !ok {
 		return false, err

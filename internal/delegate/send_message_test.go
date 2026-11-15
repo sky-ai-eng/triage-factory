@@ -49,7 +49,7 @@ func TestSendMessage_LiveProcessQueuesForIt(t *testing.T) {
 	h := s.getProc("run-live")
 	h.boundary.take() // armed from registration; disarmed so the send's own arm shows
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "run-live", runmode.LocalDefaultUserID, "hello"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "run-live", runmode.LocalDefaultUserID, "hello", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	pending := pendingRows(t, s, "run-live")
@@ -80,7 +80,7 @@ func TestSendMessage_ParkedQueuesAndWakes(t *testing.T) {
 				markNative(t, database, "r-open")
 			}
 
-			if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-open", runmode.LocalDefaultUserID, "go on"); err != nil {
+			if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-open", runmode.LocalDefaultUserID, "go on", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage: %v", err)
 			}
 
@@ -111,7 +111,7 @@ func TestSendMessage_QueuedSDKNotSteerable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-q", runmode.LocalDefaultUserID, "hi")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-q", runmode.LocalDefaultUserID, "hi", domain.TurnSettings{})
 	if !errors.Is(err, ErrConversationNotSteerable) {
 		t.Errorf("err = %v, want ErrConversationNotSteerable for a queued SDK conversation", err)
 	}
@@ -223,7 +223,7 @@ func TestBlueprintDrivableForClaim(t *testing.T) {
 		})
 	}
 
-	// No blueprint parent (interactive, reserved) is not this
+	// No blueprint parent (an interactive conversation) is not this
 	// gate's business — it mirrors the SQL's LEFT JOIN, not an inner one.
 	if !blueprintDrivableForClaim(nil, nil) {
 		t.Error("a nil blueprint must be drivable")
@@ -274,7 +274,7 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	settleConversationBlueprint(t, database, "r-ab", "aborted")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{})
 	if errors.Is(err, ErrConversationNotSteerable) {
 		t.Errorf("completed+abort run rejected at the steerable gate: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestSendMessage_CompletedFinishIsResumable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-fin", runmode.LocalDefaultUserID, "more please"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-fin", runmode.LocalDefaultUserID, "more please", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if st := storedStatus(t, database, "r-fin"); st != "" {
@@ -323,7 +323,7 @@ func TestSendMessage_MissingConversationNotFound(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "ghost", runmode.LocalDefaultUserID, "hi")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "ghost", runmode.LocalDefaultUserID, "hi", domain.TurnSettings{})
 	if !errors.Is(err, ErrConversationNotFound) {
 		t.Errorf("err = %v, want ErrConversationNotFound", err)
 	}
@@ -338,10 +338,10 @@ func TestSendMessage_EmptyInputsRefusedForALiveProcess(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.registerProc(runmode.LocalDefaultOrgID, "r-blank", &agentproc.LiveRun{})
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", runmode.LocalDefaultUserID, ""); err == nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", runmode.LocalDefaultUserID, "", domain.TurnSettings{}); err == nil {
 		t.Error("expected an error for an empty message")
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", "", "hello"); err == nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", "", "hello", domain.TurnSettings{}); err == nil {
 		t.Error("expected an error for an empty user id")
 	}
 	var n int
@@ -365,7 +365,7 @@ func TestSendMessage_AProcessLetGoTakesNothing(t *testing.T) {
 	s.registerProc(runmode.LocalDefaultOrgID, "r-letgo", &agentproc.LiveRun{})
 	s.getProc("r-letgo").lettingGo = true
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-letgo", runmode.LocalDefaultUserID, "one more thing")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-letgo", runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{})
 	if !errors.Is(err, ErrNoLiveProcess) {
 		t.Errorf("err = %v, want ErrNoLiveProcess", err)
 	}
@@ -390,7 +390,7 @@ func TestSendMessage_RefusedSendRecordsNothing(t *testing.T) {
 	// registered.
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-orphan", runmode.LocalDefaultUserID, "hello?")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-orphan", runmode.LocalDefaultUserID, "hello?", domain.TurnSettings{})
 	if !errors.Is(err, ErrNoLiveProcess) {
 		t.Errorf("err = %v, want ErrNoLiveProcess", err)
 	}

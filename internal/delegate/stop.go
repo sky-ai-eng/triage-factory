@@ -167,6 +167,9 @@ const (
 	// StopCauseTaskTakenOver — a person claimed a task the agent held. Also a
 	// still-open task, and the sentence a reader needs is who has it now.
 	StopCauseTaskTakenOver StopCause = "task_taken_over"
+	// StopCauseTaskReassigned — a person's claim was handed to someone on
+	// another team, and the task moved there with it.
+	StopCauseTaskReassigned StopCause = "task_reassigned"
 	// StopCauseTeamArchived — the team that owns the work was archived.
 	StopCauseTeamArchived StopCause = "team_archived"
 )
@@ -184,6 +187,8 @@ func (c StopCause) note() string {
 		return "Run stopped: the task was handed to a new delegation."
 	case StopCauseTaskTakenOver:
 		return "Run stopped: a person took the task over."
+	case StopCauseTaskReassigned:
+		return "Run stopped: the task was reassigned to a person on another team."
 	case StopCauseTeamArchived:
 		return "Run stopped: the team that owns this work was archived."
 	}
@@ -531,6 +536,26 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 	return domain.ConversationFailureCrash
 }
 
+// endFailedConversation stamps the failure boundary on a conversation whose
+// failure was just recorded, and settles what the boundary owes: the memory
+// the failure may owe, and a conversation to replace one a person was working
+// in. Called only once the failure itself landed: a successor's conversation
+// is not this engagement's to end. Best-effort, because the terminal is the
+// load-bearing write, and a failed stamp must not turn a recorded failure into
+// an error. what names the failure in the log line.
+func (s *Spawner) endFailedConversation(ctx context.Context, orgID, conversationID, what string) {
+	ended, err := s.conversations.EndConversationSystem(ctx, orgID, conversationID, domain.EndedFailed)
+	if err != nil {
+		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "failure", what, "error", err)
+		return
+	}
+	// A nil row had already ended, and what it owes belongs to that boundary.
+	if ended != nil {
+		s.kickMemoryOwed(orgID, ended.ID)
+		s.replaceFailedInteractive(orgID, ended)
+	}
+}
+
 // failConversation records the infra-failure terminal for a run: guarded status flip,
 // a failure row on the transcript, the boundary stamp, and the broadcast.
 //
@@ -549,11 +574,16 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 
 	bgCtx := context.Background()
 
+	// A stop note, not an assistant row: TF writes it, not the model. An
+	// assistant row is what makes a conversation one that has run
+	// (db.ConversationHasRunSQL), so writing the failure as one would make a
+	// conversation that failed before its model spoke owe a memory of work
+	// nobody did.
 	failMsg := &domain.Message{
 		ConversationID: conversationID,
-		Role:           "assistant",
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeStopNote,
 		Content:        "Error: " + errMsg,
-		IsError:        true,
 	}
 	// The failure row goes in BEFORE the status flip, because the flip
 	// releases the claim: on the fenced path an insert afterwards would name
@@ -578,7 +608,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 	// Guarded — if a terminal racing path (cancel, natural completion)
 	// reached the row first, leave its status in place rather than
 	// clobbering.
-	marked, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
+	marked, markErr := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind), errMsg)
 	if errors.Is(markErr, db.ErrClaimReleased) {
 		// The release landed between the two writes. Same answer, same tail
 		// to skip; the failure row already on the transcript is the one
@@ -594,27 +624,18 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, errMs
 
 	// The boundary, stamped after the terminal it belongs to: a failure ends
 	// the conversation's life as its task's live one, so nothing resumes it
-	// and the memory it may owe has a row to be owed against. Reached only
-	// when the fence passed — a successor's conversation is not this
-	// engagement's to end. Best-effort: the terminal above is the load-bearing write, and a
-	// failed stamp must not turn a recorded failure into an error.
-	ended, endErr := s.conversations.EndConversationSystem(bgCtx, orgID, conversationID, domain.EndedFailed)
-	if endErr != nil {
-		delegateLog.Warn("stamp the failure boundary on the conversation failed", "conversation", conversationID, "error", endErr)
-	} else if ended != nil {
-		// The memory this failure owes: the agent may have died anywhere
-		// between "before its first tool call" and "one write short of its
-		// file", and only the transcript says which. Rung for the row this
-		// call stamped.
-		s.kickMemoryOwed(orgID, ended.ID)
-	}
+	// and the memory it may owe has a row to be owed against. The agent may
+	// have died anywhere between "before its first tool call" and "one write
+	// short of its file", and only the transcript says which.
+	s.endFailedConversation(bgCtx, orgID, conversationID, "infrastructure")
 
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
-	// Told only for a failure this call recorded: a racing verdict that got
-	// there first is the conversation's answer, not this one.
+	// Rung only for a failure this call recorded: a racing verdict that got
+	// there first is the conversation's answer, and the sweep would find
+	// nothing to tell.
 	if marked {
-		s.noteDelegatorFailed(orgID, conversationID, kind, errMsg)
+		s.kickDelegatorNotice(orgID)
 	}
 	return false
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 )
 
@@ -82,6 +83,28 @@ func (a *App) memoryOwed(orgID, conversationID string) {
 		return
 	}
 	a.publishCtl(ctlbus.Message{Kind: "memory_owed", OrgID: orgID, ConversationID: conversationID})
+}
+
+// delegatorNoticeOwed relays the delegator-notice doorbell the way memoryOwed
+// relays the memory one: a conversation in orgID just failed, or parked
+// waiting on the person who delegated it, so the brain's DelegatorNotices
+// should tell them now rather than at its next pass. Its callers are the
+// spawner's, on whichever process the conversation failed or parked, which is
+// often an executor. The sweep reads every org, so the org only names the
+// ring.
+//
+// Lossy like the rest: a dropped message costs one interval
+// (delegate.DefaultDelegatorNoticeInterval), never a lost notice, because the
+// sweep reads the same rows the doorbell is about.
+func (a *App) delegatorNoticeOwed(orgID string) {
+	if orgID == "" {
+		return
+	}
+	if a.isBrainHolder() {
+		a.delegatorNotices.Nudge()
+		return
+	}
+	a.publishCtl(ctlbus.Message{Kind: ctlbus.KindDelegatorNotice, OrgID: orgID})
 }
 
 // githubRefreshMarked relays a GitHub webhook receiver's nudge the way
@@ -190,6 +213,9 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		a.applySourcesChanged(msg.OrgID, msg.Source)
 	case ctlbus.KindGitHubRefreshMarked:
 		a.applyGitHubRefreshMarked(msg.OrgID)
+	case ctlbus.KindDelegatorNotice:
+		// A non-blocking send, like the nudges around it.
+		a.delegatorNotices.Nudge()
 	case "cred_request":
 		// nil at TF_ROLE=executor (buildCredProvisioner never constructs
 		// a.credProvisioner there) and in local mode — an executor is
@@ -210,7 +236,7 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
 				defer cancel()
-				if err := a.credProvisioner.ProvisionForConversation(ctx, msg.OrgID, msg.ConversationID); err != nil {
+				if err := a.credProvisioner.ProvisionForConversation(ctx, msg.OrgID, msg.ConversationID, credprovision.ReasonCredRequest); err != nil {
 					appLog.Warn("tf_ctl: cred_request provision failed", "conversation", msg.ConversationID, "error", err)
 				}
 			}()

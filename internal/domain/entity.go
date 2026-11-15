@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -169,13 +170,14 @@ type Entity struct {
 	// snapshot's project, so it follows a move; a project key rename moves
 	// nothing, and clearing the snapshot leaves it.
 	JiraProjectID string `json:"jira_project_id,omitempty"`
-	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
-	// Slack, kind encodes thread engagement: "thread" when the bot is why
-	// the thread exists (its root message was a mention, or a conversation posted
-	// the root itself), "message" when it's a mid-thread summons into
-	// someone else's thread. Set once at creation from whichever caller
-	// first resolves the entity (ingest.go's root-mention check, or exec
-	// slack send's root-post op) and never rewritten afterward.
+	// Kind is one of EntityKinds. For the poller-backed sources it is "pr",
+	// "issue" or "vulnerable_package". For Slack, kind encodes thread
+	// engagement: "thread" when the bot is why the thread exists (its root
+	// message was a mention, or a conversation posted the root itself),
+	// "message" when it's a mid-thread summons into someone else's thread.
+	// Set once at creation from whichever caller first resolves the entity
+	// (ingest.go's root-mention check, or exec slack send's root-post op) and
+	// never rewritten afterward.
 	Kind         string     `json:"kind"`
 	Title        string     `json:"title"`
 	URL          string     `json:"url"`
@@ -218,11 +220,38 @@ type EntityContainer struct {
 	JiraProject  JiraProjectRef `json:"jira_project,omitzero"`
 }
 
-// The kinds a GitHub entity is stored under: a pull request, or an issue.
+// The kinds a GitHub entity is stored under: a pull request, an issue, or a
+// vulnerable package (VulnerablePackageSourceID). The first two are objects
+// GitHub numbers within a repository; a vulnerable package is a grouping TF
+// makes of a repository's Dependabot alerts, and has no number.
 const (
-	EntityKindPullRequest = "pr"
-	EntityKindIssue       = "issue"
+	EntityKindPullRequest       = "pr"
+	EntityKindIssue             = "issue"
+	EntityKindVulnerablePackage = "vulnerable_package"
 )
+
+// The kinds a Slack entity is stored under: a thread the bot is why exists,
+// or someone else's thread the bot was summoned into (Entity.Kind). ee/slack
+// writes them; they are named here so EntityKinds can list them.
+const (
+	EntityKindSlackThread  = "thread"
+	EntityKindSlackMessage = "message"
+)
+
+// EntityKinds is every kind an entity is stored under, sorted: the
+// vocabulary of the task reads' entity_kinds filter. A Jira or Linear issue
+// is an EntityKindIssue, as a GitHub issue is.
+func EntityKinds() []string {
+	kinds := []string{
+		EntityKindPullRequest,
+		EntityKindIssue,
+		EntityKindVulnerablePackage,
+		EntityKindSlackThread,
+		EntityKindSlackMessage,
+	}
+	slices.Sort(kinds)
+	return kinds
+}
 
 // GitHubIdentity is what GitHub answered for the objects a GitHub act names,
 // read by the observer that made the act with the credential it made it under.
@@ -243,8 +272,9 @@ type GitHubIdentity struct {
 	Kind   string `json:"kind,omitempty"`
 }
 
-// IsGitHubObjectKind reports whether kind is one a GitHub entity is stored
-// under.
+// IsGitHubObjectKind reports whether kind is one of the GitHub objects an act
+// names by number: a pull request or an issue. A vulnerable package is not
+// one; no act names it, and no identity read returns it.
 func IsGitHubObjectKind(kind string) bool {
 	return kind == EntityKindPullRequest || kind == EntityKindIssue
 }

@@ -92,7 +92,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	}
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotPending, killedClaim)
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up during the persist: %v (a 409/410 here is the bug this ticket exists for)", err)
 	}
 	if got := pendingRows(t, s, conversationID); len(got) != 1 {

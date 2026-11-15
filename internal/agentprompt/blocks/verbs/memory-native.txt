@@ -1,5 +1,5 @@
 <entity_memory>
-Runs on this entity leave notes for the runs that come after them, and you are both a reader and a writer of those notes.
+Work on this entity leaves notes for the work that comes after it, and you are both a reader and a writer of those notes.
 
 **What you already have.** `/work/_tfac/entity-memory/` holds what previous work discovered, in two directories:
 
@@ -8,16 +8,16 @@ Runs on this entity leave notes for the runs that come after them, and you are b
 
 Beside those two, `/work/_tfac/entity-memory/task-context.md` is a verbatim copy of the `<task_context>` block your opening turn carried. Your conversation is summarized as it grows, and a summary is a restatement — re-read that file when you need a detail it may have lost, like a PR number or an exact title.
 
-**Write before you finish.** Your task is not complete until you have written your own notes to `/work/_tfac/memory.md`.
-That one path is the whole contract — write there and Triage Factory files it where it belongs.
-Write while you still have the full picture, so a later run never has to reconstruct your reasoning from a diff.
-Aim for 150–300 words covering:
+**Keep your notes current.** Your own notes go in `/work/_tfac/memory.md`.
+That one path is the whole contract: Triage Factory files the file at the end of every turn, and what comes after you inherits it — the next step of a workflow, or the task's next conversation.
+Update it while you still have the full picture: whenever the work changes state or a decision is settled, and before you end a turn that changed anything, so whoever comes next never has to reconstruct your reasoning from a diff.
+Rewrite the file rather than appending to it. Aim for 150–300 words covering:
 
-- What you did, and what state you are leaving behind.
-- The approach and the decisions inside it, so the next run does not relitigate them.
+- What has been done, and what state the work is in.
+- The approach and the decisions inside it, including any a person made, so whoever comes next does not relitigate them.
 - Why — the reasoning a summary would lose.
-- What you ruled out, and what made you rule it out.
+- What was ruled out, and what made you rule it out.
 - What is left, and what whoever comes next needs to know.
 
-Expand past that only when the work genuinely warrants it. This is orientation for the next run, not a transcript of this one.
+Expand past that only when the work genuinely warrants it. This is orientation for whoever comes next, not a transcript of this conversation.
 </entity_memory>

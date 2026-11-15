@@ -131,6 +131,24 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     color: 'bg-slate-500/10 text-slate-600',
   },
 
+  // --- GitHub: vulnerable packages (Dependabot alerts) ---
+  'github:vulnerability:alert_opened': {
+    label: 'Vulnerability',
+    description: 'A Dependabot alert opened on a package in a tracked repository',
+    color: 'bg-red-500/10 text-red-600',
+  },
+  'github:vulnerability:resolved': {
+    label: 'Vulnerability Resolved',
+    description: 'The package has no open Dependabot alert left',
+    color: 'bg-emerald-500/10 text-emerald-700',
+  },
+  'github:vulnerability:unreachable': {
+    label: 'Vulnerability Unreachable',
+    description:
+      "Triage Factory no longer follows this package: the organization points at another GitHub host, or the repository's Dependabot alerts can no longer be read. Says nothing about whether the alerts were fixed",
+    color: 'bg-slate-500/10 text-slate-600',
+  },
+
   // --- Jira ---
   'jira:issue:body_updated': {
     label: 'Issue Body Updated',

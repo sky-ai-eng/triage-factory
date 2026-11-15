@@ -39,13 +39,18 @@
 package agentprompt
 
 // Surface names which agent the prompt is for — the "who am I" axis. A surface
-// is a product concept (a delegated worker), not a runtime detail.
+// is a product concept (a delegated worker, a person's collaborator), not a
+// runtime detail.
 type Surface string
 
 const (
 	// SurfaceMachinist is the delegated agent that executes a task's mission
 	// in an isolated worktree, as one step of a blueprint.
 	SurfaceMachinist Surface = "machinist"
+
+	// SurfaceWorkbench is the agent a person works with on one task, in that
+	// task's tree.
+	SurfaceWorkbench Surface = "workbench"
 )
 
 // Runtime names the loop driving the agent — the "what harness am I in" axis.

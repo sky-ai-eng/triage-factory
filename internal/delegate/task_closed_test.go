@@ -254,7 +254,7 @@ func TestTellTaskClosed_WhoStartedTheWorkChangesNothing(t *testing.T) {
 				t.Fatalf("make the conversation a person's: %v", err)
 			}
 			delivered := true
-			message := pendingUserInput(f.convID, runmode.LocalDefaultUserID, "fix the nits before I approve")
+			message := pendingUserInput(f.convID, runmode.LocalDefaultUserID, "fix the nits before I approve", domain.TurnSettings{})
 			message.Delivered = &delivered
 			if _, err := f.s.conversations.InsertMessage(ctx, org, message); err != nil {
 				t.Fatalf("record the person's message: %v", err)
@@ -328,7 +328,7 @@ func TestTellTaskResolved_ALaunchOnAClosedTaskReadsRunContextAndTheNote(t *testi
 	if want := domain.TaskClosedRunContext(domain.TaskClose{Kind: domain.TaskClosedDismissed}); line != want {
 		t.Errorf("<run_context> line = %q, want %q", line, want)
 	}
-	if block := runContext("", line, "", "/work", "", "", "", "", ""); !strings.Contains(block, line) {
+	if block := runContext("", line, "", "/work", "", "", "", "", "", ""); !strings.Contains(block, line) {
 		t.Errorf("the run context does not carry the task's state:\n%s", block)
 	}
 	// Both runtimes compose their launch's block from the same line.

@@ -41,19 +41,10 @@ const (
 	// still fits comfortably under the hard limit.
 	DefaultCompactionThreshold = 0.80
 
-	// DefaultColdCompactionModel is the forced-shape call's model — the
-	// cheapest enabled model, which today is always haiku, so it ships as a
-	// constant until model configuration makes "cheapest enabled" resolvable.
-	DefaultColdCompactionModel = "claude-haiku-4-5"
-
-	// providerCacheTTL mirrors the stamping policy's unset default (the
-	// provider's 5-minute ephemeral TTL — see inference/cachecontrol.go).
-	// Warmth is derived from the newest assistant row's age against it,
-	// never stored. The proxy is deliberately coarse: at a cold resume
-	// compaction already pays a full re-read, so a wrong guess changes
-	// nothing — which is exactly why this proxy is NOT sufficient for
-	// elision, whose entire value is being free.
-	providerCacheTTL = 5 * time.Minute
+	// DefaultColdCompactionModel is the forced-shape call's model for a
+	// caller that sets none. The delegate sets one: it resolves the model per
+	// provider, because the id a credential can call differs between them.
+	DefaultColdCompactionModel = domain.ModelHaiku
 )
 
 // The compactionFail* constants are the machine-readable discriminator values
@@ -80,33 +71,28 @@ func (e *Engine) compactionDue(params Params, rows []domain.Message) bool {
 	return occupancy(rows) >= int(threshold*float64(limit))
 }
 
-// occupancy is the newest assistant row's whole-prompt token accounting —
-// input + output + cache read + cache creation, which is what the NEXT
-// call's prompt approximately costs. Read straight off stamped usage; no
-// estimator, ever: an estimate may only place text, never trip machinery.
+// occupancy is the newest assistant row's whole-prompt token accounting
+// (domain.PromptOccupancy), which is what the NEXT call's prompt
+// approximately costs. Read straight off stamped usage; no estimator, ever:
+// an estimate may only place text, never trip machinery.
 func occupancy(rows []domain.Message) int {
 	for i := len(rows) - 1; i >= 0; i-- {
-		r := rows[i]
-		if r.Role != "assistant" {
-			continue
+		if rows[i].Role == "assistant" {
+			return domain.PromptOccupancy(rows[i])
 		}
-		total := 0
-		for _, p := range []*int{r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens} {
-			if p != nil {
-				total += *p
-			}
-		}
-		return total
 	}
 	return 0
 }
 
 // warmCacheLive reports whether the provider cache from the newest assistant
-// turn is plausibly still alive.
+// turn is plausibly still alive, by its age against domain.ProviderCacheTTL.
+// The proxy is deliberately coarse: at a cold resume compaction already pays
+// a full re-read, so a wrong guess changes nothing — which is exactly why
+// this proxy is NOT sufficient for elision, whose entire value is being free.
 func warmCacheLive(rows []domain.Message) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Role == "assistant" {
-			return time.Since(rows[i].CreatedAt) < providerCacheTTL
+			return time.Since(rows[i].CreatedAt) < domain.ProviderCacheTTL
 		}
 	}
 	return false
@@ -282,8 +268,9 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 }
 
 // compactCold is the forced-shape call: nothing inherited, nothing that can
-// fail on format. A dedicated system prompt, the cheapest enabled model, and
-// exactly one tool the call is forced to use — the schema is the parse.
+// fail on format. A dedicated system prompt, the caller's cold-compaction
+// model, and exactly one tool the call is forced to use — the schema is the
+// parse.
 func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {

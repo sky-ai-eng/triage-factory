@@ -442,9 +442,9 @@ func (c *leaseRecoveringConversations) CompleteForClaimSystem(ctx context.Contex
 	return conv, err
 }
 
-func (c *leaseRecoveringConversations) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (changed bool, err error) {
+func (c *leaseRecoveringConversations) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (changed bool, err error) {
 	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
-		changed, e = c.ConversationStore.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind)
+		changed, e = c.ConversationStore.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind, summary)
 		return e
 	})
 	return changed, err

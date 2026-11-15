@@ -132,6 +132,10 @@ function filterStorageKey(userID: string): string {
 
 type FilterMap = Record<ColumnId, LaneFilter>
 
+// A lane's facet values: the event types and the entity kinds it holds.
+type LaneFacets = { eventTypes: string[]; kinds: string[] }
+const NO_FACETS: LaneFacets = { eventTypes: [], kinds: [] }
+
 function loadFilters(userID: string): FilterMap {
   try {
     const raw = localStorage.getItem(filterStorageKey(userID))
@@ -171,6 +175,14 @@ function filterSignature(f: LaneFilter): string {
 type CollapseMap = Record<ColumnId, boolean>
 
 const COLLAPSE_STORAGE_PREFIX = 'sky330.board.collapsed.v1'
+
+// isUnusedClaimConversation reports the conversation a person's claim opened
+// in which nothing has run. It holds nothing a card shows, so it never takes a
+// card from an earlier conversation: a run a person took over keeps its
+// deliverables and its chain on the card, and its link.
+function isUnusedClaimConversation(c: Conversation): boolean {
+  return c.type === 'interactive' && c.has_run === false
+}
 
 function collapseStorageKey(userID: string): string {
   return `${COLLAPSE_STORAGE_PREFIX}.${userID || 'anon'}`
@@ -354,13 +366,14 @@ export default function Board() {
   const [showSnoozed, setShowSnoozed] = useState(false)
   const showSnoozedRef = useRef(showSnoozed)
 
-  // The event types each lane holds under its current query, from the facet
-  // read beside each lane read. The chips are drawn from this rather than
-  // from the page, so a type on an unfetched page still gets its chip.
-  const [facets, setFacets] = useState<Record<ColumnId, string[]>>({
-    queued: [],
-    in_progress: [],
-    done: [],
+  // The event types and entity kinds each lane holds under its current
+  // query, from the facet read beside each lane read. The chips are drawn
+  // from this rather than from the page, so a type on an unfetched page still
+  // gets its chip.
+  const [facets, setFacets] = useState<Record<ColumnId, LaneFacets>>({
+    queued: NO_FACETS,
+    in_progress: NO_FACETS,
+    done: NO_FACETS,
   })
 
   // Drag state. The "over column" highlight is owned by BoardColumn
@@ -481,7 +494,8 @@ export default function Board() {
       for (const taskID of taskIDs) {
         const taskConversations = conversationsByTask[taskID]
         if (!taskConversations || taskConversations.length === 0) continue
-        const latestConversation = taskConversations[0]
+        const latestConversation =
+          taskConversations.find((c) => !isUnusedClaimConversation(c)) ?? taskConversations[0]
         const blueprintRunID = latestConversation.blueprint_run_id
         if (blueprintRunID) {
           const stepConversations = taskConversations
@@ -570,8 +584,12 @@ export default function Board() {
           body: JSON.stringify(facetsBody(body)),
         })
           .then((res) => {
-            const values = (res.event_types ?? []).map((f) => f.value).sort()
-            setFacets((prev) => ({ ...prev, [col]: values }))
+            const values = (cut: { value: string }[] | undefined) =>
+              (cut ?? []).map((f) => f.value).sort()
+            setFacets((prev) => ({
+              ...prev,
+              [col]: { eventTypes: values(res.event_types), kinds: values(res.entity_kinds) },
+            }))
           })
           .catch(() => {}),
       ])
@@ -774,7 +792,8 @@ export default function Board() {
                 if (
                   existing &&
                   existing.ID !== fullConversation.ID &&
-                  existing.StartedAt >= fullConversation.StartedAt
+                  (existing.StartedAt >= fullConversation.StartedAt ||
+                    isUnusedClaimConversation(fullConversation))
                 ) {
                   return p
                 }
@@ -825,7 +844,17 @@ export default function Board() {
             } else {
               apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
                 .then((fullConversation) => {
-                  setConversations((p) => ({ ...p, [fullConversation.TaskID]: fullConversation }))
+                  setConversations((p) => {
+                    const existing = p[fullConversation.TaskID]
+                    if (
+                      existing &&
+                      existing.ID !== fullConversation.ID &&
+                      isUnusedClaimConversation(fullConversation)
+                    ) {
+                      return p
+                    }
+                    return { ...p, [fullConversation.TaskID]: fullConversation }
+                  })
                   if (fullConversation.blueprint_run_id) {
                     seedChainStepConversations(
                       fullConversation.TaskID,
@@ -848,7 +877,8 @@ export default function Board() {
                 if (
                   existing &&
                   existing.ID !== fullConversation.ID &&
-                  existing.StartedAt >= fullConversation.StartedAt
+                  (existing.StartedAt >= fullConversation.StartedAt ||
+                    isUnusedClaimConversation(fullConversation))
                 ) {
                   return p
                 }
@@ -1438,7 +1468,8 @@ export default function Board() {
                     title={COLUMN_TITLES[colId]}
                     filter={filters[colId]}
                     onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
-                    eventTypes={facets[colId]}
+                    eventTypes={facets[colId].eventTypes}
+                    kinds={facets[colId].kinds}
                     paging={paging[colId]}
                     onCollapse={() => toggleCollapse(colId)}
                     headerExtra={colId === 'done' ? doneHeader : undefined}

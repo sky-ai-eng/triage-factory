@@ -85,7 +85,15 @@ var _ cell.Jail = (*toolHostJail)(nil)
 // indistinguishable from a slow start: a tool host that cannot exec, or
 // refuses its arguments, dies immediately and would leave the caller blocked
 // on a connection nobody was ever going to make.
+//
+// The span's status on a failure is a fixed message and the error is never
+// recorded on it: an exit's error carries the tool host's stderr. A ctx that
+// ends is the caller stopping, not the tool host failing, so it is an outcome
+// and leaves the status unset.
 func (j *toolHostJail) Connect(ctx context.Context, timeout time.Duration) (net.Conn, error) {
+	_, span := tracer.Start(ctx, "agent.tool_host.connect")
+	defer span.End()
+
 	type accepted struct {
 		conn net.Conn
 		err  error
@@ -99,14 +107,24 @@ func (j *toolHostJail) Connect(ctx context.Context, timeout time.Duration) (net.
 	select {
 	case a := <-conns:
 		if a.err != nil {
+			span.SetStatus(codes.Error, "accepting the tool host's connection failed")
 			return nil, fmt.Errorf("gvisor: accept tool host connection: %w", a.err)
 		}
 		return a.conn, nil
 	case <-j.waitDone:
+		// A run is killed when the ctx it was launched on ends, so a stop can
+		// find the jail already exited, and select picks either ready arm.
+		if ctx.Err() != nil {
+			span.SetAttributes(telemetry.Outcome("cancelled"))
+			return nil, ctx.Err()
+		}
+		span.SetStatus(codes.Error, "the tool host exited before connecting")
 		return nil, fmt.Errorf("gvisor: tool host exited before connecting (%v); stderr: %s", j.waitErr, j.run.Stderr())
 	case <-ctx.Done():
+		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return nil, ctx.Err()
 	case <-time.After(timeout):
+		span.SetStatus(codes.Error, "the tool host did not connect within the timeout")
 		return nil, fmt.Errorf("gvisor: tool host did not connect within %s", timeout)
 	}
 }
@@ -260,8 +278,8 @@ func launchToolHost(ctx context.Context, rn *sandbox.RunNetwork, conversationID 
 	ctx, span := tracer.Start(ctx, "agent.jail.launch", trace.WithAttributes(telemetry.Runtime("native")))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "launching the tool host's jail failed")
+			gvisorLog.WarnContext(ctx, "launching the tool host's jail failed", "conversation", conversationID, "error", err)
 		}
 		span.End()
 	}()

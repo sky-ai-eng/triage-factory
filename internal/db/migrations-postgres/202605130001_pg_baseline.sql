@@ -934,7 +934,7 @@ CREATE TABLE public.org_settings (
     enabled_models text,
     -- The modelcatalog key both headless system jobs (scorer, repo profiler) run
     -- on; app-validated. Empty = not picked, and those jobs skip their cycles.
-    -- The SQLite twin defaults to 'claude-haiku-4-5-20251001' — do not converge.
+    -- The SQLite twin defaults to the SDK alias 'haiku' — do not converge.
     background_jobs_model text DEFAULT ''::text NOT NULL,
     -- Org-wide daily LLM spend cap. NULL (and 0, app-side) = no cap. At or above
     -- it, Spawner.Delegate refuses new runs; in-flight runs are unaffected and
@@ -1300,7 +1300,14 @@ CREATE TABLE public.messages (
     tool_call_id text,
     is_error boolean DEFAULT false NOT NULL,
     metadata jsonb,
+    -- On an assistant row, the model that produced it. On a person's own row
+    -- (role 'user', blank subtype), the model that message runs on, and
+    -- effort is the reasoning effort it runs at: one of 'low', 'medium',
+    -- 'high', 'xhigh' and 'max', NULL for the provider's default. The newest
+    -- person row holds the conversation's current settings. NULL on every
+    -- other row.
     model text,
+    effort text,
     input_tokens integer,
     output_tokens integer,
     cache_read_tokens integer,
@@ -1367,7 +1374,7 @@ CREATE TABLE public.conversation_worktrees (
 CREATE TABLE public.conversations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    -- 'delegation' | 'interactive' (reserved) | namespaced 'subagent:<kind>'
+    -- 'delegation' | 'interactive' | namespaced 'subagent:<kind>'
     -- (never the bare word). App-validated, no CHECK.
     type text DEFAULT 'delegation'::text NOT NULL,
     creator_user_id uuid,
@@ -1457,6 +1464,14 @@ CREATE TABLE public.conversations (
     -- App-validated, no CHECK (the type/origin pattern).
     ended_at timestamp with time zone,
     ended_reason text,
+    -- When the brain posted the failure notice to the person who delegated
+    -- the conversation. NULL = not posted. Written only by the brain's sweep.
+    failure_noticed_at timestamp with time zone,
+    -- The parked_at of the park whose paused notice the brain opened. A park
+    -- keeps its parked_at until a claim or a resume clears it, so a value that
+    -- differs from parked_at names an earlier park, or none. Written only by
+    -- the brain's sweep.
+    pause_noticed_parked_at timestamp with time zone,
     CONSTRAINT conversations_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -2232,6 +2247,15 @@ CREATE INDEX idx_conversations_task ON public.conversations USING btree (task_id
 
 
 CREATE INDEX idx_conversations_trigger ON public.conversations USING btree (trigger_id);
+
+
+-- The brain's failure-notice read: failed rows accumulate, and the few still
+-- owed a notice are all it reads.
+CREATE INDEX idx_conversations_failure_notice_due ON public.conversations USING btree (completed_at, id) WHERE ((status = 'failed'::text) AND (failure_noticed_at IS NULL) AND (creator_user_id IS NOT NULL));
+
+-- The brain's paused-notice read: stored 'open' covers every concluded step,
+-- and only the live parks not yet told are what it reads.
+CREATE INDEX idx_conversations_pause_notice_due ON public.conversations USING btree (parked_at, id) WHERE ((status = 'open'::text) AND (park_reason IS NOT NULL) AND (parked_at IS NOT NULL) AND (creator_user_id IS NOT NULL) AND (ended_at IS NULL) AND (archived_at IS NULL) AND (pause_noticed_parked_at IS DISTINCT FROM parked_at));
 
 
 CREATE INDEX idx_swipe_events_action_created ON public.swipe_events USING btree (action, created_at);
@@ -4399,8 +4423,9 @@ REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service
 -- Pending refresh marks: one row per target in a tracked repository that a
 -- GitHub webhook delivery said changed, written in the transaction that
 -- records the delivery in github_webhook_deliveries. kind says what target
--- holds: a pull request number in decimal, a head SHA, or a branch name
--- without refs/heads/. Deliveries naming the same target land on one row:
+-- holds: a pull request number in decimal, a head SHA, a branch name without
+-- refs/heads/, or nothing for dependabot_alerts, which names the repository's
+-- alerts as a whole. Deliveries naming the same target land on one row:
 -- each bumps revision and marked_at, and first_marked_at stays. A pass clears
 -- a mark only at the revision it read, so a delivery landing mid-pass keeps
 -- its mark.
@@ -4411,11 +4436,12 @@ CREATE TABLE public.github_refresh_marks (
     id              uuid NOT NULL DEFAULT gen_random_uuid(),
     org_id          uuid NOT NULL,
     repository_id   uuid NOT NULL,
-    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch')),
-    target          text NOT NULL CHECK (target <> ''),
+    kind            text NOT NULL CHECK (kind IN ('pull_request', 'head_sha', 'branch', 'dependabot_alerts')),
+    target          text NOT NULL,
     revision        bigint NOT NULL DEFAULT 1,
     first_marked_at timestamp with time zone NOT NULL,
-    marked_at       timestamp with time zone NOT NULL
+    marked_at       timestamp with time zone NOT NULL,
+    CHECK ((kind = 'dependabot_alerts') = (target = ''))
 );
 
 ALTER TABLE ONLY public.github_refresh_marks
@@ -4449,13 +4475,19 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.github_refresh_marks TO tf_
 -- repository). One row per repository, replaced by each probe; a repository
 -- the poll has not probed has no row.
 --
+-- Beside the answer, alerts_etag: the ETag GitHub answered the poll's last
+-- listing of the repository's open alerts with, the next listing's condition,
+-- '' when there is none to send.
+--
 -- Admin-pool wired with org_id bound per statement; the policy below is
 -- defense-in-depth.
 CREATE TABLE public.repository_dependabot_access (
     repository_id uuid NOT NULL,
     org_id        uuid NOT NULL,
     access        text NOT NULL CHECK (access IN ('readable', 'no_permission', 'disabled')),
-    checked_at    timestamp with time zone NOT NULL
+    checked_at      timestamp with time zone NOT NULL,
+    alerts_etag     text DEFAULT ''::text NOT NULL,
+    updates_read_at timestamp with time zone
 );
 
 ALTER TABLE ONLY public.repository_dependabot_access
@@ -7266,8 +7298,12 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.notification_marks TO tf_app;
 
 
 -- Unified spend view: one row-per-spend shape UNION-ing the messages ledger
--- (delegated conversations) and headless system jobs onto a single category
--- axis. Delegations split manual (per-user) from autonomous; system jobs are
+-- (delegated and interactive conversations) and headless system jobs onto a
+-- single category axis. Delegations split manual (per-user) from autonomous; an
+-- interactive conversation is a person's spend, so it is manual whatever its
+-- trigger_type, and charged to the row's own user, falling back to the
+-- creator: a reassignment within the team keeps the conversation, and each
+-- turn is the spend of the person who asked for it. System jobs are
 -- 'system_overhead' with the job as subtype. source_id is cast to text so the
 -- UNION's column type is uniform. security_invoker (PG 15+) is required so the
 -- base tables' RLS applies under the querying app-pool identity.
@@ -7277,11 +7313,14 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.org_id,
     c.team_id,
         CASE
-            WHEN (c.trigger_type = 'manual'::text) THEN 'manual'::text
+            WHEN ((c.type = 'interactive'::text) OR (c.trigger_type = 'manual'::text)) THEN 'manual'::text
             ELSE 'autonomous'::text
         END AS category,
     NULL::text AS subtype,
-    c.creator_user_id,
+        CASE
+            WHEN (c.type = 'interactive'::text) THEN COALESCE(m.user_id, c.creator_user_id)
+            ELSE c.creator_user_id
+        END AS creator_user_id,
     c.actor_agent_id,
     c.trigger_id,
     m.model,
@@ -7293,7 +7332,7 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.created_at AS occurred_at
    FROM (public.messages m
      JOIN public.conversations c ON (((c.id = m.conversation_id) AND (c.org_id = m.org_id))))
-  WHERE ((c.type = 'delegation'::text)
+  WHERE ((c.type = ANY (ARRAY['delegation'::text, 'interactive'::text]))
      AND ((m.role = 'assistant'::text) OR (m.cost_usd IS NOT NULL)))
 UNION ALL
 

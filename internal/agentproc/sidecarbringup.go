@@ -193,7 +193,7 @@ type SidecarBringUpParams struct {
 	// only in a test fixture, where a relayed op fails closed.
 	Relay RelayDispatcher
 
-	// GitHubAPIEnabled requests the GitHub-REST credential proxy (GetPR +
+	// GitHubAPIEnabled requests the GitHub-REST credential proxy (the PR read +
 	// agenthost gh verbs). The REST base it prepends is derived sidecar-side
 	// from the sealed bundle; the orchestrator points its client at the bare
 	// proxy URL the result returns.
@@ -216,7 +216,7 @@ type SidecarBringUpParams struct {
 // BringUpRunSidecar drives the full credential handshake with a launched
 // sidecar and returns the coordinates its proxies produced — the non-secret
 // sandbox env AND the per-run proxy URLs + placeholder tokens the orchestrator
-// routes its own pre-sandbox clone / GetPR / agenthost through — plus the live
+// routes its own pre-sandbox clone / PR read / agenthost through — plus the live
 // supervision Conn (kept open for the run's lifetime so the git proxy's
 // authorize callbacks and any mid-run bundle refresh keep working). The caller
 // closes the returned Conn when the run ends (and closes the sidecar handle
@@ -254,7 +254,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	case <-helloCtx.Done():
 		helloErr = helloCtx.Err()
 	}
-	telemetry.RecordSpanError(helloSpan, helloErr)
+	telemetry.RecordSpanError(helloSpan, helloErr, "the sidecar did not announce its key")
 	helloSpan.End()
 	if helloErr != nil {
 		_ = conn.Close()
@@ -266,7 +266,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	// the one that measures somebody else's latency rather than this pod's.
 	provCtx, provSpan := tracer.Start(ctx, "sidecar.provision")
 	sealed, bootEpoch, err := provision(provCtx, pubKey)
-	telemetry.RecordSpanError(provSpan, err)
+	telemetry.RecordSpanError(provSpan, err, "provisioning the sidecar's credentials failed")
 	provSpan.End()
 	if err != nil {
 		_ = conn.Close()
@@ -288,7 +288,7 @@ func BringUpRunSidecar(ctx context.Context, sc cell.Sidecar, provision SidecarPr
 	var res sidecarproto.StartProxiesResult
 	proxyCtx, proxySpan := tracer.Start(ctx, "sidecar.start_proxies")
 	err = conn.Call(proxyCtx, sidecarproto.KindStartProxies, req, &res)
-	telemetry.RecordSpanError(proxySpan, err)
+	telemetry.RecordSpanError(proxySpan, err, "starting the sidecar's proxies failed")
 	proxySpan.End()
 	if err != nil {
 		_ = conn.Close()

@@ -147,12 +147,13 @@ func TestGitHubWebhook_RefreshMarks_NamesNothing(t *testing.T) {
 		{"comment on an issue", "issue_comment", `{"action":"created","issue":{"number":12},"repository":{"id":9001}}`},
 		{"comment on an issue, null pull_request", "issue_comment", `{"action":"created","issue":{"number":12,"pull_request":null},"repository":{"id":9001}}`},
 		{"tag push", "push", `{"ref":"refs/tags/v1.0.0","repository":{"id":9001}}`},
+		{"alert assignees changed", "dependabot_alert", string(dependabotAlertBody("assignees_changed", hintRepoID))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
 			s := newTestServer(t)
 			seedWebhookApp(t, s)
-			trackHintRepo(t, s, hintRepoID, "api")
+			recordAlertsAccess(t, s, trackHintRepo(t, s, hintRepoID, "api"), domain.DependabotAlertsReadable)
 			nudges := captureNudges(s)
 
 			body := []byte(tc.body)
@@ -172,33 +173,123 @@ func TestGitHubWebhook_RefreshMarks_NamesNothing(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_DependabotAlertIsRecordedOnly: the App subscribes to
-// dependabot_alert, and a delivery of it in a tracked repository is recorded
-// and acknowledged and does nothing else yet: no mark and no nudge.
-func TestGitHubWebhook_DependabotAlertIsRecordedOnly(t *testing.T) {
-	if hintedEvent("dependabot_alert") {
-		t.Fatal("dependabot_alert is parsed as a refresh hint, which names no alert target yet")
+// recordAlertsAccess records access as the repository's Dependabot answer,
+// as the poll's probe does.
+func recordAlertsAccess(t *testing.T, s *Server, repositoryID string, access domain.DependabotAlertsAccess) {
+	t.Helper()
+	if _, err := sqlitestore.New(s.db).DependabotAccess.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, repositoryID, access); err != nil {
+		t.Fatalf("record dependabot access: %v", err)
 	}
+}
+
+// dependabotAlertBody is a dependabot_alert delivery with action about an
+// alert in the repository GitHub knows by repoID.
+func dependabotAlertBody(action, repoID string) []byte {
+	return []byte(`{"action":"` + action + `","alert":{"number":3,"state":"open",` +
+		`"dependency":{"package":{"ecosystem":"npm","name":"lodash"},"manifest_path":"package-lock.json"}},` +
+		`"repository":{"id":` + repoID + `},"installation":{"id":4242}}`)
+}
+
+// TestGitHubWebhook_DependabotAlert_MarksTheRepositorysAlerts: a
+// dependabot_alert delivery for a tracked repository whose alerts the poll
+// lists writes the one mark naming the repository's alerts, whichever alert
+// and action it is about, and nudges the holder.
+func TestGitHubWebhook_DependabotAlert_MarksTheRepositorysAlerts(t *testing.T) {
+	for _, action := range []string{"created", "fixed", "dismissed", "auto_dismissed", "reopened", "auto_reopened", "reintroduced", "withdrawn"} {
+		t.Run(action, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			s := newTestServer(t)
+			seedWebhookApp(t, s)
+			repoRow := trackHintRepo(t, s, hintRepoID, "api")
+			recordAlertsAccess(t, s, repoRow, domain.DependabotAlertsReadable)
+			nudges := captureNudges(s)
+
+			body := dependabotAlertBody(action, hintRepoID)
+			if rec := postWebhook(s, "dependabot_alert", sign(body), body); rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+			}
+			marks := refreshMarks(t, s)
+			if len(marks) != 1 || marks[0].RepositoryID != repoRow || marks[0].Target != domain.DependabotAlertsRefreshTarget() {
+				t.Errorf("marks = %+v, want the one mark naming the repository's alerts", marks)
+			}
+			if n := nudges(); len(n) != 1 || n[0] != runmode.LocalDefaultOrgID {
+				t.Errorf("nudges = %v, want one for the org", n)
+			}
+		})
+	}
+}
+
+// TestGitHubWebhook_DependabotAlert_UnlistedAlertsMarkNothing: a delivery for
+// a tracked repository whose alerts the poll does not list (the recorded
+// answer says they cannot be read, or nothing is recorded yet) is recorded and
+// acknowledged, and writes no mark and sends no nudge.
+func TestGitHubWebhook_DependabotAlert_UnlistedAlertsMarkNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		access domain.DependabotAlertsAccess
+	}{
+		{"no answer recorded", ""},
+		{"no permission", domain.DependabotAlertsNoPermission},
+		{"alerts disabled", domain.DependabotAlertsDisabled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			s := newTestServer(t)
+			seedWebhookApp(t, s)
+			repoRow := trackHintRepo(t, s, hintRepoID, "api")
+			if tc.access != "" {
+				recordAlertsAccess(t, s, repoRow, tc.access)
+			}
+			nudges := captureNudges(s)
+
+			body := dependabotAlertBody("created", hintRepoID)
+			if rec := postWebhook(s, "dependabot_alert", sign(body), body); rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+			}
+			if marks := refreshMarks(t, s); len(marks) != 0 {
+				t.Errorf("marks = %+v, want none", marks)
+			}
+			if n := nudges(); len(n) != 0 {
+				t.Errorf("nudges = %v, want none", n)
+			}
+			if n := deliveryRows(t, s); n != 1 {
+				t.Errorf("delivery rows = %d, want the delivery recorded", n)
+			}
+		})
+	}
+}
+
+// TestGitHubWebhook_DependabotAlert_Duplicates: a redelivered alert delivery
+// is a duplicate and writes nothing, and a second delivery about the
+// repository's alerts, about another alert or the same one, lands on the one
+// mark, so however many arrive before the poll reads it, it costs one listing.
+func TestGitHubWebhook_DependabotAlert_Duplicates(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	seedWebhookApp(t, s)
-	trackHintRepo(t, s, hintRepoID, "api")
+	repoRow := trackHintRepo(t, s, hintRepoID, "api")
+	recordAlertsAccess(t, s, repoRow, domain.DependabotAlertsReadable)
 	nudges := captureNudges(s)
 
-	body := []byte(`{"action":"created","alert":{"number":3,"state":"open",` +
-		`"dependency":{"package":{"ecosystem":"npm","name":"lodash"},"manifest_path":"package-lock.json"}},` +
-		`"repository":{"id":9001},"installation":{"id":4242}}`)
-	if rec := postWebhookDelivery(s, "dependabot_alert", sign(body), body, "gh-delivery-dependabot"); rec.Code != http.StatusNoContent {
+	body := dependabotAlertBody("created", hintRepoID)
+	for range 2 {
+		if rec := postWebhookDelivery(s, "dependabot_alert", sign(body), body, "gh-delivery-alert"); rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	if marks := refreshMarks(t, s); len(marks) != 1 || marks[0].Revision != 1 {
+		t.Errorf("marks = %+v after a redelivery, want one mark at revision 1", marks)
+	}
+	if n := nudges(); len(n) != 1 {
+		t.Errorf("nudges = %v after a redelivery, want one", n)
+	}
+
+	other := []byte(`{"action":"fixed","alert":{"number":4},"repository":{"id":9001},"installation":{"id":4242}}`)
+	if rec := postWebhookDelivery(s, "dependabot_alert", sign(other), other, "gh-delivery-alert-other"); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
-	if marks := refreshMarks(t, s); len(marks) != 0 {
-		t.Errorf("marks = %+v, want none", marks)
-	}
-	if n := nudges(); len(n) != 0 {
-		t.Errorf("nudges = %v, want none", n)
-	}
-	if n := deliveryRows(t, s); n != 1 {
-		t.Errorf("delivery rows = %d, want the delivery recorded", n)
+	if marks := refreshMarks(t, s); len(marks) != 1 || marks[0].Revision != 2 {
+		t.Errorf("marks = %+v after a second alert's delivery, want the one mark at revision 2", marks)
 	}
 }
 
@@ -210,17 +301,26 @@ func TestGitHubWebhook_RefreshMarks_UntrackedRepository(t *testing.T) {
 	s := newTestServer(t)
 	seedWebhookApp(t, s)
 	trackHintRepo(t, s, hintRepoID, "api")
-	if _, err := sqlitestore.New(s.db).Repos.FindOrCreateByExternalID(context.Background(), runmode.LocalDefaultOrgID,
-		domain.RepoRef{Host: "https://github.com", Owner: "octo", Repo: "untracked", ExternalID: "9002"}); err != nil {
+	untracked, err := sqlitestore.New(s.db).Repos.FindOrCreateByExternalID(context.Background(), runmode.LocalDefaultOrgID,
+		domain.RepoRef{Host: "https://github.com", Owner: "octo", Repo: "untracked", ExternalID: "9002"})
+	if err != nil {
 		t.Fatalf("register untracked: %v", err)
 	}
+	// Readable, so only the tracked set stands between its alerts and a mark.
+	recordAlertsAccess(t, s, untracked.ID, domain.DependabotAlertsReadable)
 	nudges := captureNudges(s)
 	before := registryRowCount(t, s)
 
+	deliveries := 0
 	for _, id := range []string{"9002", "9003"} {
-		body := []byte(`{"action":"opened","pull_request":{"number":7},"repository":{"id":` + id + `}}`)
-		if rec := postWebhookDelivery(s, "pull_request", sign(body), body, "gh-delivery-"+id); rec.Code != http.StatusNoContent {
-			t.Fatalf("repository %s: status = %d, want 204; body=%s", id, rec.Code, rec.Body.String())
+		for event, body := range map[string][]byte{
+			"pull_request":     []byte(`{"action":"opened","pull_request":{"number":7},"repository":{"id":` + id + `}}`),
+			"dependabot_alert": dependabotAlertBody("created", id),
+		} {
+			deliveries++
+			if rec := postWebhookDelivery(s, event, sign(body), body, "gh-delivery-"+event+"-"+id); rec.Code != http.StatusNoContent {
+				t.Fatalf("%s for repository %s: status = %d, want 204; body=%s", event, id, rec.Code, rec.Body.String())
+			}
 		}
 	}
 	if marks := refreshMarks(t, s); len(marks) != 0 {
@@ -229,8 +329,8 @@ func TestGitHubWebhook_RefreshMarks_UntrackedRepository(t *testing.T) {
 	if n := nudges(); len(n) != 0 {
 		t.Errorf("nudges = %v, want none", n)
 	}
-	if n := deliveryRows(t, s); n != 2 {
-		t.Errorf("delivery rows = %d, want both deliveries recorded", n)
+	if n := deliveryRows(t, s); n != deliveries {
+		t.Errorf("delivery rows = %d, want all %d deliveries recorded", n, deliveries)
 	}
 	if after := registryRowCount(t, s); after != before {
 		t.Errorf("registry rows = %d after the deliveries, want %d — a delivery creates no repository", after, before)
@@ -366,6 +466,43 @@ func TestGitHubWebhook_RefreshMarks_UnreadableRegistryLeavesDeliveryUnrecorded(t
 	}
 }
 
+// failingDependabotAccess fails the read a delivery's alerts are gated on.
+type failingDependabotAccess struct {
+	db.RepositoryDependabotAccessStore
+}
+
+func (failingDependabotAccess) GetSystem(context.Context, string, string) (*domain.RepositoryDependabotAccess, error) {
+	return nil, errors.New("dependabot access unreadable")
+}
+
+// TestGitHubWebhook_DependabotAlert_UnreadableAnswerLeavesDeliveryUnrecorded:
+// the recorded answer is read ahead of the record, as the repository is, so a
+// failed read answers 5xx with nothing recorded and a redelivery applies it.
+func TestGitHubWebhook_DependabotAlert_UnreadableAnswerLeavesDeliveryUnrecorded(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	recordAlertsAccess(t, s, trackHintRepo(t, s, hintRepoID, "api"), domain.DependabotAlertsReadable)
+	readable := s.dependabotAccess
+	s.dependabotAccess = failingDependabotAccess{readable}
+
+	body := dependabotAlertBody("created", hintRepoID)
+	if rec := postWebhookDelivery(s, "dependabot_alert", sign(body), body, "gh-delivery-alert-retry"); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if n := deliveryRows(t, s); n != 0 {
+		t.Errorf("delivery rows = %d, want 0", n)
+	}
+
+	s.dependabotAccess = readable
+	if rec := postWebhookDelivery(s, "dependabot_alert", sign(body), body, "gh-delivery-alert-retry"); rec.Code != http.StatusNoContent {
+		t.Fatalf("redelivery status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if marks := refreshMarks(t, s); len(marks) != 1 || marks[0].Target != domain.DependabotAlertsRefreshTarget() {
+		t.Errorf("marks = %+v after the redelivery, want the repository's alerts", marks)
+	}
+}
+
 // TestGitHubWebhook_RefreshMarks_MalformedStaysBadRequest: a content delivery
 // missing what its hint is read from is refused ahead of the dedup gate, so it
 // is 400 on every attempt and records nothing.
@@ -386,6 +523,12 @@ func TestGitHubWebhook_RefreshMarks_MalformedStaysBadRequest(t *testing.T) {
 		{"short head SHA", "check_suite", `{"action":"completed","check_suite":{"head_sha":"0123abc"},"repository":{"id":9001}}`},
 		{"listed pull request with no number", "check_run", `{"action":"completed","check_run":{"head_sha":"` + hintSHA + `","pull_requests":[{}]},"repository":{"id":9001}}`},
 		{"no ref", "push", `{"repository":{"id":9001}}`},
+		{"no alert", "dependabot_alert", `{"action":"created","repository":{"id":9001}}`},
+		{"null alert", "dependabot_alert", `{"action":"created","alert":null,"repository":{"id":9001}}`},
+		{"alert that is not an object", "dependabot_alert", `{"action":"created","alert":5,"repository":{"id":9001}}`},
+		{"alert that is a list", "dependabot_alert", `{"action":"created","alert":[],"repository":{"id":9001}}`},
+		{"alert with no repository", "dependabot_alert", `{"action":"created","alert":{"number":3}}`},
+		{"unparseable alert", "dependabot_alert", `{"action":"created","alert":{"number":3},"repository":`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(tc.body)

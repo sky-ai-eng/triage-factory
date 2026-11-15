@@ -364,6 +364,148 @@ it was added on, so after a host change the poller, the profiler and team
 tracking see only the new host's repositories, and the old host's stay on file
 untouched for a switch back.
 
+## GitHub Vulnerable Package Events
+
+A vulnerable package is one package of one ecosystem in a tracked repository
+with at least one open Dependabot alert. It is an entity of kind
+`vulnerable_package`, one per package however many alerts it has (one per
+advisory, and one per manifest the package appears in). Each GitHub cycle
+lists the open alerts of every tracked repository whose alerts the org's
+credential can read, groups them by package, and diffs each package's alerts
+by number against its stored snapshot.
+
+| Event | ID | Trigger | `dedup_key` |
+|-------|----|---------|-------------|
+| **Vulnerability Alert Opened** | `github:vulnerability:alert_opened` | An alert is open that was not open on the previous listing: created, reopened, or reintroduced. One event per alert | — |
+| **Dependabot Cannot Fix** | `github:vulnerability:dependabot_cannot_fix` | An open alert became one Dependabot cannot fix: it has no patched version (`no_patched_version`), or Dependabot tried to open a pull request for it and reported an error (`update_failed`). One event per alert | — |
+| **Vulnerability Resolved** | `github:vulnerability:resolved` | The package has no open alert left. Terminating: it closes the entity and its tasks, and a later alert on the package creates a new entity | — |
+| **Vulnerability Unreachable** | `github:vulnerability:unreachable` | TF no longer follows the package: the org's GitHub base URL now names another host (`scope_changed`), or the repository's recorded access answer says its alerts can no longer be read (`no_permission`, `alerts_disabled`). Terminating, like `resolved`, but says nothing about the alerts | — |
+
+An alert closing while another stays open on the package emits nothing; the
+snapshot drops it. `alert_opened` metadata names the alert (`alert_number`,
+`ghsa_id`, `cve_id`, `summary`, `severity`, `manifest_path`, `scope`,
+`vulnerable_version_range`, `first_patched_version`), the package (`ecosystem`, `package`), the repository
+(`repo`, `repository_id`), `highest_severity`, the highest severity among
+the package's open alerts, and `dependabot_pull_request_number` and
+`dependabot_pull_request_url` when Dependabot had already opened a pull request
+for the alert. `dependabot_cannot_fix` carries the same alert fields plus
+`reason` and, for `update_failed`, Dependabot's `error_type` (its own code, as
+`security_update_not_possible`) and `error_title`. `resolved` names the package, the repository, and
+the `alert_numbers` that were last open; `unreachable` names the same plus the
+`host` the package was listed from and the `reason`: `scope_changed`, as for
+[PR Unreachable](#pr-unreachable), or `no_permission` or `alerts_disabled`,
+the access probe's answer.
+
+A package TF holds no active entity for gets a new one, whose snapshot starts
+empty, so every alert open on the package emits `alert_opened`, however long
+it has been open, as a check already failing on a pull request TF has just
+found emits `ci_check_failed`. A repository's first listing therefore
+announces every open alert, and since `alert_opened` has no `dedup_key`, a
+handler that matches them makes one task per package.
+
+What Dependabot did about an alert is in GitHub's GraphQL alert object
+(`dependabotUpdate`: the pull request it opened, or the error it reported),
+not in the REST listing, and no ETag or webhook reports a change to it. The
+poll reads it per repository, whether or not the listing was answered 304,
+when an alert has no update recorded (it is new, a read failed since it
+opened, or a patch was released since its update was read), and otherwise a
+quarter of the age of the youngest alert Dependabot has neither fixed nor
+failed on after the last read, and at most a day after it. The read time is
+the repository's, and a read writes only the packages it changed. A pass reads
+at most 25 repositories and leaves the rest due for a later poll, and a read
+never waits for a spent GraphQL budget. An alert whose fields GitHub answered
+with an error is no answer; an alert the answer leaves out keeps the update it
+had, or is recorded as untried, and so is every alert of a repository GitHub
+answered without its alerts.
+
+An alert with no patched version emits `dependabot_cannot_fix` whatever
+Dependabot reports. An error that says a pull request already proposes the
+fix (`pull_request_exists_for_latest_version`,
+`pull_request_exists_for_security_update`) or that the dependency is no longer
+vulnerable (`security_update_not_needed`) is not a failure; any other code is.
+An alert emits again when its reason changes (a patch is released, and
+Dependabot's update to it fails) or after it stopped being one Dependabot
+cannot fix (its update later opened a pull request). A Dependabot pull request
+a person closes leaves the alert with that pull request, not an error.
+`dependabot_cannot_fix` has its own task beside the `alert_opened` one, so a
+trigger on it delegates only what Dependabot leaves undone; `resolved` and
+`unreachable` close both, and nothing else does: like `alert_opened`'s, the
+task stays open while the package has open alerts, even when the alert it was
+made for has closed or later gets a Dependabot pull request. A repository with
+security updates turned off has no failures to report, so on it only alerts
+with no patched version emit.
+
+A vulnerable package has no author, so its events route by tracked set, not
+by owner: an event reaches every team that tracks the repository and has a
+matching handler, and its task is visible to each of them. `applies_to_unowned`
+has no effect on these events: the catalog shows no toggle for it, and the
+create and PATCH routes refuse `true` with `422 INVALID_FIELD`, as they do on
+every event type whose `supports_watch` is false. When
+several teams' triggers match, they fire in order of the team's highest
+matched-rule `default_priority` (0.5 for a team that matched only by a
+trigger), then the lowest team id, and the first to fire claims the task.
+
+A handler on `alert_opened` filters on the alert that opened, not on the
+package's other alerts: `min_severity` (`low`, `medium`, `high` or `critical`,
+matching that severity or higher), `ecosystem_in` (GitHub's advisory
+ecosystems: `actions`, `composer`, `erlang`, `go`, `maven`, `npm`, `nuget`,
+`other`, `pip`, `pub`, `rubygems`, `rust` and `swift`), `package_in` (package
+names, compared ignoring case), `scope` (`runtime` or `development`; an alert
+GitHub gives no scope matches neither), `has_patched_version`, and `repo_in`.
+A handler on `dependabot_cannot_fix` takes the same fields, with `reason`
+(`no_patched_version` or `update_failed`) in place of `has_patched_version`.
+A value outside a field's set is refused as [Handler
+predicates](#handler-predicates) describes. `resolved` and `unreachable` have
+no predicate fields. One rule ships for `alert_opened`, matching every alert
+and disabled, and one trigger, matching every alert and disabled like every
+shipped trigger, on the "Remediate Vulnerable Package" blueprint: upgrade the
+package past every open alert a released version fixes, or stop with no pull
+request when no alert has a patched version.
+
+A run on a vulnerable package starts with a detached checkout of the
+repository's base branch, the one a bare `workspace add` makes, and its
+`<task_context>` lists the package's open alerts and each advisory's summary,
+read from the snapshot at launch. An `alert_opened` on the package while a run
+works on it folds into that run, and the resolution closes the task under it
+as any close does, held while the run's pull request awaits a person.
+
+A `dependabot_alert` webhook delivery is a hint, as a pull request's are. For
+a tracked repository whose alerts the poll lists, it marks the repository's
+alerts, whichever alert and action it names, except `assignees_changed`, which
+changes nothing the snapshot holds. A few seconds later the narrowed pass lists
+the marked repository's alerts and runs the same diff, so a new alert is
+announced without waiting for the next cycle. A marked listing sends no ETag,
+and a cycle that reaches the mark first lists the repository the same way.
+
+Each package on a host the org has left is retired with `unreachable` at the
+start of the next GitHub cycle, as its pull requests are, and closes with its
+tasks. Nothing fixed its alerts, so pointing the org back at the old host
+announces them again: each package with open alerts gets a new entity, which
+emits `alert_opened` for every open alert. A repository whose access probe
+answers that its alerts can no longer be read (the credential lost the
+permission, or alerts were turned off) has its packages retired the same way,
+and loses its ETag, so once the alerts are readable again every one still
+open is announced on a new entity.
+
+A repository every team untracked is still listed while TF holds a package in
+it, under a credential that reads it, as its pull requests are still
+refreshed. The listing updates and resolves the packages TF holds, so their
+tasks close when the alerts are fixed, and creates no entity for any other
+package; such a listing stores no ETag, so a team tracking the repository
+again gets those packages from a full listing.
+
+A listing is conditional on the previous one's ETag when that listing fit on
+one page and every write it made landed, so an unchanged repository costs a
+request GitHub does not count against the rate limit. A listing that changed
+clears the stored ETag before its first write. A repository no team tracks on
+the org's host that holds no package loses its ETag, so the listing after a
+team tracks it again is answered in full. A listing that fails changes
+nothing. A repository GitHub refuses is skipped until the access probe
+rechecks it, and one whose listing cannot be read in full (more than 5,000
+open alerts, a page that does not parse, or a next-page link with no cursor)
+is skipped every cycle while that lasts; any other failure ends the cycle's
+listings.
+
 ## Jira Events
 
 ### Actionable
@@ -1095,7 +1237,27 @@ A GitHub handler predicate names people and teams by GitHub's id, which a rename
 
 As with `repo_in`, an edit is checked only for the entries it adds. An empty list filters nothing. An event recorded before ids were carries none, so an identity filter never matches it: re-evaluating such an event (a deferred trigger re-scored on an old task, an injected follow-up) finds no match. A GitHub predicate has no login-valued identity field: `author_in`, `author`, `reviewer_in`, `reviewer`, `commenter_in`, `commenter`, `requested_login` and `requested_team` are unknown fields, refused with `400`. A local install's stored predicates are migrated to the id fields, each login replaced by the id of the identity binding holding it on the org's GitHub host. An entry the migration could not resolve, a login no binding with an id holds or a team's `org/slug`, stays as written and matches nothing until the handler is edited.
 
-Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate.repo_in`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
+Every GitHub event's metadata names its repository twice: `repo`, the `owner/name` it had when the event fired, and `repository_id`, the repository's registry row, which a rename does not move. A handler predicate scopes to repositories with `repo_in`, which names them by registry id (the `id` field of `POST /api/repos/list` with `team_id`), not by `owner/name`. A team's handlers only ever see events from repositories the team tracks — the router's team gate asks about the registry row the event's pull request or vulnerable package references, never the name in its key — so an empty `repo_in` matches every one of them, and each entry must be a repository the handler's team tracks. Creating, editing or promoting a handler refuses any other entry, an `owner/name` included, with `422 INVALID_FIELD` on `scope_predicate.repo_in`. An edit is checked only for the entries it adds, so a repository the team has since stopped tracking never blocks an edit that leaves it in place.
+
+### GitHub Vulnerable Package Snapshot
+
+The entity carries `source_id` (`owner/repo#ecosystem:name`, e.g.
+`octo/api#npm:lodash`), `scope` (the org's GitHub host) and `repository_id`.
+It has no `external_id`: GitHub has no object for the grouping, so the key is
+its identity among active entities. Its `url` is the repository's Dependabot
+alert list filtered to the package's open alerts. The snapshot holds:
+
+- `repo`, `ecosystem`, `package`
+- `alerts[]` — the open alerts, by number: `number`, `ghsa_id`, `cve_id`, `summary` (the advisory's one-line summary, written outside the org; its Markdown description is not kept), `severity` (`low`, `medium`, `high`, `critical`), `manifest_path`, `scope` (`runtime` or `development`, empty when GitHub does not know), `vulnerable_version_range` (as `< 4.17.21`), `first_patched_version` (empty when none is released), `updated_at` (when GitHub last changed the alert), and `dependabot_update`, absent until TF has read it: `state` (`none`, Dependabot has not tried; `pending`; `pull_request`, with `pull_request_number` and `pull_request_url`; or `error`, with `error_type` and `error_title`, Dependabot's text naming what it read from the repository and its registries). The set of numbers is diffed, and so is each alert's move to one Dependabot cannot fix; a change to another field rewrites the snapshot and emits nothing
+
+An empty `alerts` is the terminal snapshot.
+
+A task on a vulnerable package carries `vulnerable_package` on
+`POST /api/tasks/list` and `GET /api/tasks/{id}`: `repo`, `ecosystem` and
+`package` read from the key, `highest_severity`, `open_alert_count`, and the
+open `alerts`, highest severity first, each with its `url` on GitHub. The list
+and `POST /api/tasks/facets` take `entity_kinds` (`vulnerable_package` among
+them), and the facets answer an `entity_kinds` cut beside `event_types`.
 
 ### Jira Issue Snapshot
 

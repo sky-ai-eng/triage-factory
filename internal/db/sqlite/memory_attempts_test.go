@@ -47,6 +47,12 @@ func TestMemoryAttemptStore_SQLite(t *testing.T) {
 				if taskOpen {
 					status = "queued"
 				}
+				// A turn, since only a conversation that has run owes a memory.
+				if _, err := conn.Exec(
+					`INSERT INTO messages (conversation_id, role, subtype, content) VALUES (?, 'assistant', '', 'a turn')`,
+					conversationID); err != nil {
+					t.Fatalf("seed an assistant turn: %v", err)
+				}
 				if _, err := conn.Exec(`UPDATE conversations SET ended_at = ?, ended_reason = 'failed' WHERE id = ?`,
 					time.Now().UTC(), conversationID); err != nil {
 					t.Fatalf("end conversation: %v", err)
@@ -97,7 +103,7 @@ func seedSQLiteSystemLLMRun(t *testing.T, conn *sql.DB, suffix string) string {
 		ID:        id,
 		OrgID:     runmode.LocalDefaultOrgID,
 		Job:       "memory-" + suffix,
-		Model:     "claude-haiku-4-5-20251001",
+		Model:     "claude-haiku-5-5",
 		StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed system_llm_runs: %v", err)

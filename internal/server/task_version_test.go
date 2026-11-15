@@ -44,6 +44,21 @@ func (w raceAroundWriteTx) WithTx(ctx context.Context, orgID, userID string, fn 
 	return err
 }
 
+// SystemWithTx is the same race around a route whose first write transaction
+// runs on the admin pool, as the claim route's reassign arm's does.
+func (w raceAroundWriteTx) SystemWithTx(ctx context.Context, orgID string, fn func(db.SystemTxStores) error) error {
+	if race := *w.before; race != nil {
+		*w.before = nil
+		race()
+	}
+	err := w.TxRunner.SystemWithTx(ctx, orgID, fn)
+	if race := *w.after; err == nil && race != nil {
+		*w.after = nil
+		race()
+	}
+	return err
+}
+
 // moveTaskOn is another writer's change to the task: one column a person acts
 // on that none of the routes' other checks read, written the way every task
 // writer writes, so the version rises with it. It flips the column, so every

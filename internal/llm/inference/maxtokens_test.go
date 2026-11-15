@@ -39,11 +39,11 @@ func TestMaxOutputTokens_PerProviderPolicy(t *testing.T) {
 	t.Run("bedrock never asks for more than the model can emit", func(t *testing.T) {
 		// A budget above the model's own maximum is a 400, not a bigger
 		// answer — so a model whose ceiling is under the budget pins there.
-		if bedrockMaxOutputTokens <= 64000 {
+		if bedrockMaxOutputTokens <= 128000 {
 			t.Skip("the Bedrock budget no longer exceeds any model's ceiling; nothing to clamp")
 		}
-		if got := MaxOutputTokens(ProviderBedrock, "claude-haiku-4-5"); got != 64000 {
-			t.Errorf("cap = %d, want the model maximum 64000", got)
+		if got := MaxOutputTokens(ProviderBedrock, "claude-haiku-5-5"); got != 128000 {
+			t.Errorf("cap = %d, want the model maximum 128000", got)
 		}
 	})
 

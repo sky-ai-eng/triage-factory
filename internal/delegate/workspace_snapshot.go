@@ -61,6 +61,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
@@ -233,12 +234,13 @@ const snapshotBlobLeaf = "workspace.tar"
 // Why a snapshot is written, on the workspace.snapshot span. An ending covers
 // the whole transcript; a checkpoint covers it up to a position.
 const (
-	snapshotReasonPark       = "park"
-	snapshotReasonConclusion = "conclusion"
-	snapshotReasonShutdown   = "shutdown"
-	snapshotReasonUpstream   = "upstream"
-	snapshotReasonJailLost   = "jail_lost"
-	snapshotReasonCheckpoint = "checkpoint"
+	snapshotReasonPark           = "park"
+	snapshotReasonConclusion     = "conclusion"
+	snapshotReasonShutdown       = "shutdown"
+	snapshotReasonUpstream       = "upstream"
+	snapshotReasonJailLost       = "jail_lost"
+	snapshotReasonCheckpoint     = "checkpoint"
+	snapshotReasonProviderSwitch = "provider_switch"
 )
 
 // snapshotWrite names one persist: whose tree, under which key, for which
@@ -445,7 +447,13 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 
 	ctx, span := s.startSnapshotSpan(ctx, w)
 	defer func() {
-		telemetry.RecordSpanError(span, err)
+		// One line holds the whole chain, so the phases beneath log
+		// nothing of their own.
+		if err != nil {
+			telemetry.RecordSpanError(span, err, "persisting the workspace snapshot failed")
+			delegateLog.WarnContext(ctx, "workspace snapshot failed",
+				"conversation", w.conversationID, "key_id", w.keyID, "reason", w.reason, "error", err)
+		}
 		span.End()
 	}()
 
@@ -639,7 +647,7 @@ func (c *capturedSnapshot) release() {
 func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot, err error) {
 	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", w.runtime)
 	defer func() {
-		telemetry.RecordSpanError(capSpan, err)
+		telemetry.RecordSpanError(capSpan, err, "capturing the workspace failed")
 		capSpan.End()
 	}()
 	captured := &capturedSnapshot{at: time.Now()}
@@ -736,7 +744,7 @@ func (st *stagedSnapshot) discard() {
 func archiveSnapshot(ctx context.Context, w snapshotWrite, captured *capturedSnapshot) (_ *stagedSnapshot, err error) {
 	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", w.runtime)
 	defer func() {
-		telemetry.RecordSpanError(archSpan, err)
+		telemetry.RecordSpanError(archSpan, err, "archiving the workspace snapshot failed")
 		archSpan.End()
 	}()
 	man := snapshotManifest{CapturedAt: captured.at.UTC()}
@@ -791,7 +799,7 @@ func (s *Spawner) uploadSnapshot(ctx context.Context, w snapshotWrite, staged *s
 	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", w.runtime)
 	putSpan.SetAttributes(telemetry.SizeBytes(staged.compressedBytes))
 	putErr := s.Storage().Put(putCtx, snapshotKey(w.orgID, w.keyID), staged.f)
-	telemetry.RecordSpanError(putSpan, putErr)
+	telemetry.RecordSpanError(putSpan, putErr, "uploading the workspace snapshot failed")
 	putSpan.End()
 	if putErr != nil {
 		return false, fmt.Errorf("snapshot: put: %w", putErr)
@@ -1163,7 +1171,7 @@ func writeCapturedMember(tw *tar.Writer, name string, data []byte, path string) 
 	if err != nil {
 		return fmt.Errorf("tar staged %s: %w", name, err)
 	}
-	return writeTarFile(tw, name, path, size)
+	return writeTarFile(tw, name, path, size, 0o600)
 }
 
 // gitSeed is everything a cold rehydrate's git rebuild needs about one repo it
@@ -1291,7 +1299,7 @@ func (s *Spawner) checkoutRestorerFor(orgID, entityID string, sidecar *runSideca
 			if client == nil {
 				return nil, errNoGitHubClient
 			}
-			return client.GetPR(ctx, owner, repo, number, false)
+			return client.GetPRBasic(ctx, owner, repo, number)
 		},
 	}
 }
@@ -1354,11 +1362,12 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // A warm tree an older binary laid out — its root a git checkout — is not
 // warm: it is removed and the ladder continues as though it were gone.
 //
-// conv.ClaimID is read, not just carried: a rebuild records the checkouts' rows
-// before it fetches them and re-stamps worktree_path, and those writes are this
-// engagement's to make only while it still holds the conversation. Every caller
-// is a claimed dispatch, so it is populated at both — including the config the
-// step builder synthesizes, which copies it across for exactly this reason.
+// conv.ClaimID is read, not just carried: a restore moves the claim's phase to
+// cloning, records the checkouts' rows before it fetches them and re-stamps
+// worktree_path, and those writes are this engagement's to make only while it
+// still holds the conversation. Every caller is a claimed dispatch, so it is
+// populated at both — including the config the step builder synthesizes, which
+// copies it across for exactly this reason.
 func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, restorer checkoutRestorer, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, asOf *float64, err error) {
 	// The provenance IS the interesting part of this span — nothing downstream
 	// can tell the three rungs apart, since past here they are the same
@@ -1371,7 +1380,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		if prov != "" {
 			span.SetAttributes(telemetry.Workspace(string(prov)))
 		}
-		telemetry.RecordSpanError(span, err)
+		telemetry.RecordSpanError(span, err, "ensuring the workspace failed")
 		span.End()
 	}()
 
@@ -1465,6 +1474,13 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	}
 	defer func() { _ = rc.Close() }()
 
+	// Written here, once a snapshot is in hand, rather than before the lookup:
+	// the wait for a persist clones nothing, and a fall-through to the fresh
+	// builder is a source's own setup, which names its own steps. The fence
+	// result is not acted on: the agent_starting write is where a fenced
+	// engagement stops.
+	s.updatePhase(ctx, orgID, conv.ID, conv.ClaimID, domain.ClaimPhaseCloning)
+
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
 	man, rErr := s.rehydrateFromSnapshot(opCtx, orgID, conv, keyID, restorer, rc)
@@ -1498,6 +1514,9 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 // A caller with no builder gets the refusal whatever the runtime; the SDK
 // resume dispatch is the one such caller, and it could not use this arm anyway.
 func (s *Spawner) workspaceFromNothing(ctx context.Context, orgID string, conv *domain.Conversation, keyID string, fresh freshWorkspaceBuilder) (string, domain.WorkspaceProvenance, error) {
+	// TODO(TFAC-1438): an SDK conversation is refused here because its
+	// session file's only durable copy is the snapshot; with a session blob of
+	// its own it resumes onto a fresh tree, as a native one does.
 	if resumeSourceFor(conv.Runtime) != resumeSourceMessages || fresh == nil {
 		return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from: %w", conv.WorktreePath, keyID, ErrWorkspaceExpired)
 	}
@@ -1620,12 +1639,13 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID string, conv 
 			// Staged under a name of our own choosing, never the member's: the
 			// manifest is what says which members belong to which checkout.
 			dest := filepath.Join(memberStaging, strconv.Itoa(len(staged)))
-			if err := stageScratchMember(memberStaging, filepath.Base(dest), tr); err != nil {
+			if err := stageScratchMember(memberStaging, filepath.Base(dest), tr, 0o600); err != nil {
 				return snapshotManifest{}, err
 			}
 			staged[hdr.Name] = dest
 		case strings.HasPrefix(hdr.Name, snapScratchPrefix):
-			if err := stageScratchMember(scratchStaging, strings.TrimPrefix(hdr.Name, snapScratchPrefix), tr); err != nil {
+			mode := os.FileMode(hdr.Mode).Perm() & scratchFileModeCap
+			if err := stageScratchMember(scratchStaging, strings.TrimPrefix(hdr.Name, snapScratchPrefix), tr, mode); err != nil {
 				return snapshotManifest{}, err
 			}
 			sawScratch = true
@@ -1687,6 +1707,9 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID string, conv 
 	// are local and cheap, and one that fails then leaves nothing in a shared
 	// bare to take back out.
 	if sawScratch {
+		if err := openScratchDirs(scratchStaging); err != nil {
+			return snapshotManifest{}, err
+		}
 		// The fresh root has no _tfac, so move the staged tree in wholesale.
 		if err := os.Rename(scratchStaging, filepath.Join(root, worktree.ScratchDir)); err != nil {
 			return snapshotManifest{}, fmt.Errorf("rehydrate: install scratch: %w", err)
@@ -1772,7 +1795,23 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 			if gctx.Err() != nil {
 				return nil // a sibling failed; this one never started
 			}
-			c, err := s.restoreOneCheckout(gctx, root, keyID, claimID, restorer, mc, staged)
+			// Its own parent, because checkouts restore concurrently: without
+			// it every checkout's git calls and pull request read interleave
+			// under the ensure span with nothing saying which belongs to which.
+			cctx, span := tracer.Start(gctx, "engagement.workspace.restore_checkout")
+			c, err := s.restoreOneCheckout(cctx, root, keyID, claimID, restorer, mc, staged)
+			switch {
+			case err == nil:
+			case gctx.Err() != nil:
+				// Cut off by a sibling's failure or the engagement's end, so
+				// the cause is not this checkout's.
+				span.SetAttributes(telemetry.Outcome("cancelled"))
+			default:
+				// The error's text names the checkout's path, so the status
+				// message is fixed and the error is not recorded.
+				span.SetStatus(codes.Error, "restore failed")
+			}
+			span.End()
 			results[i] = result{restored: c, err: err}
 			return err
 		})
@@ -1862,7 +1901,7 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 			// read-only, the way a deleted head repository leaves a fresh one,
 			// rather than holding every other checkout's restore hostage to a
 			// PR every retry would be refused again.
-			delegateLog.Warn("restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
+			delegateLog.WarnContext(ctx, "restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
 				"checkout", mc.Path, "number", prNumber, "error", err)
 			r.PR = &worktree.PRCheckout{}
 		default:
@@ -2076,7 +2115,7 @@ func tarScratch(ctx context.Context, tw *tar.Writer, wtPath string) (omittedCILo
 		// agent's own intermediates are unbounded even with the log archives
 		// excluded. The open comes before the header is written, so a file
 		// that cannot be opened leaves nothing of itself in the tar.
-		err := writeTarFile(tw, snapScratchPrefix+rel, path, fi.Size())
+		err := writeTarFile(tw, snapScratchPrefix+rel, path, fi.Size(), int64(fi.Mode().Perm()&scratchFileModeCap))
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -2097,17 +2136,50 @@ const maxLoggedUnreadable = 20
 // directory, recreating that directory since the snapshot carried none of it.
 func plantCILogsNotice(wtDir string) error {
 	dir := filepath.Join(wtDir, worktree.ScratchDir, worktree.CILogsDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, scratchDirMode); err != nil {
 		return fmt.Errorf("mkdir ci-logs: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, ciLogsNoticeFile), []byte(ciLogsNotice), 0o600)
+	return os.WriteFile(filepath.Join(dir, ciLogsNoticeFile), []byte(ciLogsNotice), 0o644)
 }
 
-// stageScratchMember streams one _tfac tar member to relPath under
-// stagingDir without buffering it whole. The cleaned destination is verified to
-// stay under stagingDir so a crafted blob (multi-mode object store) can't escape
-// via a "../" member name.
-func stageScratchMember(stagingDir, relPath string, r io.Reader) error {
+// The claim that hands a run tree to the run's jail keeps every mode below the
+// root, and the orchestrator reads a jail-owned tree through its group bits. So
+// a _tfac file or directory a rehydrate writes narrower than a fresh tree's
+// stays unreadable to the orchestrator for the rest of the tree's life, and
+// with it the agent's memory file.
+const (
+	// scratchFileModeCap bounds the mode a _tfac file is captured and restored
+	// with: its own permission bits, less group and other write.
+	scratchFileModeCap os.FileMode = 0o755
+	// scratchDirMode is the mode of every directory a rehydrate gives _tfac,
+	// the one a fresh tree's _tfac is made with. The tar carries no directory
+	// entries, so there is no captured mode to restore.
+	scratchDirMode os.FileMode = 0o755
+)
+
+// openScratchDirs sets every directory under stagingDir, stagingDir included,
+// to scratchDirMode before the staged tree becomes _tfac.
+func openScratchDirs(stagingDir string) error {
+	err := filepath.WalkDir(stagingDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		return os.Chmod(path, scratchDirMode)
+	})
+	if err != nil {
+		return fmt.Errorf("rehydrate: set scratch directory modes: %w", err)
+	}
+	return nil
+}
+
+// stageScratchMember streams one tar member to relPath under stagingDir
+// without buffering it whole, as a file of the given mode. The cleaned
+// destination is verified to stay under stagingDir so a crafted blob
+// (multi-mode object store) can't escape via a "../" member name.
+func stageScratchMember(stagingDir, relPath string, r io.Reader, mode os.FileMode) error {
 	dest := filepath.Join(stagingDir, filepath.FromSlash(relPath))
 	if rel, err := filepath.Rel(stagingDir, dest); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("rehydrate: scratch member %q escapes staging dir", relPath)
@@ -2115,7 +2187,7 @@ func stageScratchMember(stagingDir, relPath string, r io.Reader) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return fmt.Errorf("rehydrate: mkdir scratch: %w", err)
 	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("rehydrate: create scratch %s: %w", relPath, err)
 	}
@@ -2125,6 +2197,11 @@ func stageScratchMember(stagingDir, relPath string, r io.Reader) error {
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("rehydrate: flush scratch %s: %w", relPath, err)
+	}
+	// The umask narrows the mode OpenFile creates with, and leaves the mode of
+	// a file that already existed alone.
+	if err := os.Chmod(dest, mode); err != nil {
+		return fmt.Errorf("rehydrate: chmod scratch %s: %w", relPath, err)
 	}
 	return nil
 }
@@ -2171,7 +2248,7 @@ func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 // that shrank is a short read that fails the archive rather than a member
 // padded with bytes the file never held. A file that vanished before the open
 // fails with an error matching fs.ErrNotExist, which the walk skips.
-func writeTarFile(tw *tar.Writer, name, path string, size int64) error {
+func writeTarFile(tw *tar.Writer, name, path string, size, mode int64) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("tar open %s: %w", name, err)
@@ -2179,7 +2256,7 @@ func writeTarFile(tw *tar.Writer, name, path string, size int64) error {
 	defer func() { _ = f.Close() }()
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     name,
-		Mode:     0o600,
+		Mode:     mode,
 		Size:     size,
 		Typeflag: tar.TypeReg,
 	}); err != nil {

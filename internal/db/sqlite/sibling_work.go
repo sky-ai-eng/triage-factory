@@ -33,16 +33,19 @@ func (s *taskStore) AssignmentSystem(ctx context.Context, orgID, taskID string) 
 	err := s.q.QueryRowContext(ctx, `
 		SELECT x.id, x.entity_id, x.event_type, x.dedup_key, e.source_id,
 		       COALESCE(x.claimed_by_agent_id, ''), COALESCE(x.claimed_by_user_id, ''),
-		       COALESCE(u.display_name, ''), COALESCE(tm.name, '')
+		       COALESCE(u.display_name, ''), COALESCE(tm.name, ''),
+		       COALESCE(lc.id, ''), `+db.ConversationHasRunSQL("lc")+`
 		  FROM tasks x
 		  JOIN entities e ON e.id = x.entity_id
 		  LEFT JOIN users u ON u.id = x.claimed_by_user_id
 		  LEFT JOIN teams tm ON tm.id = x.team_id
+		  LEFT JOIN conversations lc ON lc.id = `+taskLiveConversationSQL("x.org_id", "x.id")+`
 		 WHERE x.id = ?
 		   AND x.status NOT IN ('done', 'dismissed')
 		   AND (x.claimed_by_agent_id IS NOT NULL OR x.claimed_by_user_id IS NOT NULL)
 	`, taskID).Scan(&a.TaskID, &a.EntityID, &a.EventType, &a.DedupKey, &a.EntitySourceID,
-		&a.AgentID, &a.UserID, &a.AssigneeName, &a.TeamName)
+		&a.AgentID, &a.UserID, &a.AssigneeName, &a.TeamName,
+		&a.ConversationID, &a.ConversationHasRun)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

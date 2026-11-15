@@ -280,7 +280,7 @@ a.rr-row:hover {
   gap: 5px;
 }
 .rr-q-dot {
-  font: 400 10.5px/1 var(--font-mono);
+  font: 400 10.5px / normal var(--font-mono);
   color: var(--color-ink-4);
 }
 .rr-q-ico {
@@ -300,7 +300,7 @@ a.rr-row:hover {
   border-radius: 8px;
   background: var(--color-warm);
   color: var(--color-warm-ink);
-  font: 500 9.5px/1 var(--font-mono);
+  font: 500 9.5px / normal var(--font-mono);
 }
 
 .rr-age {

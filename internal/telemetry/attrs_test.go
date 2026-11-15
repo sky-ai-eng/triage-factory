@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,6 +14,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -75,6 +77,7 @@ var approvedKeys = []string{
 	"transport",
 	"turn",
 	"upstream",
+	"url.template",
 	"work.kind",
 	"workspace.provenance",
 }
@@ -98,6 +101,7 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		Model("claude-sonnet-4-5"), MaxTokens(32000), TokensInput(10), TokensOutput(20),
 		TokensCacheRead(30), TokensCacheWrite(40), LLMCostUSD(0.01), FirstChunk(800 * time.Millisecond),
 		Tool("bash"), Turn(3), StopReason("tool_calls"), MemoryKills(1),
+		URLTemplate("/repos/{owner}/{repo}/pulls/{}"),
 	}
 	for _, kv := range produced {
 		if !slices.Contains(approvedKeys, string(kv.Key)) {
@@ -145,6 +149,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"Model":            true, "MaxTokens": true, "TokensInput": true, "TokensOutput": true,
 		"TokensCacheRead": true, "TokensCacheWrite": true, "LLMCostUSD": true, "FirstChunk": true,
 		"Tool": true, "Turn": true, "StopReason": true, "MemoryKills": true,
+		"URLTemplate": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {
@@ -228,6 +233,33 @@ func TestScrubbedTracerProviderDropsStartOptionAttributes(t *testing.T) {
 	// must be a denylist, not a filter that keeps only what it recognizes.
 	if !slices.Contains(got, "http.route") {
 		t.Errorf("a non-URL attribute was dropped; the scrubber removes only the URL keys (attributes: %s)", strings.Join(got, ", "))
+	}
+}
+
+// TestScrubbedTracerProviderDropsErrorText covers the two ways a library
+// puts an error's text on a span: otelhttp's transport as a status
+// description, and otelsql as an exception event. The span must still read
+// as failed.
+func TestScrubbedTracerProviderDropsErrorText(t *testing.T) {
+	restoreTraceGlobals(t)
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+	_, span := ScrubbedTracerProvider().Tracer("test").Start(context.Background(), "outbound")
+	err := errors.New(`dial tcp 10.0.0.7:443: connect: connection refused (repository "acme/secret-project")`)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	span.End()
+
+	got := recorder.Ended()[0]
+	if got.Status().Code != codes.Error {
+		t.Errorf("status code = %v, want Error; only the text is dropped", got.Status().Code)
+	}
+	if got.Status().Description != "" {
+		t.Errorf("status description = %q, want empty", got.Status().Description)
+	}
+	if events := got.Events(); len(events) != 0 {
+		t.Errorf("recorded %d span events, want 0; an exception event holds the error's text", len(events))
 	}
 }
 

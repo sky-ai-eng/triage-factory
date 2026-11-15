@@ -2,6 +2,7 @@ package workitem
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -42,6 +43,25 @@ func RequestCancel(ctx context.Context, q DBTX, k Kind, orgID string, itemID int
 		return ErrNotCancellable
 	}
 	return nil
+}
+
+// RequestCancelEach is RequestCancel over several rows of one kind, and
+// answers how many requests it recorded. A row with nothing cancellable
+// (ErrNotCancellable) is passed over: it settled, or took a request, between
+// the caller's read of the ids and this write. Any other error stops the walk
+// and is returned with the count so far.
+func RequestCancelEach(ctx context.Context, q DBTX, k Kind, orgID string, itemIDs []int64, by, reason string) (int, error) {
+	requested := 0
+	for _, id := range itemIDs {
+		switch err := RequestCancel(ctx, q, k, orgID, id, by, reason); {
+		case err == nil:
+			requested++
+		case errors.Is(err, ErrNotCancellable):
+		default:
+			return requested, err
+		}
+	}
+	return requested, nil
 }
 
 // Redrive returns a parked row to ready with a fresh budget, preserving its

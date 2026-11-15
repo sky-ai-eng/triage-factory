@@ -22,6 +22,11 @@ const (
 	// GitHubRefreshBranch targets a branch; the target is its name without
 	// refs/heads/.
 	GitHubRefreshBranch GitHubRefreshKind = "branch"
+	// GitHubRefreshDependabotAlerts targets the repository's open Dependabot
+	// alerts, which the poll lists as a whole; the target is empty, since one
+	// listing reads every alert and there is nothing within the repository to
+	// name.
+	GitHubRefreshDependabotAlerts GitHubRefreshKind = "dependabot_alerts"
 )
 
 // GitHubRefreshTarget is one thing in a repository a webhook delivery said
@@ -49,10 +54,24 @@ func BranchRefreshTarget(branch string) GitHubRefreshTarget {
 	return GitHubRefreshTarget{Kind: GitHubRefreshBranch, Value: branch}
 }
 
+// DependabotAlertsRefreshTarget targets the repository's open Dependabot
+// alerts.
+func DependabotAlertsRefreshTarget() GitHubRefreshTarget {
+	return GitHubRefreshTarget{Kind: GitHubRefreshDependabotAlerts}
+}
+
+// DependabotAlerts reports whether the target is the repository's Dependabot
+// alerts, which a listing of them refreshes. Every other target names pull
+// requests or a branch, which a pass over the repository's pull requests
+// refreshes.
+func (t GitHubRefreshTarget) DependabotAlerts() bool {
+	return t.Kind == GitHubRefreshDependabotAlerts
+}
+
 // Validate refuses a target with an unknown kind, or with a value that is not
 // the one spelling its kind allows: a pull request number in decimal with no
-// sign or leading zero, a SHA as 40 or 64 lowercase hex digits, or a non-empty
-// branch name. A second spelling of one pull request or commit would be a
+// sign or leading zero, a SHA as 40 or 64 lowercase hex digits, a non-empty
+// branch name, or no value for the Dependabot alerts. A second spelling of one pull request or commit would be a
 // second mark for it, and the deliveries naming it would stop collapsing.
 func (t GitHubRefreshTarget) Validate() error {
 	switch t.Kind {
@@ -68,6 +87,10 @@ func (t GitHubRefreshTarget) Validate() error {
 	case GitHubRefreshBranch:
 		if t.Value == "" {
 			return fmt.Errorf("branch refresh target is empty")
+		}
+	case GitHubRefreshDependabotAlerts:
+		if t.Value != "" {
+			return fmt.Errorf("dependabot alerts refresh target %q names something; it names the repository's alerts as a whole", t.Value)
 		}
 	default:
 		return fmt.Errorf("unknown refresh target kind %q", t.Kind)

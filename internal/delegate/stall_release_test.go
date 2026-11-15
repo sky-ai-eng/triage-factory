@@ -396,9 +396,9 @@ func (c watchedConversations) ParkOpenForClaimSystem(ctx context.Context, orgID,
 	return c.ConversationStore.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, park)
 }
 
-func (c watchedConversations) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
+func (c watchedConversations) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error) {
 	c.w.note("fail")
-	return c.ConversationStore.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind)
+	return c.ConversationStore.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind, summary)
 }
 
 // TestPreAgentFailure_EveryReleaseStopsTheWatchdogFirst: a requeue, a park and

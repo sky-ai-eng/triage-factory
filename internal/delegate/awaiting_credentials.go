@@ -21,8 +21,9 @@ var errAwaitingCredentialsTimeout = errors.New("delegate: timed out waiting for 
 const awaitingCredentialsTimeout = 2 * time.Minute
 
 // awaitingCredentialsPollInterval is how often the wait re-checks
-// claim_credentials. A doorbell (the cred_request tf_ctl notification fired by
-// MarkAwaitingCredentials) makes the common case near-instant; this poll is the
-// backstop for a dropped notification, bounded by awaitingCredentialsTimeout
-// either way.
+// claim_credentials on its own. The brain rings the wait (cred_sealed) once it
+// has written the bundle, and the wait reads it then; this poll covers a ring
+// that tf_ctl dropped. A dropped cred_request, the doorbell that asks the brain
+// to seal, is covered on the brain's side by its awaiting sweep. Bounded by
+// awaitingCredentialsTimeout either way.
 const awaitingCredentialsPollInterval = 500 * time.Millisecond

@@ -34,8 +34,10 @@ import (
 // task, the agent starts there, and every checkout — a GitHub PR run's own
 // included — lives beneath it at <root>/<owner>/<repo>/<slug>, recorded in
 // conversation_worktrees. The sources differ only in what is built at setup:
-// a GitHub PR run checks out its pull request (prCheckout), every other run
-// starts with no checkout and adds what it needs with `workspace add`.
+// a GitHub PR run checks out its pull request (prCheckout), a vulnerable
+// package's run checks out its repository's base branch (baseCheckout), and
+// every other run starts with no checkout and adds what it needs with
+// `workspace add`.
 type runConfig struct {
 	orgID   string // tenant scope for every store call inside this conversation's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
 	claimID string // the engagement driving this conversation — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the claim's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed conversation in scope, which record no actuals.
@@ -71,11 +73,20 @@ type runConfig struct {
 	// request, <root>/<owner>/<repo>/pr-<N>; empty for every other run.
 	prCheckout string
 
-	// prSkeleton is the rendered PR history block folded into the run's
-	// static task context. Empty for a non-PR run, and empty (never fatal)
-	// when the fetch fails — the run proceeds with the point-in-time event
+	// baseCheckout is the host path of a vulnerable package's run's checkout
+	// of its repository's base branch, at the slug a bare `workspace add`
+	// lands at (baseCheckoutRef); empty for every other run, and on a later
+	// step whose tree no longer holds it.
+	baseCheckout string
+
+	// prSkeleton is where the PR history block folded into the run's static
+	// task context comes from. Setup records it and fetches nothing; a launch
+	// renders it only when it composes a task context, which is a native claim
+	// of a conversation not yet opened, or an SDK launch with no session to
+	// resume. The zero value, a non-PR run's, renders "", and so does a failed
+	// fetch (never fatal) — the run proceeds with the point-in-time event
 	// context it has always had.
-	prSkeleton string
+	prSkeleton prSkeletonSource
 
 	// workspace is how runRoot came to be — warm from the previous engagement,
 	// rehydrated from the durable snapshot, or built fresh. Resolved by the
@@ -90,18 +101,25 @@ type runConfig struct {
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
-	// Chain-mode toggles. The blueprint orchestrator owns the worktree
-	// lifecycle — it reclaims the task's tree once, after the chain
-	// terminates — so runAgent holds no worktree cleanup of its own. What
-	// isBlueprintStep still gates is the ghost ~/.claude/projects tidy, which
-	// short-circuits so a step's session state survives into the next one.
-	// appendSysPrompt is forwarded to agentproc as --append-system-prompt so
-	// the chain protocol reaches the model without modifying the step's prompt
-	// body.
+	// Chain-mode fields, empty for a conversation with no blueprint run. The
+	// blueprint orchestrator owns the worktree lifecycle — it reclaims the
+	// task's tree once, after the chain terminates — so runAgent holds no
+	// worktree cleanup of its own. appendSysPrompt is forwarded to agentproc
+	// as --append-system-prompt so the chain protocol reaches the model
+	// without modifying the step's prompt body.
 	blueprintRunID  string
 	blueprintStep   int
-	isBlueprintStep bool
 	appendSysPrompt string
+
+	// surface is the framework prompt the conversation runs under, from its
+	// stored type (surfaceFor): the machinist for a blueprint step, the
+	// workbench for a conversation a person works in.
+	surface agentprompt.Surface
+	// interactive is whether the conversation is one a person works in
+	// (domain.ConversationTypeInteractive). Its turns start from the person's
+	// messages, so an SDK launch with no session to resume sends them as the
+	// end of its first turn (composeLaunchTurn).
+	interactive bool
 
 	// skillsSourcePath is the orchestrator-owned staging dir holding this step's
 	// SKILL.md, bind-mounted read-only into the jail (agentproc's
@@ -698,7 +716,7 @@ func withGitHubResolveCause(err, resolveErr error) error {
 
 // setupGitHub prepares a worktree for a GitHub PR task.
 //
-// On the executor path (sidecar non-nil) the GetPR client and the host-side
+// On the executor path (sidecar non-nil) the PR read's client and the host-side
 // clone both route through the run's credential sidecar — the client against
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Local reads the PR through
@@ -707,6 +725,10 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	ghClient = prReadClient(orgID, ghClient, sidecar)
 	if ghClient == nil {
 		return runConfig{}, errNoGitHubClient
+	}
+
+	if isVulnerablePackageTask(task) {
+		return s.setupGitHubBaseCheckout(ctx, orgID, conversationID, claimID, rootKey, creatorUserID, task, ghClient, sidecar, localGit)
 	}
 
 	prNumber := domain.GitHubPRNumber(task.EntitySourceID)
@@ -732,10 +754,10 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	fetchCtx, fetchSpan := tracer.Start(ctx, "engagement.fetch")
 	// The GitHub client bounds the call itself; the watchdog's operation is
 	// the backstop behind that bound.
-	endFetch := s.activityFor(conversationID).begin("fetch_pr", fetchPROpDeadline)
-	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
+	endFetch := s.activityFor(conversationID).begin("fetch_pr", setupFetchOpDeadline)
+	pr, err := ghClient.GetPRBasic(fetchCtx, owner, repo, prNumber)
 	endFetch()
-	telemetry.RecordSpanError(fetchSpan, err)
+	telemetry.RecordSpanError(fetchSpan, err, "fetching the pull request failed")
 	fetchSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
@@ -857,7 +879,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
 	endClone()
-	telemetry.RecordSpanError(cloneSpan, err)
+	telemetry.RecordSpanError(cloneSpan, err, "checking out the pull request failed")
 	cloneSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
@@ -879,8 +901,169 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		repo:       repo,
 		prNumber:   prNumber,
 		prCheckout: prCheckout,
-		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
+		prSkeleton: prSkeletonSource{client: ghClient, owner: owner, repo: repo, prNumber: prNumber},
 	}, nil
+}
+
+// isVulnerablePackageTask reports whether task is on a vulnerable package
+// (domain.EntityKindVulnerablePackage), whose run has no pull request to check
+// out.
+func isVulnerablePackageTask(task domain.Task) bool {
+	return task.EntitySource == "github" && task.EntityKind == domain.EntityKindVulnerablePackage
+}
+
+// vulnerablePackageScope is a vulnerable package's run's scope line. The
+// package is named only in <task_context>: its name comes from the advisory
+// database, and the run context carries no externally authored text.
+func vulnerablePackageScope(owner, repo string) string {
+	return fmt.Sprintf("Repository: %s/%s\nVulnerable package: the one <task_context> names, with its open Dependabot alerts", owner, repo)
+}
+
+// baseCheckoutRef is the branch a vulnerable package's run checks out and the
+// conversation_worktrees ref of that checkout: the branch the repository row
+// names for feature work, else its default branch, else "" for the default
+// branch origin's HEAD names. It is the resolution a bare `workspace add`
+// makes, so the agent adding the repository again gets this checkout back
+// rather than a second one beside it. The stored value is operator input,
+// about to become a path segment and a fetch refspec, so it passes the
+// checkout ref guard.
+func baseCheckoutRef(repoRow domain.Repository) (ref, slug string, err error) {
+	ref = repoRow.EffectiveBaseBranch()
+	if ref != "" {
+		if err := worktree.ValidateCheckoutRef(ref); err != nil {
+			return "", "", fmt.Errorf("the base branch configured for %s: %w", repoRow.Slug(), err)
+		}
+	}
+	return ref, worktree.CheckoutRefSlug(ref), nil
+}
+
+// setupGitHubBaseCheckout prepares the run root for a vulnerable package's
+// task: a detached checkout of the repository's base branch, built as `workspace
+// add <owner/repo>` builds one, from which the agent branches for its fix.
+// There is no pull request to fetch, so the repository is read from GitHub
+// instead, for the clone URLs in the protocol the org uses, through the same
+// client and credential path a PR run's fetch takes.
+func (s *Spawner) setupGitHubBaseCheckout(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
+	repoRow, err := s.taskRepository(ctx, orgID, task)
+	if err != nil {
+		return runConfig{}, err
+	}
+	if repoRow == nil {
+		return runConfig{}, fmt.Errorf("task %s is a %q task, not a GitHub one", task.ID, task.EntitySource)
+	}
+	owner, repo := repoRow.Owner, repoRow.Repo
+	ref, slug, err := baseCheckoutRef(*repoRow)
+	if err != nil {
+		return runConfig{}, err
+	}
+
+	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseFetching)
+	fetchCtx, fetchSpan := tracer.Start(ctx, "engagement.fetch")
+	endFetch := s.activityFor(conversationID).begin("fetch_repository", setupFetchOpDeadline)
+	meta, err := ghClient.GetRepoMeta(fetchCtx, owner, repo)
+	endFetch()
+	telemetry.RecordSpanError(fetchSpan, err, "fetching the repository failed")
+	fetchSpan.End()
+	if err != nil {
+		return runConfig{}, fmt.Errorf("failed to fetch repository: %w", err)
+	}
+	// The bare's origin is rewritten to the URL passed, so the protocol is
+	// chosen as a PR run's setup chooses it, and an SSH URL GitHub did not
+	// return fails rather than repointing the bare to HTTPS.
+	cloneURL := meta.CloneURL
+	if localGit == nil && s.useSSHCloneProtocol(ctx, orgID, conversationID) {
+		if meta.SSHURL == "" {
+			return runConfig{}, fmt.Errorf("%s/%s: SSH clone protocol selected but GitHub did not return ssh_url; switch to HTTPS in Settings or check your GHE config", owner, repo)
+		}
+		cloneURL = meta.SSHURL
+	}
+	if cloneURL == "" {
+		return runConfig{}, fmt.Errorf("%s/%s: GitHub did not return a usable clone URL; cannot create worktree", owner, repo)
+	}
+
+	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseCloning)
+	var cloneAuth worktree.CloneAuth
+	if sidecar != nil {
+		cloneAuth = worktree.CloneAuthViaGitProxy(sidecar.res.GitProxyURL, cloneHostBase(cloneURL), sidecar.res.GitProxyToken)
+	} else if localGit != nil {
+		cloneAuth = localGit.cloneAuth(cloneURL)
+	}
+	runRoot, err := freshRunRoot(rootKey)
+	if err != nil {
+		return runConfig{}, fmt.Errorf("create run root: %w", err)
+	}
+	checkoutPath := filepath.Join(runRoot, owner, repo, slug)
+	if dirExists(checkoutPath) {
+		if err := worktree.RemoveAt(checkoutPath, rootKey); err != nil {
+			return runConfig{}, fmt.Errorf("clear a stale base-branch checkout: %w", err)
+		}
+	}
+	// Recorded before the clone, for the reasons the PR checkout's row is: the
+	// git gates authorize the repository through it, and a snapshot finds the
+	// checkout only through it.
+	if s.conversationWorktrees != nil {
+		recordCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+		err := s.recordCheckout(recordCtx, orgID, claimID, domain.ConversationWorktree{
+			ConversationID: conversationID,
+			RepositoryID:   repoRow.ID,
+			Path:           checkoutPath,
+			Ref:            slug,
+		})
+		cancel()
+		if err != nil {
+			return runConfig{}, fmt.Errorf("record the base-branch checkout in conversation_worktrees: %w", err)
+		}
+	}
+
+	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
+	cloneCtx, endClone := s.beginWorkspaceOp(cloneCtx, conversationID, "clone")
+	baseCheckout, err := worktree.CreateForCheckoutInRoot(cloneCtx, worktree.Repo{ID: repoRow.ID, Owner: owner, Name: repo}, cloneURL, ref, rootKey, runRoot,
+		worktree.WithCloneAuth(cloneAuth))
+	endClone()
+	telemetry.RecordSpanError(cloneSpan, err, "checking out the base branch failed")
+	cloneSpan.End()
+	if err != nil {
+		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
+	}
+
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Warn("update worktree path for conversation failed", "conversation", conversationID, "error", err)
+	}
+
+	return runConfig{
+		orgID:        orgID,
+		scope:        vulnerablePackageScope(owner, repo),
+		sources:      s.sourceDocsFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindGitHub),
+		runRoot:      runRoot,
+		owner:        owner,
+		repo:         repo,
+		baseCheckout: baseCheckout,
+	}, nil
+}
+
+// taskBaseCheckout is where root holds a vulnerable package's task's checkout
+// of its repository's base branch, for the run context of a step that opens
+// in a tree the task already has, or "" when the tree holds none there. It
+// writes no ledger row: a warm tree's checkouts are recorded for the
+// conversation with every other checkout of the task (recordTaskCheckouts),
+// and a rehydrate records the ones it rebuilds.
+//
+// The slug is the one the repository row resolves to now. A row whose base
+// branch changed since the setup names a checkout the tree does not hold, and
+// the run context leaves the line out; `workspace list` still shows the
+// checkout the tree has.
+func (s *Spawner) taskBaseCheckout(ctx context.Context, orgID, taskID, root string, repoRow domain.Repository) string {
+	_, slug, err := baseCheckoutRef(repoRow)
+	if err != nil {
+		return ""
+	}
+	findCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+	defer cancel()
+	path := s.taskCheckoutPath(findCtx, orgID, taskID, root, repoRow.ID, repoRow.Owner, repoRow.Repo, slug)
+	if !dirExists(path) {
+		return ""
+	}
+	return path
 }
 
 // dirExists reports whether path names an existing directory.
@@ -940,6 +1123,21 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 		return ""
 	}
 	return prskeleton.Render(*sk, prskeleton.Options{Now: time.Now()})
+}
+
+// prSkeletonSource is a pull request's history skeleton, not yet fetched: the
+// client a run reads its pull request through, and the pull request.
+type prSkeletonSource struct {
+	client   *ghclient.Client
+	owner    string
+	repo     string
+	prNumber int
+}
+
+// render is renderPRSkeleton over the source: two GETs to GitHub, which is
+// why a launch calls it only when the block will reach the model.
+func (src prSkeletonSource) render(ctx context.Context) string {
+	return renderPRSkeleton(ctx, src.client, src.owner, src.repo, src.prNumber)
 }
 
 // setupJira prepares the run-root for a Jira delegation. No repo is

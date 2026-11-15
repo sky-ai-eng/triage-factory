@@ -60,20 +60,11 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
 
       # EXCEPTIONS lists reachable findings TF does not reach at run time, one
-      # OSV id per line, each with its reason here:
-      #
-      #   GO-2026-6911 — mcp-go's StreamableHTTP client follows a redirect
-      #   with its headers and OAuth token. mcp-go comes in through
-      #   bifrost/core's MCP manager. TF initializes bifrost with no
-      #   MCPConfig (internal/llm/inference/client.go) and calls none of its
-      #   MCP methods, so the manager stays nil and no StreamableHTTP client
-      #   is constructed; the trace through Bifrost.Shutdown passes a nil
-      #   check the call graph does not model.
+      # OSV id per line, each with its reason here. None is excepted.
       - name: Run govulncheck
         id: govulncheck
         env:
-          EXCEPTIONS: |
-            GO-2026-6911
+          EXCEPTIONS: ""
         run: |
           # The text report is the one people read; the JSON report is the
           # one the gate decides on, since -format json exits 0 whatever it

@@ -148,7 +148,7 @@ func startWarmEngagement(t *testing.T, o warmOpts) *warmEngagement {
 		pgtest.MustExec(t, pf.h.AdminDB, `UPDATE blueprint_runs SET status = 'completed', completed_at = now() WHERE id = $1`, pf.brID)
 	}
 	if !o.noPersonMessage {
-		if _, err := pf.stores.Conversations.InsertMessageSystem(ctx, pf.orgID, pendingUserInput(claim.ID, pf.userID, "please fix the flaky test")); err != nil {
+		if _, err := pf.stores.Conversations.InsertMessageSystem(ctx, pf.orgID, pendingUserInput(claim.ID, pf.userID, "please fix the flaky test", domain.TurnSettings{})); err != nil {
 			t.Fatalf("queue the person's message: %v", err)
 		}
 	}
@@ -854,7 +854,7 @@ func TestWarmClaim_ExpiryReadsAMessageItWasNeverRungFor(t *testing.T) {
 	f := startWarmEngagement(t, warmOpts{window: 2 * time.Second, turns: []gateTurn{{text: "fixed it"}, {text: "done that too"}}})
 	f.awaitWarm(t, 1)
 
-	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), f.orgID, pendingUserInput(f.conversationID, f.userID, "one more thing")); err != nil {
+	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), f.orgID, pendingUserInput(f.conversationID, f.userID, "one more thing", domain.TurnSettings{})); err != nil {
 		t.Fatalf("queue the message: %v", err)
 	}
 	f.awaitCalls(t, 2, 10*time.Second)

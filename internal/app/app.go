@@ -49,6 +49,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -119,7 +120,11 @@ type App struct {
 	deploymentSignerHealth *commitsigner.DeploymentHealth
 	// commitSignDoorbells routes sign_done to the signature requests this
 	// executor's runs are waiting on. nil on a control pod and in local mode.
-	commitSignDoorbells *commitsigner.Doorbells
+	commitSignDoorbells *ctlbus.Doorbells
+	// credDoorbells routes cred_sealed to the credential waits this
+	// executor's engagements are parked in. nil on a control pod and in local
+	// mode.
+	credDoorbells *ctlbus.Doorbells
 	// signerHealth makes the periodic and post-push checks of each org's
 	// signer, kicked by the GitHub poll's completions. Built on every
 	// brain-capable process and triggered only while it holds the brain.
@@ -257,6 +262,13 @@ type App struct {
 	// startBrain/stopBrain, and nil-checked the same way a.wsBackplane is.
 	memoryProvisioner *memoryprovision.Manager
 
+	// delegatorNotices tells the person who delegated a conversation that it
+	// failed or is parked waiting on them, from the conversation rows. Non-nil
+	// for every brain-capable role in both modes, run with the rest of the
+	// brain in startBrain, and nudged through delegatorNoticeOwed. Nudge is
+	// nil-safe, so a role that never builds it needs no check.
+	delegatorNotices *delegate.DelegatorNotices
+
 	// metricsAddr is the resolved /metrics bind address telemetry.Init
 	// returned at boot ("" = metrics disabled) — kept so Run can start the
 	// listener after the workers are up. Role-independent: an executor
@@ -388,12 +400,6 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored on TF_ROLE=executor: an executor never holds a signing key, so forward the deployment signer to the control pods only")
 	}
 
-	// Install the OTel meter provider before anything downstream constructs
-	// instruments, so every subsystem records against the real SDK from its
-	// first sample (disabled → the global stays a no-op and instruments cost
-	// nothing). The listener itself starts in Run, once workers are up.
-	a.metricsAddr = telemetry.Init(cfg.Version)
-
 	// Resolve this process's persistent instance identity before anything
 	// else touches the state root: the identity file's exclusive
 	// lock is the two-process-on-one-state-root guard, so it's most
@@ -409,6 +415,14 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 			}
 		}
 	}()
+
+	// Install the OTel providers before anything downstream constructs
+	// instruments, so every subsystem records against the real SDK from its
+	// first sample (disabled → the globals stay no-ops and instruments cost
+	// nothing). After ensureIdentity, because the instance id is part of the
+	// resource every span and metric exports under. The listener itself
+	// starts in Run, once workers are up.
+	a.metricsAddr = telemetry.Init(cfg.Version, a.plan.role, a.identity.ID)
 
 	if a.local() {
 		// Local-mode public-exposure guardrail (TFAC-409 item 1): local mode
@@ -526,6 +540,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// credential one above). After buildRunCredentials and buildServer, whose
 	// recorder / credential seams and websocket hub it holds.
 	a.buildMemoryProvisioner()
+	if a.plan.brain {
+		a.delegatorNotices = delegate.NewDelegatorNotices(a.stores.Conversations, delegate.DefaultDelegatorNoticeInterval)
+	}
 	// The background-brain lease elector (TFAC-583) — control role in
 	// multi mode only. Local (role=all) never elects (startBrain runs
 	// directly, unconditionally, from Run); an executor is never

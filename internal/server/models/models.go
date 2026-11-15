@@ -113,7 +113,12 @@ type modelCatalogRow struct {
 	// for "unconfigured" and "unverified", which are the states no probe
 	// produced.
 	AvailabilityCheckedAt *time.Time `json:"availability_checked_at,omitempty"`
-	DisplayOrder          int        `json:"display_order"`
+	// EffortLevels are the reasoning efforts a message on this model may ask
+	// for, lowest first, as their wire values. Always present: an empty list
+	// is a model that takes no effort, which a composer answers by hiding the
+	// control, and an absent field would say nothing.
+	EffortLevels []string `json:"effort_levels"`
+	DisplayOrder int      `json:"display_order"`
 }
 
 type modelCatalogResponse struct {
@@ -233,6 +238,7 @@ func catalogRow(m modelcatalog.Model, enabled bool, avail availabilityIndex) mod
 		Availability:          state,
 		AvailabilityDetail:    detail,
 		AvailabilityCheckedAt: checkedAt,
+		EffortLevels:          append([]string{}, m.EffortLevels...),
 		DisplayOrder:          m.DisplayOrder,
 	}
 	if m.Provider != "" {

@@ -34,8 +34,8 @@ type ShippedDefaultsStore interface {
 	//     steps are written only for freshly-inserted headers — an
 	//     existing team blueprint's step list is left untouched — each
 	//     step's prompt slug resolved via the phase-1 map.
-	//  3. Handlers: db.ShippedEventHandlers, rules enabled, triggers
-	//     disabled (shipped convention) — delegates to
+	//  3. Handlers: db.ShippedEventHandlers, rules enabled unless marked
+	//     Disabled, triggers disabled (shipped convention) — delegates to
 	//     EventHandlerStore.Seed, resolving each trigger's blueprint slug
 	//     through the phase-2 map.
 	//

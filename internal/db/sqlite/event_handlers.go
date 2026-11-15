@@ -83,11 +83,11 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 					 name, default_priority, sort_order,
 					 created_at, updated_at)
 				VALUES (?, ?, ?, NULL, 'rule', ?,
-				        ?, ?, 1, 'system',
+				        ?, ?, ?, 'system',
 				        ?, ?, ?,
 				        ?, ?)
 			`, uuid.New().String(), orgID, teamID, h.EventType,
-				h.ID, pred,
+				h.ID, pred, !h.Disabled,
 				h.Name, h.DefaultPriority, h.SortOrder,
 				now, now)
 			if err != nil {
@@ -609,8 +609,8 @@ func loadTeamHandlerRowSQLite(ctx context.Context, q queryer, orgID, teamID, slu
 }
 
 // insertHandlerSQLite inserts a brand-new team copy of a shipped handler,
-// honoring the shipped enabled convention (rules enabled, triggers disabled)
-// — matches Seed.
+// honoring the shipped enabled convention (rules enabled unless marked
+// Disabled, triggers disabled) — matches Seed.
 func insertHandlerSQLite(ctx context.Context, q queryer, orgID, teamID string, h db.ShippedEventHandler, plan db.HandlerSyncPlan) error {
 	now := time.Now().UTC()
 	var pred any
@@ -626,11 +626,11 @@ func insertHandlerSQLite(ctx context.Context, q queryer, orgID, teamID string, h
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, NULL, 'rule', ?,
-			        ?, ?, 1, 'system',
+			        ?, ?, ?, 'system',
 			        ?, ?, ?,
 			        ?, ?)
 		`, uuid.New().String(), orgID, teamID, h.EventType,
-			h.ID, pred,
+			h.ID, pred, !h.Disabled,
 			plan.Name, plan.DefaultPriority, plan.SortOrder,
 			now, now)
 		return err

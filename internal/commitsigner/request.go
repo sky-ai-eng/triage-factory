@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
@@ -18,6 +17,14 @@ import (
 )
 
 var tracer = otel.Tracer("internal/commitsigner")
+
+// The kinds of the tf_ctl messages the signing queue rides (ctlbus.Message).
+const (
+	// KindSignRequest rings every control pod: a request was queued.
+	KindSignRequest = "sign_request"
+	// KindSignDone rings the executor waiting on a request: it was decided.
+	KindSignDone = "sign_done"
+)
 
 const (
 	// RequestTimeout is how long a run waits for a control pod to decide its
@@ -41,7 +48,7 @@ type Publisher func(ctx context.Context, msg ctlbus.Message) error
 type Requester struct {
 	Signatures db.CommitSignatureStore
 	Publish    Publisher
-	Doorbells  *Doorbells
+	Doorbells  *ctlbus.Doorbells
 
 	// Timeout and PollInterval replace RequestTimeout and the row-read
 	// interval when set. Tests shorten them.
@@ -124,8 +131,7 @@ func (r *Requester) Request(ctx context.Context, req Request) (res Result, err e
 	))
 	defer func() {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordSpanError(span, err, "requesting the signature failed")
 		} else {
 			span.SetAttributes(telemetry.Outcome(string(res.Outcome)))
 			if res.Refusal != "" {

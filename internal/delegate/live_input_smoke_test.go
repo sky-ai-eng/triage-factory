@@ -87,7 +87,7 @@ func startSDKLiveCheck(t *testing.T, convID, message string) *sdkLiveCheck {
 			}
 			return n
 		},
-		TFTools: sdkTFTools(),
+		TFTools: sdkTFTools(true),
 	}
 	inner := newConversationSink(s, org, convID, claimID, "manual", runmode.LocalDefaultUserID)
 	sink := &toolStartSink{
@@ -148,7 +148,7 @@ func (e *sdkLiveCheck) firstBatch(within time.Duration) string {
 }
 
 func (e *sdkLiveCheck) send(text string) error {
-	return e.s.SendMessage(e.ctx, e.park.orgID, e.park.conversationID, runmode.LocalDefaultUserID, text)
+	return e.s.SendMessage(e.ctx, e.park.orgID, e.park.conversationID, runmode.LocalDefaultUserID, text, domain.TurnSettings{})
 }
 
 func (e *sdkLiveCheck) outcome(within time.Duration) liveOutcome {

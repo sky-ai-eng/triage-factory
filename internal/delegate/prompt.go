@@ -150,17 +150,30 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 	return p, nil
 }
 
-// machinistSpec selects the delegated agent's block set from
-// internal/agentprompt. Mode is resolved here rather than inside Build, which
-// stays a pure function of its Spec — that is what makes both mode variants
-// testable without manipulating process state.
-func machinistSpec() agentprompt.Spec {
+// sdkSpec selects an SDK conversation's block set from internal/agentprompt,
+// for the surface its conversation's type names (surfaceFor). Mode is resolved
+// here rather than inside Build, which stays a pure function of its Spec —
+// that is what makes both mode variants testable without manipulating process
+// state.
+func sdkSpec(surface agentprompt.Surface) agentprompt.Spec {
 	return agentprompt.Spec{
-		Surface: agentprompt.SurfaceMachinist,
+		Surface: surface,
 		Runtime: agentprompt.RuntimeSDK,
 		Family:  agentprompt.FamilyClaude,
 		Mode:    agentprompt.ModeFor(string(runmode.Current())),
 	}
+}
+
+// surfaceFor is the framework prompt a conversation of convType runs under:
+// the workbench for a conversation a person works in, the machinist for
+// everything a delegation drives. Every build of a conversation's framework
+// prompt asks this of its stored type, so a resume composes the surface its
+// conversation opened with.
+func surfaceFor(convType string) agentprompt.Surface {
+	if convType == domain.ConversationTypeInteractive {
+		return agentprompt.SurfaceWorkbench
+	}
+	return agentprompt.SurfaceMachinist
 }
 
 // sdkSystemPrompt is the whole of what the SDK harness is appended: the
@@ -189,9 +202,9 @@ func machinistSpec() agentprompt.Spec {
 // own knowledge base; the two things the rewrite must never touch — the task
 // context and the injected memories, the only externally-authored text a run
 // reads — are transcript rows and never part of this string.
-func sdkSystemPrompt(conversationBlock, binaryPath string) string {
+func sdkSystemPrompt(surface agentprompt.Surface, conversationBlock, binaryPath string) string {
 	return resolveCLIPath(joinSections(
-		agentprompt.Build(machinistSpec()),
+		agentprompt.Build(sdkSpec(surface)),
 		conversationBlock,
 	), binaryPath)
 }
@@ -281,8 +294,8 @@ func resolveCLIPath(text, binaryPath string) string {
 // the facts of this particular run. agentprompt.Build is byte-identical for a
 // fixed Spec so the fleet shares one cached prefix, which leaves anything that
 // differs between two runs — what this one is pointed at, where its tree and
-// its PR checkout are, what the team calls its branches — to arrive here
-// instead.
+// the checkout its setup built are, what the team calls its branches — to
+// arrive here instead.
 //
 // System-authored, so unlike the task context it carries no untrusted markers.
 // An absent fact renders no line: a deployment with no public URL says nothing
@@ -315,7 +328,7 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-func runContext(scope, taskState, siblingWork, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
+func runContext(scope, taskState, siblingWork, runRoot, prCheckout, baseCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
@@ -334,6 +347,11 @@ func runContext(scope, taskState, siblingWork, runRoot, prCheckout, branchTempla
 	if prCheckout != "" {
 		lines = append(lines, "PR checkout: "+prCheckout+
 			" — the pull request's checkout, already on its branch. `cd` into it before reading or changing the code.")
+	}
+	if baseCheckout != "" {
+		lines = append(lines, "Base-branch checkout: "+baseCheckout+
+			" — the repository's checkout of its base branch, detached, as `workspace add` makes one."+
+			" `cd` into it before reading or changing the code, and create your own branch before committing.")
 	}
 	if branchTemplate != "" {
 		lines = append(lines, "Branch naming convention for this team: "+branchTemplate)

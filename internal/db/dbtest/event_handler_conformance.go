@@ -170,7 +170,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
-		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		store, orgID, teamID, seedBlueprints, handlerID := factory(t)
 		// Trigger rows in ShippedEventHandlers reference these blueprints.
 		ids := seedBlueprints(t,
 			"system-pr-review",
@@ -179,6 +179,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			"system-jira-implement",
 			"system-linear-implement",
 			"system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
@@ -202,6 +203,17 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if triggers == 0 {
 			t.Errorf("Seed produced 0 trigger rows; want > 0")
 		}
+		// Rules ship enabled unless marked Disabled, triggers disabled.
+		for _, shipped := range db.ShippedEventHandlers {
+			got := handlerCopyBySlug(t, store, handlerID, orgID, teamID, shipped.ID)
+			if got == nil {
+				t.Errorf("Seed left out shipped handler %s", shipped.ID)
+				continue
+			}
+			if want := shipped.Kind == domain.EventHandlerKindRule && !shipped.Disabled; got.Enabled != want {
+				t.Errorf("seeded %s enabled=%v, want %v", shipped.ID, got.Enabled, want)
+			}
+		}
 	})
 
 	t.Run("Seed_IsIdempotent", func(t *testing.T) {
@@ -209,6 +221,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
@@ -691,7 +704,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		// Shipped rows have no creator; the creator filter leaves them out.
 		bps := seedBlueprints(t, "system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback")
+			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate")
 		if err := store.Seed(ctx, orgID, teamID, bps); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
@@ -990,6 +1004,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
@@ -1047,6 +1062,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
+			"system-vulnerability-remediate",
 		)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)

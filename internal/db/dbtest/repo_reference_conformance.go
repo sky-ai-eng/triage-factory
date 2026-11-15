@@ -348,13 +348,14 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 	})
 
-	t.Run("The_held_untracked_read_lists_untracked_rows_an_active_pull_request_references", func(t *testing.T) {
+	t.Run("The_held_untracked_read_lists_untracked_rows_an_active_pull_request_or_package_references", func(t *testing.T) {
 		// One row per reason a row is or is not held:
 		//   octo/kept      tracked, with an active pull request    — out
 		//   octo/dropped   untracked, with an active pull request  — in
 		//   zed/lib        never tracked, two active pull requests — in, once
 		//   zed/closed     its only pull request closed            — out
 		//   zed/issues     only an issue entity                    — out
+		//   zed/vuln       only a vulnerable package               — in
 		//   zed/bare       a registry row nothing references       — out
 		//   zed/elsewhere  held, but on another host               — out here
 		s, orgID, teamID, _ := mk(t)
@@ -385,6 +386,9 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 			t.Fatalf("CloseSystem: %v", err)
 		}
 		entity(TestGitHubHost, "zed/issues#6", domain.EntityKindIssue)
+		if _, _, err := s.Entities.FindOrCreateVulnerablePackageSystem(ctx, orgID, TestGitHubHost, "zed/vuln#npm:lodash", "lodash (npm)", ""); err != nil {
+			t.Fatalf("create zed/vuln's package: %v", err)
+		}
 		if _, err := s.Repos.FindOrCreateByRefSystem(ctx, orgID, repoRef("zed/bare")); err != nil {
 			t.Fatalf("register zed/bare: %v", err)
 		}
@@ -394,7 +398,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if err != nil {
 			t.Fatalf("ListHeldUntrackedSystem: %v", err)
 		}
-		if got, want := repoSlugs(rows), []string{"octo/dropped", "zed/lib"}; !equalStringSlice(got, want) {
+		if got, want := repoSlugs(rows), []string{"octo/dropped", "zed/lib", "zed/vuln"}; !equalStringSlice(got, want) {
 			t.Fatalf("ListHeldUntrackedSystem = %v, want %v", got, want)
 		}
 		for _, row := range rows {

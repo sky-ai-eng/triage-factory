@@ -94,7 +94,12 @@ type Entry struct {
 	Prices                PricesPerMTok
 	ContextWindow         int
 	SupportsPromptCaching bool
-	DisplayOrder          int
+	// The datasheet's reasoning-effort facts, which effortLevels reads.
+	SupportsReasoning   bool
+	SupportsXHighEffort bool
+	SupportsMaxEffort   bool
+	EffortCeiling       string
+	DisplayOrder        int
 }
 
 // tokensPerMTok converts the datasheet's per-token rates to the per-million
@@ -204,6 +209,10 @@ func load(fileJSON []byte, lookup func(string) (inference.Info, bool)) ([]Entry,
 			},
 			ContextWindow:         info.MaxInputTokens,
 			SupportsPromptCaching: info.SupportsPromptCaching,
+			SupportsReasoning:     info.SupportsReasoning,
+			SupportsXHighEffort:   info.SupportsXHighEffort,
+			SupportsMaxEffort:     info.SupportsMaxEffort,
+			EffortCeiling:         info.EffortCeiling,
 			// Position in the returned slice, not in the file: a dropped
 			// entry must not leave a hole in the ordering the API publishes.
 			DisplayOrder: len(out),

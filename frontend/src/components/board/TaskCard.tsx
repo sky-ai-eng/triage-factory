@@ -8,6 +8,7 @@ import { CrateMark } from './CrateMark'
 import {
   pendingCount,
   type ArtifactTotals,
+  type CardFact,
   type EventTone,
   type Lifecycle,
   type PendingTotals,
@@ -87,6 +88,9 @@ export interface TaskCardProps {
    *  from `task.event_type` rather than looked up here: the card reads what
    *  it is handed, and every other derivation on it lives in that one file. */
   event?: { label: string; description: string; tone: EventTone }
+  /** Facts about the entity its title does not carry, on one readout line
+   *  under the title. */
+  facts?: CardFact[]
   /** The agent's live command. Scans. Ignored unless `working`. */
   command?: string
   /** A blocked run. Its presence removes the activity row. */
@@ -363,6 +367,7 @@ export function TaskCard({
   summary,
   summaryPending = false,
   event,
+  facts,
   command,
   permission,
   artifacts,
@@ -556,6 +561,19 @@ export function TaskCard({
       </div>
 
       <Chain chain={chain} working={working} />
+
+      {/* Facts the title cannot carry, as a readout rather than prose: they
+          are the system's data about the entity, and the summary below is
+          the scorer's sentence about the work. */}
+      {facts && facts.length > 0 && (
+        <div className="tc-facts">
+          {facts.map((f, i) => (
+            <span key={i} className="tc-fact" data-tone={f.tone} title={f.title}>
+              {f.text}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* What the work IS, in the scorer's own words rather than the run's,
           opened by the event that made the task. Shown in every state: the

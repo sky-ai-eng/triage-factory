@@ -386,9 +386,10 @@ type ConversationStore interface {
 	//
 	// A task owns its conversations, and a boundary is the moment one stops
 	// being the task's live one: the work went back to the queue, a person
-	// took it over, a fresh delegation opened, a blueprint advanced past this
-	// step, the team was archived, the engagement failed. These two doors are
-	// the only writers of ended_at / ended_reason.
+	// took it over, a fresh delegation opened, a person handed it to someone
+	// on another team, a blueprint advanced past this step, the team was
+	// archived, the engagement failed. These doors are the only writers of
+	// ended_at / ended_reason.
 	//
 	// reason is validated against domain.IsEndedReason before anything is
 	// written; ErrInvalidEndedReason otherwise, both dialects.
@@ -412,6 +413,24 @@ type ConversationStore interface {
 	// a conversation_update per row without re-reading. An empty slice means
 	// the task had nothing live, which is an answer, not an error.
 	EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+
+	// MintForPersonClaim mints the conversation a person works a task in, on
+	// the transaction of the claim that put the task on their plate. It is one
+	// INSERT … SELECT … WHERE NOT EXISTS: a task that already holds an un-ended
+	// top-level conversation keeps it, nothing is written, and the answer is
+	// nil with a nil error. So is a task id that names no row.
+	//
+	// The row is an `interactive` conversation, origin `interactive`, manual
+	// with userID as its creator, team-visible on the task's team as the claim
+	// left it, with no prompt, model, blueprint run, or agent. It is parked:
+	// status `open` and parked_at set, with no park reason and no verdict,
+	// the shape a turn that ends with no verdict leaves. So it reads as live
+	// and is not drivable, since the claim scan admits a parked row only with
+	// a person's undelivered message. The runtime is the dialect's, as every
+	// mint's is.
+	//
+	// Returns the row it persisted, projected as Get projects it.
+	MintForPersonClaim(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error)
 
 	// EndConversation stamps one conversation, under the same ended_at IS NULL
 	// guard. nil (with a nil error) when the id names no row in the org OR the
@@ -745,6 +764,28 @@ type ConversationStore interface {
 	// nil.
 	NewestAssistantToolCallsForConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string][]domain.ToolCall, error)
 
+	// NewestPersonMessageSystem returns the conversation's newest person row
+	// by id: a person's own message (role 'user', an author, and a blank
+	// subtype or the steer stamp a mid-turn drain gives one), delivered or
+	// still waiting, in any window state but withdrawn (delivered=false AND
+	// window_state='inactive'). A compacted row still counts, so a compaction
+	// never resets the settings a person last picked. Every person row
+	// records the model and effort it runs on, so this row holds the
+	// conversation's current settings; a row written before rows recorded
+	// them carries no model. nil when the conversation has none. Admin pool,
+	// org bound by argument: its readers are the send path, the claim and the
+	// credential seal, none of which carries a request identity.
+	NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
+	// NewestAssistant returns the conversation's newest assistant row by id
+	// whose window_state is 'active': the last call the model answered that
+	// the next call reads, whose usage says how full the window is and whose
+	// time says whether the provider cache is still warm. nil when the
+	// conversation has none. Read under the caller's claims; the System twin
+	// is the admin-pool read for the send path.
+	NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+	NewestAssistantSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
 	// conversation's exact LLM context, ordered by the effective assembly key
 	// COALESCE(seq, id). window_state='inactive' rows are excluded
@@ -761,6 +802,32 @@ type ConversationStore interface {
 	// assembled, it must become a column on this table, per the epic's
 	// standing rule.
 	ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
+
+	// OpeningTaskContextSystem returns the content of the conversation's
+	// task-context row (domain.MessageSubtypeInjectionTaskContext): the task
+	// context its opening sent. ok is false when the conversation has none,
+	// which is how a claim knows its conversation has not been opened.
+	//
+	// Every window state counts. A compaction marks the row inactive, and the
+	// conversation it opened is still one that has been opened: its opening is
+	// not minted again, and a claim retains this content as the task-context
+	// file. ListForAssemblySystem leaves the row out once it is inactive, so it
+	// cannot answer this.
+	//
+	// Only the task-context row counts, never any row. A conversation can carry
+	// a queued follow-up (a person typed while it waited for an executor) or a
+	// stop note from a bring-up that never reached the agent before it has been
+	// opened, and reading either as an opening leaves the run with no task
+	// context at all. The mint writes one task-context row per conversation;
+	// were there more, the first in assembly order is the answer.
+	OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (taskContext string, ok bool, err error)
+
+	// HasAssistantMessageSystem reports whether the conversation's transcript
+	// holds an assistant row in any window state: whether the model has taken
+	// a turn, which a compaction does not undo. It is how a conversation opened
+	// before openings were minted (its transcript begins at the agent's first
+	// reply) is told apart from one that never ran.
+	HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// The delivered flush lives on MarkDeliveredForClaimSystem below:
 	// consuming pending rows is an engagement write, so it goes through the
@@ -954,6 +1021,18 @@ type ConversationStore interface {
 	// a background context with no JWT claims in scope, so the app-pool door
 	// would see no row to end.
 	EndConversationSystem(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error)
+
+	// EndConversationsForTaskSystem is EndConversationsForTask on the admin
+	// pool. A reassign that moves a task to another team is its caller: the
+	// person reassigning may not be on the team the task lands on, so the
+	// write that moved the task also moved it out of their sight.
+	EndConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
+
+	// MintForPersonClaimSystem is MintForPersonClaim on the admin pool, with
+	// the same statement. The same reassign is its caller: the conversation's
+	// creator is the new holder, who is not the caller, so the insert policy
+	// refuses it under the caller's claims.
+	MintForPersonClaimSystem(ctx context.Context, orgID, taskID, userID string) (*domain.Conversation, error)
 
 	// EndConversationsForTeamSystem is the task door's team-scoped sibling:
 	// every non-ended top-level conversation the team owns, whatever its
@@ -1291,12 +1370,14 @@ type ConversationStore interface {
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
+	// summary is why it failed, stored as result_summary, which the failure
+	// notice reports; "" keeps the stored value.
 	//
 	// Refused once the engagement has been fenced out: ok=false means the row
 	// was already terminal, while a fenced-out caller gets ErrClaimReleased,
 	// which is a different thing and must not be treated as a lost race. A
 	// pending stop intent is cleared with the flip.
-	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error)
+	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error)
 
 	// ParkOpenForClaimSystem flips a conversation to `open`: a turn ended without a verdict. This is
 	// the ONLY writer of that state, and there is deliberately only one —
@@ -1476,6 +1557,52 @@ type ConversationStore interface {
 	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
 	// the door and orgID is bound by argument.
 	ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error)
+
+	// ListPauseNoticesDueSystem returns, across orgs, the parks whose
+	// kinds.ConversationPaused notice the brain has not opened: the rows
+	// ListAwaitingPersonSystem selects whose parked_at is not the park
+	// MarkPauseNoticedSystem last recorded. Ordered by parked_at then id, at
+	// most limit rows; the sweep reads the next page on its next pass.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and each row carries its org.
+	ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error)
+
+	// MarkPauseNoticedSystem records that the notice for the park at parkedAt
+	// was opened, and only while the conversation is still on that park and
+	// not yet marked for it: a park that ended, with a new one begun since the
+	// read, stays due. It reports whether it marked the row.
+	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), so the mark commits only with the notice, and of two
+	// passes that read the same park only the one whose mark lands opens it.
+	// A bookkeeping write that returns no row: its only reader is
+	// ListPauseNoticesDueSystem, and its caller needs only whether it marked.
+	MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error)
+
+	// ListFailureNoticesDueSystem returns, across orgs, the failed
+	// conversations a person delegated whose kinds.ConversationFailed notice
+	// the brain has not posted, ordered by completed_at then id, at most limit
+	// rows. A conversation a trigger fired has nobody to tell and is never
+	// listed. The task and its entity are outer-joined: their key is display
+	// only.
+	//
+	// A conversation fails at most once, since failed is the only terminal
+	// status and a failed conversation never runs again, so a timestamp is
+	// enough to mark it.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and each row carries its org.
+	ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error)
+
+	// MarkFailureNoticedSystem records that the conversation's failure notice
+	// was posted, unless it already was, and reports whether it marked the
+	// row.
+	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), for the reasons MarkPauseNoticedSystem gives. A
+	// bookkeeping write that returns no row, for the same reasons.
+	MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// HasActiveClaimForTaskSystem reports whether any conversation
 	// on taskID has a live claim — i.e. whether an executor is

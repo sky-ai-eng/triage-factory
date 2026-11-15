@@ -48,7 +48,7 @@ func (a *App) buildCommitSigning() {
 		}
 	}
 	if a.plan.dispatcher {
-		a.commitSignDoorbells = commitsigner.NewDoorbells()
+		a.commitSignDoorbells = ctlbus.NewDoorbells()
 		a.spawner.SetCommitSignRequester(&commitsigner.Requester{
 			Signatures: a.stores.CommitSignatures,
 			Publish:    publish,
