@@ -157,7 +157,7 @@ func newFixture(t *testing.T) *fixture {
 // from newFixture for the doorbell cases that need a second one — in particular
 // one that was never Run.
 func (f *fixture) newManager(notify func(orgID, taskID, taskStatus string)) *Manager {
-	m := NewManager(f.stores, nil, testModels, nil, nil, notify)
+	m := NewManager(f.stores, nil, testModels, nil, nil, notify, nil)
 	m.complete = f.fake
 	return m
 }
@@ -380,6 +380,54 @@ func TestFulfil_AnnouncesWhenAnAttemptOpensAndWhenItCloses(t *testing.T) {
 			if closed.memory != tc.wantMemory {
 				t.Errorf("second announcement saw memory = %v, want %v: a memory row is filed ahead of the close that reports it",
 					closed.memory, tc.wantMemory)
+			}
+		})
+	}
+}
+
+// TestFulfil_ReportsEachMemoryRowItFiles: a filed row is what makes the task's
+// queued conversation claimable, so the report follows the write for a
+// generated row and an empty one alike, and a failed model call, which files
+// nothing, reports nothing.
+func TestFulfil_ReportsEachMemoryRowItFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ran       bool
+		callErr   error
+		wantFiled int
+	}{
+		{name: "a generated row", ran: true, wantFiled: 1},
+		{name: "an empty row", wantFiled: 1},
+		{name: "a failed model call", ran: true, callErr: errors.New("500 from upstream")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.message(roleUser, "", "do the thing")
+			if tc.ran {
+				f.message(roleAssistant, "", "worked on it")
+			}
+			f.end()
+			f.fake.err = tc.callErr
+
+			var filed []string
+			f.mgr.filed = func(orgID string) {
+				if f.memory() == nil {
+					t.Error("reported a filed row before the memory row was written")
+				}
+				filed = append(filed, orgID)
+			}
+
+			if err := f.mgr.Fulfil(t.Context(), f.orgID, f.conversationID); err != nil {
+				t.Fatalf("Fulfil: %v", err)
+			}
+
+			if len(filed) != tc.wantFiled {
+				t.Fatalf("filed reports = %v, want %d", filed, tc.wantFiled)
+			}
+			for _, orgID := range filed {
+				if orgID != f.orgID {
+					t.Errorf("reported org %q, want %q", orgID, f.orgID)
+				}
 			}
 		})
 	}

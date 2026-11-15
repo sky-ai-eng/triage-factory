@@ -109,6 +109,7 @@ type Manager struct {
 	secrets  agentproc.SecretsReader
 	llm      func(ctx context.Context, orgID, model string) (map[string]string, error)
 	notify   func(orgID, taskID, taskStatus string)
+	filed    func(orgID string)
 
 	// attemptTimeout is AttemptTimeout, held as a field so a test can watch
 	// the bound fire without waiting out the real one.
@@ -144,6 +145,12 @@ type Manager struct {
 // task after every write to its memory attempts, an attempt opening and every
 // way one closes; nil is a Manager that generates memory and tells nobody,
 // which is only ever a test.
+//
+// filed reports each memory row this Manager writes, generated or empty, with
+// the row's org. The claim filter holds a task's queued conversation while an
+// ended conversation on that task has no memory row, so a filed row is the
+// moment that conversation becomes claimable, and the caller's wake is what
+// spares it the dispatcher's next scan. nil reports nothing.
 func NewManager(
 	stores db.Stores,
 	recorder *systemllm.Recorder,
@@ -151,6 +158,7 @@ func NewManager(
 	secrets agentproc.SecretsReader,
 	llm func(ctx context.Context, orgID, model string) (map[string]string, error),
 	notify func(orgID, taskID, taskStatus string),
+	filed func(orgID string),
 ) *Manager {
 	m := &Manager{
 		stores:         stores,
@@ -158,6 +166,7 @@ func NewManager(
 		secrets:        secrets,
 		llm:            llm,
 		notify:         notify,
+		filed:          filed,
 		attemptTimeout: AttemptTimeout,
 		syncEvery:      failingSyncEvery,
 		inflight:       make(map[string]struct{}),
@@ -400,6 +409,13 @@ func generatedHeader(rowsSent, rowsTotal int) string {
 func (m *Manager) file(ctx context.Context, orgID string, conv *domain.Conversation, content string, source domain.MemorySource, primaryEntityID string) error {
 	if _, err := m.stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv.ID, conv.BlueprintRunID, content, source); err != nil {
 		return fmt.Errorf("memoryprovision: file the memory of conversation %s: %w", conv.ID, err)
+	}
+	// Reported here and not from the store's upsert, which a running
+	// conversation's own memory writes share: only a row filed for an ended
+	// conversation can make a queued one claimable. Ahead of the attach,
+	// because the row alone is what the claim filter reads.
+	if m.filed != nil {
+		m.filed(orgID)
 	}
 	if primaryEntityID == "" {
 		return nil

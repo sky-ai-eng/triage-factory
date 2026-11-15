@@ -12,7 +12,8 @@ import (
 // (TFAC-586): a dedicated direct connection (pgnotify's usual shape —
 // session-scoped, bypasses any transaction-mode pooler) that nudges the
 // local dispatcher the instant ANY pod commits a step mint or a
-// resume-enqueue, instead of waiting out the 2s scan-interval backstop. Every notification
+// resume-enqueue, or the brain files a memory a queued conversation was held
+// for, instead of waiting out the 2s scan-interval backstop. Every notification
 // wakes the dispatcher unconditionally, regardless of kind/org — the
 // payload exists for future org-scoped filtering, not because this pod
 // needs it today (a claim attempt that finds nothing is a cheap no-op).
