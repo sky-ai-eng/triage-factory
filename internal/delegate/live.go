@@ -793,9 +793,25 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	// therefore falls after the release. For a park that is the status a
 	// person is watching; for a shutdown it is the claim, which must be back
 	// before the process's grace period can run out, or the conversation waits
-	// out its lease and is counted as lost.
+	// out its lease and is counted as lost. Best-effort as ever, and skipped
+	// entirely with no workspace to capture (a cancel during setup), which the
+	// persist would reject anyway, or with a tree that holds nothing the last
+	// snapshot lacks (treeToCapture). A record that could not be opened does
+	// not hold up the release either: the persist below retries the open on its
+	// own way through. A key a newer engagement already holds is left to it,
+	// and nothing is captured.
 	snapCtx := context.WithoutCancel(ctx)
-	snap := s.openEndingSnapshot(snapCtx, park)
+	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
+	var adoptTree func(context.Context) error
+	if willSnapshot {
+		willSnapshot, adoptTree = s.treeToCapture(snapCtx, park)
+	}
+	leaseHeld := false
+	if willSnapshot {
+		record := s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+		leaseHeld = record.owned()
+		willSnapshot = record != snapshotSuperseded
+	}
 
 	// Spend lands BEFORE the release: the broadcast after it is what makes
 	// every watcher refetch, and the figure has to be on the ledger by then.
@@ -812,66 +828,23 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 
 	fenced = release(ctx, park)
 
-	s.persistEndingSnapshot(snapCtx, park, reason, snap)
+	// The release ended the stall watchdog with the claim, so the snapshot's
+	// bound is the only thing that ends a capture or an upload that stops
+	// answering. It is a workspace operation's bound, the same one a
+	// snapshot taken before a terminal runs under.
+	if willSnapshot {
+		persistCtx, cancel := context.WithTimeout(snapCtx, s.resolvedActivityTimings().workspaceOp)
+		err := s.persistWorkspaceSnapshot(persistCtx, snapshotWrite{
+			orgID: park.orgID, conversationID: park.conversationID, keyID: park.namespace, claimID: park.claimID,
+			wtPath: park.claudeCwd, runtime: park.runtime, reason: reason,
+			adoptTree: adoptTree,
+		}, leaseHeld)
+		cancel()
+		if err != nil {
+			delegateLog.Warn("snapshot workspace on leaving the conversation failed", "conversation", park.conversationID, "error", err)
+		}
+	}
 	return fenced
-}
-
-// endingSnapshot is an ending's decision about its tree, made before the
-// ending releases its claim and carried out after.
-type endingSnapshot struct {
-	// capture says the ending owes the key a snapshot.
-	capture bool
-	// leaseHeld says the key's record is open under this engagement's claim.
-	leaseHeld bool
-	// adoptTree hands the tree to the engagement's jail identity before the
-	// capture, nil when the tree needs no hand-off (treeToCapture).
-	adoptTree func(context.Context) error
-}
-
-// openEndingSnapshot decides whether an ending captures its tree, and opens
-// the key's record when it does. Best-effort as ever, and skipped entirely
-// with no workspace to capture (a cancel during setup), which the persist
-// would reject anyway, or with a tree that holds nothing the last snapshot
-// lacks (treeToCapture). A record that could not be opened does not hold up
-// the release either: the persist retries the open on its own way through. A
-// key a newer engagement already holds is left to it, and nothing is captured.
-func (s *Spawner) openEndingSnapshot(ctx context.Context, park liveParkContext) endingSnapshot {
-	if park.claudeCwd == "" || park.namespace == "" || s.Storage() == nil {
-		return endingSnapshot{}
-	}
-	capture, adoptTree := s.treeToCapture(ctx, park)
-	if !capture {
-		return endingSnapshot{}
-	}
-	record := s.beginSnapshotState(ctx, park.orgID, park.namespace, park.claimID)
-	if record == snapshotSuperseded {
-		return endingSnapshot{}
-	}
-	return endingSnapshot{capture: true, leaseHeld: record.owned(), adoptTree: adoptTree}
-}
-
-// persistEndingSnapshot captures the tree an ending decided to capture, once
-// the ending has released its claim. reason names the ending on the
-// snapshot's span.
-//
-// The release ended the stall watchdog with the claim, so the snapshot's
-// bound is the only thing that ends a capture or an upload that stops
-// answering. It is a workspace operation's bound, the same one a snapshot
-// taken before a terminal runs under.
-func (s *Spawner) persistEndingSnapshot(ctx context.Context, park liveParkContext, reason string, snap endingSnapshot) {
-	if !snap.capture {
-		return
-	}
-	persistCtx, cancel := context.WithTimeout(ctx, s.resolvedActivityTimings().workspaceOp)
-	defer cancel()
-	err := s.persistWorkspaceSnapshot(persistCtx, snapshotWrite{
-		orgID: park.orgID, conversationID: park.conversationID, keyID: park.namespace, claimID: park.claimID,
-		wtPath: park.claudeCwd, runtime: park.runtime, reason: reason,
-		adoptTree: snap.adoptTree,
-	}, snap.leaseHeld)
-	if err != nil {
-		delegateLog.Warn("snapshot workspace on leaving the conversation failed", "conversation", park.conversationID, "error", err)
-	}
 }
 
 // treeToCapture decides whether an ending captures its tree, and returns the

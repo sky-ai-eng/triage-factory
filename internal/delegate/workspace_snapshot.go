@@ -246,6 +246,10 @@ const (
 	snapshotReasonJailLost       = "jail_lost"
 	snapshotReasonCheckpoint     = "checkpoint"
 	snapshotReasonProviderSwitch = "provider_switch"
+	// snapshotReasonWarmRelease is a warm claim let go for anything but a
+	// shutdown, which keeps its own reason: the window expiring, the executor
+	// draining or reclaiming the slot, or a stop.
+	snapshotReasonWarmRelease = "warm_release"
 )
 
 // snapshotWrite names one persist: whose tree, under which key, for which

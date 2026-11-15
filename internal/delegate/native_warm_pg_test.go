@@ -676,62 +676,127 @@ func TestWarmClaim_ShutdownReleasesTheClaim(t *testing.T) {
 	}
 }
 
-// A shutdown that lets a warm claim go snapshots the tree as the warm wait
-// left it, which is newer than the turn-end snapshot. The claim is released
-// before the capture is uploaded, and the conversation is not written.
-func TestWarmClaim_ShutdownSnapshotsTheTree(t *testing.T) {
-	spans := recordSpans(t)
-	f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
-	f.awaitWarm(t, 1)
-	before := f.turnEndState(t)
-	// What a process the agent left running wrote after the turn ended.
-	writeFile(t, filepath.Join(f.wtPath, "_tfac", "notes.md"), "written while the claim was warm")
+// warmLetGoEndings are two of the ways a warm claim is let go, and the reason
+// each one's checkpoint carries: a shutdown, and the registry reclaiming the
+// claim, which is how a drain, a slot wanted for queued work and an expired
+// window all end one.
+var warmLetGoEndings = []struct {
+	name   string
+	end    func(t *testing.T, f *warmEngagement)
+	reason string
+}{
+	{"shutdown", func(_ *testing.T, f *warmEngagement) { f.cancel(errDispatcherShutdown) }, snapshotReasonShutdown},
+	{"registry let-go", func(t *testing.T, f *warmEngagement) {
+		if _, ok := f.x.warmWaits.LetGoOldest(); !ok {
+			t.Fatal("the registry held no warm claim to let go")
+		}
+	}, snapshotReasonWarmRelease},
+}
 
-	f.gate.hold()
-	f.cancel(errDispatcherShutdown)
-	select {
-	case <-f.gate.entered:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the shutdown never uploaded a snapshot")
-	}
-	if released, outcome, _ := f.claimRelease(t); !released || outcome != "completed" {
-		t.Errorf("claim during the upload = {released %v, outcome %q}, want released completed: the release waited on the capture", released, outcome)
-	}
-	f.assertState(t, domain.WorkspaceSnapshotPending, f.claim.ClaimID)
-	f.gate.let()
-
-	if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
-		t.Fatalf("disposition = %+v, want the release, not a hand-back", d)
-	}
-	f.assertReleased(t)
-	f.assertState(t, domain.WorkspaceSnapshotWritten, f.claim.ClaimID)
-	if after := f.turnEndState(t); after != before {
-		t.Errorf("the shutdown moved the conversation:\nbefore %+v\nafter  %+v", before, after)
-	}
-
-	var shutdown []sdktrace.ReadOnlySpan
-	for _, span := range spansNamed(spans(), "workspace.snapshot") {
-		if spanAttr(t, span, "reason").AsString() == snapshotReasonShutdown {
-			shutdown = append(shutdown, span)
+// warmEndSpans are the workspace.snapshot spans a warm claim's ending wrote.
+func warmEndSpans(t *testing.T, spans []sdktrace.ReadOnlySpan, reason string) []sdktrace.ReadOnlySpan {
+	t.Helper()
+	var out []sdktrace.ReadOnlySpan
+	for _, span := range spansNamed(spans, "workspace.snapshot") {
+		if spanAttr(t, span, "reason").AsString() == reason {
+			out = append(out, span)
 		}
 	}
-	if len(shutdown) != 1 {
-		t.Fatalf("workspace.snapshot spans with reason %q = %d, want 1", snapshotReasonShutdown, len(shutdown))
-	}
-	if shutdown[0].Status().Code == codes.Error {
-		t.Errorf("the shutdown snapshot ended in error: %s", shutdown[0].Status().Description)
-	}
+	return out
+}
 
-	// The next boot deletes the tree, so the blob is all a resume has.
-	f.removeTree(t)
-	cwd, prov, err := f.ensureOn(t, f.y, f.claim, failingFreshBuilder(t))
-	if err != nil {
-		t.Fatalf("ensureWorkspace after the shutdown: %v", err)
+// A warm claim let go checkpoints the tree as the warm wait left it, which is
+// newer than the turn-end snapshot when a process the agent left running wrote
+// to it. The checkpoint is stored before the claim is released, and the
+// conversation is not written.
+func TestWarmClaim_LetGoSnapshotsAChangedTree(t *testing.T) {
+	for _, tc := range warmLetGoEndings {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := recordSpans(t)
+			f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+			f.awaitWarm(t, 1)
+			before := f.turnEndState(t)
+			writeFile(t, filepath.Join(f.wtPath, "_tfac", "notes.md"), "written while the claim was warm")
+
+			f.gate.hold()
+			tc.end(t, f)
+			select {
+			case <-f.gate.entered:
+			case <-time.After(15 * time.Second):
+				t.Fatal("the ending never uploaded a snapshot")
+			}
+			if released, _, _ := f.claimRelease(t); released {
+				t.Error("the claim was released while its tree was still uploading")
+			}
+			f.assertState(t, domain.WorkspaceSnapshotPending, f.claim.ClaimID)
+			f.gate.let()
+
+			if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+				t.Fatalf("disposition = %+v, want the release, not a hand-back", d)
+			}
+			f.assertReleased(t)
+			f.assertState(t, domain.WorkspaceSnapshotWritten, f.claim.ClaimID)
+			if after := f.turnEndState(t); after != before {
+				t.Errorf("the ending moved the conversation:\nbefore %+v\nafter  %+v", before, after)
+			}
+
+			ended := warmEndSpans(t, spans(), tc.reason)
+			if len(ended) != 1 {
+				t.Fatalf("workspace.snapshot spans with reason %q = %d, want 1", tc.reason, len(ended))
+			}
+			if ended[0].Status().Code == codes.Error {
+				t.Errorf("the ending's snapshot ended in error: %s", ended[0].Status().Description)
+			}
+			if got := spanAttr(t, ended[0], "outcome").AsString(); got != checkpointWritten {
+				t.Errorf("the ending's snapshot outcome = %q, want %q", got, checkpointWritten)
+			}
+
+			// The next boot deletes the tree, so the blob is all a resume has.
+			f.removeTree(t)
+			cwd, prov, err := f.ensureOn(t, f.y, f.claim, failingFreshBuilder(t))
+			if err != nil {
+				t.Fatalf("ensureWorkspace after the ending: %v", err)
+			}
+			if prov != domain.WorkspaceProvenanceRehydrated {
+				t.Fatalf("provenance = %q, want rehydrated", prov)
+			}
+			assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "written while the claim was warm")
+		})
 	}
-	if prov != domain.WorkspaceProvenanceRehydrated {
-		t.Fatalf("provenance = %q, want rehydrated", prov)
+}
+
+// A warm claim let go with the tree as the turn end left it uploads nothing
+// and leaves the key's record as the turn-end snapshot wrote it.
+func TestWarmClaim_LetGoWithAnUnchangedTreeUploadsNothing(t *testing.T) {
+	for _, tc := range warmLetGoEndings {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := recordSpans(t)
+			f := startWarmEngagement(t, warmOpts{window: time.Hour, turns: []gateTurn{{text: "fixed it"}}})
+			f.awaitWarm(t, 1)
+
+			// An upload would stop at the gate and never finish.
+			f.gate.hold()
+			tc.end(t, f)
+			if d := f.await(t, 15*time.Second); d.fenced || d.handedBack {
+				t.Fatalf("disposition = %+v, want the release, not a hand-back", d)
+			}
+			select {
+			case <-f.gate.entered:
+				t.Error("the ending uploaded a tree the turn-end snapshot already holds")
+			default:
+			}
+			f.assertReleased(t)
+			f.assertState(t, domain.WorkspaceSnapshotWritten, f.claim.ClaimID)
+
+			ended := warmEndSpans(t, spans(), tc.reason)
+			if len(ended) != 1 {
+				t.Fatalf("workspace.snapshot spans with reason %q = %d, want 1", tc.reason, len(ended))
+			}
+			if got := spanAttr(t, ended[0], "outcome").AsString(); got != checkpointSkippedUnchanged {
+				t.Errorf("the ending's snapshot outcome = %q, want %q", got, checkpointSkippedUnchanged)
+			}
+		})
 	}
-	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "written while the claim was warm")
 }
 
 // A lease fence writes nothing: the claim is someone else's to release.

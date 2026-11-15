@@ -235,6 +235,11 @@ type checkpointer struct {
 	captured chan struct{}
 	// lastFingerprint digests the tree the last written checkpoint stored.
 	lastFingerprint string
+	// position is the transcript row the stored blob covers, set by the last
+	// checkpoint that wrote the tree or found it unchanged. covered is false
+	// before the first.
+	position float64
+	covered  bool
 	// coveredAt is the latest moment the stored blob is known to match the
 	// tree: the capture time of the last checkpoint written or found
 	// unchanged, or the loop's start before the first. Monotonic.
@@ -286,7 +291,8 @@ func (s *Spawner) checkpointerFor(conversationID string) *checkpointer {
 // stop cancels a checkpoint in flight and waits for it to return, record
 // writes included, and takes no more. Every ending calls it before its own
 // snapshot; see the file comment for why waiting, not just cancelling, is the
-// point. Cancelling rather than letting the upload finish keeps a shutdown's
+// point. A warm claim's ending has no snapshot of its own: it takes this
+// checkpointer's last one (checkpointWarmEnd) and then calls stop. Cancelling rather than letting the upload finish keeps a shutdown's
 // hand-back inside its grace period: the ending's snapshot supersedes the
 // checkpoint anyway.
 func (c *checkpointer) stop() {
@@ -357,7 +363,7 @@ func (c *checkpointer) afterToolBatch(_ context.Context, position float64) {
 	last, captured := c.startLocked()
 	c.mu.Unlock()
 
-	go c.run(position, last, captured)
+	go c.run(c.ctx, c.w, position, last, captured)
 }
 
 // checkpointTurnEnd writes a checkpoint of the tree as the turn left it, at
@@ -397,8 +403,51 @@ func (c *checkpointer) checkpointTurnEnd(position float64) bool {
 	last, captured := c.startLocked()
 	c.mu.Unlock()
 
-	res := c.run(position, last, captured)
+	res := c.run(c.ctx, c.w, position, last, captured)
 	return res.recorded && (res.outcome == checkpointWritten || res.outcome == checkpointSkippedUnchanged)
+}
+
+// checkpointWarmEnd writes the checkpoint a warm claim's ending takes, after
+// the engagement has stopped its jail and while it still holds its claim: the
+// tree as the warm wait left it, at the position the turn-end checkpoint
+// covered. No turn has run since that checkpoint, so the only writes it can
+// find are those of processes the agent left running in the jail. A tree they
+// did not touch has the stored fingerprint, and nothing is uploaded and the
+// key's record is not reopened.
+//
+// It runs before the claim is released because nothing else can claim the
+// task while the claim is held, so the tree and the key are this
+// engagement's alone for the capture and the upload. A claim that lapses
+// during them is released as completed, like any warm claim's.
+//
+// ctx is the ending's: a shutdown or a stop has cancelled the engagement's
+// own by the time this runs. reason names the ending on the snapshot's span.
+// The jail is stopped, so the capture does not freeze it.
+func (c *checkpointer) checkpointWarmEnd(ctx context.Context, reason string) {
+	if c == nil {
+		return
+	}
+	end := c.activity.begin("checkpoint", turnEndCheckpointBound)
+	defer end()
+	c.wg.Wait()
+	if !c.s.waitCheckpointSlot(ctx, turnEndSlotWait) {
+		recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		return
+	}
+	c.mu.Lock()
+	if c.stopped || !c.covered {
+		c.mu.Unlock()
+		c.s.releaseCheckpointSlot()
+		return
+	}
+	position := c.position
+	last, captured := c.startLocked()
+	c.mu.Unlock()
+
+	w := c.w
+	w.freezer = nil
+	w.reason = reason
+	c.run(ctx, w, position, last, captured)
 }
 
 // startLocked marks a checkpoint as started and returns what its run needs.
@@ -414,8 +463,8 @@ func (c *checkpointer) startLocked() (lastFingerprint string, captured chan stru
 	return c.lastFingerprint, captured
 }
 
-// run is one checkpoint, from capture to recorded outcome.
-func (c *checkpointer) run(position float64, lastFingerprint string, captured chan struct{}) checkpointResult {
+// run is one checkpoint of w, from capture to recorded outcome, under ctx.
+func (c *checkpointer) run(ctx context.Context, w snapshotWrite, position float64, lastFingerprint string, captured chan struct{}) checkpointResult {
 	defer c.wg.Done()
 	var once sync.Once
 	treeReleased := func() {
@@ -426,9 +475,8 @@ func (c *checkpointer) run(position float64, lastFingerprint string, captured ch
 	}
 	defer treeReleased()
 
-	w := c.w
 	w.position = &position
-	res := c.s.writeCheckpoint(c.ctx, w, lastFingerprint, treeReleased)
+	res := c.s.writeCheckpoint(ctx, w, lastFingerprint, treeReleased)
 
 	c.mu.Lock()
 	c.inflight = false
@@ -437,8 +485,10 @@ func (c *checkpointer) run(position float64, lastFingerprint string, captured ch
 	case checkpointWritten:
 		c.lastFingerprint = res.fingerprint
 		c.coveredAt = res.capturedAt
+		c.position, c.covered = position, true
 	case checkpointSkippedUnchanged:
 		c.coveredAt = res.capturedAt
+		c.position, c.covered = position, true
 	}
 	c.mu.Unlock()
 	recordWorkspaceCheckpoint(res.outcome)
