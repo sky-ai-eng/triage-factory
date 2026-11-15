@@ -2986,11 +2986,13 @@ func (s *conversationStore) HasAssistantMessageSystem(ctx context.Context, orgID
 // folds into its assembly must not be marked spent by an engagement that has
 // been fenced out, or the successor's own assembly silently loses them.
 //
-// A non-empty subtype is stamped in the same statement — the flush is the
+// A non-empty subtype is stamped in the same transaction — the flush is the
 // moment a mid-work drain marks human input as a steer, and doing it in two
-// steps would leave a window in which a delivered row had lost its
-// provenance. NULLIF keeps the stamp optional without forking the statement:
-// an empty subtype leaves each row's own value in place.
+// would leave a window in which a delivered row had lost its provenance.
+// NULLIF keeps the stamp optional: an empty subtype leaves each row's own
+// value in place. A batch that would sit ahead of the model's newest reply
+// moves behind every delivered row (domain.DeliveryPositions) in the same
+// transaction.
 func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error {
 	if len(ids) == 0 {
 		// Nothing to consume, so nothing to fence: an empty batch writes no
@@ -3002,11 +3004,54 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx, `
-			UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
-			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
-		`, orgID, conversationID, pgIntArray(ids), subtype)
-		return err
+		var answered, tail float64
+		if err := q.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(COALESCE(seq, (id)::double precision)) FILTER (WHERE role IN ('assistant', 'tool')), 0),
+			       COALESCE(MAX(COALESCE(seq, (id)::double precision)), 0)
+			FROM messages
+			WHERE org_id = $1 AND conversation_id = $2 AND delivered = true
+		`, orgID, conversationID).Scan(&answered, &tail); err != nil {
+			return fmt.Errorf("read the delivered tail: %w", err)
+		}
+		rows, err := q.QueryContext(ctx, `
+			SELECT id, COALESCE(seq, (id)::double precision) FROM messages
+			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3) AND delivered = false
+			ORDER BY COALESCE(seq, (id)::double precision) ASC, id ASC
+		`, orgID, conversationID, pgIntArray(ids))
+		if err != nil {
+			return fmt.Errorf("read the rows to deliver: %w", err)
+		}
+		var pending []int
+		var keys []float64
+		for rows.Next() {
+			var id int
+			var key float64
+			if err := rows.Scan(&id, &key); err != nil {
+				rows.Close()
+				return err
+			}
+			pending, keys = append(pending, id), append(keys, key)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		positions := domain.DeliveryPositions(answered, tail, keys)
+		for i, id := range pending {
+			var seq *float64
+			if positions != nil {
+				seq = &positions[i]
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET delivered = true, seq = COALESCE($1, seq), subtype = COALESCE(NULLIF($2, ''), subtype)
+				WHERE org_id = $3 AND conversation_id = $4 AND id = $5
+			`, seq, subtype, orgID, conversationID, id); err != nil {
+				return fmt.Errorf("deliver row %d: %w", id, err)
+			}
+		}
+		return nil
 	})
 }
 

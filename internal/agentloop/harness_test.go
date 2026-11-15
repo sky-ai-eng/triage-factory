@@ -90,14 +90,41 @@ func (t *memTranscript) MarkDelivered(_ context.Context, _, _ string, ids []int,
 	for _, id := range ids {
 		want[id] = struct{}{}
 	}
+	// The store moves a batch that would sit ahead of the model's newest
+	// reply behind every delivered row, in its assembly order.
+	answered, tail := 0.0, 0.0
+	var pending []int
 	for i := range t.rows {
-		if _, ok := want[t.rows[i].ID]; !ok {
+		if isDelivered(t.rows[i]) {
+			key := assemblyKey(t.rows[i])
+			tail = max(tail, key)
+			if t.rows[i].Role == "assistant" || t.rows[i].Role == "tool" {
+				answered = max(answered, key)
+			}
 			continue
 		}
+		if _, ok := want[t.rows[i].ID]; ok {
+			pending = append(pending, i)
+		}
+	}
+	sort.SliceStable(pending, func(a, b int) bool {
+		return assemblyKey(t.rows[pending[a]]) < assemblyKey(t.rows[pending[b]])
+	})
+	keys := make([]float64, len(pending))
+	for k, i := range pending {
+		keys[k] = assemblyKey(t.rows[i])
+	}
+	positions := domain.DeliveryPositions(answered, tail, keys)
+	for k, i := range pending {
+		row := &t.rows[i]
 		delivered := true
-		t.rows[i].Delivered = &delivered
+		row.Delivered = &delivered
+		if positions != nil {
+			at := positions[k]
+			row.Seq = &at
+		}
 		if subtype != "" {
-			t.rows[i].Subtype = subtype
+			row.Subtype = subtype
 		}
 	}
 	return nil

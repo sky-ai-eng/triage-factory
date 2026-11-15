@@ -1181,16 +1181,21 @@ type ConversationStore interface {
 	// it still owns the conversation.
 	//
 	// subtype, when non-empty, is stamped onto the same rows in the same
-	// statement. The loop's mid-turn drain flushes human input with
+	// transaction. The loop's mid-turn drain flushes human input with
 	// "injection:steer" so the row records — durably, in the column
 	// assembly reads — that it arrived while the model was working; a bare
 	// drain passes "" and leaves each row's own subtype alone. One
-	// statement rather than flush-then-stamp because a crash between the
+	// transaction rather than flush-then-stamp because a crash between the
 	// two would leave a delivered row whose provenance was lost, and
 	// assembly would then render it as an ordinary user turn.
 	//
+	// A batch that would assemble ahead of the model's newest reply or its
+	// tool results moves behind every delivered row, in its own order, in the
+	// same transaction (domain.DeliveryPositions). Rows already delivered are
+	// left alone.
+	//
 	// Exempt from the returned-row rule: it flips a batch of pending-input
-	// rows delivered in one statement, so there is no single row a return
+	// rows delivered in one transaction, so there is no single row a return
 	// value could name.
 	MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error
 

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -987,6 +988,33 @@ const (
 	MessageWindowElided   MessageWindowState = "elided"
 	MessageWindowInactive MessageWindowState = "inactive"
 )
+
+// DeliveryPositions returns new assembly keys for pending rows delivered
+// together, whose current keys are given in assembly order, or nil when the
+// rows can stay where they are. A row's position is where the model reads it.
+// A row queued while a turn streamed takes an id below the reply that turn
+// writes, so left where it was queued it would sit ahead of a reply the model
+// produced without it, and the Anthropic API refuses a request that replays a
+// thinking block once anything ahead of the block changed.
+//
+// answered is the newest key among the conversation's delivered assistant and
+// tool rows: the model's newest reply and the results answering it. A batch
+// that starts after it stays put. Otherwise the whole batch moves, in order,
+// to fractions strictly between tail (the newest key among the delivered
+// rows) and the next whole number above it. Every later row takes an id above
+// that whole number, because no key's whole part exceeds the largest id: an
+// id is a key, and every seq sits within one of an existing row.
+func DeliveryPositions(answered, tail float64, keys []float64) []float64 {
+	if len(keys) == 0 || keys[0] > answered {
+		return nil
+	}
+	step := (math.Floor(tail) + 1 - tail) / float64(len(keys)+1)
+	out := make([]float64, len(keys))
+	for i := range out {
+		out[i] = tail + step*float64(i+1)
+	}
+	return out
+}
 
 // Claim is one executor engagement with a conversation: who drove it, when,
 // with what sealed credentials. At most one active (ReleasedAt == nil) claim
