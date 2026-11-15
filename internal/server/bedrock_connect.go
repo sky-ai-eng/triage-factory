@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 // The Bedrock vocabulary and validators shared by the three flavor routes in
@@ -55,11 +56,11 @@ var awsRegionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d+$`)
 // the incoming request path verbatim. Loopback http is allowed for tests.
 // A trailing "/" is the caller's to strip before calling.
 //
-// multi narrows that to https and a host alone. In multi mode every Bedrock
-// call is native, and bifrost's Bedrock provider keeps only the host of an
-// endpoint and dials https://<host>: loopback http would be dialled as https,
-// and a user name or password would be dropped. Refusing them here tells the
-// admin at connect time, where they can fix it, rather than at the first call.
+// multi narrows that to exactly what the native client dials. In multi mode
+// every Bedrock call is native, and bifrost's Bedrock provider keeps only the
+// host of an endpoint and dials https://<host>: a value it would change first
+// (loopback http, an upper-case scheme, a user name or password) is refused, so
+// the admin learns at connect time rather than at the first call.
 func validateBedrockBaseURL(raw string, multi bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -69,8 +70,8 @@ func validateBedrockBaseURL(raw string, multi bool) error {
 		return fmt.Errorf("endpoint URL must include scheme and host: %q", raw)
 	}
 	if multi && u.User != nil {
-		// Before any check that echoes the value, which carries what may be a
-		// password.
+		// Before the checks below, which echo the value: it carries what may
+		// be a password.
 		return fmt.Errorf("endpoint URL must not include a user name or password")
 	}
 	if u.Path != "" && u.Path != "/" {
@@ -80,8 +81,8 @@ func validateBedrockBaseURL(raw string, multi bool) error {
 		return fmt.Errorf("endpoint URL must not include query or fragment: %q", raw)
 	}
 	if multi {
-		if u.Scheme != "https" {
-			return fmt.Errorf("endpoint URL must use https: %q", raw)
+		if u.Hostname() == "" || inference.BedrockEndpointURL(raw) != raw {
+			return fmt.Errorf("endpoint URL must be \"https://\" followed by a host and an optional port: %q", raw)
 		}
 		return nil
 	}

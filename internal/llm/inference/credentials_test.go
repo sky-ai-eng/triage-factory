@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -163,4 +164,36 @@ func TestProviderCredentialsFromEnv(t *testing.T) {
 			t.Fatal("an empty model whitelist must be refused")
 		}
 	})
+}
+
+// TestProviderCredentialsFromEnv_BedrockEndpointReachesTheKey follows the
+// endpoint override from the env map every native caller passes to the key
+// bifrost reads it from, for both Bedrock shapes the map can carry.
+func TestProviderCredentialsFromEnv_BedrockEndpointReachesTheKey(t *testing.T) {
+	const vpce = "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com"
+	envs := map[string]map[string]string{
+		"bearer": {"AWS_BEARER_TOKEN_BEDROCK": "b"},
+		"sigv4":  {"AWS_ACCESS_KEY_ID": "AKIA", "AWS_SECRET_ACCESS_KEY": "s"},
+	}
+	for name, env := range envs {
+		t.Run(name, func(t *testing.T) {
+			env["AWS_REGION"] = "us-west-2"
+			env["ANTHROPIC_BEDROCK_BASE_URL"] = vpce + "/"
+			creds, err := ProviderCredentialsFromEnv(env, []string{"us.anthropic.claude-sonnet-5"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			acct, err := NewAccount(creds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := acct.GetKeysForProvider(context.Background(), ProviderBedrock)
+			if err != nil || len(keys) != 1 {
+				t.Fatalf("keys: %+v (%v)", keys, err)
+			}
+			if got := bedrockRuntimeURL(keys[0].BedrockKeyConfig); got != vpce {
+				t.Fatalf("dialled endpoint = %q, want %q", got, vpce)
+			}
+		})
+	}
 }

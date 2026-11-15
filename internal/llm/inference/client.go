@@ -89,16 +89,16 @@ func endpointsOf(account schemas.Account) map[schemas.ModelProvider]string {
 }
 
 // bedrockRuntimeURL is the address bifrost's Bedrock provider dials a chat call
-// at under cfg: https and the runtime endpoint's host, reduced the way bifrost
-// reduces it (schemas.NormalizeEndpointHost), else the public regional host.
-// "" when cfg names no region, which bifrost fills with a default of its own.
+// at under cfg: the runtime endpoint as bifrost reduces it (bedrockDialURL),
+// else the public regional host. "" when cfg names no region, which bifrost
+// fills with a default of its own.
 func bedrockRuntimeURL(cfg *schemas.BedrockKeyConfig) string {
 	if cfg == nil {
 		return ""
 	}
 	if cfg.Endpoints != nil {
-		if host := schemas.NormalizeEndpointHost(cfg.Endpoints.Runtime); host != "" {
-			return "https://" + host
+		if u := bedrockDialURL(cfg.Endpoints.Runtime); u != "" {
+			return u
 		}
 	}
 	if cfg.Region == nil || cfg.Region.GetValue() == "" {

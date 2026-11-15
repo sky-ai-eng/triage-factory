@@ -190,6 +190,22 @@ func bedrockEndpoints(baseURL string) *schemas.BedrockEndpoints {
 	return &schemas.BedrockEndpoints{Runtime: optionalSecret(baseURL)}
 }
 
+// BedrockEndpointURL is the address bifrost dials for a Bedrock endpoint
+// override: https and the host it keeps (schemas.NormalizeEndpointHost). A
+// value that is not already this would be changed before it was dialled.
+// Empty for an empty value.
+func BedrockEndpointURL(baseURL string) string {
+	return bedrockDialURL(optionalSecret(baseURL))
+}
+
+func bedrockDialURL(v *schemas.SecretVar) string {
+	host := schemas.NormalizeEndpointHost(v)
+	if host == "" {
+		return ""
+	}
+	return "https://" + host
+}
+
 // buildProviderConfig sizes the worker pool modestly and lets bifrost fill the
 // remaining network defaults (timeouts, retries) via CheckAndSetDefaults. A
 // Bedrock base URL is not set here: it rides the key (bedrockEndpoints).

@@ -382,6 +382,9 @@ func TestBedrockPut_Multi_EndpointIsAnHTTPSHost(t *testing.T) {
 		{"path", "https://gw.example.com/bedrock"},
 		{"user and password", "https://admin:hunter2@vpce.example.com"},
 		{"user and password with a path", "https://admin:hunter2@vpce.example.com/bedrock"},
+		// url.Parse lowercases the scheme; bifrost strips only "https://".
+		{"upper-case scheme", "HTTPS://vpce.example.com"},
+		{"no hostname", "https://:443"},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
