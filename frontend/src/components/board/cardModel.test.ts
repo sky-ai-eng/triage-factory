@@ -173,6 +173,30 @@ describe('deriveCard lifecycle', () => {
     expect(m.ticking).toBe(false)
   })
 
+  it('reads a held task whose conversation has not run as queued, with its age and no elapsed', () => {
+    // The conversation a person's claim opens, before anyone has typed. It
+    // is parked, and nothing ran in it, so the card is the task's.
+    const m = deriveCard(
+      task({ claimed_by_user_id: 'u1' }),
+      conversation({ type: 'interactive', Status: 'open', has_run: false, DurationMs: 0 }),
+      undefined,
+      NOW,
+    )
+    expect(m.lifecycle).toBe('queued')
+    expect(m.age).toBe('4h ago')
+    expect(m.elapsed).toBeUndefined()
+    expect(m.chain).toBeUndefined()
+  })
+
+  it('keeps a conversation that has not run yet as a run while it is queued or starting', () => {
+    // A delegation waiting for its slot has no assistant row either.
+    for (const Status of ['queued', 'cloning', 'failed']) {
+      const m = deriveCard(task(), conversation({ Status, has_run: false }), undefined, NOW)
+      expect(m.lifecycle, Status).not.toBe('queued')
+      expect(m.age, Status).toBeUndefined()
+    }
+  })
+
   it('keeps the scorer’s summary once the run has written its own account', () => {
     const m = deriveCard(
       task(),

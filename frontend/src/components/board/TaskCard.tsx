@@ -109,6 +109,9 @@ export interface TaskCardProps {
   liveState?: 'running' | 'idle'
   /** The task is waiting on the memory its last conversation owes. */
   waiting?: boolean
+  /** The holder's own conversation on the task, before it has run: the way
+   *  in to talk to the agent. The memory wait links here too. */
+  chat?: { href: string }
   /** A delegation the bot took that never fired, and the way to try again. */
   retry?: { message: string; onRetry: () => void }
   /** False removes the verbs a reader may not use — Allow, Deny. */
@@ -379,6 +382,7 @@ export function TaskCard({
   chain,
   liveState = 'running',
   waiting = false,
+  chat,
   retry,
   interactive = true,
   assigneeSlot,
@@ -472,9 +476,10 @@ export function TaskCard({
     </span>
   )
 
-  // The activity slot: a blocked run's plate, the memory wait, a delegation
-  // that never fired, or the working run's live line. Nothing on a queued or
-  // settled card — the settled footer carries its own row.
+  // The activity slot: a blocked run's plate, the memory wait, the holder's
+  // way into a chat that has not started, a delegation that never fired, or
+  // the working run's live line. Nothing else on a queued or settled card —
+  // the settled footer carries its own row.
   let slot: ReactNode = null
   if (blocked && permission) {
     slot = (
@@ -489,11 +494,16 @@ export function TaskCard({
     )
   } else if (waiting) {
     // The run page is where the wait is explained; the card only names it.
-    slot = href ? (
-      <ActivityRow label="Waiting on memory" href={href} />
+    // A holder's chat is where their message will run once the memory lands,
+    // so the wait links there.
+    const waitHref = chat?.href ?? href
+    slot = waitHref ? (
+      <ActivityRow label="Waiting on memory" href={waitHref} />
     ) : (
       <span className="tc-readout">Waiting on memory</span>
     )
+  } else if (chat) {
+    slot = <ActivityRow label="Start chat" href={chat.href} />
   } else if (retry) {
     slot = (
       <button type="button" className="tc-retry" onClick={retry.onRetry} title={retry.message}>

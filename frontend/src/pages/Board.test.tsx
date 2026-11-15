@@ -411,6 +411,46 @@ describe('the conversation a card shows', () => {
 
     expect(runLinks()).toEqual(['c-claim'])
   })
+
+  it('offers "Start chat" only to the holder, and only while their conversation has not run', async () => {
+    // The holder took the task over: the card keeps the agent's run, and the
+    // row leads to the conversation the claim opened.
+    async function startChatHref(holder: string, hasRun: boolean): Promise<string | null> {
+      const task = { ...HELD, claimed_by_user_id: holder, conversation_id: 'c-claim' }
+      const claimed = {
+        ...conversation('open'),
+        ID: 'c-claim',
+        StartedAt: '2026-09-01T13:00:00Z',
+        type: 'interactive',
+        has_run: hasRun,
+      } as Conversation
+      api.apiList.mockImplementation(async (_path: string, body: Record<string, unknown>) => {
+        const statuses = (body.statuses as string[] | undefined) ?? []
+        const items = statuses.includes('in_progress') ? [task] : []
+        return { items, next_page_token: '', total_count: items.length }
+      })
+      api.apiJSON.mockImplementation(async (path: string) => {
+        if (path === '/api/me') return { id: 'u1' }
+        if (path === '/api/tasks/facets') return { event_types: [] }
+        if (path === '/api/agent/conversations/list') {
+          return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+        }
+        throw new Error('unexpected apiJSON ' + path)
+      })
+      const view = renderBoard()
+      await screen.findByText(HELD.title)
+      // The viewer's identity lands after the first paint.
+      await waitFor(() => expect(api.apiJSON).toHaveBeenCalledWith('/api/me'))
+      await act(async () => {})
+      const href = screen.queryByRole('link', { name: 'Start chat' })?.getAttribute('href') ?? null
+      view.unmount()
+      return href
+    }
+
+    expect(await startChatHref('u1', false)).toMatch(/\/runs\/c-claim$/)
+    expect(await startChatHref('u2', false)).toBeNull()
+    expect(await startChatHref('u1', true)).toBeNull()
+  })
 })
 
 describe('starting a queued task', () => {

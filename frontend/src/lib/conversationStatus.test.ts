@@ -362,7 +362,7 @@ describe('resumeBlockedCopy', () => {
   })
 
   it('gives each boundary its own sentence about who carries the work now', () => {
-    // Six rungs, one per reason a task can move on, and the part that differs
+    // Seven rungs, one per reason a task can move on, and the part that differs
     // is what the reader does next — so no two may collapse onto one sentence,
     // and none may fall through to the generic copy.
     const reasons = [
@@ -372,6 +372,7 @@ describe('resumeBlockedCopy', () => {
       'ended_step_advanced',
       'ended_team_archived',
       'ended_failed',
+      'ended_reassigned',
     ]
     const generic = resumeBlockedCopy(base({}))
     const copies = reasons.map((r) => resumeBlockedCopy(base({ resume_blocked_reason: r })))
@@ -379,6 +380,26 @@ describe('resumeBlockedCopy', () => {
       expect(copy, reasons[i]).not.toBe(generic)
     }
     expect(new Set(copies).size).toBe(reasons.length)
+  })
+
+  it('gives a reassign to another team its own line, naming the team that carries the work', () => {
+    const copy = resumeBlockedCopy(base({ resume_blocked_reason: 'ended_reassigned' }))
+    expect(copy).not.toBe(resumeBlockedCopy(base({})))
+    expect(copy).toMatch(/another team/i)
+  })
+
+  it('tells a failed chat that a new conversation was opened, and a delegation to delegate again', () => {
+    // A failed chat is replaced for its holder; a failed delegation is not,
+    // so only the delegation is told to start one.
+    const chat = resumeBlockedCopy(
+      base({ type: 'interactive', resume_blocked_reason: 'ended_failed' }),
+    )
+    const delegation = resumeBlockedCopy(
+      base({ type: 'delegation', resume_blocked_reason: 'ended_failed' }),
+    )
+    expect(chat).not.toBe(delegation)
+    expect(chat).toMatch(/new conversation was opened/i)
+    expect(delegation).toMatch(/delegate the task again/i)
   })
 
   it('says something true for a reason this build does not know', () => {

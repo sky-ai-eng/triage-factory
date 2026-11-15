@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, within, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, within, cleanup, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
-import type { Conversation } from '../../types'
-import { listBody } from '../../test/apiResponse'
+import type { Conversation, Task } from '../../types'
+import { jsonBody, listBody } from '../../test/apiResponse'
+import { resetModelCatalogForTest } from '../../hooks/useModelCatalog'
 
 // The dock is the surface this suite is about: whether the composer input is
 // offered (and what stands in its place when it isn't), and how the approval
@@ -25,7 +26,7 @@ function station(over: Partial<Conversation>, actions: Partial<StationActions> =
         task={null}
         messages={[]}
         now={new Date('2026-07-30T00:01:00Z').getTime()}
-        actions={{ onBack: () => {}, onMessage: () => {}, ...actions }}
+        actions={{ onBack: () => {}, onMessage: async () => ({ sent: true }), ...actions }}
       />
     </MemoryRouter>,
   )
@@ -231,7 +232,7 @@ describe('RunStation for a reader who may not act', () => {
           ]}
           actions={{
             onBack: () => {},
-            onMessage: () => {},
+            onMessage: async () => ({ sent: true }),
             onCancel: () => {},
             onInterrupt: () => {},
             onResolvePermission: () => Promise.resolve(),
@@ -264,5 +265,190 @@ describe('RunStation for a reader who may not act', () => {
       expect(screen.getByRole('button', { name: /deny/i })).toBeInTheDocument()
       expect(screen.queryByText(/view only/i)).not.toBeInTheDocument()
     }
+  })
+})
+
+// The chat a person holds: the conversation their claim opened, its first
+// message, and the model and effort every message names.
+describe('RunStation chat', () => {
+  const CATALOG = {
+    items: [
+      {
+        key: 'opus',
+        display_name: 'Opus 5',
+        enabled: true,
+        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      { key: 'sonnet', display_name: 'Sonnet 5', enabled: true, effort_levels: ['low', 'high'] },
+      { key: 'haiku', display_name: 'Haiku 5', enabled: true, effort_levels: [] },
+    ],
+  }
+  // The team enables two of the org's three.
+  const TEAM_SETTINGS = {
+    team_settings: { DefaultModel: 'sonnet', EnabledModels: ['sonnet', 'haiku'] },
+  }
+
+  beforeEach(() => {
+    resetModelCatalogForTest()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url.endsWith('/models')) return Promise.resolve({ ok: true, ...jsonBody(CATALOG) })
+        if (url.endsWith('/settings'))
+          return Promise.resolve({ ok: true, ...jsonBody(TEAM_SETTINGS) })
+        return Promise.reject(new Error('no network for ' + url))
+      }),
+    )
+  })
+
+  afterEach(async () => {
+    cleanup()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  function chat(
+    over: Partial<Conversation>,
+    { task = {}, actions = {} }: { task?: Partial<Task>; actions?: Partial<StationActions> } = {},
+  ) {
+    const conversation = {
+      ID: 'c1',
+      TaskID: 't1',
+      type: 'interactive',
+      runtime: 'native',
+      Status: 'open',
+      has_run: true,
+      Model: 'sonnet',
+      next_message_model: 'sonnet',
+      StartedAt: '2026-07-30T00:00:00Z',
+      ResultSummary: '',
+      ...over,
+    } as Conversation
+    const ui = (c: Conversation) => (
+      <MemoryRouter>
+        <RunStation
+          conversation={c}
+          task={{ id: 't1', team_id: 'team1', memory_pending: false, ...task } as Task}
+          messages={[]}
+          now={new Date('2026-07-30T00:01:00Z').getTime()}
+          actions={{ onBack: () => {}, onMessage: async () => ({ sent: true }), ...actions }}
+        />
+      </MemoryRouter>
+    )
+    const view = render(ui(conversation))
+    return {
+      ...view,
+      rerenderWith: (next: Partial<Conversation>) =>
+        view.rerender(ui({ ...conversation, ...next })),
+    }
+  }
+
+  const settingsButton = () => screen.getByRole('button', { name: /message settings/i })
+  const send = () => screen.getByRole('button', { name: 'Send message' })
+  const type = (label: RegExp, text: string) =>
+    fireEvent.change(screen.getByLabelText(label), { target: { value: text } })
+
+  it('shows a conversation that has not run as ready, and invites the first message', () => {
+    chat({ has_run: false })
+    expect(screen.getAllByText('READY').length).toBeGreaterThan(0)
+    expect(screen.queryByText('IDLE')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Start the chat')).toBeInTheDocument()
+    expect(screen.getByText(/no messages yet/i)).toBeInTheDocument()
+  })
+
+  it('shows the memory wait, with the failed attempt when there was one, and keeps the composer', () => {
+    chat({ has_run: false }, { task: { memory_pending: true } })
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Waiting for the previous conversation’s memory. Your message is queued and starts as soon as it lands.',
+    )
+    expect(screen.getByLabelText('Start the chat')).toBeInTheDocument()
+
+    cleanup()
+    chat(
+      { has_run: false },
+      {
+        task: {
+          memory_pending: true,
+          memory_attempt: {
+            outcome: 'failed',
+            error_message: 'No background-jobs model is set.',
+            started_at: '2026-07-30T00:00:30Z',
+          },
+        },
+      },
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Waiting for the previous conversation’s memory. The last attempt failed: No background-jobs model is set.',
+    )
+  })
+
+  it('holds the send while the starting model is one the team does not enable', async () => {
+    chat({ next_message_model: 'opus', next_message_effort: 'high' })
+    type(/message to resume/i, 'look at the flake')
+    await waitFor(() => expect(settingsButton()).toHaveAccessibleName(/Opus 5 · .*unavailable/))
+    expect(send()).toBeDisabled()
+
+    fireEvent.click(settingsButton())
+    fireEvent.click(await screen.findByRole('radio', { name: /Sonnet 5/ }))
+    expect(send()).toBeEnabled()
+  })
+
+  it('shows a running blueprint step its own settings, read-only, until the blueprint is done', async () => {
+    const view = chat({
+      type: 'delegation',
+      blueprint_run_id: 'br1',
+      blueprint_run_status: 'running',
+      next_message_model: 'opus',
+    })
+    expect(settingsButton()).toBeDisabled()
+    await waitFor(() => expect(settingsButton()).toHaveAccessibleName(/Opus 5/))
+
+    view.rerenderWith({ blueprint_run_status: 'completed' })
+    expect(settingsButton()).toBeEnabled()
+  })
+
+  it('warns that a model switch re-reads the conversation while the cache is warm, and only then', async () => {
+    const ahead = new Date(Date.now() + 4 * 60_000).toISOString()
+    chat({ cache_warm_until: ahead })
+    fireEvent.click(settingsButton())
+    fireEvent.click(await screen.findByRole('radio', { name: /Haiku 5/ }))
+    expect(
+      screen.getByText(/re-reads the whole conversation at full input price/),
+    ).toBeInTheDocument()
+    // Back on the current model, nothing is lost.
+    fireEvent.click(screen.getByRole('radio', { name: /Sonnet 5/ }))
+    expect(screen.queryByText(/re-reads the whole conversation/)).not.toBeInTheDocument()
+
+    cleanup()
+    chat({ cache_warm_until: new Date(Date.now() - 60_000).toISOString() })
+    fireEvent.click(settingsButton())
+    fireEvent.click(await screen.findByRole('radio', { name: /Haiku 5/ }))
+    expect(screen.queryByText(/re-reads the whole conversation/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the draft through a refused send and shows the model fault in the settings', async () => {
+    const onMessage = vi.fn(async () => ({
+      sent: false as const,
+      settingsErrors: [
+        {
+          reason: 'CONFLICT',
+          message: 'sonnet is not among this team’s enabled models (haiku) — pick one of those',
+          field: 'model',
+        },
+      ],
+    }))
+    chat({}, { actions: { onMessage } })
+    type(/message to resume/i, 'look at the flake')
+    fireEvent.click(send())
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(
+      /not among this team’s enabled models/,
+    )
+    expect(screen.getByLabelText(/message to resume/i)).toHaveValue('look at the flake')
+    expect(onMessage).toHaveBeenCalledWith({
+      text: 'look at the flake',
+      model: 'sonnet',
+      effort: '',
+    })
   })
 })

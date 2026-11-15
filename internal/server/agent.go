@@ -701,8 +701,11 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		"MemoryMissing": conv.MemoryMissing,
 		// Whether the conversation holds an assistant message. A conversation a
 		// person's claim minted reads false until its first turn.
-		"has_run":              conv.HasRun,
-		"type":                 conv.Type,
+		"has_run": conv.HasRun,
+		"type":    conv.Type,
+		// The engine driving the transcript: a composer says when a settings
+		// change takes effect, which differs between the two.
+		"runtime":              conv.Runtime,
 		"TriggerType":          conv.TriggerType,
 		"TriggerID":            conv.TriggerID,
 		"actor_agent_id":       conv.ActorAgentID,

@@ -243,6 +243,21 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       .catch(() => {})
   }, [conversationID])
 
+  // refreshTask re-reads the task, quietly, the same read the load makes. The
+  // task carries the memory wait, which opens, fails and lands without the
+  // conversation's own row moving, so the station re-reads it on every push
+  // that can mean it moved.
+  const refreshTask = useCallback(() => {
+    const taskID = conversationRef.current?.TaskID
+    if (!conversationID || !taskID) return
+    const id = conversationID
+    apiJSON<Task>(`/api/tasks/${taskID}`)
+      .then((row) => {
+        if (id === lastConversationIDRef.current) setTask(row)
+      })
+      .catch(() => {})
+  }, [conversationID])
+
   // Permission prompts run through the shared queue core (the same one the
   // board uses), filtered to this single conversation so the two surfaces can't diverge
   // on fetch/TTL behavior. A conversation with no prompts is absent from the map.
@@ -569,6 +584,14 @@ export function useConversationDetail(conversationID: string | undefined): Conve
               if (conversationID === lastConversationIDRef.current) setConversation(data)
             })
             .catch(() => {})
+          // A turn starting is what clears the memory wait.
+          refreshTask()
+        }
+        // Task pings are payload-free and org-wide, so any one may be about
+        // this conversation's task: its memory wait opening, failing or
+        // landing among them.
+        if (event.type === 'task_updated' || event.type === 'tasks_updated') {
+          refreshTask()
         }
         if (
           (event.type === 'deliverable_updated' && event.conversation_id === conversationID) ||
@@ -598,7 +621,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           refreshPermissions(conversationID)
         }
       },
-      [conversationID, refreshPermissions, dropConversation, foldMessageUsage],
+      [conversationID, refreshPermissions, dropConversation, foldMessageUsage, refreshTask],
     ),
   )
 

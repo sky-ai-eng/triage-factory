@@ -103,6 +103,11 @@ describe('workingProse', () => {
     expect(workingProse(conv({ Status: 'queued' }), task({}))).toBe('Fix the flaking test')
     expect(workingProse(conv({ Status: 'queued' }), undefined)).toBe('Waiting for a slot')
   })
+  it('names the memory wait on a queued run whose task waits on one', () => {
+    expect(workingProse(conv({ Status: 'queued' }), task({ memory_pending: true }))).toBe(
+      'Waiting on memory',
+    )
+  })
 })
 
 describe('askProse', () => {
