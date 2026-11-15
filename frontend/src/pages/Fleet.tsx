@@ -1003,9 +1003,8 @@ export default function Fleet() {
     })
   }, [])
 
-  // The operator flag is known before any page renders; the entitlement is not
-  // known until its probe answers. The reads wait for both, so a viewer who is
-  // not an operator sends none, and neither does an operator before the probe.
+  // Either input rules the viewer out as soon as it is known, and the reads wait
+  // until both admit them, so the page never sends a read the server refuses.
   const allowed = operator && entLoaded && has(FeatureFleet)
   const denied = !operator || (entLoaded && !has(FeatureFleet))
 
@@ -1037,9 +1036,7 @@ export default function Fleet() {
   }, [])
 
   // Non-operator / unlicensed: the console does not exist for them. The nav item
-  // is already hidden; a direct navigation bounces home (non-disclosure). A
-  // viewer who is not an operator bounces on the first render; an operator
-  // waits for the entitlement probe, so a licensed one sees no redirect flash.
+  // is already hidden; a direct navigation bounces home (non-disclosure).
   if (denied) return <Navigate to="/" replace />
 
   const err = overview.error ?? instances.error ?? timeseries.error ?? queue.error
