@@ -290,6 +290,7 @@ of the same events:
 | `tf_sandbox_memory_kills_total` | What memory ended, by `org_id` and `kind`: `bash_budget` (a command over the per-command budget; the sandbox kept running), `ceiling` (a process the kernel killed to hold the sandbox at its limit, usually one left running in the background), `jail_lost` (a sandbox the limit ended, losing every process in it; the run continues in a new sandbox on the same files). |
 | `tf_sandbox_peak_memory_ratio` | A histogram, per sandbox, of its peak memory as a share of its limit, read when it exits. A share near 1 means the sandbox came close to its limit. Sandboxes with no limit are not counted. |
 | `tf_conversations_sandbox_lost_parks_total` | Runs paused for a person after losing their sandbox three times in a row, by `org_id` and `memory_limit` (`true` when the limit ended the last one). A paused run waits for someone to send it a message. |
+| `tf_workspace_restore_missing_commits_total` | Checkouts a run's workspace could not be rebuilt with because the git host no longer had a commit its snapshot needs, by `kind`: `head` (the commit the checkout was at) or `prerequisite` (a commit the snapshot's saved commits build on). The usual cause is a branch rewritten or deleted while the run was paused. The run stays paused for a person. |
 
 A steady `bash_budget` rate is the budget doing its job. If `ceiling` and
 `jail_lost` kills are frequent, or the `p95` of

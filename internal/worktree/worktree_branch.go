@@ -199,6 +199,11 @@ func createCheckoutWorktreeAt(ctx context.Context, r Repo, cloneURL, ref, wtDir 
 		return "", fmt.Errorf("fetch ref %s: %w", ref, err)
 	}
 	worktreeLog.Debug("fetch completed", "ref", ref, "duration", time.Since(start).Round(time.Millisecond))
+	// The self-contained checkout names ref in its clone's fetch refspec; a
+	// linked one fetches through the bare's config.
+	if err := trackOriginBranchInBareLocked(ctx, bareDir, ref); err != nil {
+		return "", err
+	}
 
 	// Detached checkout at the fetched tip. Routed through gitRunCtxAuth so the
 	// blobless bare's lazy promisor fetch (working-tree blobs deferred by the

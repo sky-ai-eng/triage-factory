@@ -685,7 +685,7 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 //
 // A bundle is read by its header, not its bytes: git does not pack the same
 // commits into the same bytes twice, and a fingerprint over them would take
-// every capture of a tree with unpushed commits for a changed one.
+// every capture of a tree that carries a bundle for a changed one.
 //
 // The scratch half is a stat of each file, not its content: path, size,
 // modification time, and the inode and change time (scratchChangeStamp),

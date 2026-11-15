@@ -107,6 +107,7 @@ func (a *App) startWorkers(ctx context.Context) {
 		// increment after a restart is a change from zero.
 		agentproc.OpenOversizedFrameSeries()
 		delegate.OpenWorkspaceCheckpointSeries()
+		delegate.OpenRestoreMissingCommitSeries()
 		delegate.OpenUnreadAtConclusionSeries()
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
