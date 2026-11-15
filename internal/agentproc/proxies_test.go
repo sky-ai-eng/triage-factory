@@ -748,11 +748,17 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 // dials the real Bedrock upstream the proxy points at.
 func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
 	const realSecret = "REAL-AWS-SECRET-MUST-NOT-LEAK"
+	// A live source, as the sidecar always passes: it replaces the static
+	// triple, and the region must survive that. Never called here, since
+	// every request below fails at the gate.
+	live := func(context.Context) (map[string]string, time.Time, error) {
+		return nil, time.Time{}, errors.New("not called")
+	}
 	bundle, _, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"AWS_ACCESS_KEY_ID":     "AKIAREALORGKEY",
 		"AWS_SECRET_ACCESS_KEY": realSecret,
-		"AWS_REGION":            "us-east-1",
-	}, nil, egressproxy.GitHubHosts{}, nil, nil)
+		"AWS_REGION":            "eu-central-1",
+	}, nil, egressproxy.GitHubHosts{}, nil, live)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -776,6 +782,9 @@ func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
 	}
 	if got := envValue(llm, "AWS_SECRET_ACCESS_KEY"); got != sigV4PlaceholderSecret {
 		t.Errorf("LLMEnv AWS_SECRET_ACCESS_KEY = %q, want the constant placeholder", got)
+	}
+	if got := envValue(llm, "AWS_REGION"); got != "eu-central-1" {
+		t.Errorf("LLMEnv AWS_REGION = %q, want the org's region the proxy signs in", got)
 	}
 	for _, e := range llm {
 		if strings.Contains(e, realSecret) {

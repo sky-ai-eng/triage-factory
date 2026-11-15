@@ -877,6 +877,10 @@ type sandboxProxyConfig struct {
 	// One of "anthropic", "bedrock_bearer", or "bedrock_sigv4". Drives
 	// the placeholder env shape (different env vars for each provider).
 	providerKind llmproxy.Provider
+	// sigV4Region is the run-start signing region for bedrock_sigv4. It is
+	// kept here because a live credential source replaces llm.SigV4Credentials,
+	// and the client's region must still match the proxy's signing scope.
+	sigV4Region string
 }
 
 // proxyConfigFromCreds maps a resolveCredentials output to the
@@ -960,6 +964,7 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 				},
 			},
 			providerKind: llmproxy.ProviderBedrockSigV4,
+			sigV4Region:  region,
 		}, nil
 	}
 
@@ -1039,8 +1044,8 @@ func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL, incomingToken string) 
 			"AWS_SECRET_ACCESS_KEY=" + sigV4PlaceholderSecret,
 			"CLAUDE_CODE_USE_BEDROCK=1",
 		}
-		if cfg.llm.SigV4Credentials != nil {
-			env = append(env, "AWS_REGION="+cfg.llm.SigV4Credentials.Region)
+		if cfg.sigV4Region != "" {
+			env = append(env, "AWS_REGION="+cfg.sigV4Region)
 		}
 		return env
 	}
