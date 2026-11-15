@@ -212,5 +212,10 @@ func newPgCloseDeferralSeeder(conn *sql.DB, orgID, userID string) dbtest.TaskClo
 			}
 			return eventIDSet, heldAtSet
 		},
+		HoldRaw: func(t *testing.T, taskID, eventID string) {
+			exec(t, "hold raw", `
+				UPDATE tasks SET close_deferred_event_id = $3, close_deferred_at = now() WHERE org_id = $1 AND id = $2
+			`, orgID, taskID, eventID)
+		},
 	}
 }

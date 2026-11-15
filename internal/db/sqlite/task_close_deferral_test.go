@@ -135,6 +135,11 @@ func newSQLiteCloseDeferral() func(t *testing.T) (*sql.DB, dbtest.TaskCloseDefer
 				}
 				return eventIDSet, heldAtSet
 			},
+			HoldRaw: func(t *testing.T, taskID, eventID string) {
+				exec(t, "hold raw", `
+					UPDATE tasks SET close_deferred_event_id = ?, close_deferred_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?
+				`, eventID, taskID)
+			},
 		}
 		return conn, dbtest.TaskCloseDeferralStores{
 			Tasks:            stores.Tasks,

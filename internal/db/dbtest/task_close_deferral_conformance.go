@@ -47,6 +47,10 @@ type TaskCloseDeferralSeeder struct {
 	// StoredHold reads whether the task's close_deferred_event_id and
 	// close_deferred_at are set, whatever the task's status.
 	StoredHold func(t *testing.T, taskID string) (eventIDSet, heldAtSet bool)
+	// HoldRaw sets both columns to eventID and now with a bare UPDATE,
+	// whatever the task's status: the state of a row closed before every
+	// close cleared its hold, which no store write produces.
+	HoldRaw func(t *testing.T, taskID, eventID string)
 }
 
 // TaskCloseDeferralFactory hands the suite a fresh database per subtest: the
@@ -394,13 +398,19 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 	t.Run("Reads_see_holds_on_active_tasks_only", func(t *testing.T) {
 		stores, orgID, seed := mk(t)
 		holding, _, holdingConv := awaiting(t, stores, orgID, seed)
-		closed, _, closedConv := awaiting(t, stores, orgID, seed)
+		closed, closedEvent, closedConv := awaiting(t, stores, orgID, seed)
 		plain := seed.Task(t)
 		// Resolved, so the sweep's list would return either hold.
 		seed.ResolveDeliverables(t, holdingConv)
 		seed.ResolveDeliverables(t, closedConv)
 		if _, err := stores.Tasks.CloseSystem(ctx, orgID, closed, "run_completed", ""); err != nil {
 			t.Fatalf("CloseSystem: %v", err)
+		}
+		// Stored rows closed before every close cleared the hold still carry
+		// one, and the reads' status test is what leaves them out.
+		seed.HoldRaw(t, closed, closedEvent)
+		if eventIDSet, heldAtSet := seed.StoredHold(t, closed); !eventIDSet || !heldAtSet {
+			t.Fatalf("closed task's hold columns after HoldRaw: set %v, %v, want both", eventIDSet, heldAtSet)
 		}
 
 		all, err := stores.Tasks.ListActiveCloseDeferralsSystem(ctx)
