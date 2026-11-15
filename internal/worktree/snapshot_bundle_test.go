@@ -494,11 +494,11 @@ func TestRestoreCheckout_BundleWithoutAPromisedBlobSurvivesRestores(t *testing.T
 	}
 }
 
-// TestRestoreCheckout_StoredThinBundleRestoresWithTheCredential: a snapshot
-// stored before the capture wrote its own bundles carries one from `git bundle
-// create`, whose pack holds the edited file as a delta against a version a
-// fresh blobless bare does not have. The import completes the pack by
-// fetching that version, which takes the run's credential.
+// TestRestoreCheckout_StoredThinBundleRestoresWithTheCredential: stored
+// snapshots carry bundles from `git bundle create`, whose pack holds an edited
+// file as a delta against a version a fresh blobless bare does not have. The
+// import completes the pack by fetching that version, which takes the run's
+// credential.
 func TestRestoreCheckout_StoredThinBundleRestoresWithTheCredential(t *testing.T) {
 	setRestoreMode(t, true)
 	o := newPrivateOrigin(t)
@@ -520,14 +520,16 @@ func TestRestoreCheckout_StoredThinBundleRestoresWithTheCredential(t *testing.T)
 		t.Fatal("fixture: the pack `git bundle create` wrote is not thin")
 	}
 
-	root = loseHost(t, key)
+	loseHost(t, key)
 	bare, err := EnsureBareClone(context.Background(), testRepo("acme", "repo"), o.url, WithCloneAuth(o.auth))
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
 	gitAt(t, bare, "fetch", "-q", o.path, "+refs/pull/7/head:refs/remotes/origin/"+branch)
-	if err := importBundle(context.Background(), bare, staged, CloneAuth{}); err == nil {
-		t.Fatal("fixture: the thin bundle imported with no credential, so it needed no fetch")
+	// Without the credential the import gets as far as asking the origin for
+	// the delta's base and is refused there, not earlier.
+	if err := importBundle(context.Background(), bare, staged, CloneAuth{}); err == nil || !strings.Contains(err.Error(), "terminal prompts disabled") {
+		t.Fatalf("fixture: import of the thin bundle with no credential = %v, want the origin refusing its fetch", err)
 	}
 
 	root = loseHost(t, key)
@@ -598,8 +600,8 @@ func TestRestoreCheckout_FetchesAMissingHeadByID(t *testing.T) {
 
 // TestRestoreCheckout_CommitTheOriginRefusesFailsByKind: the origin no longer
 // has the commit a snapshot needs. The restore fails with an error that says
-// which commit it was: the captured head, with the message that case has
-// always had, or the bundle's prerequisite.
+// which commit it was, the captured head or the bundle's prerequisite, and
+// names it.
 func TestRestoreCheckout_CommitTheOriginRefusesFailsByKind(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

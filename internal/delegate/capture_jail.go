@@ -121,8 +121,8 @@ func checkCaptureManifest(ctx context.Context, man worktree.CaptureManifest, rel
 		if cc.Delta == nil && (cc.HasBundle || cc.HasPatch || len(cc.LFSObjects) > 0) {
 			return fmt.Errorf("capture manifest gives %s members but no git state", cc.Rel)
 		}
-		// LFS objects are carried for the bundle's commits, and each is named
-		// once, by an id that is also its member's name.
+		// LFS objects are carried for commits a bundle carries, so only beside
+		// one, and each is named once, by an id that is also its member's name.
 		if len(cc.LFSObjects) > 0 && !cc.HasBundle {
 			return fmt.Errorf("capture manifest gives %s LFS objects but no bundle", cc.Rel)
 		}

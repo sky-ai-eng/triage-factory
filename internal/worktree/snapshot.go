@@ -353,8 +353,12 @@ func localRev(branch string) string {
 // line where the pack begins. It is the bundle's identity. The refs name the
 // commits it carries and the prerequisites the commits it stops at, and object
 // ids are hashes of content, so two bundles with one header carry the same
-// objects. Their bytes need not match: git writes the pack on several threads
-// and chooses its deltas differently from one run to the next.
+// commits and what those commits changed. They can differ in one way that
+// does not matter to a restore: a capture leaves out a blob the remote promised
+// and the checkout had not read (bundleLocalCommitsTo), so a later capture of
+// the same commits can hold a blob an earlier one lacks. Their bytes need not
+// match either: git writes the pack on several threads and chooses its deltas
+// differently from one run to the next.
 func BundleHeader(r io.Reader) ([]byte, error) {
 	return readBundleHeader(bufio.NewReader(r))
 }
