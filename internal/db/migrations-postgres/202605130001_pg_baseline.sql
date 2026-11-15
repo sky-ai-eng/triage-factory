@@ -298,6 +298,74 @@ $$;
 -- +goose StatementEnd
 
 
+-- A task's memory wait. pending is whether a top-level conversation on the task
+-- ended, has run, and has no conversation_memory row. The attempt columns are
+-- the newest attempt on the newest such conversation, NULL when it has none.
+-- The task read, the claim scan's memory gate, and the failing-memory count all
+-- call this, so they cannot disagree.
+--
+-- It reads past RLS because a task reassigned to another team keeps its earlier
+-- conversations on the team that had them. conversations_select hides those
+-- from the new holder, and conversation_memory_all and messages_all delegate to
+-- it, so a plain subquery reads not pending while the claim scan holds the
+-- holder's conversation.
+--
+-- It answers the wait and never the owing conversation's id, as
+-- tf.blueprint_run_is_newest_for_task answers a boolean: a reader of the task
+-- learns that it waits and what the last attempt came to, not which
+-- conversation it waits on. The attempt's error_message is TF's own wording
+-- about the model call, never a provider's body or the conversation's content.
+--
+-- The WHERE on owed is taskMemoryOwedRowSQL (internal/db/postgres/tasks.go)
+-- over p_org_id and p_task_id, and a test there pins the two. The memory sweep
+-- and the failing-memory read's failure history interpolate that predicate
+-- themselves, because they list every owing conversation, on the admin pool.
+-- With request claims p_org_id must equal the caller's org; with none (admin
+-- pool, tf_system) that check is skipped. Pinned search_path blocks definer
+-- hijacking; a NULL task is not pending.
+-- +goose StatementBegin
+CREATE FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid,
+    OUT pending boolean, OUT attempt_outcome text, OUT attempt_error_kind text,
+    OUT attempt_error_message text, OUT attempt_started_at timestamptz)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  owed_id uuid;
+BEGIN
+  pending := false;
+  IF p_task_id IS NULL THEN
+    RETURN;
+  END IF;
+  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'task_memory_wait: requested org % does not match caller org %', p_org_id, tf.current_org_id();
+  END IF;
+  SELECT owed.id INTO owed_id
+    FROM conversations owed
+   WHERE owed.org_id = p_org_id AND owed.task_id = p_task_id
+     AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
+     AND EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = owed.id AND hr.role = 'assistant'
+       AND NOT COALESCE(hr.is_error, FALSE) AND COALESCE(hr.model, '') <> '<synthetic>')
+     AND NOT EXISTS (
+         SELECT 1 FROM conversation_memory mem
+         WHERE mem.conversation_id = owed.id)
+   ORDER BY owed.ended_at DESC, owed.id DESC
+   LIMIT 1;
+  IF owed_id IS NULL THEN
+    RETURN;
+  END IF;
+  pending := true;
+  SELECT att.outcome, att.error_kind, att.error_message, att.started_at
+    INTO attempt_outcome, attempt_error_kind, attempt_error_message, attempt_started_at
+    FROM conversation_memory_attempts att
+   WHERE att.conversation_id = owed_id
+   ORDER BY att.started_at DESC, att.id DESC
+   LIMIT 1;
+END;
+$$;
+-- +goose StatementEnd
+
+
 -- The read gate for team-scoped rows: membership in an active team. The join
 -- to teams adds deleted_at IS NULL, so membership in an archived team grants no
 -- read. Archiving keeps the memberships, so restoring the team makes its rows
@@ -3363,6 +3431,10 @@ REVOKE ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id 
 GRANT ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) TO tf_app;
 
 
+REVOKE ALL ON FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid) TO tf_app;
+
+
 REVOKE ALL ON FUNCTION tf.user_can_write_team(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_can_write_team(target_team uuid) TO tf_app;
 
@@ -3576,15 +3648,12 @@ GRANT ALL ON TABLE public.conversation_memory_attempts TO postgres;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO anon;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO authenticated;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO service_role;
--- SELECT only for both roles, deliberately: the ledger is written by the brain
--- on the admin pool and only ever read anywhere else. tf_system does not read
--- the table for its own sake — it reads it through the canonical task
--- projection, which carries the pending task's newest attempt, so an executor
--- resolving a task with GetSystem selects from here whether it wants the
--- columns or not. Withholding the grant does not hide the summary; it fails
--- the whole task read.
+-- SELECT only, deliberately: the ledger is written by the brain on the admin
+-- pool and only ever read anywhere else. tf_system holds no grant. The one
+-- thing an executor reads from it, the pending task's newest attempt in the
+-- canonical task projection, it reads through tf.task_memory_wait, which reads
+-- the ledger as its owner.
 GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_app;
-GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_system;
 
 
 GRANT ALL ON TABLE public.messages TO postgres;
@@ -7428,6 +7497,10 @@ GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_
 -- running, and a resume on a warm claim refuses a concluded step whose run still
 -- is. Both statements ask through this function, on the executor.
 GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_system;
+-- The claim scan's memory gate and the task projection an executor resolves a
+-- task with both read the task's memory wait through this function, which reads
+-- the attempt ledger as its owner, so tf_system holds no grant on the ledger.
+GRANT EXECUTE ON FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid) TO tf_system;
 -- IncrementUsageSystem bumps a usage counter after resolving the step prompt.
 GRANT SELECT, UPDATE ON TABLE public.prompts TO tf_system;
 GRANT SELECT ON TABLE public.agents TO tf_system;
