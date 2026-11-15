@@ -29,7 +29,7 @@ func TestSnapshotWorkspace_SuccessRecordsWritten(t *testing.T) {
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
 
 	const claimID = "claim-writer"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestSnapshotWorkspace_PutFailureRecordsFailed(t *testing.T) {
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
 
 	const claimID = "claim-doomed"
-	err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, "", domain.ConversationRuntimeNative)
+	err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, domain.ConversationRuntimeNative)
 	if !errors.Is(err, putErr) {
 		t.Fatalf("snapshotWorkspace error = %v, want the Put failure", err)
 	}
@@ -93,7 +93,7 @@ func TestSnapshotWorkspace_SupersededWriterSkipsPut(t *testing.T) {
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "the displaced engagement's older work")
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, oldClaim, wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, oldClaim, wt, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("a superseded snapshot is not a failure: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestSnapshotWorkspace_NoClaimRecordsNothing(t *testing.T) {
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, "", wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, "", wt, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	assertSnapshotPresent(t, s, wsKey, true)
@@ -277,14 +277,14 @@ func TestSnapshotWorkspace_UnstoppedJailTreeIsNotRead(t *testing.T) {
 	s.treeNotQuiet(wt, func() bool { return exited })
 
 	const claimID = "claim-unquiet"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, "", domain.ConversationRuntimeNative); err == nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, domain.ConversationRuntimeNative); err == nil {
 		t.Fatal("a tree a running jail may be writing was captured")
 	}
 	assertSnapshotPresent(t, s, wsKey, false)
 	assertSnapshotState(t, s, wsKey, domain.WorkspaceSnapshotFailed, claimID)
 
 	exited = true
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, "claim-after", wt, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, "claim-after", wt, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace after the jail exited: %v", err)
 	}
 	assertSnapshotPresent(t, s, wsKey, true)

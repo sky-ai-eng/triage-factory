@@ -961,12 +961,15 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 	}
 	// A workspace reaped by the retention TTL is gone for good: no warm
 	// worktree, no snapshot, nothing to rebuild from, and no future release
-	// brings it back. That is 410 Gone, and refusing here means no side effect —
-	// without it the flip below succeeds and the conversation dies at claim time
-	// as a generic failConversation, turning an expected "this expired" into a destroyed
-	// run. Every run stopped by an older build lands here too: the old cancel
-	// path discarded the snapshot on its way out, so a migrated row has no
-	// workspace by construction and inherits exactly this answer.
+	// brings it back. An SDK conversation whose session has a blob still
+	// resumes onto a tree built fresh; one whose session was never saved has
+	// nothing to continue from. That is 410 Gone, and refusing here means no
+	// side effect — without it the flip below succeeds and the conversation
+	// dies at claim time as a generic failConversation, turning an expected
+	// "this expired" into a destroyed run. Every run stopped by an older build
+	// lands here too: the old cancel path discarded the snapshot on its way
+	// out, so a migrated row has no workspace by construction and inherits
+	// exactly this answer.
 	if !fresh && !s.workspaceRecoverable(ctx, orgID, conv) {
 		return ResumeBlockedWorkspaceExpired
 	}

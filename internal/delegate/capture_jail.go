@@ -38,21 +38,14 @@ func jailedCapture() bool {
 	return runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"
 }
 
-// captureWorkspaceGit captures one checkout's git delta in this process, and
-// the session transcript when the run has one. The local-mode capture; a
-// multi-mode snapshot goes through captureTreeInJail.
-func captureWorkspaceGit(ctx context.Context, wtPath, sessionID string) (worktree.CapturedState, error) {
-	var state worktree.CapturedState
+// captureWorkspaceGit captures one checkout's git delta in this process. The
+// local-mode capture; a multi-mode snapshot goes through captureTreeInJail.
+func captureWorkspaceGit(ctx context.Context, wtPath string) (worktree.CapturedState, error) {
 	delta, err := worktree.CaptureWorkspaceGit(ctx, wtPath)
 	if err != nil {
 		return worktree.CapturedState{}, err
 	}
-	state.Delta = delta
-	state.SessionID = sessionID
-	if data, ok := worktree.ReadClaudeSessionTranscript(wtPath, sessionID); ok {
-		state.Transcript = data
-	}
-	return state, nil
+	return worktree.CapturedState{Delta: delta}, nil
 }
 
 // captureViaSandbox is the seam to the brokered capture jail. A package var so

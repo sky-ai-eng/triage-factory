@@ -72,7 +72,7 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 		t.Fatalf("MakeRunRoot: %v", err)
 	}
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "scratch.md"), "agent scratch")
-	if err := s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, conversationID, wsKey, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, conversationID, wsKey, "", wtPath, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	seedSnapshotState(t, s, wsKey, evictWriterClaim, domain.WorkspaceSnapshotWritten)

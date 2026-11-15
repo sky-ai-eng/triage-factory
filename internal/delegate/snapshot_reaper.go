@@ -63,9 +63,10 @@ func (s *Spawner) snapshotRetention() time.Duration {
 	return DefaultSnapshotRetentionTTL
 }
 
-// RunSnapshotReaper runs the retention sweep at startup and then on a ticker
-// until ctx is cancelled. Wired alongside the other startup/periodic sweeps in
-// internal/app. A nil store or blob store makes it a logged no-op.
+// RunSnapshotReaper runs the retention sweep and the ended-session sweep
+// (ReapEndedSessions) at startup and then on a ticker until ctx is cancelled.
+// Wired alongside the other startup/periodic sweeps in internal/app. A nil
+// store or blob store makes it a logged no-op.
 func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration) {
 	if s.conversations == nil || s.Storage() == nil {
 		delegateLog.Warn("snapshot reaper not started: no store / blob store wired")
@@ -77,6 +78,7 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 		interval = DefaultSnapshotReapInterval
 	}
 	s.ReapExpiredSnapshots(ctx)
+	s.ReapEndedSessions(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -85,6 +87,7 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 			return
 		case <-t.C:
 			s.ReapExpiredSnapshots(ctx)
+			s.ReapEndedSessions(ctx)
 		}
 	}
 }
