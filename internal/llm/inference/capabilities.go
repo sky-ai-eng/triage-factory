@@ -11,14 +11,15 @@ import (
 // model takes adaptive thinking and an output_config.effort, whether it
 // refuses sampling parameters, its output ceiling, and the rest of what
 // schemas.ModelCapabilities names. It reads the record through a resolver the
-// application installs, and with none it guesses from the model's name, which
-// trails the models TF offers.
+// application installs, and with none it guesses from the model's name.
 //
 // The embedded datasheet is the upstream file bifrost's own catalog is built
 // from, under the same keys and field names, so each row decodes into
 // bifrost's record as written. Installing it here means the datasheet TF
 // prices and describes a model by is also what bifrost shapes that model's
-// requests by.
+// requests by, so the daily pricing refresh moves these flags too; its gate
+// (TestPricing_CatalogCapabilities) fails when a model TF offers has no
+// record.
 func init() {
 	schemas.SetCapabilityResolver(capabilitiesFor)
 }

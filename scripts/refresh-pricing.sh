@@ -8,7 +8,9 @@
 # text-generation models the token cost formula prices (mode chat / responses /
 # completion), and writes both data files. It writes ONLY data: it never edits
 # Go source, so a refresh can change what a model costs, never how cost is
-# computed. A bot can run it and open a data-only PR.
+# computed. The rows also carry the capability flags bifrost shapes each
+# model's requests by (internal/llm/inference/capabilities.go), so a refresh
+# can move those too. A bot can run it and open a data-only PR.
 #
 # Determinism: the output is key-sorted and indent=1 pretty-printed (matching
 # the committed format), so an unchanged upstream produces no diff and a real
@@ -20,10 +22,11 @@
 # the gap between fast-moving upstream data and the frozen cost formula:
 #   1. The verification gate (go test ./internal/llm/inference
 #      ./internal/llm/modelcatalog -run
-#      'TestPricing|TestCostForUsage|TestComputeTextCost') — malformed JSON, a
-#      model TF offers losing its row or a rate it bills on, a cache rate
-#      inconsistent with its input rate, or a broken cost formula fails it
-#      loudly rather than misbilling quietly. It checks no specific price.
+#      'TestPricing|TestCostForUsage|TestComputeTextCost') — malformed JSON; a
+#      model TF offers losing its row, a rate it bills on, or its capability
+#      record; a cache rate inconsistent with its input rate; or a broken cost
+#      formula fails it loudly rather than misbilling quietly. It checks no
+#      specific price.
 #   2. The schema-drift check below — a NEW per-token/cache cost field upstream
 #      (a finer context tier, a new cache-TTL bucket) that computeTextCost
 #      doesn't read is flagged so it becomes a reviewed formula change, not

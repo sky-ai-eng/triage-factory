@@ -226,5 +226,7 @@ require (
 // bifrost/core builds only against its maintainers' fork of mcp-go (its own
 // go.mod replaces it), and a dependency's replace does not apply here, so this
 // repeats it. It moves with every bifrost bump: copy the line from that
-// release's go.mod.
+// release's go.mod. govulncheck looks advisories up under the fork's path, so
+// none filed against mark3labs/mcp-go is matched here; TF passes bifrost no
+// MCPConfig (internal/llm/inference/client.go), so no MCP client is built.
 replace github.com/mark3labs/mcp-go => github.com/maximhq/mcp-go v0.0.0-20261102181017-b7da3bc145a1

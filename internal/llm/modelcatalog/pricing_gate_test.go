@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
@@ -72,6 +74,19 @@ func TestPricing_CatalogRates(t *testing.T) {
 				t.Errorf("CostForUsage = %g, want %g from the displayed rates", usd, want)
 			}
 		})
+	}
+}
+
+// TestPricing_CatalogCapabilities is the same gate for the capability flags
+// bifrost shapes requests by, which come from the same snapshot: every model
+// TF offers has a record bifrost can read. A row that no longer decodes into
+// one, a field upstream retyped, leaves bifrost guessing from the model's
+// name. A flag a refresh moves is reviewed in the PR's diff, like a price.
+func TestPricing_CatalogCapabilities(t *testing.T) {
+	for _, e := range Entries() {
+		if schemas.CapabilitiesFor(schemas.ModelProvider(e.Provider), e.Key) == nil {
+			t.Errorf("%s: no capability record bifrost can read in the snapshot", e.Key)
+		}
 	}
 }
 

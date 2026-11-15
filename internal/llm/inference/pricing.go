@@ -10,12 +10,14 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// pricing_datasheet.json is a snapshot of upstream model PRICES — the per-model
-// rate numbers only. It, and pricing_provenance.json beside it, are the sole
+// pricing_datasheet.json is a snapshot of upstream model data: each model's
+// rates, and the capability flags bifrost shapes its requests by
+// (capabilities.go). It, and pricing_provenance.json beside it, are the sole
 // outputs of scripts/refresh-pricing.sh (run daily by the refresh-pricing
 // workflow): a pure data operation that rewrites these two JSON files and never
-// touches Go source. A refresh can change what a model costs — never how cost is
-// computed (that is the formula in computeTextCost, which only a human edits).
+// touches Go source. A refresh can change what a model costs and what bifrost
+// reads it supports — never how cost is computed (that is the formula in
+// computeTextCost, which only a human edits).
 //
 // Source: LiteLLM's model_prices_and_context_window.json (the table
 // getbifrost.ai/datasheet syncs), filtered to the text-generation models the
@@ -208,7 +210,7 @@ func CostForUsage(model string, usage Usage) (float64, bool) {
 	if err != nil || table == nil {
 		return 0, false
 	}
-	price, ok := lookupPrice(table, model)
+	price, ok := lookupDatasheetRow(table, model)
 	if !ok || !isPriceableMode(price.Mode) {
 		return 0, false
 	}
@@ -225,7 +227,7 @@ func ModelWindow(model string) (int, bool) {
 	if err != nil || table == nil {
 		return 0, false
 	}
-	price, ok := lookupPrice(table, model)
+	price, ok := lookupDatasheetRow(table, model)
 	if !ok || price.MaxInputTokens == nil || *price.MaxInputTokens <= 0 {
 		return 0, false
 	}
@@ -239,7 +241,7 @@ func acceptsSampling(model string) bool {
 	if err != nil || table == nil {
 		return true
 	}
-	p, ok := lookupPrice(table, model)
+	p, ok := lookupDatasheetRow(table, model)
 	return !ok || p.SupportsSamplingParams == nil || *p.SupportsSamplingParams
 }
 
@@ -255,11 +257,6 @@ func isPriceableMode(mode string) bool {
 	default:
 		return false
 	}
-}
-
-// lookupPrice resolves a model id to its price entry (lookupDatasheetRow).
-func lookupPrice(table map[string]modelPrice, model string) (modelPrice, bool) {
-	return lookupDatasheetRow(table, model)
 }
 
 // lookupDatasheetRow resolves a model id to its datasheet row: exact match

@@ -57,7 +57,7 @@ func ModelInfo(model string) (Info, bool) {
 	if err != nil || table == nil {
 		return Info{}, false
 	}
-	p, ok := lookupPrice(table, model)
+	p, ok := lookupDatasheetRow(table, model)
 	if !ok || p.InputCostPerToken == nil || p.OutputCostPerToken == nil {
 		return Info{}, false
 	}

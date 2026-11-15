@@ -172,7 +172,7 @@ func TestCostForUsage_NonTextModeUnpriced(t *testing.T) {
 	}
 }
 
-func TestLookupPrice_BedrockRegionPrefixStrip(t *testing.T) {
+func TestLookupDatasheetRow_BedrockRegionPrefixStrip(t *testing.T) {
 	table := map[string]modelPrice{
 		"anthropic.claude-x": {InputCostPerToken: f64(1e-06)},
 	}
@@ -182,11 +182,11 @@ func TestLookupPrice_BedrockRegionPrefixStrip(t *testing.T) {
 		"apac.anthropic.claude-x",
 		"global.anthropic.claude-x",
 	} {
-		if _, ok := lookupPrice(table, model); !ok {
+		if _, ok := lookupDatasheetRow(table, model); !ok {
 			t.Errorf("region-prefixed %q should resolve to its base row", model)
 		}
 	}
-	if _, ok := lookupPrice(table, "unknown.model"); ok {
+	if _, ok := lookupDatasheetRow(table, "unknown.model"); ok {
 		t.Error("an unrelated model must not resolve")
 	}
 }

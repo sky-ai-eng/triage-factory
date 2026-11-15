@@ -159,6 +159,11 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 		{`{"labels": {"k": 1}}`, "labels", "labels must be an object of strings"},
 		// A key with a dot in it is one key, though the path splits it.
 		{`{"labels": {"a.b": 1}}`, "labels", "labels must be an object of strings"},
+		{`{"by_key": {"x.y": {"b": "x"}}}`, "by_key.b", "by_key.b must be a whole number"},
+		// encoding/json matches a key to a field ignoring case, and the
+		// field is reported under its own name.
+		{`{"Statuses": [1]}`, "statuses", "statuses must be an array of strings"},
+		{`{"INNER": {"B": "x"}}`, "inner.b", "inner.b must be a whole number"},
 		{`{"by_id": {"abc": "x"}}`, "by_id", "by_id must be an object of strings whose keys are whole numbers"},
 		{`{"bytes": 7}`, "bytes", "bytes must be a base64 string"},
 		// An unexported anonymous struct with a tag name is an ordinary field,
@@ -192,6 +197,27 @@ func TestDecodeJSONStrict_TypeFaultNamesTheJSONField(t *testing.T) {
 				t.Errorf("errors = %+v, want [%+v]", env.Errors, want)
 			}
 		})
+	}
+}
+
+// TestDecodeJSONStrict_ElementFaultOfAnObjectBodyIsTheBodys pins that a body
+// decoded into a map has no field to name: a wrong-typed member is a fault in
+// the body as a whole, never an INVALID_FIELD with an empty field.
+func TestDecodeJSONStrict_ElementFaultOfAnObjectBodyIsTheBodys(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"a": "x"}`))
+	var v map[string]int
+	if DecodeJSONStrict(rec, req, &v) {
+		t.Fatal("DecodeJSONStrict accepted a wrong-typed member")
+	}
+	var env struct {
+		Errors []ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if rec.Code != http.StatusBadRequest || len(env.Errors) != 1 || env.Errors[0].Reason != ReasonInvalidBody || env.Errors[0].Field != "" {
+		t.Errorf("status %d, errors = %+v, want 400 and one %s naming no field", rec.Code, env.Errors, ReasonInvalidBody)
 	}
 }
 
