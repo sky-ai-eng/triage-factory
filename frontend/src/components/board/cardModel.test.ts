@@ -373,15 +373,15 @@ describe('deriveCard facts', () => {
     alerts: [],
   }
 
-  it("states a vulnerable package's repository, highest severity and alert count", () => {
+  it("states a vulnerable package's highest severity and alert count, not its repository", () => {
     const m = deriveCard(
       task({ title: 'lodash (npm)', entity_kind: 'vulnerable_package', vulnerable_package: pkg }),
       undefined,
       undefined,
       NOW,
     )
-    expect(m.facts?.map((f) => f.text)).toEqual(['octo/api', 'High', '2 open alerts'])
-    expect(m.facts?.[1].tone).toBe('problem')
+    expect(m.facts?.map((f) => f.text)).toEqual(['High', '2 open alerts'])
+    expect(m.facts?.[0].tone).toBe('problem')
   })
 
   it('says a package whose last alert closed has none, with no severity', () => {
@@ -394,7 +394,7 @@ describe('deriveCard facts', () => {
       undefined,
       NOW,
     )
-    expect(m.facts?.map((f) => f.text)).toEqual(['octo/api', 'No open alerts'])
+    expect(m.facts?.map((f) => f.text)).toEqual(['No open alerts'])
   })
 
   it('gives a pull request no facts line', () => {

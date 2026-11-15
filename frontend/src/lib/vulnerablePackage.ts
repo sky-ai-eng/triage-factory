@@ -39,15 +39,13 @@ export function scopeLabel(scope: string): string {
   return scope
 }
 
-/** The facts a card states beside a vulnerable package's title: its
- *  repository, highest open severity and open alert count. The title already
- *  names the package and its ecosystem. */
-export function packageFacts(
+/** A vulnerable package's highest open severity and open alert count: the
+ *  facts the board card states beside its title, which already names the
+ *  package and, through its link and tooltip, the repository. */
+export function alertFacts(
   pkg: VulnerablePackage,
 ): { text: string; tone?: EventTone; title?: string }[] {
-  const facts: { text: string; tone?: EventTone; title?: string }[] = [
-    { text: pkg.repo, title: `${pkg.package} (${pkg.ecosystem}) in ${pkg.repo}` },
-  ]
+  const facts: { text: string; tone?: EventTone; title?: string }[] = []
   if (pkg.highest_severity) {
     facts.push({
       text: severityLabel(pkg.highest_severity),
@@ -57,4 +55,15 @@ export function packageFacts(
   }
   facts.push({ text: openAlertsLabel(pkg.open_alert_count) })
   return facts
+}
+
+/** The repository, then the alert facts: what the triage deck and the run
+ *  page state, whose titles name the package and nothing else. */
+export function packageFacts(
+  pkg: VulnerablePackage,
+): { text: string; tone?: EventTone; title?: string }[] {
+  return [
+    { text: pkg.repo, title: `${pkg.package} (${pkg.ecosystem}) in ${pkg.repo}` },
+    ...alertFacts(pkg),
+  ]
 }
