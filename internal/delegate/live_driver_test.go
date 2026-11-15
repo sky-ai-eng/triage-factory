@@ -774,3 +774,52 @@ func TestDriveLiveConversation_InputForAnotherProviderSkipsTheNudge(t *testing.T
 		t.Errorf("waiting rows = %d, want the message still waiting", len(waiting))
 	}
 }
+
+// TestDriveLiveConversation_AnUnconfirmedMoveIsTriedOnce: a turn that ends
+// with a person's message waiting, on settings the process does not confirm,
+// lets the process go with the message still waiting. The move is asked for
+// once, and no nudge runs ahead of the message.
+func TestDriveLiveConversation_AnUnconfirmedMoveIsTriedOnce(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-live-unconfirmed", "sess", "/tmp/wt")
+	claimID := markEngaged(t, database, "r-live-unconfirmed")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
+	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
+		pendingUserInput("r-live-unconfirmed", runmode.LocalDefaultUserID, "think harder",
+			domain.TurnSettings{Model: "claude-fable-5-1", Effort: domain.EffortHigh})); err != nil {
+		t.Fatalf("queue the person's message: %v", err)
+	}
+	proc := newFakeLiveProc("sess")
+	proc.model = "claude-sonnet-5-5"
+	proc.settingsErr = errors.New("not applied")
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-unconfirmed",
+		claimID: claimID, runtime: domain.ConversationRuntimeSDK,
+	}
+	// A second result answers the turn a nudge would start, so a driver that
+	// nudges fails here rather than waiting on it.
+	results := make(chan *agentproc.Result, 2)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "done"}
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "nudged"}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
+
+	s.driveLiveConversation(context.Background(), park, proc, results, nudge)
+
+	proc.mu.Lock()
+	controls := append([]string(nil), proc.controls...)
+	proc.mu.Unlock()
+	if want := []string{"set_settings claude-fable-5-1 high"}; strings.Join(controls, "|") != strings.Join(want, "|") {
+		t.Errorf("controls = %q, want %q", controls, want)
+	}
+	if asked != 0 {
+		t.Errorf("nudge asked %d times; the waiting message is the next engagement's", asked)
+	}
+	if !proc.wasClosed() {
+		t.Error("the process was not let go")
+	}
+	if waiting := pendingRows(t, s, "r-live-unconfirmed"); len(waiting) != 1 {
+		t.Errorf("waiting rows = %d, want the message still waiting", len(waiting))
+	}
+}

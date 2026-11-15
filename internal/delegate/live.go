@@ -402,7 +402,11 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			// process is let go of before the result is handed back, so the
 			// row never reads open while a process that could still write to
 			// it is alive. Input that arrived since the check above keeps the
-			// turn going after all.
+			// turn going after all, unless the check found input this
+			// process will not take: then it is let go without asking again.
+			if deferred {
+				starts = nil
+			}
 			next, fenced := s.handOnOrLetGo(ctx, park, proc, starts)
 			if fenced {
 				return liveOutcome{fenced: true, costUSD: processSpend(proc)}
@@ -445,8 +449,15 @@ func startsATurnAfterAPause(r domain.Message) bool {
 // holds while it writes a person's message, so a message queued before the
 // decision is seen by it and one queued after finds the process gone. The
 // process is closed after the lock is released, so a send waiting on the lock
-// is not held for the close.
+// is not held for the close. For the same reason the process is moved onto the
+// newest message's settings before the lock is taken (moveLiveSettings), since
+// the move waits on the wrapper's answer; under the lock the process is
+// already on them, unless a message naming others landed in between. A
+// process that cannot take them is let go without looking.
 func (s *Spawner) handOnOrLetGo(ctx context.Context, park liveParkContext, proc liveProc, starts func(domain.Message) bool) (next, fenced bool) {
+	if starts != nil && !s.moveLiveSettings(ctx, park, proc) {
+		starts = nil
+	}
 	h := s.getProc(park.conversationID)
 	if h != nil {
 		h.input.Lock()
