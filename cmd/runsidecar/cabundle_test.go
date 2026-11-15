@@ -71,7 +71,7 @@ func TestRuntime_StartProxiesWritesTheCABundle(t *testing.T) {
 			if !ok {
 				t.Fatal("no CA bundle written for the run")
 			}
-			var interceptCA, ghLeaf bool
+			var interceptCA, ghLeaf, llmLeaf bool
 			for rest := raw; ; {
 				var block *pem.Block
 				block, rest = pem.Decode(rest)
@@ -88,12 +88,20 @@ func TestRuntime_StartProxiesWritesTheCABundle(t *testing.T) {
 				if c.Subject.CommonName == "triage-factory gh injector" {
 					ghLeaf = true
 				}
+				if c.Subject.CommonName == "triage-factory llm proxy" {
+					llmLeaf = true
+				}
 			}
 			if !interceptCA {
 				t.Error("CA bundle lacks the egress interceptor's CA; every admitted registry would fail verification in the jail")
 			}
 			if ghLeaf != tc.ghWant {
 				t.Errorf("gh injector leaf in the bundle = %v, want %v", ghLeaf, tc.ghWant)
+			}
+			// No jail dials the LLM proxy, so the jail is not given its
+			// certificate either.
+			if llmLeaf {
+				t.Error("the jail's CA bundle trusts the LLM proxy's certificate; only the executor dials that proxy")
 			}
 		})
 	}

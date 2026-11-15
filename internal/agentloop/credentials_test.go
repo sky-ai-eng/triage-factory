@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // TestEnvCredentials_ACancelledCallReleasesWithoutWaiting is the shape of a
@@ -111,5 +112,36 @@ func TestEnvCredentials_ReleaseClosesTheClient(t *testing.T) {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client was never closed")
+	}
+}
+
+// TestEnvCredentials_CarriesTheCACertificate pins that the certificate a run's
+// credential proxy serves reaches the account the client is built from.
+func TestEnvCredentials_CarriesTheCACertificate(t *testing.T) {
+	_, pem, err := proxycert.Generate("llm proxy", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	creds := &EnvCredentials{
+		Resolve: func(context.Context) (map[string]string, error) {
+			return map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "run", "ANTHROPIC_BEDROCK_BASE_URL": "https://127.0.0.1:1"}, nil
+		},
+		Models:    []string{"m"},
+		CACertPEM: pem,
+		NewClient: func(account schemas.Account) (Provider, func(), error) {
+			cfg, err := account.GetConfigForProvider(inference.ProviderBedrock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = cfg.NetworkConfig.CACertPEM.GetValue()
+			return nil, nil, nil
+		},
+	}
+	if _, _, _, err := creds.ForCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got != string(pem) {
+		t.Errorf("the account's CA certificate = %q, want the proxy's", got)
 	}
 }

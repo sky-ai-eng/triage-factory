@@ -107,6 +107,11 @@ type StartProxiesResult struct {
 	// real provider key never leaves the sidecar.
 	LLMEnv []string `json:"llm_env,omitempty"`
 
+	// LLMCertPEM is the certificate the LLM proxy at LLMEnv's address serves
+	// TLS with, a per-run self-signed leaf the caller trusts for that hop
+	// alone. Public; its key stays in the sidecar.
+	LLMCertPEM []byte `json:"llm_cert_pem,omitempty"`
+
 	// IdentityName / IdentityEmail / IdentityAccountID are the org commit
 	// identity the sidecar stamped into Env's git config, read off the sealed
 	// bundle, so the orchestrator can tell the org's account apart from the

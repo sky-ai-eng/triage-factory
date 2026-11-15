@@ -41,6 +41,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // shutdownTimeout bounds the listener drain on Close. The injector holds no
@@ -159,7 +160,7 @@ func Start(cfg Config) (*Channel, error) {
 		return nil, err
 	}
 
-	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
 		return fail(fmt.Errorf("ghchannel: generate cert: %w", err))
 	}

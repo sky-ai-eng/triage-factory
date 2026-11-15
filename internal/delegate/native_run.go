@@ -684,10 +684,15 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, nam
 // Read off the sidecar's LLM coordinates rather than the sandbox env, and that
 // distinction is the whole of the cell shrink: those coordinates now go to
 // exactly one place, this call, and the jail is built without them.
+//
+// The sidecar serves that address over TLS under a certificate it minted for
+// this engagement, which rides beside the coordinates and is what the client
+// verifies the hop against.
 func (s *Spawner) nativeCredentials(cfg runConfig, switchable []string, coldModel string) agentloop.Credentials {
 	env := envSliceToMap(cfg.sidecar.engineLLMEnv())
 	return &agentloop.EnvCredentials{
-		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
+		Resolve:   func(context.Context) (map[string]string, error) { return env, nil },
+		CACertPEM: cfg.sidecar.engineLLMCertPEM(),
 		// The whitelist must name the models actually requested: bifrost
 		// reads an empty whitelist as "no models", and a wildcard would let a
 		// mis-stamped model id reach the provider unremarked. The models are

@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // proxyTokenAnthropicPrefix shapes the per-run Anthropic token like a
@@ -104,6 +105,11 @@ type runProxies struct {
 	// via RunProxyHandle.LLMEnv by the native engine, which runs in the
 	// executor process, not the jail.
 	llmEnv []string
+
+	// llmCertPEM is the public certificate the LLM proxy serves TLS with,
+	// for the caller that dials llmEnv's address to trust. Read via
+	// RunProxyHandle.LLMCertPEM.
+	llmCertPEM []byte
 
 	// gitProxyURL / gitProxyToken are the git proxy's own address and per-run
 	// placeholder token, surfaced so the orchestrator's pre-sandbox clone can
@@ -433,6 +439,17 @@ func (h *RunProxyHandle) LLMEnv() []string {
 	return h.p.llmEnv
 }
 
+// LLMCertPEM returns the PEM certificate the LLM proxy serves TLS with: a
+// per-run self-signed leaf for the address LLMEnv names. The caller dialing
+// that address trusts it for that hop, so no certificate check is skipped.
+// Public; the private key stays in this process.
+func (h *RunProxyHandle) LLMCertPEM() []byte {
+	if h == nil || h.p == nil {
+		return nil
+	}
+	return h.p.llmCertPEM
+}
+
 // GitHandler returns the git proxy's own http.Handler, or nil when this run
 // started no git proxy. The sidecar mounts it behind the gh injector's TLS
 // listener so one address — the run's shared fake-GHE origin — serves both the
@@ -567,6 +584,16 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	}
 	cfg.llm.IncomingToken = token
 
+	// The proxy serves TLS under a certificate minted here for the address it
+	// binds, because bifrost's Bedrock provider dials nothing but https. Its
+	// one client, the native engine, is handed the public half to trust; the
+	// key never leaves this process.
+	cert, certPEM, err := proxycert.Generate("llm proxy", hostVethIP)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: generate llm proxy certificate: %w", err)
+	}
+	cfg.llm.Cert = &cert
+
 	bundle := &runProxies{}
 
 	llm, err := llmproxy.New(cfg.llm)
@@ -586,13 +613,8 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	}
 	bundle.llm = llm
 
-	// http:// (not https://) on the local hop — the agent talks
-	// cleartext to the proxy across the veth pair, the proxy talks
-	// TLS to the real upstream. The agent-side hop is bounded by the
-	// netns + iptables / gVisor egress isolation, so no cleartext
-	// credential ever crosses an exposed network boundary (the
-	// placeholder is what the agent sends, not the real key).
-	llmURL := "http://" + addr
+	llmURL := "https://" + addr
+	bundle.llmCertPEM = certPEM
 
 	// The handle always carries the LLM coordinates, because whoever asked
 	// for this proxy is calling a provider through it from somewhere — the
@@ -855,6 +877,10 @@ type sandboxProxyConfig struct {
 	// One of "anthropic", "bedrock_bearer", or "bedrock_sigv4". Drives
 	// the placeholder env shape (different env vars for each provider).
 	providerKind llmproxy.Provider
+	// sigV4Region is the run-start signing region for bedrock_sigv4. It is
+	// kept here because a live credential source replaces llm.SigV4Credentials,
+	// and the client's region must still match the proxy's signing scope.
+	sigV4Region string
 }
 
 // proxyConfigFromCreds maps a resolveCredentials output to the
@@ -938,6 +964,7 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 				},
 			},
 			providerKind: llmproxy.ProviderBedrockSigV4,
+			sigV4Region:  region,
 		}, nil
 	}
 
@@ -1017,8 +1044,8 @@ func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL, incomingToken string) 
 			"AWS_SECRET_ACCESS_KEY=" + sigV4PlaceholderSecret,
 			"CLAUDE_CODE_USE_BEDROCK=1",
 		}
-		if cfg.llm.SigV4Credentials != nil {
-			env = append(env, "AWS_REGION="+cfg.llm.SigV4Credentials.Region)
+		if cfg.sigV4Region != "" {
+			env = append(env, "AWS_REGION="+cfg.sigV4Region)
 		}
 		return env
 	}

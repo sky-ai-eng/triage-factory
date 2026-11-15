@@ -18,6 +18,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 )
 
 // This file is the shared-origin contract end to end, with a real git client on
@@ -143,9 +144,9 @@ func sharedOrigin(t *testing.T, upstream string, authorize func(context.Context,
 		t.Fatalf("gitproxy.New: %v", err)
 	}
 
-	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	// The API upstream is separate from the git one only because this test's git
 	// upstream is a CGI backend with no REST surface. On a real host they are
