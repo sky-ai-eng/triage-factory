@@ -920,9 +920,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 
 	// TF_ROLE=executor: stand up the run network + credential sidecar + proxies
-	// BEFORE workspace setup, so the pre-sandbox clone/GetPR and the agenthost
-	// route through the sidecar (holding placeholders) while the orchestrator
-	// holds no credential. nil on every other role (in-process proxy path) and
+	// BEFORE workspace setup, so the pre-sandbox clone, the PR read, and the
+	// agenthost route through the sidecar (holding placeholders) while the
+	// orchestrator holds no credential. nil on every other role (in-process proxy path) and
 	// on an unwired fixture. A bring-up failure (brain not provisioning) is a
 	// transient setup failure — requeue like any other. Torn down after the run.
 	closeGate("passed", nil)
@@ -1100,7 +1100,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 
 	// Resolve the run's GitHub client for the self-contained (all/local) path.
-	// On the executor path sidecar is non-nil and setupGitHub routes GetPR
+	// On the executor path sidecar is non-nil and setupGitHub routes its PR read
 	// through the sidecar's GitHub-REST proxy instead — this client is unused
 	// there (the executor's secret store is disabled).
 	// A failed read of the task's repository is a failed resolve: setupGitHub

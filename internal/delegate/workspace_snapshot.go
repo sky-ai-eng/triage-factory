@@ -1298,7 +1298,7 @@ func (s *Spawner) checkoutRestorerFor(orgID, entityID string, sidecar *runSideca
 			if client == nil {
 				return nil, errNoGitHubClient
 			}
-			return client.GetPR(ctx, owner, repo, number, false)
+			return client.GetPRBasic(ctx, owner, repo, number)
 		},
 	}
 }

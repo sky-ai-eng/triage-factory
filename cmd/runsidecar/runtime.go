@@ -348,7 +348,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	result.GitHubCredential = bundle.GitHub.Credential()
 
 	// The GitHub/Jira/Linear API credential proxies the orchestrator's own
-	// GetPR + agenthost verbs route through: the orchestrator holds only the
+	// PR read + agenthost verbs route through: the orchestrator holds only the
 	// placeholder, the sidecar injects the real token on the upstream hop. The
 	// GitHub one is requested; Jira and Linear start for exactly the sources
 	// the bundle's source manifest names usable — sealed, or unresolved and

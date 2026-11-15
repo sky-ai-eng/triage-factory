@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -189,6 +190,52 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	}
 	assertEntries(t, got[0].Auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.3:4100", "https://github.com", "run-placeholder"))
+}
+
+// TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest: a PR checkout's
+// push tracking is rebuilt from the pull request's refs and head repository,
+// which the pull request object carries, so the rebuild asks GitHub for that
+// object alone. Each further read, of its reviews or its comments, is one
+// more serial request through the sidecar before the agent can start.
+func TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest(t *testing.T) {
+	f := newSnapshotFixture(t, "task-pr-read")
+	f.addCheckout(t, "acme/app", "pr-7")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	// An HTTPS origin, so push tracking takes the pull request's clone_url.
+	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "app", CloneURL: "https://github.com/acme/app.git"}}
+	var requests requestLog
+	srv := f.prServer(t, &requests)
+
+	// Recorded, not run: the git proxy address routes nowhere in a test, and
+	// the pull request's fields reaching the restore are what is checked.
+	var got []worktree.CheckoutRestore
+	restore := restoreCheckout
+	restoreCheckout = func(_ context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		got = append(got, r)
+		return worktree.RestoredCheckout{Owner: r.Owner, Repo: r.Repo, Path: filepath.Join(r.Root, r.Owner, r.Repo, r.Slug)}, nil
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	sidecar := &runSidecar{res: &sidecarproto.StartProxiesResult{
+		GitProxyURL: "http://10.42.0.3:4100", GitProxyToken: "run-placeholder",
+		GitHubAPIURL: srv.URL, GitHubAPIToken: "api-placeholder",
+	}}
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, "entity-unread", sidecar, nil)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("cold rehydrate rebuilt %d checkouts, want 1", len(got))
+	}
+	want := worktree.PRCheckout{HeadRef: "feature", HeadCloneURL: f.upstream(t, "acme/app"), BaseRef: "main"}
+	if got[0].PR == nil || *got[0].PR != want {
+		t.Errorf("restore push tracking = %+v, want %+v from the pull request", got[0].PR, want)
+	}
+	if paths, wantPaths := requests.all(), []string{"/repos/acme/app/pulls/7"}; !slices.Equal(paths, wantPaths) {
+		t.Errorf("GitHub requests = %v, want only %v", paths, wantPaths)
+	}
 }
 
 // TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare: an executor that never
