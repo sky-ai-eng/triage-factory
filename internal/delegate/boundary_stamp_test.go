@@ -120,7 +120,7 @@ func TestReactor_AdvancedStepRefusesAFollowUp(t *testing.T) {
 	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0)); ok || reason != ResumeBlockedEndedStepAdvanced {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedEndedStepAdvanced)
 	}
-	if err := s.SendMessage(ctx, org, step0, runmode.LocalDefaultUserID, "one more thing"); !errors.Is(err, ErrConversationEnded) {
+	if err := s.SendMessage(ctx, org, step0, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); !errors.Is(err, ErrConversationEnded) {
 		t.Errorf("SendMessage = %v, want ErrConversationEnded", err)
 	}
 	if got := pendingRows(t, s, step0); len(got) != 0 {
@@ -163,7 +163,7 @@ func TestFailedConversationRefusesAFollowUpAsEnded(t *testing.T) {
 	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, conversationID)); ok || reason != ResumeBlockedEndedFailed {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedEndedFailed)
 	}
-	if err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "retry"); !errors.Is(err, ErrConversationEnded) {
+	if err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "retry", domain.TurnSettings{}); !errors.Is(err, ErrConversationEnded) {
 		t.Errorf("SendMessage = %v, want ErrConversationEnded", err)
 	}
 }

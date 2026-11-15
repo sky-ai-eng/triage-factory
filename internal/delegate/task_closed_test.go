@@ -254,7 +254,7 @@ func TestTellTaskClosed_WhoStartedTheWorkChangesNothing(t *testing.T) {
 				t.Fatalf("make the conversation a person's: %v", err)
 			}
 			delivered := true
-			message := pendingUserInput(f.convID, runmode.LocalDefaultUserID, "fix the nits before I approve")
+			message := pendingUserInput(f.convID, runmode.LocalDefaultUserID, "fix the nits before I approve", domain.TurnSettings{})
 			message.Delivered = &delivered
 			if _, err := f.s.conversations.InsertMessage(ctx, org, message); err != nil {
 				t.Fatalf("record the person's message: %v", err)

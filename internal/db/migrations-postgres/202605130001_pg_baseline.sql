@@ -1300,7 +1300,14 @@ CREATE TABLE public.messages (
     tool_call_id text,
     is_error boolean DEFAULT false NOT NULL,
     metadata jsonb,
+    -- On an assistant row, the model that produced it. On a person's own row
+    -- (role 'user', blank subtype), the model that message runs on, and
+    -- effort is the reasoning effort it runs at: one of 'low', 'medium',
+    -- 'high', 'xhigh' and 'max', NULL for the provider's default. The newest
+    -- person row holds the conversation's current settings. NULL on every
+    -- other row.
     model text,
+    effort text,
     input_tokens integer,
     output_tokens integer,
     cache_read_tokens integer,

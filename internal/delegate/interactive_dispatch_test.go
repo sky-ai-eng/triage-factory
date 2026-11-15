@@ -84,7 +84,7 @@ func newInteractiveFixture(t *testing.T, suffix string) *interactiveFixture {
 func (f *interactiveFixture) claim(t *testing.T, message string) *domain.Conversation {
 	t.Helper()
 	ctx := context.Background()
-	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID, message); err != nil {
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID, message, domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -338,7 +338,7 @@ func TestFailureBeforeTheModelSpokeOwesNoMemory(t *testing.T) {
 	if err != nil || task == nil || task.ConversationID == "" || task.ConversationID == f.conv.ID {
 		t.Fatalf("the task's replacement conversation = (%+v, %v), want a new one", task, err)
 	}
-	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, task.ConversationID, runmode.LocalDefaultUserID, "try again"); err != nil {
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, task.ConversationID, runmode.LocalDefaultUserID, "try again", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage to the replacement: %v", err)
 	}
 	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -453,7 +453,7 @@ func TestDispatch_InteractiveSDKCutOffTurnResumesItsSession(t *testing.T) {
 
 			// The follow-up is sent, and an engagement takes it off the queue
 			// and ends before its reply does.
-			if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID, "which test?"); err != nil {
+			if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID, "which test?", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage: %v", err)
 			}
 			if _, _, ok, err := f.stores.ConversationPendingInput.Consume(ctx, runmode.LocalDefaultOrgID, f.conv.ID); err != nil || !ok {
@@ -631,7 +631,7 @@ func TestDispatch_InteractiveTurnActsForThePersonWhoAsked(t *testing.T) {
 	}
 	ctx := context.Background()
 	launched := f.endTurn(t, "sess-1421-asker", "here is what I found")
-	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, bob, "what changed?"); err != nil {
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.conv.ID, bob, "what changed?", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage as the new holder: %v", err)
 	}
 	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -690,7 +690,7 @@ func TestNativeTranscript_AttributesATurnToThePersonItAnswers(t *testing.T) {
 		t.Errorf("a row before any delivered message is attributed to %q, want the person the engagement acts for", got)
 	}
 
-	asked, err := s.conversations.InsertMessageSystem(ctx, org, pendingUserInput("r-native-asker", bob, "and the other test?"))
+	asked, err := s.conversations.InsertMessageSystem(ctx, org, pendingUserInput("r-native-asker", bob, "and the other test?", domain.TurnSettings{}))
 	if err != nil {
 		t.Fatalf("queue Bob's message: %v", err)
 	}

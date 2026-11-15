@@ -81,6 +81,9 @@ function parseArgs(argv) {
       case "--model":
         opts.model = next()
         break
+      case "--effort":
+        opts.effort = next()
+        break
       case "--permission-mode":
         opts.permissionMode = next()
         break
@@ -527,6 +530,19 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes, tfT
           await q.setPermissionMode(ctl.mode)
         } catch (err) {
           process.stderr.write(`wrapper: set_mode failed: ${err?.stack ?? err}\n`)
+        }
+        break
+
+      case "set_settings":
+        // The model and effort the process's next turn runs on. Control
+        // lines are handled one at a time, so both land before a
+        // user_message written after this one is pushed. An empty effort
+        // clears it back to Claude Code's default.
+        try {
+          await q.setModel(ctl.model)
+          await q.applyFlagSettings({ effortLevel: ctl.effort || null })
+        } catch (err) {
+          process.stderr.write(`wrapper: set_settings failed: ${err?.stack ?? err}\n`)
         }
         break
 

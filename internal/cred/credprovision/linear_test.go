@@ -157,6 +157,10 @@ func (provisionConversations) GetSystem(_ context.Context, _, conversationID str
 	return &domain.Conversation{ID: conversationID}, nil
 }
 
+func (provisionConversations) NewestPersonMessageSystem(context.Context, string, string) (*domain.Message, error) {
+	return nil, nil
+}
+
 type provisionClaimCredentials struct {
 	db.ClaimCredentialsStore
 	claimID string

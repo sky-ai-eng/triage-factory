@@ -739,12 +739,19 @@ type Message struct {
 	// person's message — and every discriminating value is named: the
 	// InjectionSubtype constants, MessageSubtypeStopNote, the deliverable
 	// system_note.
-	Subtype             string
-	ToolCalls           []ToolCall
-	ToolCallID          string
-	IsError             bool
-	Metadata            map[string]any
+	Subtype    string
+	ToolCalls  []ToolCall
+	ToolCallID string
+	IsError    bool
+	Metadata   map[string]any
+	// Model is, on an assistant row, the model that produced it. On a
+	// person's own row (role "user", blank subtype) it is the model that
+	// message runs on, and Effort is the reasoning effort it runs at (one of
+	// EffortLevels, "" for the provider's default). Every person row records
+	// both, so the newest one holds the conversation's current settings. No
+	// other row carries an Effort.
 	Model               string
+	Effort              string
 	InputTokens         *int
 	OutputTokens        *int
 	CacheReadTokens     *int
@@ -1005,7 +1012,7 @@ type Claim struct {
 	// Outcome is how the engagement ended: "completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
 	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
-	// "requeued_jail_lost". Empty while live.
+	// "requeued_jail_lost" | "requeued_provider_switch". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
@@ -1048,7 +1055,7 @@ type ExecutorClaim struct {
 	// Outcome is how the engagement ended ("completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
 	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
-	// "requeued_jail_lost"); empty while live.
+	// "requeued_jail_lost" | "requeued_provider_switch"); empty while live.
 	Outcome string
 	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
 	// when the engagement last did anything the stall watchdog counts as

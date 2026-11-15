@@ -242,7 +242,7 @@ func TestMintOpeningTurn_OpensAheadOfAQueuedFollowUp(t *testing.T) {
 
 	// A person types while the conversation waits for an executor.
 	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
-		pendingUserInput("r-hoist", runmode.LocalDefaultUserID, "and update the README")); err != nil {
+		pendingUserInput("r-hoist", runmode.LocalDefaultUserID, "and update the README", domain.TurnSettings{})); err != nil {
 		t.Fatalf("queue the follow-up: %v", err)
 	}
 

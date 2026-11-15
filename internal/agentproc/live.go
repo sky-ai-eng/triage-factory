@@ -24,10 +24,17 @@ import (
 //	{"kind":"user_message","blocks":[{"type":"text","text":"..."}, ...]}
 //	{"kind":"interrupt"}
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
+//	{"kind":"set_settings","model":"...","effort":"low|medium|high|xhigh|max|"}
 //	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
 //	{"kind":"tool_batch_reply","id":"<id>","context":"...","stop":true|false}
 //	{"kind":"tool_call_reply","id":"<id>","content":"...","is_error":true|false}
 //	{"kind":"end"}
+//
+// A set_settings moves the process's next turn onto a model and an effort,
+// an empty effort being Claude Code's default. The wrapper handles control
+// lines one at a time, so a set_settings written before a user_message is in
+// effect for the turn that message starts. A turn already running keeps the
+// settings it started with.
 //
 // A user_message spells its content one way or the other — text is a plain
 // string turn, blocks a block-content one — and either is one turn. Nothing
@@ -206,6 +213,9 @@ type LiveRun struct {
 	result    *Result
 	sessionID string
 	stderr    string
+	// model and effort are what the process's next turn runs on: the
+	// launch's, until a SetSettings the wrapper was sent moves them.
+	model, effort string
 }
 
 // RunInteractive spawns the agent in streaming-input mode and returns a
@@ -287,6 +297,8 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		tfTools:   tfToolsByName(opts.TFTools),
 		tfRun:     tooldefs.Run{OrgID: opts.OrgID, ConversationID: opts.ConversationID, ClaimID: opts.ClaimID},
 		runCtx:    runCtx,
+		model:     opts.Model,
+		effort:    opts.Effort,
 	}
 
 	// opts travels whole because the teardown stamp at the end of the loop
@@ -380,6 +392,30 @@ func (l *LiveRun) SetMode(ctx context.Context, mode string) error {
 		return err
 	}
 	return l.writeControl(map[string]any{"kind": "set_mode", "mode": mode})
+}
+
+// SetSettings moves the process's next turn onto model and effort ("" for
+// Claude Code's default effort). Written before the message that starts the
+// turn, it is in effect for it. Settings reports them once the control is
+// written.
+func (l *LiveRun) SetSettings(ctx context.Context, model, effort string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := l.writeControl(map[string]any{"kind": "set_settings", "model": model, "effort": effort}); err != nil {
+		return err
+	}
+	l.mu.Lock()
+	l.model, l.effort = model, effort
+	l.mu.Unlock()
+	return nil
+}
+
+// Settings is the model and effort the process's next turn runs on.
+func (l *LiveRun) Settings() (model, effort string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.model, l.effort
 }
 
 // Close ends the run gracefully: it tells the wrapper to end its input

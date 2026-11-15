@@ -326,7 +326,7 @@ func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
 		t.Fatalf("record the agent's turn: %v", err)
 	}
 	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
-		pendingUserInput("r-sdk-fresh", runmode.LocalDefaultUserID, "and update the README")); err != nil {
+		pendingUserInput("r-sdk-fresh", runmode.LocalDefaultUserID, "and update the README", domain.TurnSettings{})); err != nil {
 		t.Fatalf("queue the follow-up: %v", err)
 	}
 	before := len(allRows(t, s, "r-sdk-fresh"))

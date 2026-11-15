@@ -595,6 +595,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	baseOpts := agentproc.RunOptions{
 		Cwd:                claudeCwd,
 		Model:              model,
+		Effort:             s.claimEffort(ctx, orgID, conversationID, model),
 		PermissionMode:     teamOpts.permissionMode,
 		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
 		SessionID:          resumeSession,

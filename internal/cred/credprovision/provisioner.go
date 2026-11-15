@@ -468,10 +468,21 @@ func githubEntry(gh *credbundle.GitHubCreds) domain.SourceEntry {
 // on an Anthropic key seals the Anthropic key — never both, and never the org's
 // preferred provider over the conversation's own.
 //
+// It chooses the way the claim does: the newest person message's model when a
+// person row recorded one, since that is what the claim runs on, and the
+// conversation's own model otherwise.
+//
 // A read failure is propagated rather than degraded to "no model". Resolving
 // without one falls back to the org's configured provider, which for an org
 // holding both would seal material this conversation may not be able to use.
 func (m *Manager) conversationModel(ctx context.Context, orgID, conversationID string) (string, error) {
+	last, err := m.stores.Conversations.NewestPersonMessageSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("credprovision: read conversation %s's newest person message: %w", conversationID, err)
+	}
+	if last != nil && last.Model != "" {
+		return last.Model, nil
+	}
 	conv, err := m.stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return "", fmt.Errorf("credprovision: read conversation %s: %w", conversationID, err)

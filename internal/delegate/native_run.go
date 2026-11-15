@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -285,6 +286,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// whitelist below, so the request and the whitelist agree by construction.
 	coldModel := coldCompactionModelFor(model)
 
+	// The settings the engagement starts on: the claim's model, and the
+	// effort the newest person message asked for when it asked on that
+	// model. The engine moves both from there as a person's messages ask.
+	switchable := s.switchableModels(ctx, orgID, cfg.teamID, model)
+	effort := s.claimEffort(ctx, orgID, conversationID, model)
+
 	// Checkpoints, for as long as the engagement's turns and the warm waits
 	// between them run, and not a moment longer. recordNativeResult stops this
 	// before any ending writes, because a checkpoint still in flight is the same
@@ -296,7 +303,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 
 	engine := &agentloop.Engine{
 		Transcript:  transcript,
-		Credentials: s.nativeCredentials(cfg, model, coldModel),
+		Credentials: s.nativeCredentials(cfg, switchable, coldModel),
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
 		Hooks: checkpointHooks(ckpt, agentloop.Hooks{
@@ -315,14 +322,16 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 
 	params := agentloop.Params{
-		OrgID:          orgID,
-		ConversationID: conversationID,
-		ClaimID:        cfg.claimID,
-		EngagementSpan: engagementSpan,
-		Model:          model,
-		SystemPrompt:   systemPrompt,
-		SystemAddendum: launchText.systemBlock,
-		HasBlueprint:   cfg.blueprintRunID != "",
+		OrgID:            orgID,
+		ConversationID:   conversationID,
+		ClaimID:          cfg.claimID,
+		EngagementSpan:   engagementSpan,
+		Model:            model,
+		Effort:           effort,
+		SwitchableModels: switchable,
+		SystemPrompt:     systemPrompt,
+		SystemAddendum:   launchText.systemBlock,
+		HasBlueprint:     cfg.blueprintRunID != "",
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
 		BashMemBudgetMB: nativeBashMemBudgetMB(memoryLimitMB),
@@ -675,18 +684,41 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, nam
 // Read off the sidecar's LLM coordinates rather than the sandbox env, and that
 // distinction is the whole of the cell shrink: those coordinates now go to
 // exactly one place, this call, and the jail is built without them.
-func (s *Spawner) nativeCredentials(cfg runConfig, model, coldModel string) agentloop.Credentials {
+func (s *Spawner) nativeCredentials(cfg runConfig, switchable []string, coldModel string) agentloop.Credentials {
 	env := envSliceToMap(cfg.sidecar.engineLLMEnv())
 	return &agentloop.EnvCredentials{
 		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
 		// The whitelist must name the models actually requested: bifrost
 		// reads an empty whitelist as "no models", and a wildcard would let a
-		// mis-stamped model id reach the provider unremarked. The forced-shape
-		// compaction model is the caller's resolved value, not a constant read
-		// of its own — the same resolution feeds the engine's params, so the
-		// compaction request and this whitelist cannot drift apart.
-		Models: []string{model, coldModel},
+		// mis-stamped model id reach the provider unremarked. The models are
+		// the ones the engine may switch to, its own included, and the
+		// forced-shape compaction model; both are the caller's resolved
+		// values, which also feed the engine's params, so a request and this
+		// whitelist cannot drift apart.
+		Models: append(slices.Clone(switchable), coldModel),
 	}
+}
+
+// switchableModels are the models an engagement on model may move to without
+// a new credential: the team's enabled models its provider serves, by their
+// catalog entries, and model itself. A failed read of the team's models, or a
+// model the catalog does not offer, leaves model alone, and a message naming
+// another then hands the claim back for the next claim to decide.
+func (s *Spawner) switchableModels(ctx context.Context, orgID, teamID, model string) []string {
+	out := []string{model}
+	models, err := s.resolveModel(ctx, orgID, teamID)
+	if err != nil {
+		delegateLog.Warn("read the team's models for the engagement's switchable set failed; it switches to no other model",
+			"team", teamID, "model", model, "error", err)
+		return out
+	}
+	enabled := models.Enabled()
+	for _, key := range deploymentUniverse().Keys() {
+		if key != model && enabled.Has(key) && sameProvider(key, model) {
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // bedrockColdCompactionModel is Haiku 5.5 under the id a Bedrock credential
@@ -1061,6 +1093,27 @@ func (s *Spawner) recordNativeResult(
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),
 		}, cfg.jailLosses, lost, creatorUserID)
+
+	case agentloop.ResultProviderSwitch:
+		// A person's message named a model this engagement's credentials
+		// cannot call. Nothing about the conversation failed and the message
+		// is in its transcript, so the claim goes back at once, spending no
+		// budget, and the next claim seals that model's provider and runs on
+		// it.
+		if leaseFenced(ctx) {
+			return engagementDisposition{fenced: true}
+		}
+		terminal = "provider_switch"
+		return engagementDisposition{fenced: s.handBackOnProviderSwitch(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			claimID:        cfg.claimID,
+			runtime:        domain.ConversationRuntimeNative,
+			mirror:         mirror,
+			cell:           cfg.sidecar.treeHandOff(),
+		}, result.Model), handedBack: true}
 
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,

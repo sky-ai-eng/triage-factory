@@ -211,7 +211,7 @@ func TestModelsList_LocalServesTheSDKAliasList(t *testing.T) {
 				t.Errorf("%s: field %q is on the wire, want it omitted", item["key"], absent)
 			}
 		}
-		for _, required := range []string{"key", "display_name", "enabled", "display_order"} {
+		for _, required := range []string{"key", "display_name", "enabled", "display_order", "effort_levels"} {
 			if _, present := item[required]; !present {
 				t.Errorf("%v: field %q is missing", item["key"], required)
 			}
@@ -328,4 +328,32 @@ func TestTeamModelsRead_ScopeAndSets_Postgres(t *testing.T) {
 			t.Errorf("read of another org's team = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+// effort_levels is on every row as an array, so a model that takes no effort
+// says so rather than leaving the field out.
+func TestCatalogRow_EffortLevelsAreAlwaysAnArray(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		levels []string
+		want   string
+	}{
+		{"a model that takes four", []string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh, domain.EffortXHigh}, `["low","medium","high","xhigh"]`},
+		{"a model that takes none", []string{}, `[]`},
+		{"a row built with no list", nil, `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(catalogRow(modelcatalog.Model{Key: "m", DisplayName: "M", EffortLevels: tc.levels}, true, availabilityIndex{}))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(b, &raw); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := string(raw["effort_levels"]); got != tc.want {
+				t.Errorf("effort_levels = %s, want %s", got, tc.want)
+			}
+		})
+	}
 }

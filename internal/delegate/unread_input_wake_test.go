@@ -27,7 +27,7 @@ func concludeWithUnreadMessage(t *testing.T, s *Spawner, convID string, outcome 
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	claimID := holderClaimFor(t, s, org, convID)
-	if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "thanks")); err != nil {
+	if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "thanks", domain.TurnSettings{})); err != nil {
 		t.Fatalf("queue the message: %v", err)
 	}
 	if _, err := s.conversations.CompleteForClaimSystem(ctx, org, convID, claimID, domain.StatusOpen, 0, 0, 1,
@@ -265,7 +265,7 @@ func TestWakeForUnreadInput_LeavesAFollowUpsParkToTheQueue(t *testing.T) {
 				t.Fatalf("conclude: %v", err)
 			}
 			reactAsTheDispatchDoes(t, s, brID, convID)
-			if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+			if err := s.SendMessage(ctx, org, convID, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 				t.Fatalf("follow-up: %v", err)
 			}
 			followUpClaim := holderClaimFor(t, s, org, convID)
@@ -273,7 +273,7 @@ func TestWakeForUnreadInput_LeavesAFollowUpsParkToTheQueue(t *testing.T) {
 				if _, _, _, err := s.pendingInput.Consume(ctx, org, convID); err != nil {
 					t.Fatalf("drain the follow-up: %v", err)
 				}
-				if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "and another")); err != nil {
+				if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(convID, runmode.LocalDefaultUserID, "and another", domain.TurnSettings{})); err != nil {
 					t.Fatalf("queue the second message: %v", err)
 				}
 			}
@@ -334,14 +334,17 @@ func liveInputFixture(t *testing.T, convID string) (*Spawner, *sql.DB, *fakeLive
 		orgID: org, conversationID: convID, namespace: "seedbpr-" + convID, claudeCwd: "/tmp/wt-" + convID,
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
-	return s, database, newFakeLiveProc("sess-" + convID), park
+	// The process runs on the conversation's model, as a launch starts it.
+	proc := newFakeLiveProc("sess-" + convID)
+	proc.model = "claude-sonnet-4-6"
+	return s, database, proc, park
 }
 
 // sendWhileLive sends a person's message to the conversation's live process,
 // as the message endpoint does.
 func sendWhileLive(t *testing.T, s *Spawner, convID, text string) {
 	t.Helper()
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, convID, runmode.LocalDefaultUserID, text); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, convID, runmode.LocalDefaultUserID, text, domain.TurnSettings{}); err != nil {
 		t.Fatalf("send %q: %v", text, err)
 	}
 }
@@ -519,7 +522,7 @@ func TestDriveLiveConversation_AStopLeavesAWaitingMessageUnread(t *testing.T) {
 	if got := pendingRows(t, s, "r-stop"); len(got) != 1 || got[0].Content != "thanks" {
 		t.Errorf("pending rows = %+v, want the message still queued", got)
 	}
-	err := s.SendMessage(context.Background(), park.orgID, "r-stop", runmode.LocalDefaultUserID, "one more")
+	err := s.SendMessage(context.Background(), park.orgID, "r-stop", runmode.LocalDefaultUserID, "one more", domain.TurnSettings{})
 	if !errors.Is(err, ErrNoLiveProcess) {
 		t.Errorf("a send after the driver let go: err = %v, want ErrNoLiveProcess", err)
 	}

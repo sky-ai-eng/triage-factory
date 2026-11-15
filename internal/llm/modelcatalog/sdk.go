@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // SDKClaudeCode is the Claude Code SDK, the one agent harness TF drives as a
@@ -112,6 +115,9 @@ func loadSDKModels(fileJSON []byte) (map[string][]Model, error) {
 				// Position in the built slice, not in the file: a dropped row
 				// must not leave a hole in the ordering the API publishes.
 				DisplayOrder: len(models),
+				// The harness takes every level for every alias it offers,
+				// and there is no datasheet row to say otherwise.
+				EffortLevels: slices.Clone(domain.EffortLevels),
 			})
 		}
 		if len(models) == 0 {

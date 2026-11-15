@@ -794,9 +794,10 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 
 	// Past the authorization gate, so this claim will really run — decide the
 	// model it runs on before either arm below picks it up. A refusal here is a
-	// team whose default its own enable-set no longer includes: nothing has run
-	// under this claim, so it takes the ordinary pre-agent failure path and the
-	// message names the model.
+	// model the team's enable-set no longer includes, the one the newest
+	// person message asked for or the team's default: nothing has run under
+	// this claim, so it is disposed of without retries and the note names the
+	// model.
 	model, err := s.modelForClaim(ctx, orgID, br, *conv)
 	if err != nil {
 		if fencedAtGate() {
@@ -1618,6 +1619,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,
+		Effort:            s.claimEffort(stepCtx, orgID, conv.ID, conv.Model),
 		SystemBlock:       s.launchedSystemBlock(stepCtx, orgID, conv.ID),
 		GitHubOwner:       owner,
 		ExtraAllowedTools: extraTools,
@@ -1887,18 +1889,50 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 
 // modelForClaim resolves the model one claim runs on.
 //
+// It answers first with the model the newest person message runs on, which
+// the send stamped on that message's row (resolveTurnSettings), held to the
+// team's enabled set. That is what makes a person's pick the model the claim
+// carrying their message runs on. Under a running blueprint the send keeps
+// that model and the step's the same, and a model disabled since the message
+// was sent refuses the claim by name (domain.ErrModelNotEnabled), which the
+// dispatch parks without spending retries.
+//
+// A conversation no person row has given a model to resolves as
+// claimModelWithoutPersonRow does.
+func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
+	last, err := s.newestStampedPersonRow(ctx, orgID, conv.ID)
+	if err != nil {
+		return "", err
+	}
+	if last == nil {
+		return s.claimModelWithoutPersonRow(ctx, orgID, br, conv)
+	}
+	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
+	if err != nil {
+		return "", err
+	}
+	if err := models.RequireModel(last.Model); err != nil {
+		return "", err
+	}
+	return last.Model, nil
+}
+
+// claimModelWithoutPersonRow is the model a claim runs on when no person
+// message names one.
+//
 // A claim under a running blueprint is a step of a plan, and it runs on the
 // model frozen onto that step — the anti-drift rule the whole run path holds
 // to, so a config change mid-blueprint never switches models underneath work
 // already in progress.
 //
-// A claim under a blueprint that has already finished is something else: a
-// follow-up on concluded work, whose model is a fresh decision rather than an
-// inherited one. It gets the team's current default. The alternative is worse
-// than it sounds — a blueprint's last step is often its cheapest, a mechanical
-// assembly step someone pinned down on purpose, so inheriting would answer a
-// person's first-ever follow-up with that step's model, at exactly the moment
-// they are deciding whether follow-ups work at all.
+// Every other claim takes a fresh decision: the team's current default. That
+// is a follow-up on a blueprint that has finished, and a conversation with no
+// blueprint run, which is the one a person's claim mints with no model at all.
+// Inheriting would be worse than it sounds — a blueprint's last step is often
+// its cheapest, a mechanical assembly step someone pinned down on purpose, so
+// inheriting would answer a person's first-ever follow-up with that step's
+// model, at exactly the moment they are deciding whether follow-ups work at
+// all.
 //
 // Nothing is written: the conversation row keeps the model its step ran on, and
 // no blueprint step's model moves. Only this turn is re-modelled.
@@ -1910,12 +1944,8 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 // substitution R6 forbids wearing an inheritance costume. A step of a RUNNING
 // blueprint never asks: its model was frozen at the firing and mid-blueprint
 // work is not re-decided.
-//
-// A conversation a person works in takes the same fresh decision on every
-// claim. It has no step whose model could be frozen, and is minted with no
-// model at all, so there is nothing for it to inherit.
-func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
-	if conv.Type != domain.ConversationTypeInteractive && (br == nil || br.Status == domain.BlueprintRunStatusRunning) {
+func (s *Spawner) claimModelWithoutPersonRow(ctx context.Context, orgID string, br *domain.BlueprintRun, conv domain.Conversation) (string, error) {
+	if br != nil && br.Status == domain.BlueprintRunStatusRunning {
 		return conv.Model, nil
 	}
 	models, err := s.resolveModel(ctx, orgID, conv.TeamID)
@@ -2708,7 +2738,9 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 // The note is the refusal itself, which already names the model and the set
 // that excludes it, so the person reading the transcript is told the one thing
 // that fixes it. "Send a message to retry" is deliberately absent: a message
-// would wake the conversation into this same refusal until somebody picks.
+// that names no model inherits the refused one, and the send refuses it; the
+// message that clears this names an enabled model, and the claim after it
+// runs on that.
 func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) {
 	if br == nil || s.conversationHasWork(orgID, conv.ID) {
 		dispatchLog.Warn("claim refused: the model this conversation would run on is not enabled for its team; parking",

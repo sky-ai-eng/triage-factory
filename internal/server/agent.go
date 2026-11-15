@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -67,13 +68,15 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 
 // writeConversationResource reads the conversation resource exactly as
 // handleAgentStatus does — the point read plus its display enrichment
-// (artifact counts, the derived approval signal, blueprint step count, resumability) — and writes it as
-// the response. Shared with handleAgentStop/handleMessage so a mutating verb
-// route answers with the resource it just changed rather than a status stub
-// naming only the field that verb happens to touch.
+// (artifact counts, the derived approval signal, blueprint step count,
+// resumability, the next message's settings, and the cache's warmth) — and
+// writes it as the response. Shared with handleAgentStop/handleMessage so a
+// mutating verb route answers with the resource it just changed rather than a
+// status stub naming only the field that verb happens to touch.
 func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http.Request, orgID, userID, conversationID string) {
 	var conv *domain.Conversation
 	var resp map[string]any
+	var newestAssistant *domain.Message
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
@@ -124,6 +127,13 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 			}
 		}
 		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], actionCounts[conv.ID], progress, "")
+		// Read last, so a failure costs only cache_warm_until, the field it
+		// is for.
+		if a, lerr := tx.Conversations.NewestAssistant(r.Context(), orgID, conv.ID); lerr != nil {
+			serverLog.Warn("newest assistant message lookup failed; omitting cache_warm_until", "conversation", conv.ID, "error", lerr)
+		} else {
+			newestAssistant = a
+		}
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -133,9 +143,49 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		notFound(w, "conversation")
 		return
 	}
+	addCacheWarmUntil(resp, newestAssistant)
 	addResumability(r.Context(), resp, orgID, conv, ag.spawner())
+	addNextMessageSettings(r.Context(), resp, orgID, conv, ag.spawner())
 	ag.addCanWrite(r.Context(), orgID, userID, []string{conv.ID}, []map[string]any{resp})
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// addCacheWarmUntil puts on the detail read when the provider's prompt
+// cache from the newest active assistant turn goes cold: that turn's time
+// plus domain.ProviderCacheTTL, in RFC 3339 UTC, for the client to compare
+// with the current time. Warmth is derived, never stored, and the field is
+// absent for a conversation with no assistant turn in its window.
+func addCacheWarmUntil(resp map[string]any, newestAssistant *domain.Message) {
+	if newestAssistant == nil {
+		return
+	}
+	resp["cache_warm_until"] = newestAssistant.CreatedAt.Add(domain.ProviderCacheTTL).UTC().Format(time.RFC3339)
+}
+
+// addNextMessageSettings puts on the detail read the settings a message that
+// names none would run on (Spawner.NextMessageSettings), which the composer
+// opens with: next_message_model, and next_message_effort when the effort is
+// not the provider's default. Best-effort like the read's other enrichment:
+// a resolution that fails omits both, which a team whose default model is no
+// longer enabled does, and the composer then asks for a model.
+func addNextMessageSettings(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
+	if spawner == nil || conv == nil {
+		return
+	}
+	settings, err := spawner.NextMessageSettings(ctx, orgID, *conv)
+	if err != nil {
+		if !errors.Is(err, domain.ErrModelNotEnabled) {
+			serverLog.Warn("next message settings lookup failed; omitting next_message_model and next_message_effort", "conversation", conv.ID, "error", err)
+		}
+		return
+	}
+	if settings.Model == "" {
+		return
+	}
+	resp["next_message_model"] = settings.Model
+	if settings.Effort != "" {
+		resp["next_message_effort"] = settings.Effort
+	}
 }
 
 // addCanWrite puts requireWritableConversation's answer on each conversation
@@ -1017,6 +1067,13 @@ func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, 
 // broadcast — an optimistic write here used to leave a refused send painted
 // onto every watcher's transcript as a message the agent never received,
 // while the sender simultaneously saw an error toast.
+//
+// The body is {text, model?, effort?}. model and effort are the settings the
+// message runs on, and one left out takes the value the conversation's newest
+// person message ran on. A model must be one this deployment offers and an
+// effort one of domain.EffortLevels; whether the team may run the model, and
+// whether the model takes the effort, the send decides against the settings it
+// resolves (409, naming the field).
 func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -1030,15 +1087,15 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	traceConversation(r, conversationID)
 
 	var body struct {
-		Text string `json:"text"`
+		Text   string  `json:"text"`
+		Model  *string `json:"model"`
+		Effort *string `json:"effort"`
 	}
 	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.Text) == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "text is required", Field: "text",
-		})
+	settings, ok := decodeTurnSettings(w, body.Text, body.Model, body.Effort)
+	if !ok {
 		return
 	}
 
@@ -1052,7 +1109,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text); err != nil {
+	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text, settings); err != nil {
 		// A conversation deleted between the visibility read above and the routing read
 		// is a 404 like any other absent conversation — same body as the gate's own 404,
 		// not a 409 that would send the client re-reading state that no longer
@@ -1072,10 +1129,52 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		// The 4xx arms are all delegate sentinels — author-written state
 		// descriptions with nothing internal in them, and the text is the
 		// answer ("this conversation has moved on"), so it is surfaced.
-		httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: reason, Message: err.Error()})
+		httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: reason, Message: err.Error(), Field: steerErrorField(err)})
 		return
 	}
 	ag.writeConversationResource(w, r, orgID, userID, conversationID)
+}
+
+// decodeTurnSettings checks a message body's fields and answers the settings
+// the message names, reporting every failing field, text included, in one 400.
+// A model must be a key this deployment offers, the check the team-settings
+// PATCH makes for ai_model, and an effort one of domain.EffortLevels. A field
+// that is absent or null is not given, and the send resolves it.
+func decodeTurnSettings(w http.ResponseWriter, text string, model, effort *string) (domain.TurnSettings, bool) {
+	var v httpx.Validation
+	if strings.TrimSpace(text) == "" {
+		v.Missing("text")
+	}
+	var settings domain.TurnSettings
+	if model != nil {
+		if !models.DeploymentUniverse().Offers(*model) {
+			v.Invalid("model", fmt.Sprintf("model %q is not one this deployment offers (%s)", *model, strings.Join(models.DeploymentUniverse().Keys(), ", ")))
+		}
+		settings.Model = *model
+	}
+	if effort != nil {
+		if !domain.ValidEffort(*effort) {
+			v.Invalid("effort", fmt.Sprintf("effort must be one of: %s", strings.Join(domain.EffortLevels, ", ")))
+		}
+		settings.Effort = *effort
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return domain.TurnSettings{}, false
+	}
+	return settings, true
+}
+
+// steerErrorField is the body field a send refusal is about: the one a
+// settings refusal names, and model for a model the team may not run.
+func steerErrorField(err error) string {
+	var fe *delegate.SettingsFieldError
+	if errors.As(err, &fe) {
+		return fe.Field
+	}
+	if errors.Is(err, domain.ErrModelNotEnabled) {
+		return "model"
+	}
+	return ""
 }
 
 // steerErrorStatus maps a SendMessage error to an HTTP status. A
@@ -1089,13 +1188,15 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // it, so the message is not queued. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
 // conversation's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
-// A model the conversation's team may no longer pick (domain.ErrModelNotEnabled)
-// is 409 for the same reason as its neighbours and NOT the 422 a refused
-// delegation answers with: this is a rung of the resume ladder, so the composer
-// the run read disabled and the send refused here have to agree, and the client
-// re-reads the conversation to find out what changed. It is also the one rung a
-// person clears without touching the conversation at all — the message names
-// the model and the set, and re-enabling makes the very next send succeed.
+// A message whose settings the send refuses is 409 too, naming the field:
+// a model the conversation's team may not run (domain.ErrModelNotEnabled), a
+// model or effort other than a running blueprint step's
+// (delegate.ErrStepSettingsFixed), an effort the model does not take
+// (delegate.ErrEffortNotSupported), and a switch to a model whose window the
+// conversation already fills (delegate.ErrModelWindowTooSmall). Each is about
+// the conversation as it stands, and a different pick on the next message is
+// the fix, so the client re-reads the conversation rather than being told the
+// body was malformed.
 //
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it
@@ -1129,7 +1230,10 @@ func steerErrorStatus(err error) (int, string) {
 		errors.Is(err, delegate.ErrConversationNotSteerable),
 		errors.Is(err, delegate.ErrConversationNotResumable),
 		errors.Is(err, delegate.ErrStepHandedOff),
-		errors.Is(err, domain.ErrModelNotEnabled):
+		errors.Is(err, domain.ErrModelNotEnabled),
+		errors.Is(err, delegate.ErrStepSettingsFixed),
+		errors.Is(err, delegate.ErrEffortNotSupported),
+		errors.Is(err, delegate.ErrModelWindowTooSmall):
 		return http.StatusConflict, httpx.ReasonConflict
 	default:
 		return http.StatusInternalServerError, httpx.ReasonInternal

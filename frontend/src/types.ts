@@ -449,7 +449,7 @@ export interface Conversation {
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
   // 'blueprint_cancelled' | 'session_missing' | 'worktree_missing' |
-  // 'model_missing' | 'not_steerable' | one 'ended_*' per boundary
+  // 'not_steerable' | one 'ended_*' per boundary
   // (internal/delegate's ResumeBlocked* constants). Open-world by design — an
   // unrecognized reason renders as the generic "can't be resumed" copy.
   resume_blocked_reason?: string
@@ -1829,8 +1829,8 @@ export interface FleetSandboxClaim {
   failure_kind?: string
   /** How the ENGAGEMENT ended (completed | failed | cancelled | parked |
    *  requeued | requeued_credentials | reaped | requeued_shutdown |
-   *  requeued_upstream | requeued_jail_lost) — a claim vocabulary of its own, not a conversation
-   *  status. */
+   *  requeued_upstream | requeued_jail_lost | requeued_provider_switch) — a claim vocabulary of
+   *  its own, not a conversation status. */
   outcome?: string
   /** When the engagement last did anything its stall watchdog counts as
    *  activity, as the holder's last lease renewal stamped it. Absent before

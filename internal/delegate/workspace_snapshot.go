@@ -234,12 +234,13 @@ const snapshotBlobLeaf = "workspace.tar"
 // Why a snapshot is written, on the workspace.snapshot span. An ending covers
 // the whole transcript; a checkpoint covers it up to a position.
 const (
-	snapshotReasonPark       = "park"
-	snapshotReasonConclusion = "conclusion"
-	snapshotReasonShutdown   = "shutdown"
-	snapshotReasonUpstream   = "upstream"
-	snapshotReasonJailLost   = "jail_lost"
-	snapshotReasonCheckpoint = "checkpoint"
+	snapshotReasonPark           = "park"
+	snapshotReasonConclusion     = "conclusion"
+	snapshotReasonShutdown       = "shutdown"
+	snapshotReasonUpstream       = "upstream"
+	snapshotReasonJailLost       = "jail_lost"
+	snapshotReasonCheckpoint     = "checkpoint"
+	snapshotReasonProviderSwitch = "provider_switch"
 )
 
 // snapshotWrite names one persist: whose tree, under which key, for which

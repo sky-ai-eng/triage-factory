@@ -297,12 +297,12 @@ func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
 	}
 }
 
-// TestResumeWithMessage_RequiresModel pins the contract that a resume must
-// reuse the model captured at run start, so ResumeWithMessage rejects an
-// empty opts.Model with an error rather than falling back to a live
-// per-(org, team) resolve that could switch models mid-run. The guard sits
-// before any subprocess work (after the sessionID/cwd checks), so a bare
-// spawner with no stores is sufficient to exercise it.
+// TestResumeWithMessage_RequiresModel pins the contract that a resume runs on
+// the claim's model, so ResumeWithMessage rejects an empty opts.Model with an
+// error rather than resolving one of its own, which could disagree with the
+// model the claim's credentials were sealed for. The guard sits before any
+// subprocess work (after the sessionID/cwd checks), so a bare spawner with no
+// stores is sufficient to exercise it.
 func TestResumeWithMessage_RequiresModel(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "fallback-model")
 	// Even with a constructor fallback model set, an empty opts.Model must

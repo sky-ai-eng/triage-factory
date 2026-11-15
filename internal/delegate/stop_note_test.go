@@ -228,7 +228,7 @@ func TestStop_NoteRepeatsOnceAPersonHasSpoken(t *testing.T) {
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-restop", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("first stop: %v", err)
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-restop", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-restop", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'r-restop'`); err != nil {
@@ -257,7 +257,7 @@ func TestStop_ResumedConversationAssemblesTheNote(t *testing.T) {
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-resume", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-resume", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-resume", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up after the stop: %v", err)
 	}
 

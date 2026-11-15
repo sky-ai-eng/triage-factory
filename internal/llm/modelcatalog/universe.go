@@ -1,5 +1,11 @@
 package modelcatalog
 
+import (
+	"slices"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
 // Model is one row of a deployment's universe — the shape every surface that
 // offers, validates or probes a model reads, whichever execution vocabulary the
 // deployment speaks.
@@ -21,6 +27,10 @@ type Model struct {
 	Provider string
 	// Facts are the datasheet's, nil where no datasheet row backs the id.
 	Facts *Facts
+	// EffortLevels are the reasoning efforts this model takes, a subset of
+	// domain.EffortLevels in that order. Empty for a model that takes none,
+	// which is an answer rather than a gap.
+	EffortLevels []string
 }
 
 // Facts are what the pricing datasheet knows about a model, joined in at
@@ -83,9 +93,46 @@ func nativeModels() []Model {
 			DisplayOrder: e.DisplayOrder,
 			Provider:     e.Provider,
 			Facts:        &facts,
+			EffortLevels: effortLevels(e),
 		})
 	}
 	return out
+}
+
+// effortLevels derives a native model's efforts from its datasheet flags:
+// low, medium and high with supports_reasoning, xhigh and max with their own
+// flags, and nothing above a Bedrock row's ceiling. A row without
+// supports_reasoning takes none, whatever the other flags say, since they
+// describe levels of a reasoning it does not do.
+//
+// A level is offered only when the inference client also carries it to the
+// model as Anthropic's output_config.effort (Entry.CarriedEfforts): bifrost
+// sends some models a thinking budget in place of an effort, which a model
+// that takes only adaptive thinking refuses. inference's wire test pins what
+// is carried per model and level.
+func effortLevels(e Entry) []string {
+	levels := []string{}
+	if !e.SupportsReasoning {
+		return levels
+	}
+	ceiling := len(domain.EffortLevels) - 1
+	if i := slices.Index(domain.EffortLevels, e.EffortCeiling); i >= 0 {
+		ceiling = i
+	}
+	for i, level := range domain.EffortLevels {
+		if i > ceiling || !slices.Contains(e.CarriedEfforts, level) ||
+			(level == domain.EffortXHigh && !e.SupportsXHighEffort) ||
+			(level == domain.EffortMax && !e.SupportsMaxEffort) {
+			continue
+		}
+		levels = append(levels, level)
+	}
+	return levels
+}
+
+// TakesEffort reports whether this model takes effort.
+func (m Model) TakesEffort(effort string) bool {
+	return slices.Contains(m.EffortLevels, effort)
 }
 
 // Models returns the universe in display order. Freshly copied per call: it is

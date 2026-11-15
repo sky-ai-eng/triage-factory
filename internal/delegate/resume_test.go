@@ -26,7 +26,7 @@ func TestFollowUp_EmptyUserID(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-anon", "", "msg"); err == nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-anon", "", "msg", domain.TurnSettings{}); err == nil {
 		t.Fatal("expected an error for an empty user id")
 	}
 	if st := storedStatus(t, database, "r-anon"); st != "open" {
@@ -34,10 +34,10 @@ func TestFollowUp_EmptyUserID(t *testing.T) {
 	}
 }
 
-// TestFollowUp_SDKOnlyValidationGuards walks the three fields an SDK resume
+// TestFollowUp_SDKOnlyValidationGuards walks the two fields an SDK resume
 // needs on the row before a wake means anything: it re-invokes a Claude session
-// BY ID, in the tree it ran in, on the model it started with. Each case blanks
-// one of them and expects a refusal naming it.
+// BY ID, in the tree it ran in. Each case blanks one of them and expects a
+// refusal naming it. The model is not among them: it is the claim's.
 //
 // The native subtest is the other half of the same statement — these are the
 // one place in the ladder where the runtime changes the answer, so the same row
@@ -51,7 +51,6 @@ func TestFollowUp_SDKOnlyValidationGuards(t *testing.T) {
 	}{
 		{"no session", `UPDATE conversations SET sdk_session_id = NULL WHERE id = ?`, "session id"},
 		{"no worktree", `UPDATE conversations SET worktree_path = NULL WHERE id = ?`, "worktree path"},
-		{"no model", `UPDATE conversations SET model = NULL WHERE id = ?`, "model"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,7 +64,7 @@ func TestFollowUp_SDKOnlyValidationGuards(t *testing.T) {
 			}
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-guard", runmode.LocalDefaultUserID, "msg")
+			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-guard", runmode.LocalDefaultUserID, "msg", domain.TurnSettings{})
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("err = %v, want one mentioning %q", err, tc.wantSub)
 			}
@@ -83,7 +82,7 @@ func TestFollowUp_SDKOnlyValidationGuards(t *testing.T) {
 		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 		markNative(t, database, "r-native-guard")
 
-		if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-native-guard", runmode.LocalDefaultUserID, "carry on"); err != nil {
+		if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-native-guard", runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{}); err != nil {
 			t.Fatalf("SendMessage: %v", err)
 		}
 		if got := pendingRows(t, s, "r-native-guard"); len(got) != 1 {
@@ -108,7 +107,7 @@ func TestFollowUp_TerminalRefused(t *testing.T) {
 				markNative(t, database, "r-term")
 			}
 
-			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "msg")
+			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "msg", domain.TurnSettings{})
 			if !errors.Is(err, ErrConversationNotSteerable) {
 				t.Errorf("err = %v, want ErrConversationNotSteerable", err)
 			}
@@ -175,7 +174,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				paths.SetForTest(t, t.TempDir())
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-reaped", runtime, "running", false)
-				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-reaped", runmode.LocalDefaultUserID, "msg")
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-reaped", runmode.LocalDefaultUserID, "msg", domain.TurnSettings{})
 				if runtime == "native" {
 					// The transcript is the conversation, so a lost workspace
 					// costs uncommitted work rather than the whole run.
@@ -199,7 +198,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				paths.SetForTest(t, t.TempDir())
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-concluded", runtime, "cancelled", true)
-				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", runmode.LocalDefaultUserID, "msg")
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", runmode.LocalDefaultUserID, "msg", domain.TurnSettings{})
 				if !errors.Is(err, ErrBlueprintCancelled) {
 					t.Errorf("err = %v, want ErrBlueprintCancelled (409)", err)
 				}
@@ -218,7 +217,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				paths.SetForTest(t, t.TempDir())
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-followup", runtime, "completed", true)
-				if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-followup", runmode.LocalDefaultUserID, "msg"); err != nil {
+				if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-followup", runmode.LocalDefaultUserID, "msg", domain.TurnSettings{}); err != nil {
 					t.Fatalf("follow-up on a finished blueprint: %v", err)
 				}
 				if st := storedStatus(t, database, "r-followup"); st != "" {
@@ -233,7 +232,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				paths.SetForTest(t, t.TempDir())
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-legacy", runtime, "cancelled", false)
-				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-legacy", runmode.LocalDefaultUserID, "msg")
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-legacy", runmode.LocalDefaultUserID, "msg", domain.TurnSettings{})
 				want := ErrWorkspaceExpired // the permanent answer wins over the temporary one
 				if runtime == "native" {
 					// Nothing about the workspace refuses a native row, so the
@@ -263,7 +262,7 @@ func TestFollowUp_EnqueuesRatherThanSpawning(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-wake", runmode.LocalDefaultUserID, "the answer"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-wake", runmode.LocalDefaultUserID, "the answer", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -332,7 +331,7 @@ func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-race", runmode.LocalDefaultUserID, "ship it"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-race", runmode.LocalDefaultUserID, "ship it", domain.TurnSettings{}); err != nil {
 		t.Fatalf("winning wake: %v", err)
 	}
 
@@ -341,7 +340,7 @@ func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 	loserStores := testSpawnerStores(database)
 	loserStores.Conversations = staleOpenOnce(loserStores.Conversations)
 	loser := NewSpawner(database, loserStores, nil, nil, "claude-sonnet-4-6")
-	if err := loser.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-race", runmode.LocalDefaultUserID, "and check the migration"); err != nil {
+	if err := loser.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-race", runmode.LocalDefaultUserID, "and check the migration", domain.TurnSettings{}); err != nil {
 		t.Fatalf("losing wake returned %v, want nil — its message is queued, so there is nothing to report", err)
 	}
 
@@ -381,7 +380,7 @@ func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 	stores.Conversations = staleOpenOnce(stores.Conversations)
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-died", runmode.LocalDefaultUserID, "one more thing")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-died", runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{})
 	if !errors.Is(err, ErrConversationNotResumable) {
 		t.Fatalf("err = %v, want ErrConversationNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
 	}
@@ -407,7 +406,7 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -459,7 +458,7 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-deliver", runmode.LocalDefaultUserID, "the answer"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-deliver", runmode.LocalDefaultUserID, "the answer", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -510,7 +509,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 		t.Fatalf("park open: %v", err)
 	}
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -554,7 +553,7 @@ func TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 		t.Fatalf("park open: %v", err)
 	}
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{})
 	if !errors.Is(err, ErrWorkspaceExpired) {
 		t.Fatalf("SendMessage err = %v, want ErrWorkspaceExpired", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -37,6 +38,25 @@ type fakeLiveProc struct {
 	// what the world looks like at the moment the driver lets go of the
 	// process — the park must not have landed yet.
 	onClose func()
+	// model and effort are the process's settings, and controls records
+	// every control written to it, the messages as "send" and each
+	// SetSettings as "set_settings <model> <effort>", in order.
+	model, effort string
+	controls      []string
+}
+
+func (f *fakeLiveProc) SetSettings(_ context.Context, model, effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.model, f.effort = model, effort
+	f.controls = append(f.controls, "set_settings "+model+" "+effort)
+	return nil
+}
+
+func (f *fakeLiveProc) Settings() (string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.model, f.effort
 }
 
 func newFakeLiveProc(sessionID string) *fakeLiveProc {
@@ -57,6 +77,7 @@ func (f *fakeLiveProc) Send(_ context.Context, text string) error {
 	}
 	f.sendCount++
 	f.sent = append(f.sent, text)
+	f.controls = append(f.controls, "send")
 	n := f.sendCount
 	hook := f.onSend
 	f.mu.Unlock()
@@ -638,5 +659,65 @@ func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 	}
 	if !stamped.Valid || stamped.Float64 != 0.31 {
 		t.Errorf("claim row cost_usd = %+v, want 0.31 settled despite the refused park", stamped)
+	}
+}
+
+// TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings: a turn started
+// for a person's message runs on the settings the message records. On the
+// process's provider they are written to it before the message; on another
+// provider nothing is sent and the process is let go, with the message still
+// waiting for a claim that seals that provider.
+func TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	for _, tc := range []struct {
+		name         string
+		model        string
+		wantNext     bool
+		wantControls []string
+	}{
+		{"the same provider", "claude-fable-5-1", true, []string{"set_settings claude-fable-5-1 high", "send"}},
+		{"another provider", "us.anthropic.claude-sonnet-5-5", false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedConversation(t, database, "r-live-settings", "sess", "/tmp/wt")
+			claimID := markEngaged(t, database, "r-live-settings")
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
+			if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
+				pendingUserInput("r-live-settings", runmode.LocalDefaultUserID, "think harder",
+					domain.TurnSettings{Model: tc.model, Effort: domain.EffortHigh})); err != nil {
+				t.Fatalf("queue the person's message: %v", err)
+			}
+			proc := newFakeLiveProc("sess")
+			proc.model = "claude-sonnet-5-5"
+			park := liveParkContext{
+				orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-settings",
+				claimID: claimID, runtime: domain.ConversationRuntimeSDK,
+			}
+
+			next, fenced := s.handOnOrLetGo(context.Background(), park, proc, startsATurn)
+			if fenced || next != tc.wantNext {
+				t.Fatalf("handOnOrLetGo = (next %v, fenced %v), want next %v", next, fenced, tc.wantNext)
+			}
+			proc.mu.Lock()
+			controls := append([]string(nil), proc.controls...)
+			proc.mu.Unlock()
+			if strings.Join(controls, "|") != strings.Join(tc.wantControls, "|") {
+				t.Errorf("controls = %q, want %q", controls, tc.wantControls)
+			}
+			waiting := pendingRows(t, s, "r-live-settings")
+			if tc.wantNext {
+				if len(waiting) != 0 {
+					t.Errorf("waiting rows = %d, want the message taken", len(waiting))
+				}
+				return
+			}
+			if !proc.wasClosed() {
+				t.Error("the process was not let go")
+			}
+			if len(waiting) != 1 || waiting[0].Content != "think harder" {
+				t.Errorf("waiting rows = %+v, want the message still waiting", waiting)
+			}
+		})
 	}
 }

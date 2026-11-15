@@ -74,7 +74,7 @@ func TestSDKModels_IsACopy(t *testing.T) {
 	first := SDKModels(SDKClaudeCode)
 	original := first[0]
 	first[0] = Model{Key: "tampered"}
-	if SDKModels(SDKClaudeCode)[0] != original {
+	if got := SDKModels(SDKClaudeCode)[0]; got.Key != original.Key || got.DisplayName != original.DisplayName {
 		t.Error("mutating the returned slice changed the registry")
 	}
 }
@@ -255,4 +255,75 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestEffortLevels_FollowTheDatasheetFlags(t *testing.T) {
+	all := domain.EffortLevels
+	carried := func(e Entry) Entry {
+		e.CarriedEfforts = all
+		return e
+	}
+	cases := []struct {
+		name  string
+		entry Entry
+		want  []string
+	}{
+		{"reasoning alone", carried(Entry{SupportsReasoning: true}),
+			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh}},
+		{"reasoning with xhigh and max", carried(Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true}), all},
+		{"an xhigh ceiling drops max",
+			carried(Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true, EffortCeiling: domain.EffortXHigh}),
+			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh, domain.EffortXHigh}},
+		{"a high ceiling drops both upper levels",
+			carried(Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true, EffortCeiling: domain.EffortHigh}),
+			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh}},
+		{"max without xhigh",
+			carried(Entry{SupportsReasoning: true, SupportsMaxEffort: true}),
+			[]string{domain.EffortLow, domain.EffortMedium, domain.EffortHigh, domain.EffortMax}},
+		{"no reasoning", carried(Entry{SupportsXHighEffort: true, SupportsMaxEffort: true}), []string{}},
+		{"a model the client carries no effort to",
+			Entry{SupportsReasoning: true, SupportsXHighEffort: true, SupportsMaxEffort: true}, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effortLevels(tc.entry)
+			if got == nil || strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("effortLevels = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("an SDK model takes all five", func(t *testing.T) {
+		for _, m := range UniverseFor(false).Models() {
+			if strings.Join(m.EffortLevels, ",") != strings.Join(all, ",") {
+				t.Errorf("%s effort levels = %v, want %v", m.Key, m.EffortLevels, all)
+			}
+		}
+	})
+	// The shipped rows, as the pinned bifrost carries them: an effort reaches
+	// Sonnet 5.x and Fable 5.x, and Opus 5.x and Haiku 5.5 are sent a thinking
+	// budget instead (inference.TestClient_EffortReachesAnthropicAsOutputConfigEffort).
+	t.Run("the shipped native rows", func(t *testing.T) {
+		u := UniverseFor(true)
+		for key, want := range map[string]int{
+			"claude-sonnet-5-5":              5,
+			"claude-fable-5-1":               5,
+			"us.anthropic.claude-sonnet-5-5": 4,
+			"us.anthropic.claude-fable-5-1":  4,
+			"claude-opus-5-5":                0,
+			"claude-haiku-5-5":               0,
+		} {
+			m, ok := u.Lookup(key)
+			if !ok {
+				t.Fatalf("%s is not offered", key)
+			}
+			if m.EffortLevels == nil || len(m.EffortLevels) != want {
+				t.Errorf("%s effort levels = %#v, want %d of them", key, m.EffortLevels, want)
+			}
+		}
+		m, _ := u.Lookup("us.anthropic.claude-sonnet-5-5")
+		if m.TakesEffort(domain.EffortMax) || !m.TakesEffort(domain.EffortXHigh) {
+			t.Errorf("Bedrock Sonnet takes max=%v xhigh=%v, want false/true", m.TakesEffort(domain.EffortMax), m.TakesEffort(domain.EffortXHigh))
+		}
+	})
 }

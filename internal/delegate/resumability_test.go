@@ -136,7 +136,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 						t.Errorf("ResumabilityFor = (%v, %q), want (%v, %q)", ok, reason, tc.wantOK, tc.wantReason)
 					}
 
-					sendErr := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "pick this up")
+					sendErr := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "pick this up", domain.TurnSettings{})
 					if !errors.Is(sendErr, tc.wantErr) {
 						t.Errorf("SendMessage err = %v, want %v", sendErr, tc.wantErr)
 					}
@@ -171,7 +171,7 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	if ok || reason != ResumeBlockedNotSteerable {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedNotSteerable)
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "hello"); !errors.Is(err, ErrConversationNotSteerable) {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "hello", domain.TurnSettings{}); !errors.Is(err, ErrConversationNotSteerable) {
 		t.Errorf("SendMessage err = %v, want ErrConversationNotSteerable", err)
 	}
 }
@@ -361,7 +361,7 @@ func TestSendMessage_InteractiveSDKConversationTakesItsFirstMessage(t *testing.T
 			if ok != tc.wantOK || reason != tc.wantReason {
 				t.Errorf("ResumabilityFor = (%v, %q), want (%v, %q)", ok, reason, tc.wantOK, tc.wantReason)
 			}
-			sendErr := s.SendMessage(ctx, runmode.LocalDefaultOrgID, minted.ID, runmode.LocalDefaultUserID, "hello")
+			sendErr := s.SendMessage(ctx, runmode.LocalDefaultOrgID, minted.ID, runmode.LocalDefaultUserID, "hello", domain.TurnSettings{})
 			if !errors.Is(sendErr, tc.wantErr) {
 				t.Errorf("SendMessage err = %v, want %v", sendErr, tc.wantErr)
 			}

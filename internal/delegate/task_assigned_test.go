@@ -222,7 +222,7 @@ func TestWake_AConcludedConversationIsCaughtUpOnOverlappingWork(t *testing.T) {
 				f.heldTask(t, domain.EventGitHubPRReviewChangesRequested, "")
 			}
 
-			if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+			if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage: %v", err)
 			}
 
@@ -267,7 +267,7 @@ func TestDispatch_RetiresAStaleAssignmentNoteBeforeTheTurn(t *testing.T) {
 		t.Fatalf("CloseSystem: %v", err)
 	}
 
-	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "go on"); err != nil {
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "go on", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	claimAndDispatch(t, f.s, f.database)

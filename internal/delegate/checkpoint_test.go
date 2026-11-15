@@ -981,7 +981,7 @@ func (f checkpointFixture) resultRow(t *testing.T, callID string) float64 {
 func (f checkpointFixture) runEngine(t *testing.T, ctx context.Context, c *checkpointer, provider agentloop.Provider, tools agentloop.ToolHost, params agentloop.Params) agentloop.Result {
 	t.Helper()
 	transcript := newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conversationID, f.claimID)
-	if _, err := transcript.Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "do the work")); err != nil {
+	if _, err := transcript.Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "do the work", domain.TurnSettings{})); err != nil {
 		t.Errorf("seed the mission: %v", err)
 	}
 	timings := f.s.resolvedActivityTimings()

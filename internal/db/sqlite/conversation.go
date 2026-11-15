@@ -2440,18 +2440,18 @@ func (s *conversationStore) InsertMessage(ctx context.Context, orgID string, msg
 	// sequence + RETURNING — see postgres/conversation.go.
 	result, err := s.q.ExecContext(ctx, `
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
-		                      is_error, metadata, model,
+		                      is_error, metadata, model, effort,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms, stop_reason)
 		VALUES (?, ?,
 		        COALESCE(?, (SELECT id FROM claims
 		                     WHERE conversation_id = ? AND released_at IS NULL)),
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.ConversationID,
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
-		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
+		sqliteNullStr(msg.Model), sqliteNullStr(msg.Effort), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt,
 		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
@@ -2464,7 +2464,7 @@ func (s *conversationStore) InsertMessage(ctx context.Context, orgID string, msg
 }
 
 const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
+	model, effort, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning, content_blocks, delivered, window_state, seq, duration_ms, stop_reason`
 
 // scanMessageRows drains a messages result set selecting
@@ -2500,11 +2500,11 @@ func scanOneMessage(row messageScanner) (domain.Message, error) {
 	var windowState string
 	var seq sql.NullFloat64
 	var durationMs sql.NullInt64
-	var stopReason sql.NullString
+	var stopReason, effort sql.NullString
 
 	if err := row.Scan(
 		&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
-		&toolCallID, &m.IsError, &metadataStr, &model,
+		&toolCallID, &m.IsError, &metadataStr, &model, &effort,
 		&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 		&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &stopReason,
 	); err != nil {
@@ -2518,6 +2518,7 @@ func scanOneMessage(row messageScanner) (domain.Message, error) {
 	m.Subtype = subtype.String
 	m.ToolCallID = toolCallID.String
 	m.Model = model.String
+	m.Effort = effort.String
 
 	if toolCallsStr.Valid {
 		_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
@@ -2746,6 +2747,48 @@ func (s *conversationStore) NewestAssistantToolCallsForConversations(ctx context
 // 'elided' and undelivered rows are included — see the interface doc for the
 // full contract. Pure read over messages; no other table or in-process
 // state feeds in.
+func (s *conversationStore) NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.newestMessage(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM messages m_p
+		WHERE m_p.conversation_id = ? AND `+personMessageSQL+`
+		ORDER BY m_p.id DESC
+		LIMIT 1
+	`, conversationID)
+}
+
+func (s *conversationStore) NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.newestMessage(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM messages
+		WHERE conversation_id = ? AND role = 'assistant' AND window_state = 'active'
+		ORDER BY id DESC
+		LIMIT 1
+	`, conversationID)
+}
+
+func (s *conversationStore) NewestAssistantSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	return s.NewestAssistant(ctx, orgID, conversationID)
+}
+
+// newestMessage runs a single-row message read, answering nil for no row.
+func (s *conversationStore) newestMessage(ctx context.Context, query string, args ...any) (*domain.Message, error) {
+	m, err := scanOneMessage(s.q.QueryRowContext(ctx, query, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

@@ -476,7 +476,7 @@ func (p *silentProvider) Stream(ctx context.Context, _ inference.Request) (*infe
 func (f stallFixture) runNative(t *testing.T, provider agentloop.Provider, tools agentloop.ToolHost) agentloop.Result {
 	t.Helper()
 	transcript := newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conversationID, f.claimID)
-	if _, err := transcript.Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "do the work")); err != nil {
+	if _, err := transcript.Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "do the work", domain.TurnSettings{})); err != nil {
 		t.Fatalf("seed the mission: %v", err)
 	}
 	timings := f.s.resolvedActivityTimings()

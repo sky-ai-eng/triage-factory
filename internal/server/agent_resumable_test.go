@@ -1,14 +1,18 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
@@ -122,4 +126,58 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleAgentStatus_NextMessageSettingsAndCacheWarmth pins what the
+// composer opens with: the settings a message naming none would run on, and
+// when the provider cache from the newest assistant turn goes cold.
+func TestHandleAgentStatus_NextMessageSettingsAndCacheWarmth(t *testing.T) {
+	seed := func(t *testing.T, suffix string) (*Server, string) {
+		t.Helper()
+		s := newTestServer(t)
+		withEmptyBlobStore(t, s)
+		conversationID := seedSteerConversation(t, s.db, suffix, "open")
+		execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`, t.TempDir(), conversationID)
+		execSQL(t, s.db, `UPDATE blueprint_runs SET status='completed' WHERE id=(SELECT blueprint_run_id FROM conversations WHERE id=?)`, conversationID)
+		return s, conversationID
+	}
+	insert := func(t *testing.T, s *Server, msg domain.Message) {
+		t.Helper()
+		if _, err := sqlitestore.New(s.db).Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &msg); err != nil {
+			t.Fatalf("insert message: %v", err)
+		}
+	}
+
+	t.Run("no person row runs on the team default", func(t *testing.T) {
+		s, id := seed(t, "nextdefault")
+		got := readConversation(t, s, id)
+		if got["next_message_model"] != "claude-sonnet-4-6" {
+			t.Errorf("next_message_model = %v, want the team default", got["next_message_model"])
+		}
+		if _, ok := got["next_message_effort"]; ok {
+			t.Errorf("next_message_effort = %v, want absent for the provider's default", got["next_message_effort"])
+		}
+	})
+	t.Run("the newest person row's settings", func(t *testing.T) {
+		s, id := seed(t, "nextperson")
+		insert(t, s, domain.Message{ConversationID: id, UserID: runmode.LocalDefaultUserID, Role: "user", Content: "a", Model: "opus", Effort: domain.EffortLow})
+		insert(t, s, domain.Message{ConversationID: id, UserID: runmode.LocalDefaultUserID, Role: "user", Content: "b", Model: "sonnet", Effort: domain.EffortHigh})
+		got := readConversation(t, s, id)
+		if got["next_message_model"] != "sonnet" || got["next_message_effort"] != domain.EffortHigh {
+			t.Errorf("next message = (%v, %v), want (sonnet, high)", got["next_message_model"], got["next_message_effort"])
+		}
+	})
+	t.Run("cache_warm_until is the newest assistant turn plus the TTL", func(t *testing.T) {
+		s, id := seed(t, "warmuntil")
+		if got := readConversation(t, s, id); got["cache_warm_until"] != nil {
+			t.Errorf("cache_warm_until = %v with no assistant row, want absent", got["cache_warm_until"])
+		}
+		at := time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC)
+		insert(t, s, domain.Message{ConversationID: id, Role: "assistant", Content: "older", Model: "sonnet", CreatedAt: at.Add(-time.Hour)})
+		insert(t, s, domain.Message{ConversationID: id, Role: "assistant", Content: "newest", Model: "sonnet", CreatedAt: at})
+		want := at.Add(domain.ProviderCacheTTL).Format(time.RFC3339)
+		if got := readConversation(t, s, id); got["cache_warm_until"] != want {
+			t.Errorf("cache_warm_until = %v, want %s", got["cache_warm_until"], want)
+		}
+	})
 }
