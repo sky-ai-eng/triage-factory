@@ -240,9 +240,6 @@ func TestFrontendMirrorsExternalActionVocabulary(t *testing.T) {
 // event-type filter chip for it reads the same. A key the catalog lacks is a
 // label for an event that can never arrive. System types are left out: the
 // catalog marks them never user-visible, and the fallback serves them.
-//
-// It lives at the composition root, the one process that sees every
-// registered type.
 func TestFrontendMirrorsEventTypes(t *testing.T) {
 	var want []string
 	for _, et := range domain.AllEventTypes() {
@@ -340,8 +337,9 @@ var (
 	goActionConst = regexp.MustCompile(`(?m)^\tAction\w+\s+=\s+"([a-z_]+)"$`)
 	// A top-level key of a TS object literal, at the one indent level the
 	// formatter gives it: bare, or single-quoted where the key needs quoting (an
-	// event type's colons).
-	tsObjectKey = regexp.MustCompile(`(?m)^  (?:([a-z_]+)|'([a-z_:]+)'): `)
+	// event type's colons). Any spelling is read, so a key never escapes the
+	// comparison by its characters.
+	tsObjectKey = regexp.MustCompile(`(?m)^  (?:(\w+)|'([^']+)'): `)
 )
 
 // tsObjectKeys pulls the top-level keys out of a `const <decl> = { … }` object
