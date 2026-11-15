@@ -10,8 +10,8 @@ import (
 // The migration under test, and the migration before it, whose schema the
 // test seeds.
 const (
-	renameIdleParkReason       int64 = 202611150005
-	beforeRenameIdleParkReason int64 = 202611150004
+	renameIdleParkReason       int64 = 202611150006
+	beforeRenameIdleParkReason int64 = 202611150005
 )
 
 // TestMigrate_RenameIdleParkReason: every stored `idle` park reads
