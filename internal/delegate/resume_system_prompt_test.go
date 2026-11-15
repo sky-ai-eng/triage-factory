@@ -231,7 +231,7 @@ func TestNativeLaunch_ToolsAreTheNativeComposition(t *testing.T) {
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: kinds},
-	}, "", "")
+	}, "", claimReplay{})
 	if want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, kinds); !strings.Contains(text.systemBlock, want) {
 		t.Errorf("the native block does not carry the native tools section;\n%s", text.systemBlock)
 	}
@@ -271,7 +271,7 @@ func TestNativeReclaim_ReplaysTheStampedBlockByteForByte(t *testing.T) {
 	if replay.stampable {
 		t.Error("a wake with the launch's block in hand reported the row as writable")
 	}
-	woke := f.nativeLaunchText(t, "review the failing check", "", replay.block)
+	woke := f.nativeLaunchText(t, "review the failing check", "", replay)
 	if woke.systemBlock != launched {
 		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", woke.systemBlock, launched)
 	}
@@ -301,7 +301,7 @@ func TestNativeReclaim_KeepsTheManifestOnAHandedOffTree(t *testing.T) {
 	const manifest = "Team knowledge is staged at _tfac/knowledge/team/private/runbook.md"
 
 	// The launch's staging pass, which returns the manifest it rendered.
-	launched := f.nativeLaunchText(t, "review the failing check", manifest, "").systemBlock
+	launched := f.nativeLaunchText(t, "review the failing check", manifest, claimReplay{}).systemBlock
 	if !strings.Contains(launched, manifest) {
 		t.Fatalf("the launch composed no manifest;\n%s", launched)
 	}
@@ -313,12 +313,12 @@ func TestNativeReclaim_KeepsTheManifestOnAHandedOffTree(t *testing.T) {
 	// The wake, on a tree handed off: nothing is staged, so the manifest this
 	// claim could render is empty. The replay is what keeps the section.
 	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
-	if got := f.nativeLaunchText(t, "review the failing check", "", replay.block).systemBlock; got != launched {
+	if got := f.nativeLaunchText(t, "review the failing check", "", replay).systemBlock; got != launched {
 		t.Errorf("the wake's block is not the launch's;\ngot:\n%s\n\nwant:\n%s", got, launched)
 	}
 	// The control: composing on that same empty manifest is what the wake used
 	// to do, and it is what loses the section.
-	if got := f.nativeLaunchText(t, "review the failing check", "", "").systemBlock; strings.Contains(got, manifest) {
+	if got := f.nativeLaunchText(t, "review the failing check", "", claimReplay{}).systemBlock; strings.Contains(got, manifest) {
 		t.Error("a composition on an empty manifest still named the staged tree; this test proves nothing")
 	}
 }
@@ -353,15 +353,15 @@ func TestNativeClaim_OpenedRowWithNoBlockComposesOnceAndStamps(t *testing.T) {
 // whether a claim replays or composes.
 type storeReadDown struct {
 	db.ConversationStore
-	transcript bool
-	block      bool
+	opening bool
+	block   bool
 }
 
-func (d storeReadDown) ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	if d.transcript {
-		return nil, errors.New("read transcript: connection reset")
+func (d storeReadDown) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
+	if d.opening {
+		return "", false, errors.New("read opening: connection reset")
 	}
-	return d.ConversationStore.ListForAssemblySystem(ctx, orgID, conversationID)
+	return d.ConversationStore.OpeningTaskContextSystem(ctx, orgID, conversationID)
 }
 
 func (d storeReadDown) SystemBlockSystem(ctx context.Context, orgID, conversationID string) (string, error) {
@@ -388,10 +388,10 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 		wantOpened bool
 	}{
 		{name: "the system-block read is down", down: storeReadDown{block: true}, wantOpened: true},
-		// An unreadable transcript cannot say the conversation was opened, and
-		// the claim reads as fresh — which is the memory gate's cheap mistake,
-		// and must still not cost the row its block.
-		{name: "the transcript read is down", down: storeReadDown{transcript: true}},
+		// An unreadable opening cannot say the conversation was opened, and the
+		// claim reads as fresh — which is the memory gate's cheap mistake, and
+		// must still not cost the row its block.
+		{name: "the opening read is down", down: storeReadDown{opening: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLaunchFixture(t, "native-readfail")
@@ -416,6 +416,11 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 			if replay.opened != tc.wantOpened {
 				t.Errorf("opened = %v, want %v", replay.opened, tc.wantOpened)
 			}
+			// A claim that knows the conversation is opened still has its opening
+			// row, whichever read failed after the transcript's.
+			if want := map[bool]string{true: fixtureTaskContextRow}[tc.wantOpened]; replay.taskContext != want {
+				t.Errorf("taskContext = %q, want %q", replay.taskContext, want)
+			}
 			if replay.block != "" {
 				t.Errorf("block = %q, want nothing to replay — the read failed", replay.block)
 			}
@@ -434,6 +439,35 @@ func TestNativeClaim_AnUnreadableRowIsNotAnEmptyOne(t *testing.T) {
 				t.Errorf("a failed read rewrote the row;\ngot:\n%s\n\nwant:\n%s", got, launched)
 			}
 		})
+	}
+}
+
+// TestNativeReclaim_ACompactedConversationIsStillOpened: a compaction takes the
+// task-context row out of the assembly window, and the conversation it opened
+// has still been opened. Its next claim replays the stamped block rather than
+// composing and stamping a new one, and keeps the opening's task context.
+func TestNativeReclaim_ACompactedConversationIsStillOpened(t *testing.T) {
+	f := newLaunchFixture(t, "native-compacted")
+	if disp := f.runNative(t, "review the failing check"); disp.launchErr == nil {
+		t.Fatal("the fixture's tool host launched; this test needs the launch to fail after the stamp")
+	}
+	launched := f.storedSystemBlock(t)
+	if launched == "" {
+		t.Fatal("the launch stamped nothing; this test would pass vacuously")
+	}
+	f.open(t)
+	f.speak(t, "assistant", "on it")
+	f.compact(t)
+
+	replay := f.s.nativeClaimReplay(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
+	if !replay.opened {
+		t.Fatal("a compacted conversation reads as never opened")
+	}
+	if replay.block != launched || replay.stampable {
+		t.Errorf("replay = (block %q, stampable %v), want the launch's block and no stamp", replay.block, replay.stampable)
+	}
+	if replay.taskContext != fixtureTaskContextRow {
+		t.Errorf("taskContext = %q, want the opening's %q", replay.taskContext, fixtureTaskContextRow)
 	}
 }
 
@@ -460,7 +494,7 @@ func TestNativeNextStep_ComposesItsOwnBlock(t *testing.T) {
 	if replay.opened || replay.block != "" || !replay.stampable {
 		t.Fatalf("nativeClaimReplay for a new step = %+v, want a fresh conversation with a block of its own to stamp", replay)
 	}
-	composed := f.nativeLaunchText(t, "open the pull request", "", replay.block).systemBlock
+	composed := f.nativeLaunchText(t, "open the pull request", "", replay).systemBlock
 	if !strings.Contains(composed, "step-two/<ticket-id>") {
 		t.Errorf("the new step did not compose against today's inputs;\n%s", composed)
 	}
@@ -488,14 +522,14 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 
 // nativeLaunchText resolves one claim's launch text the way runNativeAgent does,
 // with the two inputs a test varies handed in: the manifest this claim's staging
-// pass rendered, and the block a previous launch stamped.
-func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge, replayed string) nativeLaunchText {
+// pass rendered, and what the claim inherited (nativeClaimReplay).
+func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge string, replay claimReplay) nativeLaunchText {
 	t.Helper()
 	return f.s.buildNativeLaunchText(context.Background(), "", f.task(t), mission, runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
 		sources: sourceDocs{kinds: []string{"github"}},
-	}, knowledge, replayed)
+	}, knowledge, replay)
 }
 
 func (f *launchFixture) task(t *testing.T) domain.Task {

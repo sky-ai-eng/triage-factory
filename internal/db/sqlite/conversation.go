@@ -2763,6 +2763,40 @@ func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, co
 	return scanMessageRows(rows)
 }
 
+// OpeningTaskContextSystem — see the interface doc. Reads every window state.
+func (s *conversationStore) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	var content sql.NullString
+	err := s.q.QueryRowContext(ctx, `
+		SELECT content
+		FROM messages
+		WHERE conversation_id = ? AND subtype = ?
+		ORDER BY COALESCE(seq, id) ASC, id ASC
+		LIMIT 1
+	`, conversationID, domain.MessageSubtypeInjectionTaskContext).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return content.String, true, nil
+}
+
+// HasAssistantMessageSystem — see the interface doc. Reads every window state.
+func (s *conversationStore) HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var exists bool
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'assistant')
+	`, conversationID).Scan(&exists)
+	return exists, err
+}
+
 // markDelivered flips delivered=true on the given message ids, scoped to
 // conversationID, stamping subtype in the same statement when non-empty. ids outside
 // the run or already delivered are silently unaffected. Reached through

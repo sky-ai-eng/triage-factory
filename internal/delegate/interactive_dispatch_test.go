@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/tooldefs"
@@ -488,6 +491,86 @@ func TestDispatch_InteractiveSDKCutOffTurnResumesItsSession(t *testing.T) {
 				t.Errorf("after the re-claim: (status %q, ended %v), want open and un-ended", conv.Status, conv.EndedAt)
 			}
 		})
+	}
+}
+
+// TestRunAgent_AResumedSessionRetainsItsOpeningRow: a re-claim whose session
+// survived sends no opening, so it fetches no PR history, and the task-context
+// file it retains is the conversation's own task-context row.
+func TestRunAgent_AResumedSessionRetainsItsOpeningRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a re-claim that resumes its session fetched %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newInteractiveFixture(t, "1439-resume")
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	const session = "sess-1439-resume"
+	first := f.endTurn(t, session, "the build is red because a test is flaky")
+	f.s.dispatchClaimedConversation(ctx, f.claim(t, "why is the build red?"), time.Now())
+	root := first.park.claudeCwd
+	if root == "" {
+		t.Fatal("the first turn never launched")
+	}
+
+	// Rewritten so that only a copy of the row can match it: a task context
+	// composed now would render the same bytes the first launch did.
+	const opening = "<task_context>\nJira issue SKY-1439-resume, as the opening rendered it\n</task_context>"
+	if _, err := f.database.Exec(`UPDATE messages SET content = ? WHERE conversation_id = ? AND subtype = ?`,
+		opening, f.conv.ID, domain.MessageSubtypeInjectionTaskContext); err != nil {
+		t.Fatalf("rewrite the task-context row: %v", err)
+	}
+	file := filepath.Join(entityMemoryTarget(&runConfig{}, f.conv.ID, root), taskContextFileName)
+	if err := os.Remove(file); err != nil {
+		t.Fatalf("remove the first launch's task-context file: %v", err)
+	}
+
+	// An engagement takes the follow-up off the queue and ends before its
+	// reply does, so the next claim launches the runtime on the session. A
+	// follow-up resumes on the model the conversation started with, so the row
+	// carries one.
+	if _, err := f.database.Exec(`UPDATE conversations SET model = 'claude-sonnet-4-6' WHERE id = ?`, f.conv.ID); err != nil {
+		t.Fatalf("stamp the model: %v", err)
+	}
+	if err := f.s.SendMessage(ctx, org, f.conv.ID, runmode.LocalDefaultUserID, "which test?"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if _, _, ok, err := f.stores.ConversationPendingInput.Consume(ctx, org, f.conv.ID); err != nil || !ok {
+		t.Fatalf("take the message off the queue = (%v, %v)", ok, err)
+	}
+	claimed, err := f.stores.ConversationQueue.ClaimNextConversation(ctx, "interactive-exec", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != f.conv.ID {
+		t.Fatalf("ClaimNextConversation = (%v, %v), want the conversation", claimed, err)
+	}
+	task, err := f.stores.Tasks.GetSystem(ctx, org, f.taskID)
+	if err != nil || task == nil {
+		t.Fatalf("GetSystem task: (%v, %v)", task, err)
+	}
+
+	resumed := f.endTurn(t, session, "it was the retry")
+	f.s.runAgent(ctx, f.conv.ID, *task, "", runConfig{
+		orgID:       org,
+		teamID:      runmode.LocalDefaultTeamID,
+		claimID:     claimed.ClaimID,
+		runRoot:     root,
+		surface:     agentprompt.SurfaceWorkbench,
+		interactive: true,
+		prSkeleton:  prSkeletonSource{client: ghclient.NewClient(srv.URL, "t"), owner: "owner", repo: "repo", prNumber: 7},
+	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID, session)
+
+	if resumed.opts.SessionID != session {
+		t.Fatalf("the re-claim launched session %q, want %q resumed", resumed.opts.SessionID, session)
+	}
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read the task-context file: %v", err)
+	}
+	// writeTaskContextFile ends the file with a newline.
+	if string(got) != opening+"\n" {
+		t.Errorf("task-context file = %q, want the task-context row's %q", got, opening)
 	}
 }
 

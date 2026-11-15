@@ -781,6 +781,32 @@ type ConversationStore interface {
 	// standing rule.
 	ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
 
+	// OpeningTaskContextSystem returns the content of the conversation's
+	// task-context row (domain.MessageSubtypeInjectionTaskContext): the task
+	// context its opening sent. ok is false when the conversation has none,
+	// which is how a claim knows its conversation has not been opened.
+	//
+	// Every window state counts. A compaction marks the row inactive, and the
+	// conversation it opened is still one that has been opened: its opening is
+	// not minted again, and a claim retains this content as the task-context
+	// file. ListForAssemblySystem leaves the row out once it is inactive, so it
+	// cannot answer this.
+	//
+	// Only the task-context row counts, never any row. A conversation can carry
+	// a queued follow-up (a person typed while it waited for an executor) or a
+	// stop note from a bring-up that never reached the agent before it has been
+	// opened, and reading either as an opening leaves the run with no task
+	// context at all. The mint writes one task-context row per conversation;
+	// were there more, the first in assembly order is the answer.
+	OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (taskContext string, ok bool, err error)
+
+	// HasAssistantMessageSystem reports whether the conversation's transcript
+	// holds an assistant row in any window state: whether the model has taken
+	// a turn, which a compaction does not undo. It is how a conversation opened
+	// before openings were minted (its transcript begins at the agent's first
+	// reply) is told apart from one that never ran.
+	HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error)
+
 	// The delivered flush lives on MarkDeliveredForClaimSystem below:
 	// consuming pending rows is an engagement write, so it goes through the
 	// claim fence like every other write the loop makes.

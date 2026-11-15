@@ -332,8 +332,8 @@ func TestSetupGitHub_VulnerablePackageChecksOutTheBaseBranch(t *testing.T) {
 			if cfg.baseCheckout != want {
 				t.Errorf("base checkout = %q, want %q", cfg.baseCheckout, want)
 			}
-			if cfg.prCheckout != "" || cfg.prNumber != 0 || cfg.prSkeleton != "" {
-				t.Errorf("config names a pull request: checkout %q, number %d, skeleton %q", cfg.prCheckout, cfg.prNumber, cfg.prSkeleton)
+			if cfg.prCheckout != "" || cfg.prNumber != 0 || cfg.prSkeleton != (prSkeletonSource{}) {
+				t.Errorf("config names a pull request: checkout %q, number %d, skeleton %+v", cfg.prCheckout, cfg.prNumber, cfg.prSkeleton)
 			}
 			if cfg.owner != "acme" || cfg.repo != "app" || cfg.runRoot != f.root {
 				t.Errorf("config = %s/%s at %q, want acme/app at %q", cfg.owner, cfg.repo, cfg.runRoot, f.root)
@@ -430,8 +430,8 @@ func TestBuildStepConfig_VulnerablePackageStepFindsItsBaseCheckout(t *testing.T)
 	if cfg.baseCheckout != checkout {
 		t.Errorf("base checkout = %q, want %q", cfg.baseCheckout, checkout)
 	}
-	if cfg.prNumber != 0 || cfg.prCheckout != "" || cfg.prSkeleton != "" {
-		t.Errorf("config names a pull request: number %d, checkout %q, skeleton %q", cfg.prNumber, cfg.prCheckout, cfg.prSkeleton)
+	if cfg.prNumber != 0 || cfg.prCheckout != "" || cfg.prSkeleton != (prSkeletonSource{}) {
+		t.Errorf("config names a pull request: number %d, checkout %q, skeleton %+v", cfg.prNumber, cfg.prCheckout, cfg.prSkeleton)
 	}
 	if want := vulnerablePackageScope("owner", "repo"); cfg.scope != want {
 		t.Errorf("scope = %q, want %q", cfg.scope, want)

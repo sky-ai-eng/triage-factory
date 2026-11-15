@@ -53,7 +53,7 @@ func TestMintOpeningRows_Shape(t *testing.T) {
 		{ID: "m1", Content: "the oldest"},
 		{ID: "m2", Content: "the newest"},
 	}
-	minted, err := mintOpeningRows(context.Background(), collectRows(&got), nil, memories, "conv-1", "user-1", "<task_context>ctx</task_context>")
+	minted, err := mintOpeningRows(context.Background(), collectRows(&got), false, nil, memories, "conv-1", "user-1", "<task_context>ctx</task_context>")
 	if err != nil {
 		t.Fatalf("mintOpeningRows: %v", err)
 	}
@@ -95,43 +95,27 @@ func TestMintOpeningRows_Shape(t *testing.T) {
 	}
 }
 
-// TestMintOpeningRows_Gate pins the discriminator the mint keys on. A
-// conversation that has only been handed control-plane rows has not opened —
-// minting nothing for it would leave the run with no task context at all — and
-// one that already carries a task-context row must not be opened twice.
+// TestMintOpeningRows_Gate: the mint opens a conversation only when its caller
+// reports it unopened. Which rows count as an opening is the store's answer
+// (OpeningTaskContextSystem). The window the mint is handed is not: after a
+// compaction it holds a summary and no opening, and a conversation whose
+// opening was compacted away must not be opened again.
 func TestMintOpeningRows_Gate(t *testing.T) {
 	delivered := true
+	compacted := []domain.Message{
+		{ID: 9, Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary", Delivered: &delivered},
+	}
 	for _, tc := range []struct {
 		name     string
-		existing []domain.Message
+		opened   bool
 		wantMint bool
 	}{
-		{name: "an empty transcript opens", wantMint: true},
-		{
-			name: "a claim-time notice is not an opening",
-			existing: []domain.Message{
-				{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "restored", Delivered: &delivered},
-			},
-			wantMint: true,
-		},
-		{
-			name: "a queued follow-up is not an opening",
-			existing: []domain.Message{
-				{Role: "user", Content: "and update the README"},
-			},
-			wantMint: true,
-		},
-		{
-			name: "a task-context row is",
-			existing: []domain.Message{
-				{Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "<task_context/>", Delivered: &delivered},
-			},
-			wantMint: false,
-		},
+		{name: "an unopened conversation opens", wantMint: true},
+		{name: "an opened one does not, whatever its window holds", opened: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got []domain.Message
-			minted, err := mintOpeningRows(context.Background(), collectRows(&got), tc.existing,
+			minted, err := mintOpeningRows(context.Background(), collectRows(&got), tc.opened, compacted,
 				[]domain.TaskMemory{{ID: "m1", Content: "prior"}}, "conv-1", "user-1", "<task_context/>")
 			if err != nil {
 				t.Fatalf("mintOpeningRows: %v", err)
@@ -162,7 +146,7 @@ func TestMintOpeningRows_StopsAtTheFirstInsertFailure(t *testing.T) {
 		}
 		return nil
 	}
-	_, err := mintOpeningRows(context.Background(), insert, nil,
+	_, err := mintOpeningRows(context.Background(), insert, false, nil,
 		memoriesOfSize(t, 10, 10, 10), "conv-1", "user-1", "<task_context/>")
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the insert's own failure", err)
@@ -247,7 +231,7 @@ func TestSelectInjectedMemories_SkipsEmptyRows(t *testing.T) {
 // were recorded, so a cumulative memory contract reads forwards.
 func TestMintOpeningRows_MintsOldestFirstUnderTheBudget(t *testing.T) {
 	var got []domain.Message
-	if _, err := mintOpeningRows(context.Background(), collectRows(&got), nil,
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), false, nil,
 		memoriesOfSize(t, 1, 1, 1, 1, 1, 1), "conv-1", "user-1", "<task_context/>"); err != nil {
 		t.Fatalf("mintOpeningRows: %v", err)
 	}
@@ -273,7 +257,7 @@ func TestMintOpeningRows_OpensAheadOfWhatIsAlreadyThere(t *testing.T) {
 	existing := []domain.Message{queued, stopNote}
 
 	var got []domain.Message
-	if _, err := mintOpeningRows(context.Background(), collectRows(&got), existing,
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), false, existing,
 		memoriesOfSize(t, 10, 10), "conv-1", "user-1", "<task_context/>"); err != nil {
 		t.Fatalf("mintOpeningRows: %v", err)
 	}
@@ -325,7 +309,7 @@ func TestMintOpeningRows_OpensAheadOfWhatIsAlreadyThere(t *testing.T) {
 // the overwhelmingly common opening for no reason.
 func TestMintOpeningRows_LeavesArrivalOrderAloneOnAFreshTranscript(t *testing.T) {
 	var got []domain.Message
-	if _, err := mintOpeningRows(context.Background(), collectRows(&got), nil,
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), false, nil,
 		memoriesOfSize(t, 10), "conv-1", "user-1", "<task_context/>"); err != nil {
 		t.Fatalf("mintOpeningRows: %v", err)
 	}
@@ -347,57 +331,12 @@ func TestMintOpeningRows_HoistsBelowAnExistingSeq(t *testing.T) {
 		{ID: 9, Role: "user", Content: "lower id, later position"},
 	}
 	var got []domain.Message
-	if _, err := mintOpeningRows(context.Background(), collectRows(&got), existing,
+	if _, err := mintOpeningRows(context.Background(), collectRows(&got), false, existing,
 		nil, "conv-1", "user-1", "<task_context/>"); err != nil {
 		t.Fatalf("mintOpeningRows: %v", err)
 	}
 	if len(got) != 1 || got[0].Seq == nil || *got[0].Seq >= sequenced {
 		t.Errorf("task-context seq = %v, want below the earliest assembly key %v", got[0].Seq, sequenced)
-	}
-}
-
-// TestConversationHasWork is the disposition's question, which is not the
-// mint's. Only native mints an opening today, so a driven SDK conversation has
-// to be recognised by the turn its model took — reading it as fresh fails a
-// blueprint over a runtime that would not restart.
-func TestConversationHasWork(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		rows []domain.Message
-		want bool
-	}{
-		{name: "nothing at all"},
-		{
-			name: "a queued follow-up is not work",
-			rows: []domain.Message{{Role: "user", Content: "and update the README"}},
-		},
-		{
-			name: "nor a stop note from a bring-up that died",
-			rows: []domain.Message{{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "would not start"}},
-		},
-		{
-			name: "nor a claim-time notice",
-			rows: []domain.Message{{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "restored"}},
-		},
-		{
-			name: "a minted opening is",
-			rows: []domain.Message{{Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "<task_context/>"}},
-			want: true,
-		},
-		{
-			name: "and so is a turn on a transcript with no opening — the SDK's shape",
-			rows: []domain.Message{
-				{Role: "user", Content: "the human's opening ask"},
-				{Role: "assistant", Content: "looking at the failing check now"},
-			},
-			want: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := conversationHasWork(tc.rows); got != tc.want {
-				t.Errorf("conversationHasWork = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 

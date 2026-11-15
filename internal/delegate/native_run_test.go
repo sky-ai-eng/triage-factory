@@ -267,6 +267,38 @@ func TestMintOpeningTurn_OpensAheadOfAQueuedFollowUp(t *testing.T) {
 	}
 }
 
+// TestMintOpeningTurn_DoesNotReopenACompactedConversation: after a compaction
+// the assembly window holds a summary and no opening, and the conversation has
+// still been opened. Its next claim writes no second task context and no second
+// set of memories ahead of the summary.
+func TestMintOpeningTurn_DoesNotReopenACompactedConversation(t *testing.T) {
+	f := newLaunchFixture(t, "mint-compacted")
+	f.open(t)
+	f.speak(t, "assistant", "on it")
+	f.compact(t)
+
+	transcript := newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)
+	if err := f.s.mintOpeningTurn(context.Background(), transcript, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID,
+		[]domain.TaskMemory{{ID: "m1", Content: "prior"}}, "<task_context>\nrecomposed\n</task_context>"); err != nil {
+		t.Fatalf("mintOpeningTurn: %v", err)
+	}
+
+	count := func(subtype string) int {
+		t.Helper()
+		var n int
+		if err := f.database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ?`, f.conv.ID, subtype).Scan(&n); err != nil {
+			t.Fatalf("count %s rows: %v", subtype, err)
+		}
+		return n
+	}
+	if n := count(domain.MessageSubtypeInjectionTaskContext); n != 1 {
+		t.Errorf("task-context rows = %d, want only the one the opening wrote", n)
+	}
+	if n := count(domain.MessageSubtypeInjectionMemory); n != 0 {
+		t.Errorf("memory rows = %d, want none; the conversation was opened again", n)
+	}
+}
+
 // TestExecutorChangedSince pins the one claim in the resume notice that
 // neither the transcript nor the tree on disk can establish: that the
 // engagement before this one ran somewhere else.

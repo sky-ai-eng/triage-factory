@@ -79,11 +79,14 @@ type runConfig struct {
 	// step whose tree no longer holds it.
 	baseCheckout string
 
-	// prSkeleton is the rendered PR history block folded into the run's
-	// static task context. Empty for a non-PR run, and empty (never fatal)
-	// when the fetch fails — the run proceeds with the point-in-time event
+	// prSkeleton is where the PR history block folded into the run's static
+	// task context comes from. Setup records it and fetches nothing; a launch
+	// renders it only when it composes a task context, which is a native claim
+	// of a conversation not yet opened, or an SDK launch with no session to
+	// resume. The zero value, a non-PR run's, renders "", and so does a failed
+	// fetch (never fatal) — the run proceeds with the point-in-time event
 	// context it has always had.
-	prSkeleton string
+	prSkeleton prSkeletonSource
 
 	// workspace is how runRoot came to be — warm from the previous engagement,
 	// rehydrated from the durable snapshot, or built fresh. Resolved by the
@@ -898,7 +901,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		repo:       repo,
 		prNumber:   prNumber,
 		prCheckout: prCheckout,
-		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
+		prSkeleton: prSkeletonSource{client: ghClient, owner: owner, repo: repo, prNumber: prNumber},
 	}, nil
 }
 
@@ -1120,6 +1123,21 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 		return ""
 	}
 	return prskeleton.Render(*sk, prskeleton.Options{Now: time.Now()})
+}
+
+// prSkeletonSource is a pull request's history skeleton, not yet fetched: the
+// client a run reads its pull request through, and the pull request.
+type prSkeletonSource struct {
+	client   *ghclient.Client
+	owner    string
+	repo     string
+	prNumber int
+}
+
+// render is renderPRSkeleton over the source: two GETs to GitHub, which is
+// why a launch calls it only when the block will reach the model.
+func (src prSkeletonSource) render(ctx context.Context) string {
+	return renderPRSkeleton(ctx, src.client, src.owner, src.repo, src.prNumber)
 }
 
 // setupJira prepares the run-root for a Jira delegation. No repo is

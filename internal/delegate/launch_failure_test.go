@@ -132,7 +132,36 @@ func (f *launchFixture) speak(t *testing.T, role, content string) {
 // and the row every "has this conversation started?" gate reads.
 func (f *launchFixture) open(t *testing.T) {
 	t.Helper()
-	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, "<task_context>\nPull request owner/repo#7\n</task_context>")
+	f.say(t, "user", domain.MessageSubtypeInjectionTaskContext, fixtureTaskContextRow)
+}
+
+// fixtureTaskContextRow is the content of the task-context row open writes.
+const fixtureTaskContextRow = "<task_context>\nPull request owner/repo#7\n</task_context>"
+
+// compact commits a compaction the way the native loop does
+// (CompactForClaimSystem): every delivered row in the window goes inactive,
+// together with the compaction's own reply, and a summary row takes their
+// place. It fails the test if the opening is still in the assembly window
+// afterwards, since then the test would not be about a compacted conversation.
+func (f *launchFixture) compact(t *testing.T) {
+	t.Helper()
+	var span []int
+	for _, m := range f.transcript(t) {
+		if m.Delivered == nil || *m.Delivered {
+			span = append(span, m.ID)
+		}
+	}
+	tokens := 190_000
+	reply := &domain.Message{Role: "assistant", Content: "<summary>the work so far</summary>", InputTokens: &tokens}
+	summary := &domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "<summary>the work so far</summary>"}
+	if err := f.stores.Conversations.CompactForClaimSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID, reply, summary, span); err != nil {
+		t.Fatalf("CompactForClaimSystem: %v", err)
+	}
+	for _, m := range f.transcript(t) {
+		if m.Subtype == domain.MessageSubtypeInjectionTaskContext {
+			t.Fatal("the task-context row is still in the assembly window after the compaction")
+		}
+	}
 }
 
 func (f *launchFixture) say(t *testing.T, role, subtype, content string) {
@@ -304,6 +333,30 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	}
 	if reclaimed.Attempts != 1 || reclaimed.SetupFailures != 0 {
 		t.Errorf("re-claim = (attempts %d, setup %d), want (1, 0) — the park ended the episode", reclaimed.Attempts, reclaimed.SetupFailures)
+	}
+}
+
+// TestPreAgentFailure_ExhaustedOnACompactedConversation_Parks: a compaction
+// takes the opening and every reply out of the assembly window, and the work
+// they stand for is still there. A conversation whose setup keeps failing
+// after one is parked like any other with work, not failed as one that never
+// ran.
+func TestPreAgentFailure_ExhaustedOnACompactedConversation_Parks(t *testing.T) {
+	f := newLaunchFixture(t, "compacted-parks")
+	f.open(t)
+	f.speak(t, "assistant", "on it")
+	f.compact(t)
+
+	spent := f.conv
+	spent.SetupFailures = maxClaimAttempts - 1
+	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
+		errors.New("connect to tool host: runsc: exit status 128"))
+
+	if st := f.storedStatus(t); st != domain.StatusOpen {
+		t.Errorf("stored status = %q after an exhausted budget, want open", st)
+	}
+	if st := f.blueprintStatus(t); st != string(domain.BlueprintRunStatusRunning) {
+		t.Errorf("blueprint_run status = %q, want running — failing it would end the work the compaction summarized", st)
 	}
 }
 
