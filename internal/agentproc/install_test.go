@@ -1,6 +1,8 @@
 package agentproc
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -139,5 +141,58 @@ func TestWriteFileIfChanged_ReportsWhetherItWrote(t *testing.T) {
 	}
 	if !wrote {
 		t.Error("changed content: expected wrote=true, got false")
+	}
+}
+
+func TestParseNodeVersion(t *testing.T) {
+	for _, tc := range []struct {
+		in           string
+		major, minor int
+		ok           bool
+	}{
+		{"v18.14.0", 18, 14, true},
+		{"v18.13.2", 18, 13, true},
+		{"v22.11.0", 22, 11, true},
+		{"v18", 0, 0, false},
+		{"vx.1.0", 0, 0, false},
+	} {
+		major, minor, err := parseNodeVersion(tc.in)
+		if ok := err == nil; ok != tc.ok || major != tc.major || minor != tc.minor {
+			t.Errorf("parseNodeVersion(%q) = %d, %d, %v; want %d, %d, ok=%v", tc.in, major, minor, err, tc.major, tc.minor, tc.ok)
+		}
+	}
+}
+
+// TestNodeFloorMatchesTheSDK fails on an SDK bump that moves the SDK's Node
+// floor, which the preflight would otherwise keep passing for Node versions
+// the SDK no longer runs on.
+func TestNodeFloorMatchesTheSDK(t *testing.T) {
+	var lock struct {
+		Packages map[string]struct {
+			Engines map[string]string `json:"engines"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(packageLockJSON, &lock); err != nil {
+		t.Fatalf("parse the embedded lockfile: %v", err)
+	}
+	got := lock.Packages["node_modules/@anthropic-ai/claude-agent-sdk"].Engines["node"]
+	if want := fmt.Sprintf(">=%d.%d.0", nodeFloorMajor, nodeFloorMinor); got != want {
+		t.Fatalf("the SDK declares engines.node %q; checkNode enforces %q", got, want)
+	}
+}
+
+func TestNodeMeetsFloor(t *testing.T) {
+	for _, tc := range []struct {
+		major, minor int
+		want         bool
+	}{
+		{nodeFloorMajor - 1, 99, false},
+		{nodeFloorMajor, nodeFloorMinor - 1, false},
+		{nodeFloorMajor, nodeFloorMinor, true},
+		{nodeFloorMajor + 1, 0, true},
+	} {
+		if got := nodeMeetsFloor(tc.major, tc.minor); got != tc.want {
+			t.Errorf("nodeMeetsFloor(%d, %d) = %v, want %v", tc.major, tc.minor, got, tc.want)
+		}
 	}
 }

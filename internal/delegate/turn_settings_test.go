@@ -18,7 +18,7 @@ func TestResolveTurnSettings(t *testing.T) {
 	const (
 		stepModel     = domain.ModelSonnet               // claude-sonnet-5: all five efforts
 		teamDefault   = "claude-sonnet-5-5"              // all five efforts
-		fable         = "claude-fable-5-1"               // all five efforts
+		fable         = "claude-fable-5-2"               // all five efforts
 		bedrockSonnet = "us.anthropic.claude-sonnet-5-5" // ceiling xhigh
 		disabled      = domain.ModelOpus
 	)

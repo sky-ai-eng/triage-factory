@@ -18,7 +18,7 @@ import (
 // Pinned SDK version. Bump on Triage Factory release after verifying the
 // new release in a spike — see scripts/clean-slate.sh notes. Keep the
 // package.json template in sync with this constant.
-const sdkVersion = "0.3.296"
+const sdkVersion = "0.3.325"
 
 // Embedded shim that translates the flag-based argv BuildArgs emits into
 // Agent SDK Options. Materialized to disk at first install so the Node
@@ -98,7 +98,7 @@ func doInstall() (string, error) {
 	// the unconditional checkNode/checkNpm pair would error there
 	// because nothing on PATH satisfies them. Local-mode users on a
 	// fresh laptop still hit the install path and still get the
-	// human-readable "install Node 18+" error in that case.
+	// human-readable "install Node" error in that case.
 	if !needsInstall(sdkDir, lockChanged) {
 		return wrapperPath, nil
 	}
@@ -195,24 +195,35 @@ func writeFileIfChanged(path string, content []byte, perm os.FileMode) (bool, er
 	return true, nil
 }
 
-// checkNode verifies a usable Node is on PATH. Required floor is 18 —
-// the SDK itself documents Node 18+ as the minimum. We surface a
-// human-readable error here so a missing-Node user sees "install Node
-// 18+" rather than the opaque ENOENT exec.Command would otherwise raise
-// when run.go later tries to spawn the wrapper.
+// nodeFloorMajor and nodeFloorMinor are the oldest Node the pinned SDK runs
+// on: the engines.node its package.json declares, which moves with an SDK
+// bump.
+const (
+	nodeFloorMajor = 18
+	nodeFloorMinor = 14
+)
+
+// checkNode verifies a usable Node is on PATH, at the pinned SDK's floor. We
+// surface a human-readable error here so a missing-Node user sees "install
+// Node" rather than the opaque ENOENT exec.Command would otherwise raise when
+// run.go later tries to spawn the wrapper.
 func checkNode() error {
 	out, err := exec.Command("node", "--version").Output()
 	if err != nil {
-		return fmt.Errorf("node not found on PATH: install Node 18+ (https://nodejs.org/) — required for the Triage Factory agent runtime")
+		return fmt.Errorf("node not found on PATH: install Node %d.%d+ (https://nodejs.org/) — required for the Triage Factory agent runtime", nodeFloorMajor, nodeFloorMinor)
 	}
-	major, err := parseNodeMajor(strings.TrimSpace(string(out)))
+	major, minor, err := parseNodeVersion(strings.TrimSpace(string(out)))
 	if err != nil {
 		return fmt.Errorf("parse node --version output %q: %w", string(out), err)
 	}
-	if major < 18 {
-		return fmt.Errorf("node %s is too old; Triage Factory requires Node 18+", strings.TrimSpace(string(out)))
+	if !nodeMeetsFloor(major, minor) {
+		return fmt.Errorf("node %s is too old; Triage Factory requires Node %d.%d+", strings.TrimSpace(string(out)), nodeFloorMajor, nodeFloorMinor)
 	}
 	return nil
+}
+
+func nodeMeetsFloor(major, minor int) bool {
+	return major > nodeFloorMajor || (major == nodeFloorMajor && minor >= nodeFloorMinor)
 }
 
 // checkNpm verifies npm is on PATH. The official Node installer ships
@@ -227,13 +238,18 @@ func checkNpm() error {
 	return nil
 }
 
-func parseNodeMajor(version string) (int, error) {
-	v := strings.TrimPrefix(version, "v")
-	dot := strings.IndexByte(v, '.')
-	if dot <= 0 {
-		return 0, fmt.Errorf("unexpected format")
+func parseNodeVersion(version string) (major, minor int, err error) {
+	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, fmt.Errorf("unexpected format")
 	}
-	return strconv.Atoi(v[:dot])
+	if major, err = strconv.Atoi(parts[0]); err != nil {
+		return 0, 0, err
+	}
+	if minor, err = strconv.Atoi(parts[1]); err != nil {
+		return 0, 0, err
+	}
+	return major, minor, nil
 }
 
 // installSDK skips when the pinned SDK is already on disk and the caller

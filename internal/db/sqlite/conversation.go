@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -2858,10 +2859,12 @@ func (s *conversationStore) HasAssistantMessageSystem(ctx context.Context, orgID
 }
 
 // markDelivered flips delivered=true on the given message ids, scoped to
-// conversationID, stamping subtype in the same statement when non-empty. ids outside
-// the run or already delivered are silently unaffected. Reached through
-// MarkDeliveredForClaimSystem, which fences it (see the claim-fence block
-// above).
+// conversationID, stamping subtype when non-empty and moving a batch that
+// would sit ahead of the model's newest reply behind every delivered row
+// (domain.DeliveryPositions), all inside the caller's transaction. ids
+// outside the run or already delivered are silently unaffected. Reached
+// through MarkDeliveredForClaimSystem, which fences it (see the claim-fence
+// block above).
 func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -2869,26 +2872,75 @@ func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversati
 	if len(ids) == 0 {
 		return nil
 	}
-	// NULLIF keeps the stamp optional without forking the statement: an
-	// empty subtype leaves each row's own value in place.
+	var answered, tail float64
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(CASE WHEN role IN ('assistant', 'tool') THEN COALESCE(seq, id) END), 0),
+		       COALESCE(MAX(COALESCE(seq, id)), 0)
+		FROM messages
+		WHERE conversation_id = ? AND delivered = 1
+	`, conversationID).Scan(&answered, &tail); err != nil {
+		return fmt.Errorf("read the delivered tail: %w", err)
+	}
+	type pendingRow struct {
+		id  int
+		key float64
+	}
+	var pending []pendingRow
 	for start := 0; start < len(ids); start += inListChunkSize {
-		end := start + inListChunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
+		end := min(start+inListChunkSize, len(ids))
 		chunk := ids[start:end]
 		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)+2)
-		args = append(args, subtype, conversationID)
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, conversationID)
 		for i, id := range chunk {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		if _, err := s.q.ExecContext(ctx, `
-			UPDATE messages SET delivered = 1, subtype = COALESCE(NULLIF(?, ''), subtype)
-			WHERE conversation_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
-		`, args...); err != nil {
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT id, COALESCE(seq, id) FROM messages
+			WHERE conversation_id = ? AND delivered = 0 AND id IN (`+strings.Join(placeholders, ",")+`)
+		`, args...)
+		if err != nil {
+			return fmt.Errorf("read the rows to deliver: %w", err)
+		}
+		for rows.Next() {
+			var r pendingRow
+			if err := rows.Scan(&r.id, &r.key); err != nil {
+				rows.Close()
+				return err
+			}
+			pending = append(pending, r)
+		}
+		if err := rows.Close(); err != nil {
 			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	sort.Slice(pending, func(i, j int) bool {
+		if pending[i].key != pending[j].key {
+			return pending[i].key < pending[j].key
+		}
+		return pending[i].id < pending[j].id
+	})
+	keys := make([]float64, len(pending))
+	for i, r := range pending {
+		keys[i] = r.key
+	}
+	positions := domain.DeliveryPositions(answered, tail, keys)
+	// NULLIF keeps the stamp optional without forking the statement: an
+	// empty subtype leaves each row's own value in place.
+	for i, r := range pending {
+		var seq *float64
+		if positions != nil {
+			seq = &positions[i]
+		}
+		if _, err := s.q.ExecContext(ctx, `
+			UPDATE messages SET delivered = 1, seq = COALESCE(?, seq), subtype = COALESCE(NULLIF(?, ''), subtype)
+			WHERE conversation_id = ? AND id = ?
+		`, seq, subtype, conversationID, r.id); err != nil {
+			return fmt.Errorf("deliver row %d: %w", r.id, err)
 		}
 	}
 	return nil

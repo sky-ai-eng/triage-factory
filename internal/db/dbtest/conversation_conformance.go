@@ -5271,6 +5271,93 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// A row queued while a turn streams takes an id below the reply the turn
+	// writes. Delivered where it was queued, it would assemble ahead of a reply
+	// the model produced without it, which the Anthropic API refuses once the
+	// reply's thinking is replayed.
+	t.Run("MarkDelivered_MovesABatchQueuedAheadOfTheNewestReplyBehindIt", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-move", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+		insert := func(m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		pending := false
+		insert(domain.Message{Role: "user", Content: "go"})
+		steer := insert(domain.Message{Role: "user", Content: "sent mid-turn", Delivered: &pending})
+		note := insert(domain.Message{Role: "user", Subtype: "injection:system-note", Content: "staged mid-turn", Delivered: &pending})
+		reply := insert(domain.Message{Role: "assistant", Content: "working", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "bash"}}})
+		under := float64(reply) + 0.5
+		insert(domain.Message{Role: "tool", ToolCallID: "c1", Content: "ok", Seq: &under})
+
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{note, steer}, ""); err != nil {
+			t.Fatalf("MarkDeliveredForClaimSystem: %v", err)
+		}
+		rows, err := store.ListForAssemblySystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("ListForAssemblySystem: %v", err)
+		}
+		var order []string
+		for _, r := range rows {
+			order = append(order, r.Content)
+		}
+		if want := []string{"go", "working", "ok", "sent mid-turn", "staged mid-turn"}; strings.Join(order, "|") != strings.Join(want, "|") {
+			t.Fatalf("assembly order = %q, want %q: delivered input behind the reply and its result, in the order it was queued", order, want)
+		}
+		for _, r := range rows[3:] {
+			if r.Seq == nil || *r.Seq >= float64(reply+1) {
+				t.Errorf("row %q seq = %v, want a fraction below %d, where the next row's id starts", r.Content, r.Seq, reply+1)
+			}
+		}
+	})
+
+	t.Run("MarkDelivered_LeavesABatchAfterTheNewestReplyWhereItIs", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "running")
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stay", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, conversationID)[0].ID
+		pending := false
+		for _, m := range []domain.Message{
+			{Role: "user", Content: "go"},
+			{Role: "assistant", Content: "done"},
+		} {
+			m.ConversationID = conversationID
+			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+		}
+		followUp, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "user", Content: "one more thing", Delivered: &pending})
+		if err != nil {
+			t.Fatalf("InsertMessage follow-up: %v", err)
+		}
+
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(followUp)}, ""); err != nil {
+			t.Fatalf("MarkDeliveredForClaimSystem: %v", err)
+		}
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+		if err != nil {
+			t.Fatalf("MessagesForConversations: %v", err)
+		}
+		for _, m := range msgs {
+			if m.ID == int(followUp) && m.Seq != nil {
+				t.Errorf("follow-up seq = %v, want NULL: it already sits behind the reply", *m.Seq)
+			}
+		}
+	})
+
 	t.Run("RequeueInput_FlipsOnlyDeliveredQueueShapedRowsOfTheConversation", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

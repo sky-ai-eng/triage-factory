@@ -13,7 +13,7 @@ import (
 func TestRun_PersonMessageSettings(t *testing.T) {
 	const (
 		start = "claude-sonnet-5-5"
-		other = "claude-fable-5-1"
+		other = "claude-fable-5-2"
 		far   = "us.anthropic.claude-sonnet-5-5"
 	)
 	person := func(content, model, effort string, delivered bool) *domain.Message {

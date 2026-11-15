@@ -98,11 +98,12 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.Effort != "" {
 		args = append(args, "--effort", opts.Effort)
 	}
-	// Always sent. The SDK leaves an omitted mode to Claude Code, which
-	// applies a settings defaultMode and, with telemetry off or a
-	// third-party provider, starts in auto — where a classifier, not the
-	// allowlist, decides whether an unlisted tool runs. Every caller that
-	// leaves PermissionMode empty is relying on the allowlist.
+	// Always sent. The SDK leaves an omitted mode to Claude Code, which takes
+	// it from a settings defaultMode or from a default that depends on its
+	// version, its provider, and whether telemetry is on. One possible answer
+	// is auto, where a classifier, not the allowlist, decides whether an
+	// unlisted tool runs. Every caller that leaves PermissionMode empty is
+	// relying on the allowlist.
 	permissionMode := opts.PermissionMode
 	if permissionMode == "" {
 		permissionMode = defaultPermissionMode
