@@ -7,11 +7,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The migration under test, and the migration before it, whose schema the
-// test seeds.
+// The migration under test, and the last migration v1.18.2 ships, whose
+// schema every test here seeds.
 const (
-	interactiveConversationBackfill       int64 = 202611150001
-	beforeInteractiveConversationBackfill int64 = 202611140002
+	dependabotAlertsInteractiveConversations       int64 = 202611120001
+	beforeDependabotAlertsInteractiveConversations int64 = 202611090001
 )
 
 // TestMigrate_InteractiveConversationBackfill: a person's claim mints the
@@ -20,7 +20,7 @@ const (
 // person holds with no un-ended top-level conversation, shaped as the claim
 // mints it, and leaves every other task as it is.
 func TestMigrate_InteractiveConversationBackfill(t *testing.T) {
-	database := openMigrationsTestDBAt(t, beforeInteractiveConversationBackfill)
+	database := openMigrationsTestDBAt(t, beforeDependabotAlertsInteractiveConversations)
 	org, team, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID
 	const agent = "00000000-0000-0000-0000-0000000000a1"
 	execAll(t, database,
@@ -101,7 +101,7 @@ func TestMigrate_InteractiveConversationBackfill(t *testing.T) {
 		before[task.id] = queryInt(t, database, `SELECT COUNT(*) FROM conversations WHERE task_id = ?`, task.id)
 	}
 
-	migrateThrough(t, database, interactiveConversationBackfill)
+	migrateThrough(t, database, dependabotAlertsInteractiveConversations)
 
 	for _, task := range tasks {
 		after := queryInt(t, database, `SELECT COUNT(*) FROM conversations WHERE task_id = ?`, task.id)
@@ -156,6 +156,45 @@ func TestMigrate_InteractiveConversationBackfill(t *testing.T) {
 		// A v4 UUID, as every conversation id the store mints is.
 		if len(id) != 36 || id[14] != '4' {
 			t.Errorf("task %s: minted id %q is not a v4 UUID", task.id, id)
+		}
+	}
+}
+
+// TestMigrate_RenameIdleParkReason: every stored `idle` park reads
+// `turn_incomplete`, and no other reason, or a row with none, changes.
+func TestMigrate_RenameIdleParkReason(t *testing.T) {
+	database := openMigrationsTestDBAt(t, beforeDependabotAlertsInteractiveConversations)
+	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	execAll(t, database,
+		`INSERT INTO orgs (id, slug, name) VALUES ('`+org+`', 'local', 'Local')`,
+		`INSERT INTO teams (id, org_id, slug, name) VALUES ('`+team+`', '`+org+`', 'default', 'Default')`,
+		`INSERT INTO users (id, display_name) VALUES ('`+runmode.LocalDefaultUserID+`', 'Local')`,
+	)
+
+	rows := []struct{ id, reason, want string }{
+		{id: "idle", reason: "idle", want: "turn_incomplete"},
+		{id: "stopped", reason: "user_cancelled", want: "user_cancelled"},
+		{id: "stalled", reason: "stalled", want: "stalled"},
+		{id: "no-reason", reason: "", want: ""},
+	}
+	for _, r := range rows {
+		if _, err := database.Exec(`
+			INSERT INTO conversations (id, org_id, team_id, origin, status, park_reason)
+			VALUES (?, ?, ?, 'interactive', 'open', ?)`,
+			r.id, org, team, nullable(r.reason)); err != nil {
+			t.Fatalf("seed conversation %s: %v", r.id, err)
+		}
+	}
+
+	migrateThrough(t, database, dependabotAlertsInteractiveConversations)
+
+	for _, r := range rows {
+		var got sql.NullString
+		if err := database.QueryRow(`SELECT park_reason FROM conversations WHERE id = ?`, r.id).Scan(&got); err != nil {
+			t.Fatalf("read conversation %s: %v", r.id, err)
+		}
+		if got.String != r.want || got.Valid != (r.want != "") {
+			t.Errorf("conversation %s: park_reason = %v, want %q", r.id, got, r.want)
 		}
 	}
 }

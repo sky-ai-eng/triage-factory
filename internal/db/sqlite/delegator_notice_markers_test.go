@@ -25,8 +25,8 @@ func TestMigrate_DelegatorNoticeMarkers_SQLite(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	conn.SetMaxOpenConns(1)
 	conn.SetMaxIdleConns(1)
-	// The migration before the markers.
-	const prior = 202611150001
+	// The last migration v1.18.2 ships.
+	const prior = 202611090001
 	if err := db.BootstrapSchemaAtForTest(conn, prior); err != nil {
 		t.Fatalf("schema at %d: %v", prior, err)
 	}
