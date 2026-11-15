@@ -221,8 +221,12 @@ func (g *spendGuard) Check(ctx context.Context, _ int) (string, error) {
 // spendParkNotice renders the cap error as the transcript notice. The cap
 // error already carries the scope and the today-vs-cap figures, which is
 // exactly what a reader needs; this adds only what the native mapping
-// contributes — that the work is paused, not lost.
+// contributes — that the work is paused, not lost, and what continues it.
+// Nothing wakes the park when the cap resets or is raised, so the notice says
+// a message is still needed then, and that one sent before it parks the run
+// again.
 func spendParkNotice(err error) string {
 	return "<system-note>\nThis run is paused: " + err.Error() + ". " +
-		"No work has been lost — it resumes on the next message, or once the cap resets or is raised.\n</system-note>"
+		"No work has been lost. Send a message to continue it once the cap resets at 00:00 UTC or is raised; " +
+		"a message sent before then pauses it again.\n</system-note>"
 }
