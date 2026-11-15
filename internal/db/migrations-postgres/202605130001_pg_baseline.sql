@@ -1206,6 +1206,11 @@ CREATE TABLE public.deliverables (
 --
 -- Which entities the row is reachable from lives in conversation_memory_entities
 -- below, which every read joins through.
+--
+-- updated_at is when agent_content last changed: the insert stamps it beside
+-- created_at, and a write that stores the content the row already holds leaves
+-- it alone. It is what tells how much of a conversation has happened since its
+-- memory was last written.
 CREATE TABLE public.conversation_memory (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1213,7 +1218,8 @@ CREATE TABLE public.conversation_memory (
     blueprint_run_id uuid,
     agent_content text,
     source text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 

@@ -148,7 +148,7 @@ type liveRunSpec struct {
 	// mirror is on park, so the engagement's ending sees whatever the last
 	// tool call did not.
 	mirror *memoryMirror
-	// nudge is the would-stop hook (artifactContractNudge), asked before a
+	// nudge is the would-stop hook (turnEndNudges), asked before a
 	// turn concludes on its own: a non-empty note is sent into the process
 	// and the run goes on. Nil asks nothing.
 	nudge func(context.Context) string
@@ -563,7 +563,7 @@ func (s *Spawner) moveLiveSettings(ctx context.Context, park liveParkContext, pr
 
 // sendNudge sends the would-stop hook's note into the live process and records
 // it on the transcript, where the hook reads it back to know it has asked
-// (askedAboutArtifactAlready). Sent before it is recorded: a row written for a
+// (askedSinceHumanInput). Sent before it is recorded: a row written for a
 // message the process never took would say the agent was asked something it
 // was not.
 //

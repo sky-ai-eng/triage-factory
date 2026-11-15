@@ -2440,6 +2440,67 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("CountPersonMessagesSinceSystem_CountsPersonRowsStrictlyAfter", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		conversationID := seedConversationForTest(t, orgID, seed, "open")
+		base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+		at := func(minutes int) time.Time { return base.Add(time.Duration(minutes) * time.Minute) }
+		insert := func(minutes int, m domain.Message) int {
+			t.Helper()
+			m.ConversationID = conversationID
+			m.CreatedAt = at(minutes)
+			id, err := store.InsertMessage(ctx, orgID, &m)
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+			return int(id)
+		}
+		count := func(since time.Time) int {
+			t.Helper()
+			n, err := store.CountPersonMessagesSinceSystem(ctx, orgID, conversationID, since)
+			if err != nil {
+				t.Fatalf("CountPersonMessagesSinceSystem(%v): %v", since, err)
+			}
+			return n
+		}
+
+		if n := count(base); n != 0 {
+			t.Fatalf("a conversation with no rows counted %d", n)
+		}
+		insert(1, domain.Message{UserID: userID, Role: "user", Content: "first"})
+		insert(2, domain.Message{Role: "assistant", Content: "reply"})
+		compacted := insert(3, domain.Message{UserID: userID, Role: "user", Content: "second"})
+		if _, err := store.SetWindowStateSystem(ctx, orgID, conversationID, float64(compacted)+0.5,
+			domain.MessageWindowActive, domain.MessageWindowInactive); err != nil {
+			t.Fatalf("SetWindowStateSystem: %v", err)
+		}
+		insert(4, domain.Message{UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: "a nudge"})
+		pending := false
+		withdrawn := insert(5, domain.Message{UserID: userID, Role: "user", Content: "never mind", Delivered: &pending})
+		if err := store.WithdrawPendingInputSystem(ctx, orgID, conversationID, []int{withdrawn}); err != nil {
+			t.Fatalf("WithdrawPendingInputSystem: %v", err)
+		}
+		insert(6, domain.Message{UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "and this"})
+		insert(7, domain.Message{UserID: userID, Role: "user", Content: "next", Delivered: &pending})
+
+		// The compacted, steered and waiting rows are the person's; the nudge,
+		// the withdrawn row and the reply are not.
+		if n := count(base); n != 4 {
+			t.Errorf("count since before every row = %d, want 4", n)
+		}
+		if n := count(at(2)); n != 3 {
+			t.Errorf("count since the reply = %d, want 3 (the compacted, steered and waiting rows)", n)
+		}
+		// Strictly after: a row created at since is not since it.
+		if n := count(at(6)); n != 1 {
+			t.Errorf("count since the steered row = %d, want 1 (the waiting row alone)", n)
+		}
+		if n := count(at(7)); n != 0 {
+			t.Errorf("count since the newest row = %d, want 0", n)
+		}
+	})
+
 	t.Run("NewestAssistant_ReadsTheNewestActiveAssistantRow", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
 		ctx := context.Background()

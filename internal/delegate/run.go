@@ -704,7 +704,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		perms:        perms,
 		sink:         sink,
 		mirror:       mirror,
-		nudge:        turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg))),
+		nudge:        turnEndNudge(s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive)),
 		hasBlueprint: cfg.blueprintRunID != "",
 	})
 
@@ -1223,6 +1223,12 @@ func (s *Spawner) processCompletion(
 		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
 	default: // turnConcluded — every other non-error turn parked above
 		resultSummary = verdict.Summary
+		// A conversation a person works in has no blueprint run, and its turn
+		// records the answer the person got, not the agent's reply to the
+		// memory note.
+		if blueprintRunID == "" && completion.Terminal == nil {
+			resultSummary = strings.TrimSpace(s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, resultSummary))
+		}
 		outcome = string(verdict.Outcome)
 		// stop_blueprint states a reason for either ending, and it is
 		// recorded either way, as on the native runtime. A turn that

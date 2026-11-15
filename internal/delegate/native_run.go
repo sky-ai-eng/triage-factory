@@ -311,7 +311,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// Every tool call is a chance the agent just wrote its memory
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
-			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, finalBlueprintStepOf(cfg)),
+			ShouldStopAfterTurn: s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -350,6 +350,19 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		NewSandbox: true,
 	}
 
+	// A turn of a conversation a person works in records the answer the person
+	// got as its summary, not the agent's reply to the memory note.
+	run := engine.Run
+	if cfg.interactive {
+		run = func(ctx context.Context, params agentloop.Params) agentloop.Result {
+			result := engine.Run(ctx, params)
+			if result.Kind == agentloop.ResultConcluded {
+				result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
+			}
+			return result
+		}
+	}
+
 	return s.runNativeTail(ctx, nativeTail{
 		orgID:          orgID,
 		conversationID: conversationID,
@@ -360,7 +373,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		creatorUserID:  creatorUserID,
 		startTime:      startTime,
 		mirror:         mirror,
-		run:            engine.Run,
+		run:            run,
 		params:         params,
 		transcript:     transcript,
 		ckpt:           ckpt,
@@ -787,8 +800,7 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // terminal external action, which is what its addendum tells it. finalStep
 // says which this is.
 //
-// Both runtimes ask it: the native loop as its ShouldStopAfterTurn hook, and
-// the SDK driver through turnEndNudge.
+// Both runtimes ask it, through turnEndNudges.
 //
 // Asking twice about the same silence would be badgering — the model already
 // answered. Asking again after a human has intervened is not: the premise
@@ -848,31 +860,31 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
 			return ""
 		}
-		if askedAboutArtifactAlready(rows) {
+		if askedSinceHumanInput(rows, artifactNudgeTag) {
 			return ""
 		}
 		return artifactNudgeNote
 	}
 }
 
-// askedAboutArtifactAlready reports whether the nudge has been put with no
-// human input since.
+// askedSinceHumanInput reports whether the nudge whose note opens with tag has
+// been put with no human input since.
 //
 // Walking back from the newest row to the first one that speaks for someone:
 // the nudge itself means the question stands answered and nothing has
 // happened to change it; genuine human input means a person spoke
 // afterwards, so the run is working on something the question was never
 // asked about. Everything else the system wrote on the agent's behalf — a
-// park's stop-note, a staged event note, the crash notice — speaks for no
-// one and is skipped, using the same closed human set the engine's drain
-// keys on. The nudge check comes first because the nudge row itself is
-// system-authored: the human filter would skip it.
-func askedAboutArtifactAlready(rows []domain.Message) bool {
+// park's stop-note, a staged event note, the crash notice, another nudge's
+// note — speaks for no one and is skipped, using the same closed human set
+// the engine's drain keys on. The tag check comes first because the nudge
+// row itself is system-authored: the human filter would skip it.
+func askedSinceHumanInput(rows []domain.Message, tag string) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Role != "user" {
 			continue
 		}
-		if strings.Contains(rows[i].Content, artifactNudgeTag) {
+		if isNudgeNote(rows[i], tag) {
 			return true
 		}
 		if agentloop.IsHumanInput(rows[i]) {
@@ -880,6 +892,15 @@ func askedAboutArtifactAlready(rows []domain.Message) bool {
 		}
 	}
 	return false
+}
+
+// isNudgeNote reports whether a row is the note a turn-end nudge sent, the one
+// whose text opens with tag. The tag alone is not enough: it is a string in
+// this repository and in every transcript the note lands in, so a person's
+// message or a staged note quoting it would otherwise read as the question
+// asked.
+func isNudgeNote(r domain.Message, tag string) bool {
+	return r.Role == "user" && r.Subtype == domain.MessageSubtypeInjectionNudge && strings.HasPrefix(r.Content, tag)
 }
 
 // turnEndNudge adapts the would-stop hook to the SDK driver's shape, which

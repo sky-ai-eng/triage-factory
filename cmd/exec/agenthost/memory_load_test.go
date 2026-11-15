@@ -36,8 +36,8 @@ func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversati
 		t.Fatalf("seed authoring conversation: %v", err)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO conversation_memory (id, conversation_id, agent_content, source, created_at) VALUES (?, ?, ?, 'agent', ?)`,
-		uuid.New().String(), conversationID, agent, createdAt,
+		`INSERT INTO conversation_memory (id, conversation_id, agent_content, source, created_at, updated_at) VALUES (?, ?, ?, 'agent', ?, ?)`,
+		uuid.New().String(), conversationID, agent, createdAt, createdAt,
 	); err != nil {
 		t.Fatalf("seed conversation_memory: %v", err)
 	}

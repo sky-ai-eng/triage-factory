@@ -88,6 +88,9 @@ type TaskMemoryStore interface {
 	// after a retry overwrites agent_content, source and blueprint_run_id but
 	// preserves the row's id and created_at. The conflict arm replacing source
 	// is what lets an agent's own conclusion overwrite a generated stand-in.
+	// updated_at moves only when agent_content does: a write of the content
+	// the row already holds says nothing new about when the memory was
+	// written, whatever source it names.
 	//
 	// Returns the stored row, sourced from RETURNING on the write statement
 	// itself — including the producing conversation's naming facts

@@ -80,9 +80,11 @@ func upsertAgentMemory(ctx context.Context, q queryer, orgID, conversationID, bl
 	}
 	mem, err := scanTaskMemory(q.QueryRowContext(ctx, `
 		WITH written AS (
-			INSERT INTO conversation_memory (id, org_id, conversation_id, blueprint_run_id, agent_content, source, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, source = EXCLUDED.source, blueprint_run_id = EXCLUDED.blueprint_run_id
+			INSERT INTO conversation_memory (id, org_id, conversation_id, blueprint_run_id, agent_content, source, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+			ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, source = EXCLUDED.source, blueprint_run_id = EXCLUDED.blueprint_run_id,
+				updated_at = CASE WHEN conversation_memory.agent_content IS DISTINCT FROM EXCLUDED.agent_content
+				                  THEN EXCLUDED.updated_at ELSE conversation_memory.updated_at END
 			RETURNING *
 		)
 	`+taskMemoryWrittenSelect,
@@ -217,7 +219,7 @@ const entityMemoryForReaderSQL = `
 // Every read SELECTs it and every write RETURNs it (via taskMemoryWrittenSelect,
 // re-applying the same join over the write's own output row), so the write
 // shape cannot drift from the read shape.
-const taskMemoryColumns = `rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
+const taskMemoryColumns = `rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at, rm.updated_at,
 	       c.task_id, c.blueprint_step_index, p.name`
 
 // taskMemorySelect / taskMemorySelectTeamScoped are the SELECT + FROM the
@@ -261,8 +263,8 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	var blueprintRunID, agentContent, taskID, promptName sql.NullString
 	var source string
 	var stepIndex sql.NullInt64
-	var createdAt time.Time
-	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
+	var createdAt, updatedAt time.Time
+	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt, &updatedAt,
 		&taskID, &stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
@@ -270,6 +272,7 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	m.Content = agentContent.String
 	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
+	m.UpdatedAt = updatedAt
 	m.TaskID = taskID.String
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)

@@ -777,6 +777,14 @@ type ConversationStore interface {
 	// credential seal, none of which carries a request identity.
 	NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
 
+	// CountPersonMessagesSinceSystem counts the conversation's person rows,
+	// on NewestPersonMessageSystem's terms, created after since. A compacted
+	// row counts, because a long conversation compacts the very messages a
+	// reader asking "how much has the person said since then" is counting.
+	// Admin pool, org bound by argument: its reader is the turn-end check,
+	// which carries no request identity.
+	CountPersonMessagesSinceSystem(ctx context.Context, orgID, conversationID string, since time.Time) (int, error)
+
 	// NewestAssistant returns the conversation's newest assistant row by id
 	// whose window_state is 'active': the last call the model answered that
 	// the next call reads, whose usage says how full the window is and whose
