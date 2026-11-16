@@ -92,7 +92,10 @@ loop's assembly columns, and `user_id`/`claim_id` attribute each row to the
 requesting user and producing engagement. Queue-is-truth generalizes: "needs
 driving" = a queued conversation or one with undelivered input and no active
 claim, and no hand-back wait (`conversations.next_attempt_at`) still ahead of
-it. Every hand-back outcome — a claim released with the conversation left
+it. Undelivered input wakes a conversation unless it was in front of a stop that
+ended with no turn run: that park moves the conversation's wake position
+(`conversations.wake_after_message_id`) to where the stop was sent, and the
+person messages at or before it stay unread for whatever wakes it next. Every hand-back outcome — a claim released with the conversation left
 mid-flight — declares the budget it spends and its backoff in one table,
 `db.HandBackPolicies`, which both dialects render their SQL from.
 

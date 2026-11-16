@@ -1513,6 +1513,16 @@ CREATE TABLE public.conversations (
     -- identity that decides it. NULL derives the reason from stop_requested_by
     -- as above. Set only with stop_requested_at, cleared with it.
     stop_requested_reason text,
+    -- The conversation's newest messages id when the stop was requested. Set
+    -- only with stop_requested_at, cleared with it. A message id and not a
+    -- time, because a message's created_at is written by the process that
+    -- inserted it.
+    stop_through_message_id bigint,
+    -- A person's undelivered message at or before this messages id does not
+    -- wake the conversation. The park that settles a stop with no turn run
+    -- moves it forward to the stop's stop_through_message_id; nothing moves it
+    -- back or clears it. NULL lets every undelivered person message wake it.
+    wake_after_message_id bigint,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
     -- Stamped on park, cleared on resume; the snapshot-retention sweep keys off it.

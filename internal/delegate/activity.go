@@ -98,6 +98,16 @@ func stopParkReason(ctx context.Context) domain.ParkReason {
 	return domain.ParkReasonUserCancelled
 }
 
+// stoppedBeforeTurnPark is the park a cancelled engagement writes when the
+// cancel caught it before its agent started. No turn ran, so the work the
+// stop ended is the person messages waiting in front of it, and the park
+// keeps them from waking the conversation again (db.Park.NoTurnRan).
+func stoppedBeforeTurnPark(ctx context.Context) db.Park {
+	park := db.ParkStopped(stopParkReason(ctx), "")
+	park.NoTurnRan = true
+	return park
+}
+
 // stallCause is what the watchdog decided on: the operation that outlived its
 // deadline and how long it had been in flight, or, with no operation, how
 // long the engagement had been idle.

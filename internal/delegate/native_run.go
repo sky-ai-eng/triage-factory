@@ -65,11 +65,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// after that, so none of them sees it nil.
 	var mirror *memoryMirror
 
-	// The park a stop lands on, wherever the stop catches this engagement. A
-	// LEASE fence is not a stop and never reaches the park: this engagement
-	// no longer owns the conversation, so recording a user cancellation on it
-	// would be recording a stop nobody made. Neither is the dispatcher
-	// shutting down, which hands the conversation back instead.
+	// The park a stop lands on when it catches this engagement before the
+	// loop runs, so no turn ran (stoppedBeforeTurnPark). A LEASE fence is not
+	// a stop and never reaches the park: this engagement no longer owns the
+	// conversation, so recording a user cancellation on it would be recording
+	// a stop nobody made. Neither is the dispatcher shutting down, which hands
+	// the conversation back instead.
 	stopped := func() engagementDisposition {
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
@@ -80,7 +81,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         db.ParkStopped(stopParkReason(ctx), ""),
+			reason:         stoppedBeforeTurnPark(ctx),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),

@@ -1179,6 +1179,13 @@ func TestStopIntent_Postgres(t *testing.T) {
 	dbtest.RunStopIntentConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
 }
 
+// TestStopWake_Postgres runs the shared wake-position conformance on the same
+// fixture the claim-lease suite uses.
+func TestStopWake_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunStopWakeConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
+
 // TestHandBack_Postgres runs the shared hand-back conformance — the fenced
 // hand-back, the wait it sets, and every read the wait keeps a conversation
 // out of — on the claim-lease fixture.

@@ -76,6 +76,18 @@ type Park struct {
 	// in place. The field stays because a future deliberate park with an
 	// actual conclusion to state would want it.
 	ResultSummary string
+	// NoTurnRan says this park settles a stop that ended the conversation's
+	// work before any turn ran: the engagement was cancelled while its agent
+	// was still being brought up. The person messages in front of the stop
+	// were that work, so the park moves the conversation's wake position to
+	// where the stop was sent and they no longer wake it. They stay
+	// undelivered, and the next engagement reads them with whatever wakes the
+	// conversation.
+	//
+	// False on every park after a turn ran, including one the stop ended: a
+	// message waiting behind that turn was not in front of the stop, and it
+	// runs next.
+	NoTurnRan bool
 }
 
 // ParkTurnIncomplete is a turn that stopped before it finished
@@ -1435,6 +1447,10 @@ type ConversationStore interface {
 	// did, and the intent is cleared in the same write. A turn_incomplete park
 	// that lands while a stop is pending records the stop, which is right —
 	// someone asked for it, and the turn stopping is how it was honored.
+	//
+	// A park with Park.NoTurnRan also moves the wake position forward to where
+	// the pending stop was sent, so the person messages in front of it no
+	// longer wake the conversation.
 	//
 	// Refused (ErrClaimReleased) once the engagement has been fenced out.
 	// Every park comes through here, deliberate or not: the self-park on the
