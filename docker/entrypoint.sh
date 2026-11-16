@@ -142,11 +142,12 @@ done
 # The broker (root) and the orchestrator (TF_ORCHESTRATOR_UID) end up
 # as different uids, so the orchestrator — holding zero capabilities,
 # including no CAP_SYS_PTRACE, and a bounding set that can never regain
-# any — cannot ptrace the broker even if it wanted to. Both stay in this
-# container's single process group, so tini's SIGTERM fan-out (`-g` in
-# the ENTRYPOINT below) reaches both for shutdown without the
-# orchestrator needing to track a process it no longer has the
-# privilege to signal-manage anyway.
+# any — cannot ptrace the broker even if it wanted to. The broker moves
+# itself into a process group of its own at start, so a stop's SIGTERM
+# fan-out (tini's `-g`, in the Dockerfile's ENTRYPOINT) reaches the
+# orchestrator alone: the broker keeps serving while the orchestrator
+# hands its runs back, which snapshots each run's tree through it. The
+# broker ends when the orchestrator exits.
 # multi_mode mirrors internal/runmode.ModeFromEnv's own parsing exactly
 # (case-insensitive match against "multi"; empty/unset means local; NOT
 # whitespace-tolerant — runmode deliberately surfaces a stray-space typo
@@ -229,6 +230,13 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # and waits for it exactly as before — this branch is the only
     # difference, so those paths stay byte-identical.
     if ! control_role; then
+        # A container stop ends the broker with the container, before it can
+        # remove its socket, and the container's filesystem outlives the
+        # stop. A socket left by the previous start would end the wait below
+        # before this broker has bound its own.
+        if [ -S "$TF_CAPBROKER_SOCKET" ]; then
+            rm -f "$TF_CAPBROKER_SOCKET"
+        fi
         triagefactory cap-broker --socket "$TF_CAPBROKER_SOCKET" --orchestrator-uid "$TF_ORCHESTRATOR_UID" --orchestrator-gid "$TF_ORCHESTRATOR_GID" &
         BROKER_PID=$!
 

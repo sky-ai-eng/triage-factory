@@ -71,6 +71,23 @@ func IsHumanInput(r domain.Message) bool {
 	return r.Subtype == "" || r.Subtype == domain.MessageSubtypeInjectionSteer
 }
 
+// newerSettingsRow is the newest delivered person row in rows that recorded
+// the settings it runs on (a model) and whose id is above from. A row still
+// waiting is not one: its settings apply from the call that reads it.
+func newerSettingsRow(rows []domain.Message, from int) (domain.Message, bool) {
+	var newest domain.Message
+	found := false
+	for _, r := range rows {
+		if r.Role != "user" || !IsHumanInput(r) || !isDelivered(r) || r.Model == "" || r.ID <= from {
+			continue
+		}
+		if !found || r.ID > newest.ID {
+			newest, found = r, true
+		}
+	}
+	return newest, found
+}
+
 // hasPending reports whether an undelivered row that must be read before
 // the run ends is waiting — the would-stop recheck, which catches input that
 // landed while the concluding turn was still streaming.

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { TaskCard } from './TaskCard'
 
@@ -252,6 +252,26 @@ describe('TaskCard, the task’s own asks', () => {
     )
   })
 
+  it('offers the holder a way into their chat, and lets the memory wait take its place', () => {
+    renderCard({ lifecycle: 'queued', age: '1h ago', href: '/runs/c0', chat: { href: '/runs/c9' } })
+    expect(screen.getByRole('link', { name: 'Start chat' })).toHaveAttribute('href', '/runs/c9')
+
+    cleanup()
+    renderCard({
+      lifecycle: 'queued',
+      age: '1h ago',
+      href: '/runs/c0',
+      chat: { href: '/runs/c9' },
+      waiting: true,
+    })
+    expect(screen.queryByRole('link', { name: 'Start chat' })).not.toBeInTheDocument()
+    // The wait leads where the holder's message will run once it lands.
+    expect(screen.getByRole('link', { name: 'Waiting on memory' })).toHaveAttribute(
+      'href',
+      '/runs/c9',
+    )
+  })
+
   it('offers the retry for a delegation that never fired', () => {
     const onRetry = vi.fn()
     renderCard({
@@ -268,10 +288,10 @@ describe('TaskCard, facts', () => {
   it('states the facts on one readout line, a severity in its tone', () => {
     renderCard({
       title: 'lodash (npm)',
-      facts: [{ text: 'octo/api' }, { text: 'High', tone: 'problem' }, { text: '2 open alerts' }],
+      facts: [{ text: 'High', tone: 'problem' }, { text: '2 open alerts' }],
     })
     const line = document.querySelector('.tc-facts')
-    expect(line).toHaveTextContent('octo/apiHigh2 open alerts')
+    expect(line).toHaveTextContent('High2 open alerts')
     expect(screen.getByText('High')).toHaveAttribute('data-tone', 'problem')
   })
 

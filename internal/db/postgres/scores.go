@@ -106,10 +106,11 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 		// Single UPDATE ... FROM (VALUES ...) so the whole batch lands in
 		// one round-trip.
 		//
-		// Placeholders are emitted with explicit ::uuid/::real/::text casts
-		// because the VALUES literal's types are inferred from the first
-		// row, and a NULL or empty string there would make later rows fail
-		// to coerce. Explicit casts pin every column's type at parse time.
+		// Placeholders are emitted with explicit ::uuid, ::double precision
+		// and ::text casts because the VALUES literal's types are inferred
+		// from the first row, and a NULL or empty string there would make
+		// later rows fail to coerce. Explicit casts pin every column's type
+		// at parse time.
 		var (
 			rowExprs []string
 			args     = []any{orgID}
@@ -117,7 +118,7 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 		)
 		for _, u := range ordered {
 			rowExprs = append(rowExprs, fmt.Sprintf(
-				"($%d::uuid, $%d::real, $%d::real, $%d::text, $%d::text)",
+				"($%d::uuid, $%d::double precision, $%d::double precision, $%d::text, $%d::text)",
 				n, n+1, n+2, n+3, n+4))
 			args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
 			n += 5

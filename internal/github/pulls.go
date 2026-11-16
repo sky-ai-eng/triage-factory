@@ -70,9 +70,7 @@ type PRTopComment struct {
 // GetPRBasic fetches only the PR object itself — title, body, refs, state, URL —
 // in a single round-trip. Unlike GetPR it skips the reviews + review-comments +
 // issue-comments list calls (three extra requests), so it's the cheap read for
-// callers that need the PR's own fields and not its discussion (e.g. the deliverable
-// PR handlers that read/promote title + body on every overlay load, edit, and
-// approve).
+// callers that need the PR's own fields and not its discussion.
 func (c *Client) GetPRBasic(ctx context.Context, owner, repo string, number int) (*PRView, error) {
 	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
 	if err != nil {

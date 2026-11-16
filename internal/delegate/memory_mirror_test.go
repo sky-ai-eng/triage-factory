@@ -268,6 +268,8 @@ type recordingSink struct {
 
 func (r *recordingSink) OnSession(string) error { return nil }
 
+func (r *recordingSink) OnSessionCost(float64) {}
+
 func (r *recordingSink) OnMessage(m *domain.Message) error {
 	r.msgs = append(r.msgs, m)
 	return r.err
@@ -334,7 +336,7 @@ func TestParkConversationOpen_FilesTheAgentsMemoryFile(t *testing.T) {
 		conversationID: conversationID,
 		claimID:        holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
 		claudeCwd:      cwd,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 		runtime:        domain.ConversationRuntimeSDK,
 		mirror:         mirror,
 	}, ""); fenced {
@@ -378,10 +380,9 @@ func TestProcessCompletion_ConclusionFilesWhatTheLastTurnWrote(t *testing.T) {
 	// The last turn revises the file and concludes without calling another tool.
 	writeAgentMemory(t, cwd, "what the run actually concluded")
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", "")
-	if parked || fenced {
-		t.Fatalf("processCompletion(finish) = (parked %v, fenced %v), want (false, false)", parked, fenced)
+	if fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+		"bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task, res("done"), cwd, mirror, "", ""); fenced {
+		t.Fatal("processCompletion(finish) reported fenced, want a recorded conclusion")
 	}
 
 	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "what the run actually concluded" {

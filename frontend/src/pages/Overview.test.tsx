@@ -38,12 +38,12 @@ vi.mock('../hooks/useWebSocket', () => ({
 
 function conv(over: Partial<Conversation>): Conversation {
   return {
-    ID: 'c1',
-    TaskID: 't-a',
-    Status: 'running',
-    Model: 'claude-opus-5',
-    StartedAt: new Date(Date.now() - 11 * 60_000).toISOString(),
-    ResultSummary: '',
+    id: 'c1',
+    task_id: 't-a',
+    status: 'running',
+    model: 'claude-opus-5',
+    started_at: new Date(Date.now() - 11 * 60_000).toISOString(),
+    result_summary: '',
     ...over,
   } as Conversation
 }
@@ -154,13 +154,13 @@ describe('NEEDS YOU', () => {
       runs: {
         't-a': [
           conv({
-            ID: 'c-fail',
-            Status: 'failed',
-            FailureKind: 'memory_limit',
-            CompletedAt: new Date(Date.now() - 18 * 3600_000).toISOString(),
+            id: 'c-fail',
+            status: 'failed',
+            failure_kind: 'memory_limit',
+            completed_at: new Date(Date.now() - 18 * 3600_000).toISOString(),
           }),
         ],
-        't-b': [conv({ ID: 'c-pr', TaskID: 't-b', Status: 'open', unresolved_pr_count: 1 })],
+        't-b': [conv({ id: 'c-pr', task_id: 't-b', status: 'open', unresolved_pr_count: 1 })],
       },
       total_count: 7,
     }
@@ -195,10 +195,10 @@ describe('NEEDS YOU', () => {
     // its task.
     answers.needs = {
       runs: {
-        't-a': [conv({ ID: 'c-1', Status: 'failed', CompletedAt: at(1) })],
-        't-b': [conv({ ID: 'c-2', TaskID: 't-b', Status: 'failed', CompletedAt: at(2) })],
-        't-c': [conv({ ID: 'c-3', TaskID: 't-c', Status: 'failed', CompletedAt: at(3) })],
-        't-d': [conv({ ID: 'c-4', TaskID: 't-d', Status: 'failed', CompletedAt: at(4) })],
+        't-a': [conv({ id: 'c-1', status: 'failed', completed_at: at(1) })],
+        't-b': [conv({ id: 'c-2', task_id: 't-b', status: 'failed', completed_at: at(2) })],
+        't-c': [conv({ id: 'c-3', task_id: 't-c', status: 'failed', completed_at: at(3) })],
+        't-d': [conv({ id: 'c-4', task_id: 't-d', status: 'failed', completed_at: at(4) })],
       },
       total_count: 4,
     }
@@ -238,17 +238,17 @@ describe('RUNNING', () => {
       runs: {
         't-a': [
           conv({
-            ID: 'c-work',
+            id: 'c-work',
             current_action: 'Replaying 6 commits onto origin/main',
-            ClaimedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+            claimed_at: new Date(Date.now() - 4 * 60_000).toISOString(),
           }),
         ],
         't-b': [
           conv({
-            ID: 'c-q',
-            TaskID: 't-b',
-            Status: 'queued',
-            QueuedAt: new Date(Date.now() - 60_000).toISOString(),
+            id: 'c-q',
+            task_id: 't-b',
+            status: 'queued',
+            queued_at: new Date(Date.now() - 60_000).toISOString(),
             queue_position: 3,
           }),
         ],

@@ -7,6 +7,8 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -200,5 +202,80 @@ func TestFiringWorker_EndsThePriorConversation(t *testing.T) {
 	}
 	if len(rung) != 1 || rung[0] != concluded {
 		t.Errorf("memory doorbell rang for %v, want exactly [%s]", rung, concluded)
+	}
+}
+
+// TestTryAutoDelegate_ARefusedRunIsASkip: a refusal at event time is a
+// decided skip, not a fault. A trigger whose blueprint has no steps is refused
+// by the spawner's plan, so tryAutoDelegate returns (false, nil) and the event
+// is not replayed for it: the task is left as it was, with no claim and no
+// run, and the trigger's team admins are told. Routed through the event, the
+// refused trigger ranks first and the next trigger still fires.
+func TestTryAutoDelegate_ARefusedRunIsASkip(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	entityID := setupFenceScenario(t, database)
+	seedLocalBot(t, database)
+	stores := sqlitestore.New(database)
+	spawner := delegate.NewSpawner(database, stores, nil, websocket.NewHub(), "claude-sonnet-4-6")
+	deps := testRouterDeps(database)
+	deps.Spawner = spawner
+	router := newTestRouter(deps)
+
+	if _, err := stores.Blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: "bp-empty", Name: "Empty", Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("create the stepless blueprint: %v", err)
+	}
+	refused, err := stores.EventHandlers.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.EventHandler{
+		ID: "t-empty", Kind: domain.EventHandlerKindTrigger, BlueprintID: "bp-empty",
+		TriggerType: domain.TriggerTypeEvent, EventType: domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create the refused trigger: %v", err)
+	}
+	// Triggers rank newest first, so the refused one is tried before t-fence.
+	if _, err := database.Exec(`UPDATE event_handlers SET created_at = datetime('now', '+1 hour') WHERE id = 't-empty'`); err != nil {
+		t.Fatalf("rank the refused trigger first: %v", err)
+	}
+
+	evt := recordFenceEvent(t, database, entityID)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, evt.EventType, evt.DedupKey, evt.ID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	fired, err := router.tryAutoDelegate(t.Context(), runmode.LocalDefaultOrgID, task, refused, entityID, evt.ID, runmode.LocalDefaultTeamID)
+	if err != nil || fired {
+		t.Fatalf("tryAutoDelegate = (fired %v, %v), want (false, nil): a refusal is a skip", fired, err)
+	}
+	after, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
+	if err != nil || after == nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if after.Status != "queued" || after.ClaimedByAgentID != "" || after.ClaimedByUserID != "" {
+		t.Errorf("task after the refusal = %s claimed by agent %q / user %q, want queued and unclaimed", after.Status, after.ClaimedByAgentID, after.ClaimedByUserID)
+	}
+	if n := fenceConversationCount(t, database, entityID); n != 0 {
+		t.Errorf("the refusal left %d conversations, want none", n)
+	}
+	rec.Active(t, runmode.LocalDefaultOrgID, kinds.TriggerRefused, "t-empty:"+domain.DelegationRefusedBlueprintUnusable)
+
+	mustHandle(t, router, recordFenceEvent(t, database, entityID))
+	var runs []string
+	rows, err := database.Query(`SELECT trigger_id FROM blueprint_runs WHERE task_id = ?`, task.ID)
+	if err != nil {
+		t.Fatalf("read runs: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		runs = append(runs, id)
+	}
+	if len(runs) != 1 || runs[0] != "t-fence" {
+		t.Errorf("runs on the task = %v, want one, of the next trigger t-fence", runs)
 	}
 }

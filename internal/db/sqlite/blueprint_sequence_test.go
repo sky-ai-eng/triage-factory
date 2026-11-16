@@ -116,7 +116,7 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 		},
 		ClaimTaskForUser: func(t *testing.T, taskID string) {
 			t.Helper()
-			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, stores.Tasks, org, taskID)); err != nil || !ok {
+			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, stores.Tasks, org, taskID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, stores.Tasks, org, taskID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		},
@@ -164,6 +164,14 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 				t.Fatalf("end the conversation: %v", err)
 			}
 		},
+		// tasks.team_id carries no foreign key here, so any other id is
+		// another team.
+		MoveTaskToAnotherTeam: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE tasks SET team_id = '00000000-0000-0000-0000-0000000000b2' WHERE id = ?`, taskID); err != nil {
+				t.Fatalf("move the task to another team: %v", err)
+			}
+		},
 		RunCount: func(t *testing.T, taskID string) int {
 			return countOn(t, `SELECT count(*) FROM blueprint_runs WHERE task_id = ?`, taskID)
 		},
@@ -209,10 +217,17 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 			}
 			return endedAt.Valid
 		},
-		// Local mode stamps every conversation with the team sentinel
-		// rather than deriving one from the task, so the assertion would
-		// prove nothing here. The Postgres arm carries it.
-		ConversationTeam: nil,
+		// Local mode stamps every conversation with the team sentinel, so
+		// the owner assertions hold here by construction; the run's team
+		// assertion still reads a value the mint wrote.
+		ConversationTeam: func(t *testing.T, convID string) string {
+			t.Helper()
+			var team sql.NullString
+			if err := conn.QueryRow(`SELECT team_id FROM conversations WHERE id = ?`, convID).Scan(&team); err != nil {
+				t.Fatalf("read conversation team_id: %v", err)
+			}
+			return team.String
+		},
 		GetConversation: func(t *testing.T, convID string) (*domain.Conversation, error) {
 			t.Helper()
 			return stores.Conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, convID)

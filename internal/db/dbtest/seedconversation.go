@@ -144,7 +144,8 @@ func SeedConversation(tb testing.TB, database *sql.DB, conv domain.Conversation)
 // subject is the stamp that fills it in can leave it empty. creator_user_id pairs with trigger_type the
 // way blueprint_runs_creator_matches_trigger_type requires — the local
 // sentinel for a manual run (the default trigger type), NULL for an event one.
-// The task's prior running run is settled first, since
+// The run is on br.TeamID when set, else on its task's team, as the mint puts
+// it. The task's prior running run is settled first, since
 // blueprint_runs_one_active_run_per_task allows only one.
 //
 // Returns the run id.
@@ -174,11 +175,11 @@ func SeedBlueprintRun(tb testing.TB, database *sql.DB, br domain.BlueprintRun) s
 		tb.Fatalf("SeedBlueprintRun %s: settle the task's prior run: %v", br.ID, err)
 	}
 	if _, err := database.Exec(`
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id,
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, team_id, trigger_type, trigger_id,
 		                            triggering_event_id, actor_agent_id, status, step_plan,
 		                            worktree_path, creator_user_id, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
+		VALUES (?, ?, ?, COALESCE(?, (SELECT team_id FROM tasks WHERE id = ?)), ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, br.ID, br.BlueprintID, br.TaskID, nullIfEmpty(br.TeamID), br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
 		nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status,
 		stepPlan, br.WorktreePath, creator); err != nil {
 		tb.Fatalf("SeedBlueprintRun %s: %v", br.ID, err)

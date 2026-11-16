@@ -1,6 +1,9 @@
 package domain
 
-import "slices"
+import (
+	"slices"
+	"time"
+)
 
 // The conversation status vocabulary and its classifiers — one Go home for
 // both halves of a set of names that is otherwise spelled as bare strings in
@@ -201,9 +204,15 @@ func (c *Conversation) Settled() bool {
 type ParkReason string
 
 const (
-	// ParkReasonIdle — the turn simply ended and nothing more arrived. The
-	// live driver's no-conclusion turn and its idle close.
-	ParkReasonIdle ParkReason = "idle"
+	// ParkReasonTurnIncomplete — the model's turn stopped before it finished.
+	// The SDK runtime's reply hit its output limit, ran out of context, was
+	// refused, or ended on a tool call; a native runtime guard stopped the
+	// turn before a model call, or the model stopped for a reason only a
+	// person can resolve; or a follow-up claim found no message to send,
+	// because the engagement that took it died before replying. The specific
+	// cause is recorded per turn, on messages.stop_reason and in the stop note
+	// on the transcript. A turn that finishes parks with no reason at all.
+	ParkReasonTurnIncomplete ParkReason = "turn_incomplete"
 	// ParkReasonUserCancelled — a person stopped this conversation.
 	ParkReasonUserCancelled ParkReason = "user_cancelled"
 	// ParkReasonSystemCancelled — TF stopped it with no user asking: a team
@@ -232,6 +241,13 @@ const (
 	// changes nothing — the fix is a person picking a model, and a park that
 	// says "the runtime could not start" sends them looking at the runtime.
 	ParkReasonModelNotEnabled ParkReason = "model_not_enabled"
+	// ParkReasonProviderNotConnected — the model this conversation would run
+	// on is served by a provider the org holds no credential for, or the org
+	// holds no credentials at all. Its own reason rather than
+	// model_not_enabled because the fix is in a different place: the org's
+	// credentials, not the team's model set. A message naming a model on a
+	// connected provider resumes it.
+	ParkReasonProviderNotConnected ParkReason = "provider_not_connected"
 	// ParkReasonStalled — the engagement's stall watchdog stopped it: idle past
 	// its limit with nothing in flight, or an operation outlived its own
 	// deadline. Nothing retries it; a message resumes it.
@@ -259,13 +275,14 @@ const (
 // exists to stop.
 func AllParkReasons() []ParkReason {
 	return []ParkReason{
-		ParkReasonIdle,
+		ParkReasonTurnIncomplete,
 		ParkReasonUserCancelled,
 		ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled,
 		ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
+		ParkReasonProviderNotConnected,
 		ParkReasonStalled,
 		ParkReasonUpstreamUnavailable,
 		ParkReasonSandboxLost,
@@ -278,30 +295,40 @@ func AllParkReasons() []ParkReason {
 // sitting in the renamed column and clear it.
 func IsParkReason(reason string) bool {
 	switch ParkReason(reason) {
-	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
+	case ParkReasonTurnIncomplete, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
-		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
-		ParkReasonUpstreamUnavailable, ParkReasonSandboxLost:
+		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonProviderNotConnected,
+		ParkReasonStalled, ParkReasonUpstreamUnavailable, ParkReasonSandboxLost:
 		return true
 	}
 	return false
 }
 
-// AwaitsPerson reports whether a conversation parked for r is waiting on a
-// person: nothing retries it, and it moves again only when someone sends it a
-// message or fixes what stopped it. An idle park is a turn that ended, not a
-// wait, and a stop or a blueprint's end is a park somebody, or something,
-// meant.
-func (r ParkReason) AwaitsPerson() bool {
+// AwaitsPerson reports whether a conversation of conversationType parked for r
+// is waiting on a person: nothing retries it, and it moves again only when
+// someone sends it a message or fixes what stopped it. A stop or a blueprint's
+// end is a park somebody, or something, meant.
+//
+// A turn that did not finish waits on a person only on a delegation. The
+// person who delegated one handed the work off, so nobody is reading it when
+// the turn stops. A person in a chat sent the message the reply was answering,
+// and its stop note lands where they are reading.
+func (r ParkReason) AwaitsPerson(conversationType string) bool {
+	if r == ParkReasonTurnIncomplete {
+		return conversationType == ConversationTypeDelegation
+	}
 	return slices.Contains(ParkReasonsAwaitingPerson(), r)
 }
 
-// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits, for the store
-// reads that select on it.
+// ParkReasonsAwaitingPerson is every reason AwaitsPerson admits for some
+// conversation type, for the store reads that select on it. Those reads test
+// turn_incomplete's type beside the reason (db.AwaitsPersonTypeSQL).
 func ParkReasonsAwaitingPerson() []ParkReason {
 	return []ParkReason{
+		ParkReasonTurnIncomplete,
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
+		ParkReasonProviderNotConnected,
 		ParkReasonStalled,
 		ParkReasonUpstreamUnavailable,
 		ParkReasonSandboxLost,
@@ -319,6 +346,32 @@ type ConversationAwaitingPerson struct {
 	ParkReason    ParkReason
 	// EntitySourceID is the key of the entity its task is about, e.g.
 	// owner/repo#18. Display only; empty when the task names no entity.
+	EntitySourceID string
+}
+
+// PauseNoticeDue is a park that waits on the person who delegated the
+// conversation and whose notice has not been opened.
+type PauseNoticeDue struct {
+	OrgID string
+	// ParkedAt identifies the park: it is set when the conversation parks and
+	// cleared when a claim or a resume takes it off, so each park has its own.
+	ParkedAt time.Time
+	ConversationAwaitingPerson
+}
+
+// FailureNoticeDue is a failed conversation a person delegated whose failure
+// notice has not been posted.
+type FailureNoticeDue struct {
+	OrgID          string
+	ConversationID string
+	// CreatorUserID is the person who delegated it, never empty.
+	CreatorUserID string
+	FailureKind   ConversationFailureKind
+	// ResultSummary is the text the failure stored. Display only.
+	ResultSummary string
+	// EntitySourceID is the key of the entity its task is about. Display
+	// only; empty when the conversation has no task or the task names no
+	// entity.
 	EntitySourceID string
 }
 

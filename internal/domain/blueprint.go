@@ -171,7 +171,13 @@ func (p BlueprintPlanStep) Step(blueprintID string) BlueprintStep {
 // path). Owns the shared worktree across all steps. Per-step state lives on the
 // conversations table linked back via conversations.blueprint_run_id (NOT NULL).
 type BlueprintRun struct {
-	ID          string               `json:"id"`
+	ID string `json:"id"`
+	// TeamID is the team the run belongs to: the team the mint creates its
+	// first step conversation on, resolved inside the mint, so a value passed
+	// in is not written. It never changes, and who may read and write the run
+	// follows it. Empty only for a local run that predates the column and had
+	// no conversation to take a team from.
+	TeamID      string               `json:"team_id,omitempty"`
 	BlueprintID string               `json:"blueprint_id"`
 	TaskID      string               `json:"task_id"`
 	TriggerType BlueprintTriggerType `json:"trigger_type"`

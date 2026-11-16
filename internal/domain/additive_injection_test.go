@@ -33,21 +33,19 @@ func TestAdditiveEventInjection_EmptyMetadata_StillNamesType(t *testing.T) {
 	}
 }
 
-// TestTaskNotes_EachSaysAPersonsMessageStillStands: every note about a task's
-// close or held close tells the agent to end the workflow unless its
-// instructions need otherwise, so every one of them ends with the sentence
-// that keeps a person's later message standing. The check is that the notes
-// share it, not what it says.
+// TestTaskNotes_EachSaysAPersonsMessageStillStands: every blueprint
+// conversation's note about a task's close tells the agent to end the
+// workflow unless its instructions need otherwise, so every one of them ends
+// with the sentence that keeps a person's later message standing. The check
+// is that the notes share it, not what it says.
 func TestTaskNotes_EachSaysAPersonsMessageStillStands(t *testing.T) {
 	notes := map[string]string{
-		"event":             TaskClosedNote(TaskClose{Kind: TaskClosedByEvent, EventType: EventGitHubPRMerged, MetadataJSON: `{"merged_by":"octocat"}`}),
-		"event, no event":   TaskClosedNote(TaskClose{Kind: TaskClosedByEvent}),
-		"completed":         TaskClosedNote(TaskClose{Kind: TaskClosedCompleted}),
-		"dismissed":         TaskClosedNote(TaskClose{Kind: TaskClosedDismissed}),
-		"duplicate":         TaskClosedNote(TaskClose{Kind: TaskClosedDuplicate, DuplicateOf: "task 7"}),
-		"reassigned":        TaskClosedNote(TaskClose{Kind: TaskClosedReassigned, EventType: EventLinearIssueAssigned}),
-		"held":              TaskCloseHeldNote(EventGitHubPRCICheckPassed, `{"check_name":"build"}`),
-		"held, no metadata": TaskCloseHeldNote(EventGitHubPRCICheckPassed, ""),
+		"event":           TaskClosedNote(TaskClose{Kind: TaskClosedByEvent, EventType: EventGitHubPRMerged, MetadataJSON: `{"merged_by":"octocat"}`}, TaskNoteForBlueprint),
+		"event, no event": TaskClosedNote(TaskClose{Kind: TaskClosedByEvent}, TaskNoteForBlueprint),
+		"completed":       TaskClosedNote(TaskClose{Kind: TaskClosedCompleted}, TaskNoteForBlueprint),
+		"dismissed":       TaskClosedNote(TaskClose{Kind: TaskClosedDismissed}, TaskNoteForBlueprint),
+		"duplicate":       TaskClosedNote(TaskClose{Kind: TaskClosedDuplicate, DuplicateOf: "task 7"}, TaskNoteForBlueprint),
+		"reassigned":      TaskClosedNote(TaskClose{Kind: TaskClosedReassigned, EventType: EventLinearIssueAssigned}, TaskNoteForBlueprint),
 	}
 	for name, note := range notes {
 		if !strings.HasSuffix(note, taskNotePersonMessage) {

@@ -32,11 +32,15 @@ type nativeTranscript struct {
 	claimID      string
 
 	mu sync.Mutex
-	// waitingPeople is the ids of the person's messages the last
-	// ListForAssembly found waiting. The loop's drain lists the window and
-	// flushes rows out of it, so a flush finds the person's rows it marks
-	// here.
-	waitingPeople map[int]bool
+	// waitingPeople maps the ids of the person's messages the last
+	// ListForAssembly found waiting to the person who sent each. The loop's
+	// drain lists the window and flushes rows out of it, so a flush finds the
+	// person's rows it marks here.
+	waitingPeople map[int]string
+	// turnUserID is the person the turn being written answers: the sender of
+	// the newest person's message a flush delivered, else the person the
+	// engagement acts for. Insert attributes the loop's own rows to them.
+	turnUserID string
 	// personDelivered is whether a flush has delivered a person's message
 	// since takePersonDelivered last read it.
 	personDelivered bool
@@ -53,6 +57,16 @@ func newNativeTranscript(s *Spawner, orgID, conversationID, claimID string) *nat
 	}
 }
 
+// actFor sets the person the engagement acts for, whom the loop's rows are
+// attributed to until a person's message is delivered. Empty leaves them
+// unattributed, as an event-triggered run's are.
+func (t *nativeTranscript) actFor(userID string) *nativeTranscript {
+	t.mu.Lock()
+	t.turnUserID = userID
+	t.mu.Unlock()
+	return t
+}
+
 // ListForAssembly reads the assembly window. The admin pool is the right
 // door for both trigger types: it is a system read on a detached goroutine,
 // and org_id + conversation_id are bound as defense in depth regardless.
@@ -61,13 +75,13 @@ func newNativeTranscript(s *Spawner, orgID, conversationID, claimID string) *nat
 func (t *nativeTranscript) ListForAssembly(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
 	rows, err := t.spawner.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err == nil {
-		var waiting map[int]bool
+		var waiting map[int]string
 		for _, r := range rows {
 			if r.Delivered != nil && !*r.Delivered && isPersonMessage(r) {
 				if waiting == nil {
-					waiting = make(map[int]bool)
+					waiting = make(map[int]string)
 				}
-				waiting[r.ID] = true
+				waiting[r.ID] = r.UserID
 			}
 		}
 		t.mu.Lock()
@@ -88,16 +102,21 @@ func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversatio
 
 // notePersonDelivered records whether the rows a flush just delivered include
 // a person's message, which is what decides whether the turn may open a warm
-// window. A row the last listing did not find waiting is not counted: the
-// mistake that leaves is a window that does not open, never one that opens
-// for a turn no person took part in.
+// window, and whose the newest of them is, which is whom the turn answers. A
+// row the last listing did not find waiting is not counted: the mistake that
+// leaves is a window that does not open, never one that opens for a turn no
+// person took part in.
 func (t *nativeTranscript) notePersonDelivered(ids []int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	newest := -1
 	for _, id := range ids {
-		if t.waitingPeople[id] {
+		if userID, ok := t.waitingPeople[id]; ok {
 			t.personDelivered = true
-			return
+			if id > newest {
+				newest = id
+				t.turnUserID = userID
+			}
 		}
 	}
 }
@@ -115,6 +134,14 @@ func (t *nativeTranscript) takePersonDelivered() bool {
 // Insert appends a row and broadcasts it. The row is attributed to this
 // engagement's claim by the same call that fences the write.
 func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain.Message) (int, error) {
+	// The loop's own rows (its turns, their tool results) arrive
+	// unattributed, and a turn belongs to whoever asked for it
+	// (domain.Message.UserID).
+	if msg.UserID == "" {
+		t.mu.Lock()
+		msg.UserID = t.turnUserID
+		t.mu.Unlock()
+	}
 	id, err := t.spawner.conversations.InsertMessageForClaimSystem(ctx, orgID, t.claimID, msg)
 	if err != nil {
 		return 0, fmt.Errorf("insert message: %w", err)
@@ -194,8 +221,12 @@ func (g *spendGuard) Check(ctx context.Context, _ int) (string, error) {
 // spendParkNotice renders the cap error as the transcript notice. The cap
 // error already carries the scope and the today-vs-cap figures, which is
 // exactly what a reader needs; this adds only what the native mapping
-// contributes — that the work is paused, not lost.
+// contributes — that the work is paused, not lost, and what continues it.
+// Nothing wakes the park when the cap resets or is raised, so the notice says
+// a message is still needed then, and that one sent before it parks the run
+// again.
 func spendParkNotice(err error) string {
 	return "<system-note>\nThis run is paused: " + err.Error() + ". " +
-		"No work has been lost — it resumes on the next message, or once the cap resets or is raised.\n</system-note>"
+		"No work has been lost. Send a message to continue it once the cap resets at 00:00 UTC or is raised; " +
+		"a message sent before then pauses it again.\n</system-note>"
 }

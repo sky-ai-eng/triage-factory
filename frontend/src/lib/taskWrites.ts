@@ -45,12 +45,14 @@ export function snoozeTask(task: TaskRef, until: string): Promise<Task> {
   })
 }
 
-/** Claims the task for the caller. */
-export function claimTask(task: TaskRef): Promise<Task> {
+/** Claims the task for the caller, landing it on teamId: one of the task's
+ *  `claim_team_ids`. Absent, the server lands it on the caller's one
+ *  candidate, and refuses when there are several (see `resolveClaimTeam`). */
+export function claimTask(task: TaskRef, teamId?: string): Promise<Task> {
   return apiJSON<Task>(taskPath(task, '/claim'), {
     method: 'POST',
     headers: json,
-    body: JSON.stringify({ version: task.version }),
+    body: JSON.stringify({ ...(teamId && { team_id: teamId }), version: task.version }),
   })
 }
 
@@ -63,14 +65,21 @@ export function reassignTask(task: TaskRef, targetUserID: string): Promise<Task>
   })
 }
 
-/** Hands the task to the agent and starts its run. Without a blueprint the
- *  server runs the team's default. */
-export function delegateTask(task: TaskRef, blueprintID?: string): Promise<DelegateResult> {
+/** Hands the task to the agent and starts its run on blueprintID, landing the
+ *  task on teamId as `claimTask` does. The server refuses a delegate that
+ *  names no blueprint, and one whose blueprint belongs to another team than
+ *  the task lands on. */
+export function delegateTask(
+  task: TaskRef,
+  blueprintID?: string,
+  teamId?: string,
+): Promise<DelegateResult> {
   return apiJSON<DelegateResult>(taskPath(task, '/delegate'), {
     method: 'POST',
     headers: json,
     body: JSON.stringify({
       ...(blueprintID && { blueprint_id: blueprintID }),
+      ...(teamId && { team_id: teamId }),
       version: task.version,
     }),
   })

@@ -27,11 +27,9 @@ func unreadAtConclusionReasons() []string {
 	reasons := []string{
 		ResumeBlockedSessionMissing,
 		ResumeBlockedWorktreeMissing,
-		ResumeBlockedModelMissing,
 		ResumeBlockedWorkspaceExpired,
 		ResumeBlockedBlueprintConcluded,
 		ResumeBlockedBlueprintCancelled,
-		ResumeBlockedModelNotEnabled,
 		unreadWakeRefused,
 		unreadWakeFailed,
 	}

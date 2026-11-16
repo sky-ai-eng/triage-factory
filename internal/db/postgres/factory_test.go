@@ -223,8 +223,8 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			}
 			brID := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
+				INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+				VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
 			`, brID, orgID, userID, bpID, taskID); err != nil {
 				t.Fatalf("seed blueprint_run: %v", err)
 			}
@@ -283,6 +283,14 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				closedAt.UTC(), entityID, orgID,
 			); err != nil {
 				t.Fatalf("close entity: %v", err)
+			}
+		},
+		SetEntityKind: func(t *testing.T, entityID, kind string) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE entities SET kind = $1 WHERE id = $2 AND org_id = $3`, kind, entityID, orgID,
+			); err != nil {
+				t.Fatalf("set entity kind: %v", err)
 			}
 		},
 		SetConversationMemory: func(t *testing.T, conversationID, content string, source domain.MemorySource) {
@@ -511,9 +519,9 @@ func TestFactoryReadStore_Postgres_GitHubMatchesTrackingByRepositoryID(t *testin
 
 // TestFactoryReadStore_Postgres_JiraScopedToTrackedProject is the Jira
 // mirror of the GitHub test: a Jira entity whose project key is attached
-// to one of the viewer's teams (a jira_project_status_rules row) rides the
-// belt; one whose project no team configured is excluded. Pins that the
-// belt's Jira side scopes by tracked project, not task existence.
+// to one of the viewer's teams (a jira_project_status_rules row) is in the
+// tracked set; one whose project no team configured is not. Pins that the
+// tracked set's Jira arm scopes by tracked project, not task existence.
 func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -525,14 +533,9 @@ func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	onAttached := seedPgJiraEntityRaw(t, h, orgID, "SKY", 1)
 	onUnattached := seedPgJiraEntityRaw(t, h, orgID, "PROJ", 2)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
+	got, err := pgstore.TrackedEntityIDsForTest(context.Background(), h.AdminDB, orgID, nil)
 	if err != nil {
-		t.Fatalf("Entities: %v", err)
-	}
-	got := map[string]bool{}
-	for _, r := range rows {
-		got[r.Entity.ID] = true
+		t.Fatalf("tracked set: %v", err)
 	}
 	if !got[onAttached] {
 		t.Errorf("Jira entity on attached project %s missing — tracked-project semi-join dropped a member", onAttached)
@@ -543,13 +546,13 @@ func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 }
 
 // TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename: the
-// belt, and the team activity node that shares its tracked-set predicate,
-// place a Jira issue by the registry row it references, never by its key's
-// prefix. After the project's key is renamed the issue stays on its team's
-// belt and its events stay counted — once the issue is renamed while the
-// registry still holds the old key, and again once the registry is re-keyed.
-// An issue in another project whose key now carries the renamed project's key
-// is on neither.
+// tracked set, and the team activity node that reads it, place a Jira issue
+// by the registry row it references, never by its key's prefix. After the
+// project's key is renamed the issue stays in its team's tracked set and its
+// events stay counted — once the issue is renamed while the registry still
+// holds the old key, and again once the registry is re-keyed. An issue in
+// another project whose key now carries the renamed project's key is in
+// neither.
 func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -574,19 +577,15 @@ func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *test
 	check := func(stage string) {
 		t.Helper()
 		for _, teamIDs := range [][]string{nil, {teamID}} {
-			rows, err := stores.Factory.Entities(ctx, orgID, 100, teamIDs)
+			got, err := pgstore.TrackedEntityIDsForTest(ctx, h.AdminDB, orgID, teamIDs)
 			if err != nil {
-				t.Fatalf("Entities(%v): %v", teamIDs, err)
-			}
-			got := map[string]bool{}
-			for _, r := range rows {
-				got[r.Entity.ID] = true
+				t.Fatalf("tracked set (%v): %v", teamIDs, err)
 			}
 			if !got[issue.ID] {
-				t.Errorf("%s, teams %v: the renamed project's issue is off the belt", stage, teamIDs)
+				t.Errorf("%s, teams %v: the renamed project's issue left the tracked set", stage, teamIDs)
 			}
 			if got[keyLies.ID] {
-				t.Errorf("%s, teams %v: an untracked project's issue keyed NEW rides the belt; the key was read, not the row", stage, teamIDs)
+				t.Errorf("%s, teams %v: an untracked project's issue keyed NEW is in the tracked set; the key was read, not the row", stage, teamIDs)
 			}
 		}
 		activity, err := stores.TeamActivity.TeamActivity(ctx, orgID, teamID, now.Add(-time.Hour), now)
@@ -611,10 +610,9 @@ func TestFactoryReadStore_Postgres_JiraFollowsTheRegistryAfterAKeyRename(t *test
 }
 
 // TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam is the Linear
-// mirror: a Linear entity rides the belt when its snapshot's team_id is a
-// Linear team one of the org's teams tracks (a linear_team_rules row, watched
-// or armed), and not otherwise — nor before its first snapshot says which team
-// it belongs to. The per-team narrowing reads the same arm.
+// mirror: a Linear entity is in the tracked set when its Linear team is one
+// the org's teams track (a linear_team_rules row, watched or armed), and not
+// otherwise. The per-team narrowing reads the same arm.
 func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -651,22 +649,17 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	tracked := seed("ENG-1", "lt-eng", `{"identifier":"ENG-1","team_id":"lt-eng"}`)
 	untracked := seed("OPS-1", "lt-ops", `{"identifier":"OPS-1","team_id":"lt-ops"}`)
 	// A snapshot the source pause cleared: the team is the column's, so the
-	// row stays on its team's belt.
+	// row stays in its team's tracked set.
 	cleared := seed("ENG-2", "lt-eng", nil)
-	// A snapshot that names a team the row is not in is not where the belt
-	// looks.
+	// A snapshot that names a team the row is not in is not where the
+	// tracked set looks.
 	snapshotOnly := seed("OPS-2", "lt-ops", `{"identifier":"OPS-2","team_id":"lt-eng"}`)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	read := func(teamIDs []string) map[string]bool {
 		t.Helper()
-		rows, err := stores.Factory.Entities(context.Background(), orgID, 100, teamIDs)
+		got, err := pgstore.TrackedEntityIDsForTest(context.Background(), h.AdminDB, orgID, teamIDs)
 		if err != nil {
-			t.Fatalf("Entities: %v", err)
-		}
-		got := map[string]bool{}
-		for _, r := range rows {
-			got[r.Entity.ID] = true
+			t.Fatalf("tracked set: %v", err)
 		}
 		return got
 	}
@@ -678,10 +671,10 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 		t.Error("Linear entity on an untracked Linear team leaked through")
 	}
 	if !got[cleared] {
-		t.Error("Linear entity with a cleared snapshot left its tracked team's belt")
+		t.Error("Linear entity with a cleared snapshot left its tracked team's set")
 	}
 	if got[snapshotOnly] {
-		t.Error("the belt took a Linear entity's team from its snapshot rather than its column")
+		t.Error("the tracked set took a Linear entity's team from its snapshot rather than its column")
 	}
 	if perTeam := read([]string{teamID}); !perTeam[tracked] || !perTeam[cleared] {
 		t.Error("the per-team filter dropped a Linear entity its team tracks")
@@ -694,17 +687,18 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	// it was saved under.
 	bindWorkspace("ws-other")
 	if read(nil)[tracked] || read([]string{teamID})[tracked] {
-		t.Error("a rule from the workspace the org moved off kept its team's issue on the belt")
+		t.Error("a rule from the workspace the org moved off kept its team's issue in the tracked set")
 	}
 }
 
 // TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS proves the per-team
 // narrowing the production app pool gets for free: driven through tf_app
-// with real JWT claims, a viewer only sees belt entities in their own
-// teams' tracked set. This is the one multi-tenant *leak* surface in the
-// cleanup (the net-new GitHub-by-repo query), held to the same standard as
-// the Jira deck. alice (teamA only) sees teamA's tracked GitHub + Jira
-// entities but not teamB's; bob (teamB only) sees the mirror.
+// with real JWT claims, a viewer only sees entities in their own teams'
+// tracked set, on the belt and in the tracked set the station counters and
+// the team activity node read. This is the one multi-tenant *leak* surface
+// in the cleanup (the net-new GitHub-by-repo query), held to the same
+// standard as the Jira deck. alice (teamA only) sees teamA's tracked GitHub,
+// Jira, and Slack entities but not teamB's; bob (teamB only) sees the mirror.
 func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -715,58 +709,65 @@ func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 	bob := seedPgMember(t, h, orgID, "bob", "member")
 	teamB := seedPgDefaultTeam(t, h, orgID, bob)
 
-	// teamA tracks acme/a-repo (GitHub) + SKY (Jira); teamB tracks
-	// acme/b-repo + BOB. Same org, disjoint tracked sets.
+	// teamA tracks acme/a-repo (GitHub), SKY (Jira), and #a (Slack); teamB
+	// tracks acme/b-repo, BOB, and #b. Same org, disjoint tracked sets.
 	trackPgRepo(t, h, orgID, teamA, "acme", "a-repo")
 	trackPgRepo(t, h, orgID, teamB, "acme", "b-repo")
 	seedPgJiraRule(t, h, teamA, "SKY")
 	seedPgJiraRule(t, h, teamB, "BOB")
+	channelA := seedPgSlackChannel(t, h, orgID, "C-A")
+	channelB := seedPgSlackChannel(t, h, orgID, "C-B")
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO team_slack_channels (org_id, team_id, slack_channel_id) VALUES ($1, $2, $3), ($1, $4, $5)`,
+		orgID, teamA, channelA, teamB, channelB)
 
 	ghA := seedPgGitHubEntityRaw(t, h, orgID, "acme", "a-repo", 1)
 	ghB := seedPgGitHubEntityRaw(t, h, orgID, "acme", "b-repo", 2)
 	jiraA := seedPgJiraEntityRaw(t, h, orgID, "SKY", 1)
 	jiraB := seedPgJiraEntityRaw(t, h, orgID, "BOB", 2)
+	slackA := seedPgSlackThread(t, h, orgID, channelA, "C-A")
+	slackB := seedPgSlackThread(t, h, orgID, channelB, "C-B")
 
-	beltFor := func(t *testing.T, userID string) map[string]bool {
+	type view struct{ belt, tracked map[string]bool }
+	viewFor := func(t *testing.T, userID string) view {
 		t.Helper()
-		ids := map[string]bool{}
+		v := view{belt: map[string]bool{}}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			rows, e := pgstore.NewForTx(tx, pgtest.SecretKey).Factory.Entities(ctx, orgID, 100, nil)
 			if e != nil {
 				return e
 			}
 			for _, r := range rows {
-				ids[r.Entity.ID] = true
+				v.belt[r.Entity.ID] = true
 			}
-			return nil
+			v.tracked, e = pgstore.TrackedEntityIDsForTest(ctx, tx, orgID, nil)
+			return e
 		})
 		if err != nil {
-			t.Fatalf("belt for %s: %v", userID, err)
+			t.Fatalf("view for %s: %v", userID, err)
 		}
-		return ids
+		return v
 	}
 
-	aliceSees := beltFor(t, alice)
-	if !aliceSees[ghA] || !aliceSees[jiraA] {
-		t.Errorf("alice (teamA) can't see her team's tracked entities (gh=%v jira=%v)", aliceSees[ghA], aliceSees[jiraA])
+	check := func(who string, v view, ours, theirs [3]string) {
+		t.Helper()
+		if !v.belt[ours[0]] {
+			t.Errorf("%s can't see their team's GitHub entity on the belt", who)
+		}
+		if v.belt[theirs[0]] {
+			t.Errorf("%s saw the other team's GitHub entity %s on the belt — tracked-repo scope leaked", who, theirs[0])
+		}
+		for i, source := range []string{"GitHub", "Jira", "Slack"} {
+			if !v.tracked[ours[i]] {
+				t.Errorf("%s can't see their team's tracked %s entity", who, source)
+			}
+			if v.tracked[theirs[i]] {
+				t.Errorf("%s saw the other team's %s entity %s — tracked-set scope leaked across the team boundary", who, source, theirs[i])
+			}
+		}
 	}
-	if aliceSees[ghB] {
-		t.Errorf("alice (teamA) saw teamB's GitHub entity %s — tracked-repo scope leaked across the team boundary", ghB)
-	}
-	if aliceSees[jiraB] {
-		t.Errorf("alice (teamA) saw teamB's Jira entity %s — tracked-project scope leaked across the team boundary", jiraB)
-	}
-
-	bobSees := beltFor(t, bob)
-	if !bobSees[ghB] || !bobSees[jiraB] {
-		t.Errorf("bob (teamB) can't see his team's tracked entities (gh=%v jira=%v)", bobSees[ghB], bobSees[jiraB])
-	}
-	if bobSees[ghA] {
-		t.Errorf("bob (teamB) saw teamA's GitHub entity %s — leak", ghA)
-	}
-	if bobSees[jiraA] {
-		t.Errorf("bob (teamB) saw teamA's Jira entity %s — leak", jiraA)
-	}
+	check("alice (teamA)", viewFor(t, alice), [3]string{ghA, jiraA, slackA}, [3]string{ghB, jiraB, slackB})
+	check("bob (teamB)", viewFor(t, bob), [3]string{ghB, jiraB, slackB}, [3]string{ghA, jiraA, slackA})
 }
 
 // TestFactoryReadStore_Postgres_CountersScopedToTrackedSet pins that the
@@ -792,6 +793,12 @@ func TestFactoryReadStore_Postgres_CountersScopedToTrackedSet(t *testing.T) {
 	tracked := seed.Entity(t, "ctr-tracked")
 	evT := seed.Event(t, tracked, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
 	seed.Task(t, tracked, "github:pr:opened", "", evT, "queued", now.Add(-10*time.Minute))
+
+	// A vulnerable package in a tracked repository: GitHub's, tracked, and
+	// still no chip the floor can draw, so its event counts nowhere either.
+	pkg := seed.Entity(t, "ctr-package")
+	seed.SetEntityKind(t, pkg, domain.EntityKindVulnerablePackage)
+	seed.Event(t, pkg, "github:pr:opened", "", now.Add(-10*time.Minute), time.Time{})
 
 	// Untracked entity: its events AND its task must NOT contribute to any
 	// counter — it's off the belt.

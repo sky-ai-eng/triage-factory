@@ -37,10 +37,15 @@ interface Props {
    *  drag-to-station flow synthesizes a task), wiring onTeamChange renders
    *  a required team picker in the header so the caller can stamp the
    *  acting team, and teamValue scopes the list to that team. The
-   *  swipe-delegate callers (claiming an existing task, whose team is
-   *  derived from the claim) leave both undefined → no picker, unscoped list. */
+   *  callers that delegate an existing task pass the team the task lands
+   *  on the same way, with teamOptions when only some of the viewer's teams
+   *  can take it. Both undefined → no picker, unscoped list. */
   teamValue?: string
   onTeamChange?: (teamId: string) => void
+  /** The teams the header's team picker offers, when not all of the
+   *  viewer's: the picker renders only with two or more of them, so a caller
+   *  with one passes it as teamValue and gets a scoped list with no picker. */
+  teamOptions?: string[]
   /** Which list the picker draws from. Default 'prompts' is the leaf-prompt
    *  picker used by the chain step editor; onSelect yields a prompt_id and
    *  the detail pane shows the prompt body. The
@@ -199,6 +204,7 @@ export default function PromptPicker({
   filter,
   teamValue,
   onTeamChange,
+  teamOptions,
   source = 'prompts',
   selectionDisabled,
 }: Props) {
@@ -508,6 +514,7 @@ export default function PromptPicker({
                     <TeamPicker
                       value={teamValue ?? ''}
                       onChange={onTeamChange}
+                      teamIds={teamOptions}
                       label="Team"
                       className="w-40"
                     />

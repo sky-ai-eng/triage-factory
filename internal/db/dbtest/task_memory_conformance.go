@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -79,8 +81,8 @@ type TaskMemorySeeder struct {
 	// TaskFor reads back the task a seeded conversation was inserted under,
 	// directly (the store interface has no conversation read) — the id the
 	// entity reads must project onto TaskMemory.TaskID, which is what splits
-	// an entity's memories into one task's and the rest. Only the naming-facts
-	// subtest needs it.
+	// an entity's memories into one task's and the rest, and the task a
+	// System entity read is handed to read as a conversation on that task.
 	TaskFor func(t *testing.T, conversationID string) string
 
 	// Role reads back the role column of a conversation_memory_entities row
@@ -126,6 +128,10 @@ func memoryForConversation(t *testing.T, ctx context.Context, s db.TaskMemorySto
 //     ties the conversation to the queried entity.
 //   - RecordEntityTouchSystem upserts a join row with role-precedence
 //     upgrade (primary > produced > touched) and is idempotent.
+//   - The System entity reads hand a conversation on a task every memory
+//     written on that task, whatever team the reader is on. Excluding another
+//     team's memory on the entity's other tasks is Postgres-only, since SQLite
+//     has one team, and is covered by that backend's own tests.
 //
 // Every UpsertAgentMemory(System) call whose row must show up in an entity read
 // is paired with a RecordEntityTouchSystem(..., domain.MemoryRolePrimary) call
@@ -239,21 +245,24 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if len(mems) != 0 {
 			t.Errorf("GetMemoriesForEntity = %+v, want no rows", mems)
 		}
-		memsSystem, err := s.GetMemoriesForEntitySystem(ctx, orgID, entityID, seed.TeamID)
+		// Read as a conversation on the same task, so neither the team arm nor
+		// the task arm can let the row through.
+		taskID := seed.TaskFor(t, conversationID)
+		memsSystem, err := s.GetMemoriesForEntitySystem(ctx, orgID, entityID, seed.TeamID, taskID)
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntitySystem: %v", err)
 		}
 		if len(memsSystem) != 0 {
 			t.Errorf("GetMemoriesForEntitySystem = %+v, want no rows", memsSystem)
 		}
-		recent, err := s.GetRecentMemoriesForEntitySystem(ctx, orgID, entityID, seed.TeamID, 10)
+		recent, err := s.GetRecentMemoriesForEntitySystem(ctx, orgID, entityID, seed.TeamID, taskID, 10)
 		if err != nil {
 			t.Fatalf("GetRecentMemoriesForEntitySystem: %v", err)
 		}
 		if len(recent) != 0 {
 			t.Errorf("GetRecentMemoriesForEntitySystem = %+v, want no rows", recent)
 		}
-		n, err := s.CountMemoriesForEntitySystem(ctx, orgID, entityID, seed.TeamID)
+		n, err := s.CountMemoriesForEntitySystem(ctx, orgID, entityID, seed.TeamID, taskID)
 		if err != nil {
 			t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 		}
@@ -267,6 +276,46 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 		if mem.Source != domain.MemorySourceNone || mem.Content != "" {
 			t.Errorf("GetForConversationSystem = (Source=%q, Content=%q), want (none, \"\")", mem.Source, mem.Content)
+		}
+	})
+
+	t.Run("a_tasks_own_memory_is_read_by_a_conversation_on_the_task_from_any_team", func(t *testing.T) {
+		// A task reassigned to someone on another team keeps its earlier
+		// conversations on the team that had them, and its next conversation
+		// is on the new team. Those earlier conversations' memories are the
+		// task's handoff, so a reader on the task sees them whatever team it
+		// reads as. otherTeam owns nothing: it stands for the team the task
+		// moved to. SQLite (one team) answers this without a filter; Postgres
+		// answers it through the task arm, since the team arm cannot match.
+		s, orgID, seed := mk(t)
+		conversationID, entityID := seed.Conversation(t, "carried-across-teams")
+		if _, err := s.UpsertAgentMemory(ctx, orgID, conversationID, "", "the old team's handoff", domain.MemorySourceAgent); err != nil {
+			t.Fatalf("UpsertAgentMemory: %v", err)
+		}
+		seedPrimary(t, s, orgID, conversationID, entityID)
+		taskID := seed.TaskFor(t, conversationID)
+		otherTeam := uuid.New().String()
+
+		mems, err := s.GetMemoriesForEntitySystem(ctx, orgID, entityID, otherTeam, taskID)
+		if err != nil {
+			t.Fatalf("GetMemoriesForEntitySystem: %v", err)
+		}
+		if len(mems) != 1 || mems[0].ConversationID != conversationID || mems[0].Content != "the old team's handoff" {
+			t.Errorf("GetMemoriesForEntitySystem as another team on the task = %+v, want the task's own memory", mems)
+		}
+		recent, err := s.GetRecentMemoriesForEntitySystem(ctx, orgID, entityID, otherTeam, taskID, 10)
+		if err != nil {
+			t.Fatalf("GetRecentMemoriesForEntitySystem: %v", err)
+		}
+		if len(recent) != 1 || recent[0].ConversationID != conversationID {
+			t.Errorf("GetRecentMemoriesForEntitySystem as another team on the task = %+v, want the task's own memory", recent)
+		}
+		n, err := s.CountMemoriesForEntitySystem(ctx, orgID, entityID, otherTeam, taskID)
+		if err != nil {
+			t.Fatalf("CountMemoriesForEntitySystem: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("CountMemoriesForEntitySystem as another team on the task = %d, want 1", n)
 		}
 	})
 
@@ -293,6 +342,56 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 		if mem.ID != first.ID || !mem.CreatedAt.Equal(first.CreatedAt) {
 			t.Errorf("the overwrite minted a new row: %+v, want the id/created_at of %+v", mem, first)
+		}
+	})
+
+	t.Run("updated_at_moves_only_when_the_content_changes", func(t *testing.T) {
+		// updated_at dates the content, not the write: a check counting what
+		// happened since the memory was last written must not have its count
+		// reset by a write of the same bytes again, nor by one that only
+		// renames who wrote them.
+		s, orgID, seed := mk(t)
+		conversationID, _ := seed.Conversation(t, "updated-at")
+		write := func(content string, source domain.MemorySource) domain.TaskMemory {
+			t.Helper()
+			mem, err := s.UpsertAgentMemory(ctx, orgID, conversationID, "", content, source)
+			if err != nil {
+				t.Fatalf("UpsertAgentMemory(%q, %s): %v", content, source, err)
+			}
+			return mem
+		}
+
+		first := write("first", domain.MemorySourceAgent)
+		if !first.UpdatedAt.Equal(first.CreatedAt) {
+			t.Errorf("insert: UpdatedAt = %v, want CreatedAt %v", first.UpdatedAt, first.CreatedAt)
+		}
+		for _, source := range []domain.MemorySource{domain.MemorySourceAgent, domain.MemorySourceGenerated} {
+			if same := write("first", source); !same.UpdatedAt.Equal(first.UpdatedAt) {
+				t.Errorf("rewriting the same content as %s moved UpdatedAt from %v to %v", source, first.UpdatedAt, same.UpdatedAt)
+			}
+		}
+		awaitClockTick()
+		second := write("second", domain.MemorySourceAgent)
+		if !second.UpdatedAt.After(first.UpdatedAt) {
+			t.Errorf("new content: UpdatedAt = %v, want after %v", second.UpdatedAt, first.UpdatedAt)
+		}
+		// NULL content is content too: clearing it, and filling it again, are
+		// both changes.
+		awaitClockTick()
+		cleared := write("", domain.MemorySourceNone)
+		if !cleared.UpdatedAt.After(second.UpdatedAt) {
+			t.Errorf("cleared content: UpdatedAt = %v, want after %v", cleared.UpdatedAt, second.UpdatedAt)
+		}
+		if again := write("", domain.MemorySourceNone); !again.UpdatedAt.Equal(cleared.UpdatedAt) {
+			t.Errorf("clearing cleared content moved UpdatedAt from %v to %v", cleared.UpdatedAt, again.UpdatedAt)
+		}
+		awaitClockTick()
+		refilled := write("third", domain.MemorySourceAgent)
+		if !refilled.UpdatedAt.After(cleared.UpdatedAt) {
+			t.Errorf("refilled content: UpdatedAt = %v, want after %v", refilled.UpdatedAt, cleared.UpdatedAt)
+		}
+		if !refilled.CreatedAt.Equal(first.CreatedAt) {
+			t.Errorf("CreatedAt moved from %v to %v", first.CreatedAt, refilled.CreatedAt)
 		}
 	})
 

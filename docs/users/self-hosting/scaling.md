@@ -61,10 +61,12 @@ interrupted. Hand-offs don't count against `TF_MAX_CLAIM_ATTEMPTS`.
 
 Set alongside it:
 
-- **A termination grace period of at least 30s** (the compose default). An
-  executor shuts down within 25s. If its 15s hand-off window expires, it logs a
-  WARN and exits anyway; a run it hadn't released is picked up by another
-  executor after 75s and counts as a lost attempt.
+- **A termination grace period of at least 45s.** The compose file sets
+  `stop_grace_period: 45s` on the executor. A Kubernetes pod needs
+  `terminationGracePeriodSeconds: 45`. An executor exits within 35s. If its 15s
+  hand-off window expires, it logs a WARN and exits anyway; a run it hadn't
+  released is picked up by another executor after 75s and counts as a lost
+  attempt.
 - **Drain first to avoid interrupting runs.** Find the executor's id, drain
   it, wait until `instance list` shows its `RUNS` at 0, then stop it. Draining
   takes effect within a few seconds; live runs finish or park at the end of

@@ -27,7 +27,10 @@ type SpendStoreFixture struct {
 	// so conversations.trigger_id has a valid FK target and the view's
 	// trigger_id column can be asserted (TFAC-478).
 	TriggerID string
-	Seeder    SpendSeeder
+	// OtherUserID is a second person in OrgID: the holder a reassign moves a
+	// conversation to, whose message a turn can be stamped with.
+	OtherUserID string
+	Seeder      SpendSeeder
 }
 
 // SpendStoreFactory returns a fresh fixture per call so subtests don't share
@@ -39,13 +42,18 @@ type SpendTokens struct {
 	Input, Output, CacheRead, CacheCreation int
 }
 
-// ConversationSpendFixture stages one delegation conversation plus ONE ledger row on
+// ConversationSpendFixture stages one conversation plus ONE ledger row on
 // it — an assistant messages row carrying the fixture's model/tokens and, when
 // Cost is non-nil, the settled cost stamp (nil → NULL cost: streamed but not
 // yet settled, the in-flight shape). CreatorUserID "" → NULL (pair with
 // TriggerType "event"); ActorAgentID "" → NULL. The seeder writes
 // origin='manual' to sidestep the blueprint-parents CHECK.
 type ConversationSpendFixture struct {
+	// Type is conversations.type; "" → 'delegation'.
+	Type string
+	// MessageUserID is the ledger row's messages.user_id, the person whose
+	// message started the turn; "" → NULL.
+	MessageUserID string
 	TeamID        string
 	CreatorUserID string
 	TriggerType   string // "manual" | "event"
@@ -515,6 +523,84 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 
 	// trigger_id surfaces on the runs arm (the autonomous by-rule attribution,
 	// TFAC-478) and is NULL for manual runs and system jobs.
+	// An interactive conversation is a person's spend: its rows are manual
+	// whatever its trigger_type, and each is attributed to the person whose
+	// message started its turn, so a reassign that keeps the conversation
+	// moves the spend of every later turn to the new holder. A row with no
+	// message user falls back to the conversation's creator. A delegation's
+	// row keeps its conversation's creator whoever's message it carries.
+	t.Run("InteractiveSpend_IsManual_AttributedToTheMessagesUser", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		reassigned := fx.Seeder.Conversation(t, ConversationSpendFixture{
+			Type: domain.ConversationTypeInteractive, MessageUserID: fx.OtherUserID,
+			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
+			Model: "m", Cost: spendCostPtr(0.40), Tokens: SpendTokens{1, 1, 1, 1}, Status: SeedConcluded, StartedAt: t1,
+		})
+		eventStamped := fx.Seeder.Conversation(t, ConversationSpendFixture{
+			Type: domain.ConversationTypeInteractive, MessageUserID: fx.UserID,
+			TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event",
+			Model: "m", Cost: spendCostPtr(0.30), Tokens: SpendTokens{1, 1, 1, 1}, Status: SeedConcluded, StartedAt: t2,
+		})
+		unstamped := fx.Seeder.Conversation(t, ConversationSpendFixture{
+			Type:   domain.ConversationTypeInteractive,
+			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
+			Model: "m", Cost: spendCostPtr(0.20), Tokens: SpendTokens{1, 1, 1, 1}, Status: SeedConcluded, StartedAt: t3,
+		})
+		delegation := fx.Seeder.Conversation(t, ConversationSpendFixture{
+			MessageUserID: fx.OtherUserID,
+			TeamID:        fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
+			Model: "m", Cost: spendCostPtr(0.10), Tokens: SpendTokens{1, 1, 1, 1}, Status: SeedConcluded, StartedAt: t4,
+		})
+
+		rows, err := fx.Store.ListSpend(ctx, fx.OrgID, domain.SpendFilter{})
+		if err != nil {
+			t.Fatalf("ListSpend: %v", err)
+		}
+		byID := indexSpend(t, rows)
+		if len(rows) != 4 {
+			t.Fatalf("ListSpend returned %d rows, want 4 (one per seeded ledger row)", len(rows))
+		}
+		for _, tc := range []struct {
+			label, id, creator string
+		}{
+			{"reassigned", reassigned, fx.OtherUserID},
+			{"event_stamped", eventStamped, fx.UserID},
+			{"unstamped", unstamped, fx.UserID},
+			{"delegation", delegation, fx.UserID},
+		} {
+			r, ok := byID[tc.id]
+			if !ok {
+				t.Errorf("%s: the ledger row is not in the view", tc.label)
+				continue
+			}
+			assertEq(t, tc.label+".source", r.Source, domain.SpendSourceRun)
+			assertEq(t, tc.label+".category", r.Category, domain.SpendCategoryManual)
+			assertPtrEq(t, tc.label+".creator_user_id", r.CreatorUserID, tc.creator)
+		}
+	})
+
+	t.Run("InteractiveSpend_CountsInSpendByCategorySystem", func(t *testing.T) {
+		fx := factory(t)
+		ctx := context.Background()
+
+		fx.Seeder.Conversation(t, ConversationSpendFixture{
+			Type: domain.ConversationTypeInteractive, MessageUserID: fx.UserID,
+			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
+			Model: "m", Cost: spendCostPtr(0.75), Tokens: SpendTokens{1, 1, 1, 1}, Status: SeedConcluded, StartedAt: t1,
+		})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{
+			TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event",
+			Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{1, 1, 1, 1}, Status: SeedConcluded, StartedAt: t2,
+		})
+
+		buckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, time.Time{}, time.Time{})
+		byCat := spendByCat(t, buckets, err)
+		assertCost(t, "manual.sum", byCat[domain.SpendCategoryManual].TotalCostUSD, 0.75)
+		assertCost(t, "autonomous.sum", byCat[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
+	})
+
 	t.Run("TriggerID_PopulatedForConversations_NullForManualAndSystem", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()

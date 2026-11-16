@@ -46,12 +46,15 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversa
 	if blueprintRunID != "" {
 		blueprintRun = blueprintRunID
 	}
+	now := time.Now().UTC()
 	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx, `
-		INSERT INTO conversation_memory (id, conversation_id, blueprint_run_id, agent_content, source, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, source = excluded.source, blueprint_run_id = excluded.blueprint_run_id
+		INSERT INTO conversation_memory (id, conversation_id, blueprint_run_id, agent_content, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, source = excluded.source, blueprint_run_id = excluded.blueprint_run_id,
+			updated_at = CASE WHEN conversation_memory.agent_content IS NOT excluded.agent_content
+			                  THEN excluded.updated_at ELSE conversation_memory.updated_at END
 		RETURNING `+taskMemoryRowColumns,
-		uuid.New().String(), conversationID, blueprintRun, agentContent, string(source), time.Now().UTC()))
+		uuid.New().String(), conversationID, blueprintRun, agentContent, string(source), now, now))
 	if err != nil {
 		return domain.TaskMemory{}, fmt.Errorf("upsert conversation_memory: %w", err)
 	}
@@ -89,25 +92,24 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 	return getMemoriesForEntity(ctx, s.q, entityID)
 }
 
-// GetMemoriesForEntitySystem ignores teamID: local mode is single-tenant
-// (N=1, one team), so there is no cross-team memory to scope out — every
-// conversation on the entity belongs to the lone team. The param exists for
-// parity with the Postgres store, where the admin pool bypasses RLS and must
-// hand-roll the team filter off the materializing conversation's team_id
-// (TFAC-506).
-func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
-	_ = teamID
+// GetMemoriesForEntitySystem ignores teamID and taskID: local mode is
+// single-tenant (N=1, one team), so every conversation on the entity belongs to
+// the lone team and the reader may see all of them. The params exist for parity
+// with the Postgres store, where the admin pool bypasses RLS and must hand-roll
+// the reading conversation's scope off them.
+func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) ([]domain.TaskMemory, error) {
+	_, _ = teamID, taskID
 	return s.GetMemoriesForEntity(ctx, orgID, entityID)
 }
 
-// GetRecentMemoriesForEntitySystem ignores teamID like its unbounded sibling
-// (local mode is single-team) and pushes the cap into the query so a
+// GetRecentMemoriesForEntitySystem ignores teamID and taskID like its unbounded
+// sibling (local mode is single-team) and pushes the cap into the query so a
 // long-history entity isn't fully fetched to keep only the tail. A non-positive
 // limit returns no rows (never unbounded); the host resolves it to a default
 // first. The query orders DESC LIMIT (the most recent N) and the result is
 // reversed to ASC so the composition matches the unbounded read.
-func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error) {
-	_ = teamID
+func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string, limit int) ([]domain.TaskMemory, error) {
+	_, _ = teamID, taskID
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -154,7 +156,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 // a row whose conversation or prompt is gone still comes back — it loses its
 // legible name, never its content.
 const taskMemorySelect = `
-	SELECT rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
+	SELECT rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at, rm.updated_at,
 	       c.task_id, c.blueprint_step_index, p.name
 	FROM conversation_memory rm
 	LEFT JOIN conversations c ON c.id = rm.conversation_id
@@ -168,7 +170,7 @@ const taskMemorySelect = `
 // against the bare conversations/prompts table names instead — the same
 // restriction sqliteClaimReturningColumns (conversation.go) exists for.
 const taskMemoryRowColumns = `
-	id, conversation_id, blueprint_run_id, agent_content, source, created_at,
+	id, conversation_id, blueprint_run_id, agent_content, source, created_at, updated_at,
 	(SELECT c.task_id FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT c.blueprint_step_index FROM conversations c WHERE c.id = conversation_memory.conversation_id),
 	(SELECT p.name FROM conversations c JOIN prompts p ON p.id = c.prompt_id WHERE c.id = conversation_memory.conversation_id)
@@ -182,8 +184,8 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	var blueprintRunID, agentContent, taskID, promptName sql.NullString
 	var source string
 	var stepIndex sql.NullInt64
-	var createdAt time.Time
-	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
+	var createdAt, updatedAt time.Time
+	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt, &updatedAt,
 		&taskID, &stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
@@ -191,6 +193,7 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	m.Content = agentContent.String
 	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
+	m.UpdatedAt = updatedAt
 	m.TaskID = taskID.String
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)
@@ -243,8 +246,8 @@ func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, co
 	return err
 }
 
-func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error) {
-	_ = teamID
+func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) (int, error) {
+	_, _ = teamID, taskID
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}

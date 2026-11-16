@@ -362,16 +362,21 @@ export default function Factory() {
       //   - Network error (fetch throws) — caught below.
       //   - Pre-claim rejection — input/state validation failures (entity not
       //     found, no matching event, viewer, an agent still running on the
-      //     task) as 400/403/404/409/422. Nothing landed on the claim axis;
-      //     toast and stop.
-      //   - Post-claim spawn failure — reason SPAWN_FAILED (422 bad blueprint
-      //     reference, 409 another run became active on the task in the gap or
-      //     its team was archived, 500 spawn/DB fault) AFTER the claim stamped. The task is bot-claimed with no
-      //     run, so refetch (the bot-claimed card must surface immediately) and
-      //     tell the user to retry. The reason is the discriminator — pre-claim
-      //     faults answer 409 and 500 too, so status alone can't tell the two
-      //     apart.
+      //     task, a bad blueprint reference, a model the team can't run, a
+      //     reached spend cap) as 400/403/404/409/422. Nothing landed on the
+      //     claim axis, and a task the create made stays queued and
+      //     unclaimed; refetch so it shows, and toast.
+      //   - Post-claim spawn failure — reason SPAWN_FAILED (409 another run
+      //     became active on the task in the gap or its team was archived,
+      //     500 spawn/DB fault) AFTER the claim stamped. The task is
+      //     bot-claimed with no run, so refetch (the bot-claimed card must
+      //     surface immediately) and tell the user to retry. The reason is
+      //     the discriminator — pre-claim faults answer 409 and 500 too, so
+      //     status alone can't tell the two apart.
       const label = entityLabel(pd.entity)
+      // Whether the create landed. A delegate refused after it leaves the
+      // task it made or found on the floor, so the floor reloads either way.
+      let created = false
       try {
         const task = await apiJSON<Task>('/api/tasks', {
           method: 'POST',
@@ -385,13 +390,16 @@ export default function Factory() {
         })
         // The create's answer carries the version the delegate names: the
         // task as this gesture found or made it.
-        await delegateTask(task, promptId)
+        created = true
+        await delegateTask(task, promptId, delegateTeam || undefined)
       } catch (err) {
-        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
-        if (spawnFailed) {
+        if (created) {
           if (delegateTeam) noteWrittenTeam(delegateTeam)
           const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
           refetch?.()
+        }
+        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
+        if (spawnFailed) {
           toast.error(
             `${label} is bot-claimed but the run didn't start: ${httpErrorMessage(err, 'spawn failed')}. Retry from the Board.`,
             'Delegate run failed',
@@ -590,12 +598,12 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         widthClass="flex-1"
         emptyMessage="No runs in flight"
         items={runs.map((r) => ({
-          key: r.run.ID,
-          dot: conversationStatusColor(r.run.Status),
+          key: r.run.id,
+          dot: conversationStatusColor(r.run.status),
           body: <ConversationRow conversation={r.run} task={r.task} />,
           // Clicking a conversation opens its full-screen station page in a
           // new tab.
-          href: orgHref(`/runs/${r.run.ID}`),
+          href: orgHref(`/runs/${r.run.id}`),
         }))}
         dropId={RUNS_DROP_ID}
       />
@@ -798,25 +806,18 @@ function QueuedEntityRow({ entity }: { entity: FactoryEntity }) {
 }
 
 // Hover popup for a queued entity row. Shows the full title (no
-// truncation) plus source-specific metadata so the user can read the
+// truncation) plus the pull request's metadata so the user can read the
 // long context without having to click through. Mirrors the columns
 // the old factory's StationDetailOverlay surfaced.
 function entityMeta(entity: FactoryEntity): { k: string; v: string }[] {
   const meta: { k: string; v: string }[] = []
-  if (entity.source === 'github') {
-    if (entity.repo) meta.push({ k: 'repo', v: entity.repo })
-    if (entity.number != null) meta.push({ k: 'number', v: `#${entity.number}` })
-    if (entity.author) meta.push({ k: 'author', v: `@${entity.author}` })
-    if (entity.additions != null || entity.deletions != null) {
-      const add = entity.additions ?? 0
-      const del = entity.deletions ?? 0
-      meta.push({ k: 'diff', v: `+${add} −${del}` })
-    }
-  } else if (entity.source === 'jira' || entity.source === 'linear') {
-    if (entity.source_id) meta.push({ k: 'key', v: entity.source_id })
-    if (entity.status) meta.push({ k: 'status', v: entity.status })
-    if (entity.priority) meta.push({ k: 'priority', v: entity.priority })
-    if (entity.assignee) meta.push({ k: 'assignee', v: entity.assignee })
+  if (entity.repo) meta.push({ k: 'repo', v: entity.repo })
+  if (entity.number != null) meta.push({ k: 'number', v: `#${entity.number}` })
+  if (entity.author) meta.push({ k: 'author', v: `@${entity.author}` })
+  if (entity.additions != null || entity.deletions != null) {
+    const add = entity.additions ?? 0
+    const del = entity.deletions ?? 0
+    meta.push({ k: 'diff', v: `+${add} −${del}` })
   }
   return meta
 }
@@ -858,13 +859,13 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
 
 function ConversationRow({ conversation, task }: { conversation: Conversation; task: Task }) {
   const ref = task.source_id || task.entity_id
-  const isOpen = conversation.Status === 'open'
+  const isOpen = conversation.status === 'open'
   return (
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
       {isOpen && (
         <span
           className="inline-flex items-center text-ui leading-none"
-          style={{ color: conversationStatusColor(conversation.Status) }}
+          style={{ color: conversationStatusColor(conversation.status) }}
           title="Run is open — not concluded, not currently executing"
         >
           ◌
@@ -873,9 +874,9 @@ function ConversationRow({ conversation, task }: { conversation: Conversation; t
       <span className="font-mono text-reported text-ink-1">{ref}</span>
       <span
         className="text-label uppercase tracking-wider"
-        style={{ color: conversationStatusColor(conversation.Status) }}
+        style={{ color: conversationStatusColor(conversation.status) }}
       >
-        {conversationStatusLabel(conversation.Status)}
+        {conversationStatusLabel(conversation.status)}
       </span>
       <span className="ml-auto font-mono text-label text-ink-3">
         {formatConversationMeta(conversation)}
@@ -885,7 +886,7 @@ function ConversationRow({ conversation, task }: { conversation: Conversation; t
 }
 
 function entityLabel(e: FactoryEntity): string {
-  if (e.source === 'github' && e.number != null) return `#${e.number}`
+  if (e.number != null) return `#${e.number}`
   return e.source_id || e.id.slice(0, 8)
 }
 
@@ -927,13 +928,13 @@ function conversationStatusLabel(status: ConversationStatusValue): string {
 
 function formatConversationMeta(conversation: Conversation): string {
   const parts: string[] = []
-  if (conversation.DurationMs && conversation.DurationMs > 0) {
-    const sec = Math.round(conversation.DurationMs / 1000)
+  if (conversation.duration_ms && conversation.duration_ms > 0) {
+    const sec = Math.round(conversation.duration_ms / 1000)
     if (sec < 60) parts.push(`${sec}s`)
     else parts.push(`${Math.floor(sec / 60)}m ${sec % 60}s`)
   }
-  if (conversation.TotalCostUSD && conversation.TotalCostUSD > 0) {
-    parts.push(`$${conversation.TotalCostUSD.toFixed(2)}`)
+  if (conversation.total_cost_usd && conversation.total_cost_usd > 0) {
+    parts.push(`$${conversation.total_cost_usd.toFixed(2)}`)
   }
   return parts.join(' · ')
 }

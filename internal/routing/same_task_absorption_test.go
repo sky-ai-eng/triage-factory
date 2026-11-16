@@ -90,6 +90,10 @@ type injectCall struct {
 	firing                                delegate.AdditiveFiringRef
 }
 
+func (s *injectingStubDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
+	return delegate.DelegationPlan{}, nil
+}
+
 func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	if !s.allowFire {
 		return "", fmt.Errorf("unexpected Delegate call: this test only exercises the busy-task branch")
@@ -102,9 +106,6 @@ func (s *injectingStubDelegator) ReviewsDismissedSystem(context.Context, string,
 }
 
 func (s *injectingStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
-}
-
-func (s *injectingStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.AdditiveDelivery {
@@ -387,7 +388,7 @@ func TestTryAutoDelegate_SameTask_HoldsTheFiringBehindAHandedNote(t *testing.T) 
 			bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 			if tc.personsClaim {
 				tasks := testTaskStore(database)
-				if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, task.ID)); err != nil || !ok {
+				if ok, err := tasks.ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, tasks, runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, tasks, runmode.LocalDefaultOrgID, task.ID)); err != nil || !ok {
 					t.Fatalf("claim the task for a person: ok=%v err=%v", ok, err)
 				}
 				if task, err = tasks.Get(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || task == nil || task.ClaimedByUserID == "" {

@@ -55,7 +55,7 @@ func newProvisionRig(t *testing.T, avail eventsource.Availability, linearTokens 
 			Secrets: secrets,
 			Orgs:    &fakeOrgs{},
 			ConversationQueue: &provisionQueue{claim: db.AwaitingCredentialsConversation{
-				ConversationID: "conv-1", OrgID: "org-1", ExecutorID: "exec-1", BootEpoch: 4,
+				ConversationID: "conv-1", OrgID: "org-1", ClaimID: "claim-1", ExecutorID: "exec-1", BootEpoch: 4,
 				CredPubKey: base64.StdEncoding.EncodeToString(kp.Public[:]),
 			}},
 			Instances:        &provisionInstances{inst: &domain.Instance{ID: "exec-1", BootEpoch: 4}},
@@ -86,6 +86,19 @@ func (r *provisionRig) provision(t *testing.T) *credbundle.Bundle {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	return bundle
+}
+
+// TestProvision_WritesTheClaimItRead: the bundle is written to the claim whose
+// key it was sealed to, named by the read that found the key, so a claim
+// released mid-provision cannot pass its seal to the next one.
+func TestProvision_WritesTheClaimItRead(t *testing.T) {
+	rig := newProvisionRig(t, eventsource.Availability{
+		eventsource.NewSource(eventsource.KindGitHub, eventsource.StateAvailable),
+	}, &installTokens{})
+	rig.provision(t)
+	if rig.claims.claimID != "claim-1" {
+		t.Errorf("bundle written to claim %q, want claim-1, the claim whose key it was sealed to", rig.claims.claimID)
+	}
 }
 
 // TestProvision_EachStateFromItsCause walks one provision through every state

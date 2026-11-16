@@ -224,11 +224,11 @@ func DedupPreserveOrder(ids []string) []string {
 //
 // blueprints is team-scoped (mirrors prompts: composite uniques (id, org_id)
 // and (id, team_id), RLS on creator + team membership). blueprint_steps
-// inherits the blueprint's access; blueprint_runs is creator-scoped (RLS gates
-// rows on creator_user_id = tf.current_user_id() for manual runs, org-visible
-// for event runs). The Postgres impl threads org_id through every WHERE for
-// defense in depth and lets RLS enforce the rest; SQLite collapses orgID to
-// runmode.LocalDefaultOrgID via assertLocalOrg.
+// inherits the blueprint's access; blueprint_runs is team-scoped (RLS gates
+// rows on membership in the run's team_id, for manual and event runs alike,
+// as it gates the run's conversations). The Postgres impl threads org_id
+// through every WHERE for defense in depth and lets RLS enforce the rest;
+// SQLite collapses orgID to runmode.LocalDefaultOrgID via assertLocalOrg.
 //
 // The ...System methods route through the admin pool (claims-less system
 // callers); every other method runs on the app pool.
@@ -342,7 +342,7 @@ type RunProgress struct {
 //     by a compare-and-swap whose `advanced` bool is the write's own answer.
 //     It returns the two conversations it wrote, which are the rows a caller
 //     acts on.
-//   - MarkRunStatus / MarkRunStatusSystem, ReopenRunForResume and
+//   - MarkRunStatusSystem, ReopenRunForResume and
 //     RequestRunCancelSystem — compare-and-swap guards whose `changed` bool is
 //     already the write's own answer about whether it landed, which is what
 //     every caller branches on. There is no miss error to retire here and no
@@ -594,7 +594,8 @@ type BlueprintStore interface {
 	//     listing finds its conversation, and a firing that waits for it reads
 	//     the team archived and writes nothing. A team id with no row takes
 	//     no lock and is not refused here.
-	//  2. The blueprint_runs insert, which requires a trigger type: the arm
+	//  2. The blueprint_runs insert, whose team_id is the run's team read in
+	//     step 1. It requires a trigger type: the arm
 	//     is chosen by that value, so an empty one selects the manual arm by
 	//     omission rather than by intent and impls reject it with
 	//     ErrBlueprintRunTriggerTypeRequired. An event-triggered run
@@ -657,13 +658,27 @@ type BlueprintStore interface {
 	// names. It holds the one-active-run index against its task, and nothing
 	// re-mints the missing step.
 	//
+	// A run is the agent's work on its task for the task's team, so a step is
+	// only ever minted while the task is on the run's team and no person holds
+	// it. A task a person has claimed, or one that moved to another team, has
+	// been taken off the run, and the run is cancelled rather than advanced.
+	//
 	// Statement order inside the transaction is fixed:
 	//
+	//  0. The run's task, share-locked (Postgres; SQLite's single writer needs
+	//     no lock), so its team and claim cannot change between the guard and
+	//     the commit. It comes first because every transaction that writes a
+	//     task and its run takes the task first. A claim or a move either
+	//     commits first, and the guard refuses the advance, or waits for this
+	//     commit, and then meets a task whose next step is already minted, as
+	//     it would during any live step.
 	//  1. The guarded bump: current_step_index moves to nextStep's own index,
-	//     and only on a row still 'running' at fromStepIndex. That is the
-	//     pointer write and the fence at once, which is why it leads — a second
-	//     reactor holding a terminal from the same step queues on this row and
-	//     then finds the guard closed, having written nothing.
+	//     and only on a row still 'running' at fromStepIndex whose task is
+	//     still on the run's team and held by no person. That is the pointer
+	//     write and the fence at once,
+	//     which is why it leads the writes — a second reactor holding a
+	//     terminal from the same step queues on this row and then finds the
+	//     guard closed, having written nothing.
 	//
 	//     Both the run being advanced and the index being advanced to are
 	//     read off nextStep rather than passed beside it: the pointer and the
@@ -677,9 +692,10 @@ type BlueprintStore interface {
 	//  3. The next step's conversations row.
 	//
 	// Returns advanced=false with nothing written when the guard missed — the
-	// run is terminal, or another engagement already moved the pointer. The
-	// sequence is somebody else's to drive by then, so a caller stands down
-	// rather than failing the blueprint.
+	// run is terminal, another engagement already moved the pointer, or the
+	// task has been taken off the run. In the first two the sequence is
+	// somebody else's to drive, so a caller stands down rather than failing
+	// the blueprint; in the third the caller cancels the run.
 	AdvanceRunToStepSystem(ctx context.Context, orgID string, fromStepIndex int, concludedConversationID string, nextStep domain.Conversation) (advanced bool, ended, conv *domain.Conversation, err error)
 
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
@@ -707,11 +723,12 @@ type BlueprintStore interface {
 	//
 	// A predicate rather than a getter for the newest run, because the honest
 	// answer is not always the caller's to see: blueprint_runs_select is
-	// creator-scoped for manual runs, so a task re-delegated by a DIFFERENT
-	// user has a superseding run the resolving caller cannot read. Postgres
-	// answers both pools through tf.blueprint_run_is_newest_for_task, which
-	// reads past that policy and hands back only the yes/no — enough to stop
-	// the close, nothing about whose work superseded it.
+	// team-scoped, so a task that moved to another team and was delegated
+	// there has a superseding run a resolving caller on the old team cannot
+	// read. Postgres answers both pools through
+	// tf.blueprint_run_is_newest_for_task, which reads past that policy and
+	// hands back only the yes/no — enough to stop the close, nothing about
+	// whose work superseded it.
 	IsNewestRunForTask(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
 
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
@@ -730,11 +747,6 @@ type BlueprintStore interface {
 	// (nil, nil, nil) when the supplied conversation is not part of a multi-step
 	// blueprint (single-conversation delegation).
 	GetRunForConversation(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
-
-	// MarkRunStatus transitions a blueprint run to a terminal status and
-	// records optional abort metadata. Returns (true, nil) when the row was
-	// updated, (false, nil) when the guard rejected the write.
-	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 
 	// ReopenRunForResume flips an `aborted` blueprint_run back to `running` (a
 	// compare-and-swap guarded on status='aborted'), clearing its abort
@@ -773,17 +785,10 @@ type BlueprintStore interface {
 	// blueprint instance, ordered by blueprint_step_index ASC, started_at ASC.
 	ConversationsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 
-	// ActiveStepConversationIDs returns the IDs of step conversations on a
-	// blueprint that have not reached a terminal state, parked `open` steps
-	// included: a cancel records its stop intent on each of them, and a
-	// paused blueprint whose parked step carried none would have nothing to
-	// settle it.
-	ActiveStepConversationIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
-
 	// RunProgress returns, for each named blueprint run, how many steps its
 	// frozen plan holds and the run's status, keyed by blueprint_run id. A run
-	// whose row is absent — not found, or hidden from the caller (manual runs
-	// are creator-scoped under RLS) — is simply missing from the map rather
+	// whose row is absent — not found, or hidden from the caller (a run is
+	// team-scoped under RLS) — is simply missing from the map rather
 	// than reported with zero values, so a caller can tell "no such run
 	// visible" from a plan of no steps.
 	//
@@ -809,8 +814,19 @@ type BlueprintStore interface {
 	ListStepsSystem(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 	GetRunForConversationSystem(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
+	// MarkRunStatusSystem transitions a running blueprint run to a terminal
+	// status, records optional abort metadata, and parks its children still
+	// mid-flight. Returns (true, nil) when the row was updated, (false, nil)
+	// when the guard rejected the write: the run is no longer running, or the
+	// status is completed and the task has been taken off the run, by a
+	// person's claim or a move to another team. A completion closes its task,
+	// which is then the person's or the new team's to close, so that run is
+	// cancelled instead, by the reactor that reads it next. A run with no team
+	// predates the column and is held to the claim alone. It has no app-pool
+	// twin: ending a run is the orchestrator's
+	// decision, and the run's write policy follows its team, which its
+	// delegator may no longer be able to write.
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
-	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
 }

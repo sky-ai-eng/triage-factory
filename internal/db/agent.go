@@ -59,7 +59,7 @@ type Park struct {
 	// "someone deliberately stopped this" and "there is a string to display"
 	// the same bit: a park recording why it happened without being a
 	// cancellation would release its claim 'cancelled', and nothing would
-	// fail. `idle` is exactly such a reason.
+	// fail. `turn_incomplete` is exactly such a reason.
 	Deliberate bool
 	// Reason is recorded on conversations.park_reason — the closed
 	// domain.ParkReason vocabulary, never free text and never the model's
@@ -76,17 +76,30 @@ type Park struct {
 	// in place. The field stays because a future deliberate park with an
 	// actual conclusion to state would want it.
 	ResultSummary string
+	// NoTurnRan says the parking engagement had no turn running: it was still
+	// bringing its agent up, or it was holding its claim between two turns. A
+	// pending stop then ended the person messages in front of it, so the park
+	// moves the conversation's wake position to where the stop was sent and
+	// they no longer wake it. They stay undelivered, and the next engagement
+	// reads them with whatever wakes the conversation. With no stop pending it
+	// changes nothing.
+	//
+	// False when the park ends a running turn, a stopped one included: a
+	// message waiting behind that turn was not in front of the stop, and it
+	// runs next.
+	NoTurnRan bool
 }
 
-// ParkIdle is the turn simply ending — the live driver's no-conclusion turn or
-// its idle close. Claim released 'parked', an already-parked row left alone.
+// ParkTurnIncomplete is a turn that stopped before it finished
+// (domain.ParkReasonTurnIncomplete). Claim released 'parked', an already-parked
+// row left alone.
 //
-// It carries a reason like any other park. "The turn ended and nothing more
-// arrived" IS what happened to this conversation, and saying so is what makes
-// the column readable at a glance; it is not a deliberate stop, and the field
-// above is what says so.
-func ParkIdle() Park {
-	return Park{Reason: domain.ParkReasonIdle}
+// It carries a reason like any other park, because a turn that did not finish
+// is what happened to this conversation and saying so is what makes the column
+// readable at a glance; it is not a deliberate stop, and Park.Deliberate is
+// what says so.
+func ParkTurnIncomplete() Park {
+	return Park{Reason: domain.ParkReasonTurnIncomplete}
 }
 
 // ParkStopped is a deliberate stop: someone or something ended this conversation.
@@ -105,6 +118,17 @@ func (p Park) ClaimOutcome() string {
 		return "cancelled"
 	}
 	return "parked"
+}
+
+// AwaitsPersonTypeSQL is the conversation-type half of
+// domain.ParkReason.AwaitsPerson as SQL, against the conversation alias the
+// caller names: a turn_incomplete park waits on a person only on a delegation.
+// The reads that select on domain.ParkReasonsAwaitingPerson add it beside
+// their reason match rather than inside it, so that match stays the plain
+// one the partial notice index is planned from.
+func AwaitsPersonTypeSQL(alias string) string {
+	return `(` + alias + `.park_reason <> '` + string(domain.ParkReasonTurnIncomplete) + `' OR ` +
+		alias + `.type = '` + domain.ConversationTypeDelegation + `')`
 }
 
 // ConversationStore owns the conversations / messages tables — agent
@@ -316,14 +340,14 @@ type ConversationStore interface {
 	// turn end read as concluded. The re-open of an aborted blueprint
 	// (BlueprintStore.ReopenRunForResume, in the same transaction) withdraws
 	// the same columns. The check reads the run past blueprint_runs RLS, so a
-	// teammate who cannot see another user's manual run gets the creator's
-	// answer.
+	// caller who is not on the run's team, and so cannot see it, gets the
+	// answer a member of the team would.
 	//
 	// WHICH step of a finished blueprint may be woken is still not checked
 	// here — only the last one may, and that gate needs an admin-pool read
-	// (blueprint_runs RLS hides another user's manual blueprint, and a
-	// teammate resuming a conversation must not be refused for a row they merely
-	// cannot see), so it lives in the caller.
+	// (blueprint_runs RLS hides a run on another team, and a caller resuming a
+	// conversation must not be refused for a row they merely cannot see), so it
+	// lives in the caller.
 	MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// ClearNextAttempt drops the wait a hand-back set on the conversation
@@ -342,6 +366,10 @@ type ConversationStore interface {
 	// Persisted mid-flight, before any terminal state, so the
 	// write-gate retry loop can resume a conversation whose initial
 	// invocation failed the memory check.
+	//
+	// A session id other than the stored one starts sdk_session_cost_usd over
+	// at zero in the same statement, since that total belongs to the session
+	// it was reported for; the same id leaves it as it is.
 	//
 	// Returns the conversation row as it reads immediately after this call —
 	// same shape as Get. ErrNoSuchConversation if conversationID names no row
@@ -764,6 +792,36 @@ type ConversationStore interface {
 	// nil.
 	NewestAssistantToolCallsForConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string][]domain.ToolCall, error)
 
+	// NewestPersonMessageSystem returns the conversation's newest person row
+	// by id: a person's own message (role 'user', an author, and a blank
+	// subtype or the steer stamp a mid-turn drain gives one), delivered or
+	// still waiting, in any window state but withdrawn (delivered=false AND
+	// window_state='inactive'). A compacted row still counts, so a compaction
+	// never resets the settings a person last picked. Every person row
+	// records the model and effort it runs on, so this row holds the
+	// conversation's current settings; a row written before rows recorded
+	// them carries no model. nil when the conversation has none. Admin pool,
+	// org bound by argument: its readers are the send path, the claim and the
+	// credential seal, none of which carries a request identity.
+	NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
+	// CountPersonMessagesSinceSystem counts the conversation's person rows,
+	// on NewestPersonMessageSystem's terms, created after since. A compacted
+	// row counts, because a long conversation compacts the very messages a
+	// reader asking "how much has the person said since then" is counting.
+	// Admin pool, org bound by argument: its reader is the turn-end check,
+	// which carries no request identity.
+	CountPersonMessagesSinceSystem(ctx context.Context, orgID, conversationID string, since time.Time) (int, error)
+
+	// NewestAssistant returns the conversation's newest assistant row by id
+	// whose window_state is 'active': the last call the model answered that
+	// the next call reads, whose usage says how full the window is and whose
+	// time says whether the provider cache is still warm. nil when the
+	// conversation has none. Read under the caller's claims; the System twin
+	// is the admin-pool read for the send path.
+	NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+	NewestAssistantSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error)
+
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
 	// conversation's exact LLM context, ordered by the effective assembly key
 	// COALESCE(seq, id). window_state='inactive' rows are excluded
@@ -780,6 +838,32 @@ type ConversationStore interface {
 	// assembled, it must become a column on this table, per the epic's
 	// standing rule.
 	ListForAssemblySystem(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
+
+	// OpeningTaskContextSystem returns the content of the conversation's
+	// task-context row (domain.MessageSubtypeInjectionTaskContext): the task
+	// context its opening sent. ok is false when the conversation has none,
+	// which is how a claim knows its conversation has not been opened.
+	//
+	// Every window state counts. A compaction marks the row inactive, and the
+	// conversation it opened is still one that has been opened: its opening is
+	// not minted again, and a claim retains this content as the task-context
+	// file. ListForAssemblySystem leaves the row out once it is inactive, so it
+	// cannot answer this.
+	//
+	// Only the task-context row counts, never any row. A conversation can carry
+	// a queued follow-up (a person typed while it waited for an executor) or a
+	// stop note from a bring-up that never reached the agent before it has been
+	// opened, and reading either as an opening leaves the run with no task
+	// context at all. The mint writes one task-context row per conversation;
+	// were there more, the first in assembly order is the answer.
+	OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (taskContext string, ok bool, err error)
+
+	// HasAssistantMessageSystem reports whether the conversation's transcript
+	// holds an assistant row in any window state: whether the model has taken
+	// a turn, which a compaction does not undo. It is how a conversation opened
+	// before openings were minted (its transcript begins at the agent's first
+	// reply) is told apart from one that never ran.
+	HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// The delivered flush lives on MarkDeliveredForClaimSystem below:
 	// consuming pending rows is an engagement write, so it goes through the
@@ -882,6 +966,23 @@ type ConversationStore interface {
 	//
 	// Return shape and miss semantics match SetSession.
 	SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error)
+
+	// RecordSessionCostSystem records totalUSD, the running total the SDK
+	// reported for session sessionID, as conversations.sdk_session_cost_usd:
+	// it raises the stored value to totalUSD and never lowers it, and only
+	// while the row's sdk_session_id is sessionID. A call naming another
+	// session changes nothing. A resumed launch reads the stored value back
+	// as the total its own spend is measured from (domain.Conversation's
+	// SessionCostUSD).
+	//
+	// Keyed on the session rather than a claim on purpose: what a session has
+	// cost is a fact about the session, so a process that has lost its claim
+	// still records it, and the raise-only rule keeps a late writer from
+	// lowering what a newer one wrote.
+	//
+	// Bookkeeping with no returned row, and no miss: a write that changes
+	// nothing is not an error.
+	RecordSessionCostSystem(ctx context.Context, orgID, conversationID, sessionID string, totalUSD float64) error
 	// SetActiveClaimPhaseSystem writes claims.phase on the conversation's
 	// ACTIVE claim — the setup/parked sub-state of a live engagement
 	// (fetching, cloning, agent_starting, awaiting_credentials). Empty
@@ -1113,16 +1214,21 @@ type ConversationStore interface {
 	// it still owns the conversation.
 	//
 	// subtype, when non-empty, is stamped onto the same rows in the same
-	// statement. The loop's mid-turn drain flushes human input with
+	// transaction. The loop's mid-turn drain flushes human input with
 	// "injection:steer" so the row records — durably, in the column
 	// assembly reads — that it arrived while the model was working; a bare
 	// drain passes "" and leaves each row's own subtype alone. One
-	// statement rather than flush-then-stamp because a crash between the
+	// transaction rather than flush-then-stamp because a crash between the
 	// two would leave a delivered row whose provenance was lost, and
 	// assembly would then render it as an ordinary user turn.
 	//
+	// A batch that would assemble ahead of the model's newest reply or its
+	// tool results moves behind every delivered row, in its own order, in the
+	// same transaction (domain.DeliveryPositions). Rows already delivered are
+	// left alone.
+	//
 	// Exempt from the returned-row rule: it flips a batch of pending-input
-	// rows delivered in one statement, so there is no single row a return
+	// rows delivered in one transaction, so there is no single row a return
 	// value could name.
 	MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error
 
@@ -1304,12 +1410,14 @@ type ConversationStore interface {
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
+	// summary is why it failed, stored as result_summary, which the failure
+	// notice reports; "" keeps the stored value.
 	//
 	// Refused once the engagement has been fenced out: ok=false means the row
 	// was already terminal, while a fenced-out caller gets ErrClaimReleased,
 	// which is a different thing and must not be treated as a lost race. A
 	// pending stop intent is cleared with the flip.
-	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error)
+	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error)
 
 	// ParkOpenForClaimSystem flips a conversation to `open`: a turn ended without a verdict. This is
 	// the ONLY writer of that state, and there is deliberately only one —
@@ -1320,33 +1428,37 @@ type ConversationStore interface {
 	// Returns ok=false (no error) if the row already reached a terminal state.
 	//
 	// park says WHY, and that is the one input the two callers differ on. It
-	// decides three things at once, so the difference between "the turn ended"
-	// and "someone stopped this" is stated once rather than forked into two
-	// methods that drifted:
+	// decides three things at once, so the difference between "the turn did
+	// not finish" and "someone stopped this" is stated once rather than forked
+	// into two methods that drifted:
 	//
 	//   - the park_reason / result_summary recorded on the row (a Park with no
 	//     reason leaves both untouched rather than blanking them),
-	//   - the outcome the claim releases with — 'parked' for an idle turn-end,
-	//     'cancelled' for a deliberate stop, which is now the ONLY place the
-	//     cancellation of an engagement is recorded,
+	//   - the outcome the claim releases with — 'parked' for a turn that did
+	//     not finish, 'cancelled' for a deliberate stop, which is now the ONLY
+	//     place the cancellation of an engagement is recorded,
 	//   - whether an already-parked row counts as a flip. A deliberate stop
 	//     re-parks (the caller has to learn it landed, so it can finalize the
-	//     blueprint); an idle park does not, because the live driver parks on
-	//     every no-conclusion turn and each one would otherwise re-broadcast.
+	//     blueprint); a turn_incomplete park does not, so a second one on a row
+	//     already parked is not broadcast again.
 	//
 	// A pending stop intent overrides the reason: the row records
 	// user_cancelled when a person asked and system_cancelled when the system
-	// did, and the intent is cleared in the same write. An idle park that lands
-	// while a stop is pending records the stop, which is right — someone asked
-	// for it, and the turn ending is how it was honored.
+	// did, and the intent is cleared in the same write. A turn_incomplete park
+	// that lands while a stop is pending records the stop, which is right —
+	// someone asked for it, and the turn stopping is how it was honored.
+	//
+	// A park with Park.NoTurnRan also moves the wake position forward to where
+	// the pending stop was sent, so the person messages in front of it no
+	// longer wake the conversation.
 	//
 	// Refused (ErrClaimReleased) once the engagement has been fenced out.
 	// Every park comes through here, deliberate or not: the self-park on the
-	// engagement's own cancelled context, and the idle park a turn that simply
-	// ended produces. The idle one still needs the fence — a zombie
-	// idle-parking a conversation a successor is mid-turn on flips a running
-	// conversation to `open` and hands the queue a row somebody is already
-	// driving.
+	// engagement's own cancelled context, and the turn_incomplete park a turn
+	// that stopped before finishing produces. That one still needs the fence —
+	// a zombie parking a conversation a successor is mid-turn on flips a
+	// running conversation to `open` and hands the queue a row somebody is
+	// already driving.
 	ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park Park) (bool, error)
 
 	// SettleClaimCostSystem lands the spend one engagement reports onto the
@@ -1489,6 +1601,52 @@ type ConversationStore interface {
 	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
 	// the door and orgID is bound by argument.
 	ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error)
+
+	// ListPauseNoticesDueSystem returns, across orgs, the parks whose
+	// kinds.ConversationPaused notice the brain has not opened: the rows
+	// ListAwaitingPersonSystem selects whose parked_at is not the park
+	// MarkPauseNoticedSystem last recorded. Ordered by parked_at then id, at
+	// most limit rows; the sweep reads the next page on its next pass.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and each row carries its org.
+	ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error)
+
+	// MarkPauseNoticedSystem records that the notice for the park at parkedAt
+	// was opened, and only while the conversation is still on that park and
+	// not yet marked for it: a park that ended, with a new one begun since the
+	// read, stays due. It reports whether it marked the row.
+	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), so the mark commits only with the notice, and of two
+	// passes that read the same park only the one whose mark lands opens it.
+	// A bookkeeping write that returns no row: its only reader is
+	// ListPauseNoticesDueSystem, and its caller needs only whether it marked.
+	MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error)
+
+	// ListFailureNoticesDueSystem returns, across orgs, the failed
+	// conversations a person delegated whose kinds.ConversationFailed notice
+	// the brain has not posted, ordered by completed_at then id, at most limit
+	// rows. A conversation a trigger fired has nobody to tell and is never
+	// listed. The task and its entity are outer-joined: their key is display
+	// only.
+	//
+	// A conversation fails at most once, since failed is the only terminal
+	// status and a failed conversation never runs again, so a timestamp is
+	// enough to mark it.
+	//
+	// The caller is the brain's sweep, with no JWT claims, so the admin pool is
+	// the door and each row carries its org.
+	ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error)
+
+	// MarkFailureNoticedSystem records that the conversation's failure notice
+	// was posted, unless it already was, and reports whether it marked the
+	// row.
+	//
+	// Only the brain writes it, as the guard of the notice it records
+	// (notify.Guard), for the reasons MarkPauseNoticedSystem gives. A
+	// bookkeeping write that returns no row, for the same reasons.
+	MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// HasActiveClaimForTaskSystem reports whether any conversation
 	// on taskID has a live claim — i.e. whether an executor is

@@ -3,7 +3,6 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -73,21 +72,41 @@ func openMigrationsTestDBAt(t *testing.T, version int64) *sql.DB {
 // version up to and including version.
 func migrateThrough(t *testing.T, database *sql.DB, version int64) {
 	t.Helper()
-	if err := upThrough(database, version); err != nil {
-		t.Fatalf("goose.UpTo(%d): %v", version, err)
-	}
-}
-
-// upThrough is migrateThrough returning the migration's error, for a test
-// about a migration that fails.
-func upThrough(database *sql.DB, version int64) error {
 	gooseMu.Lock()
 	defer gooseMu.Unlock()
 	goose.SetBaseFS(migrationsSQLiteFS)
 	if err := goose.SetDialect("sqlite3"); err != nil {
-		return fmt.Errorf("set dialect: %w", err)
+		t.Fatalf("set dialect: %v", err)
 	}
-	return goose.UpTo(database, "migrations-sqlite", version)
+	if err := goose.UpTo(database, "migrations-sqlite", version); err != nil {
+		t.Fatalf("goose.UpTo(%d): %v", version, err)
+	}
+}
+
+func execAll(t *testing.T, database *sql.DB, stmts ...string) {
+	t.Helper()
+	for _, stmt := range stmts {
+		if _, err := database.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", strings.Join(strings.Fields(stmt), " "), err)
+		}
+	}
+}
+
+func queryInt(t *testing.T, database *sql.DB, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return n
+}
+
+// nullable binds an empty string as NULL.
+func nullable(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }
 
 // TestMigrate_BricksPreV1110_GooseStampedAtOldBaseline covers the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -545,40 +546,39 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
-	t.Run("resolve_claim_team_for_visible_nonowner", func(t *testing.T) {
+	t.Run("claim_team_candidates_for_visible_nonowner", func(t *testing.T) {
 		// The ① regression case: an unclaimed task OWNED by a team the
 		// caller is NOT in (teamD), but VISIBLE to the caller's team B via
-		// a task_teams row. HandoffAgentClaim would consolidate the claim
-		// onto B, so the bot-enablement gate must check B — not the owner
-		// teamD, whose team_agents row RLS hides from the caller (which
-		// would wrongly report the bot disabled and reject the delegate).
-		// ResolveClaimTeam is what the handlers consult for that gate.
+		// a task_teams row. The claim can land on B and not on D, so the
+		// bot-enablement gate must check B — not the owner teamD, whose
+		// team_agents row RLS hides from the caller (which would wrongly
+		// report the bot disabled and reject the delegate).
+		// ClaimTeamCandidates is what the handlers consult for that gate.
 		teamD := pgtest.SeedTeam(t, h, orgID, "delta-owner") // founder NOT in D
 		task := seedMultiTeamTask(t, h, orgID, userID, teamD, "owned-by-d")
 		pgtest.MustExec(t, h.AdminDB,
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, task, teamB)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			got, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ResolveClaimTeam(ctx, orgID, task, userID)
+			got, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimTeamCandidates(ctx, orgID, task, userID)
 			if e != nil {
 				return e
 			}
-			if got != teamB {
-				t.Errorf("ResolveClaimTeam = %q; want the caller's visible team B %q (not owner D %q)", got, teamB, teamD)
+			if !slices.Equal(got, []string{teamB}) {
+				t.Errorf("ClaimTeamCandidates = %v; want only the caller's visible team B %q (not owner D %q)", got, teamB, teamD)
 			}
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("resolve claim team: %v", err)
+			t.Fatalf("claim team candidates: %v", err)
 		}
 	})
 
 	t.Run("reassign_consolidates_to_new_claimants_team", func(t *testing.T) {
 		// A task owned by team A, claimed by the founder (member of A+B).
 		// Reassigning the claim (TFAC-561) to a second user who belongs
-		// ONLY to team B must re-home team_id to B — the same task_teams-
-		// visibility-set derivation ClaimQueuedForUser/TakeoverClaimFromAgent
-		// already apply on their own claim arms.
+		// ONLY to team B must re-home team_id to B: the handoff derives the
+		// team from its target's writing teams in the task's visibility set.
 		userB := pgtest.SeedUser(t, h, "reassign-teamb")
 		pgtest.MustExec(t, h.AdminDB,
 			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, userB, orgID)

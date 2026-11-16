@@ -93,7 +93,7 @@ func TestSnapshotWorkspace_ASupersededEndingWritesNothing(t *testing.T) {
 	puts := &countingPutStorage{Storage: f.s.Storage()}
 	f.s.SetStorage(puts)
 
-	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, f.keyID, zombie, f.tree, "", domain.ConversationRuntimeNative); err != nil {
+	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, f.keyID, zombie, f.tree, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("a superseded snapshot is not a failure: %v", err)
 	}
 	if got := puts.count(); got != 0 {

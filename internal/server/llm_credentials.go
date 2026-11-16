@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -589,7 +590,7 @@ func validateBedrockConfig(c *bedrockConfig) *httpx.Validation {
 		v.Invalid("region", fmt.Sprintf("region %q does not look like an AWS region (e.g. us-east-1, us-gov-west-1)", c.Region))
 	}
 	if c.BaseURL != "" {
-		if err := validateBedrockBaseURL(c.BaseURL); err != nil {
+		if err := validateBedrockBaseURL(c.BaseURL, runmode.Current() == runmode.ModeMulti); err != nil {
 			v.Invalid("base_url", err.Error())
 		}
 	}

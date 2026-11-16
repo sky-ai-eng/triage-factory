@@ -75,7 +75,7 @@ func newDoorbellApp(t *testing.T, role runmode.DeployRole) (*App, *doorbellConve
 	t.Cleanup(func() { database.Close() })
 	a.database = database
 	a.memoryProvisioner = memoryprovision.NewManager(
-		db.Stores{Conversations: conv, MemoryAttempts: quietAttempts{}}, nil, nil, nil, nil, nil,
+		db.Stores{Conversations: conv, MemoryAttempts: quietAttempts{}}, nil, nil, nil, nil, nil, nil,
 	)
 	// Running, as it is on a pod whose brain holds the lease: the doorbell hangs
 	// off the brain's context, so a provisioner nobody started drops every nudge

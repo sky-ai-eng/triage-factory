@@ -158,8 +158,14 @@ func buildSlackManifest(orgName, transport, publicURL, orgID string) slackManife
 			// Connect, which ingest follows by moving the channel's rows. The
 			// scopes these need (the history scopes for the messages, the read
 			// scopes for the id change) are already in slackBotScopes, so
-			// subscribing here rescopes nothing.
-			EventSubscriptions: slackManifestEventSubs{BotEvents: []string{"app_mention", "message.channels", "message.groups", "channel_id_changed"}},
+			// subscribing here rescopes nothing. app_uninstalled and
+			// tokens_revoked say the app's bot token in a workspace is dead,
+			// and ingest removes that workspace's connection; neither needs a
+			// scope.
+			EventSubscriptions: slackManifestEventSubs{BotEvents: []string{
+				"app_mention", "message.channels", "message.groups", "channel_id_changed",
+				"app_uninstalled", "tokens_revoked",
+			}},
 		},
 	}
 	switch transport {

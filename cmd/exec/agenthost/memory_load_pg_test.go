@@ -192,3 +192,105 @@ func TestLocalClient_MemoryLoad_Postgres_Miss(t *testing.T) {
 		t.Errorf("miss recorded %d touch row(s), want 0", n)
 	}
 }
+
+// seedPgTask inserts a task (and the event it needs) on entityID owned by
+// teamID, returning the task id. suffix keeps the task's dedup key distinct.
+func seedPgTask(t *testing.T, h *pgtest.Harness, orgID, teamID, creatorID, entityID, suffix string) string {
+	t.Helper()
+	eventID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:opened', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	taskID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, scoring_status, priority_score, created_at)
+		VALUES ($1, $2, $3, $4, 'team', $5, 'github:pr:opened', $6, $7, 'done', 'pending', 0.5, now())
+	`, taskID, orgID, creatorID, teamID, entityID, suffix, eventID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	return taskID
+}
+
+// seedPgTaskConversation inserts a team-visible person's conversation on
+// taskID owned by teamID, returning its id.
+func seedPgTaskConversation(t *testing.T, h *pgtest.Harness, orgID, teamID, creatorID, taskID string) string {
+	t.Helper()
+	conversationID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, task_id, trigger_type, origin, status)
+		VALUES ($1, $2, $3, $4, 'team', $5, 'manual', 'interactive', 'open')
+	`, conversationID, orgID, teamID, creatorID, taskID); err != nil {
+		t.Fatalf("seed conversation on task: %v", err)
+	}
+	return conversationID
+}
+
+// TestLocalClient_MemoryLoad_Postgres_CarriesTheTaskAcrossTeams pins that
+// MemoryLoad reads as the spawn-time materializer does after a task moves to
+// another team: the new holder's conversation, on the new team, loads the
+// memory the old team's conversation on the same task wrote, and none of the
+// old team's memory on the entity's other tasks. ConversationInfo carries no
+// task, so the load has to find it on the reading conversation's row; a
+// new-team conversation on no task loads none of the old team's memory.
+func TestLocalClient_MemoryLoad_Postgres_CarriesTheTaskAcrossTeams(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, owner, oldTeam := pgtest.SeedOrgWithUser(t, h, "mem-load-carry")
+	newTeam := pgtest.SeedTeam(t, h, orgID, "mem-load-carry-b")
+	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/repo#7", "", "pr", "Shared PR", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	write := func(conversationID, content string) {
+		t.Helper()
+		if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, "", content, domain.MemorySourceAgent); err != nil {
+			t.Fatalf("UpsertAgentMemorySystem: %v", err)
+		}
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRolePrimary); err != nil {
+			t.Fatalf("RecordEntityTouchSystem: %v", err)
+		}
+	}
+
+	// The task now sits with the new team; its earlier conversation stayed
+	// with the old one.
+	reassigned := seedPgTask(t, h, orgID, newTeam, owner, ent.ID, "reassigned")
+	write(seedPgTaskConversation(t, h, orgID, oldTeam, owner, reassigned), "old team's handoff")
+	oldOther := seedPgTask(t, h, orgID, oldTeam, owner, ent.ID, "old-other")
+	write(seedPgTaskConversation(t, h, orgID, oldTeam, owner, oldOther), "old team's other task")
+
+	holder := seedPgTaskConversation(t, h, orgID, newTeam, owner, reassigned)
+	client := NewLocal(stores, ConversationInfo{OrgID: orgID, UserID: owner, TeamID: newTeam, ConversationID: holder})
+	res, err := client.MemoryLoad(ctx, "github", "octo/repo#7", 20)
+	if err != nil {
+		t.Fatalf("MemoryLoad: %v", err)
+	}
+	got := contentsOf(res.Memories)
+	if res.Count != 1 || len(res.Memories) != 1 || !got["old team's handoff"] {
+		t.Errorf("new holder's load = %v (count %d), want just the old team's handoff on the same task", got, res.Count)
+	}
+
+	// A new-team conversation with no task reads as the new team alone.
+	taskless := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
+		VALUES ($1, $2, $3, $4, 'team', 'manual', 'interactive', 'open')
+	`, taskless, orgID, newTeam, owner); err != nil {
+		t.Fatalf("seed taskless conversation: %v", err)
+	}
+	other := NewLocal(stores, ConversationInfo{OrgID: orgID, UserID: owner, TeamID: newTeam, ConversationID: taskless})
+	res2, err := other.MemoryLoad(ctx, "github", "octo/repo#7", 20)
+	if err != nil {
+		t.Fatalf("MemoryLoad taskless: %v", err)
+	}
+	if res2.Count != 0 || len(res2.Memories) != 0 {
+		t.Errorf("taskless new-team load = %v (count %d), want none of the old team's memory", contentsOf(res2.Memories), res2.Count)
+	}
+}

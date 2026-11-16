@@ -499,7 +499,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		fresh := conclude(t, domain.StatusOpen)
 
 		parked := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
-		if ok, err := HolderPark(f.Stores.Conversations, ctx, f.OrgID, parked.ID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := HolderPark(f.Stores.Conversations, ctx, f.OrgID, parked.ID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("HolderPark = (%v, %v)", ok, err)
 		}
 		f.BackdateConclusion(t, parked.ID, 2*grace)
@@ -520,7 +520,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if err != nil || again == nil || again.ID != resumed.ID {
 			t.Fatalf("re-claim of the resumed step = (%+v, %v), want %s", again, err, resumed.ID)
 		}
-		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, resumed.ID, again.ClaimID, string(domain.ConversationFailureUnclassified)); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, resumed.ID, again.ClaimID, string(domain.ConversationFailureUnclassified), ""); err != nil || !ok {
 			t.Fatalf("MarkFailedIfActiveForClaimSystem(resumed) = (%v, %v)", ok, err)
 		}
 
@@ -555,23 +555,23 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
-	// An idle park leaves its run running on purpose: the step waits on a
-	// person, and the grace passing does not make it stranded.
-	t.Run("Stranded_LeavesAnIdleParkAlone", func(t *testing.T) {
+	// A turn_incomplete park leaves its run running on purpose: the step
+	// waits on a person, and the grace passing does not make it stranded.
+	t.Run("Stranded_LeavesATurnIncompleteParkAlone", func(t *testing.T) {
 		f := mk(t)
 		const grace = time.Minute
-		idle := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
-		if ok, err := HolderPark(f.Stores.Conversations, ctx, f.OrgID, idle.ID, db.ParkIdle()); err != nil || !ok {
+		parked := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		if ok, err := HolderPark(f.Stores.Conversations, ctx, f.OrgID, parked.ID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("HolderPark = (%v, %v)", ok, err)
 		}
-		f.BackdateConclusion(t, idle.ID, 2*grace)
+		f.BackdateConclusion(t, parked.ID, 2*grace)
 
 		got, err := f.Stores.ConversationQueue.StrandedBlueprintRunsSystem(ctx, grace, 100)
 		if err != nil {
 			t.Fatalf("StrandedBlueprintRunsSystem: %v", err)
 		}
 		if len(got) != 0 {
-			t.Fatalf("stranded = %+v, want none: an idle park is not a run the reactor owes", got)
+			t.Fatalf("stranded = %+v, want none: a turn_incomplete park is not a run the reactor owes", got)
 		}
 	})
 }

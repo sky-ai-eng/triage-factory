@@ -27,7 +27,7 @@ var callTimeout = 60 * time.Second
 // client-side budget IPCClient.CaptureRunTree gives the whole streamed
 // round trip — the RPC itself, the socket accept, and the capped read all
 // share this one budget. Unlike the other host operations it shells out to
-// git (a bundle of local-only commits plus a full binary diff) against a
+// git (a pack of the checkout's commits plus a full binary diff) against a
 // worktree whose size the run dictates, so it gets a budget sized for a
 // large tree rather than a wedged syscall. A var (like callTimeout above)
 // so tests can shrink it.
@@ -161,9 +161,10 @@ func (s *Server) Serve(l net.Listener) error {
 }
 
 // Shutdown cancels every in-flight dispatch's context (unwinding any
-// ctx-aware privileged op that's still running) and waits up to ctx's
-// deadline for in-flight handlers to finish. Caller closes the listener
-// separately (unblocks Serve's Accept).
+// ctx-aware privileged op that's still running), waits up to ctx's
+// deadline for in-flight handlers to finish, and kills every runtime the
+// server supervises. Caller closes the listener separately (unblocks
+// Serve's Accept).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if s.closed {
@@ -175,6 +176,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.cancelBase()
+	// The cancel reaches each supervised runtime through a goroutine of that
+	// runtime's own, and the broker exits once this returns: one that had not
+	// run by then would leave its runtime behind with nothing to end it. So
+	// every runtime is signalled on the way out, once the handlers that could
+	// still register one have finished or ctx has run out.
+	defer s.killSupervised()
 
 	done := make(chan struct{})
 	go func() {
@@ -186,6 +193,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// killSupervised SIGKILLs every runtime in the run registry. It does not
+// wait for them: each one's supervising goroutine reaps it.
+func (s *Server) killSupervised() {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	for _, entry := range s.runs {
+		_ = entry.rt.Kill()
 	}
 }
 

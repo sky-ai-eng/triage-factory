@@ -2,9 +2,11 @@ package notifytest_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 )
@@ -112,4 +114,35 @@ func TestRecorder_AssertionsReadTheirOwnOrg(t *testing.T) {
 			}
 		})
 	}
+}
+
+// bareTx runs a system transaction's body with no stores, enough for a guard
+// that writes nothing, and fails the transaction when the body does.
+type bareTx struct{ db.TxRunner }
+
+func (bareTx) SystemWithTx(ctx context.Context, _ string, fn func(db.SystemTxStores) error) error {
+	return fn(db.SystemTxStores{})
+}
+
+// A guarded verb is recorded only when its guard reports true and its
+// transaction commits.
+func TestRecorder_RecordsAGuardedVerbOnlyWhenItsGuardPasses(t *testing.T) {
+	rec := notifytest.Record(t)
+	notifytest.GuardsIn(t, bareTx{})
+	ctx := context.Background()
+	const org = "org-guarded"
+	answer := func(ok bool, err error) notify.Guard {
+		return func(context.Context, db.SystemTxStores) (bool, error) { return ok, err }
+	}
+
+	linearKind.SetGuarded(ctx, org, team{ID: "refused"}, true, answer(false, nil))
+	linearKind.SetGuarded(ctx, org, team{ID: "failed"}, true, answer(true, errors.New("write failed")))
+	linearNotice.PostGuarded(ctx, org, team{ID: "refused"}, answer(false, nil))
+	rec.Inactive(t, org, linearKind)
+	rec.Inactive(t, org, linearNotice)
+
+	linearKind.SetGuarded(ctx, org, team{ID: "a"}, true, answer(true, nil))
+	linearNotice.PostGuarded(ctx, org, team{ID: "n"}, answer(true, nil))
+	rec.Active(t, org, linearKind, "a")
+	rec.Active(t, org, linearNotice, "n")
 }

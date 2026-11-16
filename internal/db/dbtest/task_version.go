@@ -35,3 +35,24 @@ func snoozeTask(t testing.TB, s db.TaskStore, orgID, taskID string) {
 		t.Fatalf("snooze task %s: ok=%v err=%v", taskID, ok, err)
 	}
 }
+
+// noClaimTeam is a well-formed team id that names no team.
+const noClaimTeam = "00000000-0000-4000-8000-0000000c1a1f"
+
+// ClaimTeam is the team a claim or a delegate of the task by userID lands on
+// when the caller has only one to choose: the first of
+// TaskStore.ClaimTeamCandidates. A test that is not about the team passes
+// this, so the write meets only the guards the test is about. With no
+// candidate it answers an id that names no team, so the write refuses as it
+// does for a claimant with no team to land the task on.
+func ClaimTeam(t testing.TB, s db.TaskStore, orgID, taskID, userID string) string {
+	t.Helper()
+	candidates, err := s.ClaimTeamCandidates(context.Background(), orgID, taskID, userID)
+	if err != nil {
+		t.Fatalf("read task %s claim team candidates: %v", taskID, err)
+	}
+	if len(candidates) == 0 {
+		return noClaimTeam
+	}
+	return candidates[0]
+}

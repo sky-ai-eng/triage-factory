@@ -563,7 +563,7 @@ func TestSDKTerminalNamesItsRuntime(t *testing.T) {
 	}{
 		{name: "concluded", stopReason: "end_turn", want: "concluded_continue"},
 		{name: "terminal refused by the claim fence", stopReason: "end_turn", fenced: true, want: "fenced"},
-		{name: "idle park refused by the claim fence", stopReason: "refusal", fenced: true, want: "fenced"},
+		{name: "turn_incomplete park refused by the claim fence", stopReason: "refusal", fenced: true, want: "fenced"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

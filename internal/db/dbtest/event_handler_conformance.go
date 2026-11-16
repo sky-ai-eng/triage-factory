@@ -380,6 +380,50 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
+	// 0.3 and 0.7 have no exact single-precision form, so a column narrower
+	// than a float64 reads each back as a different number.
+	t.Run("Trigger_MinAutonomySuitability_ReadsBackAsWritten", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		blueprintID := seedBlueprints(t, "p-threshold-precision")["p-threshold-precision"]
+		breaker := 2
+		minAutonomy := 0.3
+		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID:                     uuid.New().String(),
+			Kind:                   domain.EventHandlerKindTrigger,
+			BlueprintID:            blueprintID,
+			EventType:              domain.EventGitHubPRCICheckFailed,
+			Enabled:                true,
+			BreakerThreshold:       &breaker,
+			MinAutonomySuitability: &minAutonomy,
+		})
+		if err != nil {
+			t.Fatalf("Create trigger: %v", err)
+		}
+		requireThreshold := func(step string, want float64) *domain.EventHandler {
+			t.Helper()
+			got, err := store.Get(ctx, orgID, created.ID)
+			if err != nil || got == nil {
+				t.Fatalf("Get after %s: got=%v err=%v", step, got, err)
+			}
+			if got.MinAutonomySuitability == nil {
+				t.Fatalf("MinAutonomySuitability after %s = nil, want exactly %v", step, want)
+			}
+			if *got.MinAutonomySuitability != want {
+				t.Errorf("MinAutonomySuitability after %s = %v, want exactly %v", step, *got.MinAutonomySuitability, want)
+			}
+			return got
+		}
+		got := requireThreshold("Create", 0.3)
+
+		raised := 0.7
+		got.MinAutonomySuitability = &raised
+		if _, err := store.Update(ctx, orgID, *got); err != nil {
+			t.Fatalf("Update trigger: %v", err)
+		}
+		requireThreshold("Update", 0.7)
+	})
+
 	t.Run("RetargetBlueprint_MovesTriggerPreservingRow", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ctx := context.Background()

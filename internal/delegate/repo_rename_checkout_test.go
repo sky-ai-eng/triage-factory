@@ -44,7 +44,7 @@ func TestSnapshotWorkspace_CarriesACheckoutMadeBeforeARename(t *testing.T) {
 	dirtyCheckout(t, co)
 	f.ledger.renameInLedger(testRepositoryID("acme", "app"), "acme/app-renamed")
 
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
 	if !members[snapCheckoutsPrefix+"acme/app/default/bundle"] {
 		t.Fatalf("the snapshot dropped the checkout made before the rename (members: %v)", members)
@@ -125,7 +125,7 @@ func TestEnsureWorkspace_ColdRehydrate_ReadsThePRUnderTheRenamedName(t *testing.
 	}
 	f.ledger.renameInLedger(row.ID, "acme/app-renamed")
 
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	origin := f.upstream(t, "acme/app")

@@ -22,12 +22,12 @@ vi.mock('../../hooks/useWebSocket', () => ({
 
 const conversation = (over: Partial<Conversation> = {}): Conversation =>
   ({
-    ID: 'r1',
-    TaskID: 't1',
-    Status: 'open',
-    Model: 'claude-opus-5',
-    StartedAt: '2026-10-31T00:00:00Z',
-    ResultSummary: '',
+    id: 'r1',
+    task_id: 't1',
+    status: 'open',
+    model: 'claude-opus-5',
+    started_at: '2026-10-31T00:00:00Z',
+    result_summary: '',
     artifact_count: 0,
     pending_deliverable_ids: [],
     ...over,

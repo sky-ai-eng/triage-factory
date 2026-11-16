@@ -69,6 +69,15 @@ func (f fakeGitHubResolver) TokenFor(_ context.Context, _, _ string) (githubapp.
 	panic("TokenFor is not used by the host-routed gh surface")
 }
 
+// TokenForWithIdentity satisfies ghclient.TokenIdentityResolver, reporting the
+// configured tier the way ClientForRepoWithIdentity does.
+func (f fakeGitHubResolver) TokenForWithIdentity(_ context.Context, _, _ string) (githubapp.Token, ghclient.Identity, error) {
+	if f.errOnRepo != nil {
+		return githubapp.Token{}, ghclient.IdentityUnknown, f.errOnRepo
+	}
+	return githubapp.Token{Value: f.token}, f.identity, nil
+}
+
 func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
 	// Reached wherever the host builds a link on the org's GitHub (an action's
 	// anchor link, an auto-posted review) and by the pre-push hook's capture

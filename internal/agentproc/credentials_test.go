@@ -534,7 +534,7 @@ var providerEnvByCategory = map[string]string{
 	"Anthropic federation":      "ANTHROPIC_WORKSPACE_ID=federation-workspace",
 	"Claude Code credential":    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-operator",
 	"Claude Code fd credential": "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=3",
-	"model pin":                 "ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5-1",
+	"model pin":                 "ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5-2",
 }
 
 // providerEnvPassthrough is env neither job touches: names that only share a

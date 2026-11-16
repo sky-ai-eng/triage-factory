@@ -55,8 +55,8 @@ const (
 	// workspace built from nothing is a real if lossier continuation.
 	resumeSourceMessages
 	// resumeSourceSession — the engine re-invokes a session BY ID, in the tree
-	// it ran in, on the model it started with, so all three have to be stored;
-	// without the tree there is nothing to reconnect to.
+	// it ran in, so both have to be stored; without the tree there is nothing
+	// to reconnect to. The model it runs on is the claim's.
 	resumeSourceSession
 )
 

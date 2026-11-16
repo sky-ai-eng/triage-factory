@@ -58,7 +58,7 @@ func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string
 	return nil, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Context, string, string, string, string) (bool, error) {
+func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Context, string, string, string, string, string) (bool, error) {
 	return false, db.ErrClaimReleased
 }
 
@@ -296,25 +296,21 @@ func (e *executorFencedStore) SetExecutorSystem(context.Context, string, string,
 	return nil, nil
 }
 
-// TestProcessCompletion_IdleParkFenceTripReportsFenced: a turn the model did
+// TestProcessCompletion_TurnIncompleteParkFenceTripReportsFenced: a turn the model did
 // not finish parks the run with a note saying why, and both writes carry the
 // claim. When the note is refused the disposition is fenced — the caller must
 // not advance the blueprint behind a run somebody else is driving, and no park
-// follows — while parked stays true so the workspace the successor may be
-// running in is left alone.
-func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-idle-park")
+// follows.
+func TestProcessCompletion_TurnIncompleteParkFenceTripReportsFenced(t *testing.T) {
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-turn-incomplete-park")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+	fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
 		&agentproc.Result{StopReason: "refusal"}, t.TempDir(), nil, "", "")
 	if !fenced {
 		t.Fatal("a refused park note reported unfenced; the caller would react to a run it no longer owns")
-	}
-	if !parked {
-		t.Error("processCompletion(idle park, fenced) = parked false; the workspace would be torn down under a successor")
 	}
 	if stub.inserts != 1 || stub.cancels != 0 {
 		t.Errorf("fenced park wrote %d notes and attempted %d parks, want the one refused note and no park", stub.inserts, stub.cancels)
@@ -331,22 +327,18 @@ func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
 
 // TestProcessCompletion_FenceTripRecordsNothing: the result of an engagement
 // that lost its claim is not the run's disposition. The terminal is refused,
-// and processCompletion reports both "fenced" (so the caller skips the
-// blueprint reactor) and "parked" (so the workspace the successor may be
-// using is left on disk).
+// and processCompletion reports "fenced", so the caller skips the blueprint
+// reactor.
 func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-complete")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+	fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
 		res("done"), t.TempDir(), nil, "", "")
 	if !fenced {
 		t.Fatal("processCompletion did not report the fence trip; the caller would react to a run it no longer owns")
-	}
-	if !parked {
-		t.Error("processCompletion(fenced) = parked false; the workspace would be torn down under a successor")
 	}
 	if stub.completes != 1 {
 		t.Errorf("fenced terminal attempted %d times, want 1", stub.completes)
@@ -381,14 +373,11 @@ func TestProcessCompletion_SelfFencedLeaseRecordsNothing(t *testing.T) {
 	ctx, fence := context.WithCancelCause(context.Background())
 	fence(errClaimSelfFenced)
 
-	parked, fenced := s.processCompletion(ctx, runmode.LocalDefaultOrgID, conversationID,
+	fenced := s.processCompletion(ctx, runmode.LocalDefaultOrgID, conversationID,
 		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
 		res("done"), t.TempDir(), nil, "", "")
 	if !fenced {
 		t.Fatal("a self-fenced completion reported unfenced; the caller would advance the blueprint off a result nobody owns")
-	}
-	if !parked {
-		t.Error("processCompletion(self-fenced) = parked false; the workspace would be torn down under whoever takes the conversation over")
 	}
 	if stub.completes != 0 {
 		t.Errorf("a self-fenced engagement attempted %d terminal writes, want 0", stub.completes)

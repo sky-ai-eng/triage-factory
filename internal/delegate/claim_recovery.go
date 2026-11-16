@@ -191,16 +191,11 @@ func (s *Spawner) disposeOfLostConversation(ctx context.Context, conv *domain.Co
 		dispatchLog.Warn("fail a conversation whose loss budget is spent failed", "conversation", conv.ID, "error", err)
 		return
 	}
-	ended, err := s.conversations.EndConversationSystem(bgCtx, orgID, conv.ID, domain.EndedFailed)
-	if err != nil {
-		dispatchLog.Warn("stamp the failure boundary on a conversation whose loss budget is spent failed", "conversation", conv.ID, "error", err)
-	} else if ended != nil {
-		s.kickMemoryOwed(orgID, ended.ID)
-	}
+	s.endFailedConversation(bgCtx, orgID, conv.ID, "loss budget spent")
 	s.broadcastConversationUpdate(orgID, conv.ID, "failed")
-	s.noteConversationFailed(orgID, conv.ID, conv.CreatorUserID, conv.TaskID, domain.ConversationFailureExecutorLost, summary)
+	s.kickDelegatorNotice(orgID)
 	if conv.BlueprintRunID != "" {
-		s.terminateBlueprint(orgID, conv.BlueprintRunID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
+		s.terminateBlueprint(orgID, conv.BlueprintRunID, conv.TaskID, time.Now(),
 			runConfig{orgID: orgID, teamID: conv.TeamID},
 			domain.BlueprintRunStatusFailed, string(domain.ConversationFailureExecutorLost), conv.BlueprintStepIndex, false)
 	}

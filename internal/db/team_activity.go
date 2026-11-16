@@ -13,9 +13,10 @@ import (
 // synthetic read behind GET /api/teams/{team_id}/activity.
 //
 // Scoping follows the standing entity-read rule: on Postgres a team's events
-// are the tracked-set semi-join (the factory belt's gate — a github entity in
-// one of the team's tracked repos, a jira entity in one of its attached
-// projects), and its tasks and runs ride the task list's team predicate, so
+// are its tracked set's (a GitHub entity in one of the team's tracked repos,
+// a Jira entity in one of its attached projects, a Linear entity in a Linear
+// team it tracks, a Slack thread in a channel it watches), and its tasks and
+// runs ride the task list's team predicate, so
 // the node's totals reconcile with the counts the task list answers for the
 // same filters. SQLite/local is N=1 and stays unscoped. Read it under the
 // caller's claims (TxStores) — the Postgres predicates lean on tf.user_in_team

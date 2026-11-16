@@ -9,19 +9,49 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// ErrDailyCostCapReached is returned by Delegate when spend for the current UTC
-// calendar day has reached a configured max_daily_cost_usd cap — the org-wide
-// cap (TFAC-477) or a per-team cap (TFAC-482). One sentinel covers both: a
-// blocked spawn is a blocked spawn, so callers test errors.Is and surface it
-// identically (the HTTP delegate handlers return it as a delegate_error in a 200
-// response; the event router logs it and leaves the task queued for a later
-// retry once the UTC day rolls over or the admin raises the cap). The wrapped
-// message names the scope (org / team) and carries the actual today-vs-cap
-// figures for the user-facing error.
+// ErrDailyCostCapReached is what a delegation refused by a daily spend cap
+// satisfies: spend for the current UTC calendar day has reached a configured
+// max_daily_cost_usd cap, the org-wide one or a per-team one. The refusal itself
+// is a *CostCapError, which says which. Callers test errors.Is: the delegate
+// route answers 409 CONFLICT with a message naming the cap and who can raise
+// it. The router drops a trigger's firing the cap refuses rather than holding
+// it until the UTC day rolls over or an admin raises the cap, and tells the
+// trigger's team admins; the task stays on the board, for a person to delegate
+// once the cap allows it.
 var ErrDailyCostCapReached = errors.New("daily spend cap reached")
 
-// checkDailyCostCap is the admission gate at Delegate entry. It returns
-// ErrDailyCostCapReached (wrapped with the figures) when the org's settled LLM
+// CostCapScope is which daily spend cap refused a delegation.
+type CostCapScope string
+
+const (
+	CostCapScopeOrg  CostCapScope = "org"
+	CostCapScopeTeam CostCapScope = "team"
+)
+
+// CostCapError is a delegation refused by a daily spend cap. It carries the
+// figures separately from the scope because they are an org admin's read: a
+// caller that answers a person who may not see spend names the cap and leaves
+// them out.
+type CostCapError struct {
+	Scope CostCapScope
+	// TeamName is the capped team's display name, or its id when the name
+	// can't be read; empty for the org cap.
+	TeamName string
+	SpentUSD float64
+	CapUSD   float64
+}
+
+func (e *CostCapError) Error() string {
+	if e.Scope == CostCapScopeTeam {
+		return fmt.Sprintf("%v: team %q at $%.2f of $%.2f today", ErrDailyCostCapReached, e.TeamName, e.SpentUSD, e.CapUSD)
+	}
+	return fmt.Sprintf("%v: org at $%.2f of $%.2f today", ErrDailyCostCapReached, e.SpentUSD, e.CapUSD)
+}
+
+func (e *CostCapError) Unwrap() error { return ErrDailyCostCapReached }
+
+// checkDailyCostCap is the org's admission gate in PlanDelegation. It returns
+// a *CostCapError of scope CostCapScopeOrg when the org's settled LLM
 // spend for today (UTC calendar day, summed across EVERY category — autonomous
 // + manual + system overhead) is at or above the org's configured
 // cap, and nil otherwise.
@@ -38,7 +68,7 @@ var ErrDailyCostCapReached = errors.New("daily spend cap reached")
 //     read failure must not wedge all delegation. A nil store (test fixtures that
 //     pass a partial bundle) is treated the same as "no cap".
 //   - Spend is read via the admin-pool SpendByCategorySystem, NOT the app-pool
-//     SpendByCategory: Delegate runs under context.Background() with no JWT
+//     SpendByCategory: PlanDelegation runs under context.Background() with no JWT
 //     claims, so in multi-mode an app-pool read has no tf.current_org_id() and
 //     would return nothing — the cap would never trip.
 func (s *Spawner) checkDailyCostCap(ctx context.Context, orgID string) error {
@@ -69,15 +99,15 @@ func (s *Spawner) checkDailyCostCap(ctx context.Context, orgID string) error {
 	}
 
 	if total >= settings.MaxDailyCostUSD {
-		return fmt.Errorf("%w: org at $%.2f of $%.2f today", ErrDailyCostCapReached, total, settings.MaxDailyCostUSD)
+		return &CostCapError{Scope: CostCapScopeOrg, SpentUSD: total, CapUSD: settings.MaxDailyCostUSD}
 	}
 	return nil
 }
 
 // checkTeamDailyCostCap is the per-team admission gate (TFAC-482) — the team-
-// scoped sibling of checkDailyCostCap, run right after it in Delegate with the
-// task's resolved team. It returns ErrDailyCostCapReached (wrapped, naming the
-// team) when the team's settled LLM spend for today is at or above the team's
+// scoped sibling of checkDailyCostCap, run right after it in PlanDelegation
+// with the run's team. It returns a *CostCapError of scope CostCapScopeTeam
+// when the team's settled LLM spend for today is at or above the team's
 // configured cap, and nil otherwise. Both caps apply: a spawn is blocked if the
 // org cap OR the team cap trips.
 //
@@ -128,15 +158,15 @@ func (s *Spawner) checkTeamDailyCostCap(ctx context.Context, orgID, teamID strin
 	}
 
 	if total >= settings.MaxDailyCostUSD {
-		// Resolve the team's display name for the user-facing message (this error
-		// surfaces in the delegate_error payload) — a raw UUID reads as noise. Only
-		// on the cap-tripped path, so the extra read never touches the happy path;
-		// fall back to the teamID if the lookup fails or the name is empty.
+		// Resolve the team's display name for the user-facing message — a raw
+		// UUID reads as noise. Only on the cap-tripped path, so the extra read
+		// never touches the happy path; fall back to the teamID if the lookup
+		// fails or the name is empty.
 		label := teamID
 		if t, lerr := s.teams.GetSystem(ctx, orgID, teamID); lerr == nil && t != nil && t.Name != "" {
 			label = t.Name
 		}
-		return fmt.Errorf("%w: team %q at $%.2f of $%.2f today", ErrDailyCostCapReached, label, total, settings.MaxDailyCostUSD)
+		return &CostCapError{Scope: CostCapScopeTeam, TeamName: label, SpentUSD: total, CapUSD: settings.MaxDailyCostUSD}
 	}
 	return nil
 }

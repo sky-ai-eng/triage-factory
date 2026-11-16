@@ -41,7 +41,7 @@ import (
 func TestEnsureWorkspace_WarmTreeIsReused(t *testing.T) {
 	f := newSnapshotFixture(t, "task-warm")
 	f.addCheckout(t, "acme/app", "default")
-	f.snapshot(t, "", domain.ConversationRuntimeSDK)
+	f.snapshot(t, domain.ConversationRuntimeSDK)
 	marker := filepath.Join(f.root, worktree.ScratchDir, "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
@@ -60,8 +60,8 @@ func TestEnsureWorkspace_WarmTreeIsReused(t *testing.T) {
 
 // TestEnsureWorkspace_ColdRoundTrip is the restore acceptance: a run root with
 // a PR checkout and checkouts of two other repos — each with an unpushed
-// commit, an uncommitted edit and an untracked file — plus scratch and a
-// session transcript, rebuilt after the root is gone. Every checkout comes
+// commit, an uncommitted edit and an untracked file — plus scratch, rebuilt
+// after the root is gone. Every checkout comes
 // back exactly, as a self-contained clone when the run trees are, the PR
 // checkout with its push tracking, and each is recorded as the restoring
 // conversation's. A snapshot of the rebuilt tree carries all three again.
@@ -89,16 +89,11 @@ func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
 			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes", "build.log"), "scratch note")
 			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "entity-memory", "ns", "x.md"), "memory")
 			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, worktree.CILogsDir, "42", "build.log"), "ci log line")
-			const sessionID = "sess-cold"
-			sessPath := writeSession(t, f.root, sessionID, `{"type":"summary","sid":"cold"}`)
 
-			f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+			f.snapshot(t, domain.ConversationRuntimeSDK)
 			f.loseRoot(t)
-			if err := os.Remove(sessPath); err != nil {
-				t.Fatalf("rm session: %v", err)
-			}
 
-			conv := f.conv(sessionID)
+			conv := f.conv("")
 			got, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), nil)
 			if err != nil {
 				t.Fatalf("ensureWorkspace: %v", err)
@@ -137,9 +132,6 @@ func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
 			assertMissing(t, filepath.Join(got, worktree.ScratchDir, "entity-memory", "ns", "x.md"))
 			assertMissing(t, filepath.Join(got, worktree.ScratchDir, worktree.CILogsDir, "42", "build.log"))
 			assertFileContains(t, filepath.Join(got, worktree.ScratchDir, worktree.CILogsDir, ciLogsNoticeFile), "download-logs")
-			if !sessionTranscriptExists(got, sessionID) {
-				t.Error("the session transcript did not come back; a --resume would fail")
-			}
 
 			recorded := map[string]domain.ConversationWorktree{}
 			for _, w := range f.ledger.recordedRows() {
@@ -153,7 +145,7 @@ func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
 				}
 			}
 
-			f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+			f.snapshot(t, domain.ConversationRuntimeSDK)
 			members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
 			for _, rel := range []string{"acme/app/pr-7", "acme/lib/default", "acme/docs/ref-main"} {
 				if !members[snapCheckoutsPrefix+rel+"/bundle"] || !members[snapCheckoutsPrefix+rel+"/patch"] {
@@ -175,7 +167,7 @@ func TestEnsureWorkspace_FailedCheckoutLeavesNothing(t *testing.T) {
 	f := newSnapshotFixture(t, "task-fail")
 	f.addCheckout(t, "acme/lib", "default")
 	f.addCheckout(t, "acme/app", "pr-7")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 	built := f.ledger.rowsOf(fixtureConversation)
 
@@ -214,7 +206,7 @@ func TestEnsureWorkspace_FailedRestoreKeepsTheRowsTheConversationHeld(t *testing
 	f := newSnapshotFixture(t, "task-fail-held")
 	f.addCheckout(t, "acme/lib", "default")
 	f.addCheckout(t, "acme/docs", "ref-main")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	restore := restoreCheckout
@@ -246,7 +238,7 @@ func TestEnsureWorkspace_FailedRestoreAfterATakeoverLeavesTheRows(t *testing.T) 
 	f := newSnapshotFixture(t, "task-fail-takeover")
 	f.addCheckout(t, "acme/lib", "default")
 	f.addCheckout(t, "acme/docs", "ref-main")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	restore := restoreCheckout
@@ -281,7 +273,7 @@ func TestEnsureWorkspace_ColdRehydrate_RecordsEveryCheckoutBeforeItsFetch(t *tes
 	lib := f.addCheckout(t, "acme/lib", "default")
 	docs := f.addCheckout(t, "acme/docs", "ref-main")
 	dirtyCheckout(t, lib)
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 	built := f.ledger.rowsOf(fixtureConversation)
 
@@ -332,7 +324,7 @@ func TestEnsureWorkspace_ColdRehydrate_AFenceRefusalStopsTheRecord(t *testing.T)
 	f.addCheckout(t, "acme/docs", "ref-main")
 	f.addCheckout(t, "acme/lib", "default")
 	f.addCheckout(t, "acme/web", "default")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 	f.ledger.releaseAfter = 1
 
@@ -370,7 +362,7 @@ func TestEnsureWorkspace_UnreadablePRRestoresReadOnly(t *testing.T) {
 	pr := f.addCheckout(t, "acme/app", "pr-7")
 	dirtyCheckout(t, pr)
 	head := strings.TrimSpace(gitOut(t, pr, "rev-parse", "HEAD"))
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	restorer := f.restorer()
@@ -392,27 +384,26 @@ func TestEnsureWorkspace_UnreadablePRRestoresReadOnly(t *testing.T) {
 
 // TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack: a rehydrate that
 // fails after every checkout is rebuilt — here writing the session transcript
-// — removes the root and takes each checkout's push config back out of the
-// shared bare, which removing the root alone does not.
+// an older blob carries — removes the root and takes each checkout's push
+// config back out of the shared bare, which removing the root alone does not.
 func TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack(t *testing.T) {
 	f := newSnapshotFixture(t, "task-late-failure")
 	runmode.SetLocalSandboxForTest(t, false)
 	f.addCheckout(t, "acme/app", "pr-7")
 	const sessionID = "sess-late"
-	sessPath := writeSession(t, f.root, sessionID, `{"type":"summary"}`)
-	f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+	f.snapshotCarryingSession(t, sessionID, `{"type":"summary"}`)
 	f.loseRoot(t)
 	bare, err := worktree.RepoDir(testRepositoryID("acme", "app"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A directory where the transcript goes, so writing it fails.
-	if err := os.Remove(sessPath); err != nil {
+	// The directory the transcript goes in is a file, so writing it fails.
+	sessPath, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(f.root), sessionID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(sessPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Dir(sessPath), "not a directory")
+	t.Cleanup(func() { _ = os.Remove(filepath.Dir(sessPath)) })
 
 	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(sessionID), f.restorer(), nil); err == nil {
 		t.Fatal("ensureWorkspace succeeded with a transcript it could not write")
@@ -501,7 +492,7 @@ func TestSnapshotWorkspace_RowFromAnotherRootStillCarriesTheCheckout(t *testing.
 	f.ledger.rows[0].Path = filepath.Join("/elsewhere", "triagefactory-runs", f.key, "acme", "lib", "default")
 	f.ledger.mu.Unlock()
 
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
 	if !members[snapCheckoutsPrefix+"acme/lib/default/bundle"] {
 		t.Errorf("the snapshot dropped a checkout whose row names another root (members: %v)", members)
@@ -704,7 +695,7 @@ func TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist(t *testing.T) {
 	f := newSnapshotFixture(t, "task-unstattable")
 	co := f.addCheckout(t, "acme/app", "default")
 	dirtyCheckout(t, co)
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 
 	// A symlink loop where the owner directory was. Resolving the checkout's
 	// path fails with ELOOP, which stands in for the permission error a test
@@ -716,7 +707,7 @@ func TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist(t *testing.T) {
 	if err := os.Symlink("acme", owner); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, "", domain.ConversationRuntimeNative); err == nil {
+	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, domain.ConversationRuntimeNative); err == nil {
 		t.Fatal("snapshotWorkspace succeeded with a checkout it could not stat")
 	}
 	if !snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))[snapCheckoutsPrefix+"acme/app/default/bundle"] {
@@ -735,7 +726,7 @@ func TestSnapshotWorkspace_StalledCheckoutReadEndsWithTheBound(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- f.s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, "", domain.ConversationRuntimeNative)
+		done <- f.s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, domain.ConversationRuntimeNative)
 	}()
 	select {
 	case err := <-done:
@@ -795,7 +786,7 @@ func TestSnapshotWorkspace_BlobFormat(t *testing.T) {
 	logs := strings.Repeat("2026-08-20T12:00:00.0000000Z ##[group]Run go test ./...\n", 60_000)
 	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, worktree.CILogsDir, "42", "1_build.txt"), logs)
 	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes", "keep.txt"), "the agent's own intermediate")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 
 	key := snapshotKey(runmode.LocalDefaultOrgID, f.key)
 	rc, err := f.s.Storage().Get(context.Background(), key)
@@ -863,7 +854,7 @@ func TestEnsureWorkspace_NoCILogsNoticeWithoutOmittedLogs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(f.root, worktree.ScratchDir, worktree.CILogsDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f.snapshot(t, "", domain.ConversationRuntimeSDK)
+	f.snapshot(t, domain.ConversationRuntimeSDK)
 	f.loseRoot(t)
 
 	got, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), nil)
@@ -874,29 +865,64 @@ func TestEnsureWorkspace_NoCILogsNoticeWithoutOmittedLogs(t *testing.T) {
 	assertMissing(t, filepath.Join(got, worktree.ScratchDir, worktree.CILogsDir))
 }
 
-// TestEnsureWorkspace_TranscriptGuard: a snapshot that captured the session
-// transcript restores one the resume guard sees; one taken while the
-// transcript was missing rebuilds the tree but leaves the guard to report the
-// run unresumable, rather than hand the SDK a --resume it cannot honor.
-func TestEnsureWorkspace_TranscriptGuard(t *testing.T) {
-	for _, withTranscript := range []bool{true, false} {
-		f := newSnapshotFixture(t, "task-transcript")
-		const sessionID = "sess-guard"
-		writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes.txt"), "scratch survived")
-		if withTranscript {
-			writeSession(t, f.root, sessionID, `{"type":"summary"}`)
-		}
-		f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
-		f.loseRoot(t)
+// TestEnsureWorkspace_RestoresTheSessionAnOlderBlobCarries: a blob written
+// while sessions travelled inside the snapshot puts its session back where
+// --resume reads it, but never over a session file that is there, and not for
+// a conversation whose own session blob was saved since: that copy is newer,
+// and the resume puts it back.
+func TestEnsureWorkspace_RestoresTheSessionAnOlderBlobCarries(t *testing.T) {
+	const sessionID = "sess-carried"
+	for _, tc := range []struct {
+		name       string
+		onDisk     string
+		saved      bool
+		wantOnDisk string
+	}{
+		{name: "nothing else holds it", wantOnDisk: `{"carried":true}`},
+		{name: "a file is there", onDisk: `{"on_disk":true}`, wantOnDisk: `{"on_disk":true}`},
+		{name: "the conversation saved a blob since", saved: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapshotFixture(t, "task-carried")
+			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes.txt"), "scratch survived")
+			f.snapshotCarryingSession(t, sessionID, `{"carried":true}`)
+			f.loseRoot(t)
+			sessPath, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(f.root), sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(sessPath)) })
+			if tc.onDisk != "" {
+				writeFile(t, sessPath, tc.onDisk)
+			}
+			if tc.saved {
+				if err := f.s.Storage().Put(context.Background(), sessionBlobKey(runmode.LocalDefaultOrgID, fixtureConversation), strings.NewReader(`{"saved":true}`)); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-		got, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(sessionID), f.restorer(), nil)
-		if err != nil {
-			t.Fatalf("ensureWorkspace: %v", err)
-		}
-		assertFileContains(t, filepath.Join(got, worktree.ScratchDir, "notes.txt"), "scratch survived")
-		if sessionTranscriptExists(got, sessionID) != withTranscript {
-			t.Errorf("transcript captured = %v, but the guard reads %v", withTranscript, !withTranscript)
-		}
+			got, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(sessionID), f.restorer(), nil)
+			if err != nil {
+				t.Fatalf("ensureWorkspace: %v", err)
+			}
+			assertFileContains(t, filepath.Join(got, worktree.ScratchDir, "notes.txt"), "scratch survived")
+			if tc.wantOnDisk == "" {
+				assertMissing(t, sessPath)
+				return
+			}
+			assertFileContains(t, sessPath, tc.wantOnDisk)
+		})
+	}
+}
+
+// TestSnapshotWorkspace_CarriesNoSession: the session is its own blob's, so a
+// snapshot of a tree whose SDK agent left a session file carries none of it.
+func TestSnapshotWorkspace_CarriesNoSession(t *testing.T) {
+	f := newSnapshotFixture(t, "task-no-session")
+	writeSession(t, f.root, "sess-not-carried", `{"type":"summary"}`)
+	f.snapshot(t, domain.ConversationRuntimeSDK)
+	if members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key)); members[snapSession] {
+		t.Errorf("the snapshot carries a session member (members: %v)", members)
 	}
 }
 
@@ -906,7 +932,7 @@ func TestEnsureWorkspace_TranscriptGuard(t *testing.T) {
 func TestEnsureWorkspace_TruncatedZstdErrors(t *testing.T) {
 	f := newSnapshotFixture(t, "task-corrupt")
 	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "x.log"), "scratch bytes the zstd frame checksum covers")
-	f.snapshot(t, "", domain.ConversationRuntimeSDK)
+	f.snapshot(t, domain.ConversationRuntimeSDK)
 	f.loseRoot(t)
 
 	key := snapshotKey(runmode.LocalDefaultOrgID, f.key)
@@ -1031,9 +1057,7 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 	co := f.addCheckout(t, "acme/app", "default")
 	dirtyCheckout(t, co)
 	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes", "build.log"), strings.Repeat("scratch note\n", 200))
-	const sessionID = "sess-spans"
-	writeSession(t, f.root, sessionID, `{"type":"summary","sid":"spans"}`)
-	f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+	f.snapshot(t, domain.ConversationRuntimeSDK)
 
 	spans := read()
 	roots := spansNamed(spans, "workspace.snapshot")
@@ -1058,7 +1082,7 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 		}
 	}
 	capture := spansNamed(spans, "workspace.snapshot.capture")[0]
-	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes"} {
+	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes"} {
 		if got := spanAttr(t, capture, key).AsInt64(); got <= 0 {
 			t.Errorf("capture %s = %d, want > 0 for a tree carrying that member", key, got)
 		}
@@ -1077,20 +1101,20 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 	}
 }
 
-// TestSnapshotWorkspace_PhaseSpans_NoCheckoutsNoSession: a native conversation
-// with no checkouts has no delta and no transcript, and those sizes report an
-// explicit zero rather than vanishing.
-func TestSnapshotWorkspace_PhaseSpans_NoCheckoutsNoSession(t *testing.T) {
+// TestSnapshotWorkspace_PhaseSpans_NoCheckouts: a native conversation with no
+// checkouts has no delta, and its sizes report an explicit zero rather than
+// vanishing.
+func TestSnapshotWorkspace_PhaseSpans_NoCheckouts(t *testing.T) {
 	read := recordSpans(t)
 	f := newSnapshotFixture(t, "task-spans-native")
 	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes.txt"), "scratch note")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 
 	capture := spansNamed(read(), "workspace.snapshot.capture")
 	if len(capture) != 1 {
 		t.Fatalf("workspace.snapshot.capture spans = %d, want 1", len(capture))
 	}
-	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes", "count"} {
+	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "count"} {
 		if got := spanAttr(t, capture[0], key).AsInt64(); got != 0 {
 			t.Errorf("capture %s = %d, want an explicit 0", key, got)
 		}
@@ -1111,7 +1135,7 @@ func TestEnsureWorkspace_ColdRehydrate_CarriesUnpushedLFSObjects(t *testing.T) {
 	writeFile(t, object, content)
 	commitLFSPointer(t, co, "asset.bin", oid, len(content))
 
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), failingFreshBuilder(t)); err != nil {
 		t.Fatalf("ensureWorkspace: %v", err)
@@ -1130,7 +1154,7 @@ func TestEnsureWorkspace_ColdRehydrate_RebuildsAgainstTheRecordedRepository(t *t
 	app := f.addCheckoutOf(t, worktree.Repo{ID: "row-app", Owner: "acme", Name: "app"}, "default")
 	lib := f.addCheckoutOf(t, worktree.Repo{ID: "row-lib", Owner: "acme", Name: "lib"}, "ref-main")
 	dirtyCheckout(t, app)
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	restorer := f.restorer()
@@ -1383,14 +1407,14 @@ func (f *snapshotFixture) restorer() checkoutRestorer {
 }
 
 // prServer is a GitHub REST stand-in that answers pull request acme/app#7 with
-// the fixture's acme/app origin as both base and head, counting the requests
-// it serves when fetches is non-nil.
-func (f *snapshotFixture) prServer(t *testing.T, fetches *atomic.Int32) *httptest.Server {
+// the fixture's acme/app origin as both base and head, logging the path of
+// each request it serves when requests is non-nil.
+func (f *snapshotFixture) prServer(t *testing.T, requests *requestLog) *httptest.Server {
 	t.Helper()
 	origin := f.upstream(t, "acme/app")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fetches != nil {
-			fetches.Add(1)
+		if requests != nil {
+			requests.add(r.URL.Path)
 		}
 		if r.URL.Path != "/repos/acme/app/pulls/7" {
 			http.NotFound(w, r)
@@ -1404,6 +1428,25 @@ func (f *snapshotFixture) prServer(t *testing.T, fetches *atomic.Int32) *httptes
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// requestLog holds the paths a test server was asked for, in arrival order.
+// A server handles each request on its own goroutine, so the log is locked.
+type requestLog struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (l *requestLog) add(path string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.paths = append(l.paths, path)
+}
+
+func (l *requestLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.paths)
 }
 
 // taskRegistry backs the fixture's spawner with a database holding the task's
@@ -1448,7 +1491,7 @@ func (f *snapshotFixture) writeLegacySnapshot(t *testing.T) {
 		f.ledger.rows[i].RepositoryID = ""
 	}
 	f.ledger.mu.Unlock()
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 
 	rc, err := f.s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
 	if err != nil {
@@ -1478,11 +1521,74 @@ func (f *snapshotFixture) writeLegacySnapshot(t *testing.T) {
 }
 
 // snapshot writes the fixture tree's snapshot under its task key.
-func (f *snapshotFixture) snapshot(t *testing.T, sessionID, runtime string) {
+func (f *snapshotFixture) snapshot(t *testing.T, runtime string) {
 	t.Helper()
-	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, sessionID, runtime); err != nil {
+	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, runtime); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
+}
+
+// snapshotCarryingSession writes the fixture tree's snapshot the way a binary
+// that kept sessions inside the snapshot wrote it: the manifest names
+// sessionID, and the blob carries body as its session member.
+func (f *snapshotFixture) snapshotCarryingSession(t *testing.T, sessionID, body string) {
+	t.Helper()
+	f.snapshot(t, domain.ConversationRuntimeSDK)
+	key := snapshotKey(runmode.LocalDefaultOrgID, f.key)
+	rc, err := f.s.Storage().Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get blob: %v", err)
+	}
+	zr, err := zstd.NewReader(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type member struct {
+		hdr  *tar.Header
+		body []byte
+	}
+	var members []member
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Name == snapManifest {
+			var man snapshotManifest
+			if err := json.Unmarshal(data, &man); err != nil {
+				t.Fatal(err)
+			}
+			man.SessionID = sessionID
+			if data, err = json.Marshal(man); err != nil {
+				t.Fatal(err)
+			}
+			hdr.Size = int64(len(data))
+		}
+		members = append(members, member{hdr, data})
+	}
+	zr.Close()
+	_ = rc.Close()
+	putTarBlob(t, f, true, func(tw *tar.Writer) {
+		for _, m := range members {
+			if err := tw.WriteHeader(m.hdr); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tw.Write(m.body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writeTarBytes(tw, snapSession, []byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 // loseRoot removes the run root, as a host loss or a /tmp wipe does. The bares

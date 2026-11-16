@@ -32,22 +32,22 @@ func TestSettingsStores_Postgres(t *testing.T) {
 		pgtest.ClearOrgGitHubURL(t, h, orgID)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SettingsStores{
-				MultiMode:        true,
-				Orgs:             stores.Orgs,
-				Teams:            stores.Teams,
-				Users:            stores.Users,
-				JiraStatusRules:  stores.JiraStatusRules,
-				JiraProjects:     stores.JiraProjects,
-				TeamGitHubGroups: stores.TeamGitHubGroups,
-				TeamGitHubRepos:  stores.TeamGitHubRepos,
-				Repos:            stores.Repos,
-				OrgEventSources:  stores.OrgEventSources,
-				SeedTeam:         func(t *testing.T, slug string) string { return pgtest.SeedTeam(t, h, orgID, slug) },
-			}, dbtest.SettingsIDs{
-				OrgID:  orgID,
-				TeamID: teamID,
-				UserID: userID,
-			}
+			MultiMode:        true,
+			Orgs:             stores.Orgs,
+			Teams:            stores.Teams,
+			Users:            stores.Users,
+			JiraStatusRules:  stores.JiraStatusRules,
+			JiraProjects:     stores.JiraProjects,
+			TeamGitHubGroups: stores.TeamGitHubGroups,
+			TeamGitHubRepos:  stores.TeamGitHubRepos,
+			Repos:            stores.Repos,
+			OrgEventSources:  stores.OrgEventSources,
+			SeedTeam:         func(t *testing.T, slug string) string { return pgtest.SeedTeam(t, h, orgID, slug) },
+		}, dbtest.SettingsIDs{
+			OrgID:  orgID,
+			TeamID: teamID,
+			UserID: userID,
+		}
 	})
 }
 

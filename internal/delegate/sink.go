@@ -51,6 +51,10 @@ type conversationSink struct {
 	// Because each agentproc.Run call gets a fresh sink, this does
 	// not deduplicate across separate resume invocations.
 	sessionDelivered bool
+
+	// sessionID is the session OnSession handled, which OnSessionCost records
+	// the SDK's running total against. Empty until the stream's init.
+	sessionID string
 }
 
 func newConversationSink(s *Spawner, orgID, conversationID, claimID, triggerType, creatorUserID string) *conversationSink {
@@ -83,6 +87,7 @@ func (k *conversationSink) OnSession(sessionID string) error {
 		return nil
 	}
 	k.sessionDelivered = true
+	k.sessionID = sessionID
 	bgCtx := context.Background()
 	// broadcastStatus prefers the just-written row's derived display status
 	// over a hardcoded "running" guess — SetSession only touches
@@ -124,6 +129,33 @@ func (k *conversationSink) OnSession(sessionID string) error {
 	return nil
 }
 
+// OnSessionCost stores the SDK's running total for this process's session as
+// the conversation's sdk_session_cost_usd, the total the session's next resume
+// measures its own spend from.
+//
+// One door for every engagement, fenced or not: the write is keyed on the
+// session and only ever raises the stored total (RecordSessionCostSystem), so
+// a process that lost its claim still records what its session cost and
+// cannot lower a total a newer process wrote. Where the fence kept this
+// process's session id off the row, the row names another session and the
+// write changes nothing; a process that resumed the session the row already
+// names raises that session's total like any other.
+//
+// The reader goroutine has no caller context, so the write gets its own bound,
+// and a failure is logged rather than returned: losing the total costs the
+// next resume an over-count, while failing the turn would lose the turn.
+func (k *conversationSink) OnSessionCost(totalUSD float64) {
+	if k.sessionID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+	defer cancel()
+	if err := k.spawner.conversations.RecordSessionCostSystem(ctx, k.orgID, k.conversationID, k.sessionID, totalUSD); err != nil {
+		delegateLog.Warn("record session cost failed",
+			"conversation", k.conversationID, "session", k.sessionID, "total_cost_usd", totalUSD, "error", err)
+	}
+}
+
 // OnMessage inserts the parsed assistant/tool message into
 // messages and pushes it onto the websocket. Per-row failures
 // are returned to agentproc, which logs and continues — losing one
@@ -137,9 +169,17 @@ func (k *conversationSink) OnSession(sessionID string) error {
 // its own bound: a statement that blocks would otherwise hold the stream, and
 // a stall stop could not cancel it. A write that runs out of time is one more
 // per-row failure, not a fence trip.
+//
+// A row the stream hands over unattributed (the model's turns and its tool
+// results) is the person's the engagement acts for, since a turn belongs to
+// whoever asked for it (domain.Message.UserID). An event-triggered run acts
+// for nobody, and its rows stay unattributed.
 func (k *conversationSink) OnMessage(msg *domain.Message) error {
 	bgCtx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
 	defer cancel()
+	if msg.UserID == "" {
+		msg.UserID = k.creatorUserID
+	}
 	var id int64
 	switch {
 	case k.claimID != "":

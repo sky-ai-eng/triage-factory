@@ -9,6 +9,7 @@ import (
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -305,6 +306,13 @@ func (r *Router) processReDerive(ctx context.Context, item dbpkg.ClaimedReDerive
 				if c := plan.Conflict; c != nil {
 					r.postAutomationConflict(termCtx, orgID, plan.Task, c.Winner, c.Losers)
 				}
+			}
+			// Posted after the commit too, so a completion that rolls back
+			// tells nobody and its successor decides again. A refusal
+			// admitted nothing, so there is nothing for it to wait on beyond
+			// the commit.
+			for _, refusal := range plan.Refusals {
+				kinds.TriggerRefused.Post(termCtx, orgID, refusal)
 			}
 			span.SetAttributes(telemetry.Outcome("completed"))
 		case errors.Is(err, dbpkg.ErrScoreMoved):

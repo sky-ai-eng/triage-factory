@@ -25,7 +25,9 @@ Everything is under `~/.triagefactory/` (on Windows,
 
 GitHub, Jira, and Linear credentials are entered in the app and stored in the OS
 keychain or the encrypted file. Local mode never reads them from environment
-variables.
+variables. `GITHUB_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, and every `GH_` variable
+in Triage Factory's environment are removed before a delegated agent starts.
+Every other variable is passed through, including tokens under other names.
 
 The exception is Claude Code. Delegated agents can use your own Claude login,
 making use of your existing subscription. Choose under **Claude credentials**:

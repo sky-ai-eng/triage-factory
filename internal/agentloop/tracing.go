@@ -168,6 +168,8 @@ func resultOutcome(kind ResultKind) string {
 		return outcomeUpstreamUnavailable
 	case ResultToolHostLost:
 		return "tool_host_lost"
+	case ResultProviderSwitch:
+		return "provider_switch"
 	}
 	return "unknown"
 }

@@ -2515,7 +2515,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   const lastFiredHash = new Map<string, string>()
   const hashStationData = (data: ClickedStationInfo): string => {
     const queuedIds = data.queued.map((e) => e.id).join(',')
-    const conversationIds = data.runs.map((r) => `${r.run.ID}:${r.run.Status}`).join(',')
+    const conversationIds = data.runs.map((r) => `${r.run.id}:${r.run.status}`).join(',')
     return `${data.queuedCount}|${data.conversationCount}|${queuedIds}|${conversationIds}`
   }
 
@@ -2916,26 +2916,14 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
 }
 
 // Compute chip decoration (hue + short label) from a snapshot entity.
-// The hue comes from the registry row the entity belongs to — its
-// repository, Jira project or Linear team id — so every chip of one
-// repository/project/team shares a hue without any user config, and a
-// rename does not recolor them. The label is display text: the PR number
-// for GitHub, the issue key for Jira and Linear.
+// The hue comes from the pull request's repository registry row, so every
+// chip of one repository shares a hue without any user config, and a
+// rename does not recolor them. The label is the PR number.
 function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
-  if (entity.source === 'github') {
-    return {
-      hue: entity.repository_id ? hashHue(entity.repository_id) : undefined,
-      label: entity.number != null ? `#${entity.number}` : undefined,
-    }
+  return {
+    hue: entity.repository_id ? hashHue(entity.repository_id) : undefined,
+    label: entity.number != null ? `#${entity.number}` : undefined,
   }
-  if (entity.source === 'jira' || entity.source === 'linear') {
-    const group = entity.source === 'jira' ? entity.jira_project_id : entity.linear_team_id
-    return {
-      hue: group ? hashHue(group) : undefined,
-      label: entity.source_id || undefined,
-    }
-  }
-  return {}
 }
 
 // hashHue is re-exported from iso-items so callers (the React-layer

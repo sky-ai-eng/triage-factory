@@ -44,9 +44,8 @@ type socketEnvelope struct {
 // Disposable, never repaired — run's loop tears the whole connection down on
 // any error and dials fresh; there is no in-place recovery.
 type appConnection struct {
-	appID       string
-	orgID       string // the app's org (app->one-org, TFAC-533) — captured once at start
-	appTokenRef string // org_secrets key for the app-level (xapp-) token
+	appID string
+	orgID string // the app's org (app->one-org, TFAC-533) — captured once at start
 
 	cancel context.CancelFunc // stops just this connection, independent of its siblings
 	done   chan struct{}      // closed when run returns
@@ -59,6 +58,22 @@ type appConnection struct {
 	mu        sync.Mutex
 	status    connStatus
 	sightings map[string]*sightingView // keyed by team_id
+	// appTokenRef is the org_secrets key each dial reads the app-level
+	// (xapp-) token from. The reconciler moves it to another of the app's
+	// rows when the row it names is gone.
+	appTokenRef string
+}
+
+func (c *appConnection) tokenRef() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.appTokenRef
+}
+
+func (c *appConnection) setTokenRef(ref string) {
+	c.mu.Lock()
+	c.appTokenRef = ref
+	c.mu.Unlock()
 }
 
 // snapshot returns a value copy of the connection's current status,
@@ -196,7 +211,7 @@ func (c *appConnection) run(ctx context.Context, stores db.Stores, pipeline *ing
 // returns a non-nil err (ctx cancellation errors are discarded by the caller,
 // which checks ctx.Err() itself).
 func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipeline *ingestPipeline, client *http.Client) (connectedAt time.Time, err error) {
-	appToken, err := stores.Secrets.GetSystem(ctx, c.orgID, c.appTokenRef)
+	appToken, err := stores.Secrets.GetSystem(ctx, c.orgID, c.tokenRef())
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read app token: %w", err)
 	}
@@ -365,7 +380,8 @@ func ackEnvelope(ctx context.Context, conn *slackws.Conn, envelopeID string) err
 
 // processEventsAPIEnvelope is the boundary both transports share, mirroring
 // webhook.go's handleWebhook/handleEventCallback step for step: resolve the
-// (team_id, api_app_id) row, gate on entitlement, run the shared pipeline.
+// (team_id, api_app_id) row, gate on entitlement (an app removal passes),
+// run the shared pipeline.
 // Returns whether the caller should ack — true for every "nothing more to
 // do here" case (malformed/mismatched envelope, unconnected workspace,
 // cross-org anomaly, lapsed entitlement) exactly like the webhook's
@@ -399,6 +415,11 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 		// never carries them.
 		return true
 	}
+	var inner slackInnerEvent
+	if err := json.Unmarshal(payload.Event, &inner); err != nil {
+		slackLog.Error("slack socket mode: malformed inner event", "app", c.appID, "error", err)
+		return true
+	}
 
 	bundle := slackstore.FromStores(stores)
 	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, payload.TeamID, payload.APIAppID)
@@ -407,6 +428,13 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 		return false // transient — worth a redelivery retry
 	}
 	if ws == nil {
+		if removesConnection(inner.Type) {
+			// A removal TF already applied, or one from a workspace it never
+			// connected: either way the app is no longer installed there,
+			// which is no sighting.
+			slackLog.Debug("slack socket mode: app removal for an unconnected workspace", "app", c.appID, "team", payload.TeamID, "type", inner.Type)
+			return true
+		}
 		// The Grid unconnected-workspace case: this app is installed
 		// somewhere TF has no row for. Never respond from ingest (TFAC-511
 		// owns any write-back); just record the hint.
@@ -421,33 +449,15 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 			"app", c.appID, "workspace_org", ws.OrgID, "connection_org", c.orgID)
 		return true
 	}
-	if !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
+	if !removesConnection(inner.Type) && !entitlements.For(ws.OrgID).Has(entitlements.FeatureSlack) {
 		// Dormancy: an entitlement lapse mid-connection race. The reconciler
 		// takes the whole connection down within a tick; until then, drop
-		// silently — same as the webhook's ackEmpty for a lapsed org.
+		// silently — same as the webhook's ackEmpty for a lapsed org. An
+		// app removal passes (removesConnection).
 		return true
 	}
 
-	var inner slackInnerEvent
-	if err := json.Unmarshal(payload.Event, &inner); err != nil {
-		slackLog.Error("slack socket mode: malformed inner event", "app", c.appID, "error", err)
-		return true
-	}
-	ev := inboundMention{
-		Type:     inner.Type,
-		Subtype:  inner.Subtype,
-		EventID:  payload.EventID,
-		Channel:  inner.Channel,
-		User:     inner.User,
-		BotID:    inner.BotID,
-		Text:     inner.Text,
-		TS:       inner.TS,
-		ThreadTS: inner.ThreadTS,
-
-		OldChannelID: inner.OldChannelID,
-		NewChannelID: inner.NewChannelID,
-	}
-	if err := pipeline.handleEventCallback(ctx, *ws, ev); err != nil {
+	if err := pipeline.handleEventCallback(ctx, *ws, newInboundMention(payload, inner)); err != nil {
 		slackLog.Error("slack socket mode: pipeline error", "app", c.appID, "error", err)
 		return false
 	}

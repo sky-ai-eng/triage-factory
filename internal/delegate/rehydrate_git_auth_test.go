@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -160,7 +161,7 @@ func TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential(t *testing.T) {
 func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) {
 	f := newSnapshotFixture(t, "task-proxy-auth")
 	f.addCheckout(t, "acme/widgets", "default")
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 	f.loseRoot(t)
 
 	const cloneURL = "https://github.com/acme/widgets.git"
@@ -191,6 +192,52 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 		wantProxyEntries("http://10.42.0.3:4100", "https://github.com", "run-placeholder"))
 }
 
+// TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest: a PR checkout's
+// push tracking is rebuilt from the pull request's refs and head repository,
+// which the pull request object carries, so the rebuild asks GitHub for that
+// object alone. Each further read, of its reviews or its comments, is one
+// more serial request through the sidecar before the agent can start.
+func TestEnsureWorkspace_ColdRehydrate_ReadsOnlyThePullRequest(t *testing.T) {
+	f := newSnapshotFixture(t, "task-pr-read")
+	f.addCheckout(t, "acme/app", "pr-7")
+	f.snapshot(t, domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	// An HTTPS origin, so push tracking takes the pull request's clone_url.
+	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "app", CloneURL: "https://github.com/acme/app.git"}}
+	var requests requestLog
+	srv := f.prServer(t, &requests)
+
+	// Recorded, not run: the git proxy address routes nowhere in a test, and
+	// the pull request's fields reaching the restore are what is checked.
+	var got []worktree.CheckoutRestore
+	restore := restoreCheckout
+	restoreCheckout = func(_ context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		got = append(got, r)
+		return worktree.RestoredCheckout{Owner: r.Owner, Repo: r.Repo, Path: filepath.Join(r.Root, r.Owner, r.Repo, r.Slug)}, nil
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	sidecar := &runSidecar{res: &sidecarproto.StartProxiesResult{
+		GitProxyURL: "http://10.42.0.3:4100", GitProxyToken: "run-placeholder",
+		GitHubAPIURL: srv.URL, GitHubAPIToken: "api-placeholder",
+	}}
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, "entity-unread", sidecar, nil)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("cold rehydrate rebuilt %d checkouts, want 1", len(got))
+	}
+	want := worktree.PRCheckout{HeadRef: "feature", HeadCloneURL: f.upstream(t, "acme/app"), BaseRef: "main"}
+	if got[0].PR == nil || *got[0].PR != want {
+		t.Errorf("restore push tracking = %+v, want %+v from the pull request", got[0].PR, want)
+	}
+	if paths, wantPaths := requests.all(), []string{"/repos/acme/app/pulls/7"}; !slices.Equal(paths, wantPaths) {
+		t.Errorf("GitHub requests = %v, want only %v", paths, wantPaths)
+	}
+}
+
 // TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare: an executor that never
 // ran this repo has no bare at all. With the clone URL threaded through from the
 // repository row, the rebuild seeds one and completes.
@@ -198,7 +245,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	f := newSnapshotFixture(t, "task-seed-bare")
 	co := f.addCheckout(t, "acme/widgets", "default")
 	dirtyCheckout(t, co)
-	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.snapshot(t, domain.ConversationRuntimeNative)
 
 	// Fresh executor: no run root, and no bare either.
 	f.loseRoot(t)
@@ -217,6 +264,69 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 		t.Fatalf("ensureWorkspace with no bare on this host: %v", err)
 	}
 	assertFileContains(t, filepath.Join(co, "committed.txt"), "unpushed commit")
+}
+
+// TestEnsureWorkspace_ColdRehydrate_MovesThePhaseToCloning: a rebuild from the
+// store is the setup step under way, so the claim names it until the agent
+// starts.
+func TestEnsureWorkspace_ColdRehydrate_MovesThePhaseToCloning(t *testing.T) {
+	f := newSnapshotFixture(t, "task-cloning-phase")
+	f.addCheckout(t, "acme/widgets", "default")
+	f.snapshot(t, domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+	phases := &claimPhaseLog{}
+	f.s.conversations = phases
+
+	conv := f.conv("")
+	_, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), nil)
+	if err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceRehydrated {
+		t.Fatalf("provenance = %q, want %q", prov, domain.WorkspaceProvenanceRehydrated)
+	}
+	if got := phases.byClaim[conv.ClaimID]; got != domain.ClaimPhaseCloning {
+		t.Errorf("claim phase after a cold rehydrate = %q, want %q", got, domain.ClaimPhaseCloning)
+	}
+}
+
+// TestEnsureWorkspace_NoSnapshot_LeavesThePhaseToTheFreshBuilder: with nothing
+// to restore, no cloning is under way, so the rebuild writes no phase and the
+// fresh builder's source setup names its own steps.
+func TestEnsureWorkspace_NoSnapshot_LeavesThePhaseToTheFreshBuilder(t *testing.T) {
+	f := newSnapshotFixture(t, "task-no-snapshot-phase")
+	f.loseRoot(t)
+	phases := &claimPhaseLog{}
+	f.s.conversations = phases
+
+	conv := f.conv("")
+	conv.Runtime = domain.ConversationRuntimeNative
+	fresh := func(context.Context) (string, error) { return worktree.MakeRunRoot(f.key) }
+	_, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), fresh)
+	if err != nil {
+		t.Fatalf("ensureWorkspace (no snapshot): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceFresh {
+		t.Fatalf("provenance = %q, want %q", prov, domain.WorkspaceProvenanceFresh)
+	}
+	if got, ok := phases.byClaim[conv.ClaimID]; ok {
+		t.Errorf("a rebuild with no snapshot wrote phase %q; the fresh builder names its own steps", got)
+	}
+}
+
+// claimPhaseLog holds the last phase written for each claim, through the
+// claim-fenced door, and answers no other conversation write.
+type claimPhaseLog struct {
+	db.ConversationStore
+	byClaim map[string]string
+}
+
+func (l *claimPhaseLog) SetClaimPhaseSystem(_ context.Context, _, _, claimID, phase string) (*domain.ExecutorClaim, error) {
+	if l.byClaim == nil {
+		l.byClaim = map[string]string{}
+	}
+	l.byClaim[claimID] = phase
+	return &domain.ExecutorClaim{}, nil
 }
 
 // gitOriginURL reads a bare's origin remote — the upstream a fresh executor

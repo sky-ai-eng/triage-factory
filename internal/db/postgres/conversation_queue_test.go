@@ -682,8 +682,8 @@ func seedPgChildlessRun(t *testing.T, h *pgtest.Harness, orgID, userID, bpID, ta
 	t.Helper()
 	brID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now(), '[]')
+		INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', 'running', $6, now(), '[]')
 	`, brID, orgID, userID, bpID, taskID, "/tmp/wt-"+brID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
@@ -1177,6 +1177,13 @@ func TestClaimLease_Postgres(t *testing.T) {
 func TestStopIntent_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	dbtest.RunStopIntentConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
+
+// TestStopWake_Postgres runs the shared wake-position conformance on the same
+// fixture the claim-lease suite uses.
+func TestStopWake_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunStopWakeConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
 }
 
 // TestHandBack_Postgres runs the shared hand-back conformance — the fenced
@@ -1676,7 +1683,7 @@ func TestHandBack_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
 
 // TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal pins the
 // lock order the settlement shares with a run's terminal write. The terminal
-// (markBlueprintRunStatus) locks the run and then parks its children; a
+// (MarkRunStatusSystem) locks the run and then parks its children; a
 // settlement that locked a stop-pending child first and then wrote its
 // cancel-requested run would wait on the terminal while the terminal waited on
 // the child, and Postgres would kill one of them with 40P01. Both now take the

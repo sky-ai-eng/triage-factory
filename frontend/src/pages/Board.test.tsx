@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import Board from './Board'
-import type { Conversation, Task, TeamMember } from '../types'
+import type { Conversation, Task, TeamBot, TeamMember } from '../types'
 
 // The board's lanes, checked against what it actually reads; the two gestures
 // that move a card into In Progress; and its one confirmation, checked against
@@ -47,8 +47,12 @@ vi.mock('@dnd-kit/core', async (importOriginal) => {
   }
 })
 
+/** The board's socket handler, so a test can deliver a push. */
+const ws = vi.hoisted(() => ({ handler: null as null | ((event: unknown) => void) }))
 vi.mock('../hooks/useWebSocket', () => ({
-  useWebSocket: () => {},
+  useWebSocket: (handler: (event: unknown) => void) => {
+    ws.handler = handler
+  },
   setPresenceView: () => {},
 }))
 const QUEUES = {
@@ -59,11 +63,39 @@ const QUEUES = {
   resolve: vi.fn(async () => {}),
 }
 vi.mock('../hooks/usePermissionQueues', () => ({ usePermissionQueues: () => QUEUES }))
-const TEAMS = { teams: [{ id: 't1', name: 'platform' }], loaded: true }
+/** The viewer's teams. One team by default, which is also local mode. */
+const ONE_TEAM = {
+  teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
+  lastActingTeamId: '',
+  multi: false,
+  loaded: true,
+}
+const teamsStore = vi.hoisted(() => ({ current: null as unknown }))
 const TEAM_FILTER: [string[], () => void] = [[], () => {}]
-vi.mock('../hooks/useTeams', () => ({
-  useTeams: () => TEAMS,
-  useTeamFilter: () => TEAM_FILTER,
+vi.mock('../hooks/useTeams', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hooks/useTeams')>()
+  return {
+    useTeams: () => teamsStore.current,
+    useTeamFilter: () => TEAM_FILTER,
+    pickerDefault: actual.pickerDefault,
+  }
+})
+/** The blueprint picker, reduced to what the board hands it and one row to
+ *  press: what it lists is its own test's subject. */
+const promptPicker = vi.hoisted(() => ({
+  props: null as null | { teamValue?: string; teamOptions?: string[] },
+}))
+vi.mock('../components/PromptPicker', () => ({
+  default: (props: {
+    open: boolean
+    teamValue?: string
+    teamOptions?: string[]
+    onSelect: (id: string) => void
+  }) => {
+    if (!props.open) return null
+    promptPicker.props = { teamValue: props.teamValue, teamOptions: props.teamOptions }
+    return <button onClick={() => props.onSelect('bp-1')}>Run the blueprint</button>
+  },
 }))
 vi.mock('../hooks/useDeploymentConfig', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useDeploymentConfig')>()
@@ -78,7 +110,10 @@ const ME = {
   role: 'member',
   is_current_user: true,
 } as TeamMember
-const ROSTER = { members: [ME], bot: null }
+const ROSTER: { members: TeamMember[]; bot: TeamBot | null } = {
+  members: [ME],
+  bot: null,
+}
 vi.mock('../hooks/useOrgRole', () => ({ useOrgRole: () => ({ isAdmin: false }) }))
 
 /** The task the board paints into In Progress, held by the viewer. */
@@ -122,12 +157,12 @@ const DISMISSED: Task = {
 /** Its conversation, in whichever state a test puts it. */
 function conversation(status: string): Conversation {
   return {
-    ID: 'c1',
-    TaskID: HELD.id,
-    Status: status,
-    Model: 'claude-opus-5',
-    StartedAt: '2026-09-01T12:00:00Z',
-    ResultSummary: status === 'completed' ? 'opened a pull request' : '',
+    id: 'c1',
+    task_id: HELD.id,
+    status,
+    model: 'claude-opus-5',
+    started_at: '2026-09-01T12:00:00Z',
+    result_summary: status === 'completed' ? 'opened a pull request' : '',
   } as Conversation
 }
 
@@ -142,6 +177,8 @@ let closed: Task[]
 let closedRuns: Record<string, Conversation[]>
 /** The can_write every listed task carries; undefined leaves the key off. */
 let taskCanWrite: boolean | undefined
+/** The teams a task's detail read lists for a claim or a delegate. */
+let claimTeams: string[]
 
 beforeEach(() => {
   listBodies = []
@@ -151,6 +188,10 @@ beforeEach(() => {
   closed = []
   closedRuns = {}
   taskCanWrite = undefined
+  claimTeams = ['t1']
+  teamsStore.current = ONE_TEAM
+  ROSTER.bot = null
+  promptPicker.props = null
   QUEUES.resolve.mockClear()
   api.apiList.mockReset()
   api.apiJSON.mockReset()
@@ -170,24 +211,28 @@ beforeEach(() => {
     )
     return { items, next_page_token: '', total_count: items.length }
   })
-  api.apiJSON.mockImplementation(async (path: string, init?: { body?: string }) => {
-    if (path === '/api/me') return { id: 'u1' }
-    if (path === '/api/tasks/facets') {
-      facetBodies.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>)
-      return { event_types: [{ value: 'github:pr:opened', count: 2 }] }
-    }
-    if (path === '/api/agent/conversations/list') {
-      return { runs: { [HELD.id]: [held], ...closedRuns }, messages: {} }
-    }
-    // A task write answers the task with the version it left, one past the
-    // version the board read, whatever the write named.
-    const task = [HELD, FREE].find((t) => path.startsWith(`/api/tasks/${t.id}`))
-    if (task) {
-      writes.push({ path, body: JSON.parse(init?.body ?? '{}') as Record<string, unknown> })
-      return { ...task, version: task.version + 1 }
-    }
-    throw new Error('unexpected apiJSON ' + path)
-  })
+  api.apiJSON.mockImplementation(
+    async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') {
+        facetBodies.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>)
+        return { event_types: [{ value: 'github:pr:opened', count: 2 }] }
+      }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [held], ...closedRuns }, messages: {} }
+      }
+      // A task write answers the task with the version it left, one past the
+      // version the board read, whatever the write named.
+      const task = [HELD, FREE].find((t) => path.startsWith(`/api/tasks/${t.id}`))
+      // The detail read a claim or a delegate makes first, for its teams.
+      if (task && !init?.method) return { ...task, claim_team_ids: claimTeams }
+      if (task) {
+        writes.push({ path, body: JSON.parse(init?.body ?? '{}') as Record<string, unknown> })
+        return { ...task, version: task.version + 1 }
+      }
+      throw new Error('unexpected apiJSON ' + path)
+    },
+  )
   api.apiFetch.mockResolvedValue(undefined)
   dnd.drop = null
 })
@@ -371,8 +416,8 @@ describe('the conversation a card shows', () => {
     // than the run it took the task from.
     const claimed = {
       ...conversation('open'),
-      ID: 'c-claim',
-      StartedAt: '2026-09-01T13:00:00Z',
+      id: 'c-claim',
+      started_at: '2026-09-01T13:00:00Z',
       type: 'interactive',
       has_run: false,
     } as Conversation
@@ -387,14 +432,14 @@ describe('the conversation a card shows', () => {
     renderBoard()
     await screen.findByText(HELD.title)
 
-    expect(runLinks()).toEqual([held.ID])
+    expect(runLinks()).toEqual([held.id])
   })
 
   it("shows a claim's conversation once it has run", async () => {
     const claimed = {
       ...conversation('open'),
-      ID: 'c-claim',
-      StartedAt: '2026-09-01T13:00:00Z',
+      id: 'c-claim',
+      started_at: '2026-09-01T13:00:00Z',
       type: 'interactive',
       has_run: true,
     } as Conversation
@@ -410,6 +455,96 @@ describe('the conversation a card shows', () => {
     await screen.findByText(HELD.title)
 
     expect(runLinks()).toEqual(['c-claim'])
+  })
+
+  it('offers "Start chat" only to the holder, and only while their conversation has not run', async () => {
+    // The holder took the task over: the card keeps the agent's run, and the
+    // row leads to the conversation the claim opened.
+    async function startChatHref(holder: string, hasRun: boolean): Promise<string | null> {
+      const task = { ...HELD, claimed_by_user_id: holder, conversation_id: 'c-claim' }
+      const claimed = {
+        ...conversation('open'),
+        id: 'c-claim',
+        started_at: '2026-09-01T13:00:00Z',
+        type: 'interactive',
+        has_run: hasRun,
+      } as Conversation
+      api.apiList.mockImplementation(async (_path: string, body: Record<string, unknown>) => {
+        const statuses = (body.statuses as string[] | undefined) ?? []
+        const items = statuses.includes('in_progress') ? [task] : []
+        return { items, next_page_token: '', total_count: items.length }
+      })
+      api.apiJSON.mockImplementation(async (path: string) => {
+        if (path === '/api/me') return { id: 'u1' }
+        if (path === '/api/tasks/facets') return { event_types: [] }
+        if (path === '/api/agent/conversations/list') {
+          return { runs: { [HELD.id]: [claimed, held] }, messages: {} }
+        }
+        throw new Error('unexpected apiJSON ' + path)
+      })
+      const view = renderBoard()
+      await screen.findByText(HELD.title)
+      // The viewer's identity lands after the first paint.
+      await waitFor(() => expect(api.apiJSON).toHaveBeenCalledWith('/api/me'))
+      await act(async () => {})
+      const href = screen.queryByRole('link', { name: 'Start chat' })?.getAttribute('href') ?? null
+      view.unmount()
+      return href
+    }
+
+    expect(await startChatHref('u1', false)).toMatch(/\/runs\/c-claim$/)
+    expect(await startChatHref('u2', false)).toBeNull()
+    expect(await startChatHref('u1', true)).toBeNull()
+  })
+
+  it('keeps "Start chat" on the live chat when an ended one that never ran is pushed', async () => {
+    // A chat that failed before its model spoke, and the replacement opened
+    // for its holder: the failure's push must not take the offer from it.
+    const task = { ...HELD, conversation_id: 'c-new' }
+    const live = {
+      ...conversation('open'),
+      id: 'c-new',
+      started_at: '2026-09-01T13:00:00Z',
+      type: 'interactive',
+      has_run: false,
+    } as Conversation
+    const failed = {
+      ...conversation('failed'),
+      id: 'c-failed',
+      started_at: '2026-09-01T12:30:00Z',
+      type: 'interactive',
+      has_run: false,
+      ended_at: '2026-09-01T12:59:00Z',
+      ended_reason: 'failed',
+    } as Conversation
+    api.apiList.mockImplementation(async (_path: string, body: Record<string, unknown>) => {
+      const statuses = (body.statuses as string[] | undefined) ?? []
+      const items = statuses.includes('in_progress') ? [task] : []
+      return { items, next_page_token: '', total_count: items.length }
+    })
+    api.apiJSON.mockImplementation(async (path: string) => {
+      if (path === '/api/me') return { id: 'u1' }
+      if (path === '/api/tasks/facets') return { event_types: [] }
+      if (path === '/api/agent/conversations/list') {
+        return { runs: { [HELD.id]: [live, held] }, messages: {} }
+      }
+      if (path === '/api/agent/conversations/c-failed') return failed
+      throw new Error('unexpected apiJSON ' + path)
+    })
+    renderBoard()
+    await screen.findByRole('link', { name: 'Start chat' })
+
+    await act(async () => {
+      ws.handler?.({
+        type: 'conversation_update',
+        conversation_id: 'c-failed',
+        data: { status: 'failed' },
+      })
+    })
+    expect(screen.getByRole('link', { name: 'Start chat' })).toHaveAttribute(
+      'href',
+      expect.stringMatching(/\/runs\/c-new$/),
+    )
   })
 })
 
@@ -455,6 +590,83 @@ describe('starting a queued task', () => {
     fireEvent.click(picker.getByRole('option', { name: ME.display_name }))
     await waitFor(() => expect(writes.length).toBe(2))
     expect(writes.map((w) => w.body.version)).toEqual([FREE.version, FREE.version + 1])
+  })
+})
+
+describe('the team a claim or a delegate lands on', () => {
+  function onTwoTeams() {
+    teamsStore.current = {
+      teams: [
+        { id: 't1', name: 'platform', slug: 'platform' },
+        { id: 't2', name: 'data', slug: 'data' },
+      ],
+      lastActingTeamId: '',
+      multi: true,
+      loaded: true,
+    }
+  }
+
+  it('sends the one team that can take the task, without asking', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    renderBoard()
+    await screen.findByText(FREE.title)
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+
+    expect(writes).toEqual([
+      { path: `/api/tasks/${FREE.id}/claim`, body: { team_id: 't2', version: FREE.version } },
+    ])
+    expect(screen.queryByText('Which team takes this task?')).not.toBeInTheDocument()
+  })
+
+  it('asks which team when two can take the task, and claims for the one chosen', async () => {
+    onTwoTeams()
+    claimTeams = ['t1', 't2']
+    renderBoard()
+    await screen.findByText(FREE.title)
+
+    await act(async () => {
+      await dnd.drop!(FREE.id, 'in_progress')
+    })
+    // The drop wrote nothing: the claim waits on the answer.
+    await screen.findByText('Which team takes this task?')
+    expect(writes).toEqual([])
+
+    fireEvent.click(screen.getByRole('radio', { name: 'data' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Claim' }))
+
+    await waitFor(() =>
+      expect(writes).toEqual([
+        { path: `/api/tasks/${FREE.id}/claim`, body: { team_id: 't2', version: FREE.version } },
+      ]),
+    )
+  })
+
+  it('opens the blueprint picker on the team the task lands on, and delegates for it', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    ROSTER.bot = { agent_id: 'a1', display_name: 'Tess', enabled: true, model: '', autonomy: null }
+    renderBoard()
+    await waitFor(() => expect(listBodies.length).toBe(3))
+
+    const picker = await openPicker('Unassigned')
+    fireEvent.click(picker.getByRole('option', { name: /Tess/ }))
+
+    // One candidate: the picker lists that team's blueprints and offers no
+    // team to choose.
+    fireEvent.click(await screen.findByRole('button', { name: 'Run the blueprint' }))
+    expect(promptPicker.props).toEqual({ teamValue: 't2', teamOptions: undefined })
+    await waitFor(() =>
+      expect(writes).toEqual([
+        {
+          path: `/api/tasks/${FREE.id}/delegate`,
+          body: { blueprint_id: 'bp-1', team_id: 't2', version: FREE.version },
+        },
+      ]),
+    )
   })
 })
 
@@ -545,7 +757,7 @@ describe('a permission prompt on a card', () => {
   function parkOnPrompt(canWrite: boolean) {
     held = { ...conversation('running'), can_write: canWrite }
     ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
-      [held.ID]: [{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'make test' } }],
+      [held.id]: [{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'make test' } }],
     }
   }
 
@@ -580,8 +792,8 @@ describe('a closed task in Done', () => {
   function running(): Conversation {
     return {
       ...conversation('running'),
-      ID: 'c-dismissed',
-      TaskID: DISMISSED.id,
+      id: 'c-dismissed',
+      task_id: DISMISSED.id,
       current_action: 'Reading the upload test',
       can_write: true,
     }
@@ -610,10 +822,10 @@ describe('a closed task in Done', () => {
       [DISMISSED.id]: [
         {
           ...conversation('open'),
-          ID: 'c-dismissed',
-          TaskID: DISMISSED.id,
-          CompletedAt: '2026-09-01T12:04:00Z',
-          DurationMs: 240_000,
+          id: 'c-dismissed',
+          task_id: DISMISSED.id,
+          completed_at: '2026-09-01T12:04:00Z',
+          duration_ms: 240_000,
         },
       ],
     }
@@ -644,7 +856,7 @@ describe('a closed task in Done', () => {
     closed = [DISMISSED]
     closedRuns = { [DISMISSED.id]: [run] }
     ;(QUEUES as { queues: Record<string, unknown[]> }).queues = {
-      [run.ID]: [{ tool_call_id: 'toolu_9', tool_name: 'Bash', input: { command: 'make lint' } }],
+      [run.id]: [{ tool_call_id: 'toolu_9', tool_name: 'Bash', input: { command: 'make lint' } }],
     }
     renderBoard()
     expect(await screen.findByText('make lint')).toBeInTheDocument()
@@ -656,8 +868,8 @@ describe('a closed task in Done', () => {
       fireEvent.click(within(card(DISMISSED.title)).getByRole('button', { name: 'Deny' }))
     })
     expect(QUEUES.resolve.mock.calls).toEqual([
-      [run.ID, 'toolu_9', { behavior: 'allow' }],
-      [run.ID, 'toolu_9', { behavior: 'deny' }],
+      [run.id, 'toolu_9', { behavior: 'allow' }],
+      [run.id, 'toolu_9', { behavior: 'deny' }],
     ])
   })
 })

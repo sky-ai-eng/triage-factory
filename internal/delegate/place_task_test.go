@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -78,7 +79,7 @@ func TestMarkConversationOpen_ParkLeavesTheColumnAlone(t *testing.T) {
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: conversationID,
 		claimID:        holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}); fenced {
 		t.Fatal("the park was fenced out; the fixture's run holds no successor claim")
 	}
@@ -103,7 +104,7 @@ func TestSendMessage_WakeLeavesTheColumnAlone(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	setConversationStatus(t, database, conversationID, "open")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 

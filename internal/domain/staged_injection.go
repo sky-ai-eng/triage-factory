@@ -57,9 +57,8 @@ type NoteProvenance struct {
 	EventID   string `json:"event_id,omitempty"`
 	EventType string `json:"event_type,omitempty"`
 	// TaskClose is the close of the conversation's task a close note tells
-	// of (TaskCloseKey), or the held close (TaskCloseHoldKey). A person's
-	// close has no event, so this, not EventID, is what says a conversation
-	// has been told.
+	// of (TaskCloseKey). A person's close has no event, so this, not EventID,
+	// is what says a conversation has been told.
 	TaskClose string `json:"task_close,omitempty"`
 	// AssignedTask is the task an assignment note (TaskAssignedNote) tells
 	// of, by id, and Assignee is who the note says holds it (AgentAssignee,
@@ -146,11 +145,9 @@ const (
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
-	// that its task closed (TaskClosedNote), or that its close is held for a
-	// person (TaskCloseHeldNote). A conversation is told once per close and
-	// once per hold (StagedInjectionStore.HasNoteForTaskCloseSystem). A
-	// reopen of the task, and a hold cleared without its close, withdraw the
-	// notes still waiting (TaskStore.Bump).
+	// that its task closed (TaskClosedNote). A conversation is told once per
+	// close (StagedInjectionStore.HasNoteForTaskCloseSystem). A reopen of the
+	// task withdraws the notes still waiting (TaskStore.FindOrCreateAtSystem).
 	StagedInjectionProducerTaskClosing = "task_closing"
 	// StagedInjectionProducerDeliverableResolved is the note telling an agent
 	// that a deliverable it produced was resolved (DeliverableResolutionNote).

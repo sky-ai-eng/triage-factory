@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -43,7 +42,7 @@ func newViewerRig(t *testing.T) *viewerRig {
 	pgtest.AddOrgMember(t, h, viewer, orgID, teamID, "member", "viewer")
 
 	return &viewerRig{
-		bh:     New(stores.Tx, authz.New(h.AdminDB, stores.Tx), func() *delegate.Spawner { return nil }),
+		bh:     New(stores.Tx, authz.New(h.AdminDB, stores.Tx)),
 		orgID:  orgID,
 		member: member,
 		viewer: viewer,

@@ -1,11 +1,12 @@
 // The write-side check on the SDK resume's coordinates.
 //
-// A woken SDK conversation is re-invoked by session id, in the tree it ran in,
-// on the model it started with. All three live on the conversation row, all
-// three are written by whoever claims it, and nothing between the write and the
-// wake verifies the write happened — the read side just refuses, days later, in
-// a composer, naming a field the person has never heard of. That gap has cost a
-// night of archaeology once; these assertions make the next one cost a grep.
+// A woken SDK conversation is re-invoked by session id, in the tree it ran in.
+// Both live on the conversation row, both are written by whoever claims it,
+// and nothing between the write and the wake verifies the write happened — the
+// read side just refuses, days later, in a composer, naming a field the person
+// has never heard of. That gap has cost a night of archaeology once; these
+// assertions make the next one cost a grep. The model it runs on is the
+// claim's, so no wake refuses a row for its model.
 //
 // Loud but never fatal. The engagement in front of us can run perfectly well on
 // an incomplete row; it is only the follow-up months of that conversation's life
@@ -26,8 +27,8 @@ import (
 type resumeCheckpoint string
 
 const (
-	// resumeCheckClaim runs at engagement start, where the path and the model
-	// are already the claim's responsibility to have written.
+	// resumeCheckClaim runs at engagement start, where the path is already
+	// the claim's responsibility to have written.
 	resumeCheckClaim resumeCheckpoint = "claim"
 	// resumeCheckRest runs once the stream is over and the row is about to be
 	// what a follow-up finds: parked, or terminal on a step a user may still
@@ -46,9 +47,6 @@ func missingResumeCoordinates(conv domain.Conversation, at resumeCheckpoint) []s
 	}
 	if conv.WorktreePath == "" {
 		missing = append(missing, "worktree_path")
-	}
-	if conv.Model == "" {
-		missing = append(missing, "model")
 	}
 	return missing
 }

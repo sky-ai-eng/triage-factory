@@ -198,14 +198,20 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		return isolatedGHConfig(conversationID)
 	}
 
-	delegateLog.Info("local gh channel up", "conversation", conversationID, "host", ch.Host)
+	delegateLog.Info("local gh channel up", "conversation", conversationID, "host", ch.Host, "git_host", ch.GitHost)
+	return localGHChannelParams(ch), ch
+}
+
+// localGHChannelParams is the agent-facing half of a local channel.
+func localGHChannelParams(ch *ghchannel.Channel) *agentproc.GHChannelParams {
 	return &agentproc.GHChannelParams{
 		Host:           ch.Host,
+		GitHost:        ch.GitHost,
 		Token:          ch.Token,
 		CertSourcePath: ch.CertPath,
 		BinDir:         ch.BinDir,
 		ConfigDir:      ch.ConfigDir,
-	}, ch
+	}
 }
 
 // localGHRepositories is the local gh channel's repository gate source: the

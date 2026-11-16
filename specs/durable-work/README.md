@@ -461,12 +461,26 @@ transaction. It does not park the conversation itself.
 The live holder, or the dispatcher handling expired/unclaimed work, parks the conversation
 `open` and releases any claim in one transaction. Execution cannot be claimed while stop is
 requested. User follow-up clears the request to re-arm the conversation. A plain stop leaves the
-blueprint unchanged. Cancellation uses the same request/disposition separation (§1.7).
+blueprint unchanged. A blueprint run is cancelled only as part of a lifecycle action one layer up
+(a requeue, a new delegation, a person's claim, a reassignment, or a team archive), which stops the
+step conversation and requests the run's cancellation together. The cancellation uses the same
+request/disposition separation (§1.7).
 
 The request records who asked and why (`stop_requested_by`, `stop_requested_reason`), and the park
 derives `park_reason` from them, so a user stop, a system stop and a stall each park with their
-own reason. A stop does not withdraw input already queued: a parked conversation with an
-undelivered user message is claimable again once the stop settles, and the user can stop it again.
+own reason. A stop ends the work in front of it. When a turn is running, that work is the turn,
+and a person's message waiting behind it runs next. When no turn is running, that work is the
+person's waiting messages: they no longer wake the conversation. They stay unread, and the agent
+reads them, in order, with whatever wakes the conversation next. A message sent after the stop is
+not in front of it, and wakes the conversation as any message does.
+
+The request records where it was sent, the conversation's newest message
+(`stop_through_message_id`), and a park that settles a stop with no turn run moves the
+conversation's wake position (`wake_after_message_id`) forward to it: a person's message at or
+before that position does not wake the conversation. Message ids are compared rather than times,
+because a message's timestamp is written by the process that inserted it. An SDK resume message
+carries the stop notes that fall between the unread messages it joins, so the session reads where
+each stop fell; the native loop reads them in place from the transcript.
 
 ### D3. Give claims leases and takeover
 
@@ -525,7 +539,8 @@ and is refused like any other paused holder.
 #### Run health
 
 Healthy runs have no automatic total-duration limit. Claim age alone must not stop a run; this
-contract adds no `deadline_at` or `TF_RUN_DEADLINE`. Explicit stop and cancel controls remain.
+contract adds no `deadline_at` or `TF_RUN_DEADLINE`. The explicit stop, and the lifecycle actions
+that cancel a run, remain.
 
 Lease renewal proves ownership and database connectivity, not agent progress, so a stalled
 engagement whose executor still renews is detected separately (O4), by one watchdog in both

@@ -171,7 +171,7 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 		},
 		ClaimTaskForUser: func(t *testing.T, taskID string) {
 			t.Helper()
-			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userID, dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
+			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userID, dbtest.ClaimTeam(t, stores.Tasks, orgID, taskID, userID), dbtest.TaskVersion(t, stores.Tasks, orgID, taskID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		},
@@ -218,6 +218,12 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 			if _, err := h.AdminDB.Exec(`UPDATE conversations SET ended_at = $1, ended_reason = $2 WHERE id = $3`, time.Now().UTC(), string(reason), convID); err != nil {
 				t.Fatalf("end the conversation: %v", err)
 			}
+		},
+		// Each task is seeded on a team of its own, so the acting team is
+		// another one.
+		MoveTaskToAnotherTeam: func(t *testing.T, taskID string) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB, `UPDATE tasks SET team_id = $2 WHERE id = $1`, taskID, actingTeamID)
 		},
 		RunCount: func(t *testing.T, taskID string) int {
 			return countOn(t, `SELECT count(*) FROM blueprint_runs WHERE task_id = $1`, taskID)

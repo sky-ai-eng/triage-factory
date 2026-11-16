@@ -123,17 +123,18 @@ export default function Overview() {
   const needsShown = useMemo<Conversation[]>(() => {
     const rows = [...(needs?.rows ?? [])]
     rows.sort(
-      (a, b) => Date.parse(b.CompletedAt ?? b.StartedAt) - Date.parse(a.CompletedAt ?? a.StartedAt),
+      (a, b) =>
+        Date.parse(b.completed_at ?? b.started_at) - Date.parse(a.completed_at ?? a.started_at),
     )
     return rows.slice(0, NEEDS_SHOWN)
   }, [needs])
   const runningShown = useMemo<Conversation[]>(() => {
     const rows = running?.rows ?? []
     const live = rows
-      .filter((c) => (ACTIVE_STATUSES as readonly string[]).includes(c.Status))
+      .filter((c) => (ACTIVE_STATUSES as readonly string[]).includes(c.status))
       .sort((a, b) => Date.parse(workStartedAt(b)) - Date.parse(workStartedAt(a)))
     const queued = rows
-      .filter((c: Conversation) => c.Status === 'queued')
+      .filter((c: Conversation) => c.status === 'queued')
       .sort((a, b) => (a.queue_position ?? 1e9) - (b.queue_position ?? 1e9))
     return [...live, ...queued].slice(0, RUNNING_SHOWN)
   }, [running])
@@ -142,11 +143,11 @@ export default function Overview() {
   // section's cut is the Board's, so its task is not read here.
   const tasks = useTasksIndex(
     teamId,
-    [...needsShown, ...runningShown].map((c) => c.TaskID),
+    [...needsShown, ...runningShown].map((c) => c.task_id),
     tick,
   )
   const needsItems = useMemo<RunRowItem[]>(
-    () => needsShown.map((c) => needsRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge)),
+    () => needsShown.map((c) => needsRow(c, tasks?.get(c.task_id), runHref(c.id), renderAge)),
     [needsShown, tasks, runHref, renderAge],
   )
 
@@ -154,7 +155,7 @@ export default function Overview() {
   const runningItems = useMemo<RunRowItem[]>(
     () =>
       runningShown.map((c) =>
-        runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge, retryNow),
+        runningRow(c, tasks?.get(c.task_id), runHref(c.id), renderAge, retryNow),
       ),
     [runningShown, tasks, runHref, renderAge, retryNow],
   )

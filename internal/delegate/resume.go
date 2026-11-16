@@ -57,8 +57,10 @@ var ErrConversationNotResumable = errors.New("resume: conversation not in a resu
 var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step (only the step a blueprint is currently on takes follow-ups)")
 
 // ErrBlueprintCancelled is returned when a conversation's workspace is intact
-// but its blueprint was called off at its own layer — the run cancelled
-// outright, or its team archived — so nothing under it runs again.
+// but its blueprint was called off by a lifecycle action one layer up — a
+// requeue, a new delegation, a person's claim, a reassignment, or its team
+// archived — so nothing under it runs again. It is the answer only until the
+// conversation's end boundary lands, which each of those actions also stamps.
 //
 // As permanent as ErrConversationConcluded, and its own sentinel for the same
 // reason that one is split from ErrConversationNotResumable: the words a
@@ -93,10 +95,10 @@ var ErrStepHandedOff = errors.New("resume: this step just handed off to the next
 
 // ErrWorkspaceExpired is returned when a resumable conversation's workspace is
 // gone for good: its warm worktree was swept, no snapshot is there or coming,
-// and its runtime cannot continue without one. That last clause is an SDK
-// answer — its continuity lived in the session transcript the blob carried,
-// while a native conversation's lives in `messages` and survives a workspace
-// built from nothing, so a native one falls back instead of reaching here.
+// and it cannot continue without one. That last clause is an SDK answer, for
+// a conversation whose session was never saved to a blob of its own: one
+// whose session was, and a native one, whose continuity lives in `messages`,
+// both continue in a workspace built from nothing instead of reaching here.
 //
 // The conversation's status is left unchanged (no flip), so the user gets a
 // clear "this workspace has expired" signal rather than seeing the run
@@ -158,11 +160,13 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 // workspace evidence is read, which is also what keeps a control pod — which
 // serves this check and holds no workspace store — from reading snapshots.
 //
-// An SDK conversation is expired without the session transcript the blob
-// carried, so it walks four rungs, most-certain-first:
+// An SDK conversation continues from its session, so it walks five rungs,
+// most-certain-first:
 //
 //   - the warm worktree survives on disk (and is not one an older binary laid
 //     out, which the claim removes rather than reuses);
+//   - its session has a blob of its own, which a claim puts back beside
+//     whatever tree it gets, one built from nothing included;
 //   - the durable snapshot blob is present to cold-rehydrate from, of the
 //     layout this binary restores — an older blob is no snapshot;
 //   - neither, but the record says a persist is in flight and the engagement
@@ -202,6 +206,14 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 	if blobs == nil {
 		return true
 	}
+	saved, err := s.sessionSaved(ctx, orgID, conv.ID)
+	if err != nil {
+		delegateLog.Warn("resume: session blob existence check failed; treating as recoverable", "conversation", conv.ID, "error", err)
+		return true
+	}
+	if saved {
+		return true
+	}
 	keyID := workspaceKey(conv.TaskID)
 	presence, err := s.snapshotLayoutAt(ctx, orgID, keyID)
 	if err != nil {
@@ -238,14 +250,16 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 // start, so a resume reuses the exact model / repo / tool context the run
 // began with rather than re-resolving live state mid-run.
 type ResumeOptions struct {
-	// Model is the model the run started with. **Required** — a resume
-	// must reuse the model captured at run start (conv.Model, captured by
-	// dispatchResumeClaim), never a freshly-resolved one, or a config change
-	// the initial invocation and the resume would silently switch models
-	// mid-run. ResumeWithMessage rejects an empty Model with an error
-	// rather than falling back to a live per-(org, team) resolve, which
-	// would reintroduce exactly that mid-run drift.
+	// Model is the claim's model (modelForClaim): the model the newest
+	// person message runs on, or else the step's or the team's.
+	// **Required** — the claim decided it, and ResumeWithMessage rejects an
+	// empty Model rather than resolving one of its own, which could disagree
+	// with the model the claim's credentials were sealed for.
 	Model string
+
+	// Effort is the effort the resumed turn runs at (claimEffort), passed to
+	// the harness beside Model. Empty leaves it at the harness's default.
+	Effort string
 
 	// GitHubOwner is the owner of the GitHub repo the run started on — the
 	// owner the initial invocation keyed its local gh channel's credential
@@ -307,6 +321,11 @@ type ResumeOptions struct {
 	// the turn's measured sandbox cost by id; empty records nothing.
 	claimID string
 
+	// sessionCostUSD is the running total of the session being resumed
+	// (domain.Conversation's SessionCostUSD), which the resumed process's own
+	// spend is measured from (agentproc.RunOptions.SessionCostBaselineUSD).
+	sessionCostUSD float64
+
 	// mirror files the agent's memory file as this turn writes it. Built by
 	// the dispatcher rather than here because it outlives the turn: the same
 	// mirror takes the final check at every exit the dispatcher owns, from a
@@ -329,6 +348,17 @@ type ResumeOptions struct {
 	// that fails hands the claim back with the message still queued. Required:
 	// nil is refused rather than read as an org with no identity.
 	commitSigner *commitsigner.Identity
+
+	// conversationType is the resumed conversation's stored type, which picks
+	// the framework prompt's surface (surfaceFor). Read off the row rather than
+	// decided here, so a resume composes the surface its conversation opened
+	// with.
+	conversationType string
+
+	// hasBlueprint is whether the resumed conversation belongs to a blueprint
+	// run, which decides whether its process is offered stop_blueprint
+	// (liveRunSpec.hasBlueprint).
+	hasBlueprint bool
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -374,14 +404,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	if cwd == "" {
 		return nil, fmt.Errorf("resume: missing cwd")
 	}
-	// A resume MUST reuse the model the run started with. Requiring it
-	// here — rather than falling back to a live per-(org,
-	// team) resolve — is what closes the mid-run model-drift gap: a config
-	// change between the initial invocation and this resume must never
-	// switch models underneath a single logical run. The resume claim captures
-	// and passes it (conv.Model); an empty value is a wiring bug, surfaced loudly.
+	// A resume runs on the claim's model, which is what its credentials were
+	// sealed for. The resume claim passes it (conv.Model, set from
+	// modelForClaim); an empty value is a wiring bug, surfaced loudly.
 	if opts.Model == "" {
-		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")
+		return nil, fmt.Errorf("resume: missing model (caller must pass the claim's model)")
 	}
 	model := opts.Model
 
@@ -483,20 +510,22 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	worktree.WarnIfClaudeSessionNameTooLong(cwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, opts.TeamID)
 	baseOpts := agentproc.RunOptions{
-		Cwd:                cwd,
-		Model:              model,
-		PermissionMode:     teamOpts.permissionMode,
-		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
-		SessionID:          sessionID,
-		Message:            message,
-		OnOpeningUnsent:    opts.openingUnsent,
+		Cwd:                    cwd,
+		Model:                  model,
+		Effort:                 opts.Effort,
+		PermissionMode:         teamOpts.permissionMode,
+		ClaudeAIConnectors:     teamOpts.claudeAIConnectors,
+		SessionID:              sessionID,
+		SessionCostBaselineUSD: opts.sessionCostUSD,
+		Message:                message,
+		OnOpeningUnsent:        opts.openingUnsent,
 		// The append the launch gave this conversation, through the composer the
 		// launch used. The harness replays the session's own history but not the
 		// prompt that was appended to it, so a turn sent without this one wakes
 		// on Claude Code's defaults — no framework blocks, no mission, no step
 		// addendum. The CLI path resolves against THIS process's binary, which
 		// is why the stored half stops at the block.
-		SystemPrompt: sdkSystemPrompt(opts.SystemBlock, agentproc.AgentVisibleBinary(selfBin)),
+		SystemPrompt: sdkSystemPrompt(surfaceFor(opts.conversationType), opts.SystemBlock, agentproc.AgentVisibleBinary(selfBin)),
 
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
@@ -557,11 +586,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 			runtime:        domain.ConversationRuntimeSDK,
 			mirror:         opts.mirror,
 		},
-		opts:   baseOpts,
-		perms:  perms,
-		sink:   sink,
-		mirror: opts.mirror,
-		nudge:  opts.nudge,
+		opts:         baseOpts,
+		perms:        perms,
+		sink:         sink,
+		mirror:       opts.mirror,
+		nudge:        opts.nudge,
+		hasBlueprint: opts.hasBlueprint,
 	})
 
 	// A fence trip on this path — the sink's refused insert, or the driver's

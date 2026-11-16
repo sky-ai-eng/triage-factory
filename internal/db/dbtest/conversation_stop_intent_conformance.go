@@ -110,7 +110,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		// the stop has to be able to reach it first.
 		parked, _ := f.StageStep(t)
 		conv := claim(t, f, parked)
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, parked, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, parked, conv.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park: (%v, %v)", ok, err)
 		}
 		request(t, f, parked, "")
@@ -189,7 +189,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 			want     domain.ParkReason
 			outcome  string
 		}{
-			{"user stop over an idle park", stopTestUser, db.ParkIdle(), domain.ParkReasonUserCancelled, "parked"},
+			{"user stop over a turn_incomplete park", stopTestUser, db.ParkTurnIncomplete(), domain.ParkReasonUserCancelled, "parked"},
 			{"system stop over a deliberate park", "", db.ParkStopped(domain.ParkReasonBlueprintCancelled, ""), domain.ParkReasonSystemCancelled, "cancelled"},
 			{"user stop over a deliberate park", stopTestUser, db.ParkStopped(domain.ParkReasonUserCancelled, ""), domain.ParkReasonUserCancelled, "cancelled"},
 		} {
@@ -237,7 +237,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		failed, _ := f.StageStep(t)
 		conv = claim(t, f, failed)
 		request(t, f, failed, stopTestUser)
-		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash)); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash), ""); err != nil || !ok {
 			t.Fatalf("mark failed: (%v, %v)", ok, err)
 		}
 		assertNoIntent(t, f, failed, "MarkFailedIfActiveForClaimSystem")
@@ -249,7 +249,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
 		conv := claim(t, f, id)
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park: (%v, %v)", ok, err)
 		}
 		request(t, f, id, stopTestUser)
@@ -268,7 +268,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Helper()
 			id, _ := f.StageStep(t)
 			conv := claim(t, f, id)
-			if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+			if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 				t.Fatalf("park: (%v, %v)", ok, err)
 			}
 			return id
@@ -368,7 +368,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
 		conv := claim(t, f, id)
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park: (%v, %v)", ok, err)
 		}
 		request(t, f, id, "")
@@ -566,14 +566,14 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		failed, _ := f.StageStep(t)
 		conv = claim(t, f, failed)
 		requestStall(t, f, failed)
-		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash)); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash), ""); err != nil || !ok {
 			t.Fatalf("mark failed: (%v, %v)", ok, err)
 		}
 		assertNoIntent(t, f, failed, "MarkFailedIfActiveForClaimSystem")
 
 		resumed, _ := f.StageStep(t)
 		conv = claim(t, f, resumed)
-		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, resumed, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, resumed, conv.ClaimID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park: (%v, %v)", ok, err)
 		}
 		requestStall(t, f, resumed)

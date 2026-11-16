@@ -38,6 +38,16 @@ type Info struct {
 	// person choosing it should see that before they choose.
 	SupportsPromptCaching bool
 
+	// SupportsReasoning, SupportsXHighEffort and SupportsMaxEffort are the
+	// row's reasoning-effort flags (supports_reasoning,
+	// supports_xhigh_reasoning_effort and supports_max_reasoning_effort).
+	// EffortCeiling is its bedrock_output_config_effort_ceiling, the highest
+	// level a Bedrock row takes, and empty when the row has none.
+	SupportsReasoning   bool
+	SupportsXHighEffort bool
+	SupportsMaxEffort   bool
+	EffortCeiling       string
+
 	InputCostPerToken      float64
 	OutputCostPerToken     float64
 	CacheReadCostPerToken  float64
@@ -57,13 +67,17 @@ func ModelInfo(model string) (Info, bool) {
 	if err != nil || table == nil {
 		return Info{}, false
 	}
-	p, ok := lookupPrice(table, model)
+	p, ok := lookupDatasheetRow(table, model)
 	if !ok || p.InputCostPerToken == nil || p.OutputCostPerToken == nil {
 		return Info{}, false
 	}
 	info := Info{
 		Provider:               p.LiteLLMProvider,
 		SupportsPromptCaching:  p.SupportsPromptCaching,
+		SupportsReasoning:      p.SupportsReasoning,
+		SupportsXHighEffort:    p.SupportsXHighEffort,
+		SupportsMaxEffort:      p.SupportsMaxEffort,
+		EffortCeiling:          p.EffortCeiling,
 		InputCostPerToken:      *p.InputCostPerToken,
 		OutputCostPerToken:     *p.OutputCostPerToken,
 		CacheReadCostPerToken:  deref(p.CacheReadInputTokenCost),

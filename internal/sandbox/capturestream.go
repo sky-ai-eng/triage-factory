@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 )
 
 // CaptureStreamFile is the one staging file a capture jail writes its members
@@ -35,10 +36,10 @@ const (
 var CaptureStreamMaxBytes int64 = 8 << 30
 
 // CaptureStreamWriter frames named members onto w. A member is its name, then
-// its bytes in length-prefixed chunks, then a zero-length chunk. The framing
-// needs no size ahead of the bytes, which is why a git bundle or a diff can be
-// written straight from git into it without being spooled to the jail's
-// memory-backed /tmp.
+// its permission bits, then its bytes in length-prefixed chunks, then a
+// zero-length chunk. The framing needs no size ahead of the bytes, which is
+// why a git bundle or a diff can be written straight from git into it without
+// being spooled to the jail's memory-backed /tmp.
 type CaptureStreamWriter struct {
 	w   *bufio.Writer
 	cur bool
@@ -49,14 +50,17 @@ func NewCaptureStreamWriter(w io.Writer) *CaptureStreamWriter {
 	return &CaptureStreamWriter{w: bufio.NewWriterSize(w, captureStreamChunk)}
 }
 
-// Member starts a member and returns the writer for its bytes. The previous
-// member must have been closed.
-func (s *CaptureStreamWriter) Member(name string) (io.WriteCloser, error) {
+// Member starts a member of the given permission bits and returns the writer
+// for its bytes. The previous member must have been closed.
+func (s *CaptureStreamWriter) Member(name string, perm os.FileMode) (io.WriteCloser, error) {
 	if s.cur {
 		return nil, errors.New("sandbox: capture stream: member opened before the last was closed")
 	}
 	if name == "" || len(name) > CaptureMemberNameMax {
 		return nil, fmt.Errorf("sandbox: capture stream: member name length %d out of range", len(name))
+	}
+	if perm&^os.ModePerm != 0 {
+		return nil, fmt.Errorf("sandbox: capture stream: member mode %v is not permission bits", perm)
 	}
 	var hdr [2]byte
 	binary.BigEndian.PutUint16(hdr[:], uint16(len(name)))
@@ -64,6 +68,10 @@ func (s *CaptureStreamWriter) Member(name string) (io.WriteCloser, error) {
 		return nil, err
 	}
 	if _, err := s.w.WriteString(name); err != nil {
+		return nil, err
+	}
+	binary.BigEndian.PutUint16(hdr[:], uint16(perm))
+	if _, err := s.w.Write(hdr[:]); err != nil {
 		return nil, err
 	}
 	s.cur = true
@@ -125,33 +133,40 @@ func NewCaptureStreamReader(r io.Reader) *CaptureStreamReader {
 	return &CaptureStreamReader{r: bufio.NewReaderSize(r, captureStreamChunk)}
 }
 
-// Next advances to the next member and returns its name and a reader for its
-// bytes, which must be drained or abandoned before Next is called again.
-// io.EOF means the stream ended between members.
-func (s *CaptureStreamReader) Next() (string, io.Reader, error) {
+// Next advances to the next member and returns its name, its permission bits,
+// and a reader for its bytes, which must be drained or abandoned before Next is
+// called again. io.EOF means the stream ended between members.
+func (s *CaptureStreamReader) Next() (string, os.FileMode, io.Reader, error) {
 	if s.cur != nil {
 		if _, err := io.Copy(io.Discard, s.cur); err != nil {
-			return "", nil, err
+			return "", 0, nil, err
 		}
 	}
 	var hdr [2]byte
 	if _, err := io.ReadFull(s.r, hdr[:]); err != nil {
 		if errors.Is(err, io.EOF) {
-			return "", nil, io.EOF
+			return "", 0, nil, io.EOF
 		}
-		return "", nil, fmt.Errorf("sandbox: capture stream: read member header: %w", err)
+		return "", 0, nil, fmt.Errorf("sandbox: capture stream: read member header: %w", err)
 	}
 	n := int(binary.BigEndian.Uint16(hdr[:]))
 	if n == 0 || n > CaptureMemberNameMax {
-		return "", nil, fmt.Errorf("sandbox: capture stream: member name length %d out of range", n)
+		return "", 0, nil, fmt.Errorf("sandbox: capture stream: member name length %d out of range", n)
 	}
 	name := make([]byte, n)
 	if _, err := io.ReadFull(s.r, name); err != nil {
-		return "", nil, fmt.Errorf("sandbox: capture stream: read member name: %w", unexpectedEOF(err))
+		return "", 0, nil, fmt.Errorf("sandbox: capture stream: read member name: %w", unexpectedEOF(err))
 	}
-	s.read += int64(2 + n)
+	if _, err := io.ReadFull(s.r, hdr[:]); err != nil {
+		return "", 0, nil, fmt.Errorf("sandbox: capture stream: read member mode: %w", unexpectedEOF(err))
+	}
+	perm := os.FileMode(binary.BigEndian.Uint16(hdr[:]))
+	if perm&^os.ModePerm != 0 {
+		return "", 0, nil, fmt.Errorf("sandbox: capture stream: member mode %#o is not permission bits", uint32(perm))
+	}
+	s.read += int64(2 + n + 2)
 	s.cur = &captureMemberReader{s: s}
-	return string(name), s.cur, nil
+	return string(name), perm, s.cur, nil
 }
 
 type captureMemberReader struct {

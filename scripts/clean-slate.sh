@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Wipe all local state: database, config, and keychain credentials. Use
-# this to test the first-run experience from scratch.
+# Wipe all local state: the database, the workspace snapshot and session
+# blobs under ~/.triagefactory/blobs/, config, and keychain credentials.
+# Use this to test the first-run experience from scratch.
 #
 # Bare repo clones under ~/.triagefactory/repos/ are deliberately
 # preserved — they're expensive to re-fetch and aren't part of the
@@ -48,6 +49,13 @@ fi
 rm -f ~/.triagefactory/triagefactory.db ~/.triagefactory/triagefactory.db-wal ~/.triagefactory/triagefactory.db-shm
 echo "  removed database"
 
+# Blobs — one workspace snapshot per task (blobs/<org>/<task id>/) and one SDK
+# session per conversation (blobs/sessions/<org>/<conversation id>.jsonl). Every
+# object is keyed by a row of the database just removed, so nothing would read
+# or remove it again.
+rm -rf ~/.triagefactory/blobs
+echo "  removed workspace snapshot and session blobs"
+
 # Encrypted secret bag — the no-keychain secret backend's store.
 # Desktop installs keep secrets in the OS keychain (swept below); installs with
 # no keychain keep them here. Harmless to remove either way.
@@ -91,11 +99,18 @@ fi
 # Prune stale worktree registrations from every preserved bare. The
 # bare clones themselves (~/.triagefactory/repos/) stay — they're
 # expensive to refetch and not part of the first-run flow — but their
-# internal worktrees/ tracker now points at directories we just
-# deleted (projects/, /tmp/triagefactory-runs/). Pruning is
-# idempotent and cheap. Without this, the next `git worktree add`
-# / `git fetch` against any of these bares would hit the stale-
-# registration errors described in the projects-dir comment above.
+# internal worktrees/ tracker still names the checkouts under projects/,
+# deleted above. Without this, the next `git worktree add` / `git fetch`
+# against any of these bares would hit the stale-registration errors
+# described in the projects-dir comment above.
+#
+# Run trees under /tmp/triagefactory-runs/ are left in place: the app
+# removes each orphaned one at its next start, together with the Claude
+# Code session directory named after its path, and prunes the bares again
+# after. Removing them here would leave those session directories with
+# nothing to find them by. Pruning first is safe: it drops only
+# registrations whose checkout is gone, so a run tree still on disk keeps
+# its registration until the app removes it.
 if [ -d ~/.triagefactory/repos ]; then
   pruned=0
   while IFS= read -r bare; do

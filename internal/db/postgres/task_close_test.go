@@ -151,9 +151,9 @@ func seedPgBlueprintRunForClose(t *testing.T, conn *sql.DB, orgID, userID, taskI
 	}
 	brID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id,
+		INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id,
 		                            trigger_type, status, worktree_path, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', $6, '/tmp/wt', '[]')
+		VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', $6, '/tmp/wt', '[]')
 	`, brID, orgID, userID, bpID, taskID, status); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

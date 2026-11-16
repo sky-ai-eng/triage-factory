@@ -160,18 +160,16 @@ func TestProcessCompletion_AnUnfinishedTurnParksOpenWithANote(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", "")
-
-	if !parked || fenced {
-		t.Errorf("processCompletion(refusal) = (parked %v, fenced %v), want (true, false): open, not terminal", parked, fenced)
+	if fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
+		&agentproc.Result{StopReason: "refusal", Result: "partial"}, cwd, nil, "", ""); fenced {
+		t.Error("processCompletion(refusal) reported fenced, want a park this engagement recorded")
 	}
 	conv := loadConversation(t, s, conversationID)
 	if conv.Status != domain.StatusOpen || conv.Concluded() || conv.Outcome != "" {
 		t.Errorf("conv = (status %q, outcome %q, completed_at %v), want open with no verdict", conv.Status, conv.Outcome, conv.CompletedAt)
 	}
-	if conv.ParkReason != domain.ParkReasonIdle {
-		t.Errorf("conv.park_reason = %q, want %q", conv.ParkReason, domain.ParkReasonIdle)
+	if conv.ParkReason != domain.ParkReasonTurnIncomplete {
+		t.Errorf("conv.park_reason = %q, want %q", conv.ParkReason, domain.ParkReasonTurnIncomplete)
 	}
 	var note string
 	if err := database.QueryRow(`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ? ORDER BY id DESC LIMIT 1`,
@@ -191,7 +189,7 @@ func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "done" {
@@ -216,7 +214,7 @@ func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
 	}
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got == "done" {

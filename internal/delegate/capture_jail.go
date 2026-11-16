@@ -38,21 +38,14 @@ func jailedCapture() bool {
 	return runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"
 }
 
-// captureWorkspaceGit captures one checkout's git delta in this process, and
-// the session transcript when the run has one. The local-mode capture; a
-// multi-mode snapshot goes through captureTreeInJail.
-func captureWorkspaceGit(ctx context.Context, wtPath, sessionID string) (worktree.CapturedState, error) {
-	var state worktree.CapturedState
+// captureWorkspaceGit captures one checkout's git delta in this process. The
+// local-mode capture; a multi-mode snapshot goes through captureTreeInJail.
+func captureWorkspaceGit(ctx context.Context, wtPath string) (worktree.CapturedState, error) {
 	delta, err := worktree.CaptureWorkspaceGit(ctx, wtPath)
 	if err != nil {
 		return worktree.CapturedState{}, err
 	}
-	state.Delta = delta
-	state.SessionID = sessionID
-	if data, ok := worktree.ReadClaudeSessionTranscript(wtPath, sessionID); ok {
-		state.Transcript = data
-	}
-	return state, nil
+	return worktree.CapturedState{Delta: delta}, nil
 }
 
 // captureViaSandbox is the seam to the brokered capture jail. A package var so
@@ -128,8 +121,8 @@ func checkCaptureManifest(ctx context.Context, man worktree.CaptureManifest, rel
 		if cc.Delta == nil && (cc.HasBundle || cc.HasPatch || len(cc.LFSObjects) > 0) {
 			return fmt.Errorf("capture manifest gives %s members but no git state", cc.Rel)
 		}
-		// LFS objects are carried for the bundle's commits, and each is named
-		// once, by an id that is also its member's name.
+		// LFS objects are carried for commits a bundle carries, so only beside
+		// one, and each is named once, by an id that is also its member's name.
 		if len(cc.LFSObjects) > 0 && !cc.HasBundle {
 			return fmt.Errorf("capture manifest gives %s LFS objects but no bundle", cc.Rel)
 		}
@@ -207,7 +200,7 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 	scratchFiles := 0
 	sr := sandbox.NewCaptureStreamReader(newPunchingReader(f))
 	for {
-		name, body, err := sr.Next()
+		name, perm, body, err := sr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -231,7 +224,8 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 				return unpackedCapture{}, fmt.Errorf("capture stream carries more than %d scratch files", maxScratchFiles)
 			}
 			dest := filepath.Join(treeDir, worktree.ScratchDir, filepath.FromSlash(rel))
-			if err := writeStaged(dest, body); err != nil {
+			// The copy is what the archive records the mode from.
+			if err := writeStaged(dest, body, perm&scratchFileModeCap); err != nil {
 				return unpackedCapture{}, err
 			}
 		default:
@@ -247,7 +241,7 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 			if want.kind == memberLFS {
 				dest += "." + want.oid
 			}
-			if err := writeStaged(dest, body); err != nil {
+			if err := writeStaged(dest, body, 0o600); err != nil {
 				return unpackedCapture{}, err
 			}
 			switch want.kind {
@@ -278,14 +272,15 @@ func validScratchRel(rel string) bool {
 	return rel != "" && path.Clean(rel) == rel && !path.IsAbs(rel) && rel != "." && rel != ".." && !strings.HasPrefix(rel, "../") && !strings.ContainsRune(rel, 0)
 }
 
-// writeStaged writes body to a new file at dest, creating its parents. It
-// never replaces an existing file, so a stream that names a member twice, or
-// names one under another's path, fails rather than overwriting.
-func writeStaged(dest string, body io.Reader) error {
+// writeStaged writes body to a new file of the given mode at dest, creating
+// its parents. It never replaces an existing file, so a stream that names a
+// member twice, or names one under another's path, fails rather than
+// overwriting.
+func writeStaged(dest string, body io.Reader, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return fmt.Errorf("stage capture member: %w", err)
 	}
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("capture stream carries a member twice: %s", filepath.Base(dest))
@@ -293,6 +288,11 @@ func writeStaged(dest string, body io.Reader) error {
 		return fmt.Errorf("stage capture member: %w", err)
 	}
 	if _, err := io.Copy(f, body); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("stage capture member: %w", err)
+	}
+	// The umask narrows the mode OpenFile creates with.
+	if err := f.Chmod(mode); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("stage capture member: %w", err)
 	}

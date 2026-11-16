@@ -253,7 +253,7 @@ func TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning(t *testing.T
 	if first["stop_requested_at"] == nil {
 		t.Errorf("response carries no stop_requested_at: %v", first)
 	}
-	if got := first["Status"]; got != "queued" {
+	if got := first["status"]; got != "queued" {
 		t.Errorf("response Status = %v, want queued — the request writes no status", got)
 	}
 	// A second POST while the first is pending is the same answer.
@@ -293,57 +293,39 @@ func TestHandleAgentStop_TerminalConflicts(t *testing.T) {
 	}
 }
 
-// TestHandleBlueprintRunCancel_StepCarriesTheIntent: cancelling a run records
-// a stop intent on its step conversation and writes no status of its own; the
-// settlement that follows is what cancels the run.
-func TestHandleBlueprintRunCancel_StepCarriesTheIntent(t *testing.T) {
-	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerConversation(t, s.db, "bp-cancel", "")
-	// The route addresses a run by uuid, so the fixture's run is re-seated
-	// under one: a copy, the original settled, the step moved across.
-	var oldID string
-	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&oldID); err != nil {
-		t.Fatalf("read blueprint run: %v", err)
-	}
-	brID := fixtureUUID("br_bp-cancel")
-	execSQL(t, s.db, `UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, oldID)
-	execSQL(t, s.db, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, creator_user_id, started_at)
-		SELECT ?, blueprint_id, task_id, trigger_type, 'running', step_plan, worktree_path, creator_user_id, started_at
-		  FROM blueprint_runs WHERE id = ?`, brID, oldID)
-	execSQL(t, s.db, `UPDATE conversations SET status = NULL, blueprint_run_id = ? WHERE id = ?`, brID, conversationID)
-
-	rec := doJSON(t, s, "POST", "/api/blueprint-runs/"+brID+"/cancel", nil)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
-	}
-	var intent bool
-	var convStatus sql.NullString
-	var bpStatus string
-	if err := s.db.QueryRow(`
-		SELECT c.stop_requested_at IS NOT NULL, c.status, br.status
-		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
-		 WHERE c.id = ?`, conversationID).Scan(&intent, &convStatus, &bpStatus); err != nil {
-		t.Fatalf("read post-cancel state: %v", err)
-	}
-	if !intent || convStatus.Valid || bpStatus != "running" {
-		t.Errorf("after the cancel = (intent %v, status %v, run %q), want (set, none, running)", intent, convStatus, bpStatus)
-	}
-}
-
 // TestHandleAgentStop_RetiredPathsAreGone: /stop is the one address for the
-// gesture, so /cancel and /interrupt are not routes.
+// gesture, so /cancel and /interrupt are not routes, and a blueprint run has
+// no cancel of its own: a run is cancelled only by a lifecycle action one
+// layer up, such as a requeue.
 func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	conversationID := seedSteerConversation(t, s.db, "retired", "running")
+	// A run path addresses its run by uuid, and a 404 for a malformed id would
+	// pass for a missing route, so the task gets a running run under one.
+	var taskID, blueprintID string
+	if err := s.db.QueryRow(`
+		SELECT br.task_id, br.blueprint_id
+		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		 WHERE c.id = ?`, conversationID).Scan(&taskID, &blueprintID); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	brID := dbtest.SeedBlueprintRun(t, s.db, domain.BlueprintRun{
+		ID: fixtureUUID("br_retired"), BlueprintID: blueprintID, TaskID: taskID,
+	})
 
-	for _, path := range []string{"cancel", "interrupt"} {
-		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/"+path, nil)
+	for _, path := range []string{
+		"/api/agent/conversations/" + conversationID + "/cancel",
+		"/api/agent/conversations/" + conversationID + "/interrupt",
+		"/api/blueprint-runs/" + brID + "/cancel",
+	} {
+		rec := doJSON(t, s, "POST", path, nil)
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("POST /%s status = %d, want 404 (route retired)", path, rec.Code)
+			t.Errorf("POST %s status = %d, want 404 (route retired)", path, rec.Code)
 		}
+	}
+	if rec := doJSON(t, s, "GET", "/api/blueprint-runs/"+brID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("GET the re-seated run = %d, want 200 — the 404s above prove nothing unless the run is addressable: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -434,5 +416,87 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("handler did not receive the decision after resolve")
+	}
+}
+
+// TestHandleMessage_BodyValidation is the message body's contract. The
+// fields are checked before anything is looked up, and every failing field is
+// reported. An accepted body runs the send, whose row records the settings.
+func TestHandleMessage_BodyValidation(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	type item struct{ reason, field string }
+	cases := []struct {
+		name   string
+		body   string
+		status int
+		errs   []item
+		effort string
+	}{
+		{"an unknown field", `{"text":"go","temperature":0.2}`, http.StatusBadRequest, nil, ""},
+		{"a model the deployment does not offer", `{"text":"go","model":"gpt-9"}`, http.StatusBadRequest,
+			[]item{{"INVALID_FIELD", "model"}}, ""},
+		{"an effort outside the five", `{"text":"go","model":"sonnet","effort":"minimal"}`, http.StatusBadRequest,
+			[]item{{"INVALID_FIELD", "effort"}}, ""},
+		{"a body bad in model and effort", `{"text":"go","model":"gpt-9","effort":"minimal"}`, http.StatusBadRequest,
+			[]item{{"INVALID_FIELD", "model"}, {"INVALID_FIELD", "effort"}}, ""},
+		{"blank text with a bad model", `{"text":" ","model":"gpt-9"}`, http.StatusBadRequest,
+			[]item{{"MISSING_FIELD", "text"}, {"INVALID_FIELD", "model"}}, ""},
+	}
+	for _, level := range domain.EffortLevels {
+		cases = append(cases, struct {
+			name   string
+			body   string
+			status int
+			errs   []item
+			effort string
+		}{"effort " + level, `{"text":"go","model":"sonnet","effort":"` + level + `"}`, http.StatusOK, nil, level})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			withEmptyBlobStore(t, s)
+			conversationID := seedSteerConversation(t, s.db, "body", "open")
+			execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-body', worktree_path=?, model='sonnet' WHERE id=?`, t.TempDir(), conversationID)
+			// A follow-up on finished work, which a message's settings may change.
+			execSQL(t, s.db, `UPDATE blueprint_runs SET status='completed' WHERE id=(SELECT blueprint_run_id FROM conversations WHERE id=?)`, conversationID)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/agent/conversations/"+conversationID+"/message", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.status != http.StatusOK {
+				if n := messageRowCount(t, s.db, conversationID); n != 0 {
+					t.Errorf("a refused body recorded %d message(s)", n)
+				}
+				if tc.errs == nil {
+					return
+				}
+				var env struct {
+					Errors []struct{ Reason, Field string } `json:"errors"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+					t.Fatalf("decode errors: %v", err)
+				}
+				if len(env.Errors) != len(tc.errs) {
+					t.Fatalf("errors = %+v, want %+v", env.Errors, tc.errs)
+				}
+				for i, want := range tc.errs {
+					if env.Errors[i].Reason != want.reason || env.Errors[i].Field != want.field {
+						t.Errorf("error %d = %+v, want %+v", i, env.Errors[i], want)
+					}
+				}
+				return
+			}
+			var model, effort string
+			if err := s.db.QueryRow(`SELECT COALESCE(model, ''), COALESCE(effort, '') FROM messages WHERE conversation_id=?`, conversationID).Scan(&model, &effort); err != nil {
+				t.Fatalf("read the queued row: %v", err)
+			}
+			if model != "sonnet" || effort != tc.effort {
+				t.Errorf("queued row settings = (%q, %q), want (sonnet, %q)", model, effort, tc.effort)
+			}
+		})
 	}
 }

@@ -55,6 +55,11 @@ type RunOptions struct {
 	// Model is passed via --model. Empty omits the flag.
 	Model string
 
+	// Effort is the reasoning effort, one of domain.EffortLevels, passed via
+	// --effort. Empty omits the flag, which leaves it at Claude Code's
+	// default.
+	Effort string
+
 	// PermissionMode is the Claude Code permission posture used when the query
 	// starts. Empty means "default" — the allowlist decides, and an
 	// off-allowlist call is prompted or denied (see BuildArgs for why it is
@@ -68,6 +73,14 @@ type RunOptions struct {
 	// resume path, and per-message resumption against a long-lived
 	// session.
 	SessionID string
+
+	// SessionCostBaselineUSD is the running total the session in SessionID
+	// had reached before this process. Claude Code restores a session's total
+	// on a resume and reports it in every result's total_cost_usd, so the
+	// reader subtracts this to give the process's own spend as
+	// Result.CostUSD. Meaningful only with SessionID: a process that resumes
+	// nothing starts its session at zero, and this is ignored.
+	SessionCostBaselineUSD float64
 
 	// Message is the value passed to `-p`, and the opening user message of
 	// an interactive run that carries no OpeningBlocks. What it holds follows
@@ -370,9 +383,17 @@ type RunOptions struct {
 // and is injected on the upstream hop; the placeholder is all the agent's
 // environment ever holds, in either mode.
 type GHChannelParams struct {
-	// Host is the injector's bound "host:port" (no scheme) — GH_HOST. gh forces
-	// https to it and verifies against the injector's per-run cert.
+	// Host is GH_HOST, no scheme. Multi mode's is the injector's bound
+	// "host:port", which gh forces https to and verifies against the injector's
+	// per-run cert. A local run's is "127.0.0.1" with no port when its gh
+	// reaches the injector over the unix socket its ConfigDir names, since gh
+	// drops a git remote's port before it compares the remote with GH_HOST;
+	// otherwise it is GitHost.
 	Host string
+	// GitHost is the injector's TLS listener, "127.0.0.1:<port>", which a local
+	// run's git remotes are rewritten onto. Direct path only: a sandboxed run's
+	// git config is built by its sidecar.
+	GitHost string
 	// Token is the per-run placeholder the agent's gh presents
 	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
 	Token string
@@ -427,6 +448,7 @@ type NoopSink struct{}
 
 func (NoopSink) OnSession(string) error          { return nil }
 func (NoopSink) OnMessage(*domain.Message) error { return nil }
+func (NoopSink) OnSessionCost(float64)           {}
 
 // UsageSink accumulates aggregate token usage across one Run. It's the
 // drop-in replacement for NoopSink at the one-shot system-job call sites
@@ -451,6 +473,8 @@ type UsageSink struct {
 }
 
 func (s *UsageSink) OnSession(string) error { return nil }
+
+func (s *UsageSink) OnSessionCost(float64) {}
 
 func (s *UsageSink) OnMessage(m *domain.Message) error {
 	if m == nil {
@@ -490,6 +514,13 @@ type Sink interface {
 	// logged and skipped; the run does not abort because a single
 	// row failed to insert.
 	OnMessage(msg *domain.Message) error
+
+	// OnSessionCost fires once for each result the stream reports, with the
+	// session's running total as the SDK reported it (Result.SessionCostUSD),
+	// so the caller can keep it as the total the session's next resume
+	// measures its spend from. It has nothing to return: a failure to keep
+	// it is the implementation's to log, and it never fails the turn.
+	OnSessionCost(totalUSD float64)
 }
 
 // StreamObserver is an optional extension of Sink, for a caller that has to
@@ -618,7 +649,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		return &Outcome{Stderr: proc.Stderr()}, fmt.Errorf("start agent runtime: %w", err)
 	}
 
-	stream := NewStreamState()
+	stream := newStreamStateFor(opts)
 	result, streamErr := consumeStream(proc.Stdout(), sink, stream, opts.TraceID)
 
 	// If the stream reader bailed before a terminal result, the
@@ -765,10 +796,13 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// githooks.LFSSkipSmudgeEnvVar is stripped and re-set for the same reason:
 	// an inherited value would decide whether the agent's checkouts download
 	// LFS content, which is TF's call to make the same way in every run.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar})
-	if opts.GHChannel != nil {
-		parentEnv = dropEnvKeysFold(parentEnv, ghInheritedEnvKeys)
-	}
+	// GitHub's CLI variables are stripped because an operator's GITHUB_TOKEN
+	// or GH_TOKEN would let the agent act on GitHub as the operator, and an
+	// operator's GH_REPO or GH_HOST would retarget its gh (isGitHubCLIEnvKey).
+	parentEnv := filterEnvFunc(
+		filterEnv(os.Environ(), []string{jscJITEnvKey, runmode.SandboxMarkerEnvVar, backgroundTasksEnvKey, githooks.LFSSkipSmudgeEnvVar}),
+		isGitHubCLIEnvKey,
+	)
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
 	// On Windows, the Git Bash the preflight approved; nothing elsewhere.
 	hookEnv = append(hookEnv, gitBashEnv()...)
@@ -897,6 +931,7 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 			deliverMessages(sink, messages)
 
 			if result != nil {
+				sink.OnSessionCost(result.SessionCostUSD)
 				return result, nil
 			}
 		}

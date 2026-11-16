@@ -1,6 +1,6 @@
 import type { Conversation, Task } from '../../types'
 import { eventDisplay, eventTone, type EventTone } from '../../lib/eventDisplay'
-import { packageFacts } from '../../lib/vulnerablePackage'
+import { alertFacts } from '../../lib/vulnerablePackage'
 import {
   activeProse,
   completionKind,
@@ -66,8 +66,8 @@ export interface CardModel {
    *  thing a card shows, and so the card stays free of `lib/`. */
   event?: { label: string; description: string; tone: EventTone }
   /** What the title cannot say about the entity: a vulnerable package's
-   *  repository, highest open severity and open alert count. Absent for an
-   *  entity whose title says it all. */
+   *  highest open severity and open alert count. Absent for an entity whose
+   *  title says it all. */
   facts?: CardFact[]
   /** The agent's live line while working: its current action, or the setup
    *  phase or the queue wait that stands in for one. */
@@ -94,9 +94,13 @@ export function deriveCard(
   now: number = Date.now(),
 ): CardModel {
   const queuedTask = task.status === 'queued' || task.status === 'snoozed'
-  // TODO(TFAC-1423): a conversation whose has_run is false counts as no run
-  // here, so a task a person just claimed stops reading as idle.
-  const hasRun = !!conversation && !queuedTask
+  // A conversation parked without ever having run is no run: it is the one a
+  // person's claim opens, before anyone has typed, and a card reading it as
+  // idle would say work stopped that never started. One that has not run but
+  // is queued, starting or failed stays a run, since something is happening
+  // to it or went wrong.
+  const parkedUnrun = conversation?.has_run === false && conversation.status === 'open'
+  const hasRun = !!conversation && !queuedTask && !parkedUnrun
   const lifecycle = lifecycleOf(task, hasRun ? conversation : undefined)
   const working = lifecycle === 'working'
 
@@ -119,7 +123,7 @@ export function deriveCard(
   if (working && conversation) {
     const retryAt = retryingAt(conversation, now)
     if (retryAt) command = retryingAtLabel(retryAt)
-    else if (conversation.Status === 'queued') {
+    else if (conversation.status === 'queued') {
       const ahead = (conversation.queue_position ?? 1) - 1
       command = ahead > 0 ? `Waiting for a run slot · ${ahead} ahead` : 'Waiting for a run slot'
     } else command = activeProse(conversation)
@@ -133,13 +137,13 @@ export function deriveCard(
       // entered the line, a started run's elapsed from the claim stamp, so
       // queue time never inflates working time.
       const from =
-        conversation.Status === 'queued'
-          ? (conversation.QueuedAt ?? conversation.StartedAt)
+        conversation.status === 'queued'
+          ? (conversation.queued_at ?? conversation.started_at)
           : workStartedAt(conversation)
       elapsed = formatElapsed(from, now)
       ticking = true
-    } else if (conversation.DurationMs != null) {
-      elapsed = formatDurationMs(conversation.DurationMs)
+    } else if (conversation.duration_ms != null) {
+      elapsed = formatDurationMs(conversation.duration_ms)
     }
   }
 
@@ -165,7 +169,7 @@ export function deriveCard(
     // requeue and it is on a done card too: a settled lane is read to find
     // what got handled, and "what happened" is half of that.
     event: eventOf(task),
-    facts: task.vulnerable_package ? packageFacts(task.vulnerable_package) : undefined,
+    facts: task.vulnerable_package ? alertFacts(task.vulnerable_package) : undefined,
     command,
     artifacts: artifactTotals(conversation),
     pending: pendingTotals(conversation),
@@ -177,7 +181,7 @@ export function deriveCard(
     // steps that produced them are over, and a queued card carrying their
     // segments would read as a plan still in motion.
     chain: hasRun ? chainShape(chainSteps) : undefined,
-    liveState: conversation?.Status === 'queued' ? 'idle' : 'running',
+    liveState: conversation?.status === 'queued' ? 'idle' : 'running',
     ticking,
   }
 }
@@ -201,7 +205,7 @@ function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
   // No run: a task, waiting — or, for a task closed with nothing ever run on
   // it, simply done.
   if (!run) return isOpenTask(task) ? 'queued' : 'done'
-  const s = run.Status
+  const s = run.status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'
   // A concluded conversation means three things (lib/conversationStatus

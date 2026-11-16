@@ -27,7 +27,7 @@ export const FAILED_STATUSES = TERMINAL_CONVERSATION_STATUSES
 // concluded conversation is still resumable; whether the work it belongs to is
 // done is its blueprint run's status, which completionKind reads.
 export function isConcluded(conversation: Conversation): boolean {
-  return conversation.Status === 'open' && conversation.CompletedAt != null
+  return conversation.status === 'open' && conversation.completed_at != null
 }
 
 export function isTerminalStatus(
@@ -51,7 +51,7 @@ export function isClaimPhase(status: ConversationStatusValue): status is ClaimPh
 }
 
 export function isActiveConversation(conversation: Conversation): boolean {
-  return isActiveStatus(conversation.Status)
+  return isActiveStatus(conversation.status)
 }
 
 export function isActiveStatus(status: ConversationStatusValue): boolean {
@@ -80,7 +80,7 @@ export const PHASE_PROSE: Record<ClaimPhase, string> = {
 // active (queued, parked, ended) is undefined: each surface has its own
 // words for those.
 export function activeProse(conversation: Conversation): string | undefined {
-  const s = conversation.Status
+  const s = conversation.status
   if (isClaimPhase(s)) return PHASE_PROSE[s]
   if (s === 'running') return conversation.current_action || 'Working'
   return undefined
@@ -92,7 +92,7 @@ export function activeProse(conversation: Conversation): string | undefined {
 // terminals. The board confirms a requeue on this, not on whether a run
 // exists: with nothing in flight the move is reversible by re-claiming.
 export function isLiveRun(conversation: Conversation): boolean {
-  return conversation.Status === 'queued' || isActiveStatus(conversation.Status)
+  return conversation.status === 'queued' || isActiveStatus(conversation.status)
 }
 
 export function isFailedStatus(status: ConversationStatusValue): boolean {
@@ -176,7 +176,7 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
   if (!isConcluded(conversation)) return null
   const pos = chainPosition(conversation)
   const isFinal = pos ? pos.isFinal : true
-  if (conversation.Outcome === 'continue' && !isFinal) return 'handoff'
+  if (conversation.outcome === 'continue' && !isFinal) return 'handoff'
   switch (conversation.blueprint_run_status) {
     case 'completed':
       return 'done'
@@ -185,7 +185,7 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
     case 'cancelled':
       return 'stopped'
   }
-  switch (conversation.Outcome) {
+  switch (conversation.outcome) {
     case 'continue':
       return isFinal ? 'done' : 'handoff'
     case 'finish':
@@ -219,7 +219,7 @@ export function completionGloss(conversation: Conversation): string {
     // situation resolves, whatever its run did.
     if (conversation.blueprint_run_status === 'cancelled') return 'workflow cancelled'
     if (conversation.blueprint_run_status === 'failed') return 'the workflow failed'
-    return conversation.Outcome === 'abort'
+    return conversation.outcome === 'abort'
       ? 'stopped without finishing'
       : 'ended without a usable outcome — the workflow stopped here for a human'
   }
@@ -232,7 +232,7 @@ export function completionGloss(conversation: Conversation): string {
   if (pos && !pos.isFinal) return 'ended the workflow early — the later steps were skipped'
   // A finished run stays finished: a follow-up on its last step that ended on
   // an abort is recorded on the step and reopens nothing.
-  if (conversation.Outcome === 'abort')
+  if (conversation.outcome === 'abort')
     return 'work complete — a later follow-up’s abort reopened nothing'
   if (pos) return `work complete — the last of ${pos.total} steps`
   return 'work complete'
@@ -252,13 +252,14 @@ export function completionGloss(conversation: Conversation): string {
 // no entry here is printed to a person as a raw identifier, and an entry the
 // backend never writes is a gloss nobody will ever see.
 export const PARK_REASON_LABELS: Record<string, string> = {
-  idle: 'paused — nothing further came',
+  turn_incomplete: 'paused — the last reply didn’t finish',
   user_cancelled: 'stopped by user',
   system_cancelled: 'stopped by system',
   blueprint_cancelled: 'workflow cancelled',
   blueprint_terminal: 'workflow ended first',
   launch_failed: 'the runtime could not start',
   model_not_enabled: 'its model is no longer one this team can pick',
+  provider_not_connected: 'its model’s provider is not connected',
   stalled: 'stalled',
   upstream_unavailable: 'Paused: provider unavailable',
   sandbox_lost: 'its sandbox stopped too many times — send a message to try again',
@@ -279,12 +280,12 @@ export function parkReasonLabel(reason: string): string {
 // exclusion — the infrastructure under it died, so there is no tree to
 // rehydrate.
 //
-// Status is one of three inputs, and the only one the client can see: whether
+// status is one of three inputs, and the only one the client can see: whether
 // the workspace survived and whether anything would drive it are server-side
 // facts. So this is never the whole answer — use canResumeConversation, which folds in
 // the server's own verdict.
 export function isResumableConversation(conversation: Conversation): boolean {
-  return conversation.Status === 'open'
+  return conversation.status === 'open'
 }
 
 // canResumeConversation is the composer's gate for a conversation with no live
@@ -317,10 +318,7 @@ export function resumeBlockedCopy(conversation: Conversation): string {
       return 'This step just handed off — follow up on the blueprint’s latest step.'
     case 'session_missing':
     case 'worktree_missing':
-    case 'model_missing':
       return 'This run didn’t record the state a resume needs, so it can’t be continued.'
-    case 'model_not_enabled':
-      return 'This run’s model is no longer one this team can pick — choose one from the team’s enabled models in Settings, then continue.'
     // The boundary rungs. Each says the same thing — this conversation is no
     // longer the one its task is about — and then the part that differs: who
     // or what carries the work now, since that is what the reader does next.
@@ -334,10 +332,15 @@ export function resumeBlockedCopy(conversation: Conversation): string {
       return 'This step is done and the workflow has moved on — follow up on its latest step.'
     case 'ended_team_archived':
       return 'The team that owned this work was archived, so nothing will pick it back up.'
+    case 'ended_reassigned':
+      return 'This task was reassigned to someone on another team, whose team carries the work now in a conversation of its own.'
     case 'ended_failed':
-      return 'This run failed, so it can’t be continued. Delegate the task again to start fresh.'
-    // TODO(TFAC-1423): 'ended_reassigned', the boundary a reassign to another
-    // team stamps, has no sentence of its own and reads the generic one below.
+      // A failed chat is replaced for the person who holds the task, so the
+      // reader's next step is that conversation; the station links to it. A
+      // delegation is replaced by nothing.
+      return conversation.type === 'interactive'
+        ? 'This chat failed, so it can’t be continued. A new conversation was opened on the task for the person who holds it.'
+        : 'This run failed, so it can’t be continued. Delegate the task again to start fresh.'
     default:
       return 'This conversation can’t take a follow-up.'
   }
@@ -348,7 +351,7 @@ export function resumeBlockedCopy(conversation: Conversation): string {
 // queue columns. Live elapsed readouts tick from here so queue dwell never
 // inflates working time.
 export function workStartedAt(conversation: Conversation): string {
-  return conversation.ClaimedAt ?? conversation.StartedAt
+  return conversation.claimed_at ?? conversation.started_at
 }
 
 // Settled queue dwell below this stays off the display surfaces (card footer,
@@ -357,21 +360,21 @@ export function workStartedAt(conversation: Conversation): string {
 // can't drift; a live QUEUED conversation always shows its wait regardless.
 export const QUEUE_DWELL_VISIBLE_MS = 5000
 
-// queueDwellMs — how long the conversation waited in the queue: live (now − QueuedAt)
+// queueDwellMs — how long the conversation waited in the queue: live (now − queued_at)
 // while it is still queued, else the latest episode's settled dwell
-// (ClaimedAt − QueuedAt). QueuedAt is stamped when the conversation entered the
+// (claimed_at − queued_at). queued_at is stamped when the conversation entered the
 // queue this episode — a resume re-stamps it at the wake — so the readout is
 // the current wait, never the whole life since mint. A row that predates the
-// queue columns has no QueuedAt: while it is live in the queue its wait is
-// measured from StartedAt (the only stamp it has, and for such a row also its
+// queue columns has no queued_at: while it is live in the queue its wait is
+// measured from started_at (the only stamp it has, and for such a row also its
 // enqueue), and once settled its dwell is unknowable, so null.
 export function queueDwellMs(conversation: Conversation, now: number = Date.now()): number | null {
   const queuedAt =
-    conversation.QueuedAt ?? (conversation.Status === 'queued' ? conversation.StartedAt : null)
+    conversation.queued_at ?? (conversation.status === 'queued' ? conversation.started_at : null)
   if (!queuedAt) return null
-  if (conversation.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
-  if (!conversation.ClaimedAt) return null
-  return Math.max(0, new Date(conversation.ClaimedAt).getTime() - new Date(queuedAt).getTime())
+  if (conversation.status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
+  if (!conversation.claimed_at) return null
+  return Math.max(0, new Date(conversation.claimed_at).getTime() - new Date(queuedAt).getTime())
 }
 
 // retryingAt is when a deferred conversation is tried again: a queued
@@ -381,10 +384,10 @@ export function queueDwellMs(conversation: Conversation, now: number = Date.now(
 // conversation, and once the time has passed — from then on it is an ordinary
 // queued run waiting for a slot.
 export function retryingAt(
-  conversation: Pick<Conversation, 'Status' | 'next_attempt_at'>,
+  conversation: Pick<Conversation, 'status' | 'next_attempt_at'>,
   now: number = Date.now(),
 ): Date | null {
-  if (conversation.Status !== 'queued' || !conversation.next_attempt_at) return null
+  if (conversation.status !== 'queued' || !conversation.next_attempt_at) return null
   const at = new Date(conversation.next_attempt_at)
   if (Number.isNaN(at.getTime()) || at.getTime() <= now) return null
   return at
@@ -393,7 +396,13 @@ export function retryingAt(
 // retryingAtLabel renders retryingAt's time for a person, in their local time
 // and the 24-hour clock the run views stamp times with.
 export function retryingAtLabel(at: Date): string {
-  return `Retrying at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
+  return `Retrying at ${clockTime(at)}`
+}
+
+// clockTime is a time of day as the run views stamp one: local time, on the
+// 24-hour clock.
+export function clockTime(at: Date): string {
+  return at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 export function formatDurationMs(ms: number): string {

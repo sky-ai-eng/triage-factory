@@ -11,8 +11,11 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -84,7 +87,7 @@ func TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven(t *testing.T) {
 	finishBlueprint(t, database, bpr, "completed", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-followup", runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-followup", runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage on a finished blueprint's final conversation: %v", err)
 	}
 
@@ -129,7 +132,7 @@ func TestFollowUpOnFinishedBlueprint_LeavesTheBlueprintAndTaskAlone(t *testing.T
 
 	wantStatus, wantStep := blueprintState(t, database, bpr)
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	// The resume alone must not move anything.
@@ -186,7 +189,7 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 					markNative(t, database, "r-earlier")
 				}
 
-				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-earlier", runmode.LocalDefaultUserID, "one more thing")
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-earlier", runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{})
 				if !errors.Is(err, ErrConversationConcluded) {
 					t.Fatalf("err = %v, want ErrConversationConcluded — a wake here strands the row for good", err)
 				}
@@ -216,11 +219,55 @@ func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	finishBlueprint(t, database, bpr, "aborted", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
 	}
 	if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "running" {
 		t.Errorf("blueprint status = %q, want running — an abort resumes its sequence", gotStatus)
+	}
+}
+
+// A message to the step an aborted blueprint stopped on, whose model's provider
+// has since been disconnected, is refused before the wake. An accepted one
+// would re-open the blueprint and withdraw its abort for a step whose claim
+// then refuses to run it.
+func TestFollowUpOnTheAbortedStep_AnUnconnectedProviderRefusesBeforeTheBlueprintReopens(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-aborted-lost", "sess-aborted-lost", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', model=? WHERE id='r-aborted-lost'`,
+		bedrockModel,
+	); err != nil {
+		t.Fatalf("abort conversation: %v", err)
+	}
+	bpr := blueprintRunIDForConversation(t, database, "r-aborted-lost")
+	finishBlueprint(t, database, bpr, "aborted", 0)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted-lost", runmode.LocalDefaultUserID, "pick it back up", domain.TurnSettings{})
+	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
+		t.Fatalf("SendMessage err = %v, want ErrProviderUnconfigured", err)
+	}
+	// A step's model cannot change, so there is no field for the person to fix.
+	var fe *SettingsFieldError
+	if errors.As(err, &fe) {
+		t.Errorf("SendMessage err names field %q, want none", fe.Field)
+	}
+	if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "aborted" {
+		t.Errorf("blueprint status = %q, want it still aborted — a refused send re-opens nothing", gotStatus)
+	}
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-aborted-lost'`).Scan(&rows); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a refused send wrote %d message row(s)", rows)
+	}
+	if !storedConcluded(t, database, "r-aborted-lost") {
+		t.Errorf("stored status = %q, want it still concluded", storedStatus(t, database, "r-aborted-lost"))
 	}
 }
 
@@ -254,7 +301,7 @@ func TestFollowUpOnAnAbortedStep_ContinuesTheBlueprintToItsNextStep(t *testing.T
 			}
 			wantTaskStatus := taskStatus(t, database, taskID)
 
-			if err := s.SendMessage(context.Background(), org, stepConversationID, runmode.LocalDefaultUserID, "keep going"); err != nil {
+			if err := s.SendMessage(context.Background(), org, stepConversationID, runmode.LocalDefaultUserID, "keep going", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
 			}
 			if gotStatus, gotStep := blueprintState(t, database, brID); gotStatus != "running" || gotStep != 0 {
@@ -367,6 +414,62 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 	}
 }
 
+// TestModelForClaim_RunsOnTheNewestPersonRowsModel: a claim runs on the model
+// the newest person message was sent with, held to the team's set, and a
+// conversation with no blueprint run and no person message takes the team's
+// default rather than a model of its own.
+func TestModelForClaim_RunsOnTheNewestPersonRowsModel(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-claim-model", "sess", t.TempDir())
+	brID := blueprintRunIDForConversation(t, database, "r-claim-model")
+	finishBlueprint(t, database, brID, "completed", 0)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelSonnet,
+			domain.TeamModelSet([]string{domain.ModelSonnet, domain.ModelHaiku}, orgUnrestricted())), nil
+	})
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	conv, err := s.conversations.GetSystem(ctx, org, "r-claim-model")
+	if err != nil || conv == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	finished := &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}
+
+	if got, err := s.modelForClaim(ctx, org, finished, *conv); err != nil || got != domain.ModelSonnet {
+		t.Errorf("no person row = (%q, %v), want the team default", got, err)
+	}
+	if _, err := s.conversations.InsertMessageSystem(ctx, org,
+		pendingUserInput(conv.ID, runmode.LocalDefaultUserID, "quick one", domain.TurnSettings{Model: domain.ModelHaiku, Effort: domain.EffortLow})); err != nil {
+		t.Fatalf("insert person row: %v", err)
+	}
+	if got, err := s.modelForClaim(ctx, org, finished, *conv); err != nil || got != domain.ModelHaiku {
+		t.Errorf("after a person row on %s = (%q, %v), want that model", domain.ModelHaiku, got, err)
+	}
+	// The person row's model is held to the set: disabled since the message
+	// was sent, the claim is refused by name rather than run on something else.
+	if _, err := s.conversations.InsertMessageSystem(ctx, org,
+		pendingUserInput(conv.ID, runmode.LocalDefaultUserID, "hard one", domain.TurnSettings{Model: domain.ModelOpus})); err != nil {
+		t.Fatalf("insert person row: %v", err)
+	}
+	if got, err := s.modelForClaim(ctx, org, finished, *conv); !errors.Is(err, domain.ErrModelNotEnabled) || got != "" {
+		t.Errorf("a person row on a disabled model = (%q, %v), want a refusal", got, err)
+	}
+	// A step of a running blueprint runs on its own model whatever the person
+	// rows say or the set now holds: a step's work is not re-decided.
+	running := &domain.BlueprintRun{Status: domain.BlueprintRunStatusRunning}
+	if got, err := s.modelForClaim(ctx, org, running, *conv); err != nil || got != conv.Model {
+		t.Errorf("a running step = (%q, %v), want its own model %q", got, err, conv.Model)
+	}
+
+	// No blueprint run and no person row: the team's default, not the
+	// conversation's own model.
+	bare := domain.Conversation{ID: "r-no-such-rows", Model: "step-model", TeamID: runmode.LocalDefaultTeamID}
+	if got, err := s.modelForClaim(ctx, org, nil, bare); err != nil || got != domain.ModelSonnet {
+		t.Errorf("no blueprint run and no person row = (%q, %v), want the team default", got, err)
+	}
+}
+
 // TestFollowUpRecordsTaskEvent: the resume moves nothing a person can see, so
 // the task_events row is the only trace the closed card keeps of work
 // continuing after it closed.
@@ -384,7 +487,7 @@ func TestFollowUpRecordsTaskEvent(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-timeline", runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-timeline", runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -441,18 +544,37 @@ func TestDispatchClaimedRun_FinishedBlueprintWithoutAMessageParks(t *testing.T) 
 	if gotStatus, gotStep := blueprintState(t, database, bpr); gotStatus != "completed" || gotStep != 0 {
 		t.Errorf("blueprint = (%q, %d), want it untouched at (completed, 0)", gotStatus, gotStep)
 	}
+	// The follow-up's reply never finished, and the transcript says so.
+	var parkReason string
+	if err := database.QueryRow(`SELECT COALESCE(park_reason, '') FROM conversations WHERE id = 'r-nomsg'`).Scan(&parkReason); err != nil {
+		t.Fatalf("read park_reason: %v", err)
+	}
+	if parkReason != string(domain.ParkReasonTurnIncomplete) {
+		t.Errorf("park_reason = %q, want %q", parkReason, domain.ParkReasonTurnIncomplete)
+	}
+	if n := noMessageParkNotes(t, database, "r-nomsg"); n != 1 {
+		t.Errorf("%d no-message stop notes on the transcript, want one", n)
+	}
+}
+
+// noMessageParkNotes counts conversationID's stop notes that record a
+// follow-up claim parking with no message to send.
+func noMessageParkNotes(t *testing.T, database *sql.DB, conversationID string) int {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ? AND content = ?`,
+		conversationID, domain.MessageSubtypeStopNote, noMessageParkNotice).Scan(&n); err != nil {
+		t.Fatalf("count stop notes: %v", err)
+	}
+	return n
 }
 
 // A team that may no longer run the model its concluded work would continue on
-// is refused BEFORE the message is written, and the composer is told the same
-// thing by the same walk.
-//
-// That is the whole point of putting the check on the refusal ladder rather
-// than only at dispatch: the person is right there, having just typed, and the
-// answer they need — pick a model — is one they can act on in the moment. A
-// message accepted here would be queued against a claim that refuses it, and
-// they would learn minutes later from a stop note.
-func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
+// still offers the composer, because the person can pick another model, and
+// the send that would run on the disabled one is refused BEFORE the message is
+// written. A message accepted here would be queued against a claim that
+// refuses it, and the person would learn minutes later from a stop note.
+func TestFollowUp_ADisabledModelLeavesTheComposerAndRefusesTheSendThatWouldRunOnIt(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-disabled", "sess-disabled", t.TempDir())
@@ -467,7 +589,7 @@ func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	// The team's default is gone and its set no longer names what the step ran
-	// on — the two halves of the refusal, together.
+	// on, so a message that names no model would run on a disabled one.
 	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
 		return domain.NewTeamModels("",
 			domain.TeamModelSet([]string{domain.ModelHaiku}, orgUnrestricted())), nil
@@ -477,14 +599,17 @@ func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
 	if err != nil || conv == nil {
 		t.Fatalf("load conversation: %v", err)
 	}
-	ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv)
-	if ok || reason != ResumeBlockedModelNotEnabled {
-		t.Errorf("ResumabilityFor = (%v, %q), want the model rung — the composer has to say so before anyone types", ok, reason)
+	if ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv); !ok {
+		t.Errorf("ResumabilityFor = (false, %q), want resumable — the person can pick another model", reason)
 	}
 
-	err = s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-disabled", runmode.LocalDefaultUserID, "one more thing")
+	err = s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-disabled", runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{})
 	if !errors.Is(err, domain.ErrModelNotEnabled) {
 		t.Fatalf("SendMessage err = %v, want a model refusal", err)
+	}
+	var fe *SettingsFieldError
+	if !errors.As(err, &fe) || fe.Field != "model" {
+		t.Errorf("SendMessage err = %v, want it to name the model field", err)
 	}
 	// Nothing was written: no queued row for a claim that would refuse it, and
 	// the conversation is where it was.
@@ -501,17 +626,196 @@ func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
 		t.Errorf("stored status = %q, want it still concluded — a refused send writes nothing", storedStatus(t, database, "r-disabled"))
 	}
 
-	// Re-enabling is the whole fix, and it takes effect on the next read: the
-	// ladder resolves the set fresh rather than caching a verdict onto the row.
-	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
-		return domain.NewTeamModels("",
-			domain.TeamModelSet([]string{domain.ModelHaiku, domain.ModelOpus}, orgUnrestricted())), nil
-	})
-	if ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv); !ok {
-		t.Errorf("after re-enabling the model the composer is still blocked: %q", reason)
+	// Naming an enabled model is the fix, and the row records it.
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-disabled", runmode.LocalDefaultUserID, "one more thing",
+		domain.TurnSettings{Model: domain.ModelHaiku}); err != nil {
+		t.Fatalf("SendMessage naming an enabled model: %v", err)
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-disabled", runmode.LocalDefaultUserID, "one more thing"); err != nil {
-		t.Errorf("SendMessage after re-enabling: %v", err)
+	var model string
+	if err := database.QueryRow(
+		`SELECT COALESCE(model, '') FROM messages WHERE conversation_id='r-disabled' AND delivered=false`,
+	).Scan(&model); err != nil {
+		t.Fatalf("read the queued row: %v", err)
+	}
+	if model != domain.ModelHaiku {
+		t.Errorf("queued row model = %q, want %q", model, domain.ModelHaiku)
+	}
+}
+
+// An organization that has connected one provider is refused a send naming a
+// model served by another, BEFORE the message is written. The control half
+// seals no credential for that provider, so a message accepted here would
+// queue a conversation no claim can run.
+func TestFollowUp_AModelOnAnUnconnectedProviderRefusesTheSendThatNamesIt(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-unconnected", "sess-unconnected", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish' WHERE id='r-unconnected'`,
+	); err != nil {
+		t.Fatalf("conclude conversation: %v", err)
+	}
+	finishBlueprint(t, database, blueprintRunIDForConversation(t, database, "r-unconnected"), "completed", 0)
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	// The team enables the model, so the only refusal left is the provider's.
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelSonnet,
+			domain.TeamModelSet([]string{domain.ModelSonnet, bedrockModel}, orgUnrestricted())), nil
+	})
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-unconnected", runmode.LocalDefaultUserID, "one more thing",
+		domain.TurnSettings{Model: bedrockModel})
+	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
+		t.Fatalf("SendMessage err = %v, want ErrProviderUnconfigured", err)
+	}
+	var fe *SettingsFieldError
+	if !errors.As(err, &fe) || fe.Field != "model" {
+		t.Errorf("SendMessage err = %v, want it to name the model field", err)
+	}
+	if !strings.Contains(err.Error(), modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)) {
+		t.Errorf("refusal %q does not name the provider to connect", err)
+	}
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-unconnected'`).Scan(&rows); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("a refused send wrote %d message row(s)", rows)
+	}
+	if !storedConcluded(t, database, "r-unconnected") {
+		t.Errorf("stored status = %q, want it still concluded — a refused send queues nothing", storedStatus(t, database, "r-unconnected"))
+	}
+}
+
+// A message accepted while its model's provider was connected, and claimed
+// after the provider was disconnected, parks on the first claim. Nothing
+// seals a credential for that provider, so a claim let through would wait in
+// awaiting_credentials until it timed out, hand the conversation back at no
+// cost to any budget, and be claimed again.
+func TestDispatch_AClaimOnAnUnconnectedProviderParksOnce(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, true)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-lost", "sess-lost", t.TempDir())
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-lost'`); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	finishBlueprint(t, database, blueprintRunIDForConversation(t, database, "r-lost"), "completed", 0)
+	// A minted opening and the turn it produced: work a failure would destroy,
+	// which is what makes the refusal a park.
+	if _, err := database.Exec(
+		`INSERT INTO messages (org_id, conversation_id, role, subtype, content)
+		 VALUES (?, 'r-lost', 'user', ?, '<task_context>x</task_context>'),
+		        (?, 'r-lost', 'assistant', '', 'work happened here')`,
+		runmode.LocalDefaultOrgID, domain.MessageSubtypeInjectionTaskContext, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) (domain.TeamModels, error) {
+		return domain.NewTeamModels(domain.ModelSonnet,
+			domain.TeamModelSet([]string{domain.ModelSonnet, bedrockModel}, orgUnrestricted())), nil
+	})
+	ctx := context.Background()
+	if err := s.SendMessage(ctx, runmode.LocalDefaultOrgID, "r-lost", runmode.LocalDefaultUserID, "carry on",
+		domain.TurnSettings{Model: bedrockModel}); err != nil {
+		t.Fatalf("SendMessage while the provider is connected: %v", err)
+	}
+	if _, err := sqlitestore.New(database).Orgs.SetBedrockCredentialsRef(ctx, runmode.LocalDefaultOrgID, ""); err != nil {
+		t.Fatalf("disconnect bedrock: %v", err)
+	}
+
+	claimAndDispatch(t, s, database)
+
+	var status, reason string
+	if err := database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(park_reason, '') FROM conversations WHERE id='r-lost'`,
+	).Scan(&status, &reason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "open" || reason != string(domain.ParkReasonProviderNotConnected) {
+		t.Errorf("parked as (%q, %q), want (open, %s)", status, reason, domain.ParkReasonProviderNotConnected)
+	}
+	var notes int
+	var note string
+	if err := database.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(content), '') FROM messages WHERE conversation_id='r-lost' AND subtype=?`,
+		domain.MessageSubtypeStopNote,
+	).Scan(&notes, &note); err != nil {
+		t.Fatalf("read stop note: %v", err)
+	}
+	if notes != 1 {
+		t.Fatalf("%d stop notes, want one", notes)
+	}
+	for _, want := range []string{bedrockModel, modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)} {
+		if !strings.Contains(note, want) {
+			t.Errorf("stop note %q does not name %s", note, want)
+		}
+	}
+	// The park settled the waiting message, so nothing claims the
+	// conversation again until a person sends another.
+	next, err := s.conversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil {
+		t.Fatalf("claim after the park: %v", err)
+	}
+	if next != nil {
+		t.Errorf("conversation %s was claimable again after the park", next.ID)
+	}
+	var claims int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id='r-lost'`).Scan(&claims); err != nil {
+		t.Fatalf("read claims: %v", err)
+	}
+	if claims != 1 {
+		t.Errorf("claims = %d, want the one that parked it", claims)
+	}
+}
+
+// A blueprint step runs on the model its plan froze, whatever the team's set
+// says now, and it still cannot run without a credential. A step that never
+// ran has no transcript to park, so it fails as unstarted, and its blueprint
+// with it, on the refusal that names the provider.
+func TestDispatch_AnUnstartedStepOnAnUnconnectedProviderFailsWithTheRefusal(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	connectProviders(t, database, true, false)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	seedConversation(t, database, "r-pinned", "", "")
+	if _, err := database.Exec(`UPDATE conversations SET status=NULL, model=? WHERE id='r-pinned'`, bedrockModel); err != nil {
+		t.Fatalf("queue the step: %v", err)
+	}
+	bpr := blueprintRunIDForConversation(t, database, "r-pinned")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	claimAndDispatch(t, s, database)
+
+	var status, summary string
+	if err := database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(result_summary, '') FROM conversations WHERE id='r-pinned'`,
+	).Scan(&status, &summary); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != domain.StatusFailed {
+		t.Errorf("stored status = %q, want %s — a step that never ran has nothing to park", status, domain.StatusFailed)
+	}
+	var bpStatus, abortReason string
+	if err := database.QueryRow(
+		`SELECT status, COALESCE(abort_reason, '') FROM blueprint_runs WHERE id = ?`, bpr,
+	).Scan(&bpStatus, &abortReason); err != nil {
+		t.Fatalf("read blueprint run: %v", err)
+	}
+	if bpStatus != string(domain.BlueprintRunStatusFailed) {
+		t.Errorf("blueprint status = %q, want failed", bpStatus)
+	}
+	provider := modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)
+	for name, got := range map[string]string{"conversation result_summary": summary, "blueprint abort_reason": abortReason} {
+		if !strings.Contains(got, bedrockModel) || !strings.Contains(got, provider) {
+			t.Errorf("%s = %q, want the refusal naming %s and %s", name, got, bedrockModel, provider)
+		}
 	}
 }
 
@@ -621,7 +925,7 @@ func TestFollowUp_WakeRefusedUnderARunCancelledSinceTheGateIsReportedAsTheCancel
 	stores.Blueprints = staleLiveBlueprint{BlueprintStore: stores.Blueprints, reads: new(int)}
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-cancelled", runmode.LocalDefaultUserID, "carry on")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-cancelled", runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{})
 	if !errors.Is(err, ErrBlueprintCancelled) {
 		t.Fatalf("SendMessage = %v, want ErrBlueprintCancelled", err)
 	}
@@ -631,13 +935,13 @@ func TestFollowUp_WakeRefusedUnderARunCancelledSinceTheGateIsReportedAsTheCancel
 }
 
 // unreadableAfterGateBlueprint is staleLiveBlueprint whose every read after
-// the gate's fails.
+// the gate's and the send's settings read fails, the wake's re-read first.
 type unreadableAfterGateBlueprint struct {
 	staleLiveBlueprint
 }
 
 func (b unreadableAfterGateBlueprint) GetRunSystem(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
-	if *b.reads >= 1 {
+	if *b.reads >= 2 {
 		*b.reads++
 		return nil, errors.New("blueprint read failed")
 	}
@@ -663,7 +967,7 @@ func TestFollowUp_WakeRefusedWithAnUnreadableRunIsAConflict(t *testing.T) {
 	stores.Blueprints = unreadableAfterGateBlueprint{staleLiveBlueprint{BlueprintStore: stores.Blueprints, reads: new(int)}}
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-unreadable", runmode.LocalDefaultUserID, "carry on")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-unreadable", runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{})
 	if !errors.Is(err, ErrConversationNotResumable) {
 		t.Fatalf("SendMessage = %v, want ErrConversationNotResumable", err)
 	}
@@ -720,7 +1024,7 @@ func TestFollowUp_ARefusedWakeLeavesNoMessage(t *testing.T) {
 			hub.SetBackplane(captured)
 			s := NewSpawner(database, stores, nil, hub, "claude-sonnet-4-6")
 
-			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, id, runmode.LocalDefaultUserID, "carry on")
+			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, id, runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("SendMessage = %v, want %v", err, tc.want)
 			}

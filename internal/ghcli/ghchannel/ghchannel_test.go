@@ -148,8 +148,8 @@ func TestStart_PlaceholderIsPerRun(t *testing.T) {
 	if first.Token == "" || first.Token == other.Token {
 		t.Errorf("placeholders = %q / %q, want distinct non-empty per-run values", first.Token, other.Token)
 	}
-	if first.Host == other.Host {
-		t.Errorf("both runs bound %q, want separate listeners", first.Host)
+	if first.GitHost == other.GitHost {
+		t.Errorf("both runs bound %q, want separate listeners", first.GitHost)
 	}
 }
 
@@ -194,7 +194,7 @@ func TestStart_ObserveWriteReachesInjector(t *testing.T) {
 		t.Fatal("trust file carried no usable cert")
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-	req, _ := http.NewRequest(http.MethodPatch, "https://"+ch.Host+"/api/v3/repos/octo/repo/pulls/7", nil)
+	req, _ := http.NewRequest(http.MethodPatch, "https://"+ch.GitHost+"/api/v3/repos/octo/repo/pulls/7", nil)
 	req.Header.Set("Authorization", "token "+ch.Token)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -250,7 +250,7 @@ func TestStart_ObserveReadReachesInjector(t *testing.T) {
 		t.Fatal("trust file carried no usable cert")
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-	req, _ := http.NewRequest(http.MethodGet, "https://"+ch.Host+"/api/v3/repos/octo/repo/pulls/7/files", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://"+ch.GitHost+"/api/v3/repos/octo/repo/pulls/7/files", nil)
 	req.Header.Set("Authorization", "token "+ch.Token)
 	resp, err := client.Do(req)
 	if err != nil {

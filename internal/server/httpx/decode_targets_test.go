@@ -265,12 +265,30 @@ func selfDecoding(t types.Type) string {
 	return ""
 }
 
-// isJSONType reports whether t is encoding/json's type of that name.
-// json.RawMessage is allowed though it decodes itself: its UnmarshalJSON
-// keeps the bytes and refuses nothing.
+// isJSONType reports whether t is encoding/json's type of that name, whether
+// the name declares the type or an alias for one: json.RawMessage is an alias
+// for jsontext.Value. json.RawMessage is allowed though it decodes itself: its
+// UnmarshalJSON keeps the bytes and refuses nothing.
 func isJSONType(t types.Type, name string) bool {
-	named, ok := types.Unalias(t).(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "encoding/json" && named.Obj().Name() == name
+	for {
+		var obj *types.TypeName
+		switch tt := t.(type) {
+		case *types.Alias:
+			obj = tt.Obj()
+		case *types.Named:
+			obj = tt.Obj()
+		default:
+			return false
+		}
+		if obj.Pkg() != nil && obj.Pkg().Path() == "encoding/json" && obj.Name() == name {
+			return true
+		}
+		alias, ok := t.(*types.Alias)
+		if !ok {
+			return false
+		}
+		t = alias.Rhs()
+	}
 }
 
 // isStructType reports whether t is a struct or a pointer to one.

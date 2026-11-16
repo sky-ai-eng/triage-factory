@@ -16,9 +16,9 @@
 //
 // It is its own package because both enforcement points need it and neither can
 // import the other. The settings handler asks at save time, so a team's default
-// cannot be set to something its next run would refuse; the delegate asks at
-// dispatch, which is what catches a configuration saved before a credential was
-// unbound.
+// cannot be set to something its next run would refuse; the delegate asks when
+// work is about to start, at a firing, a person's message, and a claim, which
+// is what catches a configuration saved before a credential was unbound.
 package modelaccess
 
 import (

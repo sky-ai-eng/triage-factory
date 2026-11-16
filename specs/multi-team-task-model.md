@@ -127,7 +127,7 @@ These are inherent to event→task→claim. The general fix, if ever needed, is 
 - Bot reviews per requested codeowner team; org/repo default for direct `@bot`.
 - Bot identity via the SKY-352 resolver.
 - **Two routing axes:** `review_requested` → reviewer's team; all other GitHub PR events → entity's owning team (derivation: override → prior _owned author-centric_ task → author-teams; an ambiguous multi-team author ⇒ `team_id = NULL` visible to all, a non-TF author ⇒ no task unless an explicit user rule opts a team in), with **review tasks excluded** from the owning-team derivation. Owner-only automation: only the resolved owner's triggers fire; a NULL owner fires nothing.
-- **Acting team on claim** is derived (claimer's teams ∩ `task_teams`; bot = firing trigger's team) — not blocked on the team-picker.
+- **Acting team on claim.** A person's own claim, and their delegate, name it (`team_id`): one of the caller's candidates, which are the task's own team when it is active and they write it, and otherwise their active writing teams in `task_teams`. It resolves without being named only when there is one candidate. A delegate's blueprint must belong to that team. A handoff to another person derives it from the target (target's writing teams ∩ `task_teams`, preferring the current owner), and the bot's is the firing trigger's team.
 - **Transfer** = directed FROM→TO, atomic (entity `owning_team_id` + FROM-owned tasks), reviewer tasks stay; cheap because entities are org-shared.
 
 **Open / deferred:**

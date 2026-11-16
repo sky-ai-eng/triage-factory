@@ -43,7 +43,7 @@ func TestTaskTeams_VisibilityAndClaimConsolidation(t *testing.T) {
 
 	// --- bob claims it: owner consolidates to teamB ---
 	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob, dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob, dbtest.ClaimTeam(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID, bob), dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
 		if e != nil {
 			return e
 		}
@@ -75,7 +75,7 @@ func TestTaskTeams_VisibilityAndClaimConsolidation(t *testing.T) {
 
 	// --- Second claim no-ops (CAS) ---
 	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob, dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob, dbtest.ClaimTeam(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID, bob), dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
 		if e != nil {
 			return e
 		}
@@ -110,7 +110,7 @@ func TestTaskTeams_ClaimPrefersOwnerWhenAmbiguous(t *testing.T) {
 	taskID := seedSharedTask(t, h, orgA, alice, teamA, []string{teamA, teamB})
 
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice, dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice, dbtest.ClaimTeam(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID, alice), dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
 		if e != nil {
 			return e
 		}
@@ -157,7 +157,7 @@ func TestTaskTeams_NullOwner_VisibleViaTaskTeams_ConsolidatesOnClaim(t *testing.
 
 	// alice claims → owner consolidates to teamA.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice, dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice, dbtest.ClaimTeam(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID, alice), dbtest.TaskVersion(t, pgstore.NewForTx(tx, pgtest.SecretKey).Tasks, orgA, taskID))
 		if e != nil {
 			return e
 		}

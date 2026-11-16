@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -12,9 +13,14 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
 )
 
@@ -312,7 +318,7 @@ func TestReDeriveWorker_UserClaimed_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 	scoreTask(t, database, taskID, 0.9)
-	if ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, testTaskStore(database), runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
+	if ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, testTaskStore(database), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, testTaskStore(database), runmode.LocalDefaultOrgID, taskID)); err != nil || !ok {
 		t.Fatalf("stamp user claim: ok=%v err=%v", ok, err)
 	}
 
@@ -568,4 +574,74 @@ func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
 	if firings := firingsForTask(t, database, task.ID); len(firings) != 1 || firings[0].TriggerID != "t-view" {
 		t.Errorf("firings = %+v, want one for t-view", firings)
 	}
+}
+
+// TestReDeriveWorker_ARefusedRunAdmitsNoFiring: a score-gated trigger whose
+// run the spawner's plan would refuse admits no firing. The org has connected
+// Bedrock and not Anthropic, which serves the team's default model, so the
+// plan the re-evaluation makes before admitting refuses the run. Nothing is
+// admitted and no claim is stamped, so the task stays queued and unclaimed
+// rather than in progress with no run, and the trigger's team admins are told
+// once.
+func TestReDeriveWorker_ARefusedRunAdmitsNoFiring(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	taskID, triggerID := setupReDeriveScenario(t, database, 0.6)
+	if _, err := sqlitestore.New(database).Orgs.SetBedrockCredentialsRef(t.Context(), runmode.LocalDefaultOrgID, "aws_bearer_token_bedrock"); err != nil {
+		t.Fatalf("connect bedrock: %v", err)
+	}
+	spawner := delegate.NewSpawner(database, sqlitestore.New(database), nil, websocket.NewHub(), domain.ModelSonnet)
+	scoreTask(t, database, taskID, 0.8)
+
+	drainReDeriveOnce(t, reDeriveRouter(t, database, spawner))
+
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
+	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != "queued" || task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
+		t.Errorf("task = %s claimed by agent %q / user %q, want queued and unclaimed", task.Status, task.ClaimedByAgentID, task.ClaimedByUserID)
+	}
+
+	open := rec.Open(runmode.LocalDefaultOrgID, kinds.TriggerRefused)
+	if len(open) != 1 || open[0].Seen != 1 || open[0].Key != triggerID+":"+domain.DelegationRefusedProviderNotConnected {
+		t.Fatalf("open = %+v, want one notice for the trigger's provider refusal", open)
+	}
+	n := open[0].Params.(kinds.TriggerRefusal)
+	if n.TriggerID != triggerID || n.TeamID != runmode.LocalDefaultTeamID || n.Subject != "owner/repo#1" {
+		t.Errorf("notice = %+v, want the trigger, its team, and the task's entity", n)
+	}
+	if !strings.Contains(n.Detail, modelcatalog.ProviderDisplayName(modelcatalog.ProviderAnthropic)) {
+		t.Errorf("notice detail %q does not carry the refusal's message naming the provider", n.Detail)
+	}
+}
+
+// TestReDeriveWorker_APlanFaultIsRetried: a plan that fails on a read, rather
+// than refusing the run, reached no verdict. The re-evaluation row is
+// requeued with its attempt charged, nothing is admitted or claimed, and
+// nobody is told of a refusal.
+func TestReDeriveWorker_APlanFaultIsRetried(t *testing.T) {
+	database := newTestDB(t)
+	rec := notifytest.Record(t)
+	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+	scoreTask(t, database, taskID, 0.8)
+	stub := &stubDelegator{db: database, planErr: errors.New("stub: a plan read failed")}
+
+	drainReDeriveOnce(t, reDeriveRouter(t, database, stub))
+
+	requireNoFirings(t, database, taskID)
+	if row := reDeriveRowFor(t, database, taskID); row.status != workitem.StatusReady || row.attempt != 1 ||
+		row.lastOutcome != string(workitem.OutcomeTransient) || !row.nextAttempt.Valid {
+		t.Errorf("task_rederive_queue row = %+v, want ready, charged, with a backoff and the transient outcome", row)
+	}
+	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != "queued" || task.ClaimedByAgentID != "" {
+		t.Errorf("task = %s claimed by %q, want queued and unclaimed", task.Status, task.ClaimedByAgentID)
+	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.TriggerRefused)
 }

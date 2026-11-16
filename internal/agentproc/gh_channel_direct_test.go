@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -108,7 +107,7 @@ func TestNewDirectCommand_GHChannelDropsInheritedGitHubTokens(t *testing.T) {
 	}
 	for _, e := range cmd.Env {
 		k, v, _ := strings.Cut(e, "=")
-		if v == fromShell && slices.ContainsFunc(ghInheritedEnvKeys, func(g string) bool { return strings.EqualFold(g, k) }) {
+		if v == fromShell && isGitHubCLIEnvKey(envNameForMatch(k)) {
 			t.Errorf("%s=%q reached a run with a gh channel", k, v)
 		}
 	}
@@ -121,14 +120,6 @@ func TestNewDirectCommand_GHChannelDropsInheritedGitHubTokens(t *testing.T) {
 		if env[k] != want {
 			t.Errorf("%s = %q, want %q", k, env[k], want)
 		}
-	}
-}
-
-func TestDropEnvKeysFold(t *testing.T) {
-	got := dropEnvKeysFold([]string{"GH_TOKEN=a", "gh_token=b", "PATH=/bin", "GH_TOKENX=c"}, []string{"GH_TOKEN"})
-	want := []string{"PATH=/bin", "GH_TOKENX=c"}
-	if !slices.Equal(got, want) {
-		t.Errorf("dropEnvKeysFold = %v, want %v", got, want)
 	}
 }
 

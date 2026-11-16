@@ -696,6 +696,17 @@ func liveNode(state string, draft, merged bool) string {
 
 func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, deleteStatus int, deleteBody string) *rejectStub {
 	t.Helper()
+	rs, stub := serveRejectStub(t, live, node, deleteStatus, deleteBody)
+	seedApp(t, srv, stub, acmeInstall())
+	stores := sqlitestore.New(srv.db)
+	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores, reconcile.TrustRecords, nil))
+	return rs
+}
+
+// serveRejectStub starts the GitHub stub rejectStub describes, with no App or
+// org seeded against it, and returns it beside the recorder.
+func serveRejectStub(t *testing.T, live map[string]any, node string, deleteStatus int, deleteBody string) (*rejectStub, *httptest.Server) {
+	t.Helper()
 	rs := &rejectStub{}
 	mux := newAppAPIMux()
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
@@ -730,10 +741,7 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	})
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-	stores := sqlitestore.New(srv.db)
-	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores, reconcile.TrustRecords, nil))
-	return rs
+	return rs, stub
 }
 
 // TestDeliverableReject_PR: a rejection deletes the head branch, closes the draft

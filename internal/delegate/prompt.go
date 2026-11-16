@@ -20,27 +20,35 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
 
-// Sentinel errors the delegate HTTP handler uses to map prompt-resolution
-// failures to 4xx instead of 5xx.
+// PlanDelegation's refusals about the blueprint a caller named. Each is the
+// request's fault rather than the server's, so the delegate route answers them
+// as 422 INVALID_FIELD on blueprint_id.
 var (
-	// ErrPromptNotFound — Delegate's caller passed a prompt id that
-	// doesn't resolve to any row. Race-correctable (the prompt was
-	// deleted between snapshot fetch and drop, or the id was simply
-	// wrong) — 400 Bad Request, not 5xx.
+	// ErrPromptNotFound — a step names a prompt id that doesn't resolve to
+	// any row the caller can see. Race-correctable: the prompt was deleted
+	// between the picker's read and the delegation, or the id was wrong.
 	ErrPromptNotFound = errors.New("delegate: prompt not found")
 
-	// ErrPromptUnspecified — Delegate's caller passed an empty prompt
-	// id. The picker should have prevented this; 400 Bad Request when
-	// the contract is violated.
+	// ErrPromptUnspecified — a step names no prompt.
 	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
 
-	// ErrBlueprintNotFound — Delegate's caller passed a blueprint id that
-	// doesn't resolve to any row. Race-correctable — 400 Bad Request.
+	// ErrBlueprintNotFound — the caller passed a blueprint id that doesn't
+	// resolve to any row it can see. Race-correctable.
 	ErrBlueprintNotFound = errors.New("delegate: blueprint not found")
 
-	// ErrBlueprintUnspecified — Delegate's caller passed an empty blueprint
-	// id. The picker / trigger should have prevented this; 400 Bad Request.
+	// ErrBlueprintUnspecified — the caller passed an empty blueprint id. The
+	// picker and the trigger always name one.
 	ErrBlueprintUnspecified = errors.New("delegate: no blueprint specified")
+
+	// ErrBlueprintNoSteps — the blueprint the caller named has no steps, so
+	// a firing of it would mint a run with nothing to drive.
+	ErrBlueprintNoSteps = errors.New("delegate: blueprint has no steps")
+
+	// ErrBlueprintOtherTeam — the blueprint belongs to another team than the
+	// one the run is planned for. A run spends its team's budget under its
+	// team's model settings and is staged with its team's knowledge, so it
+	// executes only that team's blueprints.
+	ErrBlueprintOtherTeam = errors.New("delegate: blueprint belongs to another team")
 )
 
 // resolveBlueprint finds the blueprint to fire from an explicit blueprint ID.
@@ -150,17 +158,30 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 	return p, nil
 }
 
-// machinistSpec selects the delegated agent's block set from
-// internal/agentprompt. Mode is resolved here rather than inside Build, which
-// stays a pure function of its Spec — that is what makes both mode variants
-// testable without manipulating process state.
-func machinistSpec() agentprompt.Spec {
+// sdkSpec selects an SDK conversation's block set from internal/agentprompt,
+// for the surface its conversation's type names (surfaceFor). Mode is resolved
+// here rather than inside Build, which stays a pure function of its Spec —
+// that is what makes both mode variants testable without manipulating process
+// state.
+func sdkSpec(surface agentprompt.Surface) agentprompt.Spec {
 	return agentprompt.Spec{
-		Surface: agentprompt.SurfaceMachinist,
+		Surface: surface,
 		Runtime: agentprompt.RuntimeSDK,
 		Family:  agentprompt.FamilyClaude,
 		Mode:    agentprompt.ModeFor(string(runmode.Current())),
 	}
+}
+
+// surfaceFor is the framework prompt a conversation of convType runs under:
+// the workbench for a conversation a person works in, the machinist for
+// everything a delegation drives. Every build of a conversation's framework
+// prompt asks this of its stored type, so a resume composes the surface its
+// conversation opened with.
+func surfaceFor(convType string) agentprompt.Surface {
+	if convType == domain.ConversationTypeInteractive {
+		return agentprompt.SurfaceWorkbench
+	}
+	return agentprompt.SurfaceMachinist
 }
 
 // sdkSystemPrompt is the whole of what the SDK harness is appended: the
@@ -189,9 +210,9 @@ func machinistSpec() agentprompt.Spec {
 // own knowledge base; the two things the rewrite must never touch — the task
 // context and the injected memories, the only externally-authored text a run
 // reads — are transcript rows and never part of this string.
-func sdkSystemPrompt(conversationBlock, binaryPath string) string {
+func sdkSystemPrompt(surface agentprompt.Surface, conversationBlock, binaryPath string) string {
 	return resolveCLIPath(joinSections(
-		agentprompt.Build(machinistSpec()),
+		agentprompt.Build(sdkSpec(surface)),
 		conversationBlock,
 	), binaryPath)
 }
@@ -512,6 +533,15 @@ func stopReasonParkNotice(stopReason string) string {
 		"so it was not read as a finished turn. The work so far is intact; send a message to pick it back up.\n"+
 		"</system-note>", cause, stopReason)
 }
+
+// noMessageParkNotice is the transcript's record of a follow-up claim that
+// parks because it found no message it could send. That is a claim whose
+// predecessor took the last message and ended before its reply finished, or
+// one whose read of the waiting message failed, so the note claims only what
+// holds for both.
+const noMessageParkNotice = "<system-note>\nThis run paused: the reply to the last message did not finish, " +
+	"and this engagement could not resume it. The work so far is intact; send a message to pick it back up.\n" +
+	"</system-note>"
 
 func parseOwnerRepo(s string) (string, string) {
 	parts := strings.SplitN(s, "/", 2)

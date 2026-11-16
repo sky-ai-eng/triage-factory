@@ -78,14 +78,24 @@ const liveClaimExistsSQL = `EXISTS (
 		  AND cl_a.phase IS NOT '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
-// still awaiting delivery. Injections ride whatever engagement runs next and
-// never wake one on their own; a withdrawn row (undelivered + window_state
-// 'inactive') never happened. Nothing here reads `seq`, which compaction
-// re-writes to fractional values. Served by idx_messages_undelivered.
+// still awaiting delivery, sent after the conversation's wake position.
+// Injections ride whatever engagement runs next and never wake one on their
+// own; a withdrawn row (undelivered + window_state 'inactive') never
+// happened. Nothing here reads `seq`, which compaction re-writes to
+// fractional values. Served by idx_messages_undelivered. The Postgres twin
+// says what the wake position is.
 const undeliveredInputExistsSQL = `EXISTS (
 		SELECT 1 FROM messages m_i
 		WHERE m_i.conversation_id = r.id AND m_i.delivered = 0
-		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		  AND m_i.id > COALESCE(r.wake_after_message_id, 0))`
+
+// wakeAfterStopSQL is the Postgres twin's wake position in this dialect,
+// against the bare columns of the row an UPDATE writes. SQLite's
+// multi-argument MAX is NULL when any argument is, where Postgres's GREATEST
+// skips a NULL, so the COALESCE supplies whichever side is set.
+const wakeAfterStopSQL = `COALESCE(MAX(wake_after_message_id, stop_through_message_id),
+		                                 wake_after_message_id, stop_through_message_id)`
 
 // undeliveredInputDuringClaimSQL is undeliveredInputExistsSQL narrowed to the
 // person messages that arrived while the claim claimExpr names held the
@@ -302,11 +312,12 @@ func EpisodeJailLossesSQL(convAlias string) string {
 // conversation carries the owning team for the capture writers. The claim
 // identity fields (ExecutorID/ClaimedAt) and the episode counts are hydrated from the
 // freshly minted claims row, not this projection.
-const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
+var conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
-	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
+	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.sdk_session_cost_usd, r.trigger_type, COALESCE(r.trigger_id, ''),
 	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
-	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index`
+	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index,
+	` + db.ConversationHasRunSQL("r")
 
 // insertConversation is the mint a delegation conversation is written by. It
 // takes the queryer because it always runs on the transaction that also
@@ -441,7 +452,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		if _, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
 			                         queued_at = CASE WHEN status IS NOT NULL THEN ? ELSE queued_at END,
-			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 			                         next_attempt_at = NULL
 			WHERE id = ? AND (status IS NOT NULL OR next_attempt_at IS NOT NULL)
 		`, claimedAt, claimed.ID); err != nil {
@@ -583,7 +594,7 @@ func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, or
 // them in COALESCE strips the declared column type the driver needs to
 // hand back a time.Time, so the scan would see a raw string.
 const awaitingCredentialsCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.team_id, ''), COALESCE(r.task_id, ''),
-	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
+	COALESCE(cl.id, ''), COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
 	COALESCE(cl.cred_pubkey, '')`
 
 func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversationID string) (db.AwaitingCredentialsConversation, bool, error) {
@@ -600,7 +611,7 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = ? AND r.id = ?
-	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
+	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
 	if err == sql.ErrNoRows {
 		return db.AwaitingCredentialsConversation{}, false, nil
 	}
@@ -688,7 +699,7 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 			claimedAt sql.NullTime
 			startedAt time.Time
 		)
-		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		r.ClaimedAt = startedAt
@@ -1290,7 +1301,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			}
 			if terminal {
 				if _, err := q.ExecContext(ctx, `
-					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 					                         next_attempt_at = NULL
 					WHERE id = ?
 				`, v.id); err != nil {
@@ -1301,9 +1312,11 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				SET status = 'open',
 				    parked_at = COALESCE(parked_at, ?),
 				    park_reason = ?,
+				    wake_after_message_id = `+wakeAfterStopSQL+`,
 				    stop_requested_at = NULL,
 				    stop_requested_by = NULL,
 				    stop_requested_reason = NULL,
+				    stop_through_message_id = NULL,
 				    next_attempt_at = NULL
 				WHERE id = ?
 			`, now, parkReason, v.id); err != nil {
@@ -1783,8 +1796,8 @@ func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		stepIdx sql.NullInt64
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
-		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx)
+		&r.WorktreePath, &r.SessionID, &r.SessionCostUSD, &r.TriggerType, &r.TriggerID,
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

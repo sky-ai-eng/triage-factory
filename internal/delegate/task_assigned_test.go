@@ -58,7 +58,7 @@ func (f siblingWorkFixture) heldTask(t *testing.T, eventType, dedupKey string) s
 	if err != nil {
 		t.Fatalf("create the %s task: %v", eventType, err)
 	}
-	if ok, err := f.stores.Tasks.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID,
+	if ok, err := f.stores.Tasks.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, f.stores.Tasks, runmode.LocalDefaultOrgID, task.ID, runmode.LocalDefaultUserID),
 		dbtest.TaskVersion(t, f.stores.Tasks, runmode.LocalDefaultOrgID, task.ID)); err != nil || !ok {
 		t.Fatalf("ClaimQueuedForUser = %v (err %v)", ok, err)
 	}
@@ -222,7 +222,7 @@ func TestWake_AConcludedConversationIsCaughtUpOnOverlappingWork(t *testing.T) {
 				f.heldTask(t, domain.EventGitHubPRReviewChangesRequested, "")
 			}
 
-			if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+			if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "one more thing", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage: %v", err)
 			}
 
@@ -267,7 +267,7 @@ func TestDispatch_RetiresAStaleAssignmentNoteBeforeTheTurn(t *testing.T) {
 		t.Fatalf("CloseSystem: %v", err)
 	}
 
-	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "go on"); err != nil {
+	if err := f.s.SendMessage(ctx, runmode.LocalDefaultOrgID, f.convID, runmode.LocalDefaultUserID, "go on", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	claimAndDispatch(t, f.s, f.database)
@@ -306,7 +306,7 @@ func TestDispatch_RetiresAStaleAssignmentNoteBeforeTheTurn(t *testing.T) {
 func TestTellTaskAssigned_TheTasksOwnConversationIsToldWhoHoldsItNow(t *testing.T) {
 	f := newSiblingWorkFixture(t, "c-own")
 	ctx := context.Background()
-	if ok, err := f.stores.Tasks.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultUserID,
+	if ok, err := f.stores.Tasks.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultUserID),
 		dbtest.TaskVersion(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID)); err != nil || !ok {
 		t.Fatalf("ClaimQueuedForUser = %v (err %v)", ok, err)
 	}
@@ -374,7 +374,7 @@ func TestTellTaskAssigned_TheTasksOwnConversationIsToldWhoHoldsItNow(t *testing.
 		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed the agent: %v", err)
 	}
-	if _, _, err := f.stores.Tasks.HandoffAgentClaim(ctx, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID,
+	if _, _, err := f.stores.Tasks.HandoffAgentClaim(ctx, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID, runmode.LocalDefaultUserID),
 		dbtest.TaskVersion(t, f.stores.Tasks, runmode.LocalDefaultOrgID, f.taskID)); err != nil {
 		t.Fatalf("HandoffAgentClaim: %v", err)
 	}

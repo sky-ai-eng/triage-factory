@@ -18,6 +18,7 @@ import { hasUnresolvedDeliverables } from '../../lib/approval'
 export type StationKey =
   | 'queued'
   | 'working'
+  | 'ready'
   | 'open'
   | 'attention'
   | 'done'
@@ -122,8 +123,22 @@ export function stationState(conversation: Conversation): StationState {
         belt: 0,
       }
   }
-  switch (conversation.Status) {
+  switch (conversation.status) {
     case 'open':
+      // Parked before anything ran: the conversation a person's claim opens,
+      // waiting for its first message. Idle's light and motion, under its
+      // own word, since nothing has gone idle yet.
+      if (conversation.has_run === false) {
+        return {
+          key: 'ready',
+          light: HMI_CYAN,
+          label: 'READY',
+          live: false,
+          scanner: false,
+          heat: 0.22,
+          belt: 0.34,
+        }
+      }
       // Honest idle: not executing, no verdict. Powered, waiting — the
       // machine glows its baseline cyan, belt idling, vents barely warm.
       return {
@@ -159,7 +174,7 @@ export function stationState(conversation: Conversation): StationState {
       return {
         key: 'open',
         light: HMI_CYAN,
-        label: conversation.Status.toUpperCase(),
+        label: conversation.status.toUpperCase(),
         live: false,
         scanner: false,
         heat: 0.2,

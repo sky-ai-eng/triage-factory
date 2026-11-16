@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // vocabularyRig is a multi-mode server addressed through the settings handlers
@@ -152,9 +153,10 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesTheOtherVocabulary
 	}
 }
 
-// A background-jobs model whose provider the org has not connected is refused,
-// naming the provider. Postgres only: the gate reads the provider off a wire id,
-// and an SDK alias names none.
+// A background-jobs model whose provider the org has not connected is refused
+// with 409 NOT_CONFIGURED on the field, naming the provider: the status the
+// message route and delegate give the fault. Postgres only: the gate reads the
+// provider off a wire id, and an SDK alias names none.
 func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvider(t *testing.T) {
 	rig := newVocabularyRig(t)
 	rig.connect(t, true, false)
@@ -163,9 +165,10 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvide
 	rec := rig.patchOrg(t, map[string]any{
 		"background_jobs_model": modelKeyOn(t, modelcatalog.ProviderBedrock),
 	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
 	}
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "background_jobs_model")
 	if !strings.Contains(rec.Body.String(), modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)) {
 		t.Errorf("refusal does not name the provider to connect: %s", rec.Body.String())
 	}
@@ -174,9 +177,9 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvide
 	}
 }
 
-// A team default whose provider the org never connected is refused with the
-// field named, and the stored default is untouched. Postgres only, for the same
-// reason as the org knob above.
+// A team default whose provider the org never connected is refused with 409
+// NOT_CONFIGURED on the field, and the stored default is untouched. Postgres
+// only, for the same reason as the org knob above.
 func TestTeamSettingsPatch_Postgres_ModelProviderMustBeAvailable(t *testing.T) {
 	bedrockModel := modelKeyOn(t, modelcatalog.ProviderBedrock)
 
@@ -185,10 +188,13 @@ func TestTeamSettingsPatch_Postgres_ModelProviderMustBeAvailable(t *testing.T) {
 		rig.connect(t, true, false)
 
 		rec := rig.patchTeam(t, map[string]any{"ai_model": bedrockModel})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
 		}
-		assertFieldError(t, rec, "ai_model")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "ai_model")
+		if !strings.Contains(rec.Body.String(), modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)) {
+			t.Errorf("refusal does not name the provider to connect: %s", rec.Body.String())
+		}
 
 		set, err := rig.s.allStores.Teams.GetSettingsSystem(t.Context(), rig.teamID)
 		if err != nil {

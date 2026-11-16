@@ -458,7 +458,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		taskID, inserted, claimed := fire(t, "claim-race", db.AgentClaimStamp{AgentID: agentID}, func(taskID string) {
 			// The user claims the task in the window before the insert. They
 			// win the claim; the run must still be committed.
-			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, stores.Tasks, org, taskID)); err != nil || !ok {
+			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, org, taskID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, stores.Tasks, org, taskID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, stores.Tasks, org, taskID)); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		})
@@ -632,17 +632,17 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 		ID: "blueprint-run-guard", BlueprintID: "guard-blueprint", TaskID: task.ID,
 	})
 
-	changed, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
+	changed, err := blueprints.MarkRunStatusSystem(ctx, org, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
 	if err != nil {
-		t.Fatalf("MarkRunStatus: %v", err)
+		t.Fatalf("MarkRunStatusSystem: %v", err)
 	}
 	if !changed {
 		t.Error("expected changed=true for running → completed")
 	}
 
-	changed2, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusAborted, "late abort", nil)
+	changed2, err := blueprints.MarkRunStatusSystem(ctx, org, blueprintRunID, domain.BlueprintRunStatusAborted, "late abort", nil)
 	if err != nil {
-		t.Fatalf("MarkRunStatus second: %v", err)
+		t.Fatalf("MarkRunStatusSystem second: %v", err)
 	}
 	if changed2 {
 		t.Error("expected changed=false when blueprint run already terminal")
@@ -688,8 +688,8 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	// Abort it (recording reason + step), then re-open: flips back to running and
 	// clears the abort metadata so the resumed step re-finalizes cleanly.
 	step := 2
-	if _, err := blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusAborted, "stopped for review", &step); err != nil {
-		t.Fatalf("MarkRunStatus(aborted): %v", err)
+	if _, err := blueprints.MarkRunStatusSystem(ctx, org, brID, domain.BlueprintRunStatusAborted, "stopped for review", &step); err != nil {
+		t.Fatalf("MarkRunStatusSystem(aborted): %v", err)
 	}
 	// A conversation that is not the run's current step reopens nothing.
 	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID, "not-a-step"); err != nil || reopened {

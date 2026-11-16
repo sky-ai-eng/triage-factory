@@ -47,6 +47,12 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv(processGroupHelperEnv) == "1" {
+		os.Exit(runProcessGroupHelper())
+	}
+	if role := os.Getenv(parentWatchHelperEnv); role != "" {
+		os.Exit(runParentWatchHelper(role))
+	}
 	if os.Getenv(capReportEnv) == "1" {
 		names, err := procinfo.EffectiveCaps()
 		if err != nil {

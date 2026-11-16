@@ -278,10 +278,8 @@ func RunFiringOnAnArchivedTeamConformance(t *testing.T, mk BlueprintSequenceFact
 		if got := sc.TaskOwnerTeam(t, taskID); got != sc.ConsolidateTeamID {
 			t.Errorf("task owner team = %q, want %q", got, sc.ConsolidateTeamID)
 		}
-		if sc.ConversationTeam != nil {
-			if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
-				t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
-			}
+		if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
+			t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
 		}
 	})
 }

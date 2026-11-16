@@ -16,6 +16,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
@@ -92,7 +93,7 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 		case warmResumed:
 			conv := s.warmResumeModelHolds(context.WithoutCancel(ctx), n)
 			if conv == nil {
-				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+				return s.letGoWarm(ctx, n, result, snapshotReasonWarmRelease)
 			}
 			resumed, err := s.conversations.ResumeWarmClaimSystem(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.cfg.claimID)
 			if errors.Is(err, db.ErrClaimReleased) {
@@ -103,16 +104,15 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 					delegateLog.Warn("resume the conversation on its warm claim failed; letting the claim go",
 						"conversation", n.conversationID, "claim", n.cfg.claimID, "error", err)
 				}
-				return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+				return s.letGoWarm(ctx, n, result, snapshotReasonWarmRelease)
 			}
 			s.broadcastConversationUpdate(n.orgID, n.conversationID, domain.StatusRunning)
 			// An assignment note staged while the claim was warm can have
 			// stopped being true by now, and the turn is about to read it.
 			s.retireStaleAssignmentNotes(context.WithoutCancel(ctx), n.orgID, n.conversationID)
-			// A close, or a close beginning to hold, while the claim was warm
-			// told only the conversations that were working, which this one
-			// was not. The loop reads the note at the turn's first model
-			// call, with the person's message.
+			// A close while the claim was warm told only the conversations
+			// that were working, which this one was not. The loop reads the
+			// note at the turn's first model call, with the person's message.
 			s.tellTaskResolved(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.task.ID)
 			// The first turn's params say how this engagement started: in a
 			// sandbox launched for it, in a workspace built or restored for
@@ -124,9 +124,9 @@ func (s *Spawner) runNativeTail(ctx context.Context, n nativeTail) engagementDis
 			params.ExecutorChanged = false
 			result = accumulateTurns(result, n.run(ctx, params))
 		case warmLetGo:
-			return s.letGoWarm(ctx, n, result)
+			return s.letGoWarm(ctx, n, result, snapshotReasonWarmRelease)
 		case warmShutdown:
-			return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+			return s.letGoWarm(ctx, n, result, snapshotReasonShutdown)
 		case warmStopped:
 			return s.endWarmStopped(ctx, n, result)
 		case warmFenced:
@@ -286,6 +286,7 @@ const (
 // still reaches it, and a message or ending that landed before registration
 // is seen by the read.
 func (s *Spawner) waitWarm(ctx context.Context, n nativeTail, deadline time.Time) warmEnd {
+	s.endTurn(n.conversationID, n.cfg.claimID)
 	wait := s.warmWaits.Register(n.conversationID, n.orgID)
 	defer wait.Unregister()
 	defer s.activityFor(n.conversationID).begin(warmWaitOp, time.Until(deadline)+backstopMargin)()
@@ -368,11 +369,13 @@ func (s *Spawner) readWarmWait(ctx context.Context, n nativeTail) db.WarmWaitSta
 
 // warmResumeModelHolds asks the model question a claim asks (modelForClaim)
 // before a warm resume, and returns the conversation it read when the answer
-// is the model the engagement was built with. Otherwise it returns nil and
+// is a model the engagement can call: its own, or one in its SwitchableModels,
+// which the engine moves to at its next call. Otherwise it returns nil and
 // the claim is let go: the resumed conversation is left queued with no claim,
 // and the cold claim that drives it makes the decision as every claim does,
-// switching models or refusing the one the team no longer enables. A failed
-// read answers nil too, so the cold claim decides.
+// sealing another provider's credentials or refusing a model the team no
+// longer enables or whose provider is no longer connected. A failed read
+// answers nil too, so the cold claim decides.
 func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domain.Conversation {
 	conv, err := s.conversations.GetSystem(ctx, n.orgID, n.conversationID)
 	if err != nil || conv == nil {
@@ -394,17 +397,17 @@ func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domai
 			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "error", err)
 		return nil
 	}
-	if model != n.params.Model {
-		delegateLog.Info("a claim would now run on another model than the warm engagement's; letting the claim go",
+	if model != n.params.Model && !slices.Contains(n.params.SwitchableModels, model) {
+		delegateLog.Info("a claim would now run on a model the warm engagement's credentials cannot call; letting the claim go",
 			"conversation", n.conversationID, "claim", n.cfg.claimID, "engagement_model", n.params.Model, "model", model)
 		return nil
 	}
 	return conv
 }
 
-// letGoWarm ends an engagement keeping its claim warm: the jail stopped, then
-// the claim released. The conversation is not written; it has held its
-// turn-end state since the turn ended.
+// letGoWarm ends an engagement keeping its claim warm: the jail stopped, the
+// tree checkpointed, then the claim released. The conversation is not written;
+// it has held its turn-end state since the turn ended.
 //
 // The jail stops before the release, as it does at every other ending, so no
 // claim that comes after this one finds this engagement's processes in the
@@ -412,10 +415,16 @@ func (s *Spawner) warmResumeModelHolds(ctx context.Context, n nativeTail) *domai
 // it onto a claim about to go, and the release then leaves the conversation
 // for the queue.
 //
+// The checkpoint is for what the turn-end one cannot hold: a process the
+// agent left running in the jail can have written to the tree all through the
+// wait. This executor's next boot deletes the tree, and a claim on another
+// executor never had it, so the blob is where that work has to be. reason
+// names the ending on the checkpoint's span.
+//
 // It records the engagement's terminal span, as recordNativeResult does for
 // every other ending. result is the last turn's ending, carrying the turns,
 // time and spend of the whole engagement.
-func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.Result) (disp engagementDisposition) {
+func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.Result, reason string) (disp engagementDisposition) {
 	_, span := s.startNativeEngagementSpan(ctx, n.orgID, n.conversationID, n.task.ID, result)
 	defer func() {
 		terminal := "concluded_" + string(result.Outcome)
@@ -426,9 +435,17 @@ func (s *Spawner) letGoWarm(ctx context.Context, n nativeTail, result agentloop.
 		span.End()
 	}()
 	n.release()
+	// A stop or a shutdown that arrives now does not cut the ending short.
+	writeCtx := context.WithoutCancel(ctx)
+	if s.treeQuiet(n.claudeCwd) {
+		n.ckpt.checkpointWarmEnd(writeCtx, reason)
+	} else {
+		delegateLog.Warn("the warm claim's jail is still running; its tree is not checkpointed before the claim is let go",
+			"conversation", n.conversationID, "claim", n.cfg.claimID)
+	}
 	n.ckpt.stop()
 	s.releaseActivity(n.conversationID, n.cfg.claimID)
-	released, err := s.conversations.ReleaseWarmClaimSystem(context.WithoutCancel(ctx), n.orgID, n.conversationID, n.cfg.claimID)
+	released, err := s.conversations.ReleaseWarmClaimSystem(writeCtx, n.orgID, n.conversationID, n.cfg.claimID)
 	if err != nil {
 		delegateLog.Warn("release the warm claim failed; its lease lapses and the takeover releases it",
 			"conversation", n.conversationID, "claim", n.cfg.claimID, "error", err)
@@ -455,7 +472,7 @@ func (s *Spawner) endWarmStopped(ctx context.Context, n nativeTail, result agent
 			CostUSD:    result.CostUSD,
 		})
 	}
-	return s.letGoWarm(context.WithoutCancel(ctx), n, result)
+	return s.letGoWarm(ctx, n, result, snapshotReasonWarmRelease)
 }
 
 // endWarmFenced ends an engagement whose claim went to a successor: the jail

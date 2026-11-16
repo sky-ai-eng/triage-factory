@@ -47,7 +47,7 @@ type ClaimPredicateHarness struct {
 	// SetBlueprintState writes the shared blueprint_run's status and
 	// current_step_index directly. The store's own writes cannot reach a
 	// terminal blueprint whose sequencing column still points at a step (the
-	// guarded MarkRunStatus refuses a non-running row), and that combination
+	// guarded MarkRunStatusSystem refuses a non-running row), and that combination
 	// is exactly what the finished-blueprint arm of the claim gate reads.
 	SetBlueprintState func(t *testing.T, status string, currentStepIndex int)
 
@@ -169,7 +169,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		case "reaped":
 			_, err = h.Stores.ConversationQueue.ResetProcessingConversations(ctx, predicateExecutorID, predicateBootEpoch+1)
 		case "parked":
-			_, err = HolderPark(h.Stores.Conversations, ctx, orgID, convID, db.ParkIdle())
+			_, err = HolderPark(h.Stores.Conversations, ctx, orgID, convID, db.ParkTurnIncomplete())
 		case "completed":
 			// The engagement recorded its step's verdict: the conversation
 			// parks open with the conclusion stamped, the claim releases
@@ -978,6 +978,33 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		mustClaim(t, h, persons.ID)
 	})
 
+	// The other half of the gate: a conversation a person's claim mints has
+	// no blueprint run, and on a task that owes no memory the person's message
+	// makes it claimable on the first scan. The agent's conversation here
+	// ended without running, so it owes nothing.
+	t.Run("AnInteractiveConversationWithNoRunIsClaimedOnThePersonsMessage", func(t *testing.T) {
+		h := mk(t)
+		unrun := h.StageDelegation(t, "sdk")
+		agents, err := h.Stores.Conversations.GetSystem(ctx, h.OrgID, unrun)
+		if err != nil || agents == nil {
+			t.Fatalf("read the agent's conversation: (%v, %v)", agents, err)
+		}
+		if _, err := h.Stores.Conversations.EndConversationSystem(ctx, h.OrgID, unrun, domain.EndedTakenOver); err != nil {
+			t.Fatalf("end the agent's conversation: %v", err)
+		}
+		persons, err := h.Stores.Conversations.MintForPersonClaimSystem(ctx, h.OrgID, agents.TaskID, agents.CreatorUserID)
+		if err != nil || persons == nil {
+			t.Fatalf("MintForPersonClaimSystem = (%v, %v)", persons, err)
+		}
+		mustNotClaim(t, h)
+
+		h.InsertRow(t, persons.ID, userRow("what happened here?", false))
+		got := mustClaim(t, h, persons.ID)
+		if got.BlueprintRunID != "" || got.Type != domain.ConversationTypeInteractive {
+			t.Errorf("claimed = (blueprint run %q, type %q), want an interactive conversation with no run", got.BlueprintRunID, got.Type)
+		}
+	})
+
 	// A conversation that ended and DID leave a memory owes nothing, so its
 	// task's next step is claimed on the first scan. Without this the subtest
 	// above proves only that ending a conversation blocks a task, which is
@@ -1218,7 +1245,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
 		}
 		mustClaim(t, h, convID)
-		if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, db.ParkIdle()); err != nil || !ok {
+		if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, db.ParkTurnIncomplete()); err != nil || !ok {
 			t.Fatalf("park = (%v, %v), want (true, nil)", ok, err)
 		}
 
@@ -1226,8 +1253,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v conv=%v", err, got)
 		}
-		if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonIdle {
-			t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, domain.ParkReasonIdle)
+		if got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonTurnIncomplete {
+			t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, domain.ParkReasonTurnIncomplete)
 		}
 		if got.Concluded() || got.Outcome != "" || got.OutcomeReason != "" {
 			t.Errorf("verdict = (concluded %v, outcome %q, reason %q), want none: the wake cleared the earlier one", got.Concluded(), got.Outcome, got.OutcomeReason)

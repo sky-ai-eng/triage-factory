@@ -81,8 +81,8 @@ func seedPromptConversation(t *testing.T, h *Harness, orgID, userID, teamID, tas
 	`, bpID, orgID, userID, teamID)
 	brID := uuid.New().String()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'completed', '/tmp/wt', $6, '[]')
+		INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', 'completed', '/tmp/wt', $6, '[]')
 	`, brID, orgID, userID, bpID, taskID, startedAt)
 	convID := uuid.New().String()
 	stored, concluded := dbtest.SeedStatus(status)
@@ -106,8 +106,8 @@ func seedPromptConversation(t *testing.T, h *Harness, orgID, userID, teamID, tas
 func seedMarketplaceBlueprintRun(t *testing.T, h *Harness, orgID, userID, taskID, blueprintID, status string, startedAt time.Time) {
 	t.Helper()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
-		VALUES ($1, $2, $3, $4, $5, 'manual', $6, '/tmp/wt', $7, '[]')
+		INSERT INTO blueprint_runs (id, org_id, team_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, (SELECT team_id FROM blueprints WHERE id = $4 AND org_id = $2), $3, $4, $5, 'manual', $6, '/tmp/wt', $7, '[]')
 	`, uuid.New().String(), orgID, userID, blueprintID, taskID, status, startedAt)
 }
 

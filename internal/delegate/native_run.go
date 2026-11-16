@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -165,8 +166,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// into the memory tree the launch is about to mount read-only. Block 1 is the
 	// same for every native run; everything about this one is block 2 and the
 	// opening row.
-	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay.block)
-	systemPrompt := nativeSystemPrompt()
+	launchText := s.buildNativeLaunchText(ctx, conversationID, task, mission, cfg, knowledge, replay)
+	systemPrompt := nativeSystemPrompt(cfg.surface)
 
 	// The task context's retention. Nothing is pinned through a compaction, so
 	// the row carrying these bytes is summarized like any other, and this file is
@@ -270,7 +271,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	ctx = detachEngagement(ctx)
 	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
-	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
+	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID).actFor(creatorUserID)
 	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, taskMemories, launchText.taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
@@ -285,6 +286,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// whitelist below, so the request and the whitelist agree by construction.
 	coldModel := coldCompactionModelFor(model)
 
+	// The settings the engagement starts on: the claim's model, and the
+	// effort the newest person message asked for when it asked on that
+	// model. The engine moves both from there as a person's messages ask.
+	switchable := s.switchableModels(ctx, orgID, cfg.teamID, model)
+	effort := s.claimEffort(ctx, orgID, conversationID, model)
+
 	// Checkpoints, for as long as the engagement's turns and the warm waits
 	// between them run, and not a moment longer. recordNativeResult stops this
 	// before any ending writes, because a checkpoint still in flight is the same
@@ -296,7 +303,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 
 	engine := &agentloop.Engine{
 		Transcript:  transcript,
-		Credentials: s.nativeCredentials(cfg, model, coldModel),
+		Credentials: s.nativeCredentials(cfg, switchable, coldModel),
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
 		Hooks: checkpointHooks(ckpt, agentloop.Hooks{
@@ -304,7 +311,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// Every tool call is a chance the agent just wrote its memory
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
-			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg.appendSysPrompt == ""),
+			ShouldStopAfterTurn: s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive),
 		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
@@ -315,14 +322,16 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}
 
 	params := agentloop.Params{
-		OrgID:          orgID,
-		ConversationID: conversationID,
-		ClaimID:        cfg.claimID,
-		EngagementSpan: engagementSpan,
-		Model:          model,
-		SystemPrompt:   systemPrompt,
-		SystemAddendum: launchText.systemBlock,
-		HasBlueprint:   true,
+		OrgID:            orgID,
+		ConversationID:   conversationID,
+		ClaimID:          cfg.claimID,
+		EngagementSpan:   engagementSpan,
+		Model:            model,
+		Effort:           effort,
+		SwitchableModels: switchable,
+		SystemPrompt:     systemPrompt,
+		SystemAddendum:   launchText.systemBlock,
+		HasBlueprint:     cfg.hasBlueprint(),
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
 		BashMemBudgetMB: nativeBashMemBudgetMB(memoryLimitMB),
@@ -341,6 +350,20 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		NewSandbox: true,
 	}
 
+	// Every turn, the first and each one a warm claim resumes, starts when the
+	// engine does: what the engine runs before it drains the waiting input
+	// (the transcript repair, a cold-resume compaction) is that turn's work. A
+	// turn of a conversation a person works in records the answer the person
+	// got as its summary, not the agent's reply to the memory note.
+	run := func(ctx context.Context, params agentloop.Params) agentloop.Result {
+		s.startTurn(ctx, conversationID, cfg.claimID)
+		result := engine.Run(ctx, params)
+		if cfg.interactive && result.Kind == agentloop.ResultConcluded {
+			result.ResultSummary = s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, result.ResultSummary)
+		}
+		return result
+	}
+
 	return s.runNativeTail(ctx, nativeTail{
 		orgID:          orgID,
 		conversationID: conversationID,
@@ -351,7 +374,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		creatorUserID:  creatorUserID,
 		startTime:      startTime,
 		mirror:         mirror,
-		run:            engine.Run,
+		run:            run,
 		params:         params,
 		transcript:     transcript,
 		ckpt:           ckpt,
@@ -415,16 +438,21 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, conversationI
 // injected memories, then the task context — through the claim-fenced
 // transcript.
 //
-// It is the runtime half of mintOpeningRows: the transcript read the gate
-// needs, and the insert door the rows go through. Everything about which rows
-// exist and in what order lives there, so the SDK opens a conversation with
-// the same rows by supplying its own door.
+// It is the runtime half of mintOpeningRows: the two reads it needs — whether
+// the conversation has been opened, and the window an opening is sequenced
+// ahead of — and the insert door the rows go through. Everything about which
+// rows exist and in what order lives there, so the SDK opens a conversation
+// with the same rows by supplying its own door.
 //
 // What the run was asked to do is not here: the mission is a system block, so
 // it is re-sent on every call and a compaction can never summarize it away.
 // These rows can be, and the task context's bytes are on disk for the agent to
 // re-read.
 func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) error {
+	_, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return fmt.Errorf("read the conversation's opening: %w", err)
+	}
 	rows, err := transcript.ListForAssembly(ctx, orgID, conversationID)
 	if err != nil {
 		return err
@@ -433,7 +461,7 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 		_, err := transcript.Insert(ctx, orgID, msg)
 		return err
 	}
-	_, err = mintOpeningRows(ctx, insert, rows, memories, conversationID, creatorUserID, taskContext)
+	_, err = mintOpeningRows(ctx, insert, opened, rows, memories, conversationID, creatorUserID, taskContext)
 	return err
 }
 
@@ -445,8 +473,8 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 // own block instead. What is left is identical for every native run against the
 // same spec, which is what lets it be block 1, the one the cache breakpoint is
 // stamped on and every conversation in the org reads.
-func nativeSystemPrompt() string {
-	return agentprompt.Build(nativeSpec())
+func nativeSystemPrompt(surface agentprompt.Surface) string {
+	return agentprompt.Build(nativeSpec(surface))
 }
 
 // nativeLaunchText is the two pieces of composed text one native engagement
@@ -459,8 +487,9 @@ type nativeLaunchText struct {
 	// Composed by the claim that opens the conversation and replayed verbatim by
 	// every claim after it, so it is the same string for the life of the row.
 	systemBlock string
-	// taskContext is the opening user row: the rendered <task_context>, and
-	// the same bytes the launch retains as a file.
+	// taskContext is the opening user row's content: the <task_context> the
+	// launch renders, and on every later claim the bytes that row holds. It is
+	// what the claim retains as the task-context file.
 	taskContext string
 }
 
@@ -468,25 +497,27 @@ type nativeLaunchText struct {
 // The compositions themselves are composeConversationSystemBlock and
 // BuildTaskContext; what lives here is the reads they need.
 //
-// replayed is the block 2 the conversation was launched with, empty when this
-// claim IS that launch. Given one, block 2 is neither composed nor read for:
-// the stored bytes are the answer, and every live input a fresh composition
-// would reach for is one that may have moved since — a team's branch
-// convention, and the knowledge manifest, which is empty on a run tree this
-// process no longer owns. Recomposing would change the model's own instructions
-// mid-conversation and miss the cache entry those bytes were warmed on.
+// replay.block is the block 2 the conversation was launched with, empty when
+// this claim IS that launch. Given one, block 2 is neither composed nor read
+// for: the stored bytes are the answer, and every live input a fresh
+// composition would reach for is one that may have moved since — a team's
+// branch convention, and the knowledge manifest, which is empty on a run tree
+// this process no longer owns. Recomposing would change the model's own
+// instructions mid-conversation and miss the cache entry those bytes were
+// warmed on.
 //
-// The task context is built either way. It is per claim by construction: the
-// event fields and PR history it renders are read fresh, and it is a transcript
-// row, where the opening gate decides whether it is written at all.
+// The task context follows the same rule on the opening row. A conversation
+// that has been opened is handed its row's content (replay.taskContext), and
+// nothing that feeds a task context is read or fetched: no opening row is
+// minted again, so a new composition would reach only the task-context file,
+// where it would stop being a copy of the row the conversation actually opened
+// with. Only the launch composes one, from the event fields, artifacts and PR
+// history it reads.
 //
-// Nothing in it fails: the one read it makes degrades to a task context with no
-// event fields rather than refusing the launch.
-func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
-	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
-	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
-
-	systemBlock := replayed
+// Nothing in it fails. A read or the PR history fetch that fails leaves its
+// part out of the task context rather than refusing the launch.
+func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, knowledge string, replay claimReplay) nativeLaunchText {
+	systemBlock := replay.block
 	if systemBlock == "" {
 		// The handoff addendum is this step's, not this spec's, so it rides
 		// block 2 rather than the shared prompt. appendSysPrompt is the same
@@ -514,6 +545,11 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		)
 	}
 
+	if replay.opened {
+		return nativeLaunchText{systemBlock: systemBlock, taskContext: replay.taskContext}
+	}
+	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
+	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 	return nativeLaunchText{
 		systemBlock: systemBlock,
 		// The task context is the one section that stays a transcript row.
@@ -521,22 +557,28 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, conversationID stri
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
+		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.render(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), cfg.orgID, task), artifacts, deliverables),
 	}
 }
 
 // claimReplay is what a native claim inherits from the conversation it is
 // picking up, resolved before it composes anything.
 type claimReplay struct {
-	// opened is whether that conversation has already been opened — the
-	// transcript's task-context row, which is this runtime's "has it run
-	// before" and stands in for the prior session id the SDK path has. It
-	// decides both which memory file the claim may trust and whether block 2 is
-	// this claim's to compose.
+	// opened is whether that conversation has already been opened — its
+	// task-context row, in any window state (OpeningTaskContextSystem), which
+	// is this runtime's "has it run before" and stands in for the prior session
+	// id the SDK path has. It decides which memory file the claim may trust,
+	// whether block 2 is this claim's to compose, and whether the task context
+	// is composed or replayed.
 	opened bool
 	// block is the block 2 to run under, verbatim: what the launch stamped on an
 	// opened conversation. Empty when this claim must compose its own.
 	block string
+	// taskContext is the content of an opened conversation's task-context row,
+	// the task context its opening sent, and what this claim retains as the
+	// task-context file. Set whenever opened is, whichever read failed after the
+	// transcript's.
+	taskContext string
 	// stampable is whether this claim may put what it composes on the row, and
 	// it is true only when the row is KNOWN to hold nothing. A read that failed
 	// is not that: an opened conversation's row may already carry the launch's
@@ -555,19 +597,19 @@ type claimReplay struct {
 // never writes the column back; here the difference between "empty" and
 // "unreadable" decides a write, so it has to survive.
 //
-// Neither read failing refuses the claim. A transcript this process cannot read
+// Neither read failing refuses the claim. An opening this process cannot read
 // is treated as unopened, which is the cheap mistake for the memory file it
 // gates — crediting this run with a predecessor's notes corrupts the entity's
 // durable record, while distrusting its own costs one run's notes. Both failures
 // then cost this turn a recomposed block 2, and neither costs the row its own.
 func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID string) claimReplay {
-	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	taskContext, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read transcript to classify this claim failed; composing this engagement's block 2 and leaving the row's to the next claim",
+		delegateLog.Warn("read the conversation's opening to classify this claim failed; composing this engagement's block 2 and leaving the row's to the next claim",
 			"conversation", conversationID, "error", err)
 		return claimReplay{}
 	}
-	if !conversationOpened(rows) {
+	if !opened {
 		// This claim IS the launch, so the block it composes is the one the row
 		// owes every claim after it.
 		return claimReplay{stampable: true}
@@ -576,11 +618,11 @@ func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID s
 	if err != nil {
 		delegateLog.Warn("read the launch's system block failed; this engagement composes its own block 2 and leaves the row's to the next claim",
 			"conversation", conversationID, "org_id", orgID, "error", err)
-		return claimReplay{opened: true}
+		return claimReplay{opened: true, taskContext: taskContext}
 	}
 	// An empty block on an opened conversation is a row from before this runtime
 	// stamped one. It composes live, once, and stamps what it composed.
-	return claimReplay{opened: true, block: block, stampable: block == ""}
+	return claimReplay{opened: true, block: block, taskContext: taskContext, stampable: block == ""}
 }
 
 // nativeSpec is the prompt selector for every native engagement.
@@ -591,9 +633,9 @@ func (s *Spawner) nativeClaimReplay(ctx context.Context, orgID, conversationID s
 // mode is a wiring bug. Passing the ambient mode would compose a local-mode
 // prompt for it and let it proceed on paths that do not exist; pinning makes
 // agentprompt refuse, which is the same answer the launch gives moments later.
-func nativeSpec() agentprompt.Spec {
+func nativeSpec(surface agentprompt.Surface) agentprompt.Spec {
 	return agentprompt.Spec{
-		Surface: agentprompt.SurfaceMachinist,
+		Surface: surface,
 		Runtime: agentprompt.RuntimeNative,
 		Family:  agentprompt.FamilyClaude,
 		Mode:    agentprompt.ModeMulti,
@@ -612,8 +654,8 @@ func nativeSpec() agentprompt.Spec {
 //
 // Both are skipped for an opened conversation: a parked engagement picking up a
 // steer, whose own memory file is at that path. opened is nativeClaimReplay's
-// answer, which is the same conversationOpened reading mintOpeningRows makes a
-// few calls later.
+// answer, read from the same OpeningTaskContextSystem the mint's gate is a few
+// calls later.
 func prepareInheritedMemory(cwd string, handedOff, opened bool) *memoryFingerprint {
 	if opened {
 		return nil
@@ -656,18 +698,46 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, nam
 // Read off the sidecar's LLM coordinates rather than the sandbox env, and that
 // distinction is the whole of the cell shrink: those coordinates now go to
 // exactly one place, this call, and the jail is built without them.
-func (s *Spawner) nativeCredentials(cfg runConfig, model, coldModel string) agentloop.Credentials {
+//
+// The sidecar serves that address over TLS under a certificate it minted for
+// this engagement, which rides beside the coordinates and is what the client
+// verifies the hop against.
+func (s *Spawner) nativeCredentials(cfg runConfig, switchable []string, coldModel string) agentloop.Credentials {
 	env := envSliceToMap(cfg.sidecar.engineLLMEnv())
 	return &agentloop.EnvCredentials{
-		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
+		Resolve:   func(context.Context) (map[string]string, error) { return env, nil },
+		CACertPEM: cfg.sidecar.engineLLMCertPEM(),
 		// The whitelist must name the models actually requested: bifrost
 		// reads an empty whitelist as "no models", and a wildcard would let a
-		// mis-stamped model id reach the provider unremarked. The forced-shape
-		// compaction model is the caller's resolved value, not a constant read
-		// of its own — the same resolution feeds the engine's params, so the
-		// compaction request and this whitelist cannot drift apart.
-		Models: []string{model, coldModel},
+		// mis-stamped model id reach the provider unremarked. The models are
+		// the ones the engine may switch to, its own included, and the
+		// forced-shape compaction model; both are the caller's resolved
+		// values, which also feed the engine's params, so a request and this
+		// whitelist cannot drift apart.
+		Models: append(slices.Clone(switchable), coldModel),
 	}
+}
+
+// switchableModels are the models an engagement on model may move to without
+// a new credential: the team's enabled models its provider serves, by their
+// catalog entries, and model itself. A failed read of the team's models, or a
+// model the catalog does not offer, leaves model alone, and a message naming
+// another then hands the claim back for the next claim to decide.
+func (s *Spawner) switchableModels(ctx context.Context, orgID, teamID, model string) []string {
+	out := []string{model}
+	models, err := s.resolveModel(ctx, orgID, teamID)
+	if err != nil {
+		delegateLog.Warn("read the team's models for the engagement's switchable set failed; it switches to no other model",
+			"team", teamID, "model", model, "error", err)
+		return out
+	}
+	enabled := models.Enabled()
+	for _, key := range deploymentUniverse().Keys() {
+		if key != model && enabled.Has(key) && sameProvider(key, model) {
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // bedrockColdCompactionModel is Haiku 5.5 under the id a Bedrock credential
@@ -731,8 +801,7 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // terminal external action, which is what its addendum tells it. finalStep
 // says which this is.
 //
-// Both runtimes ask it: the native loop as its ShouldStopAfterTurn hook, and
-// the SDK driver through turnEndNudge.
+// Both runtimes ask it, through turnEndNudges.
 //
 // Asking twice about the same silence would be badgering — the model already
 // answered. Asking again after a human has intervened is not: the premise
@@ -751,10 +820,11 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 		// nudge that sends a finished run back to work on a false premise.
 		//
 		// A task that closed, or whose close is held for a person, asks for
-		// nothing more: the run was told the situation resolved and to end
-		// unless its instructions need it to go on, and the nudge would send
-		// it back for an artifact that situation no longer calls for. Read
-		// here, since either can happen at any point in the engagement.
+		// nothing more: the situation it is about resolved, and the nudge
+		// would send the run back for an artifact that situation no longer
+		// calls for. A closed task's run was also told to end unless its
+		// instructions need it to go on. Read here, since either can happen
+		// at any point in the engagement.
 		current, err := s.tasks.GetSystem(ctx, orgID, task.ID)
 		if err != nil {
 			delegateLog.Warn("read the task for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
@@ -792,31 +862,31 @@ func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domai
 			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
 			return ""
 		}
-		if askedAboutArtifactAlready(rows) {
+		if askedSinceHumanInput(rows, artifactNudgeTag) {
 			return ""
 		}
 		return artifactNudgeNote
 	}
 }
 
-// askedAboutArtifactAlready reports whether the nudge has been put with no
-// human input since.
+// askedSinceHumanInput reports whether the nudge whose note opens with tag has
+// been put with no human input since.
 //
 // Walking back from the newest row to the first one that speaks for someone:
 // the nudge itself means the question stands answered and nothing has
 // happened to change it; genuine human input means a person spoke
 // afterwards, so the run is working on something the question was never
 // asked about. Everything else the system wrote on the agent's behalf — a
-// park's stop-note, a staged event note, the crash notice — speaks for no
-// one and is skipped, using the same closed human set the engine's drain
-// keys on. The nudge check comes first because the nudge row itself is
-// system-authored: the human filter would skip it.
-func askedAboutArtifactAlready(rows []domain.Message) bool {
+// park's stop-note, a staged event note, the crash notice, another nudge's
+// note — speaks for no one and is skipped, using the same closed human set
+// the engine's drain keys on. The tag check comes first because the nudge
+// row itself is system-authored: the human filter would skip it.
+func askedSinceHumanInput(rows []domain.Message, tag string) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Role != "user" {
 			continue
 		}
-		if strings.Contains(rows[i].Content, artifactNudgeTag) {
+		if isNudgeNote(rows[i], tag) {
 			return true
 		}
 		if agentloop.IsHumanInput(rows[i]) {
@@ -824,6 +894,15 @@ func askedAboutArtifactAlready(rows []domain.Message) bool {
 		}
 	}
 	return false
+}
+
+// isNudgeNote reports whether a row is the note a turn-end nudge sent, the one
+// whose text opens with tag. The tag alone is not enough: it is a string in
+// this repository and in every transcript the note lands in, so a person's
+// message or a staged note quoting it would otherwise read as the question
+// asked.
+func isNudgeNote(r domain.Message, tag string) bool {
+	return r.Role == "user" && r.Subtype == domain.MessageSubtypeInjectionNudge && strings.HasPrefix(r.Content, tag)
 }
 
 // turnEndNudge adapts the would-stop hook to the SDK driver's shape, which
@@ -1043,6 +1122,27 @@ func (s *Spawner) recordNativeResult(
 			cell:           cfg.sidecar.treeHandOff(),
 		}, cfg.jailLosses, lost, creatorUserID)
 
+	case agentloop.ResultProviderSwitch:
+		// A person's message named a model this engagement's credentials
+		// cannot call. Nothing about the conversation failed and the message
+		// is in its transcript, so the claim goes back at once, spending no
+		// budget, and the next claim seals that model's provider and runs on
+		// it.
+		if leaseFenced(ctx) {
+			return engagementDisposition{fenced: true}
+		}
+		terminal = "provider_switch"
+		return engagementDisposition{fenced: s.handBackOnProviderSwitch(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			claimID:        cfg.claimID,
+			runtime:        domain.ConversationRuntimeNative,
+			mirror:         mirror,
+			cell:           cfg.sidecar.treeHandOff(),
+		}, result.Model), handedBack: true}
+
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,
 		// or a stop reason only a person can resolve. The conversation is
@@ -1052,13 +1152,15 @@ func (s *Spawner) recordNativeResult(
 			return engagementDisposition{fenced: true}
 		}
 		terminal = "open"
+		_, spendCapped := result.ParkGuard.(*spendGuard)
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         db.ParkIdle(),
+			reason:         db.ParkTurnIncomplete(),
+			spendCapped:    spendCapped,
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 			cell:           cfg.sidecar.treeHandOff(),
@@ -1096,7 +1198,7 @@ func (s *Spawner) recordNativeResult(
 	// The claim is still held, so the snapshot is one of the engagement's
 	// operations: bounded, and the idle limit does not apply while it runs.
 	snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
-	err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, "", domain.ConversationRuntimeNative)
+	err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, domain.ConversationRuntimeNative)
 	endSnap()
 	if err != nil {
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "conversation", conversationID, "error", err)

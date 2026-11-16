@@ -23,7 +23,7 @@ func reviewTask() domain.Task {
 // resume reads that block off the row rather than rebuilding it — so these
 // tests compose it the way the launch does and hand it over the same door.
 func launchAppend(mission, runCtxBlock, toolsRef, nonTerminal, binaryPath string) string {
-	return sdkSystemPrompt(composeConversationSystemBlock(mission, runCtxBlock, toolsRef, nonTerminal), binaryPath)
+	return sdkSystemPrompt(agentprompt.SurfaceMachinist, composeConversationSystemBlock(mission, runCtxBlock, toolsRef, nonTerminal), binaryPath)
 }
 
 // TestSDKSystemPrompt_IsTheTwoBlocks is the parity this runtime is held to: the
@@ -39,7 +39,7 @@ func TestSDKSystemPrompt_IsTheTwoBlocks(t *testing.T) {
 
 	got := launchAppend(mission, runCtx, toolsRef, nonTerminal, "/bin/tf")
 	want := resolveCLIPath(
-		strings.TrimSpace(agentprompt.Build(machinistSpec()))+"\n\n"+
+		strings.TrimSpace(agentprompt.Build(sdkSpec(agentprompt.SurfaceMachinist)))+"\n\n"+
 			strings.TrimSpace(composeConversationSystemBlock(mission, runCtx, toolsRef, nonTerminal)),
 		"/bin/tf")
 	if got != want {
@@ -57,7 +57,7 @@ func TestSDKSystemPrompt_IsTheTwoBlocks(t *testing.T) {
 // reference from a section.
 func frameworkBlocks(t *testing.T) string {
 	t.Helper()
-	return resolveCLIPath(strings.TrimSpace(agentprompt.Build(machinistSpec())), "/bin/tf")
+	return resolveCLIPath(strings.TrimSpace(agentprompt.Build(sdkSpec(agentprompt.SurfaceMachinist))), "/bin/tf")
 }
 
 // TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay covers the manual

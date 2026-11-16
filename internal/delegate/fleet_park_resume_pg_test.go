@@ -225,9 +225,9 @@ func (f *parkFleet) deliverStop(t *testing.T, e *liveEngagement) {
 	}
 }
 
-// parkIdle is an engagement's own park, run to completion: the turn ended
-// with nothing further to do.
-func (f *parkFleet) parkIdle(t *testing.T, s *Spawner, conv *domain.Conversation, cwd string) {
+// parkTurnIncomplete is an engagement's own park, run to completion: the
+// turn stopped before it finished.
+func (f *parkFleet) parkTurnIncomplete(t *testing.T, s *Spawner, conv *domain.Conversation, cwd string) {
 	t.Helper()
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          f.orgID,
@@ -236,9 +236,9 @@ func (f *parkFleet) parkIdle(t *testing.T, s *Spawner, conv *domain.Conversation
 		claudeCwd:      cwd,
 		claimID:        conv.ClaimID,
 		runtime:        conv.Runtime,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}, ""); fenced {
-		t.Fatalf("the idle park under claim %s was refused by the fence", conv.ClaimID)
+		t.Fatalf("the turn_incomplete park under claim %s was refused by the fence", conv.ClaimID)
 	}
 }
 
@@ -256,7 +256,7 @@ func (f *parkFleet) claim(t *testing.T, s *Spawner) *domain.Conversation {
 }
 
 func (f *parkFleet) followUp(text string) error {
-	return f.control.SendMessage(context.Background(), f.orgID, f.conversationID, f.userID, text)
+	return f.control.SendMessage(context.Background(), f.orgID, f.conversationID, f.userID, text, domain.TurnSettings{})
 }
 
 // read is the display read — the row as the board and the station see it.
@@ -591,7 +591,7 @@ func TestFleet_ParkFirst_StopParksBeforeTheExecutorPersists(t *testing.T) {
 		t.Errorf("display status under the new claim = %q, want running", got)
 	}
 
-	f.parkIdle(t, f.x, next, f.wtPath)
+	f.parkTurnIncomplete(t, f.x, next, f.wtPath)
 	f.assertState(t, domain.WorkspaceSnapshotWritten, next.ClaimID)
 	f.assertInvariants(t)
 }
@@ -665,10 +665,10 @@ func TestFleet_WarmResume_SameExecutorNeverWaitsOnItsOwnPersist(t *testing.T) {
 	assertFileContains(t, filepath.Join(f.wtPath, "_tfac", "notes.md"), "half-finished work")
 
 	// The successor's park re-owns the key: its record, its blob.
-	f.parkIdle(t, f.x, next, f.wtPath)
+	f.parkTurnIncomplete(t, f.x, next, f.wtPath)
 	f.assertState(t, domain.WorkspaceSnapshotWritten, next.ClaimID)
 	if got := f.read(t).Status; got != domain.StatusOpen || f.activeClaims(t) != 0 {
-		t.Fatalf("after the idle park: status %q, active claims %d", got, f.activeClaims(t))
+		t.Fatalf("after the turn_incomplete park: status %q, active claims %d", got, f.activeClaims(t))
 	}
 
 	// And that blob is the one a cold resume gets: sweep the tree, resume,
@@ -692,7 +692,7 @@ func TestFleet_WarmResume_SameExecutorNeverWaitsOnItsOwnPersist(t *testing.T) {
 	assertFileContains(t, filepath.Join(cwd, "_tfac", "successor.md"), "written by the second engagement")
 	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "half-finished work")
 
-	f.parkIdle(t, f.x, again, cwd)
+	f.parkTurnIncomplete(t, f.x, again, cwd)
 	f.assertInvariants(t)
 }
 
@@ -759,7 +759,7 @@ func TestFleet_CrossExecutorResume_WaitsOutTheLiveWriter(t *testing.T) {
 		t.Error("Y does not report the executor changed; the rebuilt-workspace notice would understate what moved")
 	}
 
-	f.parkIdle(t, f.y, next, cwd)
+	f.parkTurnIncomplete(t, f.y, next, cwd)
 	f.assertInvariants(t)
 }
 
@@ -852,7 +852,7 @@ func TestFleet_CrossExecutorResume_FallsBackWhenTheWriterIsDead(t *testing.T) {
 			if f.blobPresent(t) {
 				t.Error("a blob exists for a persist that failed")
 			}
-			f.parkIdle(t, f.y, next, freshDir)
+			f.parkTurnIncomplete(t, f.y, next, freshDir)
 			f.assertState(t, domain.WorkspaceSnapshotWritten, next.ClaimID)
 			f.assertInvariants(t)
 		})
@@ -870,7 +870,7 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	if first == nil {
 		t.Fatal("X could not claim")
 	}
-	f.parkIdle(t, f.x, first, f.wtPath)
+	f.parkTurnIncomplete(t, f.x, first, f.wtPath)
 	f.assertState(t, domain.WorkspaceSnapshotWritten, first.ClaimID)
 	// Parked seven hours ago, mint included. The key's idle-since is the
 	// MAXIMUM of every stamp its conversations carry, so backdating parked_at
@@ -980,7 +980,7 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	}
 	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "half-finished work")
 
-	f.parkIdle(t, f.x, next, cwd)
+	f.parkTurnIncomplete(t, f.x, next, cwd)
 	f.assertInvariants(t)
 }
 
@@ -998,7 +998,7 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 	if first == nil {
 		t.Fatal("X could not claim")
 	}
-	f.parkIdle(t, f.x, first, f.wtPath)
+	f.parkTurnIncomplete(t, f.x, first, f.wtPath)
 	if err := f.followUp("again"); err != nil {
 		t.Fatalf("follow-up: %v", err)
 	}
@@ -1013,7 +1013,7 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 		t.Fatal("X could not claim its own resumed conversation at once")
 	}
 	f.deliver(t, next)
-	f.parkIdle(t, f.x, next, f.wtPath)
+	f.parkTurnIncomplete(t, f.x, next, f.wtPath)
 
 	// Same stamp, but X has gone quiet: the warm tree is on a machine nobody
 	// can reach, so the stamp yields immediately.
@@ -1026,7 +1026,7 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 		t.Fatal("Y could not claim a stale executor's resumed conversation")
 	}
 	f.deliver(t, onY)
-	f.parkIdle(t, f.y, onY, f.wtPath)
+	f.parkTurnIncomplete(t, f.y, onY, f.wtPath)
 
 	// The stamp follows the engagement: Y drove it last, so the next resume
 	// is Y's.
@@ -1048,6 +1048,6 @@ func TestFleet_Affinity_ResumeChasesTheLastExecutor(t *testing.T) {
 		t.Fatal("X could not claim once the aging window elapsed")
 	}
 	f.deliver(t, aged)
-	f.parkIdle(t, f.x, aged, f.wtPath)
+	f.parkTurnIncomplete(t, f.x, aged, f.wtPath)
 	f.assertInvariants(t)
 }

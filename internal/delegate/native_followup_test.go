@@ -61,7 +61,7 @@ func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-native")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-native", runmode.LocalDefaultUserID, "also check the tests"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-native", runmode.LocalDefaultUserID, "also check the tests", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	pending := pendingRows(t, s, "r-native")
@@ -132,7 +132,7 @@ func TestSendMessage_NativeBroadcastCarriesTheStoredRow(t *testing.T) {
 	markNative(t, database, "r-bcast")
 
 	for _, text := range []string{"first", "second"} {
-		if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-bcast", runmode.LocalDefaultUserID, text); err != nil {
+		if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-bcast", runmode.LocalDefaultUserID, text, domain.TurnSettings{}); err != nil {
 			t.Fatalf("SendMessage(%q): %v", text, err)
 		}
 	}
@@ -175,7 +175,7 @@ func TestSendMessage_NativeQueuedAppendsWithoutWaking(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-nq")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-nq", runmode.LocalDefaultUserID, "and this too"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-nq", runmode.LocalDefaultUserID, "and this too", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if got := pendingRows(t, s, "r-nq"); len(got) != 1 || got[0].Content != "and this too" {
@@ -198,7 +198,7 @@ func TestSendMessage_NativeCancelledNotSteerable(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-term")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "hello?")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "hello?", domain.TurnSettings{})
 	if !errors.Is(err, ErrConversationNotSteerable) {
 		t.Fatalf("err = %v, want ErrConversationNotSteerable", err)
 	}
@@ -231,7 +231,7 @@ func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 			markNative(t, database, "r-done")
 
-			if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-done", runmode.LocalDefaultUserID, "try again"); err != nil {
+			if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-done", runmode.LocalDefaultUserID, "try again", domain.TurnSettings{}); err != nil {
 				t.Fatalf("SendMessage: %v", err)
 			}
 			if st := storedStatus(t, database, "r-done"); st != "" {

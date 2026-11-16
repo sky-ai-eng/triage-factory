@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -311,10 +310,12 @@ func TestTaskClaim_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 }
 
 // TestTaskDelegate_RefusedLeavesTheTaskUnchanged is the delegate half: a task
-// another user holds refuses the delegate with a 409 and no claim change.
+// another user holds refuses the delegate with a 409 and no claim change. The
+// blueprint is one the plan accepts, so the refusal is the handoff's.
 func TestTaskDelegate_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	blueprintID := seedOneStepBlueprint(t, s, "drefuse", "")
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004dd"
 
@@ -347,7 +348,7 @@ func TestTaskDelegate_RefusedLeavesTheTaskUnchanged(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/delegate",
-		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000007", map[string]any{"blueprint_id": "any"}))
+		withTaskVersion(t, s, "00000000-0000-4000-8000-000000000007", map[string]any{"blueprint_id": blueprintID}))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -620,11 +621,11 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 }
 
 // TestTaskDelegate_TransfersOwnUserClaim: delegating a task the caller holds is
-// a user → agent transfer, not a stolen claim. The claim moves even when the
-// spawn then fails, and SPAWN_FAILED says so.
+// a user → agent transfer, not a stolen claim.
 func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
+	blueprintID := seedOneStepBlueprint(t, s, "y2a", "")
 
 	// A task the local user holds, as before a You → Agent drag.
 	const eventType = "github:pr:opened"
@@ -650,27 +651,7 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 		t.Fatalf("seed user-claimed task: %v", err)
 	}
 
-	// A blueprint id that won't resolve: the claim moves before the spawn,
-	// which then fails with a 422.
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", withTaskVersion(t, s, "00000000-0000-4000-8000-000000000004", map[string]any{
-		"blueprint_id": "no-such-prompt",
-	}))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
-	}
-	// The claim-survived marker: without SPAWN_FAILED the FE would read this
-	// as a nothing-landed failure and skip the refetch + retry affordance.
-	var errBody struct {
-		Errors []struct {
-			Reason string `json:"reason"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if len(errBody.Errors) != 1 || errBody.Errors[0].Reason != "SPAWN_FAILED" {
-		t.Errorf("errors = %+v; want one SPAWN_FAILED item", errBody.Errors)
-	}
+	delegateOnce(t, s, "00000000-0000-4000-8000-000000000004", blueprintID)
 
 	var claimedAgent, claimedUser sql.NullString
 	if err := s.db.QueryRow(

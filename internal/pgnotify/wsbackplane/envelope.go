@@ -13,7 +13,9 @@ import (
 // JSON (see Event's doc comment in pkg/websocket) — but the backplane
 // needs them on the wire between pods so the receiving pod's
 // DeliverRemote can reapply the same per-connection scope filter
-// Broadcast would have applied locally.
+// Broadcast would have applied locally. ReadersOfConversation is not a
+// field here: the envelope key an event travels under carries it (see
+// wsEnvelope).
 //
 // omitempty on UserIDs loses nothing: Broadcast drops an event with an
 // empty non-nil set before it reaches Publish, so an absent user_ids is
@@ -61,11 +63,38 @@ func (w wireEvent) toEvent() websocket.Event {
 // wsEnvelope is the tf_ws NOTIFY payload shape (spec §5: "{origin_pod,
 // event}"). Event carries the inline payload when it fits under the
 // configured threshold; OutboxID carries a ws_outbox row reference
-// otherwise. Exactly one of the two is set.
+// otherwise.
+//
+// An event marked ReadersOfConversation travels under keys of its own,
+// ReadersEvent and ReadersOutboxID, never Event or OutboxID. Pods on a
+// build without the marker read only event and outbox_id, so they find
+// neither and drop the envelope; under the shared keys they would deliver
+// the event by its org alone, to every team in it. Exactly one of the four
+// is set.
 type wsEnvelope struct {
 	OriginInstanceID string     `json:"origin_instance_id"`
 	Event            *wireEvent `json:"event,omitempty"`
 	OutboxID         int64      `json:"outbox_id,omitempty"`
+	ReadersEvent     *wireEvent `json:"readers_event,omitempty"`
+	ReadersOutboxID  int64      `json:"readers_outbox_id,omitempty"`
+}
+
+// inlineEnvelope is the envelope carrying we inline, under the readers key
+// when its event is marked ReadersOfConversation.
+func inlineEnvelope(originID string, we *wireEvent, forReaders bool) wsEnvelope {
+	if forReaders {
+		return wsEnvelope{OriginInstanceID: originID, ReadersEvent: we}
+	}
+	return wsEnvelope{OriginInstanceID: originID, Event: we}
+}
+
+// outboxEnvelope is the envelope referencing ws_outbox row outboxID, under
+// the readers key when its event is marked ReadersOfConversation.
+func outboxEnvelope(originID string, outboxID int64, forReaders bool) wsEnvelope {
+	if forReaders {
+		return wsEnvelope{OriginInstanceID: originID, ReadersOutboxID: outboxID}
+	}
+	return wsEnvelope{OriginInstanceID: originID, OutboxID: outboxID}
 }
 
 // kickEnvelope is the tf_ctl NOTIFY payload shape for the cross-pod

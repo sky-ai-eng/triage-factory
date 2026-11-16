@@ -13,6 +13,7 @@ package lite
 
 import (
 	"context"
+	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -52,6 +53,10 @@ func (s *workspaceStore) Get(context.Context, string, string, string) (*slacksto
 
 func (s *workspaceStore) Delete(context.Context, string, string, string) error {
 	return db.ErrNotApplicableInLocal
+}
+
+func (s *workspaceStore) DeleteSystem(context.Context, string, string, string, time.Time) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }
 
 func (s *workspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {

@@ -31,12 +31,9 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	seedDraftPRDeliverable(t, s, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		res("opened a PR"), t.TempDir(), nil, "", "")
 
-	if parked {
-		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
-	}
 	if conv := loadConversation(t, s, conversationID); !conv.Concluded() || conv.Outcome != "continue" {
 		t.Fatalf("conv = {status:%q completed_at:%v outcome:%q}, want concluded with continue", conv.Status, conv.CompletedAt, conv.Outcome)
 	}
@@ -45,8 +42,8 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 
 // TestProcessCompletion_PlainAbortWritesSnapshot: a plain abort (completed +
 // outcome=abort, no queued deliverable) snapshots its workspace at the terminal
-// write but returns parked=false — the worktree is torn down by the cleanup
-// defers and cold rehydrate from the snapshot is the resume path.
+// write, so a cold rehydrate from the snapshot is the resume path once the
+// tree is gone.
 func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "ab-snap")
@@ -54,13 +51,10 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		stopped(domain.ConversationOutcomeAbort, "needs a human to rotate the token", "looked into it"),
 		t.TempDir(), nil, "", "")
 
-	if parked {
-		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
-	}
 	if conv := loadConversation(t, s, conversationID); !conv.Concluded() || conv.Outcome != "abort" {
 		t.Fatalf("conv = {status:%q completed_at:%v outcome:%q}, want concluded with abort", conv.Status, conv.CompletedAt, conv.Outcome)
 	}
@@ -70,7 +64,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 // TestProcessCompletion_CleanFinishWritesSnapshot is the case the write policy
 // was widened for: a clean finish snapshots its workspace at the terminal write,
 // while the worktree and transcript are still on disk, so the work a successful
-// run produced is still somewhere once the cleanup defers tear the tree down.
+// run produced is still somewhere once the blueprint's end removes the tree.
 func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fin-snap")
@@ -78,12 +72,9 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
 		stopped(domain.ConversationOutcomeFinish, "nothing more to do", "shipped it"), t.TempDir(), nil, "", "")
 
-	if parked {
-		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
-	}
 	if conv := loadConversation(t, s, conversationID); !conv.Concluded() || conv.Outcome != "finish" {
 		t.Fatalf("conv = {status:%q completed_at:%v outcome:%q}, want concluded with finish", conv.Status, conv.CompletedAt, conv.Outcome)
 	}
@@ -140,7 +131,7 @@ func TestTerminateBlueprint_RetainsSnapshot(t *testing.T) {
 				t.Fatalf("settle the snapshot lifecycle: %v", err)
 			}
 
-			s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+			s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, time.Now(),
 				runConfig{orgID: runmode.LocalDefaultOrgID}, status, "", nil, true)
 
 			assertSnapshotPresent(t, s, taskID, true)
@@ -272,7 +263,7 @@ func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := dbtest.HolderPark(s.conversations, ctx, runmode.LocalDefaultOrgID, conversationID, db.ParkIdle()); err != nil {
+	if _, err := dbtest.HolderPark(s.conversations, ctx, runmode.LocalDefaultOrgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 		t.Fatalf("park: %v", err)
 	}
 	if !parkedAtSet(t, database, conversationID) {

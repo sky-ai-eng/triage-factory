@@ -47,7 +47,7 @@ func RunSourceStatusConformance(t *testing.T, factory func(t *testing.T) SourceS
 	}
 	claim := func(t *testing.T, h SourceStatusHarness, taskID string) {
 		t.Helper()
-		if ok, err := h.Tasks.ClaimQueuedForUser(ctx, h.OrgID, taskID, h.UserID, TaskVersion(t, h.Tasks, h.OrgID, taskID)); err != nil || !ok {
+		if ok, err := h.Tasks.ClaimQueuedForUser(ctx, h.OrgID, taskID, h.UserID, ClaimTeam(t, h.Tasks, h.OrgID, taskID, h.UserID), TaskVersion(t, h.Tasks, h.OrgID, taskID)); err != nil || !ok {
 			t.Fatalf("ClaimQueuedForUser = (%v, %v), want the claim to land", ok, err)
 		}
 	}
@@ -89,7 +89,7 @@ func RunSourceStatusConformance(t *testing.T, factory func(t *testing.T) SourceS
 		if got := sourceStatus(t, h, taskID); got != nil {
 			t.Fatalf("source_status after the agent's claim = %+v, want nil: only a user claim records it", got)
 		}
-		if ok, err := h.Tasks.TakeoverClaimFromAgent(ctx, h.OrgID, taskID, h.UserID, TaskVersion(t, h.Tasks, h.OrgID, taskID)); err != nil || !ok {
+		if ok, err := h.Tasks.TakeoverClaimFromAgent(ctx, h.OrgID, taskID, h.UserID, ClaimTeam(t, h.Tasks, h.OrgID, taskID, h.UserID), TaskVersion(t, h.Tasks, h.OrgID, taskID)); err != nil || !ok {
 			t.Fatalf("TakeoverClaimFromAgent = (%v, %v)", ok, err)
 		}
 		want := domain.SourceStatus{StatusID: "10000", StatusName: "To Do", AssigneeID: "acc-ann"}

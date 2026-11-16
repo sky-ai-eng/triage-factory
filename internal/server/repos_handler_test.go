@@ -17,6 +17,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -144,18 +145,27 @@ func testRSAPEM(t *testing.T) string {
 // the given installations. The PEM is stored so the resolver can mint tokens.
 func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.OrgGitHubAppInstallation) {
 	t.Helper()
+	seedAppIn(t, s.orgs, s.secrets, s.githubApps, runmode.LocalDefaultOrgID, stub, installs)
+}
+
+// seedAppIn is seedApp for any org, through the stores it is handed: in
+// multi mode a test passes admin-pool stores, since the App's install flow
+// writes without request claims.
+func seedAppIn(t *testing.T, orgs db.OrgsStore, secrets db.SecretStore, apps db.GitHubAppsStore, org string, stub *httptest.Server, installs []domain.OrgGitHubAppInstallation) {
+	t.Helper()
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
-	dbtest.SeedOrgSettings(t, s.orgs, org, domain.OrgSettings{GitHubBaseURL: stub.URL})
-	if err := s.secrets.Put(ctx, org, "pem", testRSAPEM(t), ""); err != nil {
+	dbtest.SeedOrgSettings(t, orgs, org, domain.OrgSettings{GitHubBaseURL: stub.URL})
+	if err := secrets.Put(ctx, org, "pem", testRSAPEM(t), ""); err != nil {
 		t.Fatalf("store pem: %v", err)
 	}
-	if _, err := s.githubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := apps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: org, AppID: "123", Slug: "test-bot", PEMRef: "pem", Active: true,
 	}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	seedBYOAppCredentialClass(t, s, org)
+	if _, err := orgs.SetGitHubCredentialClass(ctx, org, domain.GitHubCredentialClassBYOApp); err != nil {
+		t.Fatalf("set github credential class: %v", err)
+	}
 	for _, inst := range installs {
 		inst.OrgID = org
 		// An installation that names no host is on the org's current one, which
@@ -163,7 +173,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 		if inst.GitHubHost == "" {
 			inst.GitHubHost = stub.URL
 		}
-		if _, err := s.githubApps.UpsertInstallation(ctx, inst); err != nil {
+		if _, err := apps.UpsertInstallation(ctx, inst); err != nil {
 			t.Fatalf("upsert installation %s: %v", inst.AccountLogin, err)
 		}
 	}

@@ -184,6 +184,9 @@ type desiredApp struct {
 	appID       string
 	orgID       string
 	appTokenRef string
+	// tokenRefs holds the app-token ref of every one of the app's socket
+	// rows. The token belongs to the app, so any of them dials.
+	tokenRefs map[string]bool
 }
 
 // desiredApps computes the full desired connection set: every api_app_id
@@ -224,9 +227,12 @@ func (m *socketManager) desiredApps(ctx context.Context) (map[string]desiredApp,
 				"app", row.APIAppID, "workspace", row.WorkspaceID)
 			continue
 		}
-		if _, exists := desired[row.APIAppID]; !exists {
-			desired[row.APIAppID] = desiredApp{appID: row.APIAppID, orgID: row.OrgID, appTokenRef: row.AppTokenRef}
+		d, exists := desired[row.APIAppID]
+		if !exists {
+			d = desiredApp{appID: row.APIAppID, orgID: row.OrgID, appTokenRef: row.AppTokenRef, tokenRefs: map[string]bool{}}
+			desired[row.APIAppID] = d
 		}
+		d.tokenRefs[row.AppTokenRef] = true
 	}
 	return desired, nil
 }
@@ -248,9 +254,19 @@ func (m *socketManager) reconcile(ctx context.Context) {
 	m.mu.Lock()
 	var stop []*appConnection
 	for appID, conn := range m.conns {
-		if _, ok := desired[appID]; !ok {
+		d, ok := desired[appID]
+		if !ok {
 			stop = append(stop, conn)
 			delete(m.conns, appID)
+			continue
+		}
+		// Disconnecting one of the app's workspaces, by an admin or by Slack
+		// removing the app there, deletes that row's secrets, its copy of the
+		// app token among them. A connection started from that row would
+		// otherwise redial with a key nothing holds, and the app's other
+		// workspaces would lose Socket Mode until a restart.
+		if !d.tokenRefs[conn.tokenRef()] {
+			conn.setTokenRef(d.appTokenRef)
 		}
 	}
 	var start []desiredApp

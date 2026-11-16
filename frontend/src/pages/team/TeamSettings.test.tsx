@@ -118,8 +118,8 @@ const MEMBERS = {
   ],
 }
 
-// The flow node and the spend slice the figures read. Slack's null count is
-// the shape's point: an undefined measurement renders as a dash, not a zero.
+// The flow node and the spend slice the figures read. The null count is the
+// shape's point: an undefined measurement renders as a dash, not a zero.
 const ACTIVITY = {
   team_id: 't1',
   by_day: [{ date: '2026-08-20', events: 8, tasks: 4 }],
@@ -499,6 +499,57 @@ describe('the sources panel', () => {
     expect(cardNames()).toEqual(['GitHub', 'Jira', 'Linear', 'Slack', 'Schedule'])
     const linear = screen.getByRole('link', { name: 'Linear' })
     expect(linear).toHaveAttribute('data-state', 'configured')
+    // The cards stay live, but the foot claims nothing it has not been told.
+    expect(screen.getByText('— sources connected · last event —')).toBeInTheDocument()
+  })
+
+  // The activity read with a tracked-set cut of the caller's, every other
+  // route answering as the suite's default does.
+  const minutesAgo = (min: number) => new Date(Date.now() - min * 60000).toISOString()
+  const unit = (source: string, unit_id: string, last_event_at: string | null) => ({
+    source,
+    unit_id,
+    events: 0,
+    tasks: 0,
+    runs: 0,
+    last_event_at,
+  })
+  const answerTracked = (by_tracked: ReturnType<typeof unit>[]) => {
+    const base = api.apiJSON.getMockImplementation()!
+    api.apiJSON.mockImplementation((path: string, init?: RequestInit) =>
+      path.includes('/activity?') ? Promise.resolve({ ...ACTIVITY, by_tracked }) : base(path, init),
+    )
+  }
+
+  it('dates the foot by the newest event among the connected sources', async () => {
+    sources.state = { ...SERVED, jira: 'disabled' }
+    answerTracked([
+      unit('github', 'r1', minutesAgo(90)),
+      unit('github', 'r2', minutesAgo(12)),
+      unit('github', 'r3', null),
+      // Newer than either, but Jira is turned off.
+      unit('jira', 'reg-PLAT', minutesAgo(2)),
+    ])
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(bandHead()!)
+    expect(await screen.findByText('3 sources connected · last event 12m ago')).toBeInTheDocument()
+  })
+
+  it('reads an event stamped ahead of this clock as just now, and counts one source as one', async () => {
+    sources.state = {
+      github: 'available',
+      jira: 'unconfigured',
+      linear: 'unconfigured',
+      slack: 'unconfigured',
+    }
+    answerTracked([unit('github', 'r1', minutesAgo(-0.5))])
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(bandHead()!)
+    expect(await screen.findByText('1 source connected · last event 1m ago')).toBeInTheDocument()
   })
 
   it('leaves out a source the read does not return, and opens no link to it', async () => {
@@ -879,6 +930,29 @@ describe('the models panel', () => {
       )
       expect(values).toEqual(['100%', '0%', '—'])
     })
+  })
+
+  // The badge is the one every model picker shows. The other availability
+  // values refuse nothing, so they are not badged here.
+  it('badges a model whose provider is not connected, and no other row', async () => {
+    const routes = api.apiJSON.getMockImplementation()!
+    api.apiJSON.mockImplementation((path: string, init?: RequestInit) => {
+      if (path.endsWith('/models'))
+        return Promise.resolve({
+          items: MODELS_READ.items.map((m, i) => ({
+            ...m,
+            availability: (['verified', 'unconfigured', 'red'] as const)[i] ?? 'unverified',
+          })),
+        })
+      return routes(path, init)
+    })
+    await openPanel()
+
+    const row = within(table()).getByText('Claude Sonnet 5').closest('.tb-row') as HTMLElement
+    expect(within(row).getByText('Not connected')).toBeInTheDocument()
+    expect(within(table()).getAllByText('Not connected')).toHaveLength(1)
+    for (const word of ['Verified', 'Unavailable', 'Untested'])
+      expect(within(table()).queryByText(word)).toBeNull()
   })
 
   it('gives a member no star and no toggle, but the same spend readings', async () => {

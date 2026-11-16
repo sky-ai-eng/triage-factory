@@ -1374,6 +1374,9 @@ func TestRun_SpendGuardParksBeforeTheCall(t *testing.T) {
 	if got.ParkNotice != "org at $50.00 of $50.00 today" {
 		t.Errorf("the guard's own wording must survive: %q", got.ParkNotice)
 	}
+	if _, ok := got.ParkGuard.(guardFunc); !ok {
+		t.Errorf("ParkGuard = %#v, want the guard that parked the engagement", got.ParkGuard)
+	}
 }
 
 func TestRun_GuardReadFailureFailsOpen(t *testing.T) {

@@ -14,15 +14,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestAskedAboutArtifactAlready pins when the artifact-contract question
-// re-arms. Asking twice about the same silence is badgering; asking again
+// TestAskedSinceHumanInput pins when a turn-end nudge's question re-arms,
+// walked for the artifact contract and checked for the memory note's own tag.
+// Asking twice about the same silence is badgering; asking again
 // after a human has changed the premise is a different question about
 // different work.
 //
 // The state is read from the transcript rather than remembered, so an
 // engagement that inherits a conversation behaves exactly like the one that
 // started it — a crash cannot buy a second nudge, and cannot lose one.
-func TestAskedAboutArtifactAlready(t *testing.T) {
+func TestAskedSinceHumanInput(t *testing.T) {
 	nudge := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: artifactNudgeNote}
 	assistant := domain.Message{Role: "assistant", Content: "nothing to publish"}
 	human := domain.Message{Role: "user", Content: "actually, open the PR"}
@@ -31,6 +32,9 @@ func TestAskedAboutArtifactAlready(t *testing.T) {
 	sandboxNotice := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNewSandbox, Content: "your sandbox is new"}
 	stopNote := domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run reached its spend cap and has been paused."}
 	stagedNote := domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>PR gained commits</system-note>"}
+	memoryNudge := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: memoryNudgeNote}
+	quoting := domain.Message{Role: "user", Content: artifactNudgeNote}
+	stagedQuoting := domain.Message{Role: "user", Subtype: "injection:system-note", Content: artifactNudgeNote}
 
 	tests := []struct {
 		name string
@@ -82,15 +86,39 @@ func TestAskedAboutArtifactAlready(t *testing.T) {
 			want: true,
 		},
 		{
+			// Each nudge has its own tag, so one nudge's note does not answer
+			// the other's question.
+			name: "the memory note does not answer the artifact question",
+			rows: []domain.Message{human, assistant, memoryNudge, assistant},
+		},
+		{
+			// The tag is a string anyone can write. Only the note itself,
+			// under the nudge subtype, is the question asked.
+			name: "a person's message quoting the note is the person writing",
+			rows: []domain.Message{human, assistant, quoting, assistant},
+		},
+		{
+			name: "a staged note quoting the note is not the note",
+			rows: []domain.Message{human, assistant, stagedQuoting, assistant},
+		},
+		{
 			name: "an empty transcript has nothing to have asked",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := askedAboutArtifactAlready(tc.rows); got != tc.want {
-				t.Errorf("askedAboutArtifactAlready = %v, want %v", got, tc.want)
+			if got := askedSinceHumanInput(tc.rows, artifactNudgeTag); got != tc.want {
+				t.Errorf("askedSinceHumanInput(artifact) = %v, want %v", got, tc.want)
 			}
 		})
+	}
+
+	// The same walk answers for the memory note under its own tag.
+	if !askedSinceHumanInput([]domain.Message{human, assistant, memoryNudge, assistant}, memoryNudgeTag) {
+		t.Error("the memory note does not answer its own question")
+	}
+	if askedSinceHumanInput([]domain.Message{human, assistant, nudge, assistant}, memoryNudgeTag) {
+		t.Error("the artifact note answers the memory question")
 	}
 }
 
@@ -242,7 +270,7 @@ func TestMintOpeningTurn_OpensAheadOfAQueuedFollowUp(t *testing.T) {
 
 	// A person types while the conversation waits for an executor.
 	if _, err := s.conversations.InsertMessageSystem(ctx, runmode.LocalDefaultOrgID,
-		pendingUserInput("r-hoist", runmode.LocalDefaultUserID, "and update the README")); err != nil {
+		pendingUserInput("r-hoist", runmode.LocalDefaultUserID, "and update the README", domain.TurnSettings{})); err != nil {
 		t.Fatalf("queue the follow-up: %v", err)
 	}
 
@@ -264,6 +292,38 @@ func TestMintOpeningTurn_OpensAheadOfAQueuedFollowUp(t *testing.T) {
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("assembly order =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// TestMintOpeningTurn_DoesNotReopenACompactedConversation: after a compaction
+// the assembly window holds a summary and no opening, and the conversation has
+// still been opened. Its next claim writes no second task context and no second
+// set of memories ahead of the summary.
+func TestMintOpeningTurn_DoesNotReopenACompactedConversation(t *testing.T) {
+	f := newLaunchFixture(t, "mint-compacted")
+	f.open(t)
+	f.speak(t, "assistant", "on it")
+	f.compact(t)
+
+	transcript := newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)
+	if err := f.s.mintOpeningTurn(context.Background(), transcript, runmode.LocalDefaultOrgID, f.conv.ID, runmode.LocalDefaultUserID,
+		[]domain.TaskMemory{{ID: "m1", Content: "prior"}}, "<task_context>\nrecomposed\n</task_context>"); err != nil {
+		t.Fatalf("mintOpeningTurn: %v", err)
+	}
+
+	count := func(subtype string) int {
+		t.Helper()
+		var n int
+		if err := f.database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND subtype = ?`, f.conv.ID, subtype).Scan(&n); err != nil {
+			t.Fatalf("count %s rows: %v", subtype, err)
+		}
+		return n
+	}
+	if n := count(domain.MessageSubtypeInjectionTaskContext); n != 1 {
+		t.Errorf("task-context rows = %d, want only the one the opening wrote", n)
+	}
+	if n := count(domain.MessageSubtypeInjectionMemory); n != 0 {
+		t.Errorf("memory rows = %d, want none; the conversation was opened again", n)
 	}
 }
 

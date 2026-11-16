@@ -332,7 +332,7 @@ func TestUpstream_AMessageRetriesAtOnce(t *testing.T) {
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
 
-	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "the provider is back, try again"); err != nil {
+	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "the provider is back, try again", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if _, ok := f.nextAttemptIn(t); ok {
@@ -358,7 +358,7 @@ func TestUpstream_AMessageSentDuringTheOutageRetriesAtOnce(t *testing.T) {
 	f := newUpstreamFixture(t, "r-upstream-message-during")
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
-	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "is it back yet?"); err != nil {
+	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "is it back yet?", domain.TurnSettings{}); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if frames := captured.conversationUpdates(t, f.conversationID); len(frames) != 0 {

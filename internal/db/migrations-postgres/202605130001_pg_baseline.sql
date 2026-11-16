@@ -202,10 +202,10 @@ $$;
 -- +goose StatementEnd
 
 
--- Reads one blueprint's running-ness past the creator-scoped blueprint_runs_select
+-- Reads one blueprint's running-ness past the team-scoped blueprint_runs_select
 -- policy, so the resume CAS refuses to un-terminal a completed conversation whose
--- blueprint is still running even for a non-creator caller (a plain subquery would
--- find nothing and fail open). With request claims p_org_id must equal the caller's
+-- blueprint is still running even for a caller on another team (a plain subquery
+-- would find nothing and fail open). With request claims p_org_id must equal the caller's
 -- org; with none (admin pool) that check is skipped. Pinned search_path blocks
 -- definer hijacking; a NULL id or a missing row answers false.
 -- +goose StatementBegin
@@ -229,10 +229,10 @@ $$;
 -- +goose StatementEnd
 
 
--- Reads whether one blueprint run completed past the same creator-scoped
+-- Reads whether one blueprint run completed past the same team-scoped
 -- blueprint_runs_select policy, so a count of completed runs includes a step a
 -- person followed up on whoever reads it (a plain subquery would find nothing
--- for a non-creator and drop the run from the count). The org check, the pinned
+-- for a caller on another team and drop the run from the count). The org check, the pinned
 -- search_path, and the false answer for a NULL id or a missing row are
 -- tf.blueprint_run_is_running's.
 -- +goose StatementBegin
@@ -256,11 +256,11 @@ $$;
 -- +goose StatementEnd
 
 
--- Answers "is this run the task's newest" past the same creator-scoped
+-- Answers "is this run the task's newest" past the same team-scoped
 -- blueprint_runs_select policy, for the terminal-on-last closing hooks: a task
--- re-delegated by a different user has a newer MANUAL run the resolving caller
--- cannot see, and a plain query would answer that the superseded run is still
--- the newest and close the task under the live one. A boolean rather than the
+-- that moved to another team has a newer run there that a resolving caller on
+-- the old team cannot see, and a plain query would answer that the superseded
+-- run is still the newest and close the task under the live one. A boolean rather than the
 -- newest run's id, so a caller learns only whether its own run has been
 -- superseded and nothing about whose work superseded it. Ordering breaks a
 -- started_at tie on id so the order is total. With request claims p_org_id must
@@ -293,6 +293,74 @@ BEGIN
       AND (other.started_at > self_started_at
            OR (other.started_at = self_started_at AND other.id > p_id))
   );
+END;
+$$;
+-- +goose StatementEnd
+
+
+-- A task's memory wait. pending is whether a top-level conversation on the task
+-- ended, has run, and has no conversation_memory row. The attempt columns are
+-- the newest attempt on the newest such conversation, NULL when it has none.
+-- The task read, the claim scan's memory gate, and the failing-memory count all
+-- call this, so they cannot disagree.
+--
+-- It reads past RLS because a task reassigned to another team keeps its earlier
+-- conversations on the team that had them. conversations_select hides those
+-- from the new holder, and conversation_memory_all and messages_all delegate to
+-- it, so a plain subquery reads not pending while the claim scan holds the
+-- holder's conversation.
+--
+-- It answers the wait and never the owing conversation's id, as
+-- tf.blueprint_run_is_newest_for_task answers a boolean: a reader of the task
+-- learns that it waits and what the last attempt came to, not which
+-- conversation it waits on. The attempt's error_message is TF's own wording
+-- about the model call, never a provider's body or the conversation's content.
+--
+-- The WHERE on owed is taskMemoryOwedRowSQL (internal/db/postgres/tasks.go)
+-- over p_org_id and p_task_id, and a test there pins the two. The memory sweep
+-- and the failing-memory read's failure history interpolate that predicate
+-- themselves, because they list every owing conversation, on the admin pool.
+-- With request claims p_org_id must equal the caller's org; with none (admin
+-- pool, tf_system) that check is skipped. Pinned search_path blocks definer
+-- hijacking; a NULL task is not pending.
+-- +goose StatementBegin
+CREATE FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid,
+    OUT pending boolean, OUT attempt_outcome text, OUT attempt_error_kind text,
+    OUT attempt_error_message text, OUT attempt_started_at timestamptz)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  owed_id uuid;
+BEGIN
+  pending := false;
+  IF p_task_id IS NULL THEN
+    RETURN;
+  END IF;
+  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'task_memory_wait: requested org % does not match caller org %', p_org_id, tf.current_org_id();
+  END IF;
+  SELECT owed.id INTO owed_id
+    FROM conversations owed
+   WHERE owed.org_id = p_org_id AND owed.task_id = p_task_id
+     AND owed.ended_at IS NOT NULL AND owed.parent_conversation_id IS NULL
+     AND EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = owed.id AND hr.role = 'assistant'
+       AND NOT COALESCE(hr.is_error, FALSE) AND COALESCE(hr.model, '') <> '<synthetic>')
+     AND NOT EXISTS (
+         SELECT 1 FROM conversation_memory mem
+         WHERE mem.conversation_id = owed.id)
+   ORDER BY owed.ended_at DESC, owed.id DESC
+   LIMIT 1;
+  IF owed_id IS NULL THEN
+    RETURN;
+  END IF;
+  pending := true;
+  SELECT att.outcome, att.error_kind, att.error_message, att.started_at
+    INTO attempt_outcome, attempt_error_kind, attempt_error_message, attempt_started_at
+    FROM conversation_memory_attempts att
+   WHERE att.conversation_id = owed_id
+   ORDER BY att.started_at DESC, att.id DESC
+   LIMIT 1;
 END;
 $$;
 -- +goose StatementEnd
@@ -426,7 +494,7 @@ CREATE TABLE public.agents (
     org_id uuid NOT NULL,
     display_name text DEFAULT 'Triage Factory Bot'::text NOT NULL,
     default_model text,
-    default_autonomy_suitability real,
+    default_autonomy_suitability double precision,
     github_pat_user_id uuid,
     github_org_login text,
     -- GitHub's numeric id for the github_org_login account, written with it.
@@ -678,11 +746,11 @@ CREATE TABLE public.event_handlers (
     applies_to_unowned boolean DEFAULT false NOT NULL,
     system_slug text,
     name text,
-    default_priority real,
+    default_priority double precision,
     sort_order integer,
     blueprint_id text,
     breaker_threshold integer,
-    min_autonomy_suitability real,
+    min_autonomy_suitability double precision,
     -- Notify-only: who a notify rule tells, its creator ('creator') or its
     -- team's members ('team'). NULL for rules and triggers.
     notify_audience text,
@@ -1206,6 +1274,11 @@ CREATE TABLE public.deliverables (
 --
 -- Which entities the row is reachable from lives in conversation_memory_entities
 -- below, which every read joins through.
+--
+-- updated_at is when agent_content last changed: the insert stamps it beside
+-- created_at, and a write that stores the content the row already holds leaves
+-- it alone. It is what tells how much of a conversation has happened since its
+-- memory was last written.
 CREATE TABLE public.conversation_memory (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1213,7 +1286,8 @@ CREATE TABLE public.conversation_memory (
     blueprint_run_id uuid,
     agent_content text,
     source text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -1300,7 +1374,14 @@ CREATE TABLE public.messages (
     tool_call_id text,
     is_error boolean DEFAULT false NOT NULL,
     metadata jsonb,
+    -- On an assistant row, the model that produced it. On a person's own row
+    -- (role 'user', blank subtype), the model that message runs on, and
+    -- effort is the reasoning effort it runs at: one of 'low', 'medium',
+    -- 'high', 'xhigh' and 'max', NULL for the provider's default. The newest
+    -- person row holds the conversation's current settings. NULL on every
+    -- other row.
     model text,
+    effort text,
     input_tokens integer,
     output_tokens integer,
     cache_read_tokens integer,
@@ -1367,7 +1448,7 @@ CREATE TABLE public.conversation_worktrees (
 CREATE TABLE public.conversations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    -- 'delegation' | 'interactive' (reserved) | namespaced 'subagent:<kind>'
+    -- 'delegation' | 'interactive' | namespaced 'subagent:<kind>'
     -- (never the bare word). App-validated, no CHECK.
     type text DEFAULT 'delegation'::text NOT NULL,
     creator_user_id uuid,
@@ -1394,6 +1475,11 @@ CREATE TABLE public.conversations (
     model text,
     -- SDK resume handle. NULL under runtime='native', where messages are truth.
     sdk_session_id text,
+    -- The running total the SDK last reported for the session in
+    -- sdk_session_id, which a resumed process's own spend is measured from.
+    -- Nothing here writes it above zero, since a multi delegation mints
+    -- runtime='native'; it keeps the row the shape SQLite's is.
+    sdk_session_cost_usd double precision DEFAULT 0 NOT NULL,
     -- This conversation's own system block (the run's facts, its verb
     -- reference, its mission and its step addendum) as the launch composed it —
     -- a fourth SDK resume coordinate beside sdk_session_id, worktree_path and
@@ -1427,6 +1513,16 @@ CREATE TABLE public.conversations (
     -- identity that decides it. NULL derives the reason from stop_requested_by
     -- as above. Set only with stop_requested_at, cleared with it.
     stop_requested_reason text,
+    -- The conversation's newest messages id when the stop was requested. Set
+    -- only with stop_requested_at, cleared with it. A message id and not a
+    -- time, because a message's created_at is written by the process that
+    -- inserted it.
+    stop_through_message_id bigint,
+    -- A person's undelivered message at or before this messages id does not
+    -- wake the conversation. The park that settles a stop with no turn run
+    -- moves it forward to the stop's stop_through_message_id; nothing moves it
+    -- back or clears it. NULL lets every undelivered person message wake it.
+    wake_after_message_id bigint,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
     -- Stamped on park, cleared on resume; the snapshot-retention sweep keys off it.
@@ -1457,6 +1553,14 @@ CREATE TABLE public.conversations (
     -- App-validated, no CHECK (the type/origin pattern).
     ended_at timestamp with time zone,
     ended_reason text,
+    -- When the brain posted the failure notice to the person who delegated
+    -- the conversation. NULL = not posted. Written only by the brain's sweep.
+    failure_noticed_at timestamp with time zone,
+    -- The parked_at of the park whose paused notice the brain opened. A park
+    -- keeps its parked_at until a claim or a resume clears it, so a value that
+    -- differs from parked_at names an earlier park, or none. Written only by
+    -- the brain's sweep.
+    pause_noticed_parked_at timestamp with time zone,
     CONSTRAINT conversations_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -1533,9 +1637,9 @@ CREATE TABLE public.tasks (
     dedup_key text DEFAULT ''::text NOT NULL,
     primary_event_id uuid NOT NULL,
     status text DEFAULT 'queued'::text NOT NULL,
-    priority_score real,
+    priority_score double precision,
     ai_summary text,
-    autonomy_suitability real,
+    autonomy_suitability double precision,
     priority_reasoning text,
     scoring_status text DEFAULT 'pending'::text NOT NULL,
     -- Counts score writes. UpdateTaskScores raises it with the scores and, in
@@ -1592,7 +1696,7 @@ CREATE TABLE public.team_agents (
     agent_id uuid NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
     per_team_model text,
-    per_team_autonomy_suitability real,
+    per_team_autonomy_suitability double precision,
     added_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -2228,6 +2332,15 @@ CREATE INDEX idx_conversations_task ON public.conversations USING btree (task_id
 
 
 CREATE INDEX idx_conversations_trigger ON public.conversations USING btree (trigger_id);
+
+
+-- The brain's failure-notice read: failed rows accumulate, and the few still
+-- owed a notice are all it reads.
+CREATE INDEX idx_conversations_failure_notice_due ON public.conversations USING btree (completed_at, id) WHERE ((status = 'failed'::text) AND (failure_noticed_at IS NULL) AND (creator_user_id IS NOT NULL));
+
+-- The brain's paused-notice read: stored 'open' covers every concluded step,
+-- and only the live parks not yet told are what it reads.
+CREATE INDEX idx_conversations_pause_notice_due ON public.conversations USING btree (parked_at, id) WHERE ((status = 'open'::text) AND (park_reason IS NOT NULL) AND (parked_at IS NOT NULL) AND (creator_user_id IS NOT NULL) AND (ended_at IS NULL) AND (archived_at IS NULL) AND (pause_noticed_parked_at IS DISTINCT FROM parked_at));
 
 
 CREATE INDEX idx_swipe_events_action_created ON public.swipe_events USING btree (action, created_at);
@@ -3333,6 +3446,10 @@ REVOKE ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id 
 GRANT ALL ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) TO tf_app;
 
 
+REVOKE ALL ON FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid) TO tf_app;
+
+
 REVOKE ALL ON FUNCTION tf.user_can_write_team(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_can_write_team(target_team uuid) TO tf_app;
 
@@ -3546,15 +3663,12 @@ GRANT ALL ON TABLE public.conversation_memory_attempts TO postgres;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO anon;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO authenticated;
 GRANT ALL ON TABLE public.conversation_memory_attempts TO service_role;
--- SELECT only for both roles, deliberately: the ledger is written by the brain
--- on the admin pool and only ever read anywhere else. tf_system does not read
--- the table for its own sake — it reads it through the canonical task
--- projection, which carries the pending task's newest attempt, so an executor
--- resolving a task with GetSystem selects from here whether it wants the
--- columns or not. Withholding the grant does not hide the summary; it fails
--- the whole task read.
+-- SELECT only, deliberately: the ledger is written by the brain on the admin
+-- pool and only ever read anywhere else. tf_system holds no grant. The one
+-- thing an executor reads from it, the pending task's newest attempt in the
+-- canonical task projection, it reads through tf.task_memory_wait, which reads
+-- the ledger as its owner.
 GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_app;
-GRANT SELECT ON TABLE public.conversation_memory_attempts TO tf_system;
 
 
 GRANT ALL ON TABLE public.messages TO postgres;
@@ -3807,6 +3921,10 @@ CREATE TABLE public.blueprint_steps (
 CREATE TABLE public.blueprint_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
+    -- The team the run belongs to, set at mint to the team its first step
+    -- conversation is created on, and never changed: a task that moves to
+    -- another team gets a new run there. The row policies read it.
+    team_id uuid NOT NULL,
     -- NULL for trigger_type='event' runs (system-emitted via the admin pool);
     -- manual runs carry the human delegator. Paired by the CHECK below.
     creator_user_id uuid,
@@ -3925,6 +4043,8 @@ ALTER TABLE ONLY public.blueprint_runs
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_team_fkey            FOREIGN KEY (team_id, org_id)         REFERENCES public.teams(id, org_id);
+ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_blueprint_fkey       FOREIGN KEY (blueprint_id, org_id) REFERENCES public.blueprints(id, org_id);
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
@@ -3969,34 +4089,34 @@ CREATE POLICY blueprint_steps_all ON public.blueprint_steps FOR ALL
                            WHERE b.id = blueprint_steps.blueprint_id
                              AND b.org_id = blueprint_steps.org_id)));
 
--- Creator-scoped for manual runs, org-visible for event-triggered runs, which
--- carry creator_user_id NULL (system-emitted via the admin pool).
+-- Team-scoped, as the run's conversations are: a member of the run's team reads
+-- it and a member who can write the team writes it, whoever delegated it and
+-- whether a person or a trigger did. An insert also names its caller as the
+-- creator; event-triggered runs carry creator_user_id NULL and are minted on the
+-- admin pool.
 CREATE POLICY blueprint_runs_select ON public.blueprint_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND ((creator_user_id IS NULL)
-              OR (creator_user_id = tf.current_user_id())));
+         AND tf.user_in_team(team_id));
 
 CREATE POLICY blueprint_runs_insert ON public.blueprint_runs FOR INSERT
   WITH CHECK ((org_id = tf.current_org_id())
               AND tf.user_has_org_access(org_id)
-              AND (creator_user_id = tf.current_user_id()));
+              AND (creator_user_id = tf.current_user_id())
+              AND tf.user_can_write_team(team_id));
 
 CREATE POLICY blueprint_runs_update ON public.blueprint_runs FOR UPDATE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND ((creator_user_id IS NULL)
-              OR (creator_user_id = tf.current_user_id())))
+         AND tf.user_can_write_team(team_id))
   WITH CHECK ((org_id = tf.current_org_id())
               AND tf.user_has_org_access(org_id)
-              AND ((creator_user_id IS NULL)
-                   OR (creator_user_id = tf.current_user_id())));
+              AND tf.user_can_write_team(team_id));
 
 CREATE POLICY blueprint_runs_delete ON public.blueprint_runs FOR DELETE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND ((creator_user_id IS NULL)
-              OR (creator_user_id = tf.current_user_id())));
+         AND tf.user_can_write_team(team_id));
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_steps TO tf_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_runs  TO tf_app;
@@ -7266,8 +7386,12 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.notification_marks TO tf_app;
 
 
 -- Unified spend view: one row-per-spend shape UNION-ing the messages ledger
--- (delegated conversations) and headless system jobs onto a single category
--- axis. Delegations split manual (per-user) from autonomous; system jobs are
+-- (delegated and interactive conversations) and headless system jobs onto a
+-- single category axis. Delegations split manual (per-user) from autonomous; an
+-- interactive conversation is a person's spend, so it is manual whatever its
+-- trigger_type, and charged to the row's own user, falling back to the
+-- creator: a reassignment within the team keeps the conversation, and each
+-- turn is the spend of the person who asked for it. System jobs are
 -- 'system_overhead' with the job as subtype. source_id is cast to text so the
 -- UNION's column type is uniform. security_invoker (PG 15+) is required so the
 -- base tables' RLS applies under the querying app-pool identity.
@@ -7277,11 +7401,14 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.org_id,
     c.team_id,
         CASE
-            WHEN (c.trigger_type = 'manual'::text) THEN 'manual'::text
+            WHEN ((c.type = 'interactive'::text) OR (c.trigger_type = 'manual'::text)) THEN 'manual'::text
             ELSE 'autonomous'::text
         END AS category,
     NULL::text AS subtype,
-    c.creator_user_id,
+        CASE
+            WHEN (c.type = 'interactive'::text) THEN COALESCE(m.user_id, c.creator_user_id)
+            ELSE c.creator_user_id
+        END AS creator_user_id,
     c.actor_agent_id,
     c.trigger_id,
     m.model,
@@ -7293,7 +7420,7 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.created_at AS occurred_at
    FROM (public.messages m
      JOIN public.conversations c ON (((c.id = m.conversation_id) AND (c.org_id = m.org_id))))
-  WHERE ((c.type = 'delegation'::text)
+  WHERE ((c.type = ANY (ARRAY['delegation'::text, 'interactive'::text]))
      AND ((m.role = 'assistant'::text) OR (m.cost_usd IS NOT NULL)))
 UNION ALL
 
@@ -7391,6 +7518,10 @@ GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_
 -- running, and a resume on a warm claim refuses a concluded step whose run still
 -- is. Both statements ask through this function, on the executor.
 GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_system;
+-- The claim scan's memory gate and the task projection an executor resolves a
+-- task with both read the task's memory wait through this function, which reads
+-- the attempt ledger as its owner, so tf_system holds no grant on the ledger.
+GRANT EXECUTE ON FUNCTION tf.task_memory_wait(p_task_id uuid, p_org_id uuid) TO tf_system;
 -- IncrementUsageSystem bumps a usage counter after resolving the step prompt.
 GRANT SELECT, UPDATE ON TABLE public.prompts TO tf_system;
 GRANT SELECT ON TABLE public.agents TO tf_system;

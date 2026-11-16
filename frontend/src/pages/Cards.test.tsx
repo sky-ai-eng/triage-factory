@@ -19,7 +19,23 @@ const toast = vi.hoisted(() => ({ failed: vi.fn(), error: vi.fn() }))
 vi.mock('../components/Toast/toastStore', () => ({ toast }))
 vi.mock('../hooks/useWebSocket', () => ({ useWebSocket: () => {} }))
 const TEAM_FILTER: [string[], () => void] = [[], () => {}]
-vi.mock('../hooks/useTeams', () => ({ useTeamFilter: () => TEAM_FILTER }))
+/** The viewer's teams. One team by default, which is also local mode. */
+const teamsStore = vi.hoisted(() => ({
+  current: {
+    teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
+    lastActingTeamId: '',
+    multi: false,
+    loaded: true,
+  },
+}))
+vi.mock('../hooks/useTeams', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hooks/useTeams')>()
+  return {
+    useTeamFilter: () => TEAM_FILTER,
+    useTeams: () => teamsStore.current,
+    pickerDefault: actual.pickerDefault,
+  }
+})
 vi.mock('../components/TeamScopeSelect', () => ({ default: () => null }))
 vi.mock('../components/TaskRulesPanel', () => ({ default: () => null }))
 vi.mock('../components/NotifyRulesPanel', () => ({ default: () => null }))
@@ -44,10 +60,23 @@ const NEXT: Task = { ...CARD, id: 'task-next', title: 'Pin the base image', vers
 let writes: Array<{ path: string; method?: string; body: Record<string, unknown> }> = []
 /** What the requeue answers: the task, or a refusal to throw. */
 let requeueAnswer: () => unknown
+/** The teams the top card's detail read lists for a claim. */
+let claimTeams: string[]
+/** Holds the detail read open until it settles, when a test sets one. */
+let detailGate: Promise<void> | null
 
 beforeEach(() => {
   writes = []
+  claimTeams = ['t1']
+  detailGate = null
+  teamsStore.current = {
+    teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
+    lastActingTeamId: '',
+    multi: false,
+    loaded: true,
+  }
   toast.failed.mockReset()
+  toast.error.mockReset()
   requeueAnswer = () => ({ ...CARD, version: 4 })
   api.apiList.mockReset()
   api.apiJSON.mockReset()
@@ -57,6 +86,11 @@ beforeEach(() => {
       // The page's other reads (its config, among them) are not what this is
       // about.
       if (!path.startsWith('/api/tasks/')) return {}
+      // The detail read a claim or delegate makes first, for its teams.
+      if (!init?.method) {
+        await detailGate
+        return { ...CARD, claim_team_ids: claimTeams }
+      }
       writes.push({
         path,
         method: init?.method,
@@ -127,5 +161,133 @@ describe('the undo toast', () => {
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument(),
     )
+  })
+})
+
+// A claim names the team the task lands on. The deck asks which only when more
+// than one of the viewer's teams can take the card, and the card stays on top
+// until the question is answered.
+describe('the claim swipe', () => {
+  async function renderDeck() {
+    render(
+      <MemoryRouter>
+        <Cards />
+      </MemoryRouter>,
+    )
+    await screen.findByText(CARD.title)
+  }
+
+  function onTwoTeams() {
+    teamsStore.current = {
+      teams: [
+        { id: 't1', name: 'platform', slug: 'platform' },
+        { id: 't2', name: 'data', slug: 'data' },
+      ],
+      lastActingTeamId: '',
+      multi: true,
+      loaded: true,
+    }
+  }
+
+  it('sends no team for a person on one team', async () => {
+    await renderDeck()
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(writes).toHaveLength(1)
+    })
+    expect(writes[0]).toEqual({
+      path: `/api/tasks/${CARD.id}/claim`,
+      method: 'POST',
+      body: { version: CARD.version },
+    })
+  })
+
+  it('sends the one team that can take the card, without asking', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    await renderDeck()
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(writes).toHaveLength(1)
+    })
+    expect(writes[0].body).toEqual({ team_id: 't2', version: CARD.version })
+    expect(screen.queryByText('Which team takes this task?')).not.toBeInTheDocument()
+  })
+
+  it('asks which team when two can take the card, and claims for the one chosen', async () => {
+    onTwoTeams()
+    claimTeams = ['t1', 't2']
+    await renderDeck()
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(screen.getByText('Which team takes this task?')).toBeInTheDocument()
+    })
+    // Nothing is written, and the card is still the top card.
+    expect(writes).toHaveLength(0)
+    expect(screen.getByText(CARD.title)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'data' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Claim' }))
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).toEqual({
+      path: `/api/tasks/${CARD.id}/claim`,
+      method: 'POST',
+      body: { team_id: 't2', version: CARD.version },
+    })
+  })
+
+  it('writes nothing, and keeps the card, when the question is cancelled', async () => {
+    onTwoTeams()
+    claimTeams = ['t1', 't2']
+    await renderDeck()
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(screen.getByText('Which team takes this task?')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('Which team takes this task?')).not.toBeInTheDocument(),
+    )
+    expect(writes).toHaveLength(0)
+    expect(screen.getByText(CARD.title)).toBeInTheDocument()
+  })
+
+  it('ignores another gesture while the claim is reading its teams', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    let open = () => {}
+    detailGate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    await renderDeck()
+
+    // Pressing until the read is out waits for the bound key handler.
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(api.apiJSON).toHaveBeenCalledWith(`/api/tasks/${CARD.id}`)
+    })
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    open()
+
+    // The card the claim was reading for was not dismissed under it.
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).toEqual({
+      path: `/api/tasks/${CARD.id}/claim`,
+      method: 'POST',
+      body: { team_id: 't2', version: CARD.version },
+    })
+  })
+
+  it('writes nothing when no team of the viewer’s can take the card', async () => {
+    onTwoTeams()
+    claimTeams = []
+    await renderDeck()
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(toast.error).toHaveBeenCalledWith('You have no team this task can land on.')
+    })
+    expect(writes).toHaveLength(0)
+    expect(screen.getByText(CARD.title)).toBeInTheDocument()
   })
 })

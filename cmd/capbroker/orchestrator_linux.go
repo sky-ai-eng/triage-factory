@@ -70,9 +70,9 @@ var brokerSocketPath = DefaultSocketPath
 // Start found (and dialed) a broker some other ancestor already spawned
 // — the default container path — in which case Close is correctly a
 // no-op: this process was never the broker's parent and, post-drop, no
-// longer has the privilege to manage its lifecycle anyway. That process
-// gets torn down via the container's own signal propagation instead (see
-// docker/entrypoint.sh).
+// longer has the privilege to manage its lifecycle anyway. That broker
+// ends when this process exits: it watches for its parent's exit, and the
+// container ends with this process (see docker/entrypoint.sh).
 type Process struct {
 	cmd        *exec.Cmd
 	socketPath string

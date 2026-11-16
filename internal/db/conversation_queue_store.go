@@ -144,6 +144,10 @@ const (
 	// engagement's tools ran in died under it and could not be restarted in
 	// place.
 	HandBackJailLost = "requeued_jail_lost"
+	// HandBackProviderSwitch is a claim handed back because a person's
+	// message moved the conversation to a model another provider serves,
+	// which the engagement's sealed credentials cannot call.
+	HandBackProviderSwitch = "requeued_provider_switch"
 )
 
 // HandBackBudget names the budget a hand-back outcome spends.
@@ -192,6 +196,10 @@ type HandBackPolicy struct {
 //     the jail kept dying with no call completing between restarts. Every
 //     call the engagement had in flight was answered, so the next claim
 //     continues the transcript at once, in a new cell.
+//   - requeued_provider_switch: a person's message named a model another
+//     provider serves, and the engagement's credentials were sealed for its
+//     own provider alone. The next claim seals the new one and runs on that
+//     model at once; a person's choice is not a loss.
 //
 // The upstream budget counts attempts, not time: next_attempt_at is database
 // time, and a machine that sleeps advances it while nobody retries, so a time
@@ -204,6 +212,7 @@ var HandBackPolicies = []HandBackPolicy{
 	{Outcome: HandBackUpstream, Budget: BudgetUpstream,
 		Schedule: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}},
 	{Outcome: HandBackJailLost, Budget: BudgetJail},
+	{Outcome: HandBackProviderSwitch, Budget: BudgetNone},
 }
 
 // HandBackPolicyFor returns outcome's policy, and false for an outcome that is
@@ -300,8 +309,8 @@ func SQLiteCompletedRunSQL(alias string) string {
 
 // PostgresCompletedRunSQL is a completed run over the alias the caller names.
 // It reads the run's status through tf.blueprint_run_is_completed, because
-// blueprint_runs is readable only by a manual run's creator and a count read
-// by a teammate would otherwise leave the run out.
+// blueprint_runs is readable only by the run's team and a count read by a
+// caller on another team would otherwise leave the run out.
 func PostgresCompletedRunSQL(alias string) string {
 	return `(` + ConcludedConversationSQL(alias) + ` OR (` + alias + `.status = 'open' AND tf.blueprint_run_is_completed(` + alias + `.blueprint_run_id, ` + alias + `.org_id)))`
 }
@@ -337,8 +346,15 @@ func UnsettledConversationSQL(alias string) string {
 // row, and a conversation nobody has typed in collects them, so a user row
 // says nothing about whether an engagement produced a turn. Served by
 // idx_messages_conversation.
+//
+// Only an assistant row a model produced counts. The SDK runtime writes its
+// own assistant row for a call that failed before the model answered
+// (domain.ModelSynthetic), and stored failure records include assistant rows
+// flagged is_error. Neither is a turn, so a conversation holding only those
+// has done no work to remember.
 func ConversationHasRunSQL(alias string) string {
-	return `EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = ` + alias + `.id AND hr.role = 'assistant')`
+	return `EXISTS (SELECT 1 FROM messages hr WHERE hr.conversation_id = ` + alias + `.id AND hr.role = 'assistant'
+		AND NOT COALESCE(hr.is_error, FALSE) AND COALESCE(hr.model, '') <> '` + domain.ModelSynthetic + `')`
 }
 
 // EpisodeStartSQL renders when a conversation's current queue episode began,
@@ -663,7 +679,7 @@ type ConversationQueueStore interface {
 	// and the release leaves the row for this pass.
 	//
 	// Lock order is run before conversation, the order a run's terminal
-	// write (BlueprintStore.MarkRunStatus) takes them in, so the two cannot
+	// write (BlueprintStore.MarkRunStatusSystem) takes them in, so the two cannot
 	// deadlock; a run another writer holds is skipped and settled on the
 	// next pass. Cross-org system sweep on the admin pool; concurrent passes
 	// skip each other's rows.
@@ -908,12 +924,12 @@ type ConversationQueueStore interface {
 
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
-	// phase='awaiting_credentials'. One scan serves the whole provisioner:
-	// the phase column is the substrate and ConversationType is how the
-	// caller routes. The brain-side backstop sweep's input; primary
-	// provisioning happens synchronously off the executor's cred_request
-	// tf_ctl notification, and this recovers whatever the lossy relay
-	// dropped.
+	// phase='awaiting_credentials' and holds no sealed bundle yet. One scan
+	// serves the whole provisioner: the phase column is the substrate and
+	// ConversationType is how the caller routes. The brain-side backstop
+	// sweep's input; primary provisioning happens synchronously off the
+	// executor's cred_request tf_ctl notification, and this recovers
+	// whatever the lossy relay dropped.
 	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsConversation, error)
 
 	// ListActiveNeedingCredentialRefresh returns every conversation with a
@@ -974,7 +990,7 @@ type ConversationQueueStore interface {
 	// run. Parking either here would race that pass for the same row.
 	//
 	// Current writers settle a run's conversations with the run (the atomic
-	// park in BlueprintStore.MarkRunStatus, the settlement), so every row
+	// park in BlueprintStore.MarkRunStatusSystem, the settlement), so every row
 	// returned means one of them broke, and the caller reports each. Rows
 	// another transaction holds are skipped and taken on a later pass.
 	// Cross-org system sweep on the admin pool; the brain runs it, in one
@@ -1109,9 +1125,14 @@ type AwaitingCredentialsConversation struct {
 	ConversationType string
 	TeamID           string
 	TaskID           string
-	ExecutorID       string
-	BootEpoch        int64
-	ClaimedAt        time.Time
+	// ClaimID is the active claim's id, empty when the conversation has none.
+	// The provisioner writes a bundle by this id, because the key it seals to
+	// belongs to this claim and the conversation can hold another by the time
+	// the write lands.
+	ClaimID    string
+	ExecutorID string
+	BootEpoch  int64
+	ClaimedAt  time.Time
 	// CredPubKey is the per-run sidecar public key recorded by
 	// MarkAwaitingCredentials; empty when the claim was parked without one.
 	CredPubKey string

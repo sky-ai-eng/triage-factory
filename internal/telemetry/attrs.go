@@ -51,7 +51,6 @@ const (
 	keySnapBundle     = attribute.Key("snapshot.bundle_bytes")
 	keySnapPatch      = attribute.Key("snapshot.patch_bytes")
 	keySnapLFS        = attribute.Key("snapshot.lfs_bytes")
-	keySnapTranscript = attribute.Key("snapshot.transcript_bytes")
 	keySnapRaw        = attribute.Key("snapshot.raw_bytes")
 	keySnapWaitedMS   = attribute.Key("snapshot.waited_ms")
 	keyAgentCostUSD   = attribute.Key("agent.cost_usd")
@@ -191,16 +190,15 @@ func SizeBytes(n int64) attribute.KeyValue { return keySizeBytes.Int64(n) }
 // The workspace-snapshot member sizes, one per thing the snapshot carries,
 // plus the pre-compression total. They exist because SizeBytes alone could
 // not say where a slow snapshot's bytes came from: the git delta and its Git
-// LFS objects, the scratch tree, or the transcript are captured, archived, and uploaded by
+// LFS objects, and the scratch tree, are captured, archived, and uploaded by
 // three different phases, and sizing a fix (shallower delta, faster codec,
 // multipart PUT) needs the split. snapshot.raw_bytes against the archive
 // span's SizeBytes is the compression ratio. All magnitudes — the member
 // NAMES are fixed format strings, so no key here can carry tenant data.
-func SnapshotBundleBytes(n int64) attribute.KeyValue     { return keySnapBundle.Int64(n) }
-func SnapshotPatchBytes(n int64) attribute.KeyValue      { return keySnapPatch.Int64(n) }
-func SnapshotLFSBytes(n int64) attribute.KeyValue        { return keySnapLFS.Int64(n) }
-func SnapshotTranscriptBytes(n int64) attribute.KeyValue { return keySnapTranscript.Int64(n) }
-func SnapshotRawBytes(n int64) attribute.KeyValue        { return keySnapRaw.Int64(n) }
+func SnapshotBundleBytes(n int64) attribute.KeyValue { return keySnapBundle.Int64(n) }
+func SnapshotPatchBytes(n int64) attribute.KeyValue  { return keySnapPatch.Int64(n) }
+func SnapshotLFSBytes(n int64) attribute.KeyValue    { return keySnapLFS.Int64(n) }
+func SnapshotRawBytes(n int64) attribute.KeyValue    { return keySnapRaw.Int64(n) }
 
 // SnapshotWaitedMs is how long a workspace ensure spent waiting on a persist
 // that was still in flight, on the ensure span beside the provenance. Zero on

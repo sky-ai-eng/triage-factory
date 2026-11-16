@@ -12,14 +12,23 @@
 //     scope below exists.
 //   - Delivery scope mirrors the REST read. A conversation is readable by
 //     its org, its team, or its creator, as its visibility says, and the hub
-//     scopes connections on (org, user) only. So a Notifier built with an
-//     AudienceFunc resolves the audience at emit time and sends one envelope
-//     that carries it as a recipient set (websocket.Event.UserIDs). One
-//     envelope rather than one per user, because message is the
-//     highest-rate frame the hub carries and in multi mode every Broadcast
-//     is a Postgres NOTIFY, or an outbox row for a large payload. The
-//     audience is read fresh for every frame, so a membership change applies
-//     from the next one; nothing is captured per connection.
+//     scopes connections on (org, user) only. So each frame goes out as one
+//     envelope addressed to that audience as a recipient set
+//     (websocket.Event.UserIDs). One envelope rather than one per user,
+//     because message is the highest-rate frame the hub carries and in multi
+//     mode every Broadcast is a Postgres NOTIFY, or an outbox row for a
+//     large payload.
+//
+// Where the audience is read depends on the pod that emits the frame. A
+// pod that serves HTTP builds its Notifier with an AudienceFunc and resolves
+// the audience at emit. An executor cannot: its database role has no grant
+// on memberships, because deciding who may read a conversation is the
+// control plane's job. So it builds a deferred Notifier, whose frame names
+// its conversation instead (websocket.Event.ReadersOfConversation), and each
+// control pod that delivers the frame resolves the audience for its own
+// sockets. Either way the audience is read fresh for every frame, so a
+// membership change applies from the next one; nothing is captured per
+// connection.
 package conversationframe
 
 import (
@@ -42,10 +51,11 @@ const (
 )
 
 // audienceTimeout bounds the audience read. Its callers run on a run's
-// transcript and lifecycle paths, on request handlers, and inside a
-// permission prompt's wait. A frame is a hint the client can recover from,
-// and a presence check that fails reads as absent, so a slow read gives up
-// rather than holding up the work it serves.
+// transcript and lifecycle paths, on request handlers, inside a permission
+// prompt's wait, and on a control pod's backplane listener, which delivers
+// the fleet's events one at a time. A frame is a hint the client can
+// recover from, and a presence check that fails reads as absent, so a slow
+// read gives up rather than holding up the work it serves.
 const audienceTimeout = 3 * time.Second
 
 // StatusUpdate is the conversation_update payload: the status the
@@ -114,10 +124,12 @@ type Broadcaster interface {
 // construction chose: a nil audience is the local-mode shape (one
 // org-scoped broadcast, since N=1 has no team boundary), a non-nil audience
 // is the multi-mode shape (one broadcast addressed to the resolved
-// recipients).
+// recipients), and a deferred Notifier is the executor's shape (one
+// broadcast naming the conversation whose readers receive it).
 type Notifier struct {
 	hub      Broadcaster
 	audience AudienceFunc
+	deferred bool
 }
 
 // NewNotifier builds a Notifier over hub. Pass audience only in multi mode.
@@ -125,6 +137,16 @@ type Notifier struct {
 // nil-safety so emit sites need no guards.
 func NewNotifier(hub Broadcaster, audience AudienceFunc) *Notifier {
 	return &Notifier{hub: hub, audience: audience}
+}
+
+// NewDeferredNotifier builds a Notifier over hub that reads no audience: each
+// frame is marked for its conversation's readers and carries no recipient
+// set, and the control pods that deliver it resolve who receives it. For a
+// multi-mode process that serves no sockets and cannot read memberships,
+// whose hub publishes only to the backplane. A nil hub no-ops, as for
+// NewNotifier.
+func NewDeferredNotifier(hub Broadcaster) *Notifier {
+	return &Notifier{hub: hub, deferred: true}
 }
 
 // Message sends one transcript row.
@@ -157,9 +179,15 @@ func (n *Notifier) DeliverableUpdated(ctx context.Context, orgID, conversationID
 // an org-wide broadcast would send the conversation to every team. A dropped
 // message frame is repaired by the run station's tail-follow read, and any
 // other frame by the client's next refetch. An audience of nobody also
-// stops the frame here, since the hub refuses an empty recipient set.
+// stops the frame here, since the hub refuses an empty recipient set. A
+// deferred Notifier reads nothing here and leaves both decisions to the
+// delivering pods.
 func (n *Notifier) publish(ctx context.Context, eventType, orgID, conversationID string, data any) {
 	if n == nil || n.hub == nil {
+		return
+	}
+	if n.deferred {
+		n.hub.Broadcast(websocket.Event{Type: eventType, OrgID: orgID, ConversationID: conversationID, ReadersOfConversation: true, Data: data})
 		return
 	}
 	userIDs, ok, err := n.audience.Readers(ctx, orgID, conversationID)

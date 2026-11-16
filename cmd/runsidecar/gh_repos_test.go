@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -127,9 +128,9 @@ func TestRuntime_GHInjectorRelaysARepositoryDenial(t *testing.T) {
 	rt.githubBase = "https://github.com"
 	rt.mu.Unlock()
 
-	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	cert, certPEM, err := proxycert.Generate("gh injector", "127.0.0.1")
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	const placeholder = "per-run-placeholder"
 	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, "run-under-test", nil))

@@ -26,7 +26,7 @@ import (
 // sidecar brought up: the process holding the unsealed bundle, the
 // supervision channel to it, and the coordinates for reaching its proxies. The
 // dispatcher stands it up on TF_ROLE=executor BEFORE the pre-sandbox clone, so
-// the clone (and GetPR, and the agenthost) route through those proxies while
+// the clone (and the PR read, and the agenthost) route through those proxies while
 // the orchestrator holds no credential. It owns its own teardown, which the
 // dispatcher defers until after the agent run returns.
 //
@@ -206,6 +206,15 @@ func (rs *runSidecar) engineLLMEnv() []string {
 	return rs.res.LLMEnv
 }
 
+// engineLLMCertPEM is the certificate the LLM proxy engineLLMEnv names serves
+// TLS with, which the engine trusts for that hop. nil-safe.
+func (rs *runSidecar) engineLLMCertPEM() []byte {
+	if rs == nil || rs.res == nil {
+		return nil
+	}
+	return rs.res.LLMCertPEM
+}
+
 // runCell is the engagement's cell, which the jail launches into. nil-safe.
 func (rs *runSidecar) runCell() cell.Cell {
 	if rs == nil {
@@ -273,7 +282,10 @@ func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
-func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *domain.Conversation, task domain.Task) (*runSidecar, error) {
+//
+// actingUserID is the person the engagement acts for, which the sandbox's
+// verbs are attributed to (see the dispatcher's actingUserID).
+func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *domain.Conversation, task domain.Task, actingUserID string) (*runSidecar, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
@@ -313,7 +325,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	stores, storesSet := s.getStores()
 	info := agenthost.ConversationInfo{
 		OrgID:            orgID,
-		UserID:           conv.CreatorUserID,
+		UserID:           actingUserID,
 		ConversationID:   conv.ID,
 		TeamID:           conv.TeamID,
 		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
@@ -349,7 +361,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		// the exec verb-trace DB ops, all identity-bound from ConversationInfo. Holds
 		// the stores + secrets the capless sidecar cannot.
 		Relay: relaySrv,
-		// Every delegated run may touch a GitHub repo (clone/push + GetPR +
+		// Every delegated run may touch a GitHub repo (clone/push + the PR read +
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
 		// No upstream travels with them: the host each lane forwards to is the
 		// one sealed into this run's bundle beside the token, so a base-URL
@@ -381,7 +393,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// The provisioning inside this call replaces the operation with the
 	// credentials wait for as long as it lasts (sidecarProvisionFor).
 	endBringUp := activity.begin("sidecar_bringup", sidecarOpDeadline)
-	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID), params)
+	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID, conv.ClaimID), params)
 	endBringUp()
 	if err != nil {
 		telemetry.RecordSpanError(bringUpSpan, err, "bringing up the credential sidecar failed")
@@ -629,15 +641,21 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 // sidecar's published public key. It publishes that key onto the run's claim
 // (claims.cred_pubkey) and fires the cred_request doorbell — so the brain seals
 // THIS run's bundle to the sidecar's per-run key, not the claiming instance's
-// key — then polls claim_credentials for the OPAQUE sealed bytes and hands them
-// back. The orchestrator never opens them; only the sidecar holds the matching
-// private key. This is what replaces the pre-sandbox awaitCredentials unseal.
+// key — then reads claim_credentials, when the brain's cred_sealed ring wakes
+// it or on its poll, for the OPAQUE sealed bytes and hands them back. The
+// orchestrator never opens them; only the sidecar holds the matching private
+// key. This is what replaces the pre-sandbox awaitCredentials unseal.
 //
 // A timeout (brain down at claim time) surfaces as errAwaitingCredentialsTimeout,
 // failing the bring-up; the dispatcher then hands the claim back without
 // spending the setup budget (handlePreAgentFailure). Only the executor role
 // reaches here (bringUpRunSidecar returns nil otherwise).
-func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.SidecarProvisionFunc {
+//
+// The bundle arriving ends the park, so the poll that finds it moves claimID's
+// phase to fetching: every multi engagement, of every source, fresh or resumed,
+// next assembles the task context the agent starts from, and a claim left at
+// awaiting_credentials past this point names a step that is over.
+func (s *Spawner) sidecarProvisionFor(orgID, conversationID, claimID string) agentproc.SidecarProvisionFunc {
 	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
 		// The awaiting-credentials park, measured from the run's side: how long
@@ -650,6 +668,14 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 		provCtx, span := tracer.Start(provCtx, "engagement.credentials.await",
 			trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
 		defer span.End()
+
+		// Listen before the key is published: the brain can seal as soon as
+		// it reads the key, and a ring that lands before anything listens
+		// leaves the bundle to the next poll. Keyed by conversation, which
+		// holds at most one active claim; a ring for a bundle sealed to
+		// another claim costs one read that the check below skips.
+		ring, stopListening := s.credentialDoorbells().Listen(conversationID)
+		defer stopListening()
 
 		// Publish the sidecar's per-run pubkey onto the claim + fire the
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
@@ -676,23 +702,27 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 			} else if ok && b.ExecutorID == myID && b.BootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
 				// never opens it (only the sidecar's private key can). Gate on the
-				// bundle's stamped (executor, boot_epoch) matching ours: a row left
-				// by a prior claimant — a dead executor's, or an earlier boot's —
-				// is sealed to a sidecar key this run never minted, so relaying it
-				// would just fail the unseal. Skip and keep polling until the brain
-				// re-seals for THIS claim.
+				// bundle's stamped (executor, boot_epoch) matching ours, as Get's
+				// contract requires: a bundle stamped for another executor or an
+				// earlier boot is sealed to a sidecar key this run never minted, so
+				// relaying it would only fail the unseal. Skip and keep polling
+				// until the brain seals for THIS claim.
 				//
 				// The poll count separates "the brain answered the doorbell"
 				// from "the sweep eventually got to it" — the same elapsed time
 				// means different things for the two, and only one of them is a
 				// working doorbell.
 				span.SetAttributes(telemetry.Count(polls), telemetry.Outcome("sealed"))
+				// The fence result is not acted on here: the agent_starting
+				// write is where a fenced engagement stops.
+				s.updatePhase(provCtx, orgID, conversationID, claimID, domain.ClaimPhaseFetching)
 				return b.Sealed, b.BootEpoch, nil
 			}
 			select {
 			case <-provCtx.Done():
 				telemetry.RecordSpanError(span, provCtx.Err(), "the credentials wait was cancelled")
 				return nil, 0, provCtx.Err()
+			case <-ring:
 			case <-ticker.C:
 				if time.Now().After(deadline) {
 					err := fmt.Errorf("%w: conversation %s after %s (brain not provisioning)", errAwaitingCredentialsTimeout, conversationID, timeout)

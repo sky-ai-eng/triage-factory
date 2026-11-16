@@ -1,7 +1,9 @@
 package db
 
 import (
+	"cmp"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,21 +40,47 @@ func ConsumePendingInput(rows []PendingRow, err error) (message, userID string, 
 }
 
 // JoinPendingRows assembles queued input into the single prompt string an SDK
-// resume takes: every row, oldest first, separated by a blank line. Peek and
+// resume takes: every row in id order, separated by a blank line. Peek and
 // Consume both go through it, which keeps the routing decision and delivery
 // from disagreeing about what is pending.
 //
-// The userID is the newest row's; see ConversationPendingInputStore for why a
-// queue with several authors reports one, and why it is that one.
+// The rows are the person messages waiting and the stop notes that lie
+// between the oldest and the newest of them (PendingRowBounds). A session
+// holds only what it was sent, so a stop note in place is how it learns that
+// the messages before it were in front of a stop and the ones after it came
+// later. With no stop note among them, the text is the person messages alone.
+//
+// The userID is the newest person message's; see ConversationPendingInputStore
+// for why a queue with several authors reports one, and why it is that one.
 func JoinPendingRows(rows []PendingRow) (message, userID string, ok bool) {
-	if len(rows) == 0 {
+	sorted := slices.Clone(rows)
+	slices.SortStableFunc(sorted, func(a, b PendingRow) int { return cmp.Compare(a.ID, b.ID) })
+	parts := make([]string, 0, len(sorted))
+	for _, r := range sorted {
+		parts = append(parts, r.Content)
+		if r.Subtype != domain.MessageSubtypeStopNote {
+			userID, ok = r.UserID, true
+		}
+	}
+	if !ok {
 		return "", "", false
 	}
-	parts := make([]string, 0, len(rows))
-	for _, r := range rows {
-		parts = append(parts, r.Content)
+	return strings.Join(parts, PendingInputSeparator), userID, true
+}
+
+// PendingRowBounds returns the smallest and largest id among the person
+// messages a pending-input read returned: the stop notes a resume message
+// carries are the ones strictly between the two. ok is false with fewer than
+// two rows, where nothing lies between.
+func PendingRowBounds(rows []PendingRow) (lo, hi int64, ok bool) {
+	if len(rows) < 2 {
+		return 0, 0, false
 	}
-	return strings.Join(parts, PendingInputSeparator), rows[len(rows)-1].UserID, true
+	lo, hi = rows[0].ID, rows[0].ID
+	for _, r := range rows[1:] {
+		lo, hi = min(lo, r.ID), max(hi, r.ID)
+	}
+	return lo, hi, true
 }
 
 // StagedInjectionFromPending maps one normalized messages row onto the

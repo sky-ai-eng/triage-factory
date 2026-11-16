@@ -158,17 +158,35 @@ const liveClaimExistsSQL = `EXISTS (
 		  AND cl_a.phase IS DISTINCT FROM '` + domain.ClaimPhaseWarm + `')`
 
 // undeliveredInputExistsSQL matches drivable input: a plain user message
-// still awaiting delivery. Injections (subtype 'injection:…', including a
-// compaction request — which is inserted delivered anyway) ride whatever
-// engagement runs next and never wake one on their own; a withdrawn row
-// (undelivered + window_state 'inactive') never happened. No assumption is
-// made about `seq` — a compaction commit re-seqs undelivered rows to
-// fractional values and nothing here reads the column. Served by
-// idx_messages_undelivered.
+// still awaiting delivery, sent after the conversation's wake position.
+// Injections (subtype 'injection:…', including a compaction request — which
+// is inserted delivered anyway) ride whatever engagement runs next and never
+// wake one on their own; a withdrawn row (undelivered + window_state
+// 'inactive') never happened. No assumption is made about `seq` — a
+// compaction commit re-seqs undelivered rows to fractional values and nothing
+// here reads the column. Served by idx_messages_undelivered.
+//
+// The wake position (wake_after_message_id) is where a stop that ended with
+// no turn run was sent: the messages in front of it were the work that stop
+// ended, so they no longer wake the conversation. They stay undelivered, and
+// the next engagement reads them with whatever woke it.
 const undeliveredInputExistsSQL = `EXISTS (
 		SELECT 1 FROM messages m_i
 		WHERE m_i.conversation_id = r.id AND m_i.delivered = false
-		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		  AND m_i.id > COALESCE(r.wake_after_message_id, 0))`
+
+// wakeAfterStopSQL is the wake position a park that settles a stop with no
+// turn run writes, read off the row alias names as it stood before the write:
+// the position moved forward to where the stop was sent, and never back. A
+// row with no stop recorded keeps the position it had.
+//
+// It is not written by a park after a turn that was running when the stop
+// arrived. A person's message waiting behind that turn was not in front of the
+// stop, and it runs next.
+func wakeAfterStopSQL(alias string) string {
+	return `GREATEST(` + alias + `.wake_after_message_id, ` + alias + `.stop_through_message_id)`
+}
 
 // undeliveredInputDuringClaimSQL is undeliveredInputExistsSQL narrowed to the
 // person messages that arrived while the claim claimExpr names held the
@@ -455,6 +473,7 @@ const conversationQueueClaimSelect = `r.id, r.org_id, r.status, r.queued_at, r.s
 	COALESCE(r.runtime, '')               AS runtime,
 	COALESCE(r.worktree_path, '')         AS worktree_path,
 	COALESCE(r.sdk_session_id, '')        AS sdk_session_id,
+	r.sdk_session_cost_usd,
 	r.trigger_type,
 	COALESCE(r.trigger_id::text, '')      AS trigger_id,
 	COALESCE(r.creator_user_id::text, '') AS creator_user_id,
@@ -573,7 +592,7 @@ func EpisodeJailLossesSQL(convAlias string) string {
 // The claim minted in this statement is not among them: it is unreleased, and
 // the subquery reads the statement's snapshot, which does not hold it.
 var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
-	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
+	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id, candidate.sdk_session_cost_usd,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
 	candidate.team_id,
 	candidate.blueprint_run_id, candidate.blueprint_step_index,
@@ -586,7 +605,8 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	COALESCE((SELECT prior.outcome FROM claims prior
 	          WHERE prior.conversation_id = candidate.id AND prior.released_at IS NOT NULL
 	          ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.id DESC
-	          LIMIT 1), '') AS last_hand_back_outcome`
+	          LIMIT 1), '') AS last_hand_back_outcome,
+	` + db.ConversationHasRunSQL("candidate") + ` AS has_run`
 
 // orgActiveCTE counts each org's engagements rather than its stored
 // statuses: an unreleased claim is an occupied slot, a warm one included.
@@ -745,7 +765,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
 			                         queued_at = CASE WHEN conversations.status IS NOT NULL THEN now()
 			                                          ELSE conversations.queued_at END,
-			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 			                         next_attempt_at = NULL
 			FROM candidate
 			WHERE conversations.id = candidate.id
@@ -942,7 +962,7 @@ func (s *conversationQueueStore) ReacquireClaimLeaseSystem(ctx context.Context, 
 // split is the lock order. The first locks every run the pass may cancel; the
 // second settles, and admits a conversation whose settlement would write its
 // run only when that run is one the first statement locked. A run's terminal
-// write (markBlueprintRunStatus) locks the run and then parks its children, so
+// write (MarkRunStatusSystem) locks the run and then parks its children, so
 // a settlement that locked a child first and its run second could wait on it
 // while it waited on the child. Both take the run first, and a run another
 // writer holds is skipped (SKIP LOCKED) and settled on the next pass.
@@ -1067,9 +1087,12 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				                       WHEN v.stop_requested_reason IS NOT NULL THEN v.stop_requested_reason
 				                       WHEN v.stop_requested_by IS NULL THEN 'system_cancelled'
 				                       ELSE 'user_cancelled' END,
+				    wake_after_message_id = CASE WHEN v.was_settled THEN c.wake_after_message_id
+				                                 ELSE `+wakeAfterStopSQL("c")+` END,
 				    stop_requested_at = NULL,
 				    stop_requested_by = NULL,
 				    stop_requested_reason = NULL,
+				    stop_through_message_id = NULL,
 				    next_attempt_at = NULL
 				FROM victims v WHERE c.id = v.id
 				RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.was_settled,
@@ -1561,10 +1584,10 @@ func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, or
 
 // awaitingCredentialsCols is the shared claim-identity projection: the
 // conversation joined to its active (unreleased) claim, with the claim's
-// executor/boot/pubkey and claimed_at falling back to started_at for a
+// id/executor/boot/pubkey and claimed_at falling back to started_at for a
 // never-claimed row.
 const awaitingCredentialsCols = `r.id::text, r.org_id::text, COALESCE(r.type, ''), COALESCE(r.team_id::text, ''), COALESCE(r.task_id::text, ''),
-	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
+	COALESCE(cl.id::text, ''), COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
 
 func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversationID string) (db.AwaitingCredentialsConversation, bool, error) {
 	var r db.AwaitingCredentialsConversation
@@ -1573,7 +1596,7 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = $1 AND r.id = $2
-	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
+	`, orgID, conversationID).Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.AwaitingCredentialsConversation{}, false, nil
 	}
@@ -1625,11 +1648,17 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	// property of the engagement, not the surface, so this one scan is the
 	// whole provisioner's input and the caller routes on the type it
 	// returns.
+	//
+	// A parked claim that already holds a bundle is left out: a claim
+	// publishes its sidecar key once and its bundle row is sealed to that key,
+	// so the bundle is the one the claim is waiting on, and sealing again
+	// would overwrite it and mint installation tokens nothing revokes.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
 		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE cl.phase = 'awaiting_credentials'
+		  AND NOT EXISTS (SELECT 1 FROM claim_credentials cc WHERE cc.claim_id = cl.id)
 		ORDER BY cl.claimed_at ASC, cl.id ASC
 	`)
 	if err != nil {
@@ -1674,7 +1703,7 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 	var out []db.AwaitingCredentialsConversation
 	for rows.Next() {
 		var r db.AwaitingCredentialsConversation
-		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.ConversationID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ClaimID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -2240,10 +2269,10 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		claimedAt time.Time
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
-		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
+		&r.WorktreePath, &r.SessionID, &r.SessionCostUSD, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
 		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks,
-		&r.JailLosses, &r.LastHandBackOutcome)
+		&r.JailLosses, &r.LastHandBackOutcome, &r.HasRun)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

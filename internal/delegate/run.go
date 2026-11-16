@@ -21,6 +21,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
@@ -217,13 +218,15 @@ func stampCommitIdentity(opts *agentproc.RunOptions, id githooks.CommitIdentity)
 // conversation stranded mid-flight by a crash. When present and the session
 // transcript survived alongside the warm worktree, the agent resumes that
 // session instead of starting fresh, so a restart continues the conversation
-// rather than re-running it from scratch.
+// rather than re-running it from scratch. priorSessionCostUSD is that
+// session's running total (domain.Conversation's SessionCostUSD), which a
+// launch resuming it measures its own spend from.
 //
 // Returns fenced: true when the DB refused this engagement's writes because
 // its claim was released out from under it. Nothing was recorded and nothing
 // may be — the caller must stop too, rather than reacting to a terminal that
 // belongs to whoever owns the conversation now.
-func (s *Spawner) runAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) engagementDisposition {
+func (s *Spawner) runAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string, priorSessionCostUSD float64) engagementDisposition {
 	orgID := cfg.orgID
 
 	// The config is built, so whatever this engagement was going to write about
@@ -238,15 +241,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// claim, so a crash that never reaches this defer costs nothing.
 	defer s.ExpirePermissionsForClaim(orgID, cfg.claimID)
 
-	// parked is set true when this run ends dormant rather than terminating:
-	// a park flips it to `open` (runAgent, below). The ghost-projects cleanup
-	// defer below reads it to KEEP the session JSONL on disk as the warm
-	// resume cache — the same thing the isBlueprintStep skip beside it does.
-	// Captured by reference by the deferred closures, so they observe its
-	// final value at return. A completed run does not park: a queued deliverable
-	// is a sidecar, not a reason to hold the run open.
-	var parked bool
-
 	// The mirror this engagement files its memory file through, built below
 	// once the inherited fingerprint it judges the file against exists. The
 	// exits declared here capture it by reference; every one of them is
@@ -256,8 +250,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// fail records this run's infra-failure terminal and folds a fence trip
 	// into the same disposition every other fenced exit takes: nothing
 	// written, and the workspace left on disk for whoever owns the
-	// conversation now (see the mid-stream trip below for why deleting it is
-	// the worse mistake). Returns what runAgent returns.
+	// conversation now. Returns what runAgent returns.
 	fail := func(msg string, kind domain.ConversationFailureKind) bool {
 		// A failure observed as the lease fenced (a read cut short by the
 		// cancelled context, a process killed before it produced a result)
@@ -265,7 +258,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// accepts a terminal until the lease actually lapses.
 		if leaseFenced(ctx) {
 			s.releaseActivity(conversationID, cfg.claimID)
-			parked = true
 			return true
 		}
 		// The last moment this engagement holds its tree. Whatever the agent
@@ -274,30 +266,21 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// from.
 		mirror.settle(ctx)
 		s.releaseActivity(conversationID, cfg.claimID)
-		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, msg, kind) {
-			return false
-		}
-		parked = true
-		return true
+		return s.failConversation(orgID, conversationID, task.ID, cfg.claimID, msg, kind)
 	}
 
-	// cancelled parks this run and folds a fence trip the same way. parked is
-	// set unconditionally, not just on a fence trip: a cancel is a park, so
-	// the worktree stays as the warm resume cache exactly like a turn-end
-	// park's does. A stall is a cancel too, and stopParkReason names it. The
-	// dispatcher shutting down is not: the conversation is handed back rather
-	// than parked, and the next claim resumes the session in the same tree.
+	// cancelled parks this run and folds a fence trip the same way. A stall is
+	// a cancel too, and stopParkReason names it. The dispatcher shutting down
+	// is not: the conversation is handed back rather than parked, and the next
+	// claim resumes the session in the same tree.
 	//
 	// sessionID and costUSD ride in from the caller because they are only
 	// known once the agent has actually started — the pre-launch cancel below
 	// passes "" and 0 and snapshots a workspace with no transcript to carry.
 	//
 	// A LEASE fence arrives as a cancelled ctx too, and is not a cancel: this
-	// engagement has lost the conversation, so it records nothing. parked
-	// stays true either way — the worktree is the successor's warm cache as
-	// much as a stopped run's.
+	// engagement has lost the conversation, so it records nothing.
 	cancelled := func(sessionID string, costUSD float64) engagementDisposition {
-		parked = true
 		if leaseFenced(ctx) {
 			s.releaseActivity(conversationID, cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -322,19 +305,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// Initial cwd for the child claude: the run root, for every run. The agent
 	// cd's into a checkout beneath it — the PR's, or one `workspace add` made.
 	claudeCwd := cfg.runRoot
-	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
-	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
-	defer func() {
-		if cfg.isBlueprintStep {
-			return
-		}
-		if parked {
-			// Keep the session JSONL: it's the conversation state the resumed
-			// `claude --resume` reads (and what the cold-path snapshot carries).
-			return
-		}
-		worktree.RemoveClaudeProjectDir(claudeCwd)
-	}()
 
 	// The workspace key groups this run with every other conversation on its
 	// task — the run tree and the workspace snapshot. Exported below so the
@@ -413,14 +383,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		return engagementDisposition{fenced: fail("failed to resolve own binary path: "+err.Error(), domain.ConversationFailureUnclassified)}
 	}
 
-	// Load the metadata of the newest event that spawned or bumped the task so
-	// the task context can carry its fields (workflow run id, head sha, check
-	// name, ...). A DB failure here is non-fatal: the block just renders
-	// without them. FKs guarantee the event exists, so a real miss would be a
-	// DB-level problem we want to log and continue through rather than
-	// aborting the run.
-	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
-
 	// Resolve the paths the agent will actually observe, which differ from the
 	// host paths under the sandbox: the run-root is presented at cell.WorkDir
 	// and the TF binary at cell.TFBinaryPath. The prompt states both concretely,
@@ -438,7 +400,25 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
-	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+
+	// The session this launch would resume goes back where --resume reads it
+	// when it is not there: a tree rebuilt or built fresh brings no session
+	// file along, and the session's blob is its durable copy. A store that
+	// cannot answer hands the launch back, rather than open a fresh session
+	// over one that exists.
+	if err := s.restoreSession(ctx, orgID, conversationID, claudeCwd, priorSessionID); err != nil {
+		if ctx.Err() != nil {
+			return cancelled("", 0)
+		}
+		return engagementDisposition{launchErr: err}
+	}
+
+	// Whether this launch sends the conversation's opening: it has no session to
+	// resume, so it starts a model that knows nothing. A launch resuming a
+	// session sends a continuation note instead (composeLaunchTurn), and the
+	// session already holds everything this launch would compose for a first
+	// turn.
+	opens := priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID)
 
 	// The two channels this launch composes, split by who authored what. TF's
 	// own words — the framework blocks, the mission, this run's facts, the verb
@@ -453,7 +433,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// The overlapping work is a launch's on the same terms: a resumed session
 	// was told of each assignment since by a note.
 	taskState, siblingWork := "", ""
-	if priorSessionID == "" || !sessionTranscriptExists(claudeCwd, priorSessionID) {
+	if opens {
 		taskState = s.closedTaskContext(context.WithoutCancel(ctx), orgID, task.ID)
 		siblingWork = s.siblingWorkContext(context.WithoutCancel(ctx), orgID, conversationID)
 	}
@@ -463,8 +443,26 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)
-	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
+	systemPrompt := sdkSystemPrompt(cfg.surface, systemBlock, agentBin)
+
+	// Only a launch that sends the opening composes a task context, because the
+	// opening is the one place it reaches the model. A resumed session is handed
+	// its conversation's own task-context row instead, and nothing that feeds a
+	// task context is read or fetched for it.
+	var taskContext string
+	if opens {
+		// The metadata of the newest event that spawned or bumped the task, so
+		// the task context can carry its fields (workflow run id, head sha,
+		// check name, ...). A DB failure here is non-fatal: the block just
+		// renders without them. FKs guarantee the event exists, so a real miss
+		// would be a DB-level problem we want to log and continue through
+		// rather than aborting the run.
+		metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
+		artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+		taskContext = BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton.render(ctx), s.taskVulnerablePackage(context.WithoutCancel(ctx), orgID, task), artifacts, deliverables)
+	} else {
+		taskContext = s.openedTaskContext(ctx, orgID, conversationID)
+	}
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the
@@ -491,7 +489,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		if ctx.Err() != nil {
 			return cancelled("", 0)
 		}
-		parked = true
 		return engagementDisposition{launchErr: err}
 	}
 
@@ -513,13 +510,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// refusal here means a successor owns the conversation, which is not what a
 	// user cancel is, and only one of the two parks with a cancel recorded.
 	if s.persistSystemBlock(ctx, orgID, conversationID, cfg.claimID, systemBlock) {
-		parked = true
 		return engagementDisposition{fenced: true}
 	}
 	if s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting) {
 		// Fenced out before the runtime came up: nothing to write, no process
 		// to kill. The workspace stays for whoever owns the conversation now.
-		parked = true
 		return engagementDisposition{fenced: true}
 	}
 
@@ -552,9 +547,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// fails in ensureWorkspace before reaching here), so the transcript is
 	// present exactly when it's safe to resume; otherwise we fall back to a
 	// fresh session, which is correct, just re-does the step's work.
-	resumeSession := ""
-	if priorSessionID != "" && sessionTranscriptExists(claudeCwd, priorSessionID) {
-		resumeSession = priorSessionID
+	resumeSession, resumeSessionCostUSD := "", 0.0
+	if !opens {
+		resumeSession, resumeSessionCostUSD = priorSessionID, priorSessionCostUSD
 		delegateLog.Info("conversation re-claimed mid-flight; resuming session", "conversation", conversationID, "session", priorSessionID)
 	}
 
@@ -617,11 +612,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	teamOpts := s.resolveSDKTeamOptions(ctx, teamID)
 	baseOpts := agentproc.RunOptions{
-		Cwd:                claudeCwd,
-		Model:              model,
-		PermissionMode:     teamOpts.permissionMode,
-		ClaudeAIConnectors: teamOpts.claudeAIConnectors,
-		SessionID:          resumeSession,
+		Cwd:                    claudeCwd,
+		Model:                  model,
+		Effort:                 s.claimEffort(ctx, orgID, conversationID, model),
+		PermissionMode:         teamOpts.permissionMode,
+		ClaudeAIConnectors:     teamOpts.claudeAIConnectors,
+		SessionID:              resumeSession,
+		SessionCostBaselineUSD: resumeSessionCostUSD,
 		// The gh subcommands are granted only when the channel is actually
 		// live: without one, `gh` on a local host would resolve to the user's
 		// own installation under the user's own auth, so the allowlist must
@@ -669,14 +666,15 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// The first user message this launch sends, composed onto the options and
 	// recorded through the sink's own insert door. Last before the launch, so
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
-	// that really was about to speak.
-	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, taskMemories, taskContext); err != nil {
+	// that really was about to speak. The turn starts here, where it takes the
+	// person's waiting messages.
+	s.startTurn(ctx, conversationID, cfg.claimID)
+	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, workspaceNote(cfg.runRoot, cfg.workspace), cfg.interactive, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the
 			// conversation, and every row this engagement still wrote would
 			// interleave with its. Nothing to record, nothing to kill.
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
-			parked = true
 			return engagementDisposition{fenced: true}
 		}
 		return engagementDisposition{fenced: fail("failed to open the conversation: "+err.Error(), domain.ConversationFailureUnclassified)}
@@ -715,11 +713,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			runtime:        domain.ConversationRuntimeSDK,
 			mirror:         mirror,
 		},
-		opts:   baseOpts,
-		perms:  perms,
-		sink:   sink,
-		mirror: mirror,
-		nudge:  turnEndNudge(s.artifactContractNudge(orgID, conversationID, task, cfg.appendSysPrompt == "")),
+		opts:         baseOpts,
+		perms:        perms,
+		sink:         sink,
+		mirror:       mirror,
+		nudge:        turnEndNudge(s.turnEndNudges(orgID, conversationID, task, finalBlueprintStepOf(cfg), cfg.interactive)),
+		hasBlueprint: cfg.hasBlueprint(),
 	})
 
 	// Fenced out mid-stream: the claim this engagement holds was released and
@@ -733,13 +732,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// write (the sink) or a refused park (the driver). They are separate
 	// signals because they come from different writes — a run whose turn ended
 	// quietly may never attempt another insert.
-	//
-	// parked=true is what keeps the workspace on disk. Ownership is gone, so
-	// whether the successor is rehydrating into this very worktree is no
-	// longer knowable from here; a leaked directory is reclaimed by the next
-	// startup sweep, a deleted one that turned out to be in use is not.
 	if sink.fenceTripped() || out.fenced {
-		parked = true
 		return engagementDisposition{fenced: true}
 	}
 
@@ -758,16 +751,13 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	}
 
 	// The driver parked the run itself (status `open`, snapshot written) after
-	// a paused turn — a dormant disposition, so keep the warm worktree as the
-	// fast resume path.
+	// a paused turn.
 	if out.hibernated {
-		parked = true
 		return engagementDisposition{}
 	}
 
 	// The provider was unavailable through the SDK's own retries: handed back
-	// rather than recorded. parked, so the session file stays on disk as the
-	// resume's warm cache.
+	// rather than recorded.
 	if disp, ok := s.leaveSDKOnUpstream(ctx, liveParkContext{
 		orgID:          orgID,
 		conversationID: conversationID,
@@ -777,13 +767,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		runtime:        domain.ConversationRuntimeSDK,
 		mirror:         mirror,
 	}, out.result, out.sessionID, cfg.upstreamHandBacks, creatorUserID); ok {
-		parked = true
 		return disp
 	}
 
 	if out.result != nil {
-		var fenced bool
-		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, creatorUserID)
+		fenced := s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, creatorUserID)
 		return engagementDisposition{fenced: fenced}
 	}
 
@@ -813,8 +801,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // opening over the top of that would read as a second briefing and restart the
 // mission — so it gets the continuation note instead, which says the one thing
 // the session cannot: why it paused. lastHandBackOutcome picks the note (see
-// continuationNote). A launch with no session to resume has a model that knows
-// nothing, and gets the opening.
+// continuationNote). workspaceNote, set when the tree was rebuilt under the
+// session, comes first, since what the tree lost is what the rest of the turn
+// is read against. A launch with no session to resume has a model that knows
+// nothing, gets the opening, and is told nothing about a tree it has no
+// memory of.
 //
 // Either one carries the notes staged for the conversation, so a launch reads
 // what landed before it as every other engagement does. The continuation note
@@ -826,26 +817,38 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // refused write leaves them staged, and opts.OnOpeningUnsent puts them back
 // on the queue if the message never reaches the agent; it is nil when no
 // note was flushed.
+//
+// A conversation a person works in (interactive) opens on the person's own
+// messages rather than a mission, so its opening ends with what they have
+// asked (firstTurnPersonInput), after the notes, as one final block. Their
+// rows are already on the transcript, where the opening is sequenced ahead of
+// them (mintOpeningRows), so nothing is written for them: the waiting ones are
+// only taken off the queue, here, past every hand-back and just before the
+// runtime starts, which is where the resume path takes its message too
+// (dispatchResumeClaim).
 func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
 	sink *conversationSink,
-	orgID, conversationID, creatorUserID, lastHandBackOutcome string,
+	orgID, conversationID, creatorUserID, lastHandBackOutcome, workspaceNote string,
+	interactive bool,
 	memories []domain.TaskMemory,
 	taskContext string,
 ) error {
 	if opts.SessionID != "" {
+		if workspaceNote != "" {
+			if err := s.recordLaunchNote(sink, conversationID, creatorUserID, domain.MessageSubtypeInjectionExecutorChanged, workspaceNote); err != nil {
+				return err
+			}
+		}
 		note := continuationNote(lastHandBackOutcome)
-		if err := s.recordContinuationNote(sink, conversationID, creatorUserID, note); err != nil {
+		if err := s.recordLaunchNote(sink, conversationID, creatorUserID, domain.MessageSubtypeInjectionNudge, note); err != nil {
 			return err
 		}
-		opts.OpeningBlocks = nil
-		opts.Message = note
 		notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
 		opts.OnOpeningUnsent = unsent
-		if notes != "" {
-			opts.Message = notes + "\n\n" + note
-		}
+		opts.OpeningBlocks = nil
+		opts.Message = joinTurnText(workspaceNote, notes, note)
 		return nil
 	}
 	blocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, memories, taskContext)
@@ -857,9 +860,70 @@ func (s *Spawner) composeLaunchTurn(
 	if notes != "" {
 		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: notes})
 	}
+	if interactive {
+		if asked := s.firstTurnPersonInput(ctx, orgID, conversationID); asked != "" {
+			blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: asked})
+		}
+	}
 	opts.Message = ""
 	opts.OpeningBlocks = blocks
 	return nil
+}
+
+// firstTurnPersonInput is everything a person has asked a conversation that
+// has never run, oldest first and joined as the resume path joins its queue
+// (db.PendingInputSeparator), or "" when they have asked nothing.
+//
+// The waiting messages are not the whole of it. A message an earlier
+// engagement took off the queue without any model answering it (a claim that
+// paused before its agent ran, a hand-back at shutdown) is delivered but
+// unanswered, and this launch starts a session that has seen none of it. So
+// the delivered ones come from the transcript and the waiting ones from the
+// queue, which takes them in the same read that returns them and so cannot
+// miss one that arrives between the two.
+//
+// A take that fails leaves the waiting messages out of this turn. That is the
+// recoverable way to be wrong: still waiting, they wake the conversation once
+// this turn ends, and by then it has a session, so the resume delivers them.
+func (s *Spawner) firstTurnPersonInput(ctx context.Context, orgID, conversationID string) string {
+	var asked []string
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read the messages a person already sent for the first turn failed; the turn carries only the waiting ones",
+			"conversation", conversationID, "error", err)
+	}
+	for _, r := range rows {
+		if isPersonMessage(r) && (r.Delivered == nil || *r.Delivered) {
+			asked = append(asked, r.Content)
+		}
+	}
+	if s.pendingInput != nil {
+		msg, _, ok, err := s.pendingInput.Consume(ctx, orgID, conversationID)
+		switch {
+		case err != nil:
+			delegateLog.Warn("take the person's waiting messages for the first turn failed; the turn starts without them, and they wake the conversation again once it ends",
+				"conversation", conversationID, "error", err)
+		case ok:
+			asked = append(asked, msg)
+		}
+	}
+	return strings.Join(asked, db.PendingInputSeparator)
+}
+
+// openedTaskContext is the content of the conversation's task-context row, the
+// task context its opening sent, or "" when the transcript holds none: older
+// builds opened conversations without one. A read that fails answers "" too.
+// Either way the launch writes no task-context file, and whatever an earlier
+// engagement wrote there stays, rather than being replaced by a file that is
+// not a copy of the row.
+func (s *Spawner) openedTaskContext(ctx context.Context, orgID, conversationID string) string {
+	taskContext, _, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
+	if err != nil {
+		delegateLog.Warn("read the conversation's task-context row failed; this launch writes no task-context file",
+			"conversation", conversationID, "error", err)
+		return ""
+	}
+	return taskContext
 }
 
 // continuationNote is the note a launch resuming a session sends, by how the
@@ -876,31 +940,50 @@ func continuationNote(lastHandBackOutcome string) string {
 	return domain.SessionContinuationNote
 }
 
-// recordContinuationNote writes the note a resuming launch sends, through the
-// same door the rest of the engagement's rows go through.
+// recordLaunchNote writes a note a resuming launch sends, under subtype,
+// through the same door the rest of the engagement's rows go through.
 //
 // Delivered, not pending: an undelivered user row is the SDK's resume queue,
 // so a note left there would come back at the next claim as a follow-up
 // nobody typed. The row exists so the transcript shows what was actually sent
 // — the session file is the model's copy, and nothing else here reads it.
-func (s *Spawner) recordContinuationNote(sink *conversationSink, conversationID, creatorUserID, note string) error {
+func (s *Spawner) recordLaunchNote(sink *conversationSink, conversationID, creatorUserID, subtype, note string) error {
 	delivered := true
 	return sink.OnMessage(&domain.Message{
 		ConversationID: conversationID,
 		UserID:         creatorUserID,
 		Role:           "user",
-		Subtype:        domain.MessageSubtypeInjectionNudge,
+		Subtype:        subtype,
 		Content:        note,
 		Delivered:      &delivered,
 	})
+}
+
+// workspaceNote is the note an SDK conversation resuming its session opens
+// with when its tree at root was rebuilt (prov), and "" when it was not. The
+// session file carries the conversation and not the tree, so a resume into a
+// restored or rebuilt tree is told what the tree lost, as a native resume is.
+func workspaceNote(root string, prov domain.WorkspaceProvenance) string {
+	return agentloop.WorkspaceRebuiltNote(agentloop.WorkspaceLayout{Root: agentproc.AgentVisibleRoot(root)}, prov)
+}
+
+// joinTurnText joins the non-empty parts of a turn's text in order, a blank
+// line between each.
+func joinTurnText(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "\n\n")
 }
 
 // openingTurnBlocks mints the SDK conversation's opening rows and assembles
 // them into the content blocks of its first user message.
 //
 // It is the runtime half of mintOpeningRows, the counterpart of native's
-// mintOpeningTurn: the transcript read the gate needs, the insert door the rows
-// go through — the sink's, so the rows broadcast to the run station and pass
+// mintOpeningTurn: the two reads it needs, the insert door the rows go through — the sink's, so the rows broadcast to the run station and pass
 // the claim fence like every other row this engagement writes — and then the
 // one assembler both runtimes send through.
 //
@@ -909,12 +992,16 @@ func (s *Spawner) recordContinuationNote(sink *conversationSink, conversationID,
 // no session to resume starts an SDK process that knows nothing, on a
 // transcript whose opening was minted by the engagement that died.
 func (s *Spawner) openingTurnBlocks(ctx context.Context, sink *conversationSink, orgID, conversationID, creatorUserID string, memories []domain.TaskMemory, taskContext string) ([]agentproc.ContentBlock, error) {
+	_, opened, err := s.conversations.OpeningTaskContextSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("read the conversation's opening: %w", err)
+	}
 	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("read transcript: %w", err)
 	}
 	insert := func(_ context.Context, msg *domain.Message) error { return sink.OnMessage(msg) }
-	opening, err := mintOpeningRows(ctx, insert, rows, memories, conversationID, creatorUserID, taskContext)
+	opening, err := mintOpeningRows(ctx, insert, opened, rows, memories, conversationID, creatorUserID, taskContext)
 	if err != nil {
 		return nil, err
 	}
@@ -999,21 +1086,13 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // the file after its last tool call, and it carries the inherited fingerprint
 // that keeps content the agent never wrote from being ingested as its work.
 //
-// Returns parked: true when the turn ended dormant (open, no verdict, nothing
-// for the blueprint to act on), which is what keeps the session JSONL on disk
-// as the warm resume cache. A verdict or a failure (including a verdict that
-// produced a draft PR / pending review) returns false — the step has given the
-// only answer it is going to, the blueprint acts on it, and the deliverable is
-// a resolvable sidecar, not a reason to keep the tree warm.
-//
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in
 // scope, which keeps the unfenced write.
 //
 // Returns fenced: true when that terminal was refused because the claim is
 // released. Nothing was recorded, and the caller must not react to the run's
-// state either — a successor owns its disposition. parked comes back true
-// alongside it so the workspace survives (see runAgent).
+// state either — a successor owns its disposition.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	orgID, conversationID, blueprintRunID, claimID string,
@@ -1022,7 +1101,7 @@ func (s *Spawner) processCompletion(
 	claudeCwd string,
 	mirror *memoryMirror,
 	sessionID, creatorUserID string,
-) (parked, fenced bool) {
+) (fenced bool) {
 	// The engagement's terminal, as a punctual span linked back to the setup
 	// that started it. This is where a run's own accounting already exists —
 	// cost, wall time, turn count — so it is the one place those figures can
@@ -1066,13 +1145,13 @@ func (s *Spawner) processCompletion(
 	// terminal, snapshot and broadcast for an engagement that has already
 	// decided it cannot prove it holds the claim.
 	//
-	// So the result is dropped. Its session and worktree survive (parked), the
+	// So the result is dropped. Its session and worktree stay on disk, the
 	// lease lapses, and whoever picks the conversation up re-concludes it —
 	// one re-drive, against a write this engagement could not stand behind.
 	if leaseFenced(ctx) {
 		delegateLog.Warn("dropping a completion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
-		return true, true
+		return true
 	}
 
 	// The key of the workspace (tree + snapshot) this run shares with every
@@ -1091,12 +1170,11 @@ func (s *Spawner) processCompletion(
 	// A refused note or park is reported as fenced, not swallowed: the row
 	// belongs to a successor, so nothing here — not the terminal, not the
 	// blueprint advance the caller would run on a plain park — is this
-	// engagement's to decide. parked stays true either way, because that is
-	// what keeps the workspace on disk for whoever holds the conversation now.
+	// engagement's to decide.
 	class, verdict := classifyTurn(completion)
 	if !completion.IsError && class == turnParked {
 		if s.insertClaimStopNote(ctx, orgID, conversationID, claimID, creatorUserID, stopReasonParkNotice(completion.StopReason)) {
-			return true, true
+			return true
 		}
 		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
@@ -1104,12 +1182,12 @@ func (s *Spawner) processCompletion(
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        claimID,
-			reason:         db.ParkIdle(),
+			reason:         db.ParkTurnIncomplete(),
 			runtime:        domain.ConversationRuntimeSDK,
 			costUSD:        completion.CostUSD,
 			mirror:         mirror,
 		}, sessionID)
-		return true, fencedOut
+		return fencedOut
 	}
 
 	// The agent's own memory file, one last time — the mirror has been filing
@@ -1137,10 +1215,11 @@ func (s *Spawner) processCompletion(
 	// cancelled turn still owns its terminal bookkeeping.
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
-	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
-	// blueprint), so this helper never owns task disposition: it persists
-	// outcome/status only and leaves advancement + task close to the orchestrator
-	// (reactToStepTerminal / terminateBlueprint). blueprintRunID is always non-empty here.
+	// This helper never owns task disposition: it persists outcome/status only
+	// and leaves advancement + task close to the orchestrator
+	// (reactToStepTerminal / terminateBlueprint). A conversation a person works
+	// in has no blueprint run, so it has nothing to advance and nothing here
+	// closes its task either.
 
 	resultSummary := ""
 	status := domain.StatusOpen
@@ -1157,6 +1236,12 @@ func (s *Spawner) processCompletion(
 		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
 	default: // turnConcluded — every other non-error turn parked above
 		resultSummary = verdict.Summary
+		// A conversation a person works in has no blueprint run, and its turn
+		// records the answer the person got, not the agent's reply to the
+		// memory note.
+		if blueprintRunID == "" && completion.Terminal == nil {
+			resultSummary = strings.TrimSpace(s.turnAnswer(context.WithoutCancel(ctx), orgID, conversationID, resultSummary))
+		}
 		outcome = string(verdict.Outcome)
 		// stop_blueprint states a reason for either ending, and it is
 		// recorded either way, as on the native runtime. A turn that
@@ -1189,16 +1274,15 @@ func (s *Spawner) processCompletion(
 	// finish terminates) per blueprintDecisionForStepConversation, and the approval state is
 	// derived downstream from the unresolved-deliverable set (has_unresolved_deliverables).
 
-	// Every verdict snapshots its workspace — while the worktree and session
-	// transcript are still on disk — then lets the cleanup defers tear the
-	// worktree down (parked stays false: keeping a concluded step's worktree
-	// warm is not acceptable, so cold rehydrate from this blob is the resume
-	// path). Whatever the outcome: an abort is picked back up by a human, and a
-	// finish is the case a follow-up on concluded work needs — a workspace that
-	// only exists for the runs that went badly is a workspace nobody can follow
-	// up on. A failed run is excluded: the infrastructure under it died, so
-	// there is nothing coherent to rehydrate, and failConversation drops
-	// whatever blob it had.
+	// Every verdict snapshots its workspace, and saves its session, while the
+	// worktree and session file are still on disk. The tree does not outlive
+	// its blueprint's end or the idle evictor, so a cold rehydrate from this
+	// blob is how a later follow-up resumes. Whatever the outcome: an abort is
+	// picked back up by a human, and a finish is the case a follow-up on
+	// concluded work needs — a workspace that only exists for the runs that
+	// went badly is a workspace nobody can follow up on. A failed run is
+	// excluded: the infrastructure under it died, so there is nothing coherent
+	// to rehydrate, and failConversation drops whatever blob it had.
 	//
 	// Every step of a blueprint writes to the one key the blueprint shares, so a
 	// multi-step run overwrites its own blob per step and the last writer — the
@@ -1212,9 +1296,14 @@ func (s *Spawner) processCompletion(
 	//
 	// The claim is still held, so the snapshot is one of the engagement's
 	// operations: bounded, and the idle limit does not apply while it runs.
+	//
+	// The session's own blob goes first, under the same ordering contract,
+	// and whatever becomes of the snapshot: a follow-up resumes the session
+	// from it onto whatever tree it gets.
 	if status == domain.StatusOpen {
+		s.saveSession(bgCtx, orgID, conversationID, claudeCwd, sessionID)
 		snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
-		err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, claimID, claudeCwd, sessionID, domain.ConversationRuntimeSDK)
+		err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, claimID, claudeCwd, domain.ConversationRuntimeSDK)
 		endSnap()
 		if err != nil {
 			delegateLog.Warn("snapshot workspace for concluded conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)
@@ -1238,10 +1327,16 @@ func (s *Spawner) processCompletion(
 		// resume from the blob before its own conclusion overwrites it.
 		delegateLog.Error("claim fence refused the completion terminal — a successor owns this conversation; recording nothing",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", completeErr)
-		return true, true
+		return true
 	}
 	if completeErr != nil {
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", completeErr)
+	}
+	// A failure ends the conversation, as every other failure does: nothing
+	// resumes a failed conversation, and while it stays un-ended its task can
+	// have no other, so a person's chat would be left with nothing to send to.
+	if status == domain.StatusFailed && completeErr == nil {
+		s.endFailedConversation(bgCtx, orgID, conversationID, "agent error")
 	}
 
 	// broadcastStatus prefers the row the write actually persisted over the
@@ -1268,7 +1363,7 @@ func (s *Spawner) processCompletion(
 		s.toastRunCompleted(orgID, creatorUserID, completedRow)
 	case domain.StatusFailed:
 		if completeErr == nil {
-			s.noteConversationFailed(orgID, conversationID, creatorUserID, task.ID, failureKind, resultSummary)
+			s.kickDelegatorNotice(orgID)
 		}
 	}
 
@@ -1276,7 +1371,7 @@ func (s *Spawner) processCompletion(
 	// task (the shared workspace's key) — there is no conversation-id-keyed
 	// snapshot to drop here. A parked run keeps its snapshot for the eventual
 	// resume.
-	return parked, false
+	return false
 }
 
 // toastRunCompleted tells the run's creator that it completed. row is what

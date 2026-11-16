@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -36,8 +37,12 @@ type ProviderCredentials struct {
 	// APIKey is the Anthropic API key (or gateway bearer). Empty for a Bedrock
 	// role/SigV4 config that authenticates through Bedrock instead.
 	APIKey string
-	// BaseURL overrides the provider endpoint (a customer gateway or a Bedrock
-	// VPC endpoint). Optional.
+	// BaseURL overrides the provider endpoint: a gateway in front of
+	// Anthropic, or a Bedrock runtime endpoint (a VPC interface endpoint, or a
+	// host the regional formula can't produce). Optional.
+	//
+	// bifrost dials a Bedrock endpoint as https://<host>: it keeps only the
+	// host, and drops a scheme, a path, or credentials in the URL.
 	BaseURL string
 	// ExtraHeaders are attached to every request to this provider (e.g. a
 	// gateway Authorization bearer, a beta header override). Optional.
@@ -62,6 +67,12 @@ type ProviderCredentials struct {
 	// is the prize this class of guard exists to protect, is out of reach
 	// regardless of what this field says.
 	AllowPrivateNetwork bool
+
+	// CACertPEM is one or more PEM certificates the client trusts for this
+	// provider's endpoint in addition to the system roots: the per-run
+	// certificate a run's credential proxy serves, so the hop to it is
+	// verified like any other. Optional.
+	CACertPEM []byte
 
 	// Concurrency / BufferSize override the modest defaults for this provider's
 	// worker pool and queue. Zero uses the defaults.
@@ -148,6 +159,15 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 		Weight: 1,
 	}
 
+	// bifrost's Anthropic provider only logs a CA it cannot parse and then
+	// fails the handshake on every call, so the refusal is made here.
+	if len(c.CACertPEM) > 0 && !x509.NewCertPool().AppendCertsFromPEM(c.CACertPEM) {
+		return schemas.Key{}, fmt.Errorf("the CA certificate is not a PEM certificate")
+	}
+
+	if c.Provider == ProviderBedrock && c.Bedrock == nil {
+		return schemas.Key{}, fmt.Errorf("a Bedrock provider requires Bedrock credentials")
+	}
 	if c.Bedrock != nil {
 		if c.Bedrock.Region == "" {
 			return schemas.Key{}, fmt.Errorf("bedrock credentials require a region")
@@ -161,6 +181,7 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 			RoleARN:         optionalSecret(c.Bedrock.RoleARN),
 			ExternalID:      optionalSecret(c.Bedrock.ExternalID),
 			RoleSessionName: optionalSecret(c.Bedrock.RoleSessionName),
+			Endpoints:       bedrockEndpoints(c.BaseURL),
 		}
 		return key, nil
 	}
@@ -171,8 +192,38 @@ func buildKey(c ProviderCredentials) (schemas.Key, error) {
 	return key, nil
 }
 
+// bedrockEndpoints carries a Bedrock base URL where bifrost's Bedrock provider
+// reads a host: the key's endpoint for each AWS service, never
+// NetworkConfig.BaseURL. Runtime is the only service a chat call uses; the
+// region still sets the SigV4 signing scope, whatever host is dialled.
+func bedrockEndpoints(baseURL string) *schemas.BedrockEndpoints {
+	if baseURL == "" {
+		return nil
+	}
+	return &schemas.BedrockEndpoints{Runtime: optionalSecret(baseURL)}
+}
+
+// BedrockEndpointURL is the address bifrost dials for a Bedrock endpoint
+// override: https and the host it keeps (schemas.NormalizeEndpointHost). A
+// value that is not already this would be changed before it was dialled.
+// Empty for an empty value.
+func BedrockEndpointURL(baseURL string) string {
+	return bedrockDialURL(optionalSecret(baseURL))
+}
+
+func bedrockDialURL(v *schemas.SecretVar) string {
+	host := schemas.NormalizeEndpointHost(v)
+	if host == "" {
+		return ""
+	}
+	return "https://" + host
+}
+
 // buildProviderConfig sizes the worker pool modestly and lets bifrost fill the
-// remaining network defaults (timeouts, retries) via CheckAndSetDefaults.
+// remaining network defaults (timeouts, retries) via CheckAndSetDefaults. A
+// Bedrock base URL is not set here: it rides the key (bedrockEndpoints). The
+// CA certificate is set here for every provider; both the Bedrock and the
+// Anthropic client read it from the network config.
 func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	concurrency := c.Concurrency
 	if concurrency <= 0 {
@@ -182,11 +233,16 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	if bufSize <= 0 {
 		bufSize = defaultBufferSize
 	}
+	baseURL := c.BaseURL
+	if c.Provider == ProviderBedrock {
+		baseURL = ""
+	}
 	cfg := &schemas.ProviderConfig{
 		NetworkConfig: schemas.NetworkConfig{
-			BaseURL:             c.BaseURL,
-			ExtraHeaders:        c.ExtraHeaders,
+			BaseURL:             baseURL,
+			ExtraHeaders:        plainHeaders(c.ExtraHeaders),
 			AllowPrivateNetwork: c.AllowPrivateNetwork,
+			CACertPEM:           optionalSecret(string(c.CACertPEM)),
 		},
 		ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
 			Concurrency: concurrency,
@@ -199,6 +255,19 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 
 func plainSecret(v string) schemas.SecretVar {
 	return schemas.SecretVar{Val: v, SecretType: schemas.SecretTypePlainText}
+}
+
+// plainHeaders carries extra headers as bifrost's plain-text secret values.
+// nil stays nil, so an account with none sends none.
+func plainHeaders(h map[string]string) map[string]schemas.SecretVar {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string]schemas.SecretVar, len(h))
+	for k, v := range h {
+		out[k] = plainSecret(v)
+	}
+	return out
 }
 
 func optionalSecret(v string) *schemas.SecretVar {

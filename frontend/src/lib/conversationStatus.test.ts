@@ -26,16 +26,16 @@ import {
 
 const base = (over: Partial<Conversation>): Conversation =>
   ({
-    ID: 'r1',
-    TaskID: 't1',
-    Status: 'running',
-    StartedAt: '2026-07-16T10:00:00Z',
+    id: 'r1',
+    task_id: 't1',
+    status: 'running',
+    started_at: '2026-07-16T10:00:00Z',
     ...over,
   }) as Conversation
 
 // A conversation parked with its step's verdict: `open`, conclusion stamped.
 const concluded = (over: Partial<Conversation>): Conversation =>
-  base({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', ...over })
+  base({ status: 'open', completed_at: '2026-07-16T11:00:00Z', ...over })
 
 const T = (iso: string) => new Date(iso).getTime()
 
@@ -99,10 +99,10 @@ describe('status classification', () => {
 describe('activeProse', () => {
   it('names every claim phase and nothing outside the active set', () => {
     for (const phase of CLAIM_PHASES) {
-      expect(activeProse(base({ Status: phase }))).toBe(PHASE_PROSE[phase])
+      expect(activeProse(base({ status: phase }))).toBe(PHASE_PROSE[phase])
     }
     for (const status of ['queued', 'open', ...TERMINAL_CONVERSATION_STATUSES]) {
-      expect(activeProse(base({ Status: status, current_action: 'Editing x' }))).toBeUndefined()
+      expect(activeProse(base({ status, current_action: 'Editing x' }))).toBeUndefined()
     }
   })
   it('leads a running conversation with its action and falls back to the state word', () => {
@@ -113,7 +113,7 @@ describe('activeProse', () => {
     expect(activeProse(base({ current_action: '' }))).toBe('Working')
   })
   it('lets a setup phase win over a stale action', () => {
-    expect(activeProse(base({ Status: 'cloning', current_action: 'Editing x' }))).toBe(
+    expect(activeProse(base({ status: 'cloning', current_action: 'Editing x' }))).toBe(
       'Cloning the repository',
     )
   })
@@ -122,12 +122,14 @@ describe('activeProse', () => {
 describe('isConcluded', () => {
   it('is an open conversation with the conclusion stamped, and nothing else', () => {
     expect(isConcluded(concluded({}))).toBe(true)
-    expect(isConcluded(base({ Status: 'open' }))).toBe(false)
-    expect(isConcluded(base({ Status: 'open', CompletedAt: null }))).toBe(false)
+    expect(isConcluded(base({ status: 'open' }))).toBe(false)
+    expect(isConcluded(base({ status: 'open', completed_at: null }))).toBe(false)
     // A failed conversation carries the stamp too; it is terminal, not concluded.
-    expect(isConcluded(base({ Status: 'failed', CompletedAt: '2026-07-16T11:00:00Z' }))).toBe(false)
+    expect(isConcluded(base({ status: 'failed', completed_at: '2026-07-16T11:00:00Z' }))).toBe(
+      false,
+    )
     // A follow-up on concluded work runs with the stamp in place.
-    expect(isConcluded(base({ Status: 'running', CompletedAt: '2026-07-16T11:00:00Z' }))).toBe(
+    expect(isConcluded(base({ status: 'running', completed_at: '2026-07-16T11:00:00Z' }))).toBe(
       false,
     )
   })
@@ -144,7 +146,7 @@ describe('chain position and completion', () => {
 
   it('reads a plan of one as no chain at all — that is the plain single-prompt conversation', () => {
     expect(chainPosition(step(0, 1))).toBeNull()
-    expect(completionKind(step(0, 1, { Outcome: 'continue' }))).toBe('done')
+    expect(completionKind(step(0, 1, { outcome: 'continue' }))).toBe('done')
   })
 
   it('treats an unresolved plan length as unknown position, not as step one of none', () => {
@@ -152,7 +154,7 @@ describe('chain position and completion', () => {
     // (a teammate's manual blueprint run under RLS); absent is a client predating it.
     expect(chainPosition(step(0, 0))).toBeNull()
     expect(chainPosition(concluded({ blueprint_step_index: 0 }))).toBeNull()
-    expect(completionKind(step(0, 0, { Outcome: 'continue' }))).toBe('done')
+    expect(completionKind(step(0, 0, { outcome: 'continue' }))).toBe('done')
   })
 
   it('numbers a mid-chain step for display and marks the last one final', () => {
@@ -161,20 +163,20 @@ describe('chain position and completion', () => {
   })
 
   it('calls a non-final step that concluded normally a hand-off, not the task finishing', () => {
-    expect(completionKind(step(1, 4, { Outcome: 'continue' }))).toBe('handoff')
-    expect(completionGloss(step(1, 4, { Outcome: 'continue' }))).toBe(
+    expect(completionKind(step(1, 4, { outcome: 'continue' }))).toBe('handoff')
+    expect(completionGloss(step(1, 4, { outcome: 'continue' }))).toBe(
       'step 2 of 4 done — handed off to the next step',
     )
   })
 
   it('calls the chain’s last step done, even though it too records continue', () => {
-    expect(completionKind(step(3, 4, { Outcome: 'continue' }))).toBe('done')
-    expect(completionKind(step(3, 4, { Outcome: 'finish' }))).toBe('done')
+    expect(completionKind(step(3, 4, { outcome: 'continue' }))).toBe('done')
+    expect(completionKind(step(3, 4, { outcome: 'finish' }))).toBe('done')
   })
 
   it('calls a mid-chain finish done — it ended the whole workflow early', () => {
-    expect(completionKind(step(1, 4, { Outcome: 'finish' }))).toBe('done')
-    expect(completionGloss(step(1, 4, { Outcome: 'finish' }))).toBe(
+    expect(completionKind(step(1, 4, { outcome: 'finish' }))).toBe('done')
+    expect(completionGloss(step(1, 4, { outcome: 'finish' }))).toBe(
       'ended the workflow early — the later steps were skipped',
     )
   })
@@ -184,22 +186,22 @@ describe('chain position and completion', () => {
     // nothing runs after the step. Reading it as a hand-off would claim a
     // successor that will never come; reading it as done would be the
     // original bug.
-    expect(completionKind(step(1, 4, { Outcome: '' }))).toBe('stopped')
+    expect(completionKind(step(1, 4, { outcome: '' }))).toBe('stopped')
     expect(completionKind(step(1, 4))).toBe('stopped')
-    expect(completionGloss(step(1, 4, { Outcome: '' }))).toBe(
+    expect(completionGloss(step(1, 4, { outcome: '' }))).toBe(
       'ended without a usable outcome — the workflow stopped here for a human',
     )
     // The abort keeps its own wording — the agent decided to stop, which is a
     // different thing to tell the viewer than a step that just never said.
-    expect(completionGloss(step(1, 4, { Outcome: 'abort' }))).toBe('stopped without finishing')
+    expect(completionGloss(step(1, 4, { outcome: 'abort' }))).toBe('stopped without finishing')
   })
 
   it('leaves the final step and the single-prompt conversation alone when the outcome is missing', () => {
     // Same missing outcome, opposite disposition: decideBlueprintStep resolves
     // it to a finish once there is no step left to hand off to. This is the
     // arm that DOES branch on position.
-    expect(completionKind(step(3, 4, { Outcome: '' }))).toBe('done')
-    expect(completionKind(step(0, 1, { Outcome: '' }))).toBe('done')
+    expect(completionKind(step(3, 4, { outcome: '' }))).toBe('done')
+    expect(completionKind(step(0, 1, { outcome: '' }))).toBe('done')
   })
 
   it('stops on an outcome the vocabulary does not know, at every position', () => {
@@ -209,28 +211,28 @@ describe('chain position and completion', () => {
     // otherwise slip through as a green verdict on an aborted blueprint —
     // this wire field is deliberately open-world, so a build reading a name
     // added after it shipped has to land somewhere honest.
-    expect(completionKind(step(1, 4, { Outcome: 'from_the_future' }))).toBe('stopped')
-    expect(completionKind(step(3, 4, { Outcome: 'from_the_future' }))).toBe('stopped')
-    expect(completionKind(step(0, 1, { Outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionKind(step(1, 4, { outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionKind(step(3, 4, { outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionKind(step(0, 1, { outcome: 'from_the_future' }))).toBe('stopped')
     // Position it cannot read at all doesn't rescue it either — the
     // orchestrator's answer here doesn't depend on the position.
-    expect(completionKind(step(1, 0, { Outcome: 'from_the_future' }))).toBe('stopped')
-    expect(completionGloss(step(3, 4, { Outcome: 'from_the_future' }))).toBe(
+    expect(completionKind(step(1, 0, { outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionGloss(step(3, 4, { outcome: 'from_the_future' }))).toBe(
       'ended without a usable outcome — the workflow stopped here for a human',
     )
   })
 
   it('separates an abort from a success wherever it lands in the chain', () => {
-    expect(completionKind(step(1, 4, { Outcome: 'abort' }))).toBe('stopped')
-    expect(completionKind(step(3, 4, { Outcome: 'abort' }))).toBe('stopped')
-    expect(completionKind(concluded({ Outcome: 'abort' }))).toBe('stopped')
-    expect(completionGloss(concluded({ Outcome: 'abort' }))).toBe('stopped without finishing')
+    expect(completionKind(step(1, 4, { outcome: 'abort' }))).toBe('stopped')
+    expect(completionKind(step(3, 4, { outcome: 'abort' }))).toBe('stopped')
+    expect(completionKind(concluded({ outcome: 'abort' }))).toBe('stopped')
+    expect(completionGloss(concluded({ outcome: 'abort' }))).toBe('stopped without finishing')
   })
 
   it('answers for concluded conversations only', () => {
     for (const status of ['queued', 'running', 'open', 'failed', ...CLAIM_PHASES]) {
-      expect(completionKind(base({ Status: status })), status).toBeNull()
-      expect(completionGloss(base({ Status: status })), status).toBe('')
+      expect(completionKind(base({ status })), status).toBeNull()
+      expect(completionGloss(base({ status })), status).toBe('')
     }
   })
 })
@@ -247,7 +249,7 @@ describe('completion read off the blueprint run', () => {
     })
 
   it('keeps a finished run done when a later follow-up on its last step reported an abort', () => {
-    const c = finalStep({ blueprint_run_status: 'completed', Outcome: 'abort' })
+    const c = finalStep({ blueprint_run_status: 'completed', outcome: 'abort' })
     expect(completionKind(c)).toBe('done')
     expect(completionGloss(c)).toBe('work complete — a later follow-up’s abort reopened nothing')
   })
@@ -255,15 +257,15 @@ describe('completion read off the blueprint run', () => {
   it('stops on an aborted, failed or cancelled run whatever the step said', () => {
     for (const status of ['aborted', 'failed', 'cancelled'] as const) {
       expect(
-        completionKind(finalStep({ blueprint_run_status: status, Outcome: 'finish' })),
+        completionKind(finalStep({ blueprint_run_status: status, outcome: 'finish' })),
         status,
       ).toBe('stopped')
     }
     expect(
-      completionGloss(finalStep({ blueprint_run_status: 'cancelled', Outcome: 'finish' })),
+      completionGloss(finalStep({ blueprint_run_status: 'cancelled', outcome: 'finish' })),
     ).toBe('workflow cancelled')
     expect(
-      completionGloss(finalStep({ blueprint_run_status: 'failed', Outcome: 'continue' })),
+      completionGloss(finalStep({ blueprint_run_status: 'failed', outcome: 'continue' })),
     ).toBe('the workflow failed')
   })
 
@@ -272,17 +274,17 @@ describe('completion read off the blueprint run', () => {
       blueprint_run_id: 'br1',
       blueprint_step_index: 0,
       blueprint_step_count: 2,
-      Outcome: 'continue',
+      outcome: 'continue',
     })
     expect(completionKind({ ...earlier, blueprint_run_status: 'aborted' })).toBe('handoff')
     expect(completionKind({ ...earlier, blueprint_run_status: 'completed' })).toBe('handoff')
   })
 
   it('falls back to the verdict while the run is still acting on it', () => {
-    expect(completionKind(finalStep({ blueprint_run_status: 'running', Outcome: 'abort' }))).toBe(
+    expect(completionKind(finalStep({ blueprint_run_status: 'running', outcome: 'abort' }))).toBe(
       'stopped',
     )
-    expect(completionKind(finalStep({ blueprint_run_status: 'running', Outcome: 'finish' }))).toBe(
+    expect(completionKind(finalStep({ blueprint_run_status: 'running', outcome: 'finish' }))).toBe(
       'done',
     )
   })
@@ -290,28 +292,28 @@ describe('completion read off the blueprint run', () => {
 
 describe('isResumableConversation', () => {
   it('wakes a parked conversation, concluded or not, mirroring the backend resumableState', () => {
-    expect(isResumableConversation(base({ Status: 'open' }))).toBe(true)
-    expect(isResumableConversation(concluded({ Outcome: 'abort' }))).toBe(true)
+    expect(isResumableConversation(base({ status: 'open' }))).toBe(true)
+    expect(isResumableConversation(concluded({ outcome: 'abort' }))).toBe(true)
     // Finished work is followed up on — every verdict snapshots its workspace.
-    expect(isResumableConversation(concluded({ Outcome: 'finish' }))).toBe(true)
+    expect(isResumableConversation(concluded({ outcome: 'finish' }))).toBe(true)
   })
 
   it('excludes the failed terminal and anything still in flight', () => {
-    expect(isResumableConversation(base({ Status: 'failed' }))).toBe(false)
-    expect(isResumableConversation(base({ Status: 'queued' }))).toBe(false)
-    expect(isResumableConversation(base({ Status: 'running' }))).toBe(false)
-    expect(isResumableConversation(base({ Status: 'awaiting_credentials' }))).toBe(false)
+    expect(isResumableConversation(base({ status: 'failed' }))).toBe(false)
+    expect(isResumableConversation(base({ status: 'queued' }))).toBe(false)
+    expect(isResumableConversation(base({ status: 'running' }))).toBe(false)
+    expect(isResumableConversation(base({ status: 'awaiting_credentials' }))).toBe(false)
   })
 })
 
 describe('canResumeConversation', () => {
   it('defers to the server when it answered', () => {
-    expect(canResumeConversation(base({ Status: 'open', resumable: true }))).toBe(true)
+    expect(canResumeConversation(base({ status: 'open', resumable: true }))).toBe(true)
     // The whole point of the field: status says resumable, the workspace says
     // otherwise, and only the server can see the difference.
     expect(
       canResumeConversation(
-        base({ Status: 'open', resumable: false, resume_blocked_reason: 'workspace_expired' }),
+        base({ status: 'open', resumable: false, resume_blocked_reason: 'workspace_expired' }),
       ),
     ).toBe(false)
   })
@@ -319,12 +321,12 @@ describe('canResumeConversation', () => {
   it('falls back to status when the server omitted the field', () => {
     // Absent means "not answered" — an older response, or a conversation the detail read
     // skips — never false.
-    expect(canResumeConversation(base({ Status: 'open' }))).toBe(true)
-    expect(canResumeConversation(base({ Status: 'failed' }))).toBe(false)
+    expect(canResumeConversation(base({ status: 'open' }))).toBe(true)
+    expect(canResumeConversation(base({ status: 'failed' }))).toBe(false)
   })
 
   it('never opens the composer on a status that cannot take a follow-up', () => {
-    expect(canResumeConversation(base({ Status: 'failed', resumable: true }))).toBe(false)
+    expect(canResumeConversation(base({ status: 'failed', resumable: true }))).toBe(false)
   })
 })
 
@@ -362,7 +364,7 @@ describe('resumeBlockedCopy', () => {
   })
 
   it('gives each boundary its own sentence about who carries the work now', () => {
-    // Six rungs, one per reason a task can move on, and the part that differs
+    // Seven rungs, one per reason a task can move on, and the part that differs
     // is what the reader does next — so no two may collapse onto one sentence,
     // and none may fall through to the generic copy.
     const reasons = [
@@ -372,6 +374,7 @@ describe('resumeBlockedCopy', () => {
       'ended_step_advanced',
       'ended_team_archived',
       'ended_failed',
+      'ended_reassigned',
     ]
     const generic = resumeBlockedCopy(base({}))
     const copies = reasons.map((r) => resumeBlockedCopy(base({ resume_blocked_reason: r })))
@@ -379,6 +382,26 @@ describe('resumeBlockedCopy', () => {
       expect(copy, reasons[i]).not.toBe(generic)
     }
     expect(new Set(copies).size).toBe(reasons.length)
+  })
+
+  it('gives a reassign to another team its own line, naming the team that carries the work', () => {
+    const copy = resumeBlockedCopy(base({ resume_blocked_reason: 'ended_reassigned' }))
+    expect(copy).not.toBe(resumeBlockedCopy(base({})))
+    expect(copy).toMatch(/another team/i)
+  })
+
+  it('tells a failed chat that a new conversation was opened, and a delegation to delegate again', () => {
+    // A failed chat is replaced for its holder; a failed delegation is not,
+    // so only the delegation is told to start one.
+    const chat = resumeBlockedCopy(
+      base({ type: 'interactive', resume_blocked_reason: 'ended_failed' }),
+    )
+    const delegation = resumeBlockedCopy(
+      base({ type: 'delegation', resume_blocked_reason: 'ended_failed' }),
+    )
+    expect(chat).not.toBe(delegation)
+    expect(chat).toMatch(/new conversation was opened/i)
+    expect(delegation).toMatch(/delegate the task again/i)
   })
 
   it('says something true for a reason this build does not know', () => {
@@ -391,7 +414,7 @@ describe('resumeBlockedCopy', () => {
 
 describe('workStartedAt', () => {
   it('prefers the claim stamp so queue dwell never inflates working elapsed', () => {
-    const conversation = base({ ClaimedAt: '2026-07-16T10:06:00Z' })
+    const conversation = base({ claimed_at: '2026-07-16T10:06:00Z' })
     expect(workStartedAt(conversation)).toBe('2026-07-16T10:06:00Z')
   })
 
@@ -402,19 +425,19 @@ describe('workStartedAt', () => {
 
 describe('queueDwellMs', () => {
   it('ticks live from QueuedAt while the conversation is still queued', () => {
-    const conversation = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:00Z' })
+    const conversation = base({ status: 'queued', queued_at: '2026-07-16T10:00:00Z' })
     expect(queueDwellMs(conversation, T('2026-07-16T10:06:00Z'))).toBe(6 * 60_000)
   })
 
   it('falls back to StartedAt for a queued legacy row', () => {
-    const conversation = base({ Status: 'queued' })
+    const conversation = base({ status: 'queued' })
     expect(queueDwellMs(conversation, T('2026-07-16T10:01:00Z'))).toBe(60_000)
   })
 
   it('settles to ClaimedAt − QueuedAt once the conversation started', () => {
     const conversation = base({
-      QueuedAt: '2026-07-16T10:00:00Z',
-      ClaimedAt: '2026-07-16T10:06:00Z',
+      queued_at: '2026-07-16T10:00:00Z',
+      claimed_at: '2026-07-16T10:06:00Z',
     })
     expect(queueDwellMs(conversation, T('2026-07-16T11:00:00Z'))).toBe(6 * 60_000)
   })
@@ -424,7 +447,7 @@ describe('queueDwellMs', () => {
   })
 
   it('clamps clock skew to zero rather than going negative', () => {
-    const conversation = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:05Z' })
+    const conversation = base({ status: 'queued', queued_at: '2026-07-16T10:00:05Z' })
     expect(queueDwellMs(conversation, T('2026-07-16T10:00:00Z'))).toBe(0)
   })
 })
@@ -469,17 +492,17 @@ describe('retryingAt', () => {
   const now = T('2026-07-16T10:00:00Z')
 
   it('is the stamp on a queued conversation while it is still ahead', () => {
-    const at = retryingAt(base({ Status: 'queued', next_attempt_at: '2026-07-16T10:05:00Z' }), now)
+    const at = retryingAt(base({ status: 'queued', next_attempt_at: '2026-07-16T10:05:00Z' }), now)
     expect(at?.getTime()).toBe(T('2026-07-16T10:05:00Z'))
   })
 
   it('is null once the stamp has passed, without one, or off the queue', () => {
     expect(
-      retryingAt(base({ Status: 'queued', next_attempt_at: '2026-07-16T09:59:00Z' }), now),
+      retryingAt(base({ status: 'queued', next_attempt_at: '2026-07-16T09:59:00Z' }), now),
     ).toBeNull()
-    expect(retryingAt(base({ Status: 'queued' }), now)).toBeNull()
+    expect(retryingAt(base({ status: 'queued' }), now)).toBeNull()
     expect(
-      retryingAt(base({ Status: 'running', next_attempt_at: '2026-07-16T10:05:00Z' }), now),
+      retryingAt(base({ status: 'running', next_attempt_at: '2026-07-16T10:05:00Z' }), now),
     ).toBeNull()
   })
 })

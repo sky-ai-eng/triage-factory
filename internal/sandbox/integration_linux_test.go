@@ -129,18 +129,13 @@ func requireRunCgroups(t *testing.T) {
 }
 
 // requireApk gates the rootfs-toolchain integration tests on a host
-// that can actually populate the cache (chroot + apk-add). Same
+// that can both populate the cache and launch a jail over it. Same
 // skip pattern as requireRunsc — the suite runs end-to-end on the
 // sandbox-CI box but degrades gracefully on stripped-down dev boxes.
 func requireApk(t *testing.T) {
 	t.Helper()
 	requireRunsc(t)
-	if _, err := exec.LookPath("chroot"); err != nil {
-		t.Skip("chroot not installed; skipping rootfs-toolchain test")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("rootfs toolchain build needs root for chroot; skipping")
-	}
+	requireRootfsBuild(t)
 }
 
 // runToCompletion starts the launched run, drains its stdout, waits for

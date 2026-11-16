@@ -80,9 +80,11 @@ func upsertAgentMemory(ctx context.Context, q queryer, orgID, conversationID, bl
 	}
 	mem, err := scanTaskMemory(q.QueryRowContext(ctx, `
 		WITH written AS (
-			INSERT INTO conversation_memory (id, org_id, conversation_id, blueprint_run_id, agent_content, source, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, source = EXCLUDED.source, blueprint_run_id = EXCLUDED.blueprint_run_id
+			INSERT INTO conversation_memory (id, org_id, conversation_id, blueprint_run_id, agent_content, source, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+			ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, source = EXCLUDED.source, blueprint_run_id = EXCLUDED.blueprint_run_id,
+				updated_at = CASE WHEN conversation_memory.agent_content IS DISTINCT FROM EXCLUDED.agent_content
+				                  THEN EXCLUDED.updated_at ELSE conversation_memory.updated_at END
 			RETURNING *
 		)
 	`+taskMemoryWrittenSelect,
@@ -115,12 +117,18 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 }
 
 // GetMemoriesForEntitySystem reads on the admin pool (BYPASSRLS), so the
-// team scoping the app-pool variant inherits from RLS (conversation_memory_all
-// delegates to conversations_select) is hand-rolled here off the
-// materializing conversation's owning team_id. See
-// getMemoriesForEntityTeamScoped + TFAC-506.
-func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
-	return getMemoriesForEntityTeamScoped(ctx, s.admin, orgID, entityID, teamID)
+// scoping the app-pool variant inherits from RLS (conversation_memory_all
+// delegates to conversations_select) is hand-rolled here off the reading
+// conversation's team and task. See entityMemoryForReaderSQL.
+func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) ([]domain.TaskMemory, error) {
+	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+entityMemoryForReaderSQL+`
+		ORDER BY rm.created_at ASC
+	`, orgID, entityID, teamID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTaskMemories(rows)
 }
 
 func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.TaskMemory, error) {
@@ -137,38 +145,21 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 	return scanTaskMemories(rows)
 }
 
-// getMemoriesForEntityTeamScoped is the admin-pool (BYPASSRLS) read that
-// reproduces, without RLS, the team scoping the app-pool path gets for
-// free: a JOIN to the parent conversation plus the visibility branches of
-// conversations_select. The engagement-start materializer has no JWT-claims
-// context, so we scope by the materializing conversation's owning team_id
-// directly — return the memory whose parent conversation that team can see:
-// any org-visible conversation, plus team-visible conversations the team
-// owns. Private-visibility conversations are excluded (creator-scoped, no
-// user to match here; every conversation is visibility='team' today, so the
-// 'org' arm is forward-compat). teamID binds through NULLIF(...)::uuid so an
-// (in practice impossible) empty team_id degrades to "org-visible only"
-// rather than a uuid cast error. org_id stays in the WHERE clause and on
-// the JOIN as defense in depth alongside the now-bypassed RLS policy.
-// GetRecentMemoriesForEntitySystem is getMemoriesForEntityTeamScoped with the
-// cap pushed into the query (ORDER BY created_at DESC LIMIT), so an on-demand
-// read on a hot entity doesn't transfer its whole history to keep the tail. A
+// GetRecentMemoriesForEntitySystem is GetMemoriesForEntitySystem with the cap
+// pushed into the query (ORDER BY created_at DESC LIMIT), so an on-demand read
+// on a hot entity doesn't transfer its whole history to keep the tail. A
 // non-positive limit returns no rows (never unbounded — Postgres rejects a
 // negative LIMIT); the host resolves it to a default first. The DESC LIMIT
 // selects the most recent N; the result is reversed to ASC so callers compose
 // identically to the unbounded read.
-func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error) {
+func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string, limit int) ([]domain.TaskMemory, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+`
-		WHERE rm.org_id = $1
-		  AND rm.agent_content IS NOT NULL
-		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
+	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+entityMemoryForReaderSQL+`
 		ORDER BY rm.created_at DESC
-		LIMIT $4
-	`, orgID, entityID, teamID, limit)
+		LIMIT $5
+	`, orgID, entityID, teamID, taskID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -190,20 +181,33 @@ func reverseTaskMemories(mems []domain.TaskMemory) {
 	}
 }
 
-func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
-	rows, err := q.QueryContext(ctx, taskMemorySelectTeamScoped+`
+// entityMemoryForReaderSQL is the WHERE clause every admin-pool entity read
+// shares — the materializer's, the on-demand load's, and its count — so the
+// three answer for the same rows. It expects the conversation joined as `c`
+// and binds $1 org, $2 entity, $3 the reading conversation's team, and $4 its
+// task.
+//
+// The reader sees two sets. Its own task's memory, from every conversation on
+// the task whatever team or visibility that conversation has: a task's
+// memories are its handoff, so they move with the task to whatever team holds
+// it, and none of them is withheld. And the entity's other memory as a member
+// of the reading team would see it through conversations_select: org-visible
+// conversations, plus team-visible ones the team owns. Private-visibility
+// conversations are excluded from that second set, being creator-scoped with
+// no user here to match.
+//
+// $3 and $4 bind through NULLIF(...)::uuid, so an empty team or task matches
+// no conversation on its arm rather than failing the uuid cast. org_id stays
+// in the WHERE clause and on the join as defense in depth alongside the
+// bypassed RLS policy.
+const entityMemoryForReaderSQL = `
 		WHERE rm.org_id = $1
 		  AND rm.agent_content IS NOT NULL
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
-		ORDER BY rm.created_at ASC
-	`, orgID, entityID, teamID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanTaskMemories(rows)
-}
+		  AND (c.task_id = NULLIF($4, '')::uuid
+		       OR c.visibility = 'org'
+		       OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
+`
 
 // taskMemoryColumns is the canonical projection of a conversation_memory row
 // joined with the three facts about its producing conversation a reader needs
@@ -215,13 +219,14 @@ func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entit
 // Every read SELECTs it and every write RETURNs it (via taskMemoryWrittenSelect,
 // re-applying the same join over the write's own output row), so the write
 // shape cannot drift from the read shape.
-const taskMemoryColumns = `rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at,
+const taskMemoryColumns = `rm.id, rm.conversation_id, rm.blueprint_run_id, rm.agent_content, rm.source, rm.created_at, rm.updated_at,
 	       c.task_id, c.blueprint_step_index, p.name`
 
 // taskMemorySelect / taskMemorySelectTeamScoped are the SELECT + FROM the
 // reads start from. They differ only in how the conversation is
 // reached — the app-pool read leaves visibility to RLS and LEFT JOINs, the
-// admin-pool reads hand-roll the team filter off an INNER JOIN. The prompts
+// admin-pool reads hand-roll the reader's scope (entityMemoryForReaderSQL) off
+// an INNER JOIN. The prompts
 // arm is LEFT in both: a memory row whose prompt is gone still comes back,
 // minus its legible name.
 const taskMemorySelect = `
@@ -258,8 +263,8 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	var blueprintRunID, agentContent, taskID, promptName sql.NullString
 	var source string
 	var stepIndex sql.NullInt64
-	var createdAt time.Time
-	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt,
+	var createdAt, updatedAt time.Time
+	if err := row.Scan(&m.ID, &m.ConversationID, &blueprintRunID, &agentContent, &source, &createdAt, &updatedAt,
 		&taskID, &stepIndex, &promptName); err != nil {
 		return domain.TaskMemory{}, err
 	}
@@ -267,6 +272,7 @@ func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, err
 	m.Content = agentContent.String
 	m.Source = domain.MemorySource(source)
 	m.CreatedAt = createdAt
+	m.UpdatedAt = updatedAt
 	m.TaskID = taskID.String
 	if stepIndex.Valid {
 		idx := int(stepIndex.Int64)
@@ -307,16 +313,12 @@ func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, co
 	return err
 }
 
-func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error) {
+func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID, taskID string) (int, error) {
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM conversation_memory rm
 		JOIN conversations c ON c.id = rm.conversation_id AND c.org_id = rm.org_id
-		WHERE rm.org_id = $1
-		  AND rm.agent_content IS NOT NULL
-		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
-	`, orgID, entityID, teamID).Scan(&n)
+	`+entityMemoryForReaderSQL, orgID, entityID, teamID, taskID).Scan(&n)
 	return n, err
 }

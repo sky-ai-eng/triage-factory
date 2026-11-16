@@ -92,6 +92,10 @@ export interface Task {
   // when the viewer belongs to ≥2 teams.
   // TODO: board row color-coding consumes this.
   team_id?: string
+  // conversation_id names the task's current conversation: the one a
+  // person's claim opened, or the delegation working it. Absent while the
+  // task holds none, which includes a task just returned to the queue.
+  conversation_id?: string
   // The task's version. Every task write sends the one its caller read
   // (lib/taskWrites), and the server refuses a write whose task has changed
   // since with 409 VERSION_CONFLICT. Every write answers the new one, which is
@@ -119,6 +123,12 @@ export interface Task {
   // the server did not answer, and consumers offer the control, whose route
   // still refuses with a 403.
   can_write?: boolean
+  // claim_team_ids is the teams the caller's claim of the task, or their
+  // delegate of it, may land it on: what those routes accept as team_id. On
+  // the detail read (GET /api/tasks/{id}) only. An empty list means no team
+  // of the caller's can take the task; ABSENT means the server did not
+  // answer, and a gesture sends no team and shows what the route says.
+  claim_team_ids?: string[]
 }
 
 // TranscriptPage is GET /api/agent/conversations/{id}/messages.
@@ -206,7 +216,7 @@ export interface TeamBot {
 // conversation status against a name the arrays don't hold.
 
 // CLAIM_PHASES are the setup/parked sub-states of a live executor engagement.
-// They arrive in Conversation.Status because display reads coalesce the active
+// They arrive in Conversation.status because display reads coalesce the active
 // claim's phase over the conversation's stored status.
 export const CLAIM_PHASES = [
   'fetching',
@@ -218,7 +228,7 @@ export type ClaimPhase = (typeof CLAIM_PHASES)[number]
 
 // TERMINAL_CONVERSATION_STATUSES are the states a conversation never leaves: the
 // infrastructure under it died. A conversation never concludes — a step's
-// verdict parks it `open` with CompletedAt stamped (lib/conversationStatus
+// verdict parks it `open` with completed_at stamped (lib/conversationStatus
 // isConcluded), and whether the work is done is its blueprint run's status
 // (blueprint_run_status) to say. Stopping a conversation parks it `open` too —
 // cancellation is spelled at the task and blueprint layers, never as a
@@ -244,52 +254,67 @@ export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number]
 // classify it as unknown) instead of being a compile error at the boundary.
 //
 // It exists to be a NAME rather than a type constraint. The lint rule reads a
-// status comparison two ways — `<expr>.Status` (the PascalCase Conversation
-// projection; every other DTO in this file spells its own status lowercase, so
-// the case alone separates the blueprint-run vocabulary from this one) and any
-// value annotated with this alias. So a helper that takes a status
+// status comparison two ways — `<expr>.status` where the checker resolves the
+// property to Conversation's own member (every other DTO in this file spells
+// its status the same way, so the declaration is what separates the
+// blueprint-run vocabulary from this one) and any value annotated with this
+// alias. So a helper that takes a status
 // second-hand — `conversationStatusColor(status)`, a tone switch — says so in
 // its signature and gets checked like the property access it came from.
 export type ConversationStatusValue = string
 
-// Conversation is the durable agent-context row's display projection —
-// served through a handler-side map, so its fields are PascalCase (mirroring
-// internal/domain/agent.go's Conversation). One conversation is one delegation.
+// Conversation is the durable agent-context row's display projection, served
+// through a handler-side map of internal/domain/agent.go's Conversation. One
+// conversation is one delegation.
 export interface Conversation {
-  ID: string
-  TaskID: string
-  // Status is the coalesced display status. ConversationStatusValue (a string), not the
+  id: string
+  task_id: string
+  // status is the coalesced display status. ConversationStatusValue (a string), not the
   // ConversationStatus union, on purpose — see the alias for why the wire field stays
   // open-world and how the lint rule closes the branching over it.
-  Status: ConversationStatusValue
+  status: ConversationStatusValue
   // type is the kind of conversation: 'delegation', or 'interactive' for the
   // one a person's claim opens on the task they hold.
   type?: string
   // has_run is whether the agent has taken a turn in the conversation. A
   // person's claim opens one that reads false until its first message runs.
   has_run?: boolean
-  Model: string
-  StartedAt: string
-  // QueuedAt is when the conversation last entered the queue; ClaimedAt is when the
+  // runtime is the engine driving the transcript: 'sdk' or 'native'. It says
+  // when a change of model or effort takes effect on a turn already running.
+  runtime?: string
+  // next_message_model / next_message_effort are what a message naming no
+  // settings would run on, and so what the composer opens with. Detail read
+  // only. Both are absent when the send would refuse such a message (a team
+  // whose default model is no longer enabled), and the effort is absent too
+  // when it is the provider's default.
+  next_message_model?: string
+  next_message_effort?: string
+  // cache_warm_until is when the provider's prompt cache from the newest
+  // assistant turn goes cold, RFC 3339. Detail read only; absent for a
+  // conversation with no assistant turn.
+  cache_warm_until?: string
+  model: string
+  started_at: string
+  // queued_at is when the conversation last entered the queue; claimed_at is when the
   // dispatcher last claimed it (work actually began). Together they carry the
-  // latest queue episode's dwell — the queue timer — while StartedAt stays the
-  // mint stamp and DurationMs stays pure working time. Both absent on legacy
+  // latest queue episode's dwell — the queue timer — while started_at stays the
+  // mint stamp and duration_ms stays pure working time. Both absent on legacy
   // rows that predate the queue columns.
-  QueuedAt?: string | null
-  ClaimedAt?: string | null
-  // CompletedAt is the conclusion stamp: when the step recorded its verdict
+  queued_at?: string | null
+  claimed_at?: string | null
+  // completed_at is the conclusion stamp: when the step recorded its verdict
   // (or when the conversation failed). On an `open` conversation it is what
   // makes it concluded rather than paused — see isConcluded.
-  CompletedAt?: string | null
-  TotalCostUSD?: number
-  DurationMs?: number
-  NumTurns?: number
-  // ParkReason is WHY the conversation was parked `open` — one of the
+  completed_at?: string | null
+  total_cost_usd?: number
+  duration_ms?: number
+  num_turns?: number
+  // park_reason is WHY the conversation was parked `open` — one of the
   // domain.ParkReason vocabulary, glossed for display by parkReasonLabel
   // (lib/conversationStatus.ts). Absent when it was never parked, or was resumed
   // since. The MODEL's stop reason is per-turn and rides MessageDTO.
-  ParkReason?: string
-  ResultSummary: string
+  park_reason?: string
+  result_summary: string
   // current_action is the derived one-line prose for a conversation that is
   // WORKING — what its agent is doing right now, composed server-side from the
   // newest assistant message's last tool call. It is the run row's identity
@@ -331,24 +356,24 @@ export interface Conversation {
   // renewal ('provider', 'tool:bash', 'clone', 'rehydrate', 'permission', …).
   // Absent when nothing was in flight.
   claim_current_op?: string
-  // Outcome is the step's verdict, the parsed completion-envelope outcome
+  // outcome is the step's verdict, the parsed completion-envelope outcome
   // (continue|finish|abort), persisted to conversations.outcome. Empty/absent
   // before a verdict, for an infra-error conversation, or for a step that ended
   // without a recognized conclusion.
   // The blueprint run timeline reads this in place of the old verdict object.
-  Outcome?: string
-  // OutcomeReason is the "why I stopped" populated only on an abort outcome.
-  OutcomeReason?: string
-  // FailureKind is the machine-readable failure discriminator for a
+  outcome?: string
+  // outcome_reason is the "why I stopped" populated only on an abort outcome.
+  outcome_reason?: string
+  // failure_kind is the machine-readable failure discriminator for a
   // status='failed' conversation ('memory_limit' | 'crash' | 'no_result' |
   // 'agent_error'), classified backend-side via errors.Is — never derived
   // from message text. Empty/absent for non-failed conversations, legacy failed rows,
   // and failures nothing classified; only 'memory_limit' currently gets
   // distinct rendering (the "Killed: memory limit" badge + the
   // TF_CLAIM_MEMORY_LIMIT_MB pointer).
-  FailureKind?: string
-  SessionID?: string
-  WorktreePath?: string
+  failure_kind?: string
+  session_id?: string
+  worktree_path?: string
   // Derived approval signal. Conversations never park for
   // approval; the "needs approval" state is a *view*
   // over the conversation's unresolved-deliverable set. A card surfaces in the approval
@@ -400,8 +425,8 @@ export interface Conversation {
   // blueprint_step_count is the length of the owning blueprint run's frozen
   // step plan — what turns blueprint_step_index into a position ("step 2 of
   // 4") and says whether a completed step is the chain's last. 0 when the
-  // server could not resolve the plan (a manual blueprint run is creator-scoped
-  // under RLS, so a teammate reads 0); lib/conversationStatus treats that as unknown and
+  // server could not resolve the plan (a blueprint run is team-scoped under
+  // RLS, so a reader off its team reads 0); lib/conversationStatus treats that as unknown and
   // falls back to the unqualified reading. Every delegated conversation belongs to
   // a blueprint, so 1 — not 0 — is the plain single-prompt case.
   blueprint_step_count?: number
@@ -413,7 +438,7 @@ export interface Conversation {
   // falls back to the step's own verdict.
   blueprint_run_status?: '' | BlueprintRun['status']
   // Token rollups: the SUM over this conversation's messages, derived by the
-  // same conversation read that carries TotalCostUSD / DurationMs / NumTurns. The
+  // same conversation read that carries total_cost_usd / duration_ms / num_turns. The
   // authoritative numbers — the same ones the usage dashboard reports — so a
   // surface reads them here rather than walking the transcript. 0 for a
   // conversation that never streamed a usage-bearing message;
@@ -428,7 +453,7 @@ export interface Conversation {
   // drivability) of which the client can see exactly one part. The composer
   // gates on it: a stopped conversation whose workspace never made it, was reaped by
   // retention, or predates the snapshot work looks identically resumable from
-  // Status alone and answers every message with a 409/410.
+  // status alone and answers every message with a 409/410.
   //
   // Detail read only (GET /api/agent/conversations/{id}) and only for a
   // conversation that is neither active nor failed — the board shows no composer,
@@ -449,7 +474,7 @@ export interface Conversation {
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
   // 'blueprint_cancelled' | 'session_missing' | 'worktree_missing' |
-  // 'model_missing' | 'not_steerable' | one 'ended_*' per boundary
+  // 'not_steerable' | one 'ended_*' per boundary
   // (internal/delegate's ResumeBlocked* constants). Open-world by design — an
   // unrecognized reason renders as the generic "can't be resumed" copy.
   resume_blocked_reason?: string
@@ -1342,23 +1367,16 @@ export interface FactoryEntity {
    * events in sequence (new_commits → ci_passed) shows both transitions
    * rather than teleporting to the latest. */
   recent_events?: FactoryRecentEvent[]
-  /** The registry row the entity belongs to: a pull request's repository, a
-   *  Jira issue's project, a Linear issue's team. Only the one for the
-   *  entity's source is set. The belt groups chips by it rather than by a
-   *  name, so a renamed repository or project keeps its chips' hue. */
+  /** The pull request's repository registry row. The belt groups chips by
+   *  it rather than by a name, so a renamed repository keeps its chips'
+   *  hue. */
   repository_id?: string
-  jira_project_id?: string
-  linear_team_id?: string
   // GitHub PR fields.
   number?: number
   repo?: string
   author?: string
   additions?: number
   deletions?: number
-  // Jira fields.
-  status?: string
-  priority?: string
-  assignee?: string
   /** Active tasks for this entity, grouped by event_type. Drives the
    *  station drawer's drag-to-delegate flow: dropping on the runs tray
    *  reads the matching event_type's first dedup_key and forwards it
@@ -1822,15 +1840,15 @@ export interface FleetSandboxClaim {
   duration_seconds: number
   peak_mem_mb?: number
   cpu_usec?: number
-  /** The driven conversation's status — the same vocabulary Conversation.Status
+  /** The driven conversation's status — the same vocabulary Conversation.status
    *  carries, so branch on it through a ConversationStatusValue-annotated helper rather
    *  than inline literals. */
   status?: ConversationStatusValue
   failure_kind?: string
   /** How the ENGAGEMENT ended (completed | failed | cancelled | parked |
    *  requeued | requeued_credentials | reaped | requeued_shutdown |
-   *  requeued_upstream | requeued_jail_lost) — a claim vocabulary of its own, not a conversation
-   *  status. */
+   *  requeued_upstream | requeued_jail_lost | requeued_provider_switch) — a claim vocabulary of
+   *  its own, not a conversation status. */
   outcome?: string
   /** When the engagement last did anything its stall watchdog counts as
    *  activity, as the holder's last lease renewal stamped it. Absent before

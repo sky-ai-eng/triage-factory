@@ -273,7 +273,8 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 		    failure_kind = NULLIF($6, ''),
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
-		    stop_requested_reason = NULL
+		    stop_requested_reason = NULL,
+		    stop_through_message_id = NULL
 		WHERE org_id = $7 AND id = $8
 		RETURNING *
 	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
@@ -342,14 +343,14 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 //
 // A pending stop decides the reason whatever the caller passed, because the
 // intent is what records who asked, and every path that delivers a stop —
-// the local cancel, the cross-pod signal, the renewal, an idle turn-end that
-// happens to land first — reaches this write. The derivation is one CASE so a
+// the local cancel, the cross-pod signal, the renewal, a turn_incomplete park
+// that happens to land first — reaches this write. The derivation is one CASE so a
 // further kind of stop is one more arm. Every SET expression reads the row as
 // it stood before the write, so the stop columns cleared below are still the
-// pending intent where the reason reads them.
+// pending intent where the reason and the wake position read them.
 func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park db.Park) (bool, error) {
-	// A deliberate stop re-parks an already-parked row; an idle turn-end does
-	// not. Spelled as an extra clause rather than two queries.
+	// A deliberate stop re-parks an already-parked row; a turn_incomplete park
+	// does not. Spelled as an extra clause rather than two queries.
 	reparkGuard := ` AND (status IS NULL OR status <> 'open')`
 	if park.Deliberate {
 		reparkGuard = ``
@@ -364,12 +365,15 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF($2, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary),
+		    wake_after_message_id = CASE WHEN $6::boolean THEN `+wakeAfterStopSQL("conversations")+`
+		                                 ELSE wake_after_message_id END,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
-		    stop_requested_reason = NULL
+		    stop_requested_reason = NULL,
+		    stop_through_message_id = NULL
 		WHERE org_id = $4 AND id = $5
 		  AND `+db.UnsettledConversationSQL("conversations")+reparkGuard+`
-	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID, park.NoTurnRan)
 	if err != nil {
 		return false, err
 	}
@@ -385,9 +389,12 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // and why the blueprint check is in this statement rather than in the caller.
 //
 // It goes through tf.blueprint_run_is_running rather than a correlated
-// subquery because this statement runs on the app pool: blueprint_runs is
-// creator-scoped for manual runs, so a non-creator teammate's subquery would
-// find nothing and the guard would fail OPEN on exactly the rows it protects.
+// subquery because this statement runs on the app pool, under two different
+// rules: the conversation's write policy admits a private row's creator and an
+// org-visible row's org admin, and the run's read policy admits its team's
+// members alone. A subquery by a caller the first admits and the second does
+// not would find nothing, and the guard would fail OPEN on exactly the rows it
+// protects.
 //
 // The other guard, that the conversation's run was not called off, cannot
 // take that route: no definer function answers it, so the run is read
@@ -489,7 +496,7 @@ func resumeFlip(ctx context.Context, q queryer, orgID, conversationID string, ca
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
 		                completed_at = NULL, outcome = NULL, outcome_reason = NULL,
-		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL,
 		                next_attempt_at = NULL,
 		                queued_at = now(),
 		                preferred_executor_id = (
@@ -647,9 +654,9 @@ func (s *conversationStore) ReleaseWarmClaimSystem(ctx context.Context, orgID, c
 // conversationRunCalledOff reports whether the conversation's blueprint run
 // was called off: cancel requested, or cancelled. It is the claim gate's
 // blueprintDrivableSQL clause for a called-off run, read on the admin pool so
-// a teammate who cannot see another user's manual run gets the same answer as
-// its creator. A conversation with no run, or no such conversation, answers
-// false.
+// a caller who is not on the run's team, and so cannot see it, gets the same
+// answer as a member of the team. A conversation with no run, or no such
+// conversation, answers false.
 func conversationRunCalledOff(ctx context.Context, admin queryer, orgID, conversationID string) (bool, error) {
 	var calledOff bool
 	err := admin.QueryRowContext(ctx, `
@@ -818,28 +825,12 @@ func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, c
 }
 
 func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID string) ([]domain.ConversationAwaitingPerson, error) {
-	reasons := domain.ParkReasonsAwaitingPerson()
-	names := make([]string, len(reasons))
-	for i, r := range reasons {
-		names[i] = string(r)
-	}
-	// A claim clears park_reason as it takes a row off its park, so a
-	// conversation someone woke leaves the set at its claim. The entity is
-	// outer-joined: its key is display only, and a task that names none still
-	// leaves its delegator waiting.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
-		FROM conversations c
-		JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
-		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
-		WHERE c.org_id = $1
-		  AND c.status = 'open'
-		  AND c.park_reason = ANY($2::text[])
-		  AND c.creator_user_id IS NOT NULL
-		  AND c.ended_at IS NULL
-		  AND c.archived_at IS NULL
+		`+parkedForPersonSQL("$2")+`
+		  AND c.org_id = $1
 		ORDER BY c.id
-	`, orgID, names)
+	`, orgID, parkedForPersonReasons())
 	if err != nil {
 		return nil, err
 	}
@@ -857,17 +848,155 @@ func (s *conversationStore) ListAwaitingPersonSystem(ctx context.Context, orgID 
 	return out, rows.Err()
 }
 
+func (s *conversationStore) ListPauseNoticesDueSystem(ctx context.Context, limit int) ([]domain.PauseNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, pauseNoticesDueQuery, parkedForPersonReasons(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PauseNoticeDue
+	for rows.Next() {
+		var d domain.PauseNoticeDue
+		var reason string
+		if err := rows.Scan(&d.OrgID, &d.ParkedAt, &d.ConversationID, &d.CreatorUserID, &reason, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.ParkReason = domain.ParkReason(reason)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkPauseNoticedSystem(ctx context.Context, orgID, conversationID string, parkedAt time.Time) (bool, error) {
+	// The IS DISTINCT FROM is what a concurrent pass's mark meets: the row
+	// lock makes it wait for the first, and once that commits the row no
+	// longer matches.
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE conversations SET pause_noticed_parked_at = parked_at
+		WHERE org_id = $1 AND id = $2 AND parked_at = $3
+		  AND pause_noticed_parked_at IS DISTINCT FROM parked_at
+	`, orgID, conversationID, parkedAt)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *conversationStore) ListFailureNoticesDueSystem(ctx context.Context, limit int) ([]domain.FailureNoticeDue, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, failureNoticesDueQuery, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.FailureNoticeDue
+	for rows.Next() {
+		var d domain.FailureNoticeDue
+		var kind string
+		if err := rows.Scan(&d.OrgID, &d.ConversationID, &d.CreatorUserID, &kind, &d.ResultSummary, &d.EntitySourceID); err != nil {
+			return nil, err
+		}
+		d.FailureKind = domain.ConversationFailureKind(kind)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) MarkFailureNoticedSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE conversations SET failure_noticed_at = now()
+		WHERE org_id = $1 AND id = $2 AND failure_noticed_at IS NULL
+	`, orgID, conversationID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// pauseNoticesDueQuery is ListPauseNoticesDueSystem's statement. A park keeps
+// its parked_at until a claim or a resume takes the row off it, so a marker
+// that differs from it names an earlier park, or none.
+//
+// Its predicate and order are idx_conversations_pause_notice_due's, so the
+// read walks the parks still owed a notice rather than every open
+// conversation, concluded steps included.
+var pauseNoticesDueQuery = `
+		SELECT c.org_id::text, c.parked_at, c.id::text, c.creator_user_id::text, c.park_reason, COALESCE(e.source_id, '')
+		` + parkedForPersonSQL("$1") + `
+		  AND c.parked_at IS NOT NULL
+		  AND c.pause_noticed_parked_at IS DISTINCT FROM c.parked_at
+		ORDER BY c.parked_at, c.id
+		LIMIT $2`
+
+// failureNoticesDueQuery is ListFailureNoticesDueSystem's statement. Its
+// predicate and order are idx_conversations_failure_notice_due's, so the read
+// walks the few failures still owed a notice rather than every failure ever
+// recorded.
+const failureNoticesDueQuery = `
+		SELECT c.org_id::text, c.id::text, c.creator_user_id::text,
+		       COALESCE(c.failure_kind, ''), COALESCE(c.result_summary, ''), COALESCE(e.source_id, '')
+		FROM conversations c
+		LEFT JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
+		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
+		WHERE c.status = 'failed'
+		  AND c.failure_noticed_at IS NULL
+		  AND c.creator_user_id IS NOT NULL
+		ORDER BY c.completed_at, c.id
+		LIMIT $1`
+
+// parkedForPersonSQL is the FROM and WHERE of a conversation that waits on the
+// person who delegated it (domain.ParkReason.AwaitsPerson), with reasons the
+// placeholder binding parkedForPersonReasons. ListAwaitingPersonSystem, which
+// resolves paused notices, and ListPauseNoticesDueSystem, which opens them,
+// both read it, so a notice the sweep opens is one it keeps.
+//
+// A claim clears park_reason as it takes a row off its park, so a
+// conversation someone woke leaves the set at its claim. The entity is
+// outer-joined: its key is display only, and a task that names none still
+// leaves its delegator waiting.
+func parkedForPersonSQL(reasons string) string {
+	return `
+		FROM conversations c
+		JOIN tasks t ON t.org_id = c.org_id AND t.id = c.task_id
+		LEFT JOIN entities e ON e.org_id = t.org_id AND e.id = t.entity_id
+		WHERE c.status = 'open'
+		  AND c.park_reason = ANY(` + reasons + `::text[])
+		  AND ` + db.AwaitsPersonTypeSQL("c") + `
+		  AND c.creator_user_id IS NOT NULL
+		  AND c.ended_at IS NULL
+		  AND c.archived_at IS NULL`
+}
+
+// parkedForPersonReasons is the bind for parkedForPersonSQL's reasons.
+func parkedForPersonReasons() []string {
+	reasons := domain.ParkReasonsAwaitingPerson()
+	names := make([]string, len(reasons))
+	for i, r := range reasons {
+		names[i] = string(r)
+	}
+	return names
+}
+
 func (s *conversationStore) ListMemoryOwedSystem(ctx context.Context, orgID string, backoff time.Duration, limit int) ([]domain.MemoryOwed, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	// The owing condition is taskMemoryOwedRowSQL — the same words the task
-	// read's memory_pending flag and the claim scan's gate are written in, so
-	// the sweep cannot come to a different conclusion about what is owed than
-	// the two readers waiting on it. Correlating it against the tasks row
-	// makes the join: `owed.org_id = t.org_id AND owed.task_id = t.id` is the
-	// join condition, which is why the FROM lists both relations and the WHERE
-	// carries the whole predicate.
+	// The owing condition is taskMemoryOwedRowSQL — the same words
+	// tf.task_memory_wait holds, which the task read's memory_pending flag and
+	// the claim scan's gate call, so the sweep cannot come to a different
+	// conclusion about what is owed than the readers waiting on it. The sweep
+	// lists every owing conversation, not only a task's newest, so it
+	// interpolates the predicate rather than calling the function. Correlating
+	// it against the tasks row makes the join: `owed.org_id = t.org_id AND
+	// owed.task_id = t.id` is the join condition, which is why the FROM lists
+	// both relations and the WHERE carries the whole predicate.
 	//
 	// The backoff arm is the sweep's own: an attempt that started inside the
 	// window is either running right now or too recent to repeat, and an
@@ -946,6 +1075,17 @@ func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, convers
 	return setConversationSession(ctx, s.admin, orgID, conversationID, sessionID)
 }
 
+func (s *conversationStore) RecordSessionCostSystem(ctx context.Context, orgID, conversationID, sessionID string, totalUSD float64) error {
+	if !isValidUUID(conversationID) {
+		return nil
+	}
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE conversations SET sdk_session_cost_usd = $1
+		WHERE org_id = $2 AND id = $3 AND sdk_session_id = $4 AND sdk_session_cost_usd < $1
+	`, totalUSD, orgID, conversationID, sessionID)
+	return err
+}
+
 // SetSessionForClaimSystem is SetSessionSystem behind the fence. The write is
 // byte-identical; what the transaction adds is that a zombie's late init can no
 // longer land the successor's resume coordinate on a dead session.
@@ -985,7 +1125,10 @@ func (s *conversationStore) ClearNextAttempt(ctx context.Context, orgID, convers
 
 func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	return writeConversationReturning(ctx, q, `
-		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
+		UPDATE conversations
+		   SET sdk_session_cost_usd = CASE WHEN sdk_session_id IS NOT DISTINCT FROM $1 THEN sdk_session_cost_usd ELSE 0 END,
+		       sdk_session_id = $1
+		 WHERE org_id = $2 AND id = $3
 		RETURNING *
 	`, sessionID, orgID, conversationID)
 }
@@ -1250,14 +1393,14 @@ func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversa
 // fence. The two negative answers stay distinct: ok=false is the guarded
 // flip's own "somebody else reached the terminal first", ErrClaimReleased is
 // "you are not the one who gets to decide".
-func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
+func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind, summary string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error
-		flipped, err = markFailedIfActive(ctx, q, orgID, conversationID, failureKind)
+		flipped, err = markFailedIfActive(ctx, q, orgID, conversationID, failureKind, summary)
 		if err != nil || !flipped {
 			return err
 		}
@@ -1269,7 +1412,7 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 	return flipped, nil
 }
 
-func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind string) (bool, error) {
+func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind, summary string) (bool, error) {
 	// 'open' without a verdict is deliberately failable here — see
 	// ConversationStore.MarkFailedIfActiveForClaimSystem: a warm 'open'
 	// conversation has no durable snapshot yet, so an infra error reaching
@@ -1278,10 +1421,11 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
 		    failure_kind = NULLIF($2, ''),
-		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
+		    result_summary = COALESCE(NULLIF($5, ''), result_summary),
+		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL
 		WHERE org_id = $3 AND id = $4
 		  AND `+db.UnsettledConversationSQL("conversations")+`
-	`, time.Now().UTC(), failureKind, orgID, conversationID)
+	`, time.Now().UTC(), failureKind, orgID, conversationID, summary)
 	if err != nil {
 		return false, err
 	}
@@ -1468,6 +1612,7 @@ var pgConversationColumns = `
 	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
 	COALESCE(r.failure_kind, ''),
 	COALESCE(r.sdk_session_id, ''),
+	r.sdk_session_cost_usd,
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
 	COALESCE(r.creator_user_id::text, ''),
@@ -1805,6 +1950,14 @@ func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID
 // writeStopIntent records a stop request on a non-terminal conversation and
 // reports whether it landed. See RequestStopSystem for why every column keys
 // on stop_requested_at.
+//
+// stop_through_message_id is where the stop was sent: the conversation's
+// newest message when the request was recorded. A park that settles the stop
+// with no turn run moves the wake position to it (wakeAfterStopSQL), so the
+// person messages in front of the stop stop waking the conversation and the
+// ones sent after it still do. A message's id is drawn from its sequence when
+// the row is inserted, so one whose insert has not committed when this reads
+// falls on the side of the stop its id was drawn on.
 func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by string, reason domain.ParkReason) (bool, error) {
 	var id string
 	err := q.QueryRowContext(ctx, `
@@ -1813,7 +1966,11 @@ func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by s
 		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
 		                             THEN NULLIF($1, '') ELSE stop_requested_by END,
 		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
-		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
+		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END,
+		    stop_through_message_id = CASE WHEN stop_requested_at IS NULL
+		                                   THEN (SELECT max(m.id) FROM messages m
+		                                         WHERE m.org_id = conversations.org_id AND m.conversation_id = conversations.id)
+		                                   ELSE stop_through_message_id END
 		WHERE org_id = $2 AND id = $3
 		  AND `+db.UnsettledConversationSQL("conversations")+`
 		RETURNING id
@@ -2443,7 +2600,7 @@ func insertConversationMessage(ctx context.Context, q queryer, orgID string, msg
 	var id int64
 	err := q.QueryRowContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls,
-		                      tool_call_id, is_error, metadata, model,
+		                      tool_call_id, is_error, metadata, model, effort,
 		                      input_tokens, output_tokens,
 		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms,
@@ -2452,13 +2609,13 @@ func insertConversationMessage(ctx context.Context, q queryer, orgID string, msg
 		        COALESCE($4, (SELECT id FROM claims
 		                      WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL)),
 		        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+		        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		RETURNING id
 	`,
 		orgID, msg.ConversationID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		nullableJSONB(toolCallsJSON), nullIfEmpty(msg.ToolCallID), msg.IsError,
-		nullableJSONB(metadataJSON), nullIfEmpty(msg.Model),
+		nullableJSONB(metadataJSON), nullIfEmpty(msg.Model), nullIfEmpty(msg.Effort),
 		nullIntPtr(msg.InputTokens), nullIntPtr(msg.OutputTokens),
 		nullIntPtr(msg.CacheReadTokens), nullIntPtr(msg.CacheCreationTokens),
 		nullFloatPtr(msg.CostUSD), msg.CreatedAt,
@@ -2505,7 +2662,7 @@ func nullInt64Ptr(p *int64) any {
 
 const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COALESCE(claim_id::text, ''),
 	role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
+	model, COALESCE(effort, ''), input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning::text, content_blocks::text, delivered, window_state, seq, duration_ms,
 	COALESCE(stop_reason, '')`
 
@@ -2544,7 +2701,7 @@ func scanOneMessage(row messageScanner) (domain.Message, error) {
 
 	if err := row.Scan(
 		&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
-		&toolCallID, &m.IsError, &metadataStr, &model,
+		&toolCallID, &m.IsError, &metadataStr, &model, &m.Effort,
 		&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 		&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &m.StopReason,
 	); err != nil {
@@ -2740,6 +2897,68 @@ func (s *conversationStore) NewestAssistantToolCallsForConversations(ctx context
 	return db.ScanNewestToolCalls(rows)
 }
 
+func (s *conversationStore) NewestPersonMessageSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
+		return nil, nil
+	}
+	return newestMessage(ctx, s.admin, `
+		SELECT `+pgMessageColumns+`
+		FROM messages m_p
+		WHERE m_p.org_id = $1 AND m_p.conversation_id = $2 AND `+personMessageSQL+`
+		ORDER BY m_p.id DESC
+		LIMIT 1
+	`, orgID, conversationID)
+}
+
+func (s *conversationStore) CountPersonMessagesSinceSystem(ctx context.Context, orgID, conversationID string, since time.Time) (int, error) {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
+		return 0, nil
+	}
+	var n int
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM messages m_p
+		WHERE m_p.org_id = $1 AND m_p.conversation_id = $2 AND m_p.created_at > $3 AND `+personMessageSQL+`
+	`, orgID, conversationID, since.UTC()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count person messages since: %w", err)
+	}
+	return n, nil
+}
+
+func (s *conversationStore) NewestAssistant(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	return newestAssistant(ctx, s.q, orgID, conversationID)
+}
+
+func (s *conversationStore) NewestAssistantSystem(ctx context.Context, orgID, conversationID string) (*domain.Message, error) {
+	return newestAssistant(ctx, s.admin, orgID, conversationID)
+}
+
+func newestAssistant(ctx context.Context, q queryer, orgID, conversationID string) (*domain.Message, error) {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
+		return nil, nil
+	}
+	return newestMessage(ctx, q, `
+		SELECT `+pgMessageColumns+`
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND role = 'assistant' AND window_state = 'active'
+		ORDER BY id DESC
+		LIMIT 1
+	`, orgID, conversationID)
+}
+
+// newestMessage runs a single-row message read, answering nil for no row.
+func newestMessage(ctx context.Context, q queryer, query string, args ...any) (*domain.Message, error) {
+	m, err := scanOneMessage(q.QueryRowContext(ctx, query, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // ListForAssemblySystem returns every row a native loop needs to rebuild this
 // conversation's exact LLM context, ordered by the effective assembly key
 // COALESCE(seq, id). window_state='inactive' rows are excluded (superseded by
@@ -2767,16 +2986,49 @@ func (s *conversationStore) ListForAssemblySystem(ctx context.Context, orgID, co
 	return scanMessageRows(rows)
 }
 
+// OpeningTaskContextSystem — see the interface doc. Reads every window state,
+// on the admin pool for the reason ListForAssemblySystem does: its callers are
+// claims driving a conversation with no request identity.
+func (s *conversationStore) OpeningTaskContextSystem(ctx context.Context, orgID, conversationID string) (string, bool, error) {
+	var content sql.NullString
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT content
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND subtype = $3
+		ORDER BY COALESCE(seq, (id)::double precision) ASC, id ASC
+		LIMIT 1
+	`, orgID, conversationID, domain.MessageSubtypeInjectionTaskContext).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return content.String, true, nil
+}
+
+// HasAssistantMessageSystem — see the interface doc. Reads every window state,
+// on the admin pool for the same reason.
+func (s *conversationStore) HasAssistantMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	var exists bool
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM messages WHERE org_id = $1 AND conversation_id = $2 AND role = 'assistant')
+	`, orgID, conversationID).Scan(&exists)
+	return exists, err
+}
+
 // MarkDeliveredForClaimSystem is the engagement's drain flush, behind the
 // fence. Consuming a pending row is a claim on it: the rows an engagement
 // folds into its assembly must not be marked spent by an engagement that has
 // been fenced out, or the successor's own assembly silently loses them.
 //
-// A non-empty subtype is stamped in the same statement — the flush is the
+// A non-empty subtype is stamped in the same transaction — the flush is the
 // moment a mid-work drain marks human input as a steer, and doing it in two
-// steps would leave a window in which a delivered row had lost its
-// provenance. NULLIF keeps the stamp optional without forking the statement:
-// an empty subtype leaves each row's own value in place.
+// would leave a window in which a delivered row had lost its provenance.
+// NULLIF keeps the stamp optional: an empty subtype leaves each row's own
+// value in place. A batch that would sit ahead of the model's newest reply
+// moves behind every delivered row (domain.DeliveryPositions) in the same
+// transaction.
 func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error {
 	if len(ids) == 0 {
 		// Nothing to consume, so nothing to fence: an empty batch writes no
@@ -2788,11 +3040,54 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx, `
-			UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
-			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
-		`, orgID, conversationID, pgIntArray(ids), subtype)
-		return err
+		var answered, tail float64
+		if err := q.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(COALESCE(seq, (id)::double precision)) FILTER (WHERE role IN ('assistant', 'tool')), 0),
+			       COALESCE(MAX(COALESCE(seq, (id)::double precision)), 0)
+			FROM messages
+			WHERE org_id = $1 AND conversation_id = $2 AND delivered = true
+		`, orgID, conversationID).Scan(&answered, &tail); err != nil {
+			return fmt.Errorf("read the delivered tail: %w", err)
+		}
+		rows, err := q.QueryContext(ctx, `
+			SELECT id, COALESCE(seq, (id)::double precision) FROM messages
+			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3) AND delivered = false
+			ORDER BY COALESCE(seq, (id)::double precision) ASC, id ASC
+		`, orgID, conversationID, pgIntArray(ids))
+		if err != nil {
+			return fmt.Errorf("read the rows to deliver: %w", err)
+		}
+		var pending []int
+		var keys []float64
+		for rows.Next() {
+			var id int
+			var key float64
+			if err := rows.Scan(&id, &key); err != nil {
+				rows.Close()
+				return err
+			}
+			pending, keys = append(pending, id), append(keys, key)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		positions := domain.DeliveryPositions(answered, tail, keys)
+		for i, id := range pending {
+			var seq *float64
+			if positions != nil {
+				seq = &positions[i]
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET delivered = true, seq = COALESCE($1, seq), subtype = COALESCE(NULLIF($2, ''), subtype)
+				WHERE org_id = $3 AND conversation_id = $4 AND id = $5
+			`, seq, subtype, orgID, conversationID, id); err != nil {
+				return fmt.Errorf("deliver row %d: %w", id, err)
+			}
+		}
+		return nil
 	})
 }
 
@@ -2983,7 +3278,7 @@ func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...a
 	dest := []any{
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.SessionCostUSD, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,

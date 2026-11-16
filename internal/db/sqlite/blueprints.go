@@ -781,7 +781,7 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		}
 
 		// 2. The run.
-		if err := insertFiringRun(ctx, q, br, stepPlan, event, &inserted); err != nil {
+		if err := insertFiringRun(ctx, q, br, runTeamID, stepPlan, event, &inserted); err != nil {
 			return err
 		}
 		if !inserted {
@@ -884,15 +884,25 @@ func (s *blueprintStore) AdvanceRunToStepSystem(ctx context.Context, orgID strin
 	return advanced, ended, conv, nil
 }
 
+// runIsItsTasksWorkSQL holds a run's advance and its completion to the task
+// the run is working: still on the run's team, and held by no person. A
+// person's claim takes a task off the agent, and a move to another team takes
+// it off the run's team, so in either case the run is cancelled instead. A run
+// with no team predates the column and is held to the claim alone.
+const runIsItsTasksWorkSQL = `(blueprint_runs.team_id IS NULL
+	    OR blueprint_runs.team_id = (SELECT team_id FROM tasks WHERE id = blueprint_runs.task_id))
+	AND (SELECT claimed_by_user_id FROM tasks WHERE id = blueprint_runs.task_id) IS NULL`
+
 // advanceRunCurrentStep moves a running blueprint_run's sequencing pointer one
 // step on, and reports whether it moved. The predicate is the compare-and-swap
 // the advance transaction fences on: a run that terminated since its reactor
-// read it, or whose pointer another engagement already moved, matches no row
-// and writes nothing.
+// read it, whose pointer another engagement already moved, or whose task it is
+// no longer working (runIsItsTasksWorkSQL) matches no row and writes nothing.
 func advanceRunCurrentStep(ctx context.Context, q queryer, id string, from, to int) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE blueprint_runs SET current_step_index = ?
 		WHERE id = ? AND status = 'running' AND current_step_index = ?
+		  AND `+runIsItsTasksWorkSQL+`
 	`, to, id, from)
 	if err != nil {
 		return false, err
@@ -945,21 +955,21 @@ func firingTeamArchived(ctx context.Context, q queryer, teamID string) (bool, er
 // only difference — the fence and the creator column the
 // blueprint_runs_creator_matches_trigger_type CHECK pairs with trigger_type —
 // reads as the two statements it is.
-func insertFiringRun(ctx context.Context, q queryer, br domain.BlueprintRun, stepPlan string, event bool, inserted *bool) error {
+func insertFiringRun(ctx context.Context, q queryer, br domain.BlueprintRun, teamID, stepPlan string, event bool, inserted *bool) error {
 	var res sql.Result
 	var err error
 	if event {
 		res, err = q.ExecContext(ctx, `
-			INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
-			VALUES (?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+			VALUES (?, ?, ?, ?, 'event', ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-		`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
+		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID,
 			nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath)
 	} else {
 		res, err = q.ExecContext(ctx, `
-			INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
-			VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
+			INSERT INTO blueprint_runs (id, team_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, actor_agent_id, status, step_plan, worktree_path, creator_user_id, started_at)
+			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`, br.ID, nullIfEmpty(teamID), br.BlueprintID, br.TaskID, br.TriggerType, nullIfEmpty(br.TriggerID),
 			nullIfEmpty(br.ActorAgentID), br.Status, stepPlan, br.WorktreePath, runmode.LocalDefaultUserID)
 	}
 	if err != nil {
@@ -1033,7 +1043,7 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 // the order scanBlueprintRunSQLite reads them. Both reads SELECT it and both
 // single-row run writes RETURN it, so the write shape cannot drift from the
 // read shape.
-const blueprintRunColumns = `id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
+const blueprintRunColumns = `id, team_id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
 		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at`
 
@@ -1049,6 +1059,7 @@ const blueprintRunSelect = `
 func scanBlueprintRunSQLite(scan func(...any) error) (domain.BlueprintRun, error) {
 	var (
 		br              domain.BlueprintRun
+		teamID          sql.NullString
 		triggerID       sql.NullString
 		actorAgentID    sql.NullString
 		abortReason     sql.NullString
@@ -1057,7 +1068,7 @@ func scanBlueprintRunSQLite(scan func(...any) error) (domain.BlueprintRun, error
 		cancelRequested int
 		stepPlanRaw     string
 	)
-	if err := scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
+	if err := scan(&br.ID, &teamID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
 		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt); err != nil {
 		return br, err
@@ -1067,6 +1078,7 @@ func scanBlueprintRunSQLite(scan func(...any) error) (domain.BlueprintRun, error
 		return br, fmt.Errorf("unmarshal step plan for blueprint_run %s: %w", br.ID, err)
 	}
 	br.CancelRequested = cancelRequested != 0
+	br.TeamID = teamID.String
 	br.TriggerID = triggerID.String
 	br.ActorAgentID = actorAgentID.String
 	br.AbortReason = abortReason.String
@@ -1176,7 +1188,7 @@ func (s *blueprintStore) GetRunForConversationSystem(ctx context.Context, orgID,
 	return s.GetRunForConversation(ctx, orgID, stepConversationID)
 }
 
-func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -1194,9 +1206,9 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	// Flip the blueprint_run terminal AND cancel any still-active child
 	// conversation in one transaction, so a terminal parent can never be
 	// observed (or committed) alongside a live child. inTx composes with the
-	// caller's tx when MarkRunStatus runs inside SyntheticClaimsWithTx (manual
-	// path) and opens a fresh one on the bare admin/system handle — either way
-	// the two writes are all-or-nothing. Without a non-terminal child a cancel
+	// caller's tx when this runs inside SystemWithTx and opens a fresh one on
+	// the bare handle — either way the two writes are all-or-nothing. Without a
+	// non-terminal child a cancel
 	// that raced the dispatcher's claim/setup window (or a parked `open` step
 	// the sequence-cancel path skips) would strand a child 'running', keeping
 	// the dispatcher on phantom work and pinning its feature branch in a
@@ -1207,7 +1219,8 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 			UPDATE blueprint_runs
 			SET status = ?, abort_reason = ?, aborted_at_step = ?, completed_at = ?
 			WHERE id = ? AND status = 'running'
-		`, string(status), reasonArg, stepArg, now, id)
+			  AND (NOT ? OR (`+runIsItsTasksWorkSQL+`))
+		`, string(status), reasonArg, stepArg, now, id, status == domain.BlueprintRunStatusCompleted)
 		if err != nil {
 			return err
 		}
@@ -1233,7 +1246,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 
 // parkOrphanedChildConversations parks every still-mid-flight child
 // conversation of blueprintRunID `open` and releases those children's active
-// claims. Called by MarkRunStatus's atomic flip.
+// claims. Called by MarkRunStatusSystem's atomic flip.
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without
@@ -1260,7 +1273,7 @@ func parkOrphanedChildConversations(ctx context.Context, q queryer, blueprintRun
 		    parked_at = COALESCE(parked_at, ?),
 		    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
-		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
+		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL, stop_through_message_id = NULL
 		WHERE blueprint_run_id = ? AND status IS NULL
 	`, time.Now().UTC(), "Stopped: owning blueprint run reached a terminal state", blueprintRunID)
 	return err
@@ -1412,30 +1425,6 @@ func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, b
 	return out, rows.Err()
 }
 
-func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id FROM conversations
-		WHERE blueprint_run_id = ?
-		  AND `+db.UnsettledConversationSQL("conversations")+`
-	`, blueprintRunID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]db.RunProgress, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -1474,16 +1463,8 @@ func (s *blueprintStore) ListStepsSystem(ctx context.Context, orgID, blueprintID
 	return s.ListSteps(ctx, orgID, blueprintID)
 }
 
-func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
-	return s.MarkRunStatus(ctx, orgID, id, status, abortReason, abortedAtStep)
-}
-
 func (s *blueprintStore) GetRunSystem(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
 	return s.GetRun(ctx, orgID, id)
-}
-
-func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return s.ActiveStepConversationIDs(ctx, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {

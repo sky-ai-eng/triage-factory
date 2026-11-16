@@ -134,7 +134,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		EventHandlers: eventHandlers,
 		// Blueprints wires both pools: the request-facing reads on app
 		// under RLS, every write and every `...System` read (ListSteps,
-		// MarkRunStatus, ConversationsForBlueprint) on admin, which is
+		// MarkRunStatusSystem, ConversationsForBlueprint) on admin, which is
 		// what gives the blueprint orchestrator goroutine a route for its
 		// detached-context work.
 		Blueprints: newBlueprintStore(app, admin),

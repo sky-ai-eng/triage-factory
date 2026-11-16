@@ -110,6 +110,13 @@ type taskJSON struct {
 	// task a write answers with, and when the check fails, which a client
 	// reads as unknown.
 	CanWrite *bool `json:"can_write,omitempty"`
+	// ClaimTeamIDs is the teams the caller's claim of the task, or their
+	// delegate of it, may land it on (db.TaskStore.ClaimTeamCandidates), in
+	// the order that read gives: what those routes accept as team_id, and
+	// with one entry the team they resolve an absent team_id to. On the
+	// detail read only. A pointer so that no candidate is an empty list and
+	// a failed read is an absent key, which a client reads as unknown.
+	ClaimTeamIDs *[]string `json:"claim_team_ids,omitempty"`
 }
 
 // memoryAttemptJSON is the wire shape of the newest memory-generation attempt
@@ -1055,11 +1062,22 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	// Best-effort, like the other display enrichment on a read: a failed
 	// probe omits the field rather than failing the read of a row the caller
 	// can see. It runs after the read's transaction because the probe opens
-	// its own.
+	// its own, and so does the candidates read below, whose failure must not
+	// take the task's read with it.
 	if canWrite, err := s.az.UserCanWriteTask(r.Context(), userID, orgID, task.ID); err != nil {
 		serverLog.Warn("task-write probe failed; omitting can_write", "task", task.ID, "error", err)
 	} else {
 		out.CanWrite = &canWrite
+	}
+	candidates := []string{}
+	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teams, e := tx.Tasks.ClaimTeamCandidates(r.Context(), orgID, task.ID, userID)
+		candidates = append(candidates, teams...)
+		return e
+	}); err != nil {
+		serverLog.Warn("claim-team read failed; omitting claim_team_ids", "task", task.ID, "error", err)
+	} else {
+		out.ClaimTeamIDs = &candidates
 	}
 	writeJSON(w, http.StatusOK, out)
 }

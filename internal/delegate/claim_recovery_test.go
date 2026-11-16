@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -79,6 +80,7 @@ func TestDispatch_LossBudgetSpent_FailsTheConversationWithoutRunningIt(t *testin
 	if waker.count() == 0 {
 		t.Error("the firing worker was never woken; the task's queued firings wait on this conversation")
 	}
+	passOnce(t, f.s)
 	rec.Active(t, org, kinds.ConversationFailed, f.conv.ID)
 }
 
@@ -141,9 +143,115 @@ func TestSidecarProvision_TimeoutIsTheSentinel(t *testing.T) {
 	f.s.SetExecutorID("lf-exec", 1)
 	f.s.SetAwaitingCredentialsTimeout(20*time.Millisecond, 5*time.Millisecond)
 
-	_, _, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID)(context.Background(), "pubkey")
+	_, _, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(context.Background(), "pubkey")
 	if !errors.Is(err, errAwaitingCredentialsTimeout) {
 		t.Fatalf("provision after the wait ran out = %v, want errAwaitingCredentialsTimeout", err)
+	}
+}
+
+// lateBundle is a credentials channel whose bundle the brain writes only after
+// the wait's first read has missed it.
+type lateBundle struct {
+	db.ClaimCredentialsStore
+	mu        sync.Mutex
+	reads     int
+	firstRead chan struct{}
+	bundle    *db.SealedBundle
+}
+
+func (b *lateBundle) Get(context.Context, string, string) (db.SealedBundle, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reads++
+	if b.reads == 1 {
+		close(b.firstRead)
+	}
+	if b.bundle == nil {
+		return db.SealedBundle{}, false, nil
+	}
+	return *b.bundle, true, nil
+}
+
+func (b *lateBundle) seal(sealed db.SealedBundle) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bundle = &sealed
+}
+
+// TestSidecarProvision_TheSealedRingWakesTheWait: a bundle the brain writes
+// after the wait's first read is read once the conversation's doorbell rings,
+// not on the wait's next poll, which here is an hour away.
+func TestSidecarProvision_TheSealedRingWakesTheWait(t *testing.T) {
+	f := newLaunchFixture(t, "cred-ring")
+	store := &lateBundle{firstRead: make(chan struct{})}
+	f.s.claimCredentials = store
+	f.s.SetExecutorID("lf-exec", 1)
+	f.s.SetAwaitingCredentialsTimeout(2*time.Hour, time.Hour)
+	doorbells := ctlbus.NewDoorbells()
+	f.s.SetCredentialDoorbells(doorbells)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		sealed []byte
+		epoch  int64
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sealed, epoch, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(ctx, "pubkey")
+		done <- result{sealed, epoch, err}
+	}()
+
+	select {
+	case <-store.firstRead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait never read claim_credentials")
+	}
+	store.seal(db.SealedBundle{ExecutorID: "lf-exec", BootEpoch: 1, Sealed: []byte("sealed")})
+	doorbells.Ring(f.conv.ID)
+
+	select {
+	case r := <-done:
+		if r.err != nil || string(r.sealed) != "sealed" || r.epoch != 1 {
+			t.Fatalf("provision = (%q, %d, %v), want the bundle sealed after the first read", r.sealed, r.epoch, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ring did not wake the wait to read the bundle")
+	}
+}
+
+// ownBundle is a credentials channel holding a bundle sealed for one executor
+// boot, as the brain leaves it once it has answered the doorbell.
+type ownBundle struct {
+	db.ClaimCredentialsStore
+	executorID string
+	bootEpoch  int64
+}
+
+func (b ownBundle) Get(context.Context, string, string) (db.SealedBundle, bool, error) {
+	return db.SealedBundle{ExecutorID: b.executorID, BootEpoch: b.bootEpoch, Sealed: []byte("sealed")}, true, nil
+}
+
+// TestSidecarProvision_TheBundleArrivingMovesThePhaseToFetching: the park ends
+// when the poll finds this executor's bundle, so the claim names the step that
+// follows the seal rather than the wait that is over.
+func TestSidecarProvision_TheBundleArrivingMovesThePhaseToFetching(t *testing.T) {
+	f := newLaunchFixture(t, "cred-arrived")
+	f.s.claimCredentials = ownBundle{executorID: "lf-exec", bootEpoch: 1}
+	f.s.SetExecutorID("lf-exec", 1)
+	f.s.SetAwaitingCredentialsTimeout(time.Second, 5*time.Millisecond)
+
+	sealed, epoch, err := f.s.sidecarProvisionFor(runmode.LocalDefaultOrgID, f.conv.ID, f.conv.ClaimID)(context.Background(), "pubkey")
+	if err != nil || string(sealed) != "sealed" || epoch != 1 {
+		t.Fatalf("provision = (%q, %d, %v), want this executor's bundle", sealed, epoch, err)
+	}
+	var phase string
+	if err := f.database.QueryRow(`SELECT COALESCE(phase, '') FROM claims WHERE id = ?`, f.conv.ClaimID).Scan(&phase); err != nil {
+		t.Fatalf("read claim phase: %v", err)
+	}
+	if phase != domain.ClaimPhaseFetching {
+		t.Errorf("claim phase after the bundle arrived = %q, want %q", phase, domain.ClaimPhaseFetching)
 	}
 }
 
@@ -227,7 +335,7 @@ func TestTerminateBlueprint_AnAlreadyTerminalRunRunsNoSideEffects(t *testing.T) 
 	s.SetFiringWaker(waker)
 	taskBefore := readTaskStatus(t, database, taskID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID,
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 

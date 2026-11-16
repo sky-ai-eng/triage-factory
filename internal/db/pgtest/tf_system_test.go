@@ -63,25 +63,21 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 
 // TestTfSystem_OffSurfaceReadDenied pins that tables entirely outside the
 // executor's enumerated surface are unreachable, even for a plain SELECT
-// that would return zero rows. Two of them, for two reasons:
-// sso_connections is control-plane configuration; and org_secrets holds
+// that would return zero rows. Three of them, for three reasons:
+// sso_connections is control-plane configuration; org_secrets holds
 // ciphertext an executor could not read anyway, since it never holds
 // TF_SECRET_ENCRYPTION_KEY — its per-run credential material arrives
-// pre-resolved as sealed claim_credentials bundles.
+// pre-resolved as sealed claim_credentials bundles; and
+// conversation_memory_attempts is the memory provisioner's ledger, which an
+// executor reads only through tf.task_memory_wait in the canonical task
+// projection, a function that reads the ledger as its owner.
 //
-// A grant on either would be invisible in production — nothing on the
+// A grant on any of them would be invisible in production — nothing on the
 // executor selects from them — so it would sit until something did.
-//
-// conversation_memory_attempts was a third entry here, on exactly that
-// reasoning, until the canonical task projection began carrying the pending
-// task's newest attempt: an executor now selects from it on every
-// Tasks.GetSystem whether it wants the columns or not, so withholding the
-// grant does not hide the summary, it fails the whole task read. It has a
-// read-only pin of its own below rather than no pin at all.
 func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
 	h := Shared(t)
 
-	for _, table := range []string{"sso_connections", "org_secrets"} {
+	for _, table := range []string{"sso_connections", "org_secrets", "conversation_memory_attempts"} {
 		var n int
 		err := h.SystemDB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)
 		if err == nil {
@@ -112,39 +108,6 @@ func TestTfSystem_DeploymentSignerUnreachable(t *testing.T) {
 		t.Fatal("tf_system UPDATE deployment_commit_signer succeeded, want permission denied")
 	}
 	assertPgCode(t, err, "42501", "tf_system UPDATE deployment_commit_signer")
-}
-
-// TestTfSystem_MemoryAttemptsAreReadOnly pins the shape of the one grant the
-// task projection forced open. The ledger stays brain-written: an executor
-// reads it, transitively, because the task read projects the pending task's
-// newest attempt, and it must not be able to open, close, or erase an attempt
-// — those are the memory provisioner's writes and the provisioner is
-// control-plane only.
-//
-// Written as three refused writes rather than as "it is not in the
-// off-surface list", because the interesting property is not that SELECT
-// works; it is that nothing else does.
-func TestTfSystem_MemoryAttemptsAreReadOnly(t *testing.T) {
-	h := Shared(t)
-
-	var n int
-	if err := h.SystemDB.QueryRow(`SELECT COUNT(*) FROM conversation_memory_attempts`).Scan(&n); err != nil {
-		t.Fatalf("tf_system SELECT conversation_memory_attempts: %v — the canonical task read projects this table", err)
-	}
-
-	// Each write names a column list the real writer uses, so a grant that
-	// appeared for one of them would be caught by the statement that needs it
-	// rather than by a syntax error on the way.
-	_, err := h.SystemDB.Exec(`
-		INSERT INTO conversation_memory_attempts (org_id, conversation_id)
-		VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002')`)
-	assertPgCode(t, err, "42501", "tf_system INSERT conversation_memory_attempts")
-
-	_, err = h.SystemDB.Exec(`UPDATE conversation_memory_attempts SET outcome = 'generated'`)
-	assertPgCode(t, err, "42501", "tf_system UPDATE conversation_memory_attempts")
-
-	_, err = h.SystemDB.Exec(`DELETE FROM conversation_memory_attempts`)
-	assertPgCode(t, err, "42501", "tf_system DELETE conversation_memory_attempts")
 }
 
 // TestTfSystem_RegistryGCIsControlPlaneOnly pins the one instances write an
@@ -330,7 +293,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
-		if _, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+		if _, err := dbtest.HolderPark(stores.Conversations, ctx, orgID, conversationID, db.ParkTurnIncomplete()); err != nil {
 			t.Errorf("holder park: %v", err)
 		}
 		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
@@ -456,10 +419,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
 			t.Errorf("TaskMemory.RecordEntityTouchSystem: %v", err)
 		}
-		if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
+		if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, teamID, ""); err != nil {
 			t.Errorf("TaskMemory.GetMemoriesForEntitySystem: %v", err)
 		}
-		if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
+		if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, orgID, entityID, teamID, ""); err != nil {
 			t.Errorf("TaskMemory.CountMemoriesForEntitySystem: %v", err)
 		}
 	})
@@ -681,9 +644,6 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 		if _, err := stores.Blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID); err != nil {
 			t.Errorf("Blueprints.ConversationsForBlueprintSystem: %v", err)
-		}
-		if _, err := stores.Blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID); err != nil {
-			t.Errorf("Blueprints.ActiveStepConversationIDsSystem: %v", err)
 		}
 		if _, err := stores.Blueprints.SetRunWorktreePathSystem(ctx, orgID, blueprintRunID, "/tmp/conformance-shared-wt"); err != nil {
 			t.Errorf("Blueprints.SetRunWorktreePathSystem: %v", err)

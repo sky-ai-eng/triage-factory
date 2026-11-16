@@ -15,6 +15,10 @@ func TestNewAccount_Validation(t *testing.T) {
 		"empty whitelist":      {{Provider: ProviderAnthropic, APIKey: "k"}},
 		"anthropic no api key": {{Provider: ProviderAnthropic, Models: []string{"m"}}},
 		"bedrock no region":    {{Provider: ProviderBedrock, Models: []string{"m"}, Bedrock: &BedrockCredentials{}}},
+		// A bearer alone would build a key with no Bedrock config, where a base
+		// URL has nowhere to go.
+		"bedrock no bedrock credentials": {{Provider: ProviderBedrock, APIKey: "bearer", Models: []string{"m"}}},
+		"ca not a certificate":           {{Provider: ProviderAnthropic, APIKey: "k", Models: []string{"m"}, CACertPEM: []byte("not a certificate")}},
 	}
 	for name, creds := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -114,6 +118,54 @@ func TestNewAccount_BedrockSTSConfig(t *testing.T) {
 	if bk.RoleARN == nil || bk.RoleARN.GetValue() != "arn:aws:iam::123456789012:role/tf-bedrock" {
 		t.Fatalf("role arn not carried: %+v", bk.RoleARN)
 	}
+}
+
+// TestNewAccount_BedrockEndpoint puts a Bedrock base URL on the key's runtime
+// endpoint, which is the only place bifrost's Bedrock provider reads a host
+// from, and leaves the key with no endpoints when there is none.
+func TestNewAccount_BedrockEndpoint(t *testing.T) {
+	const vpce = "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com"
+	bedrockKey := func(t *testing.T, baseURL string) (*schemas.BedrockKeyConfig, *schemas.ProviderConfig) {
+		t.Helper()
+		acct, err := NewAccount(ProviderCredentials{
+			Provider: ProviderBedrock,
+			APIKey:   "bearer",
+			BaseURL:  baseURL,
+			Models:   []string{"us.anthropic.claude-sonnet-5"},
+			Bedrock:  &BedrockCredentials{Region: "us-west-2"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys, err := acct.GetKeysForProvider(context.Background(), ProviderBedrock)
+		if err != nil || len(keys) != 1 || keys[0].BedrockKeyConfig == nil {
+			t.Fatalf("keys: %+v (%v)", keys, err)
+		}
+		cfg, err := acct.GetConfigForProvider(ProviderBedrock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return keys[0].BedrockKeyConfig, cfg
+	}
+
+	t.Run("with a base URL", func(t *testing.T) {
+		bk, cfg := bedrockKey(t, vpce)
+		if bk.Endpoints == nil || bk.Endpoints.Runtime == nil || bk.Endpoints.Runtime.GetValue() != vpce {
+			t.Fatalf("runtime endpoint = %+v, want %s", bk.Endpoints, vpce)
+		}
+		if e := bk.Endpoints; e.ControlPlane != nil || e.Mantle != nil || e.AgentRuntime != nil || e.S3 != nil {
+			t.Errorf("only the runtime endpoint is TF's to set: %+v", e)
+		}
+		if cfg.NetworkConfig.BaseURL != "" {
+			t.Errorf("NetworkConfig.BaseURL = %q, which bifrost's Bedrock provider never reads", cfg.NetworkConfig.BaseURL)
+		}
+	})
+	t.Run("without a base URL", func(t *testing.T) {
+		bk, _ := bedrockKey(t, "")
+		if bk.Endpoints != nil {
+			t.Fatalf("endpoints = %+v, want none", bk.Endpoints)
+		}
+	})
 }
 
 // TestNew_InitAcceptsAccounts exercises the embedded bifrost Init path offline

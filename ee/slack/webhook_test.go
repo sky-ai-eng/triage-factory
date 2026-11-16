@@ -79,6 +79,17 @@ func (f *fakeWorkspaceStore) Get(context.Context, string, string, string) (*slac
 	return nil, nil
 }
 func (f *fakeWorkspaceStore) Delete(context.Context, string, string, string) error { return nil }
+func (f *fakeWorkspaceStore) DeleteSystem(_ context.Context, orgID, workspaceID, apiAppID string, updatedAt time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := workspaceID + "/" + apiAppID
+	row, ok := f.byWorkspaceApp[key]
+	if !ok || row.OrgID != orgID || !row.UpdatedAt.Equal(updatedAt) {
+		return false, nil
+	}
+	delete(f.byWorkspaceApp, key)
+	return true, nil
+}
 func (f *fakeWorkspaceStore) ListAllSystem(context.Context) ([]slackstore.Workspace, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -99,9 +110,18 @@ func (f *fakeWorkspaceStore) AppBoundToOtherOrgSystem(context.Context, string, s
 }
 
 // fakeSecretStore is a minimal db.SecretStore fake — only GetSystem is
-// exercised by the webhook handler.
+// exercised by the webhook handler. mu guards values for the socket tests,
+// which delete a secret while a connection goroutine may read it.
 type fakeSecretStore struct {
+	mu     sync.Mutex
 	values map[string]string // orgID + "/" + key -> value
+}
+
+// deleteValue removes a secret, as a disconnect's sweep does.
+func (f *fakeSecretStore) deleteValue(orgID, key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.values, orgID+"/"+key)
 }
 
 var _ db.SecretStore = (*fakeSecretStore)(nil)
@@ -109,6 +129,8 @@ var _ db.SecretStore = (*fakeSecretStore)(nil)
 func (f *fakeSecretStore) Put(context.Context, string, string, string, string) error { return nil }
 func (f *fakeSecretStore) Get(context.Context, string, string) (string, error)       { return "", nil }
 func (f *fakeSecretStore) GetSystem(_ context.Context, orgID, key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.values[orgID+"/"+key], nil
 }
 func (f *fakeSecretStore) PutSystemIfValue(context.Context, string, string, string, string, string) (bool, error) {

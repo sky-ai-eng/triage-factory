@@ -28,6 +28,12 @@ type Scorer interface {
 // wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
+	// PlanDelegation makes every check Delegate makes ahead of its firing,
+	// for teamID, the team the run will belong to, and writes nothing. The
+	// score re-evaluation asks it before it admits a firing, so a run the
+	// plan would refuse is never admitted and its task never claimed for it.
+	// Signature matches *delegate.Spawner's method exactly.
+	PlanDelegation(task domain.Task, teamID string, opts delegate.DelegateOpts) (delegate.DelegationPlan, error)
 	// ReviewsDismissedSystem follows a terminating close that dismissed the
 	// closed pull request's pending reviews (TerminalCloseResult.DismissedReviews),
 	// once it has committed: each review is announced on the conversation that
@@ -59,12 +65,6 @@ type Delegator interface {
 	// its own, and is sent once per close. Signature matches
 	// *delegate.Spawner's method exactly.
 	TellTaskClosed(ctx context.Context, orgID, taskID string, conversationIDs []string)
-	// TellTaskCloseHeld tells each of conversationIDs, the conversations
-	// working on the task when an event's close of it began to hold, that
-	// the event resolved the task's situation and the task stays open for
-	// a person. Delivered as TellTaskClosed's note is, once per hold.
-	// Signature matches *delegate.Spawner's method exactly.
-	TellTaskCloseHeld(ctx context.Context, orgID, taskID string, conversationIDs []string)
 }
 
 // EventPublisher is the bus-publish seam the router uses to mirror the

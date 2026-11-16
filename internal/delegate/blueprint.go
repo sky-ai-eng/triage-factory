@@ -83,9 +83,10 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 	}
 }
 
-// errRunAlreadyTerminal rolls back terminateBlueprint's transaction when the
-// run it would end was already ended by another writer.
-var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
+// errRunNotEnded rolls back terminateBlueprint's transaction when its mark
+// ended nothing: another writer already ended the run, or the store refused a
+// completion because the task was taken off the run.
+var errRunNotEnded = errors.New("blueprint run not ended by this write")
 
 // terminateBlueprint finalizes the blueprint run row and runs the shared
 // worktree cleanup that runAgent's per-step defers skipped. status
@@ -94,21 +95,21 @@ var errRunAlreadyTerminal = errors.New("blueprint run already terminal")
 // for human review" (any other terminal). skipCleanup short-circuits
 // when the worktree itself is already gone (worktree_lost path).
 //
-// triggerType + creatorUserID route the terminal writes. Manual blueprints
-// (and user-initiated CancelBlueprintRun / Resume* that pass "manual" + the
-// requesting user's ID) write under synthetic claims; event-triggered
-// blueprints write through the admin pool.
+// The terminal writes go through the admin pool for every run, manual or
+// event-triggered. Ending a run is the orchestrator's decision rather than its
+// delegator's, and the run's row policies follow its team: a delegator who has
+// since left the team, or become a viewer on it, would have their write match
+// no row, and the run would stay running with nothing left to end it.
 //
 // The cfg here is a cleanup-scoped config (worktree fields + orgID), not the
 // full run-execution config. The run-bearing callers (dispatchClaimedConversation /
-// handlePreAgentFailure) stamp cfg.teamID off the claimed run, but the
-// CancelBlueprintRun / paused-cleanup callers have only a task (no claimed run)
-// and leave it empty — so cfg.teamID is NOT reliably set here. Any future
-// run-attributed work on the terminal path (e.g. recording a failed run's
-// deliverables, TFAC-454) must thread the team/identity explicitly rather than
-// trust cfg.
+// handlePreAgentFailure) stamp cfg.teamID off the claimed run, but the resumed
+// step's reactor passes the org alone and leaves it empty — so cfg.teamID is
+// NOT reliably set here. Any future run-attributed work on the terminal path
+// (e.g. recording a failed run's deliverables) must thread the team/identity
+// explicitly rather than trust cfg.
 func (s *Spawner) terminateBlueprint(
-	orgID, blueprintRunID, taskID, triggerType, creatorUserID string,
+	orgID, blueprintRunID, taskID string,
 	startTime time.Time,
 	cfg runConfig,
 	status domain.BlueprintRunStatus,
@@ -140,57 +141,38 @@ func (s *Spawner) terminateBlueprint(
 	// keeps: a firing locks its task before it inserts its run. Whether this
 	// write is the one that ended the run is only known from the mark, so a
 	// run another writer already ended rolls the close back with it
-	// (errRunAlreadyTerminal): that writer decided what happens to the task.
+	// (errRunNotEnded): that writer decided what happens to the task.
+	// So does a completion the mark refuses because the task was taken off
+	// the run (a person's claim, a move to another team) since the reactor
+	// checked: the run stays running, and the stranded-run replay's reactor
+	// cancels it.
 	//
 	// A task already closed (ErrNoSuchTask: the close's WHERE is
 	// state-guarded) is not a failure. Any other close error fails the whole
 	// write and leaves the run running, for the stranded-run replay to end.
-	finish := func(closeFn func() error, mark func() (bool, error)) error {
+	markErr := s.tx.SystemWithTx(bgCtx, orgID, func(ts db.SystemTxStores) error {
 		if closeTask {
-			if err := closeFn(); err != nil && !errors.Is(err, db.ErrNoSuchTask) {
+			if _, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, db.RunCompletedCloseReason, ""); err != nil && !errors.Is(err, db.ErrNoSuchTask) {
 				return fmt.Errorf("close task: %w", err)
 			}
 		}
-		changed, err := mark()
+		changed, err := ts.Blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 		if err != nil {
 			return err
 		}
 		if !changed {
-			return errRunAlreadyTerminal
+			return errRunNotEnded
 		}
 		return nil
-	}
-	var markErr error
-	if triggerType == "manual" {
-		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return finish(
-				func() error {
-					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
-					return err
-				},
-				func() (bool, error) {
-					return ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-				})
-		})
-	} else {
-		markErr = s.tx.SystemWithTx(bgCtx, orgID, func(ts db.SystemTxStores) error {
-			return finish(
-				func() error {
-					_, err := ts.Tasks.CloseSystem(bgCtx, orgID, taskID, db.RunCompletedCloseReason, "")
-					return err
-				},
-				func() (bool, error) {
-					return ts.Blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
-				})
-		})
-	}
+	})
 	// Everything below belongs to the write that ended the run. A run already
 	// terminal was ended by another writer — a replay of a stranded run racing
 	// its late reactor, two executors replaying one run, a cancel that landed
 	// first — and that writer ran them. Running them twice would remove a
-	// worktree a follow-up has since been given.
-	if errors.Is(markErr, errRunAlreadyTerminal) {
-		blueprintLog.Info("blueprint_run already terminal; its terminal side effects belong to the write that ended it",
+	// worktree a follow-up has since been given. A refused completion ended
+	// nothing, and the cancel that follows it runs them.
+	if errors.Is(markErr, errRunNotEnded) {
+		blueprintLog.Info("blueprint_run not ended by this write: it is already terminal, or its task was taken off it before it could complete",
 			"blueprint_run", blueprintRunID, "status", status)
 		return
 	}
@@ -305,9 +287,12 @@ func (s *Spawner) runBlueprintWorktreeCleanup(orgID, blueprintRunID, wsKey strin
 			}
 		}
 	}
-	// Clean the agent's ghost ~/.claude/projects entry (keyed on the session cwd,
-	// the run root) BEFORE removing the root — RemoveClaudeProjectDir resolves
-	// the cwd via EvalSymlinks and silently no-ops once the dir is gone.
+	// The agent's ~/.claude/projects entry, keyed on the session cwd (the run
+	// root), holds the session files SDK follow-ups resume, and goes with the
+	// tree whatever the snapshot did: each session was saved to a blob of its
+	// own at its last ending, which a follow-up puts back beside whatever tree
+	// it gets. BEFORE removing the root — RemoveClaudeProjectDir resolves the
+	// cwd via EvalSymlinks and silently no-ops once the dir is gone.
 	worktree.RemoveClaudeProjectDir(root)
 	// RemoveAt prunes every bare once the tree is gone, so the PR branches below
 	// are no longer checked out anywhere when they are deleted.
@@ -428,102 +413,29 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 	return b.String()
 }
 
-// raiseBlueprintCancel writes the blueprint layer's durable cancel signal for a
-// run's owning blueprint, and reports whether it landed. It is the one place
-// cancellation is spelled: from here the claim gate stops handing out this
-// blueprint's steps, and whichever path disposes of the running step finalizes
-// the blueprint 'cancelled' (reactToStepTerminal for a step that ran, fresh or
-// resumed, the dispatcher's stop settlement for one nobody holds).
+// requestBlueprintCancel writes the blueprint layer's durable cancel signal for
+// a run's owning blueprint. It is the one place cancellation is spelled: from
+// here the claim gate stops handing out this blueprint's steps, and whichever
+// path disposes of the running step finalizes the blueprint 'cancelled'
+// (reactToStepTerminal for a step that ran, fresh or resumed, the dispatcher's
+// stop settlement for one nobody holds).
 //
-// It returns the error rather than swallowing it because what follows a failed
-// signal differs by caller: a blueprint whose signal never committed is one
-// the claim gate will keep advancing, so a caller whose next move depends on
-// the sequence being stopped has to know. requestBlueprintCancel is the
-// best-effort spelling for the callers that don't.
+// Only the lifecycle stop reaches this, for a caller one layer up that has
+// decided the work is over (a task requeued, delegated again, claimed by a
+// person or reassigned, an archived team). Stopping a conversation must not:
+// the signal is what turns a parked step into a permanently unresumable one.
 //
-// Only the blueprint's own cancel verbs and the lifecycle teardown one layer up
-// (a task requeued, delegated again or claimed by a person, an archived team)
-// reach this. Stopping a
-// conversation must not: the signal is what turns a parked step into a
-// permanently unresumable one.
-func (s *Spawner) raiseBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) error {
-	if s.blueprints == nil || blueprintRunID == "" {
-		return nil
-	}
-	_, err := s.blueprints.RequestRunCancelSystem(ctx, orgID, blueprintRunID)
-	return err
-}
-
-// requestBlueprintCancel raises the signal best-effort, for the callers that
-// finish their teardown either way: a failure leaves the blueprint running
-// with a parked step, which the orphan park and the retention sweep both
-// tolerate, so it logs rather than failing the caller.
+// Best-effort, because the lifecycle stop finishes its teardown either way: a
+// failure leaves the blueprint running with a parked step, which the orphan
+// park and the retention sweep both tolerate, so it logs rather than failing
+// the caller.
 func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) {
-	if err := s.raiseBlueprintCancel(ctx, orgID, blueprintRunID); err != nil {
+	if s.blueprints == nil || blueprintRunID == "" {
+		return
+	}
+	if _, err := s.blueprints.RequestRunCancelSystem(ctx, orgID, blueprintRunID); err != nil {
 		blueprintLog.Warn("raise cancel signal failed", "blueprint_run", blueprintRunID, "error", err)
 	}
-}
-
-// CancelBlueprintRun asks a blueprint run to end: it raises the run's cancel
-// signal, then records a stop intent on every step conversation that has not
-// concluded. It writes no conversation status and no run status. The step's
-// holder settles its stop through its own fenced park and the reactor behind
-// it finalizes the run 'cancelled'; a step nobody holds — queued, or parked
-// `open` — is settled by the dispatcher, which cancels the run in the same
-// transaction. Safe to call when the run is already terminal.
-//
-// userID is the acting user and becomes each intent's actor, so the settlement
-// records the cancellation as theirs. In local mode callers pass
-// runmode.LocalDefaultUserID; multi-mode handlers extract the user from JWT
-// claims.
-func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error {
-	ctx := context.Background()
-	cr, err := s.blueprints.GetRunSystem(ctx, orgID, blueprintRunID)
-	if err != nil {
-		return fmt.Errorf("load blueprint run: %w", err)
-	}
-	if cr == nil {
-		return fmt.Errorf("blueprint run %s not found", blueprintRunID)
-	}
-	if cr.Status != domain.BlueprintRunStatusRunning {
-		return nil
-	}
-
-	// The run's own intent first. From here the claim gate stops handing out
-	// this blueprint's queued steps, and whichever writer settles a step's
-	// stop reads it and finalizes the run 'cancelled' rather than advancing.
-	s.requestBlueprintCancel(ctx, orgID, blueprintRunID)
-
-	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID)
-	if err != nil {
-		// The cancel signal above still keeps the run from advancing, but with
-		// no step carrying an intent nothing settles it, so the caller hears
-		// that the cancel did not take.
-		return fmt.Errorf("list active step conversations: %w", err)
-	}
-	var errs []error
-	for _, id := range stepIDs {
-		// ErrNoActiveConversation is a step that concluded between the list
-		// and the intent write; the reactor reading its terminal sees the
-		// cancel signal and finalizes the run.
-		if err := s.requestStop(ctx, orgID, id, userID); err != nil && !errors.Is(err, ErrNoActiveConversation) {
-			errs = append(errs, fmt.Errorf("request stop for step conversation %s: %w", id, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// finalizeCancelledBlueprintRun writes a running blueprint_run's cancelled
-// terminal, as a system cancel, and cleans the shared worktree behind it. Its
-// caller is StopBlueprintRun on a run with no step conversation: nothing else
-// is going to reach that terminal, because there is no conversation to carry
-// an intent.
-//
-// abortedAtStep is the step the cancellation landed on, when the caller has
-// one; nil when the run had no step to name.
-func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID string, cr *domain.BlueprintRun, abortedAtStep *int) {
-	_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", abortedAtStep)
-	s.cleanupCancelledBlueprintWorktree(orgID, cr.ID, cr.TaskID)
 }
 
 // cleanupCancelledBlueprintWorktree reclaims a cancelled run's shared run
@@ -581,6 +493,15 @@ func finalBlueprintStep(br *domain.BlueprintRun, stepIdx *int) bool {
 		return true
 	}
 	return *stepIdx >= len(br.StepPlan)-1
+}
+
+// finalBlueprintStepOf is whether the run cfg configures is the last step of
+// its blueprint, which is when the artifact-contract nudge asks after a turn
+// that produced nothing. appendSysPrompt is set exactly when a later step
+// follows this one. A conversation with no blueprint run is no step at all: a
+// person's turn that produces nothing is ordinary, and nothing is owed for it.
+func finalBlueprintStepOf(cfg runConfig) bool {
+	return cfg.blueprintRunID != "" && cfg.appendSysPrompt == ""
 }
 
 // resumedStepIsFinal is finalBlueprintStep for a conversation a resume is

@@ -50,8 +50,9 @@ func TestRun_RefusesOpeningBlocks(t *testing.T) {
 // captureSink records what consumeStream delivered, so a test can
 // assert the regression-case message survived the stream reader.
 type captureSink struct {
-	sessionID string
-	messages  []*domain.Message
+	sessionID    string
+	messages     []*domain.Message
+	sessionCosts []float64
 }
 
 func (c *captureSink) OnSession(sid string) error {
@@ -62,6 +63,10 @@ func (c *captureSink) OnSession(sid string) error {
 func (c *captureSink) OnMessage(m *domain.Message) error {
 	c.messages = append(c.messages, m)
 	return nil
+}
+
+func (c *captureSink) OnSessionCost(totalUSD float64) {
+	c.sessionCosts = append(c.sessionCosts, totalUSD)
 }
 
 // TestConsumeStream_HandlesOversizedToolResult is the SKY-* regression
@@ -289,6 +294,74 @@ func TestNewDirectCommand_NeverCarriesSandboxMarker(t *testing.T) {
 	}
 }
 
+// TestNewDirectCommand_StripsInheritedGitHubCLIEnv pins that a local run
+// reaches GitHub only through its gh channel: no GitHub token or gh setting
+// from the operator's environment reaches the agent, with a channel or
+// without one, while the channel's own entries do and a variable that only
+// shares a stem is left alone.
+func TestNewDirectCommand_StripsInheritedGitHubCLIEnv(t *testing.T) {
+	inherited := map[string]string{
+		"GH_TOKEN":                "gho_operators_own",
+		"GITHUB_TOKEN":            "ghp_operators_own",
+		"GH_ENTERPRISE_TOKEN":     "ghe_operators_own",
+		"GITHUB_ENTERPRISE_TOKEN": "ghe_operators_other",
+		"GH_REPO":                 "operator/elsewhere",
+		"GH_HOST":                 "github.operator.example",
+	}
+	for key, value := range inherited {
+		t.Setenv(key, value)
+	}
+	t.Setenv("GITHUB_WORKSPACE", "/operator/workspace")
+
+	channel := &GHChannelParams{
+		Host:           "127.0.0.1",
+		GitHost:        "127.0.0.1:4443",
+		Token:          "per-run-placeholder",
+		CertSourcePath: "/state/gh-channel/conv/injector.crt",
+		ConfigDir:      "/state/gh-channel/conv/config",
+	}
+	for name, tc := range map[string]struct {
+		channel *GHChannelParams
+		want    map[string][]string
+	}{
+		"no channel": {want: map[string][]string{
+			"GITHUB_WORKSPACE": {"/operator/workspace"},
+		}},
+		"channel": {channel: channel, want: map[string][]string{
+			"GH_HOST":             {"127.0.0.1"},
+			"GH_ENTERPRISE_TOKEN": {"per-run-placeholder"},
+			"GH_TOKEN":            {ghNoCredentialToken},
+			"GH_CONFIG_DIR":       {"/state/gh-channel/conv/config"},
+			"GITHUB_WORKSPACE":    {"/operator/workspace"},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd, err := newDirectCommand(context.Background(), RunOptions{GHChannel: tc.channel}, []string{"wrapper.mjs"})
+			if err != nil {
+				t.Fatalf("newDirectCommand: %v", err)
+			}
+			got := map[string][]string{}
+			for _, kv := range cmd.Env {
+				key, value, _ := strings.Cut(kv, "=")
+				if operators, ok := inherited[key]; ok && operators == value {
+					t.Errorf("agent env carries the operator's %s", key)
+				}
+				got[key] = append(got[key], value)
+			}
+			for key, want := range tc.want {
+				if !slices.Equal(got[key], want) {
+					t.Errorf("%s entries = %q, want %q", key, got[key], want)
+				}
+			}
+			for key := range inherited {
+				if _, wanted := tc.want[key]; !wanted && len(got[key]) != 0 {
+					t.Errorf("%s entries = %q, want none", key, got[key])
+				}
+			}
+		})
+	}
+}
+
 func TestNewDirectCommand_ComposesLocalGitProxyPairs(t *testing.T) {
 	cmd, err := newDirectCommand(context.Background(), RunOptions{
 		GitUserName:  "TF Bot",
@@ -303,9 +376,9 @@ func TestNewDirectCommand_ComposesLocalGitProxyPairs(t *testing.T) {
 	}
 	cfg := gitConfigMap(t, cmd.Env)
 	for key, want := range map[string]string{
-		"user.name":                                "TF Bot",
-		"user.email":                               "bot@example.com",
-		"url.https://127.0.0.1:4443/.insteadOf":    "https://github.com/",
+		"user.name":                             "TF Bot",
+		"user.email":                            "bot@example.com",
+		"url.https://127.0.0.1:4443/.insteadOf": "https://github.com/",
 		"http.https://127.0.0.1:4443/.extraHeader": "Authorization: Basic placeholder",
 	} {
 		if got := cfg[key]; got != want {

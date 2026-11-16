@@ -32,6 +32,10 @@ type fenceStubDelegator struct {
 	calls int64
 }
 
+func (s *fenceStubDelegator) PlanDelegation(domain.Task, string, delegate.DelegateOpts) (delegate.DelegationPlan, error) {
+	return delegate.DelegationPlan{}, nil
+}
+
 func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	return stubDelegateRun(s.db, task, opts)
@@ -41,9 +45,6 @@ func (s *fenceStubDelegator) ReviewsDismissedSystem(context.Context, string, []d
 }
 
 func (s *fenceStubDelegator) TellTaskClosed(context.Context, string, string, []string) {
-}
-
-func (s *fenceStubDelegator) TellTaskCloseHeld(context.Context, string, string, []string) {
 }
 
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.AdditiveDelivery {

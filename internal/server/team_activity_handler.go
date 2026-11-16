@@ -47,8 +47,8 @@ type teamActivityDaySourceJSON struct {
 }
 
 // teamActivitySourceJSON is one source's totals. events is null — not 0 —
-// when the count is undefined for the source (Slack has no tracked set, so
-// "the team's slack events" names nothing); last_poll_at is null for a
+// when the count is undefined for the source (one with no tracked set, for
+// which "the team's events" names nothing); last_poll_at is null for a
 // source with no poller or one that hasn't completed a cycle. A client
 // renders both as a dash, never as a zero.
 type teamActivitySourceJSON struct {
@@ -61,7 +61,8 @@ type teamActivitySourceJSON struct {
 
 // teamActivityTrackedJSON is one unit of the team's tracked set. unit_id is
 // the id the unit's source page keys its row on — a repository's registry
-// id, a jira_projects row id, a Linear team's UUID — so a client joins with
+// id, a jira_projects row id, a Linear team's UUID, a slack_channels row id —
+// so a client joins with
 // no name lookup. A quiet unit answers zeros; last_event_at is null only for
 // a unit that has never sent an event, since it is bounded by the window's
 // end alone.

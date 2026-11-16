@@ -160,10 +160,10 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
-		                           creator_user_id, blueprint_run_id, blueprint_step_index, completed_at, origin)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, ?)
+		                           creator_user_id, blueprint_run_id, blueprint_step_index, completed_at, origin, type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'delegation'))
 	`, id, conv.TaskID, conv.PromptID, status, conv.Model,
-		trigger, triggerID, teamID, creator, blueprintRunID, stepIdx, completedAt, origin); err != nil {
+		trigger, triggerID, teamID, creator, blueprintRunID, stepIdx, completedAt, origin, conv.Type); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
@@ -473,7 +473,7 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
 			t.Helper()
 			// Raw UPDATE — must NOT cascade onto child conversations (unlike
-			// BlueprintStore.MarkRunStatus), so the parked child stays parked.
+			// BlueprintStore.MarkRunStatusSystem), so the parked child stays parked.
 			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, blueprintRunID); err != nil {
 				t.Fatalf("set blueprint_run status: %v", err)
 			}

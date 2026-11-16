@@ -56,7 +56,7 @@ type runConfig struct {
 	// resumes an SDK session picks its continuation note by it.
 	lastHandBackOutcome string
 
-	teamID   string     // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp deliverables.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
+	teamID   string     // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp deliverables.team_id. Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty on the resumed step's reactor path, which carries only the org.
 	scope    string     // what the agent is scoped to (repo, PR, issue)
 	sources  sourceDocs // the run's <tools> section and its <run_context> source notes
 	runRoot  string     // the run root: the agent's starting directory and conversations.worktree_path, for every source
@@ -79,11 +79,14 @@ type runConfig struct {
 	// step whose tree no longer holds it.
 	baseCheckout string
 
-	// prSkeleton is the rendered PR history block folded into the run's
-	// static task context. Empty for a non-PR run, and empty (never fatal)
-	// when the fetch fails — the run proceeds with the point-in-time event
+	// prSkeleton is where the PR history block folded into the run's static
+	// task context comes from. Setup records it and fetches nothing; a launch
+	// renders it only when it composes a task context, which is a native claim
+	// of a conversation not yet opened, or an SDK launch with no session to
+	// resume. The zero value, a non-PR run's, renders "", and so does a failed
+	// fetch (never fatal) — the run proceeds with the point-in-time event
 	// context it has always had.
-	prSkeleton string
+	prSkeleton prSkeletonSource
 
 	// workspace is how runRoot came to be — warm from the previous engagement,
 	// rehydrated from the durable snapshot, or built fresh. Resolved by the
@@ -98,18 +101,25 @@ type runConfig struct {
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
-	// Chain-mode toggles. The blueprint orchestrator owns the worktree
-	// lifecycle — it reclaims the task's tree once, after the chain
-	// terminates — so runAgent holds no worktree cleanup of its own. What
-	// isBlueprintStep still gates is the ghost ~/.claude/projects tidy, which
-	// short-circuits so a step's session state survives into the next one.
-	// appendSysPrompt is forwarded to agentproc as --append-system-prompt so
-	// the chain protocol reaches the model without modifying the step's prompt
-	// body.
+	// Chain-mode fields, empty for a conversation with no blueprint run. The
+	// blueprint orchestrator owns the worktree lifecycle — it reclaims the
+	// task's tree once, after the chain terminates — so runAgent holds no
+	// worktree cleanup of its own. appendSysPrompt is forwarded to agentproc
+	// as --append-system-prompt so the chain protocol reaches the model
+	// without modifying the step's prompt body.
 	blueprintRunID  string
 	blueprintStep   int
-	isBlueprintStep bool
 	appendSysPrompt string
+
+	// surface is the framework prompt the conversation runs under, from its
+	// stored type (surfaceFor): the machinist for a blueprint step, the
+	// workbench for a conversation a person works in.
+	surface agentprompt.Surface
+	// interactive is whether the conversation is one a person works in
+	// (domain.ConversationTypeInteractive). Its turns start from the person's
+	// messages, so an SDK launch with no session to resume sends them as the
+	// end of its first turn (composeLaunchTurn).
+	interactive bool
 
 	// skillsSourcePath is the orchestrator-owned staging dir holding this step's
 	// SKILL.md, bind-mounted read-only into the jail (agentproc's
@@ -156,9 +166,36 @@ func (c runConfig) container() string {
 	return c.jiraProject
 }
 
-// ErrTaskBusy is returned by Delegate, on either path, when the insert loses
-// to the one-active-run-per-task index: something already holds this task's
-// single live engagement. On the event path that is a different (event,
+// hasBlueprint is whether the launch's conversation belongs to a blueprint
+// run: only such a conversation has a workflow for stop_blueprint to end.
+func (c runConfig) hasBlueprint() bool {
+	return c.blueprintRunID != ""
+}
+
+// bindConversation sets on c what the claimed conversation conv decides about
+// its launch: who it runs for, under which framework prompt, and, for a
+// conversation that belongs to a blueprint run, the run br and the step
+// stepIdx it executes. A conversation a person works in belongs to none and
+// is bound none, so br may be nil for it; for any other conversation br must
+// be the run the dispatcher loaded.
+func (c *runConfig) bindConversation(orgID string, conv domain.Conversation, br *domain.BlueprintRun, stepIdx int) {
+	c.orgID = orgID
+	c.teamID = conv.TeamID
+	c.claimID = conv.ClaimID
+	c.upstreamHandBacks = conv.UpstreamHandBacks
+	c.jailLosses = conv.JailLosses
+	c.lastHandBackOutcome = conv.LastHandBackOutcome
+	c.surface = surfaceFor(conv.Type)
+	c.interactive = conv.Type == domain.ConversationTypeInteractive
+	if !c.interactive {
+		c.blueprintRunID = br.ID
+		c.blueprintStep = stepIdx
+	}
+}
+
+// ErrTaskBusy is returned by FireDelegation, on either path, when the insert
+// loses to the one-active-run-per-task index: something already holds this
+// task's single live engagement. On the event path that is a different (event,
 // trigger) pair going active between the router's gate read and this insert;
 // on the manual path it is a second delegate gesture racing the first, or an
 // event firing that got there first.
@@ -170,7 +207,7 @@ func (c runConfig) container() string {
 // against a view that shows what is already running.
 var ErrTaskBusy = errors.New("delegate: another run is active on this task")
 
-// ErrAlreadyFired is returned by Delegate on the event path when the run
+// ErrAlreadyFired is returned by FireDelegation on the event path when the run
 // insert hit the (triggering_event_id, trigger_id) fence — a run for this
 // (event, trigger) already committed on a prior delivery of the same event.
 // The router treats it as a clean skip: the at-least-once event
@@ -178,14 +215,14 @@ var ErrTaskBusy = errors.New("delegate: another run is active on this task")
 // there is nothing to re-fire and the original run's claim still stands.
 var ErrAlreadyFired = errors.New("delegate: run already fired for this (event, trigger)")
 
-// ErrTaskClosed is returned by Delegate on the event path when the task had
-// closed by the time the firing locked it — a
-// close that landed after the router's own check. No run starts, and the
+// ErrTaskClosed is returned by FireDelegation on the event path when the task
+// had closed by the time the firing locked it — a close that landed after the
+// router's own check. No run starts, and the
 // router skips the firing as it skips one on a closed task.
 var ErrTaskClosed = errors.New("delegate: the task closed")
 
-// ErrTeamArchived is returned by Delegate, on either path, when the team the
-// run would belong to was archived by the time the firing read it under the
+// ErrTeamArchived is returned by FireDelegation, on either path, when the team
+// the run would belong to was archived by the time the firing read it under the
 // task's lock — an archive that landed after the caller's own checks. No run
 // starts: the router and the firing worker skip the firing, and the delegate
 // route answers 409.
@@ -301,75 +338,124 @@ type DelegateOpts struct {
 	OwnerTeamID string
 }
 
-// Delegate kicks off an async agent run for any task type.
-// Routes to the appropriate worktree setup based on task source.
+// Delegate plans a delegation of task and fires it: PlanDelegation for the
+// team the run belongs to, then FireDelegation. A caller with a write of its
+// own to make between the two, which a refused plan must never follow, calls
+// them itself.
 func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) {
-	orgID := opts.OrgID
-
-	// TFAC-477 runaway-spend fuse: if the org has hit its daily LLM spend cap,
-	// refuse the spawn before any blueprint resolution or DB write — so no
-	// blueprint_run is minted and the choke point holds for manual + autonomous
-	// alike. Fails open on a read error (see checkDailyCostCap). context.Background
-	// — Delegate is claims-less, and the cap reads through the admin pool.
-	if err := s.checkDailyCostCap(context.Background(), orgID); err != nil {
-		return "", err
-	}
-
-	// Resolve this run's GitHub client + default model per (org, owner, team).
-	// Both modes go through the same seam: the resolver mints an
-	// App-installation token in multi or borrows the keychain PAT in local;
-	// modelFor reads the task's team default (a multi-team org honors each
-	// team's model choice). owner is parsed from the task (empty for Jira
-	// runs); task.TeamID is the run's owning team — nullable now, but a task
-	// reaching Delegate always has a resolved owner (an unowned task gates
-	// auto-fire off, and a manual claim consolidates the owner first), so the
-	// nil deref to "" is purely defensive. context.Background — Delegate has
-	// no request ctx and the resolve is a bounded token-mint / DB read; the
-	// run's own cancellable ctx is created further down for the subprocess.
+	// task.TeamID is the run's owning team — nullable, but a task reaching
+	// Delegate always has a resolved owner (an unowned task gates auto-fire
+	// off, and a manual claim consolidates the owner first), so the nil deref
+	// to "" is purely defensive.
 	teamID := ""
 	if task.TeamID != nil {
 		teamID = *task.TeamID
 	}
 	// The firing's own consolidation wins over what the task currently says.
-	// It commits inside the firing transaction, further down, so the row still
-	// reads the old owner here — and everything below (the per-team spend cap,
-	// the team's model default and enable-set) is about the team this run
-	// belongs to, which is the team that is firing it.
+	// It commits inside the firing transaction, so the row still reads the old
+	// owner here — and everything the plan checks (the per-team spend cap, the
+	// team's model default and enable-set) is about the team this run belongs
+	// to, which is the team that is firing it.
 	if opts.OwnerTeamID != "" {
 		teamID = opts.OwnerTeamID
 	}
+	plan, err := s.PlanDelegation(task, teamID, opts)
+	if err != nil {
+		return "", err
+	}
+	return s.FireDelegation(plan)
+}
 
-	// TFAC-482 per-team fuse: after the org-wide cap above, also refuse the spawn
-	// when THIS team has hit its own daily LLM spend cap (EE/governance-gated;
-	// dormant when unlicensed, with the org cap as the safety net). Skipped for an
-	// unowned task (no team to cap). Same claims-less admin-pool read + fail-open
-	// posture as the org cap, and likewise before any blueprint resolution or DB
-	// write so a tripped team cap mints no blueprint_run.
+// DelegationPlan is a delegation that has passed every check PlanDelegation
+// makes, resolved to what its firing writes. Its fields are unexported so that
+// PlanDelegation is the only way to make one: FireDelegation reads no
+// configuration of its own, so a plan nobody checked would fire unchecked.
+type DelegationPlan struct {
+	orgID             string
+	task              domain.Task
+	triggerType       string
+	triggerID         string
+	triggeringEventID string
+	creatorUserID     string
+	actorAgentID      string
+	taskClaim         db.AgentClaimStamp
+	ownerTeamID       string
+	blueprint         domain.Blueprint
+	firstStep         domain.BlueprintStep
+	// stepPlan is the blueprint's steps with each prompt's content, frozen
+	// onto the blueprint_run at mint.
+	stepPlan []domain.BlueprintPlanStep
+	// firstStepModel is step 0's model: its own pin, or the team default it
+	// inherits.
+	firstStepModel string
+}
+
+// PlanDelegation makes every check a delegation of task makes ahead of its
+// firing transaction, and resolves what that transaction writes: both daily
+// spend caps, the task's repository, the team's model configuration and its
+// default, the blueprint and its steps, each step's prompt, the providers of
+// the models the run could use, and step 0's model. It writes nothing and
+// emits nothing, so a refusal leaves no trace for anyone to undo.
+//
+// teamID is the team the run will belong to. It is an argument rather than
+// read off task because a caller can plan before the write that moves the
+// task to that team, when the row still names the team it is leaving.
+//
+// The refusals are typed, so a caller can tell them apart: a *CostCapError
+// (ErrDailyCostCapReached), domain.ErrNoDefaultModel, ErrBlueprintNotFound,
+// ErrBlueprintUnspecified, ErrBlueprintNoSteps, ErrPromptNotFound,
+// ErrPromptUnspecified, modelaccess.ErrNoCredentials,
+// modelaccess.ErrProviderUnconfigured, and domain.ErrModelNotEnabled.
+// RefusalCause classifies them. ErrBlueprintOtherTeam is typed too and is
+// not one RefusalCause classifies: only a manual delegation can meet it.
+// Anything else is a read that failed.
+//
+// No GitHub client is resolved here: the dispatcher resolves one per claim.
+func (s *Spawner) PlanDelegation(task domain.Task, teamID string, opts DelegateOpts) (DelegationPlan, error) {
+	orgID := opts.OrgID
+	// context.Background — the spawner's entry points are claims-less, and
+	// every read below is a bounded store read on the admin pool or under the
+	// creator's synthetic claims.
+	ctx := context.Background()
+
+	// Runaway-spend fuse: if the org has hit its daily LLM spend cap,
+	// refuse before any blueprint resolution — so the choke point holds for
+	// manual + autonomous alike. Fails open on a read error (see
+	// checkDailyCostCap).
+	if err := s.checkDailyCostCap(ctx, orgID); err != nil {
+		return DelegationPlan{}, err
+	}
+
+	// Per-team fuse: after the org-wide cap above, also refuse when
+	// THIS team has hit its own daily LLM spend cap (EE/governance-gated;
+	// dormant when unlicensed, with the org cap as the safety net). Skipped for
+	// an unowned task (no team to cap). Same claims-less admin-pool read +
+	// fail-open posture as the org cap.
 	if teamID != "" {
-		if err := s.checkTeamDailyCostCap(context.Background(), orgID, teamID); err != nil {
-			return "", err
+		if err := s.checkTeamDailyCostCap(ctx, orgID, teamID); err != nil {
+			return DelegationPlan{}, err
 		}
 	}
 
+	// A GitHub task's run is about its repository, so a task whose repository
+	// row can't be read is refused here rather than at the claim that would
+	// build its workspace.
+	if _, err := s.taskRepository(ctx, orgID, task); err != nil {
+		return DelegationPlan{}, err
+	}
 	// The team's model configuration is captured here — its default is stamped
 	// onto every enqueued step so the whole blueprint runs on one model, and its
-	// enable-set is what each step's pin is held to. The GitHub client is
-	// resolved per-claim by the dispatcher (the queue path defers all workspace
-	// setup off this call).
-	owner, repo, err := s.taskOwnerRepo(context.Background(), orgID, task)
+	// enable-set is what each step's pin is held to.
+	teamModels, err := s.resolveModel(ctx, orgID, teamID)
 	if err != nil {
-		return "", err
-	}
-	_, teamModels, err := s.resolveRunCredentials(context.Background(), orgID, owner, repo, teamID)
-	if err != nil {
-		return "", err
+		return DelegationPlan{}, err
 	}
 	// A team whose default its own set no longer includes refuses right here,
-	// before any write, naming the model. Asked at the delegation because this
-	// is where the default is chosen for the whole firing.
+	// naming the model. Asked at the delegation because this is where the
+	// default is chosen for the whole firing.
 	defaultModel, err := teamModels.RequireDefault()
 	if err != nil {
-		return "", err
+		return DelegationPlan{}, err
 	}
 
 	// Compute trigger type + creator user up front so resolvePrompt
@@ -379,7 +465,6 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	if triggerType == "" {
 		triggerType = "manual"
 	}
-	triggerID := opts.TriggerID
 
 	// Pair creator_user_id with trigger_type per the audit-honesty
 	// invariant. Manual runs (the delegate route / drag-to-Agent / factory
@@ -398,54 +483,29 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	}
 
 	// Resolve the blueprint to fire + its ordered steps under the right pool
-	// for the trigger type. There is one execution path now: every blueprint —
+	// for the trigger type. There is one execution path: every blueprint —
 	// 1-step or multi-step — mints a blueprint_run and runs through the
 	// orchestrator (it just loops once for a 1-step). No step-count branch.
 	blueprint, err := s.resolveBlueprint(orgID, opts.ExplicitBlueprintID, triggerType, creatorUserID)
 	if err != nil {
-		return "", err
+		return DelegationPlan{}, err
+	}
+	// The read above admits any blueprint the caller can see, which for a
+	// person on several teams is every one of those teams'. A trigger's
+	// blueprint is its own team's by foreign key, so this refuses only a
+	// manual delegation. A plan for an unowned task names no team to compare
+	// with, as for the per-team cap above.
+	if teamID != "" && blueprint.TeamID != teamID {
+		return DelegationPlan{}, fmt.Errorf("%w: %q", ErrBlueprintOtherTeam, blueprint.Name)
 	}
 	steps, err := s.resolveBlueprintSteps(orgID, blueprint.ID, triggerType, creatorUserID)
 	if err != nil {
-		return "", fmt.Errorf("load blueprint steps: %w", err)
+		return DelegationPlan{}, fmt.Errorf("load blueprint steps: %w", err)
 	}
 	if len(steps) == 0 {
-		return "", fmt.Errorf("blueprint %q has no steps", blueprint.Name)
+		return DelegationPlan{}, fmt.Errorf("%w: %q", ErrBlueprintNoSteps, blueprint.Name)
 	}
 
-	model := defaultModel
-
-	// Bump blueprint usage_count, routed per trigger type. Manual delegations
-	// write under the user's synthetic claims; event-triggered ones fire
-	// through the admin pool.
-	bgCtx := context.Background()
-	if triggerType == "manual" {
-		if e := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.Blueprints.IncrementUsage(bgCtx, orgID, blueprint.ID)
-		}); e != nil {
-			delegateLog.Warn("increment usage for blueprint failed", "blueprint", blueprint.ID, "error", e)
-		}
-	} else if e := s.blueprints.IncrementUsageSystem(bgCtx, orgID, blueprint.ID); e != nil {
-		delegateLog.Warn("increment usage for blueprint failed", "blueprint", blueprint.ID, "error", e)
-	}
-
-	// One dispatch path: mint the blueprint_run, then run the orchestrator
-	// (which loops once for a 1-step blueprint — N=1 is no longer a special
-	// path). The blueprint_run is the firing unit and the crash-consistent
-	// commit point of a delegation, so it's created synchronously here, before
-	// the orchestrator goroutine does any worktree setup — that's where the
-	// relocated replay fence lives. worktree_path is filled in after setup.
-	blueprintRunID := uuid.New().String()
-	// triggering_event_id is event-path-only: it's half the replay-fence key, so
-	// a manual run that carried one would participate in the
-	// (triggering_event_id, trigger_id) unique index and could either trip a
-	// spurious UNIQUE violation or stamp misleading provenance. The DelegateOpts
-	// contract says manual never sets it, but pin that here rather than trust the
-	// caller — only the event path threads it onto the row.
-	triggeringEventID := ""
-	if triggerType == "event" {
-		triggeringEventID = opts.TriggeringEventID
-	}
 	// Freeze the resolved step plan onto the blueprint_run at mint: snapshot
 	// each step's full prompt content (not just ids) so the
 	// dispatcher/reactor/resume sequence off this plan and an in-flight run is
@@ -458,7 +518,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	for i, st := range steps {
 		p, err := s.resolvePrompt(orgID, task, st.StepPromptID, triggerType, creatorUserID)
 		if err != nil {
-			return "", fmt.Errorf("resolve step %d prompt for blueprint %q: %w", st.StepIndex, blueprint.Name, err)
+			return DelegationPlan{}, fmt.Errorf("resolve step %d prompt for blueprint %q: %w", st.StepIndex, blueprint.Name, err)
 		}
 		stepPlan[i] = domain.BlueprintPlanStep{
 			StepIndex:    st.StepIndex,
@@ -472,36 +532,84 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 	}
 	// Refuse a firing whose models this org cannot authenticate — a provider it
-	// never connected. Here, because this is the last point before the commit:
-	// the plan's pins are resolved and nothing durable has been written, so the
-	// refusal leaves no blueprint_run to reap and nothing to retry.
-	if err := s.checkModelProviders(bgCtx, orgID, blueprintModels(model, stepPlan)); err != nil {
-		return "", err
+	// never connected — once the plan's pins are resolved.
+	if err := s.checkModelProviders(ctx, orgID, blueprintModels(defaultModel, stepPlan)); err != nil {
+		return DelegationPlan{}, err
 	}
-	// Step 0's model, decided before the commit for the same reason: a pin the
-	// team's enable-set excludes fails the firing outright, and a firing that
-	// never happened should leave no blueprint_run behind. Later steps' pins are
-	// held to the set at their own advance instead, where the set is read fresh
-	// — narrowing one mid-flight is the case no check here can see.
-	stepModel, err := stepModelOrInherit(stepPlan[0].Model, model, teamModels.Enabled())
+	// Step 0's model: a pin the team's enable-set excludes fails the firing
+	// outright, and a firing that never happened should leave no blueprint_run
+	// behind. Later steps' pins are held to the set at their own advance
+	// instead, where the set is read fresh — narrowing one mid-flight is the
+	// case no check here can see.
+	firstStepModel, err := stepModelOrInherit(stepPlan[0].Model, defaultModel, teamModels.Enabled())
 	if err != nil {
-		return "", err
+		return DelegationPlan{}, err
 	}
 
+	// triggering_event_id is event-path-only: it's half the replay-fence key, so
+	// a manual run that carried one would participate in the
+	// (triggering_event_id, trigger_id) unique index and could either trip a
+	// spurious UNIQUE violation or stamp misleading provenance. The DelegateOpts
+	// contract says manual never sets it, but pin that here rather than trust the
+	// caller — only the event path threads it onto the row.
+	triggeringEventID := ""
+	if triggerType == "event" {
+		triggeringEventID = opts.TriggeringEventID
+	}
+
+	return DelegationPlan{
+		orgID:             orgID,
+		task:              task,
+		triggerType:       triggerType,
+		triggerID:         opts.TriggerID,
+		triggeringEventID: triggeringEventID,
+		creatorUserID:     creatorUserID,
+		actorAgentID:      opts.ActorAgentID,
+		taskClaim:         opts.TaskClaim,
+		ownerTeamID:       opts.OwnerTeamID,
+		blueprint:         *blueprint,
+		firstStep:         steps[0],
+		stepPlan:          stepPlan,
+		firstStepModel:    firstStepModel,
+	}, nil
+}
+
+// FireDelegation commits a planned delegation's run and starts it: the
+// blueprint_run with its first step, in one transaction, and then what follows
+// that commit. It checks nothing the plan checked: a blueprint, prompt, model,
+// credential, or spend cap that changed since the plan was made is not seen
+// here. What the transaction itself refuses is the task's state at the commit:
+// another active run (ErrTaskBusy), a closed task on the event path
+// (ErrTaskClosed), or an archived team (ErrTeamArchived). A replay the event
+// fence caught is ErrAlreadyFired.
+func (s *Spawner) FireDelegation(plan DelegationPlan) (string, error) {
+	if len(plan.stepPlan) == 0 {
+		return "", errors.New("delegate: fire of a delegation PlanDelegation did not plan")
+	}
+	orgID := plan.orgID
+	bgCtx := context.Background()
+
+	// One dispatch path: mint the blueprint_run, then run the orchestrator,
+	// which loops once for a 1-step blueprint. The blueprint_run is the firing
+	// unit and the crash-consistent commit point of a delegation, and the
+	// replay fence is on its row, so it's created synchronously here, before
+	// the orchestrator goroutine does any worktree setup. worktree_path is
+	// filled in after setup.
+	blueprintRunID := uuid.New().String()
 	brRow := domain.BlueprintRun{
 		ID:                blueprintRunID,
-		BlueprintID:       blueprint.ID,
-		TaskID:            task.ID,
-		TriggerType:       domain.BlueprintTriggerType(triggerType),
-		TriggerID:         triggerID,
-		TriggeringEventID: triggeringEventID,
+		BlueprintID:       plan.blueprint.ID,
+		TaskID:            plan.task.ID,
+		TriggerType:       domain.BlueprintTriggerType(plan.triggerType),
+		TriggerID:         plan.triggerID,
+		TriggeringEventID: plan.triggeringEventID,
 		// Freeze the executing bot at mint. Every step run inherits this onto
 		// conversations.actor_agent_id, so execution attribution is resolved once here
 		// rather than re-derived from the task claim per step (which is empty at
 		// step 0 on the event path and cleared by a mid-blueprint takeover).
-		ActorAgentID: opts.ActorAgentID,
+		ActorAgentID: plan.actorAgentID,
 		Status:       domain.BlueprintRunStatusRunning,
-		StepPlan:     stepPlan,
+		StepPlan:     plan.stepPlan,
 	}
 	// The firing is ONE transaction: the blueprint_run insert, the delegation
 	// boundary on the task's settled conversations, the task's owner
@@ -521,18 +629,18 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// delegations carry no triggering_event_id and take no part in that fence
 	// — but the one-active-run-per-task index holds them like any other mint,
 	// which is what makes two concurrent delegate gestures produce one run.
-	// Everything before this (blueprint/step resolution, usage bumps) is cheap
-	// and idempotent enough to re-run on a fenced replay.
+	// The plan before this is reads only, so a fenced replay re-runs it at no
+	// cost.
 	//
-	// opts.TaskClaim rides the same transaction: the firing is the commitment
+	// plan.taskClaim rides the same transaction: the firing is the commitment
 	// point, so the task's claim commits with it or not at all. A claim
 	// *refusal* (a user won the race, the bot already owns it, or, for a
 	// person's delegation, the task went terminal) leaves the run and its step
 	// committed — the claim race has a winner either way and the run must
 	// still stand. An event firing on a terminal task is refused before the
 	// claim (ErrTaskClosed).
-	firstStep := s.buildStepConversation(bgCtx, orgID, blueprintRunID, task, steps[0], stepModel, triggerType, triggerID, creatorUserID, brRow.ActorAgentID)
-	inserted, _, _, ended, err := s.blueprints.CreateRunWithFirstStepSystem(bgCtx, orgID, brRow, opts.TaskClaim, opts.OwnerTeamID, firstStep)
+	firstStep := s.buildStepConversation(bgCtx, orgID, blueprintRunID, plan.task, plan.firstStep, plan.firstStepModel, plan.triggerType, plan.triggerID, plan.creatorUserID, brRow.ActorAgentID)
+	inserted, _, _, ended, err := s.blueprints.CreateRunWithFirstStepSystem(bgCtx, orgID, brRow, plan.taskClaim, plan.ownerTeamID, firstStep)
 	if err != nil {
 		// The one-active-run-per-task index refused: this task already holds a
 		// live engagement. The delegate route tears the prior one down before
@@ -555,6 +663,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		// claim, its first step and its boundary committed already.
 		return "", ErrAlreadyFired
 	}
+	s.incrementBlueprintUsage(bgCtx, plan)
 	for _, c := range ended {
 		// One ring per row, after the boundary commits — the same shape the
 		// step-advance stamper uses. A conversation that ended owing memory is
@@ -571,15 +680,34 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// and the reactor enqueues each next step (or finalizes). No in-process
 	// for-loop holds the sequencing — blueprint_runs does
 	// (current_step_index), so a crash mid-flight is recoverable.
-	toast.FireUser(s.wsHub, orgID, creatorUserID, toast.LevelInfo, "", fmt.Sprintf("Blueprint started: %s (%s)",
-		truncateToastMsg(blueprint.Name, 60), shortConversationID(blueprintRunID)))
+	toast.FireUser(s.wsHub, orgID, plan.creatorUserID, toast.LevelInfo, "", fmt.Sprintf("Blueprint started: %s (%s)",
+		truncateToastMsg(plan.blueprint.Name, 60), shortConversationID(blueprintRunID)))
 
 	// The blueprint_run is live → announce the placement the bot claim already
 	// made. This is the only board work a delegation does; nothing in the
 	// run's later life moves the card again.
-	s.announceTaskPlacement(orgID, task.ID)
+	s.announceTaskPlacement(orgID, plan.task.ID)
 	s.wakeDispatcher()
 	return blueprintRunID, nil
+}
+
+// incrementBlueprintUsage counts a committed run against its blueprint, under
+// the pool the trigger type routes by: a manual delegation writes under the
+// user's synthetic claims, an event firing through the admin pool. It runs
+// after the firing commits, so the count is of runs that exist. A failed bump
+// is logged and nothing more, because the run it counts already stands.
+func (s *Spawner) incrementBlueprintUsage(ctx context.Context, plan DelegationPlan) {
+	var err error
+	if plan.triggerType == "manual" {
+		err = s.tx.SyntheticClaimsWithTx(ctx, plan.orgID, plan.creatorUserID, func(ts db.TxStores) error {
+			return ts.Blueprints.IncrementUsage(ctx, plan.orgID, plan.blueprint.ID)
+		})
+	} else {
+		err = s.blueprints.IncrementUsageSystem(ctx, plan.orgID, plan.blueprint.ID)
+	}
+	if err != nil {
+		delegateLog.Warn("increment usage for blueprint failed", "blueprint", plan.blueprint.ID, "error", err)
+	}
 }
 
 // cloneHostBase returns the scheme://host of an HTTPS clone URL — the insteadOf
@@ -706,7 +834,7 @@ func withGitHubResolveCause(err, resolveErr error) error {
 
 // setupGitHub prepares a worktree for a GitHub PR task.
 //
-// On the executor path (sidecar non-nil) the GetPR client and the host-side
+// On the executor path (sidecar non-nil) the PR read's client and the host-side
 // clone both route through the run's credential sidecar — the client against
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Local reads the PR through
@@ -745,7 +873,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// The GitHub client bounds the call itself; the watchdog's operation is
 	// the backstop behind that bound.
 	endFetch := s.activityFor(conversationID).begin("fetch_pr", setupFetchOpDeadline)
-	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
+	pr, err := ghClient.GetPRBasic(fetchCtx, owner, repo, prNumber)
 	endFetch()
 	telemetry.RecordSpanError(fetchSpan, err, "fetching the pull request failed")
 	fetchSpan.End()
@@ -891,7 +1019,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		repo:       repo,
 		prNumber:   prNumber,
 		prCheckout: prCheckout,
-		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
+		prSkeleton: prSkeletonSource{client: ghClient, owner: owner, repo: repo, prNumber: prNumber},
 	}, nil
 }
 
@@ -1113,6 +1241,21 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 		return ""
 	}
 	return prskeleton.Render(*sk, prskeleton.Options{Now: time.Now()})
+}
+
+// prSkeletonSource is a pull request's history skeleton, not yet fetched: the
+// client a run reads its pull request through, and the pull request.
+type prSkeletonSource struct {
+	client   *ghclient.Client
+	owner    string
+	repo     string
+	prNumber int
+}
+
+// render is renderPRSkeleton over the source: two GETs to GitHub, which is
+// why a launch calls it only when the block will reach the model.
+func (src prSkeletonSource) render(ctx context.Context) string {
+	return renderPRSkeleton(ctx, src.client, src.owner, src.repo, src.prNumber)
 }
 
 // setupJira prepares the run-root for a Jira delegation. No repo is

@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -100,6 +101,11 @@ type Spawner struct {
 	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
 	// nil-safe (local resolves credentials directly and never gates on it).
 	claimCredentials db.ClaimCredentialsStore
+	// credDoorbells rings an engagement's credential wait when the brain
+	// has sealed its bundle (cred_sealed). nil-safe: a nil set never rings,
+	// and the wait reads on its poll alone. Set via SetCredentialDoorbells, in
+	// multi mode on a process that runs engagements.
+	credDoorbells *ctlbus.Doorbells
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout.
@@ -144,9 +150,9 @@ type Spawner struct {
 	// deletion; every per-org read goes through OrgsStore.GetSettingsSystem
 	// (no JWT claims context on the run goroutine).
 	orgs db.OrgsStore
-	// spend reads the org's settled LLM spend for the TFAC-477 daily-cost-cap
-	// admission check at Delegate entry. Read via SpendByCategorySystem — the
-	// admin-pool variant — because Delegate runs under context.Background()
+	// spend reads the org's settled LLM spend for the daily-cost-cap
+	// admission check in PlanDelegation. Read via SpendByCategorySystem — the
+	// admin-pool variant — because the plan runs under context.Background()
 	// with no JWT claims, so an app-pool/RLS read would see nothing and the cap
 	// would never trip. Read-only; a plain store ref like s.orgs.
 	spend db.SpendStore
@@ -267,9 +273,13 @@ type Spawner struct {
 	// frames), and so whose tabs may count as present for its permission
 	// prompts (see presentFor). Nil, the default and always the case in
 	// local mode, sends those frames to the whole org and counts any tab in
-	// it; multi mode wires the per-frame resolution through
-	// SetConversationFrameAudience.
+	// it; a multi-mode pod that serves HTTP wires the per-frame resolution
+	// through SetConversationFrameAudience.
 	frameAudience conversationframe.AudienceFunc
+	// framesDeferred leaves each frame's audience to the control pods that
+	// deliver it (DeferConversationFrameAudience): an executor's database
+	// role cannot read the memberships the audience is resolved from.
+	framesDeferred bool
 	// presence is the optional multi-mode presence checker (TFAC-584),
 	// wired via SetPresenceChecker. When set, presentFor consults it
 	// (local Hub state OR the fleet-wide ws_presence table) instead of
@@ -377,6 +387,11 @@ type Spawner struct {
 	// field when set; zero keeps each constant. Only tests set it, through
 	// setActivityTimings.
 	activityTimingsOverride activityTimings
+	// liveRunOverride stands in for the SDK process and its driver when set:
+	// it is handed the spec runLiveAndDrive would start and returns the
+	// outcome the driver would have. Only tests set it, to read what a launch
+	// hands the runtime and to end a turn without a process.
+	liveRunOverride func(context.Context, liveRunSpec) liveOutcome
 
 	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	firingWaker    FiringWaker    // nil-safe; set post-construction via SetFiringWaker
@@ -392,6 +407,13 @@ type Spawner struct {
 	// why a nil one is survivable — the doorbell only shortens the wait, and
 	// the brain's backstop sweep settles the debt either way.
 	memoryOwed func(orgID, conversationID string)
+	// delegatorNotice is the doorbell a failure or a park that waits on a
+	// person rings: the brain's DelegatorNotices sweep tells the person who
+	// delegated the conversation, from the rows. Nil-safe; set
+	// post-construction via SetOnDelegatorNotice and read through
+	// kickDelegatorNotice under mu, like memoryOwed beside it. A nil one costs
+	// the notice one sweep interval.
+	delegatorNotice func(orgID string)
 
 	// commitSignRequester queues a sandboxed run's commit signature requests
 	// for the control plane, handed to each engagement's relay server at
@@ -798,6 +820,33 @@ func (s *Spawner) SetOnMemoryOwed(fn func(orgID, conversationID string)) {
 	s.memoryOwed = fn
 }
 
+// SetOnDelegatorNotice wires the delegator-notice doorbell. Post-construction,
+// same pattern as SetOnMemoryOwed; nil (the default, and every test) leaves
+// the notice to the brain's next sweep.
+func (s *Spawner) SetOnDelegatorNotice(fn func(orgID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delegatorNotice = fn
+}
+
+// SetCredentialDoorbells wires the doorbells this process's tf_ctl listener
+// rings on cred_sealed, keyed by conversation, so an engagement's credential
+// wait reads its bundle once the brain has written it. Post-construction,
+// same pattern as SetCommitSignRequester.
+func (s *Spawner) SetCredentialDoorbells(d *ctlbus.Doorbells) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credDoorbells = d
+}
+
+// credentialDoorbells is the doorbells SetCredentialDoorbells wired, read
+// under mu.
+func (s *Spawner) credentialDoorbells() *ctlbus.Doorbells {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.credDoorbells
+}
+
 // SetCommitSignRequester wires the queue a sandboxed run's sign_digest relay op
 // signs through. Post-construction, same pattern as SetOnMemoryOwed; the app
 // sets it on the roles that run sandboxed engagements in multi mode.
@@ -847,6 +896,20 @@ func (s *Spawner) kickMemoryOwed(orgID, conversationID string) {
 	fn(orgID, conversationID)
 }
 
+// kickDelegatorNotice rings the delegator-notice doorbell for orgID. Call it
+// once the failure or the park is recorded: the sweep it wakes reads the rows,
+// so a ring ahead of the write tells nobody until the next pass. Synchronous
+// for the reason kickMemoryOwed is.
+func (s *Spawner) kickDelegatorNotice(orgID string) {
+	s.mu.Lock()
+	fn := s.delegatorNotice
+	s.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(orgID)
+}
+
 // SetConversationFrameAudience scopes the spawner's conversation frames to
 // each conversation's REST audience, resolved per frame, and the presence
 // check behind its permission prompts to the same audience, resolved per
@@ -857,11 +920,25 @@ func (s *Spawner) SetConversationFrameAudience(audience conversationframe.Audien
 	s.frameAudience = audience
 }
 
+// DeferConversationFrameAudience sends the spawner's conversation frames
+// without an audience, each naming its conversation for the control pods
+// that deliver it to resolve (conversationframe.NewDeferredNotifier). For a
+// multi-mode process that serves no HTTP: its database role cannot read
+// memberships, and its hub holds no sockets. Its permission prompts then
+// count nobody present (see presentFor). Multi-mode wiring only, once at
+// boot before any run starts, in place of SetConversationFrameAudience.
+func (s *Spawner) DeferConversationFrameAudience() {
+	s.framesDeferred = true
+}
+
 // frames is the notifier every websocket frame about one conversation goes
 // through (message, conversation_update, the permission frames). It is
 // built over the spawner's current hub, so a hub replaced after
 // construction is the one the frame reaches.
 func (s *Spawner) frames() *conversationframe.Notifier {
+	if s.framesDeferred {
+		return conversationframe.NewDeferredNotifier(s.wsHub)
+	}
 	return conversationframe.NewNotifier(s.wsHub, s.frameAudience)
 }
 
@@ -1085,28 +1162,6 @@ func (s *Spawner) Storage() storage.Storage {
 	return s.blobs
 }
 
-// resolveRunCredentials resolves the per-(org, owner) GitHub client and the
-// run's team model configuration. Both modes call this identically;
-// mode-awareness lives inside the resolver (App token vs PAT) and the
-// secrets reader (system door vs nil), not at the call site. owner is the
-// GitHub account the run targets — empty for Jira runs, which don't
-// pre-clone. repo disambiguates a bundle-backed lookup (TFAC-614) when the
-// run's authorized set covers more than one repo under owner; empty when
-// the caller has none in view. teamID is the task's owning team, so a
-// multi-team org honors each team's model choice; empty falls back to the
-// org default team.
-//
-// A model that cannot be resolved is an error rather than a substitution, so
-// the caller refuses the delegation instead of buying a model nobody chose.
-func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo, teamID string) (*ghclient.Client, domain.TeamModels, error) {
-	models, err := s.resolveModel(ctx, orgID, teamID)
-	if err != nil {
-		return nil, domain.TeamModels{}, err
-	}
-	gh, _ := s.resolveGHClient(ctx, orgID, owner, repo)
-	return gh, models, nil
-}
-
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
 // resolver, falling back to the constructor-supplied client when
 // no resolver is wired (test fixtures). A resolve failure returns a nil
@@ -1125,7 +1180,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // would let credbundle.ResolveRepoToken's map iteration pick an arbitrary sibling
 // repo's token, which then 403s every call it's used for.
 func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
-	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
+	// TF_ROLE=executor never reaches here for a run's PR read — setupGitHub
 	// builds its client against the credential sidecar's GitHub-REST proxy
 	// (sidecar), so this resolver path serves only all/local.
 	s.mu.Lock()
@@ -1398,6 +1453,10 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 	// still leaves the setup we just traced worth exporting.
 	if phase == "" {
 		s.endEngagement(conversationID, engagementLive)
+	}
+	// No store, no claim row to write and no stored status to announce.
+	if s.conversations == nil {
+		return false
 	}
 	// Detached from cancellation exactly as the former context.Background()
 	// was — a shutdown mid-setup must not abort the progress write — but

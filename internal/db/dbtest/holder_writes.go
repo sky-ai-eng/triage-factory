@@ -77,7 +77,7 @@ func HolderMarkFailed(store db.ConversationStore, ctx context.Context, orgID, co
 	if err != nil {
 		return false, err
 	}
-	ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind)
+	ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind, "")
 	if err == nil && !ok {
 		releaseMinted(ctx, store, orgID, conversationID, minted)
 	}

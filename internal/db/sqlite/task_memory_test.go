@@ -133,13 +133,13 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.TaskMemory.GetMemoriesForEntity(ctx, badOrg, "e"); err == nil {
 		t.Error("GetMemoriesForEntity(non-local org) should error")
 	}
-	if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID); err == nil {
+	if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID, ""); err == nil {
 		t.Error("GetMemoriesForEntitySystem(non-local org) should error")
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, badOrg, "r", "e", domain.MemoryRolePrimary); err == nil {
 		t.Error("RecordEntityTouchSystem(non-local org) should error")
 	}
-	if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID); err == nil {
+	if _, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, badOrg, "e", runmode.LocalDefaultTeamID, ""); err == nil {
 		t.Error("CountMemoriesForEntitySystem(non-local org) should error")
 	}
 }
@@ -161,7 +161,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
-	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID); err != nil {
+	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID, ""); err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 	} else if n != 1 {
 		t.Errorf("Count = %d, want 1", n)
@@ -175,7 +175,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
-	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID); err != nil {
+	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID, ""); err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 	} else if n != 2 {
 		t.Errorf("Count = %d, want 2", n)
@@ -183,7 +183,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 
 	// Unrelated entity has none.
 	_, otherEntity := seedSQLiteConversationForTaskMemory(t, conn, "count-unrelated")
-	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, otherEntity, runmode.LocalDefaultTeamID); err != nil {
+	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, otherEntity, runmode.LocalDefaultTeamID, ""); err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 	} else if n != 0 {
 		t.Errorf("Count for unrelated entity = %d, want 0", n)

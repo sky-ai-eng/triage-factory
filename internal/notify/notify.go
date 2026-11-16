@@ -14,7 +14,9 @@
 //
 // No verb returns a value. A failure is logged and counted in
 // tf_notify_write_failures_total{kind}, and never fails the work that raised
-// it; Set and Sync correct it on the next evaluation.
+// it; Set and Sync correct it on the next evaluation. A producer that records
+// what it has told, so as to tell it once, passes that record as a Guard to
+// SetGuarded or PostGuarded, which commit it only with the notification.
 //
 // A verb opens its own transaction, so call it outside any of the producer's:
 // local mode's database has one connection, and a verb inside a transaction

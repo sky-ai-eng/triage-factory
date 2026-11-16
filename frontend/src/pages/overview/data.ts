@@ -44,7 +44,7 @@ export function utcMidnightISO(now: number = Date.now()): string {
  *  own mark, because it should not have to be read to be seen. A run with no
  *  task (or a conversation-shaped source like Slack) is a conversation. */
 export function sourceOf(conv: Conversation, task: Task | undefined): RunSource {
-  if (isFailedStatus(conv.Status)) return 'alert'
+  if (isFailedStatus(conv.status)) return 'alert'
   if (task?.source === 'github') return 'pull'
   if (task?.source === 'jira' || task?.source === 'linear') return 'ticket'
   return 'manual'
@@ -66,19 +66,24 @@ export function refOf(task: Task | undefined): string | null {
 }
 
 export function lifecycleOf(conv: Conversation): RunLifecycle {
-  if (conv.Status === 'queued') return 'queued'
-  if ((ACTIVE_STATUSES as readonly string[]).includes(conv.Status)) return 'working'
-  if (isFailedStatus(conv.Status)) return 'failed'
+  if (conv.status === 'queued') return 'queued'
+  if ((ACTIVE_STATUSES as readonly string[]).includes(conv.status)) return 'working'
+  if (isFailedStatus(conv.status)) return 'failed'
   return 'done'
 }
 
 /** A working (or queued) row's one prose string. A queued run's prose names
- *  the work it will do — the wait itself is the hourglass mark's job. From
- *  the claim on it is the line every surface narrates a live conversation
- *  with (lib/conversationStatus activeProse): the setup phase, then the
- *  agent's own action, with the bare state word until it has one. */
+ *  the work it will do — the wait itself is the hourglass mark's job — unless
+ *  it waits on the memory its task's previous conversation owes, which no
+ *  slot frees and which the row names instead. From the claim on it is the
+ *  line every surface narrates a live conversation with
+ *  (lib/conversationStatus activeProse): the setup phase, then the agent's
+ *  own action, with the bare state word until it has one. */
 export function workingProse(conv: Conversation, task: Task | undefined): string {
-  if (conv.Status === 'queued') return task?.title || 'Waiting for a slot'
+  if (conv.status === 'queued') {
+    if (task?.memory_pending) return 'Waiting on memory'
+    return task?.title || 'Waiting for a slot'
+  }
   return activeProse(conv) ?? 'Working'
 }
 
@@ -97,8 +102,8 @@ const FAILURE_PROSE: Record<string, string> = {
  *  unresolved deliverables name what to approve; the remainder of the attention
  *  set is a conversation holding a permission prompt. */
 export function askProse(conv: Conversation): string {
-  if (isFailedStatus(conv.Status)) {
-    return FAILURE_PROSE[conv.FailureKind ?? ''] ?? 'Failed'
+  if (isFailedStatus(conv.status)) {
+    return FAILURE_PROSE[conv.failure_kind ?? ''] ?? 'Failed'
   }
   const prs = conv.unresolved_pr_count ?? 0
   const reviews = conv.unresolved_review_count ?? 0
@@ -122,17 +127,17 @@ export function runningRow(
   renderAge: (iso: string) => ReactNode,
   now: number = Date.now(),
 ): RunRowItem {
-  const queued = conv.Status === 'queued'
+  const queued = conv.status === 'queued'
   // A run waiting out an unavailable model provider has no place in line, so
   // its one sentence says when it tries again rather than naming its work.
   const retryAt = retryingAt(conv, now)
   return {
-    id: conv.ID,
+    id: conv.id,
     source: sourceOf(conv, task),
     lifecycle: lifecycleOf(conv),
     activity: retryAt ? retryingAtLabel(retryAt) : workingProse(conv, task),
     ref: refOf(task),
-    age: renderAge(queued ? (conv.QueuedAt ?? conv.StartedAt) : workStartedAt(conv)),
+    age: renderAge(queued ? (conv.queued_at ?? conv.started_at) : workStartedAt(conv)),
     // queue_position is the 1-based place in line; the mark wears the places
     // AHEAD (position − 1), which is the component's contract — position 1 is
     // nobody ahead, and the mark says so rather than showing a misleading 1.
@@ -151,12 +156,12 @@ export function needsRow(
   renderAge: (iso: string) => ReactNode,
 ): RunRowItem {
   return {
-    id: conv.ID,
+    id: conv.id,
     source: sourceOf(conv, task),
     lifecycle: lifecycleOf(conv),
     activity: askProse(conv),
     ref: refOf(task),
-    age: renderAge(conv.CompletedAt ?? conv.StartedAt),
+    age: renderAge(conv.completed_at ?? conv.started_at),
     asks: true,
     href,
   }

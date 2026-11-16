@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/proxycert"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -97,9 +98,9 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	// derivation, so the mount source matches if validation runs). We inline the
 	// write+grant here rather than call agenthost.WriteCABundle to avoid the
 	// agenthost→agentproc import cycle a test in this package would create.
-	cert, certPEM, err := ghinjector.GenerateCert(net.HostIP)
+	cert, certPEM, err := proxycert.Generate("gh injector", net.HostIP)
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	certPath := sandbox.TrustedCABundlePath(conversationID)
 	// Registered before the writes, so a failed one still removes what it left.
@@ -240,9 +241,9 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = net.Close() })
 
-	cert, certPEM, err := ghinjector.GenerateCert(net.HostIP)
+	cert, certPEM, err := proxycert.Generate("gh injector", net.HostIP)
 	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
+		t.Fatalf("proxycert.Generate: %v", err)
 	}
 	certPath := sandbox.TrustedCABundlePath(conversationID)
 	// Registered before the writes, so a failed one still removes what it left.

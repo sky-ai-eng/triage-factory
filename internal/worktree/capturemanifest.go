@@ -42,7 +42,7 @@ type CheckoutCapture struct {
 	HasBundle bool `json:"has_bundle,omitempty"`
 	HasPatch  bool `json:"has_patch,omitempty"`
 	// LFSObjects are the ids of the Git LFS objects the stream carries for
-	// the bundle's commits, one member each.
+	// the checkout's unpushed commits, one member each.
 	LFSObjects []string `json:"lfs_objects,omitempty"`
 }
 

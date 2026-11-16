@@ -144,9 +144,9 @@ func TestConsumeStreamInteractive_InterruptMarksResult(t *testing.T) {
 
 // TestConsumeStreamInteractive_FoldTakesNewestRunningTotal pins the
 // accounting the merged result hands the driver: the SDK's total_cost_usd is
-// a process-wide running total on every result, so after two turns
-// reporting 0.10 then 0.30 the process spent 0.30. Each per-turn result
-// still reaches OnResult with its own wire figure.
+// a running total on every result, so after two turns reporting 0.10 then
+// 0.30 a process that resumed nothing spent 0.30. Each per-turn result still
+// reaches OnResult with its own wire figure.
 func TestConsumeStreamInteractive_FoldTakesNewestRunningTotal(t *testing.T) {
 	input := strings.Join([]string{
 		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":1000,"total_cost_usd":0.10,"result":"one"}`,
@@ -165,6 +165,48 @@ func TestConsumeStreamInteractive_FoldTakesNewestRunningTotal(t *testing.T) {
 	if merged == nil || merged.CostUSD != 0.30 || merged.DurationMs != 2600 || merged.NumTurns != 2 {
 		t.Errorf("merged accounting must be the newest running total, got %+v", merged)
 	}
+}
+
+// TestConsumeStreamInteractive_SubtractsTheSessionBaseline: a resumed
+// process reports its session's running total, the earlier processes' spend
+// included, so the reader measures the process's own spend from the total
+// the launch gave it. With a baseline of 0.25 and results of 0.5 then 0.75,
+// the process has spent 0.5, the session stands at 0.75, and the sink hears
+// each raw total. A total below the baseline is no spend at all, never a
+// negative one.
+func TestConsumeStreamInteractive_SubtractsTheSessionBaseline(t *testing.T) {
+	opts := RunOptions{SessionID: "sess-resumed", SessionCostBaselineUSD: 0.25}
+
+	t.Run("newest total less the baseline", func(t *testing.T) {
+		input := strings.Join([]string{
+			`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.5,"result":"one"}`,
+			`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.75,"result":"two"}`,
+		}, "\n") + "\n"
+		sink := &captureSink{}
+		l := &LiveRun{ready: make(chan struct{}), done: make(chan struct{})}
+		merged, err := l.consumeStreamInteractive(strings.NewReader(input), sink, newStreamStateFor(opts), nil, nil, "t")
+		if err != nil {
+			t.Fatalf("consumeStreamInteractive: %v", err)
+		}
+		if merged == nil || merged.CostUSD != 0.5 || merged.SessionCostUSD != 0.75 {
+			t.Errorf("merged = %+v, want CostUSD 0.5 and SessionCostUSD 0.75", merged)
+		}
+		if !slices.Equal(sink.sessionCosts, []float64{0.5, 0.75}) {
+			t.Errorf("OnSessionCost heard %v, want each raw total [0.5 0.75]", sink.sessionCosts)
+		}
+	})
+
+	t.Run("a total below the baseline is zero", func(t *testing.T) {
+		input := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.125,"result":"one"}` + "\n"
+		l := &LiveRun{ready: make(chan struct{}), done: make(chan struct{})}
+		merged, err := l.consumeStreamInteractive(strings.NewReader(input), NoopSink{}, newStreamStateFor(opts), nil, nil, "t")
+		if err != nil {
+			t.Fatalf("consumeStreamInteractive: %v", err)
+		}
+		if merged == nil || merged.CostUSD != 0 || merged.SessionCostUSD != 0.125 {
+			t.Errorf("merged = %+v, want CostUSD 0 and SessionCostUSD 0.125", merged)
+		}
+	})
 }
 
 // TestLiveRun_SendRefusedOnceClosing: from the moment Close begins, a Send is
@@ -254,4 +296,87 @@ func TestLiveRun_SendBlocksRefusesEmpty(t *testing.T) {
 	if stdin.String() != "" {
 		t.Errorf("refused send still wrote %q", stdin.String())
 	}
+}
+
+// TestLiveRun_SetSettingsWaitsForTheWrapper: SetSettings returns only once
+// the wrapper answers its set_settings, and the process reports the new
+// settings only when the answer says they applied. A refused move, a process
+// that ends first, a caller that gives up, and a wrapper that never answers
+// are each an error and leave the old settings.
+func TestLiveRun_SetSettingsWaitsForTheWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		timeout            time.Duration
+		answer             func(l *LiveRun, id string, cancel context.CancelFunc)
+		wantErr            bool
+		wantModel, wantEff string
+	}{
+		{"applied", 0, func(l *LiveRun, id string, _ context.CancelFunc) {
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":true}`)
+		}, false, "opus", "max"},
+		{"refused", 0, func(l *LiveRun, id string, _ context.CancelFunc) {
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":false,"error":"no such model"}`)
+		}, true, "haiku", "low"},
+		{"the process ended first", 0, func(l *LiveRun, _ string, _ context.CancelFunc) { close(l.done) }, true, "haiku", "low"},
+		{"the caller gave up", 0, func(_ *LiveRun, _ string, cancel context.CancelFunc) { cancel() }, true, "haiku", "low"},
+		{"no answer in time", 250 * time.Millisecond, func(*LiveRun, string, context.CancelFunc) {}, true, "haiku", "low"},
+		{"an answer after the wait is over", 250 * time.Millisecond, func(l *LiveRun, id string, _ context.CancelFunc) {
+			time.Sleep(400 * time.Millisecond)
+			l.settleAnswer(t, `{"type":"control","subtype":"settings_result","id":"`+id+`","applied":true}`)
+		}, true, "haiku", "low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := newSyncBuffer()
+			l := &LiveRun{
+				stdin:           captureWriteCloser{stdin},
+				ready:           make(chan struct{}),
+				done:            make(chan struct{}),
+				model:           "haiku",
+				effort:          "low",
+				settingsTimeout: tc.timeout,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errc := make(chan error, 1)
+			go func() { errc <- l.SetSettings(ctx, "opus", "max") }()
+
+			var sent struct {
+				Kind, ID, Model, Effort string
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for sent.ID == "" {
+				if time.Now().After(deadline) {
+					t.Fatal("no set_settings was written")
+				}
+				_ = json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &sent)
+				time.Sleep(time.Millisecond)
+			}
+			if sent.Kind != "set_settings" || sent.Model != "opus" || sent.Effort != "max" {
+				t.Fatalf("control = %+v, want set_settings opus max", sent)
+			}
+			select {
+			case err := <-errc:
+				t.Fatalf("SetSettings returned %v before the wrapper answered", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			tc.answer(l, sent.ID, cancel)
+			if err := <-errc; (err != nil) != tc.wantErr {
+				t.Fatalf("SetSettings = %v, want error %v", err, tc.wantErr)
+			}
+			if model, effort := l.Settings(); model != tc.wantModel || effort != tc.wantEff {
+				t.Errorf("settings = (%s, %s), want (%s, %s)", model, effort, tc.wantModel, tc.wantEff)
+			}
+		})
+	}
+}
+
+// settleAnswer hands line to the run as the reader would: parsed as a
+// control line, then settled.
+func (l *LiveRun) settleAnswer(t *testing.T, line string) {
+	t.Helper()
+	ctl, ok := parseControlLine([]byte(line))
+	if !ok || ctl.Subtype != "settings_result" {
+		t.Fatalf("%s is not a settings_result", line)
+	}
+	l.settleSettings(ctl)
 }

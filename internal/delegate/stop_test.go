@@ -192,100 +192,28 @@ func TestStopConversationAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *te
 	}
 }
 
-// TestCancelBlueprintRun_RecordsIntentAndTheSettlementCancels pins the layer
-// the stop verb hands cancellation off TO. Now that stopping a conversation
-// only freezes the plan, this is the only verb that can end one — a blueprint
-// sitting 'running' with no queued step and no live claim has no other exit
-// short of resuming the conversation or dispositioning the task.
-//
-// The verb itself writes requests only: the run's cancel signal and a stop
-// intent on its step. The dispatcher's settlement, finding the step unheld,
-// parks it and cancels the run in one transaction. A paused blueprint, its
-// step parked `open`, takes the same path: nothing holds that step either,
-// and without an intent on it nothing would ever end the run.
-func TestCancelBlueprintRun_RecordsIntentAndTheSettlementCancels(t *testing.T) {
-	for name, stage := range map[string]string{
-		"queued": `UPDATE conversations SET status = NULL WHERE id = ?`,
-		"parked": `UPDATE conversations SET status = 'open', park_reason = 'idle' WHERE id = ?`,
-	} {
-		t.Run(name, func(t *testing.T) { testCancelBlueprintRunSettles(t, stage) })
-	}
-}
-
-func testCancelBlueprintRunSettles(t *testing.T, stage string) {
-	paths.SetForTest(t, t.TempDir())
+// TestStopConversationAndCancelBlueprint_RefusesABlueprintRunID: the verb is
+// addressed by conversation, and a blueprint_run id resolves against nothing
+// in that table. A teardown handed the wrong table's id must say so, because
+// a caller that gets a nil error goes on as if the work had been ended.
+func TestStopConversationAndCancelBlueprint_RefusesABlueprintRunID(t *testing.T) {
 	database := newDelegateTestDB(t)
-	const conversationID = "r-bp-cancel"
-	seedConversation(t, database, conversationID, "sess-bp-cancel", "/tmp/wt-bp-cancel")
-	if _, err := database.Exec(stage, conversationID); err != nil {
-		t.Fatalf("stage the step: %v", err)
-	}
+	const conversationID = "r-conv-verb"
+	seedConversation(t, database, conversationID, "sess-cv", "/tmp/wt-cv")
 	brID := "seedbpr-" + conversationID
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.CancelBlueprintRun(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("CancelBlueprintRun: %v", err)
+	err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, brID, "", StopCauseTeamArchived)
+	if !errors.Is(err, ErrNoActiveConversation) {
+		t.Fatalf("StopConversationAndCancelBlueprint with a blueprint_run id = %v, want ErrNoActiveConversation", err)
 	}
-
-	var bpStatus string
-	var cancelRequested bool
-	if err := database.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus, &cancelRequested); err != nil {
-		t.Fatalf("read blueprint_run: %v", err)
+	var convStatus string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("read conversation: %v", err)
 	}
-	if bpStatus != "running" || !cancelRequested {
-		t.Errorf("blueprint_run after the request = (%q, cancel_requested=%v), want (running, true) — the verb writes no run status", bpStatus, cancelRequested)
-	}
-	var intent bool
-	if err := database.QueryRow(`SELECT stop_requested_at IS NOT NULL FROM conversations WHERE id = ?`, conversationID).Scan(&intent); err != nil {
-		t.Fatalf("read the intent: %v", err)
-	}
-	if !intent {
-		t.Fatal("the step carries no stop intent; nothing would settle the cancel")
-	}
-
-	s.settleUnclaimedStops(context.Background())
-
-	var abortReason string
-	if err := database.QueryRow(`SELECT status, COALESCE(abort_reason, '') FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus, &abortReason); err != nil {
-		t.Fatalf("read blueprint_run: %v", err)
-	}
-	if bpStatus != "cancelled" || abortReason != "user_cancelled" {
-		t.Errorf("blueprint_run after settlement = (%q, %q), want (cancelled, user_cancelled)", bpStatus, abortReason)
-	}
-	var stepStatus, parkReason string
-	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, conversationID).Scan(&stepStatus, &parkReason); err != nil {
-		t.Fatalf("read step conversation: %v", err)
-	}
-	if stepStatus != "open" || parkReason != string(domain.ParkReasonUserCancelled) {
-		t.Errorf("step = (%q, %q), want (open, user_cancelled) — cancelling the plan parks its steps, it does not write terminals on them", stepStatus, parkReason)
-	}
-}
-
-// TestCancelBlueprintRun_AlreadyTerminalIsNoOp: the blueprint verb is idempotent
-// against a plan that already ended, so a second click cannot re-stamp a
-// terminal over the one that recorded how the blueprint actually finished.
-func TestCancelBlueprintRun_AlreadyTerminalIsNoOp(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	database := newDelegateTestDB(t)
-	const conversationID = "r-bp-done"
-	seedConversation(t, database, conversationID, "sess-bp-done", "/tmp/wt-bp-done")
-	brID := "seedbpr-" + conversationID
-	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
-		t.Fatalf("complete blueprint: %v", err)
-	}
-
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.CancelBlueprintRun(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("CancelBlueprintRun on a terminal plan: %v", err)
-	}
-
-	var bpStatus string
-	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus); err != nil {
-		t.Fatalf("read blueprint_run: %v", err)
-	}
-	if bpStatus != "completed" {
-		t.Errorf("blueprint_run status = %q, want completed (unchanged)", bpStatus)
+	if convStatus != "running" {
+		t.Errorf("conversation status = %q, want running — the conversation verb reaches nothing when handed a blueprint_run id", convStatus)
 	}
 }
 
@@ -416,7 +344,7 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 	}
 	s.settleUnclaimedStops(context.Background())
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on", domain.TurnSettings{}); err != nil {
 		t.Fatalf("resume after stop: %v (a stopped step must stay resumable)", err)
 	}
 
@@ -594,7 +522,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 
 	// 3. The user's follow-up, a minute later. It has to be accepted off the
 	// snapshot alone, and it has to be claimable.
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up after a cross-pod stop: %v", err)
 	}
 	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -642,7 +570,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	}
 	var content string
 	if err := database.QueryRow(
-		`SELECT content FROM messages WHERE conversation_id = ? AND is_error = 1`, conversationID,
+		`SELECT content FROM messages WHERE conversation_id = ? AND subtype = ?`, conversationID, domain.MessageSubtypeStopNote,
 	).Scan(&content); err != nil {
 		t.Fatalf("read the failure row: %v", err)
 	}
@@ -734,7 +662,7 @@ func TestMarkConversationOpen_RefusesAParkWithNoClaim(t *testing.T) {
 	if fenced := s.markConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
 		conversationID: "r-claimless",
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}); !fenced {
 		t.Error("a claimless park reported success")
 	}
@@ -827,8 +755,8 @@ func TestRecordNativeResult_ParkedSettlesThroughTheClaim(t *testing.T) {
 	).Scan(&status, &parkReason); err != nil {
 		t.Fatalf("read conversation: %v", err)
 	}
-	if status != "open" || parkReason != string(domain.ParkReasonIdle) {
-		t.Errorf("after the guard park = (%q, %q), want (open, idle)", status, parkReason)
+	if status != "open" || parkReason != string(domain.ParkReasonTurnIncomplete) {
+		t.Errorf("after the guard park = (%q, %q), want (open, turn_incomplete)", status, parkReason)
 	}
 	if hasActiveClaim(t, database, conversationID) {
 		t.Error("the guard park left the claim live; the park and the release are one write")

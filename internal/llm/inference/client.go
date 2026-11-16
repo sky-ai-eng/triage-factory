@@ -25,10 +25,10 @@ import (
 // shuts the embedded bifrost workers down.
 type Client struct {
 	bf *bifrost.Bifrost
-	// endpoints is the configured base URL per provider, captured at
-	// construction so a failed call can say which host it was talking to.
-	// A provider mapped to "" was enumerable but left on its built-in
-	// endpoint; a provider absent from the map entirely was never
+	// endpoints is the address each provider's calls are dialled at,
+	// captured at construction so a failed call can say which host it was
+	// talking to. A provider mapped to "" was enumerable but left on its
+	// built-in endpoint; a provider absent from the map entirely was never
 	// enumerable (endpointsOf's best-effort read failed for it), so
 	// annotateEndpoint adds nothing rather than guessing which case it is.
 	endpoints map[schemas.ModelProvider]string
@@ -55,9 +55,15 @@ func New(account schemas.Account) (*Client, error) {
 	return &Client{bf: bf, endpoints: endpointsOf(account)}, nil
 }
 
-// endpointsOf reads each configured provider's base URL off the account.
-// Best-effort: an account that declines to enumerate itself just yields no
-// annotation, since this exists only to make an error self-explaining.
+// endpointsOf reads, off the account, the address each configured provider's
+// calls are dialled at. Best-effort: an account that declines to enumerate
+// itself just yields no annotation, since this exists only to make an error
+// self-explaining.
+//
+// Bedrock is read off its key, not its config, because bifrost's Bedrock
+// provider takes its host from the key and ignores NetworkConfig.BaseURL. A
+// provider with more than one key is skipped: bifrost picks among them per
+// call, so no single address is the one dialled.
 func endpointsOf(account schemas.Account) map[schemas.ModelProvider]string {
 	providers, err := account.GetConfiguredProviders()
 	if err != nil {
@@ -65,6 +71,14 @@ func endpointsOf(account schemas.Account) map[schemas.ModelProvider]string {
 	}
 	out := make(map[schemas.ModelProvider]string, len(providers))
 	for _, p := range providers {
+		if p == ProviderBedrock {
+			keys, err := account.GetKeysForProvider(context.Background(), p)
+			if err != nil || len(keys) != 1 {
+				continue
+			}
+			out[p] = bedrockRuntimeURL(keys[0].BedrockKeyConfig)
+			continue
+		}
 		cfg, err := account.GetConfigForProvider(p)
 		if err != nil || cfg == nil {
 			continue
@@ -72,6 +86,25 @@ func endpointsOf(account schemas.Account) map[schemas.ModelProvider]string {
 		out[p] = cfg.NetworkConfig.BaseURL
 	}
 	return out
+}
+
+// bedrockRuntimeURL is the address bifrost's Bedrock provider dials a chat call
+// at under cfg: the runtime endpoint as bifrost reduces it (bedrockDialURL),
+// else the public regional host. "" when cfg names no region, which bifrost
+// fills with a default of its own.
+func bedrockRuntimeURL(cfg *schemas.BedrockKeyConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Endpoints != nil {
+		if u := bedrockDialURL(cfg.Endpoints.Runtime); u != "" {
+			return u
+		}
+	}
+	if cfg.Region == nil || cfg.Region.GetValue() == "" {
+		return ""
+	}
+	return "https://bedrock-runtime." + cfg.Region.GetValue() + ".amazonaws.com"
 }
 
 // Close shuts down the embedded bifrost workers. Safe to call more than once
@@ -104,8 +137,9 @@ type Request struct {
 	// shares. Empty sends one block.
 	SystemAddendum string
 
-	// Effort is the reasoning effort ("minimal" | "low" | "medium" | "high" |
-	// "none"). Empty leaves reasoning at the provider default.
+	// Effort is the reasoning effort, one of TF's five levels
+	// (domain.EffortLevels: low, medium, high, xhigh and max). Empty leaves
+	// reasoning at the provider default.
 	Effort string
 	// MaxTokens caps the completion. Zero resolves the per-provider budget
 	// policy (MaxOutputTokens) against this request's provider and model —
@@ -206,7 +240,7 @@ func (c *Client) wrapProviderError(provider schemas.ModelProvider, e *schemas.Bi
 	return c.annotateEndpoint(provider, bifrostError(e))
 }
 
-// annotateEndpoint appends the base URL the call was aimed at. Which host
+// annotateEndpoint appends the address the call was dialled at. Which host
 // answered (or didn't) is the first thing worth knowing about a transport
 // failure — a run whose credentials point at its own sidecar proxy fails very
 // differently from one that reached the public provider — and bifrost's error

@@ -20,13 +20,28 @@ import (
 // didn't match" — so a caller that needs the distinction re-reads.
 var ErrNoSuchTask = errors.New("no task with that id")
 
-// ErrNoActiveClaimTeam is the claim mutations' refusal, and ResolveClaimTeam's
-// answer, when a claim has no active team to land the task on: the claimant is
-// on no active team in the task's visibility set, and the task's own team is
-// archived (or it has none). Nothing is written. Unlike a lost race, a retry
-// gets the same answer until the claimant joins an active team that can see
-// the task or the owner team is restored.
+// ErrNoActiveClaimTeam is the claim mutations' refusal when the claimant has
+// no team to land the task on (TaskStore.ClaimTeamCandidates is empty) and an
+// archived team is why: the task's own team is archived, or an archived team
+// the claimant writes is in its visibility set. Nothing is written. Unlike a
+// lost race, a retry gets the same answer until the team is restored or the
+// claimant can write an active team that can see the task.
 var ErrNoActiveClaimTeam = errors.New("db: the claim has no active team to land the task on")
+
+// ErrNoClaimTeam is the claim mutations' refusal when the claimant has no
+// team to land the task on and no archived team accounts for it: they write
+// neither the task's own team nor any team in its visibility set, because
+// they are on none of them or only view the ones they are on. Nothing is
+// written, and a retry gets the same answer until their memberships or the
+// task's teams change.
+var ErrNoClaimTeam = errors.New("db: the claimant writes no team the task can land on")
+
+// ErrClaimTeamNotCandidate is the claim mutations' refusal when the claimant
+// has teams to land the task on and the team the write names is not one of
+// them. Nothing is written. A caller that resolved the team from
+// TaskStore.ClaimTeamCandidates sees it only when the task's teams or the
+// claimant's memberships changed between that read and the write.
+var ErrClaimTeamNotCandidate = errors.New("db: the claim's team is not one the claimant can land the task on")
 
 // ErrEntityClosed means a task mint found its entity closed — or found no
 // entity at all — inside the same transaction that would have inserted the
@@ -110,7 +125,8 @@ type TaskCloseOutcome struct {
 	NewlyHeld bool
 	// WorkingConversationIDs are the conversations working on the task when
 	// it closed or held, oldest first, read in the transaction that decided
-	// it: the set the caller tells. The close writes nothing on them.
+	// it. The caller tells that set when the task closed. The close writes
+	// nothing on them.
 	WorkingConversationIDs []string
 }
 
@@ -613,8 +629,7 @@ type TaskStore interface {
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
 	// update primary_event_id; subsequent events are tracked via
 	// the task_events junction (see RecordEvent). It also clears a close
-	// the task holds (domain.TaskCloseDeferral), and withdraws the close
-	// notes still waiting on its conversations: the task's own event
+	// the task holds (domain.TaskCloseDeferral): the task's own event
 	// arriving again says the situation is live again.
 	Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 
@@ -711,10 +726,11 @@ type TaskStore interface {
 	// same-agent→bot; refuses on a different-user claim. A landing
 	// claim puts the row in_progress, like every other claim door. See
 	// HandoffResult for the discriminator the caller maps. On a
-	// changed claim the owning team_id consolidates to the acting
-	// team derived from the delegating user (see ClaimQueuedForUser),
-	// and with no such team the handoff is refused with
-	// ErrNoActiveClaimTeam, ahead of the same-agent no-op.
+	// changed claim the owning team_id becomes teamID, which must be one
+	// of the delegating user's candidates (see ClaimTeamCandidates): with
+	// no candidate the handoff is refused with what NoClaimTeamReason
+	// answers, and with candidates that do not include teamID with
+	// ErrClaimTeamNotCandidate, both ahead of the same-agent no-op.
 	//
 	// The returned task is the row the handoff leaves: the one its UPDATE
 	// wrote on HandoffChanged, and the row as it stands on HandoffNoOp,
@@ -725,21 +741,30 @@ type TaskStore interface {
 	// ErrTaskVersion, the no-op included: a re-delegation stops and replaces
 	// the task's runs, which a caller that has not seen the task's latest
 	// state must not do.
-	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string, version int64) (HandoffResult, domain.Task, error)
+	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID, teamID string, version int64) (HandoffResult, domain.Task, error)
 
-	// ResolveClaimTeam returns the team a user→bot handoff WOULD
-	// consolidate the task onto, without mutating anything — the same
-	// derivation every user-initiated claim applies (see
-	// ClaimQueuedForUser). Returns "" when the task doesn't exist (or RLS
-	// hides it), and ErrNoActiveClaimTeam when it exists but the claim
-	// would have no active team to land on.
+	// ClaimTeamCandidates returns the teams a claim or a delegate by userID
+	// may land the task on, in team id order, without writing anything:
 	//
-	// The delegate handlers call this BEFORE the bot-enablement gate so
-	// the gate checks team_agents for the team the claim will actually
-	// land on — not the pre-handoff team_id, which for a multi-team
-	// unclaimed task can be a team the caller doesn't belong to (whose
-	// team_agents row RLS then hides, wrongly reporting the bot disabled).
-	ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error)
+	//   - when the task has a team, that team is active, and userID writes
+	//     it (as an admin or member, never as a viewer): that team alone;
+	//   - otherwise the active teams in the task's visibility set
+	//     (task_teams) that userID writes.
+	//
+	// Empty when no team qualifies, and when the task doesn't exist (or RLS
+	// hides it). The claim writes that take a team (ClaimQueuedForUser,
+	// TakeoverClaimFromAgent, HandoffAgentClaim) guard on the same SQL, so
+	// a team this read returned is one the write accepts unless the task's
+	// teams or the user's memberships changed in between.
+	ClaimTeamCandidates(ctx context.Context, orgID, taskID, userID string) ([]string, error)
+
+	// NoClaimTeamReason says why userID has no candidate for the task, for
+	// a caller whose ClaimTeamCandidates read came back empty: it returns
+	// ErrNoActiveClaimTeam when an archived team accounts for it (the
+	// task's own team is archived, or an archived team userID writes is in
+	// its visibility set), and ErrNoClaimTeam otherwise. The claim writes
+	// refuse a claimant with no candidate with the same answer.
+	NoClaimTeamReason(ctx context.Context, orgID, taskID, userID string) error
 
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
 	// to a user claim, landing the row in_progress. Race-safe: guards on
@@ -747,12 +772,10 @@ type TaskStore interface {
 	// other user owning it. Returns ok=true on success; false means the race
 	// was lost (caller surfaces 409), and ErrTaskVersion a task at another
 	// version.
-	// On success the owning team_id consolidates to the acting team
-	// derived from userID (see ClaimQueuedForUser), and source_status
-	// records the entity snapshot's state the same way. With no acting
-	// team it refuses with ErrNoActiveClaimTeam, as ClaimQueuedForUser
-	// does.
-	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error)
+	// On success the owning team_id becomes teamID, and source_status
+	// records the entity snapshot's state, both as ClaimQueuedForUser does.
+	// It refuses a team that is not a candidate the same way.
+	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID, teamID string, version int64) (bool, error)
 
 	// ClaimQueuedForUser is the user-claim handler's atomic "take
 	// this task off the queue" — succeeds only on (queued|snoozed)
@@ -761,32 +784,32 @@ type TaskStore interface {
 	// ok=true when the claim landed; false means another claimant won or the
 	// task is closed, and ErrTaskVersion a task at another version.
 	//
-	// On success the owning team_id consolidates to the acting team:
-	// the claimer's active team in the task's visibility set
-	// (task_teams), preferring the current owner team when the claimer
-	// belongs to it and otherwise the lowest-id such team. The existing
-	// owner is kept only when that intersection is empty, and only while
-	// the owner is active. An archived team is never chosen or kept: with
-	// neither answer the claim is refused with ErrNoActiveClaimTeam and
-	// nothing is written. The result is always a team the claimer is a
-	// member of, which the RLS update check requires.
+	// On success the owning team_id becomes teamID. The write's own WHERE
+	// clause requires teamID to be one of userID's candidates
+	// (ClaimTeamCandidates): the RLS update check requires write access to
+	// the team the row lands on, and an archived team stops its work, so a
+	// team the claimer only views, or an archived one, is never landed on.
+	// With no candidate the claim is refused with what NoClaimTeamReason
+	// answers (ErrNoActiveClaimTeam or ErrNoClaimTeam), and with candidates
+	// that do not include teamID with ErrClaimTeamNotCandidate; nothing is
+	// written either way.
 	//
 	// The same UPDATE records source_status (domain.SourceStatus): the
 	// status and assignee the task's Jira or Linear entity snapshot holds,
 	// which a requeue reads to put the issue back. NULL for any
 	// other source.
-	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string, version int64) (bool, error)
+	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID, teamID string, version int64) (bool, error)
 
 	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the
 	// other claim mutations don't cover: an atomic CAS that requires the
-	// task to be presently claimed by fromUserID AND toUserID to belong to
-	// an active team associated with the task (its task_teams visibility
-	// set or its current team_id), moving the claim to toUserID and the
-	// task to the team ClaimQueuedForUser would derive for toUserID — which
-	// that guard guarantees is active. Returns ok=true when
-	// the claim moved; false means either guard tripped — a genuine race
+	// task to be presently claimed by fromUserID AND toUserID to be an
+	// admin or member of an active team associated with the task (its
+	// task_teams visibility set or its current team_id), moving the claim
+	// to toUserID and the task to a team derived from toUserID (below) —
+	// which that guard guarantees is active. Returns ok=true
+	// when the claim moved; false means either guard tripped — a genuine race
 	// (someone else changed the claim/status between the caller's read and
-	// this call) or toUserID sharing no team with the task — and the
+	// this call) or toUserID writing no team on the task — and the
 	// caller re-reads to tell the two apart before surfacing 409. A task at
 	// another version than the caller read answers ErrTaskVersion. It does
 	// NOT accept an unclaimed or bot-claimed task as a valid "from" state —
@@ -798,12 +821,15 @@ type TaskStore interface {
 	// governed solely by team_id (tasks_select RLS's task_teams branch only
 	// ever applies to an unclaimed row) — reassigning to someone with no
 	// relationship to the task's team(s) would silently hand them a claim
-	// they can't even see afterward.
+	// they can't even see afterward, and reassigning to a viewer would hand
+	// them one they can see and not act on.
 	//
-	// On success the owning team_id consolidates to the acting team derived
-	// from toUserID — the same task_teams-visibility-set derivation
-	// ClaimQueuedForUser applies — so reassigning across teams re-homes the
-	// card to the new claimant's team. Conversation ownership is per-
+	// On success the owning team_id consolidates to a team derived from
+	// toUserID: an active team in the task's visibility set that toUserID
+	// writes, preferring the current owner team and otherwise the lowest id,
+	// and with none the current owner while it is active. So reassigning
+	// across teams re-homes the card to the new claimant's team.
+	// Conversation ownership is per-
 	// conversation, not per-claim: this method never touches conversations
 	// — an active delegated conversation keeps executing regardless of who
 	// now holds the task's claim.
@@ -866,8 +892,8 @@ type TaskStore interface {
 	// when claimed, queued when not, which is what tasks_queue_unclaimed
 	// admits), clears closed_at, close_reason, close_event_type and any held
 	// close, and withdraws the close notes still waiting on the task's
-	// conversations, as Bump does for a hold it clears. The task comes back
-	// in the shape a found one does, with TaskReopened.
+	// conversations, since the close they tell of no longer stands. The task
+	// comes back in the shape a found one does, with TaskReopened.
 	//
 	// These doors are outside the returned-row rule: they return the task
 	// joined to its entity, which the router reads and no RETURNING can
@@ -973,16 +999,15 @@ type TaskStore interface {
 
 	// CloseDeferralForTaskSystem returns the close the task holds, or nil
 	// when it holds none or is no longer active. Admin pool: its reader, a
-	// run's launch, carries no claims.
+	// run's turn-end check, carries no claims.
 	CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error)
 
 	// ListActiveCloseDeferralsSystem returns every deferral held by an active
 	// task in every org that is not deleted and that nothing holds any more,
 	// ordered by org then task id, for the router's deferral sweep: none of
 	// the task's deliverables awaits a person, by the predicate
-	// CloseOrHoldSystem holds on. A deferral left on a task that closed by
-	// another path is never returned, and neither is one in a deleted org,
-	// whose tasks no close should reach any more. A deliverable can be
+	// CloseOrHoldSystem holds on. A deferral in a deleted org, whose tasks no
+	// close should reach any more, is never returned. A deliverable can be
 	// recorded after this read, so ApplyHeldCloseSystem decides again under
 	// the task's lock. Admin pool, org-wide by design: the sweep is one brain
 	// loop over all orgs, and the partial index on the deferral column keeps
@@ -993,8 +1018,7 @@ type TaskStore interface {
 	// eventID — a compare-and-clear on the event the sweep read, so a
 	// deferral a later closing event overwrote in between survives for the
 	// next pass. It does not look at the task's status. cleared reports whether
-	// the compare matched, and a clear withdraws the close notes still
-	// waiting on the task's conversations, as Bump does.
+	// the compare matched.
 	//
 	// Exempt from the returned-row rule: what it leaves is a row with no
 	// deferral, and the one fact the caller acts on is whether the compare

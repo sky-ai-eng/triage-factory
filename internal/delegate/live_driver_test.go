@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -37,6 +38,31 @@ type fakeLiveProc struct {
 	// what the world looks like at the moment the driver lets go of the
 	// process — the park must not have landed yet.
 	onClose func()
+	// model and effort are the process's settings, and controls records
+	// every control written to it, the messages as "send" and each
+	// SetSettings as "set_settings <model> <effort>", in order.
+	model, effort string
+	controls      []string
+	// settingsErr is what SetSettings answers, so a test can model a process
+	// that does not confirm the move; its settings then stay as they were.
+	settingsErr error
+}
+
+func (f *fakeLiveProc) SetSettings(_ context.Context, model, effort string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.controls = append(f.controls, "set_settings "+model+" "+effort)
+	if f.settingsErr != nil {
+		return f.settingsErr
+	}
+	f.model, f.effort = model, effort
+	return nil
+}
+
+func (f *fakeLiveProc) Settings() (string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.model, f.effort
 }
 
 func newFakeLiveProc(sessionID string) *fakeLiveProc {
@@ -57,6 +83,7 @@ func (f *fakeLiveProc) Send(_ context.Context, text string) error {
 	}
 	f.sendCount++
 	f.sent = append(f.sent, text)
+	f.controls = append(f.controls, "send")
 	n := f.sendCount
 	hook := f.onSend
 	f.mu.Unlock()
@@ -416,7 +443,7 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none",
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
-		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
+		claimID: claimID, reason: db.ParkTurnIncomplete(), runtime: domain.ConversationRuntimeSDK,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
@@ -469,7 +496,7 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 	park := liveParkContext{
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause",
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
-		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
+		claimID: claimID, reason: db.ParkTurnIncomplete(), runtime: domain.ConversationRuntimeSDK,
 	}
 
 	out := s.driveLiveConversation(context.Background(), park, proc, results, nil)
@@ -638,5 +665,161 @@ func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 	}
 	if !stamped.Valid || stamped.Float64 != 0.31 {
 		t.Errorf("claim row cost_usd = %+v, want 0.31 settled despite the refused park", stamped)
+	}
+}
+
+// TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings: a turn started
+// for a person's message runs on the settings the message records. On the
+// process's provider they are written to it before the message; on another
+// provider, or when the process does not confirm the move, nothing is sent
+// and the process is let go, with the message still waiting for a claim that
+// starts on its settings.
+func TestHandOnOrLetGo_MovesTheProcessOntoTheMessagesSettings(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	for _, tc := range []struct {
+		name         string
+		model        string
+		settingsErr  error
+		wantNext     bool
+		wantControls []string
+	}{
+		{"the same provider", "claude-fable-5-2", nil, true, []string{"set_settings claude-fable-5-2 high", "send"}},
+		{"another provider", "us.anthropic.claude-sonnet-5-5", nil, false, nil},
+		{"a move the process does not confirm", "claude-fable-5-2", errors.New("not applied"), false, []string{"set_settings claude-fable-5-2 high"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedConversation(t, database, "r-live-settings", "sess", "/tmp/wt")
+			claimID := markEngaged(t, database, "r-live-settings")
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
+			if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
+				pendingUserInput("r-live-settings", runmode.LocalDefaultUserID, "think harder",
+					domain.TurnSettings{Model: tc.model, Effort: domain.EffortHigh})); err != nil {
+				t.Fatalf("queue the person's message: %v", err)
+			}
+			proc := newFakeLiveProc("sess")
+			proc.model = "claude-sonnet-5-5"
+			proc.settingsErr = tc.settingsErr
+			park := liveParkContext{
+				orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-settings",
+				claimID: claimID, runtime: domain.ConversationRuntimeSDK,
+			}
+
+			next, fenced := s.handOnOrLetGo(context.Background(), park, proc, startsATurn)
+			if fenced || next != tc.wantNext {
+				t.Fatalf("handOnOrLetGo = (next %v, fenced %v), want next %v", next, fenced, tc.wantNext)
+			}
+			proc.mu.Lock()
+			controls := append([]string(nil), proc.controls...)
+			proc.mu.Unlock()
+			if strings.Join(controls, "|") != strings.Join(tc.wantControls, "|") {
+				t.Errorf("controls = %q, want %q", controls, tc.wantControls)
+			}
+			waiting := pendingRows(t, s, "r-live-settings")
+			if tc.wantNext {
+				if len(waiting) != 0 {
+					t.Errorf("waiting rows = %d, want the message taken", len(waiting))
+				}
+				return
+			}
+			if !proc.wasClosed() {
+				t.Error("the process was not let go")
+			}
+			if len(waiting) != 1 || waiting[0].Content != "think harder" {
+				t.Errorf("waiting rows = %+v, want the message still waiting", waiting)
+			}
+		})
+	}
+}
+
+// TestDriveLiveConversation_InputForAnotherProviderSkipsTheNudge: a turn that
+// ends with a person's message waiting on another provider's model lets the
+// process go with the message still waiting. It asks the would-stop nudge
+// nothing, since the nudge's turn would run on this process's model ahead
+// of the message.
+func TestDriveLiveConversation_InputForAnotherProviderSkipsTheNudge(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-live-switch", "sess", "/tmp/wt")
+	claimID := markEngaged(t, database, "r-live-switch")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
+	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
+		pendingUserInput("r-live-switch", runmode.LocalDefaultUserID, "on bedrock now",
+			domain.TurnSettings{Model: "us.anthropic.claude-sonnet-5-5"})); err != nil {
+		t.Fatalf("queue the person's message: %v", err)
+	}
+	proc := newFakeLiveProc("sess")
+	proc.model = "claude-sonnet-5-5"
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-switch",
+		claimID: claimID, runtime: domain.ConversationRuntimeSDK,
+	}
+	// A second result answers the turn a nudge would start, so a driver that
+	// nudges fails here rather than waiting on it.
+	results := make(chan *agentproc.Result, 2)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "done"}
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "nudged"}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
+
+	s.driveLiveConversation(context.Background(), park, proc, results, nudge)
+
+	if asked != 0 || proc.sends() != 0 {
+		t.Errorf("nudge asked %d times, %d sends; the waiting message is the next engagement's", asked, proc.sends())
+	}
+	if !proc.wasClosed() {
+		t.Error("the process was not let go")
+	}
+	if waiting := pendingRows(t, s, "r-live-switch"); len(waiting) != 1 {
+		t.Errorf("waiting rows = %d, want the message still waiting", len(waiting))
+	}
+}
+
+// TestDriveLiveConversation_AnUnconfirmedMoveIsTriedOnce: a turn that ends
+// with a person's message waiting, on settings the process does not confirm,
+// lets the process go with the message still waiting. The move is asked for
+// once, and no nudge runs ahead of the message.
+func TestDriveLiveConversation_AnUnconfirmedMoveIsTriedOnce(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-live-unconfirmed", "sess", "/tmp/wt")
+	claimID := markEngaged(t, database, "r-live-unconfirmed")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-5-5")
+	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID,
+		pendingUserInput("r-live-unconfirmed", runmode.LocalDefaultUserID, "think harder",
+			domain.TurnSettings{Model: "claude-fable-5-2", Effort: domain.EffortHigh})); err != nil {
+		t.Fatalf("queue the person's message: %v", err)
+	}
+	proc := newFakeLiveProc("sess")
+	proc.model = "claude-sonnet-5-5"
+	proc.settingsErr = errors.New("not applied")
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-live-unconfirmed",
+		claimID: claimID, runtime: domain.ConversationRuntimeSDK,
+	}
+	// A second result answers the turn a nudge would start, so a driver that
+	// nudges fails here rather than waiting on it.
+	results := make(chan *agentproc.Result, 2)
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "done"}
+	results <- &agentproc.Result{StopReason: "end_turn", Result: "nudged"}
+	asked := 0
+	nudge := func(context.Context) string { asked++; return "did you mean to?" }
+
+	s.driveLiveConversation(context.Background(), park, proc, results, nudge)
+
+	proc.mu.Lock()
+	controls := append([]string(nil), proc.controls...)
+	proc.mu.Unlock()
+	if want := []string{"set_settings claude-fable-5-2 high"}; strings.Join(controls, "|") != strings.Join(want, "|") {
+		t.Errorf("controls = %q, want %q", controls, want)
+	}
+	if asked != 0 {
+		t.Errorf("nudge asked %d times; the waiting message is the next engagement's", asked)
+	}
+	if !proc.wasClosed() {
+		t.Error("the process was not let go")
+	}
+	if waiting := pendingRows(t, s, "r-live-unconfirmed"); len(waiting) != 1 {
+		t.Errorf("waiting rows = %d, want the message still waiting", len(waiting))
 	}
 }

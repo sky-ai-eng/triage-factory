@@ -1041,11 +1041,11 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 func moveEntityReferences(ctx context.Context, q queryer, orgID, loserID, survivorID string) (dismissed []string, err error) {
 	rows, err := q.QueryContext(ctx, `
 		UPDATE tasks
-		   SET `+db.TaskSetSQL(
-		db.TaskAssign{Col: "status", Expr: "'dismissed'"},
-		db.TaskAssign{Col: "closed_at", Expr: "$1"},
-		db.TaskAssign{Col: "close_reason", Expr: "$2"},
-	)+`
+		   SET `+db.TaskSetSQL(append([]db.TaskAssign{
+		{Col: "status", Expr: "'dismissed'"},
+		{Col: "closed_at", Expr: "$1"},
+		{Col: "close_reason", Expr: "$2"},
+	}, db.CloseTaskAssigns...)...)+`
 		WHERE org_id = $3 AND entity_id = $4 AND status NOT IN ('done','dismissed')
 		  AND EXISTS (SELECT 1 FROM tasks s WHERE s.org_id = $3 AND s.entity_id = $5
 		              AND s.event_type = tasks.event_type AND s.dedup_key = tasks.dedup_key
@@ -1263,9 +1263,7 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			}
 			switch {
 			case out.Held:
-				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{
-					TaskID: taskID, NewlyHeld: out.NewlyHeld, WorkingConversationIDs: out.WorkingConversationIDs,
-				})
+				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{TaskID: taskID, NewlyHeld: out.NewlyHeld})
 			case out.Closed:
 				res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
 				res.WorkingConversationIDs[taskID] = out.WorkingConversationIDs

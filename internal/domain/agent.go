@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -106,9 +107,10 @@ const (
 
 // The conversations.type vocabulary — which surface owns a conversation.
 // App-validated (no schema CHECK, the house pattern for open vocabularies).
-// One claim loop drives every type. The dispatcher has one execution arm, the
-// blueprint step's, and fails a claimed conversation with no blueprint run as
-// blueprint_missing.
+// One claim loop and one dispatcher drive every type. The dispatcher drives a
+// delegation as a step of its blueprint run, and fails one whose run is gone as
+// blueprint_missing; it drives an interactive conversation with no blueprint
+// run at all, under the workbench prompt.
 const (
 	// ConversationTypeDelegation is a task-driven conversation — every
 	// blueprint step today.
@@ -116,7 +118,9 @@ const (
 	// ConversationTypeInteractive is the conversation a person drives on a
 	// task they hold. A person's claim mints it
 	// (ConversationStore.MintForPersonClaim), parked with no verdict, and it
-	// stays the task's conversation until a boundary ends it.
+	// stays the task's conversation until a boundary ends it. A person's
+	// message starts each of its turns, and every turn ends parked with no
+	// verdict, so it idles between turns and never completes.
 	ConversationTypeInteractive = "interactive"
 )
 
@@ -166,14 +170,17 @@ const (
 	// before the new conversation is minted, so a task never has two live
 	// conversations at once.
 	EndedDelegated EndedReason = "delegated"
-	// EndedTakenOver — a person claimed a task an agent held. Stamped in the
-	// claim's transaction, before the person's own conversation is minted.
+	// EndedTakenOver — a person claimed a task the agent was working. Stamped
+	// in the claim's transaction, before the person's own conversation is
+	// minted, or by the reactor on a run's last step when it cancels a run
+	// whose task a person holds and the claim stamped nothing.
 	EndedTakenOver EndedReason = "taken_over"
-	// EndedReassigned — a person's claim was handed to someone on another
-	// team, and the task moved to that team. The conversation stays with the
-	// team that made it, and the new holder gets one of their own. A handoff
-	// that leaves the task on its team is not a boundary: the conversation
-	// stays the task's.
+	// EndedReassigned — the task moved to another team: a person's claim was
+	// handed to someone there, or a blueprint run's task left the run's team
+	// and the reactor cancelled the run. The conversation stays with the team
+	// that made it, and the new holder gets one of their own. A handoff that
+	// leaves the task on its team is not a boundary: the conversation stays
+	// the task's.
 	EndedReassigned EndedReason = "reassigned"
 	// EndedStepAdvanced — the blueprint moved to step N+1, so step N's
 	// conversation is superseded rather than merely finished.
@@ -368,7 +375,9 @@ const UpstreamContinuationNote = "<system-note kind=\"continuation\">\n" +
 // regardless of surface (a delegated task conversation, a future interactive
 // session or subagent). Per-engagement execution state lives on Claim. The
 // status/summary projection is served through a handler-side map; the
-// transcript rows cross the wire as the snake_case MessageDTO.
+// transcript rows cross the wire as the snake_case MessageDTO. The JSON tags
+// spell the map's keys, so a read that marshals the struct itself writes the
+// same names.
 type Conversation struct {
 	// Type names the owning surface: "delegation" | "interactive" (minted by
 	// a person's claim) | namespaced "subagent:<kind>" (reserved). Empty on
@@ -390,17 +399,17 @@ type Conversation struct {
 	// changes assembly, and assembly must be a pure function of rows).
 	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 
-	ID       string
-	TaskID   string
-	PromptID string // FK to prompts.id — which prompt was used for this conversation
+	ID       string `json:"id"`
+	TaskID   string `json:"task_id"`
+	PromptID string `json:"prompt_id"` // FK to prompts.id — which prompt was used for this conversation
 	// Status is the DISPLAYED lifecycle: the stored column with the live
 	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
 	// name here. The vocabulary and its classifiers live in conversation_status.go;
 	// don't restate the names anywhere else. Approval is a derived view over
 	// the unresolved-deliverable set, never a stored status.
-	Status    string
-	Model     string
-	StartedAt time.Time
+	Status    string    `json:"status"`
+	Model     string    `json:"model"`
+	StartedAt time.Time `json:"started_at"`
 	// QueuedAt is when the conversation entered the queue this episode — the
 	// enqueue for a fresh conversation, re-stamped by the wake on a resume;
 	// ClaimedAt is when the dispatcher last claimed it (work actually began).
@@ -409,9 +418,9 @@ type Conversation struct {
 	// StartedAt stays the mint stamp and DurationMs stays pure working time
 	// (the SDK-reported per-turn duration, never wall clock across the
 	// queue). Both nil on legacy rows that predate the queue columns.
-	QueuedAt    *time.Time
-	ClaimedAt   *time.Time
-	CompletedAt *time.Time
+	QueuedAt    *time.Time `json:"queued_at"`
+	ClaimedAt   *time.Time `json:"claimed_at"`
+	CompletedAt *time.Time `json:"completed_at"`
 
 	// NextAttemptAt is the earliest time the dispatcher may claim this
 	// conversation again, set when an engagement handed it back to wait out
@@ -435,21 +444,20 @@ type Conversation struct {
 	// one — in a shared fleet it can therefore understate the wait, which is
 	// accepted. The deployment-truthful view is the fleet console's, behind
 	// the operator gate.
-	QueuePosition *int
+	QueuePosition *int `json:"queue_position,omitempty"`
 
 	// TotalCostUSD / DurationMs / NumTurns are derived at read time, not
 	// stored: cost is the SUM of the messages ledger's cost_usd stamps,
 	// duration/turns the SUM of the claims' per-engagement telemetry. nil
 	// when nothing has settled yet. Wire shape unchanged from the
 	// stored-column era.
-	TotalCostUSD *float64
-	DurationMs   *int
-	NumTurns     *int
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	DurationMs   *int     `json:"duration_ms"`
+	NumTurns     *int     `json:"num_turns"`
 
 	// Token breakdown, derived at read time as the SUM over this
 	// conversation's messages (plain ints — 0 for a conversation that never
-	// streamed a usage-bearing message). Mirrors system_llm_runs' columns;
-	// snake_case json tags keep the frozen wire shape.
+	// streamed a usage-bearing message). Mirrors system_llm_runs' columns.
 	InputTokens         int `json:"input_tokens"`
 	OutputTokens        int `json:"output_tokens"`
 	CacheReadTokens     int `json:"cache_read_tokens"`
@@ -459,7 +467,7 @@ type Conversation struct {
 	// ParkReason vocabulary, see the type. Empty === SQL NULL: never parked,
 	// or resumed since (a resume clears it, so a conversation that went on to
 	// conclude doesn't still name the stop it was picked back up from).
-	ParkReason ParkReason
+	ParkReason ParkReason `json:"park_reason"`
 
 	// EndedAt / EndedReason are the boundary stamp: WHEN this conversation
 	// stopped being its task's live one, and WHY (the closed EndedReason
@@ -471,8 +479,8 @@ type Conversation struct {
 	// `failed` or parked `open` — what ended it is the task moving on, not
 	// the transcript finishing — so a reader asking "is this still the task's
 	// conversation" reads EndedAt and nothing else.
-	EndedAt     *time.Time
-	EndedReason EndedReason
+	EndedAt     *time.Time  `json:"ended_at,omitempty"`
+	EndedReason EndedReason `json:"ended_reason,omitempty"`
 
 	// StopRequestedAt / StopRequestedBy are a pending stop: someone asked for
 	// this conversation to stop and neither its holder nor the dispatcher has
@@ -494,31 +502,38 @@ type Conversation struct {
 	ClaimLastActivityAt *time.Time `json:"claim_last_activity_at,omitempty"`
 	ClaimCurrentOp      string     `json:"claim_current_op,omitempty"`
 
-	WorktreePath  string
-	ResultSummary string
+	WorktreePath  string `json:"worktree_path"`
+	ResultSummary string `json:"result_summary"`
 
 	// Outcome is the step's verdict (ConversationOutcome vocabulary),
 	// persisted with the park that records it. Empty string === SQL NULL: no
 	// verdict yet, or an infra-error conversation (status='failed'). The
 	// orchestrator reads this to advance.
-	Outcome string
+	Outcome string `json:"outcome"`
 	// OutcomeReason is the natural-language "why I stopped / what a human
 	// needs to do": the reason a stop_blueprint call gave, for either ending.
 	// Distinct from ResultSummary (the always-present "what I did"). Empty ===
 	// NULL.
-	OutcomeReason string
+	OutcomeReason string `json:"outcome_reason"`
 	// FailureKind is the machine-readable failure discriminator
 	// (ConversationFailureKind vocabulary) for a status='failed' conversation —
 	// see the type's doc. Empty string === SQL NULL: non-failed conversations,
 	// legacy failed rows, and failures nothing classified.
-	FailureKind ConversationFailureKind
-	SessionID   string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
+	FailureKind ConversationFailureKind `json:"failure_kind"`
+	SessionID   string                  `json:"session_id"` // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
+	// SessionCostUSD is the running total the SDK last reported for the
+	// session in SessionID (conversations.sdk_session_cost_usd). Claude Code
+	// restores a session's total on --resume, so a launch resuming SessionID
+	// hands this to the process as the total its own spend is measured from.
+	// Bookkeeping for that subtraction, never a spend figure: the spend is
+	// TotalCostUSD.
+	SessionCostUSD float64 `json:"-"`
 	// MemoryMissing — the agent did not write its own memory: the conversation
 	// has no conversation_memory row whose Source is MemorySourceAgent. A
 	// generated row (the provisioner standing in) and a `none` row (a run that
 	// concluded with nothing to say) both leave it true, because the question
 	// is about the agent and not about whether a row exists.
-	MemoryMissing bool
+	MemoryMissing bool `json:"memory_missing"`
 	// HasRun says the conversation holds an assistant message: an engagement
 	// has produced a turn on it. Derived on every read
 	// (db.ConversationHasRunSQL), never stored. A conversation a person's
@@ -526,8 +541,8 @@ type Conversation struct {
 	// notes it has collected, and a conversation that never ran owes no
 	// memory when a boundary ends it.
 	HasRun      bool   `json:"has_run"`
-	TriggerType string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
-	TriggerID   string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
+	TriggerType string `json:"trigger_type"` // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
+	TriggerID   string `json:"trigger_id"`   // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule; empty/NULL for manual conversations
 
 	// TriggeringEventID is the event instance that auto-fired this
 	// conversation. Set only on the event path; empty (→ SQL NULL) for manual
@@ -538,14 +553,14 @@ type Conversation struct {
 	// already committed conflicts on the fence and is skipped. Forward-only
 	// provenance — written via BlueprintStore.CreateRunWithFirstStepSystem, not
 	// hydrated by Get.
-	TriggeringEventID string
+	TriggeringEventID string `json:"triggering_event_id"`
 
 	// ActorAgentID is the agents.id the spawner stamped when the conversation
 	// started. Immutable audit pointer — survives later
 	// config edits and agent-row deletion (SET NULL on delete). Empty
 	// string = NULL on the row (conversation was spawned before the agent
 	// bootstrap completed, or after the agent was deleted).
-	ActorAgentID string
+	ActorAgentID string `json:"actor_agent_id"`
 
 	// ActorAgentName is the display name of the actor agent, denormalized
 	// from agents.display_name via a LEFT JOIN on the read projections (Get /
@@ -553,7 +568,7 @@ type Conversation struct {
 	// without a second round-trip. Empty when actor_agent_id is NULL or the
 	// referenced agent row was deleted (LEFT JOIN → NULL name); not a stored
 	// column, so insert/scan paths that don't JOIN agents leave it "".
-	ActorAgentName string
+	ActorAgentName string `json:"actor_agent_name"`
 
 	// CreatorUserID is the users.id of the human who initiated this
 	// conversation. Set for manual conversations (the delegate route /
@@ -562,7 +577,7 @@ type Conversation struct {
 	// CHECK pairs this with trigger_type: 'manual' ↔ non-NULL,
 	// 'event' ↔ NULL. Same shape the system_rows_nullable
 	// migration introduced for prompts / task_rules / etc.
-	CreatorUserID string
+	CreatorUserID string `json:"creator_user_id"`
 
 	// TeamID is the conversation's owning team — conversations.team_id, NOT NULL (the
 	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
@@ -572,7 +587,7 @@ type Conversation struct {
 	// deliverables.team_id (NOT NULL, per TFAC-455 F1) directly off the conversation.
 	// Populated by the Get and ClaimNextConversation scan paths; empty on rows
 	// hydrated by projections that don't select it.
-	TeamID string
+	TeamID string `json:"team_id"`
 
 	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for conversations that are a step inside a multi-step blueprint
 	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step conversations
@@ -736,12 +751,19 @@ type Message struct {
 	// person's message — and every discriminating value is named: the
 	// InjectionSubtype constants, MessageSubtypeStopNote, the deliverable
 	// system_note.
-	Subtype             string
-	ToolCalls           []ToolCall
-	ToolCallID          string
-	IsError             bool
-	Metadata            map[string]any
+	Subtype    string
+	ToolCalls  []ToolCall
+	ToolCallID string
+	IsError    bool
+	Metadata   map[string]any
+	// Model is, on an assistant row, the model that produced it. On a
+	// person's own row (role "user", blank subtype) it is the model that
+	// message runs on, and Effort is the reasoning effort it runs at (one of
+	// EffortLevels, "" for the provider's default). Every person row records
+	// both, so the newest one holds the conversation's current settings. No
+	// other row carries an Effort.
 	Model               string
+	Effort              string
 	InputTokens         *int
 	OutputTokens        *int
 	CacheReadTokens     *int
@@ -978,6 +1000,33 @@ const (
 	MessageWindowInactive MessageWindowState = "inactive"
 )
 
+// DeliveryPositions returns new assembly keys for pending rows delivered
+// together, whose current keys are given in assembly order, or nil when the
+// rows can stay where they are. A row's position is where the model reads it.
+// A row queued while a turn streamed takes an id below the reply that turn
+// writes, so left where it was queued it would sit ahead of a reply the model
+// produced without it, and the Anthropic API refuses a request that replays a
+// thinking block once anything ahead of the block changed.
+//
+// answered is the newest key among the conversation's delivered assistant and
+// tool rows: the model's newest reply and the results answering it. A batch
+// that starts after it stays put. Otherwise the whole batch moves, in order,
+// to fractions strictly between tail (the newest key among the delivered
+// rows) and the next whole number above it. Every later row takes an id above
+// that whole number, because no key's whole part exceeds the largest id: an
+// id is a key, and every seq sits within one of an existing row.
+func DeliveryPositions(answered, tail float64, keys []float64) []float64 {
+	if len(keys) == 0 || keys[0] > answered {
+		return nil
+	}
+	step := (math.Floor(tail) + 1 - tail) / float64(len(keys)+1)
+	out := make([]float64, len(keys))
+	for i := range out {
+		out[i] = tail + step*float64(i+1)
+	}
+	return out
+}
+
 // Claim is one executor engagement with a conversation: who drove it, when,
 // with what sealed credentials. At most one active (ReleasedAt == nil) claim
 // exists per conversation. Dollars and tokens live on Message (the ledger),
@@ -1002,7 +1051,7 @@ type Claim struct {
 	// Outcome is how the engagement ended: "completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
 	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
-	// "requeued_jail_lost". Empty while live.
+	// "requeued_jail_lost" | "requeued_provider_switch". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
@@ -1045,7 +1094,7 @@ type ExecutorClaim struct {
 	// Outcome is how the engagement ended ("completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
 	// "reaped" | "requeued_shutdown" | "requeued_upstream" |
-	// "requeued_jail_lost"); empty while live.
+	// "requeued_jail_lost" | "requeued_provider_switch"); empty while live.
 	Outcome string
 	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
 	// when the engagement last did anything the stall watchdog counts as

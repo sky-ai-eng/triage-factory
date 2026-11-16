@@ -12,8 +12,8 @@
     "display_name": "Claude Opus 5.5"
   },
   {
-    "key": "claude-fable-5-1",
-    "display_name": "Claude Fable 5.1"
+    "key": "claude-fable-5-2",
+    "display_name": "Claude Fable 5.2"
   },
   {
     "key": "claude-sonnet-5",
@@ -40,8 +40,8 @@
     "display_name": "Claude Opus 5.5 (Bedrock, US)"
   },
   {
-    "key": "us.anthropic.claude-fable-5-1",
-    "display_name": "Claude Fable 5.1 (Bedrock, US)"
+    "key": "us.anthropic.claude-fable-5-2",
+    "display_name": "Claude Fable 5.2 (Bedrock, US)"
   },
   {
     "key": "us.anthropic.claude-sonnet-5",

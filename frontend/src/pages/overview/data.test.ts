@@ -18,12 +18,12 @@ const NOW = Date.parse('2026-08-29T12:00:00Z')
 
 function conv(over: Partial<Conversation>): Conversation {
   return {
-    ID: 'c1',
-    TaskID: 't1',
-    Status: 'running',
-    Model: 'claude-opus-5',
-    StartedAt: '2026-08-29T11:00:00Z',
-    ResultSummary: '',
+    id: 'c1',
+    task_id: 't1',
+    status: 'running',
+    model: 'claude-opus-5',
+    started_at: '2026-08-29T11:00:00Z',
+    result_summary: '',
     ...over,
   } as Conversation
 }
@@ -70,7 +70,7 @@ describe('sourceOf / refOf / lifecycleOf', () => {
     expect(sourceOf(conv({}), task({}))).toBe('pull')
     expect(sourceOf(conv({}), task({ source: 'jira', source_id: 'SKY-412' }))).toBe('ticket')
     expect(sourceOf(conv({}), undefined)).toBe('manual')
-    expect(sourceOf(conv({ Status: 'failed' }), task({}))).toBe('alert')
+    expect(sourceOf(conv({ status: 'failed' }), task({}))).toBe('alert')
   })
   it('writes the reference the source way, dropping the GitHub owner', () => {
     expect(refOf(task({}))).toBe('factory-api#761')
@@ -79,12 +79,12 @@ describe('sourceOf / refOf / lifecycleOf', () => {
     expect(refOf(undefined)).toBeNull()
   })
   it('folds the status vocabulary onto the row axis', () => {
-    expect(lifecycleOf(conv({ Status: 'queued' }))).toBe('queued')
-    expect(lifecycleOf(conv({ Status: 'cloning' }))).toBe('working')
-    expect(lifecycleOf(conv({ Status: 'running' }))).toBe('working')
-    expect(lifecycleOf(conv({ Status: 'failed' }))).toBe('failed')
-    expect(lifecycleOf(conv({ Status: 'completed' }))).toBe('done')
-    expect(lifecycleOf(conv({ Status: 'open' }))).toBe('done')
+    expect(lifecycleOf(conv({ status: 'queued' }))).toBe('queued')
+    expect(lifecycleOf(conv({ status: 'cloning' }))).toBe('working')
+    expect(lifecycleOf(conv({ status: 'running' }))).toBe('working')
+    expect(lifecycleOf(conv({ status: 'failed' }))).toBe('failed')
+    expect(lifecycleOf(conv({ status: 'completed' }))).toBe('done')
+    expect(lifecycleOf(conv({ status: 'open' }))).toBe('done')
   })
 })
 
@@ -93,24 +93,29 @@ describe('workingProse', () => {
     expect(
       workingProse(conv({ current_action: 'Editing internal/server/agent.go' }), undefined),
     ).toBe('Editing internal/server/agent.go')
-    expect(workingProse(conv({ Status: 'cloning' }), undefined)).toBe('Cloning the repository')
-    expect(workingProse(conv({ Status: 'awaiting_credentials' }), undefined)).toBe(
+    expect(workingProse(conv({ status: 'cloning' }), undefined)).toBe('Cloning the repository')
+    expect(workingProse(conv({ status: 'awaiting_credentials' }), undefined)).toBe(
       'Waiting on credentials',
     )
     expect(workingProse(conv({}), undefined)).toBe('Working')
   })
   it('gives a queued run the work it will do, not the wait', () => {
-    expect(workingProse(conv({ Status: 'queued' }), task({}))).toBe('Fix the flaking test')
-    expect(workingProse(conv({ Status: 'queued' }), undefined)).toBe('Waiting for a slot')
+    expect(workingProse(conv({ status: 'queued' }), task({}))).toBe('Fix the flaking test')
+    expect(workingProse(conv({ status: 'queued' }), undefined)).toBe('Waiting for a slot')
+  })
+  it('names the memory wait on a queued run whose task waits on one', () => {
+    expect(workingProse(conv({ status: 'queued' }), task({ memory_pending: true }))).toBe(
+      'Waiting on memory',
+    )
   })
 })
 
 describe('askProse', () => {
   it('names a failure from the machine-readable kind only', () => {
-    expect(askProse(conv({ Status: 'failed', FailureKind: 'memory_limit' }))).toBe(
+    expect(askProse(conv({ status: 'failed', failure_kind: 'memory_limit' }))).toBe(
       'Killed at the memory limit',
     )
-    expect(askProse(conv({ Status: 'failed' }))).toBe('Failed')
+    expect(askProse(conv({ status: 'failed' }))).toBe('Failed')
   })
   it('names what to approve from the unresolved counts', () => {
     expect(askProse(conv({ unresolved_pr_count: 1 }))).toBe('Approve the draft pull request')
@@ -132,7 +137,7 @@ describe('rows', () => {
 
   it('builds a running row that ticks from the claim stamp', () => {
     const r = runningRow(
-      conv({ ClaimedAt: '2026-08-29T11:56:00Z', current_action: 'Running go test ./...' }),
+      conv({ claimed_at: '2026-08-29T11:56:00Z', current_action: 'Running go test ./...' }),
       task({}),
       '/runs/c1',
       frozenAge,
@@ -150,7 +155,7 @@ describe('rows', () => {
   })
   it('gives a queued row its wait and the places ahead of it', () => {
     const r = runningRow(
-      conv({ Status: 'queued', QueuedAt: '2026-08-29T11:59:00Z', queue_position: 3 }),
+      conv({ status: 'queued', queued_at: '2026-08-29T11:59:00Z', queue_position: 3 }),
       task({}),
       '/runs/c1',
       frozenAge,
@@ -163,8 +168,8 @@ describe('rows', () => {
   it('says when a queued row waiting out an unavailable provider tries again', () => {
     const r = runningRow(
       conv({
-        Status: 'queued',
-        QueuedAt: '2026-08-29T11:59:00Z',
+        status: 'queued',
+        queued_at: '2026-08-29T11:59:00Z',
         next_attempt_at: '2026-08-29T12:10:00Z',
       }),
       task({}),
@@ -178,7 +183,7 @@ describe('rows', () => {
   })
   it('builds a needs row that always asks and ages from settled time', () => {
     const r = needsRow(
-      conv({ Status: 'completed', CompletedAt: '2026-08-29T10:00:00Z', unresolved_pr_count: 1 }),
+      conv({ status: 'completed', completed_at: '2026-08-29T10:00:00Z', unresolved_pr_count: 1 }),
       task({}),
       '/runs/c1',
       frozenAge,

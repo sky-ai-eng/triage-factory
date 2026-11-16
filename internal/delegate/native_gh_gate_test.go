@@ -414,7 +414,7 @@ func newGateHarness(t *testing.T, conversationID, mission string, turns []gateTu
 
 	h := &gateHarness{t: t, spawner: s, conversationID: conversationID, claimID: claimID, host: &recordingToolHost{}, turns: turns}
 	if _, err := newNativeTranscript(s, runmode.LocalDefaultOrgID, conversationID, claimID).
-		Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(conversationID, runmode.LocalDefaultUserID, mission)); err != nil {
+		Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(conversationID, runmode.LocalDefaultUserID, mission, domain.TurnSettings{})); err != nil {
 		t.Fatalf("seed the mission: %v", err)
 	}
 	return h

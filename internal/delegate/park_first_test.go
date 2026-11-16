@@ -92,7 +92,7 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	}
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotPending, killedClaim)
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach", domain.TurnSettings{}); err != nil {
 		t.Fatalf("follow-up during the persist: %v (a 409/410 here is the bug this ticket exists for)", err)
 	}
 	if got := pendingRows(t, s, conversationID); len(got) != 1 {
@@ -144,7 +144,7 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 		namespace:      namespace,
 		claudeCwd:      wt,
 		claimID:        claimID,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}, ""); fenced {
 		t.Fatal("parkConversationOpen reported a fence trip on a live claim")
 	}
@@ -184,7 +184,7 @@ func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
 		namespace:      namespace,
 		claudeCwd:      wt,
 		claimID:        claimID,
-		reason:         db.ParkIdle(),
+		reason:         db.ParkTurnIncomplete(),
 	}, ""); fenced {
 		t.Fatal("parkConversationOpen reported a fence trip on a live claim")
 	}
@@ -349,7 +349,7 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	go func() {
 		time.Sleep(30 * time.Millisecond)
 		persisted <- s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-			namespace, writerClaim, writerTree, "", domain.ConversationRuntimeNative)
+			namespace, writerClaim, writerTree, domain.ConversationRuntimeNative)
 	}()
 	t.Cleanup(func() {
 		if err := <-persisted; err != nil {
@@ -391,7 +391,7 @@ func TestEnsureWorkspace_AnInFlightPersistOutranksAnEarlierBlob(t *testing.T) {
 	earlierTree := t.TempDir()
 	writeFile(t, filepath.Join(earlierTree, "_tfac", "notes.txt"), "as of the last step boundary")
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID,
-		namespace, "claim-earlier", earlierTree, "", domain.ConversationRuntimeNative); err != nil {
+		namespace, "claim-earlier", earlierTree, domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("earlier snapshot: %v", err)
 	}
 

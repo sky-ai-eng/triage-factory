@@ -113,7 +113,7 @@ func TestNativeTranscript_NotesAPersonsMessageDelivered(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	tr := newNativeTranscript(f.s, org, f.conversationID, f.claimID)
 
-	person, err := f.s.conversations.InsertMessageSystem(ctx, org, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "please fix it"))
+	person, err := f.s.conversations.InsertMessageSystem(ctx, org, pendingUserInput(f.conversationID, runmode.LocalDefaultUserID, "please fix it", domain.TurnSettings{}))
 	if err != nil {
 		t.Fatalf("queue the person's message: %v", err)
 	}
