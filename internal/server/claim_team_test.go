@@ -23,7 +23,7 @@ import (
 // claimTeamRig is a Postgres-backed Server, with RLS live, whose one person
 // writes two teams, each with the bot enabled and a blueprint of its own,
 // beside a third team the person is not on. first is the team with the lower
-// id, which a claim that named no team used to land on.
+// id, so a claim that lands on second did not get there by id order.
 type claimTeamRig struct {
 	h               *pgtest.Harness
 	s               *Server
@@ -435,4 +435,40 @@ func TestTaskClaimAndDelegate_NoTeamToLandOnIsForbidden(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A delegate that cannot move the task onto the team it resolved is refused
+// before it asks for a team or plans a run. Both tasks are org-visible and
+// held on a team the caller, the org's owner, is not on, with two of the
+// caller's teams able to see them.
+func TestTaskDelegate_RefusesATaskHeldOnAnotherTeam(t *testing.T) {
+	r := newClaimTeamRig(t)
+
+	// A task another person holds answers that, not a request for a team.
+	t.Run("another person holds it", func(t *testing.T) {
+		other := pgtest.SeedUser(t, r.h, "other")
+		pgtest.AddOrgMember(t, r.h, other, r.orgID, r.outside, "member", "member")
+		taskID := r.seedTask(t, r.outside)
+		pgtest.MustExec(t, r.h.AdminDB,
+			`UPDATE tasks SET visibility = 'org', claimed_by_user_id = $2, status = 'in_progress' WHERE id = $1`,
+			taskID, other)
+		r.assertRefusedAndUnwritten(t, taskID, "delegate",
+			map[string]any{"blueprint_id": r.firstBlueprint},
+			refusal{http.StatusConflict, httpx.ReasonConflict, ""})
+	})
+
+	// The handoff of a task the agent already holds writes nothing, so the
+	// run would be the holding team's and execute the named team's blueprint.
+	t.Run("the agent holds it", func(t *testing.T) {
+		taskID := r.seedTask(t, r.outside)
+		pgtest.MustExec(t, r.h.AdminDB,
+			`UPDATE tasks SET visibility = 'org', claimed_by_agent_id = $2, status = 'in_progress' WHERE id = $1`,
+			taskID, r.agentID)
+		body := map[string]any{"team_id": r.first, "blueprint_id": r.firstBlueprint}
+		r.assertRefusedAndUnwritten(t, taskID, "delegate", body,
+			refusal{http.StatusForbidden, httpx.ReasonForbidden, ""})
+		if n := r.blueprintRuns(t, taskID); n != 0 {
+			t.Errorf("the refused delegate left %d blueprint runs", n)
+		}
+	})
 }

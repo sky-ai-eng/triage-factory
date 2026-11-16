@@ -205,12 +205,13 @@ export default function Cards() {
   ) => {
     const task = choice?.task ?? tasks[0]
     if (!task) return
+    // One at a time: while a claim or a delegate is reading its teams the top
+    // card is spoken for, so a second gesture of any kind would act on a card
+    // the first is about to write.
+    if (!choice && teamResolveInFlight.current) return
 
     let teamId = choice?.teamId
     if ((action === 'claim' || action === 'delegate') && !choice) {
-      // One at a time: a held or repeated key would otherwise start a second
-      // gesture on the same card while the first is still reading its teams.
-      if (teamResolveInFlight.current) return
       teamResolveInFlight.current = true
       let team
       try {

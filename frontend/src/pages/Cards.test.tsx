@@ -62,10 +62,13 @@ let writes: Array<{ path: string; method?: string; body: Record<string, unknown>
 let requeueAnswer: () => unknown
 /** The teams the top card's detail read lists for a claim. */
 let claimTeams: string[]
+/** Holds the detail read open until it settles, when a test sets one. */
+let detailGate: Promise<void> | null
 
 beforeEach(() => {
   writes = []
   claimTeams = ['t1']
+  detailGate = null
   teamsStore.current = {
     teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
     lastActingTeamId: '',
@@ -84,7 +87,10 @@ beforeEach(() => {
       // about.
       if (!path.startsWith('/api/tasks/')) return {}
       // The detail read a claim or delegate makes first, for its teams.
-      if (!init?.method) return { ...CARD, claim_team_ids: claimTeams }
+      if (!init?.method) {
+        await detailGate
+        return { ...CARD, claim_team_ids: claimTeams }
+      }
       writes.push({
         path,
         method: init?.method,
@@ -245,6 +251,32 @@ describe('the claim swipe', () => {
     )
     expect(writes).toHaveLength(0)
     expect(screen.getByText(CARD.title)).toBeInTheDocument()
+  })
+
+  it('ignores another gesture while the claim is reading its teams', async () => {
+    onTwoTeams()
+    claimTeams = ['t2']
+    let open = () => {}
+    detailGate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    await renderDeck()
+
+    // Pressing until the read is out waits for the bound key handler.
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      expect(api.apiJSON).toHaveBeenCalledWith(`/api/tasks/${CARD.id}`)
+    })
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    open()
+
+    // The card the claim was reading for was not dismissed under it.
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0]).toEqual({
+      path: `/api/tasks/${CARD.id}/claim`,
+      method: 'POST',
+      body: { team_id: 't2', version: CARD.version },
+    })
   })
 
   it('writes nothing when no team of the viewer’s can take the card', async () => {

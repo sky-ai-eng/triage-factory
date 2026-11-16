@@ -804,9 +804,10 @@ type agentClaimTarget struct {
 
 // readAgentClaimTarget makes every read and check the delegate's claim makes
 // before its write, and writes nothing: the task exists and is at the version
-// the caller read, it isn't terminal, the team the body names (pickedTeam, or
-// the caller's one candidate) is one it can land on, and the bot is enabled
-// for that team. ok=false once it has written the refusal.
+// the caller read, it isn't terminal, nobody else holds it, the team the body
+// names (pickedTeam, or the caller's one candidate) is one it can land on and
+// the one it will be on after the handoff, and the bot is enabled for that
+// team. ok=false once it has written the refusal.
 func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, orgID, userID, id string, pickedTeam *string, version int64) (agentClaimTarget, bool) {
 	// Pre-load to disambiguate HandoffRefused (404 missing / 409 terminal /
 	// 409 theft) and to gate the bot-enablement check on the task's own team.
@@ -830,6 +831,13 @@ func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, or
 		writeTaskTerminal(w, "delegate")
 		return agentClaimTarget{}, false
 	}
+	// Ahead of the team, as on the claim route: a task another person holds
+	// is refused whatever team the body names, so the caller is never asked
+	// to select a team for a delegate the handoff would refuse.
+	if task.ClaimedByUserID != "" && task.ClaimedByUserID != userID {
+		writeClaimedByAnotherUser(w)
+		return agentClaimTarget{}, false
+	}
 
 	// Gate on the team the claim will land the task on, not the pre-handoff
 	// task.TeamID: for an unclaimed task visible to several teams the latter
@@ -847,6 +855,14 @@ func (s *Server) readAgentClaimTarget(w http.ResponseWriter, r *http.Request, or
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
 		})
+		return agentClaimTarget{}, false
+	}
+	// A task the agent already holds stays on its team: the handoff writes
+	// nothing, and the run belongs to the task's team. That team differs from
+	// the one resolved above only when the caller does not write it, so the
+	// run would execute under a team the caller cannot delegate for.
+	if task.ClaimedByAgentID == a.ID && (task.TeamID == nil || *task.TeamID != claimTeamID) {
+		writeNoClaimTeam(w)
 		return agentClaimTarget{}, false
 	}
 	if !enabled {
@@ -890,12 +906,11 @@ func (s *Server) handOffAgentClaim(w http.ResponseWriter, r *http.Request, orgID
 		return domain.Task{}, false
 	}
 	if result == db.HandoffRefused {
-		// readAgentClaimTarget ruled out missing + terminal, so the only remaining
-		// refusal is "different user owns the claim." The TOCTOU window is
-		// narrow but real; the user retries from a fresh view either way.
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-			Reason: httpx.ReasonConflict, Message: "task is claimed by another user; refusing to steal",
-		})
+		// readAgentClaimTarget ruled out missing, terminal and another
+		// person's claim as it read them, so what remains is a claim that
+		// landed since. The TOCTOU window is narrow but real; the user
+		// retries from a fresh view either way.
+		writeClaimedByAnotherUser(w)
 		return domain.Task{}, false
 	}
 
@@ -1392,6 +1407,14 @@ func writeClaimTeamRefusal(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	return true
+}
+
+// writeClaimedByAnotherUser answers a delegate of a task another person
+// holds: 409 CONFLICT, since the delegate would take the task from them.
+func writeClaimedByAnotherUser(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason: httpx.ReasonConflict, Message: "task is claimed by another user; refusing to steal",
+	})
 }
 
 // writeNoClaimTeam answers a claim or delegation refused because the caller

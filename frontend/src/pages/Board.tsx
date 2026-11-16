@@ -1410,9 +1410,19 @@ export default function Board() {
   // The blueprint picker opens on the team the task lands on, so it lists
   // that team's blueprints: the one candidate, or the caller's choice among
   // several, which the picker's own team selector changes.
+  const delegateResolveInFlight = useRef(false)
   const handlePickerDelegate = useCallback(
     async (task: Task) => {
-      const team = await resolveTeam(task.id)
+      // One at a time: a second delegate started while the first reads its
+      // teams would open the picker for whichever read answers last.
+      if (delegateResolveInFlight.current) return
+      delegateResolveInFlight.current = true
+      let team
+      try {
+        team = await resolveTeam(task.id)
+      } finally {
+        delegateResolveInFlight.current = false
+      }
       if (team.kind === 'none') {
         toast.error(NO_CLAIM_TEAM)
         return
