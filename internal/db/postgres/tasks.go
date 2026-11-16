@@ -1695,16 +1695,23 @@ func claimTeamRefusal(ctx context.Context, q queryer, orgID, taskID, userID stri
 //
 // The claimant's active team in the task's visibility set comes first,
 // preferring the current owner and otherwise the lowest id; with none, the
-// current owner while it is active. An archived team is neither chosen nor
-// kept: archiving a team stops its work, and a claimed task on one is a task
-// nobody can see. NULL when neither applies; every write's WHERE clause
-// refuses that case, so a claim with nowhere to go writes nothing.
+// current owner while it is active. The visibility set offers only a team the
+// claimant can write, never one they can only view: tasks_update requires
+// write access to the team the row lands on, and a claim held on a view-only
+// team is one its holder cannot act on. The roles are spelled here rather
+// than read through tf.user_can_write_team, which takes the user from the
+// request claims: the handoff runs this for its target, on the admin pool,
+// where there are none. An archived team is neither chosen nor kept:
+// archiving a team stops its work, and a claimed task on one is a task nobody
+// can see. NULL when neither applies; every write's WHERE clause refuses that
+// case, so a claim with nowhere to go writes nothing.
 func pgClaimTeamExpr(task, user string) string {
 	return `COALESCE(
 		(SELECT tt.team_id FROM task_teams tt
 		   JOIN memberships m ON m.team_id = tt.team_id
 		   JOIN teams tm ON tm.id = tt.team_id
 		  WHERE tt.task_id = ` + task + ` AND m.user_id = ` + user + `
+		    AND m.role IN ('admin', 'member')
 		    AND tm.deleted_at IS NULL
 		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
 		(SELECT tm.id FROM teams tm WHERE tm.id = tasks.team_id AND tm.deleted_at IS NULL))`
@@ -1782,15 +1789,18 @@ func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID
 // admin-pool ReassignClaimToUserSystem sibling. Besides the claim CAS every
 // other claim mutation does, it bakes the target-team-membership guard
 // directly into the WHERE clause — an EXISTS against memberships requiring
-// toUserID to belong to an active team associated with the task (its
-// task_teams visibility set or its current team_id) — atomically with the CAS
-// itself: no separate round trip, no TOCTOU window between validating the
-// target and landing the write. Without this guard a reassign could hand the
-// claim to a user with zero relationship to the task's team, who would then be
-// unable to even see the row (tasks_select RLS requires membership of an
-// active team once a task is claimed — there's no "or you're the claimant"
-// escape hatch). The guard passing is also what keeps pgClaimTeamExpr from
-// coming up NULL here, so this write needs no refusal of its own for that.
+// toUserID to be an admin or member of an active team associated with the
+// task (its task_teams visibility set or its current team_id) — atomically
+// with the CAS itself: no separate round trip, no TOCTOU window between
+// validating the target and landing the write. Without this guard a reassign
+// could hand the claim to a user with zero relationship to the task's team,
+// who would then be unable to even see the row (tasks_select RLS requires
+// membership of an active team once a task is claimed — there's no "or you're
+// the claimant" escape hatch), or to a viewer, who could see the claim and
+// not act on it: the write runs on the admin pool, so tasks_update's write
+// check never applies to it. The guard passing is also what keeps
+// pgClaimTeamExpr from coming up NULL here, so this write needs no refusal of
+// its own for that.
 func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUserID, toUserID string, version int64) (bool, error) {
 	if fromUserID == "" {
 		return false, errors.New("ReassignClaimToUser: empty fromUserID")
@@ -1813,6 +1823,7 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 		         SELECT 1 FROM memberships m2
 		           JOIN teams tm2 ON tm2.id = m2.team_id
 		          WHERE m2.user_id = $1
+		            AND m2.role IN ('admin', 'member')
 		            AND tm2.deleted_at IS NULL
 		            AND (
 		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = $3)

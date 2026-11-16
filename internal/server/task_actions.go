@@ -434,11 +434,11 @@ func linearUserCredentialMissingMessage(err error) string {
 // reassignClaim is the claim route's target_user_id arm: the user↔user
 // handoff. It's a race-safe CAS on the *expected* current claimant —
 // ReassignClaimToUserSystem refuses unless the task is presently claimed by
-// exactly that user AND the target is a member of a team associated with the
-// task — so two concurrent handoffs (or one racing a takeover) can't clobber
-// each other, and a claim can never land on someone who'd then be unable to
-// even see the row (tasks_select RLS requires team membership on a claimed
-// task).
+// exactly that user AND the target is an admin or member of a team associated
+// with the task — so two concurrent handoffs (or one racing a takeover) can't
+// clobber each other, and a claim can never land on someone who'd then be
+// unable to even see the row (tasks_select RLS requires team membership on a
+// claimed task) or able to see it and not act on it (a viewer).
 //
 // Refuses (in order): a missing task (404), a task past the version the
 // caller read (409 VERSION_CONFLICT), a closed one (409), a task that isn't
@@ -446,7 +446,7 @@ func linearUserCredentialMissingMessage(err error) string {
 // target; self-claim/takeover instead (409), the caller being neither the
 // current claimant nor an admin of the task's owning team (403), a task that
 // changed between that read and the CAS (409 VERSION_CONFLICT), and a target
-// on no team that can see the task (422). Handing off to the current claimant
+// who is an admin or member of no team that can see the task (422). Handing off to the current claimant
 // is treated as an idempotent no-op, matching the self-claim idempotency in
 // selfClaim. Returns the version the handoff left, and false when it already
 // wrote an error response.
@@ -601,10 +601,12 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		// A task that moved since the read above answered ErrTaskVersion,
 		// so this one is still at that version, with the claim and status
 		// that read checked. What refused the CAS is the target-team
-		// guard, which no retry fixes: the target isn't on a team that can
-		// see this task, a reference to an object in the wrong team rather
-		// than a state conflict. The one other way to match no row is a
-		// task deleted in between, which the re-read tells apart.
+		// guard, which no retry fixes: the target is an admin or member of
+		// no team that can see this task, either because they are on none
+		// of those teams or because they can only view the ones they are
+		// on. That is a reference to a user in the wrong team rather than a
+		// state conflict. The one other way to match no row is a task
+		// deleted in between, which the re-read tells apart.
 		var fresh *domain.Task
 		_ = s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
@@ -617,7 +619,7 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		}
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 			Reason:  httpx.ReasonCrossTeamRef,
-			Message: "target user isn't on a team that can see this task",
+			Message: "target user isn't a member with write access on a team that can see this task",
 			Field:   "target_user_id",
 		})
 		return 0, false
