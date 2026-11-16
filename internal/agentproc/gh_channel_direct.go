@@ -52,6 +52,16 @@ func directGHChannelEnv(gc *GHChannelParams) []string {
 	return env
 }
 
+// isGitHubCLIEnvKey reports whether an inherited variable configures gh or
+// carries a GitHub token: every GH_ key, and the two token names gh reads
+// beside them, which other tools read too. A local run reaches GitHub as the
+// org's configured identity, through the gh channel, so none of these from
+// the operator's environment may reach the agent, with a channel or without
+// one. directGHChannelEnv adds the channel's own after they are dropped.
+func isGitHubCLIEnvKey(key string) bool {
+	return strings.HasPrefix(key, "GH_") || key == "GITHUB_TOKEN" || key == "GITHUB_ENTERPRISE_TOKEN"
+}
+
 // prependPath puts dir first in a PATH list, dropping any later copy of it so
 // repeated application is stable.
 func prependPath(dir, current string) string {
