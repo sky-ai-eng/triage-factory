@@ -30,7 +30,7 @@ func TestReactor_CancelsARunWhoseTaskWasTakenOffIt(t *testing.T) {
 	}
 	claimForAPerson := func(t *testing.T, s *Spawner, database *sql.DB, taskID, _ string) {
 		tasks := sqlitestore.New(database).Tasks
-		if ok, err := tasks.ClaimQueuedForUser(context.Background(), org, taskID, runmode.LocalDefaultUserID, dbtest.TaskVersion(t, tasks, org, taskID)); err != nil || !ok {
+		if ok, err := tasks.ClaimQueuedForUser(context.Background(), org, taskID, runmode.LocalDefaultUserID, dbtest.ClaimTeam(t, tasks, org, taskID, runmode.LocalDefaultUserID), dbtest.TaskVersion(t, tasks, org, taskID)); err != nil || !ok {
 			t.Fatalf("claim the task for a person: (%v, %v)", ok, err)
 		}
 	}
