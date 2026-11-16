@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -56,11 +57,14 @@ func (r *gateRuntime) Record(_ context.Context, _ *domain.Deliverable, act *doma
 	r.denied = append(r.denied, act.Target)
 }
 
+// newGateClient's resolver reports no tier, so a denial's credential lookup
+// asks nothing of the stores this client does not have.
 func newGateClient(rt *gateRuntime) *LocalClient {
 	return &LocalClient{
-		info:      ConversationInfo{OrgID: "org-1", ConversationID: "conv-1", TeamID: "team-1"},
-		rt:        rt,
-		gateWired: true,
+		info:       ConversationInfo{OrgID: "org-1", ConversationID: "conv-1", TeamID: "team-1"},
+		rt:         rt,
+		gateWired:  true,
+		ghResolver: baseOnlyResolver{},
 	}
 }
 
@@ -273,5 +277,28 @@ func TestLocalClient_GithubVerbsAreGatedInLocalMode(t *testing.T) {
 	checkOutRepoForTest(t, stores, info, widgets)
 	if _, err := client.GithubGetPR(ctx, "acme", "widgets", 12, false); err != nil {
 		t.Fatalf("GithubGetPR on a repo the run checked out = %v, want it read", err)
+	}
+}
+
+// TestLocalClient_GateDenialNamesTheResolvedCredential: a local exec-gh verb
+// the gate refuses resolves no client, so its git_denied row takes the tier the
+// resolver reports for the repository's owner, not the App default.
+func TestLocalClient_GateDenialNamesTheResolvedCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	stores, info := newCaptureStores(t, true)
+	client := NewLocal(stores, info)
+	client.SetGitHubResolver(fakeGitHubResolver{token: "org-pat", identity: ghclient.IdentityPAT})
+
+	if _, err := client.GithubGetPR(context.Background(), "acme", "payments", 12, false); err == nil {
+		t.Fatal("GithubGetPR on an untracked repo = nil, want the gate's refusal")
+	}
+	var credentials []string
+	for _, a := range listExternalActions(t, stores) {
+		if a.Action == domain.ActionGitDenied {
+			credentials = append(credentials, a.Credential)
+		}
+	}
+	if want := []string{domain.CredentialGitHubPAT}; !slices.Equal(credentials, want) {
+		t.Errorf("git_denied credentials = %v, want %v", credentials, want)
 	}
 }

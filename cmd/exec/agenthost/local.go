@@ -61,8 +61,10 @@ type LocalClient struct {
 	// ghCredential is the credential every GitHub audit row this client builds
 	// is stamped with (a domain.Credential* value). It is learned, never
 	// assumed: on an executor the sidecar reports it off the sealed bundle
-	// (proxyCreds), and everywhere else it is the tier the resolver actually
-	// selected for the repo being written to (resolveRepoClient). Empty until
+	// (proxyCreds); everywhere else it is the tier the resolver actually
+	// selected for the repo being written to (resolveRepoClient), or, for a
+	// denial recorded before any client was resolved, the tier the resolver
+	// reports for the repository's owner (learnGitHubCredential). Empty until
 	// one of those happens, which githubCredential reads as the App — the value
 	// this column has carried since it existed, so an unclassified write keeps
 	// reading as it always has rather than claiming a tier nothing observed.
@@ -1635,6 +1637,19 @@ func (c *LocalClient) noteGitHubCredential(identity ghclient.Identity) {
 	c.ghCredential = identity.Credential()
 }
 
+// learnGitHubCredential learns the label from the tier the resolver holds for
+// owner, when this client has none yet. A denial needs it: the repository gate
+// refuses before any client is resolved. It is the read the local gh channel
+// labels its own rows with, so a denial here and one through the channel name
+// the same credential for the same org and owner. A tier the resolver cannot
+// report leaves the label unlearned.
+func (c *LocalClient) learnGitHubCredential(ctx context.Context, owner string) {
+	if c.ghCredential != "" || c.proxyCreds != nil {
+		return
+	}
+	c.noteGitHubCredential(ghclient.TokenIdentity(ctx, c.githubResolver(), c.info.OrgID, owner))
+}
+
 // scopedRepoClient builds a per-repo down-scoped client. On TF_ROLE=executor,
 // when the daemon attached a sealed run bundle to ctx (server.dispatch), it
 // builds straight from the bundle's repo-scoped installation token — no
@@ -2639,6 +2654,7 @@ func (c *LocalClient) recordGitHubAction(ctx context.Context, act *domain.Extern
 // is logged and swallowed, and a denial is a security signal recorded even for
 // a denied read.
 func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op, reason string) {
+	c.learnGitHubCredential(ctx, owner)
 	c.recordBotAction(ctx, gitDeniedAction(owner+"/"+repo, ref, op, reason, c.githubCredential()))
 }
 
