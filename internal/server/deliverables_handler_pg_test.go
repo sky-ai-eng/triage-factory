@@ -43,24 +43,7 @@ func TestDeliverableReject_TeammateClosesTheTaskOfACompletedRun_Postgres(t *test
 	// acme, seeded on the admin pool as the App's install flow would.
 	rs, stub := serveRejectStub(t, livePR("open", true, false), liveNode("OPEN", true, false), http.StatusNoContent, "")
 	seed := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.SeedOrgSettings(t, seed.Orgs, orgID, domain.OrgSettings{GitHubBaseURL: stub.URL})
-	if err := seed.Secrets.Put(ctx, orgID, "pem", testRSAPEM(t), ""); err != nil {
-		t.Fatalf("store pem: %v", err)
-	}
-	if _, err := seed.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
-		OrgID: orgID, AppID: "123", Slug: "test-bot", PEMRef: "pem", Active: true,
-	}); err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-	if _, err := seed.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
-		t.Fatalf("set github credential class: %v", err)
-	}
-	for _, inst := range acmeInstall() {
-		inst.OrgID, inst.GitHubHost = orgID, stub.URL
-		if _, err := seed.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
-			t.Fatalf("upsert installation %s: %v", inst.AccountLogin, err)
-		}
-	}
+	seedAppIn(t, seed.Orgs, seed.Secrets, seed.GitHubApps, orgID, stub, acmeInstall())
 
 	// The delegator's run: a bot-claimed task on the team, the completed run
 	// and its concluded step on the same team, and the draft pull request the
