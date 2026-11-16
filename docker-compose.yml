@@ -730,6 +730,11 @@ services:
     # same identity-supersession crash-loop-is-the-alarm rationale applies
     # to every role, executors included.
     restart: unless-stopped
+    # An executor's shutdown is bounded at 35s: it hands its runs back, and
+    # each hand-back uploads a snapshot of the run's workspace. A shorter
+    # period cuts the hand-back off, and a run cut off resumes from an older
+    # snapshot.
+    stop_grace_period: 45s
     depends_on:
       postgres: { condition: service_healthy }
       # postgres-postinit reconciles the role passwords; the executor's
