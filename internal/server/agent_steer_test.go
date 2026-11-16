@@ -293,57 +293,41 @@ func TestHandleAgentStop_TerminalConflicts(t *testing.T) {
 	}
 }
 
-// TestHandleBlueprintRunCancel_StepCarriesTheIntent: cancelling a run records
-// a stop intent on its step conversation and writes no status of its own; the
-// settlement that follows is what cancels the run.
-func TestHandleBlueprintRunCancel_StepCarriesTheIntent(t *testing.T) {
+// TestHandleAgentStop_RetiredPathsAreGone: /stop is the one address for the
+// gesture, so /cancel and /interrupt are not routes, and a blueprint run has
+// no cancel of its own: a run is cancelled only by a lifecycle action one
+// layer up, such as a requeue.
+func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerConversation(t, s.db, "bp-cancel", "")
-	// The route addresses a run by uuid, so the fixture's run is re-seated
-	// under one: a copy, the original settled, the step moved across.
+	conversationID := seedSteerConversation(t, s.db, "retired", "running")
+	// A run path addresses its run by uuid, and a 404 for a malformed id would
+	// pass for a missing route, so the fixture's running run is re-seated under
+	// one: a copy, the original settled, the step moved across.
 	var oldID string
 	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&oldID); err != nil {
 		t.Fatalf("read blueprint run: %v", err)
 	}
-	brID := fixtureUUID("br_bp-cancel")
+	brID := fixtureUUID("br_retired")
 	execSQL(t, s.db, `UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, oldID)
 	execSQL(t, s.db, `
 		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, step_plan, worktree_path, creator_user_id, started_at)
 		SELECT ?, blueprint_id, task_id, trigger_type, 'running', step_plan, worktree_path, creator_user_id, started_at
 		  FROM blueprint_runs WHERE id = ?`, brID, oldID)
-	execSQL(t, s.db, `UPDATE conversations SET status = NULL, blueprint_run_id = ? WHERE id = ?`, brID, conversationID)
+	execSQL(t, s.db, `UPDATE conversations SET blueprint_run_id = ? WHERE id = ?`, brID, conversationID)
 
-	rec := doJSON(t, s, "POST", "/api/blueprint-runs/"+brID+"/cancel", nil)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
-	}
-	var intent bool
-	var convStatus sql.NullString
-	var bpStatus string
-	if err := s.db.QueryRow(`
-		SELECT c.stop_requested_at IS NOT NULL, c.status, br.status
-		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
-		 WHERE c.id = ?`, conversationID).Scan(&intent, &convStatus, &bpStatus); err != nil {
-		t.Fatalf("read post-cancel state: %v", err)
-	}
-	if !intent || convStatus.Valid || bpStatus != "running" {
-		t.Errorf("after the cancel = (intent %v, status %v, run %q), want (set, none, running)", intent, convStatus, bpStatus)
-	}
-}
-
-// TestHandleAgentStop_RetiredPathsAreGone: /stop is the one address for the
-// gesture, so /cancel and /interrupt are not routes.
-func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
-	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerConversation(t, s.db, "retired", "running")
-
-	for _, path := range []string{"cancel", "interrupt"} {
-		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/"+path, nil)
+	for _, path := range []string{
+		"/api/agent/conversations/" + conversationID + "/cancel",
+		"/api/agent/conversations/" + conversationID + "/interrupt",
+		"/api/blueprint-runs/" + brID + "/cancel",
+	} {
+		rec := doJSON(t, s, "POST", path, nil)
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("POST /%s status = %d, want 404 (route retired)", path, rec.Code)
+			t.Errorf("POST %s status = %d, want 404 (route retired)", path, rec.Code)
 		}
+	}
+	if rec := doJSON(t, s, "GET", "/api/blueprint-runs/"+brID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("GET the re-seated run = %d, want 200 — the 404s above prove nothing unless the run is addressable: %s", rec.Code, rec.Body.String())
 	}
 }
 

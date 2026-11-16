@@ -57,8 +57,9 @@ var ErrConversationNotResumable = errors.New("resume: conversation not in a resu
 var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step (only the step a blueprint is currently on takes follow-ups)")
 
 // ErrBlueprintCancelled is returned when a conversation's workspace is intact
-// but its blueprint was called off at its own layer — the run cancelled
-// outright, or its team archived — so nothing under it runs again.
+// but its blueprint was called off by a lifecycle action one layer up — a
+// requeue, a new delegation, a person's claim, or its team archived — so
+// nothing under it runs again.
 //
 // As permanent as ErrConversationConcluded, and its own sentinel for the same
 // reason that one is split from ErrConversationNotResumable: the words a

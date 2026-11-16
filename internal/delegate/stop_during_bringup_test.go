@@ -121,10 +121,11 @@ func TestDispatch_StopDuringBringUpCancelsTheSetupAndParks(t *testing.T) {
 }
 
 // TestDispatch_BlueprintCancelDuringBringUpEndsTheRun is the same window with
-// a blueprint cancel behind the stop. The engagement's park settles the step
-// and clears its intent, so the dispatcher's settlement never sees it: the
-// run reaches 'cancelled' through this engagement or it stays 'running',
-// holding its worktree and its task's one-active-run slot.
+// a lifecycle stop, which cancels the blueprint behind the step: here a
+// requeue. The engagement's park settles the step and clears its intent, so
+// the dispatcher's settlement never sees it: the run reaches 'cancelled'
+// through this engagement or it stays 'running', holding its worktree and its
+// task's one-active-run slot.
 func TestDispatch_BlueprintCancelDuringBringUpEndsTheRun(t *testing.T) {
 	fx := newLaunchFixtureWithWorktree(t, "938", "")
 
@@ -153,7 +154,7 @@ func TestDispatch_BlueprintCancelDuringBringUpEndsTheRun(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("bring-up never reached the PR fetch")
 	}
-	if err := fx.s.CancelBlueprintRun(runmode.LocalDefaultOrgID, conv.BlueprintRunID, runmode.LocalDefaultUserID); err != nil {
+	if err := fx.s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, conv.ID, runmode.LocalDefaultUserID, StopCauseTaskRequeued); err != nil {
 		t.Fatalf("cancel blueprint during bring-up: %v", err)
 	}
 	select {

@@ -1,6 +1,6 @@
-// The stop verbs — one addressed by conversation, one by blueprint run — plus
-// the failure-finalization helpers a stopped or errored run uses to reach its
-// final DB state + surface a toast.
+// The stop verbs — the plain stop and the lifecycle stop, both addressed by
+// conversation — plus the failure-finalization helpers a stopped or errored
+// run uses to reach its final DB state + surface a toast.
 //
 // Stopping means one thing, and it means it for every conversation — an
 // intermediate blueprint step, a final step, the only step, or a conversation
@@ -18,7 +18,8 @@
 // parked-and-dead under a terminal one, because the claim gate only ever
 // drives steps of a running blueprint. So the stop verb leaves the blueprint
 // alone and the callers that own a lifecycle one layer up spell their own
-// cancellation (StopConversationAndCancelBlueprint and StopBlueprintRun, below).
+// cancellation (StopConversationAndCancelBlueprint, below). A blueprint run is
+// cancelled only as part of one of those lifecycle actions, never on its own.
 //
 // A stop is a request, and the verbs here write only the request. The row's
 // stop intent (conversations.stop_requested_at/by) is one writer's fact and
@@ -38,9 +39,9 @@
 //
 // A frozen blueprint is the deliberate cost of that. A stopped step leaves its
 // blueprint 'running' with no queued step and no live claim, holding its
-// worktree, until the conversation is resumed or something ends the run (its
-// cancel, a requeue, a new delegation, a person claiming the task, the team's
-// archive) — so every surface that counts live blueprints counts it.
+// worktree, until the conversation is resumed or something ends the run (a
+// requeue, a new delegation, a person claiming the task, the team's archive)
+// — so every surface that counts live blueprints counts it.
 //
 // That cost is bounded to the stopped conversation's own task, and it has to
 // stay that way. Auto-delegation gates on the task, so a frozen blueprint
@@ -72,23 +73,6 @@ import (
 // read, a failed park) and must not be reported as a missing run, nor echoed
 // to a client.
 var ErrNoActiveConversation = errors.New("no active conversation")
-
-// The two ways StopBlueprintRun can find nothing to tear down. They are
-// separate errors because they mean opposite things to a caller unwinding its
-// own side effects, and that caller has to be able to say which happened:
-//
-//   - ErrBlueprintRunConcluded — the run reached a terminal on its own first.
-//     Benign: there is no live run left to orphan, which is the outcome the
-//     unwinding caller wanted anyway.
-//   - ErrNoSuchBlueprintRun — no such run in this org at all. Anomalous for
-//     any caller holding an id it just watched commit, and never benign.
-//
-// A single "nothing to stop" sentinel would force one message to cover both,
-// which can only be done by overstating the first or understating the second.
-var (
-	ErrBlueprintRunConcluded = errors.New("blueprint run already concluded")
-	ErrNoSuchBlueprintRun    = errors.New("no such blueprint run")
-)
 
 // The two answers CheckTaskUnheld gives when an executor holds a conversation
 // on the task. A caller that replaces a task's run refuses on either before
@@ -241,79 +225,6 @@ func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 // whoever reads it later.
 func (s *Spawner) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause StopCause) error {
 	return s.stop(orgID, conversationID, userID, true, cause.note())
-}
-
-// StopBlueprintRun tears down a whole blueprint run — every live step, the
-// blueprint_run row, and the shared worktree behind them — for a system caller
-// that owns a lifecycle one layer up and has decided the run should never have
-// existed. It is the twin of StopConversationAndCancelBlueprint, addressed
-// from the other end: that verb reaches a blueprint_run through a conversation,
-// this one reaches conversations through a blueprint_run. Both ids are opaque
-// strings and neither resolves against the other's table, so which verb a
-// caller wants follows from which id it is holding.
-//
-// The cancel signal is raised before any step is enumerated: it is what stops
-// the claim gate handing this blueprint's steps out, so the run cannot grow a
-// step behind the teardown's back and a step minted but not yet claimed is
-// covered whether or not this call sees it. A signal that fails to commit
-// aborts the teardown before anything is killed — every step below it is
-// pointless without it, and half of them are harmful.
-//
-// System-attributed throughout: the user-facing cancel of a blueprint run is
-// CancelBlueprintRun, which carries the acting user's identity into its writes.
-// cause names the lifecycle event and reaches every stopped step's transcript.
-func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause) error {
-	if s.blueprints == nil {
-		return fmt.Errorf("stop blueprint run: no blueprint store")
-	}
-	ctx := context.Background()
-	br, err := s.blueprints.GetRunSystem(ctx, orgID, blueprintRunID)
-	if err != nil {
-		return fmt.Errorf("load blueprint run: %w", err)
-	}
-	if br == nil {
-		return fmt.Errorf("%w %s", ErrNoSuchBlueprintRun, blueprintRunID)
-	}
-	if br.Status != domain.BlueprintRunStatusRunning {
-		return fmt.Errorf("%w %s: status %s", ErrBlueprintRunConcluded, blueprintRunID, br.Status)
-	}
-
-	if err := s.raiseBlueprintCancel(ctx, orgID, blueprintRunID); err != nil {
-		// Nothing below is worth attempting without it. Killing a step under a
-		// blueprint that never learned it was cancelled doesn't stop the run —
-		// the reactor reads that step's terminal, finds no cancel_requested,
-		// and enqueues the next step — so a teardown that proceeded from here
-		// would trade one live step for its successor and report success.
-		return fmt.Errorf("raise blueprint cancel signal: %w", err)
-	}
-
-	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID)
-	if err != nil {
-		// The signal is committed, so the claim gate hands out none of this
-		// blueprint's queued steps. What this call cannot do without the list
-		// is record the step stops that carry the run to its terminal, so the
-		// caller hears that the stop did not take.
-		return fmt.Errorf("list active step conversations: %w", err)
-	}
-	var errs []error
-	for _, id := range stepIDs {
-		// ErrNoActiveConversation is a step that raced this teardown to its
-		// own terminal. Not a failure: the cancel signal is already raised, so
-		// the reactor reading that terminal finalizes the blueprint instead of
-		// enqueuing what comes next.
-		if err := s.stop(orgID, id, "", true, cause.note()); err != nil && !errors.Is(err, ErrNoActiveConversation) {
-			errs = append(errs, fmt.Errorf("stop step conversation %s: %w", id, err))
-		}
-	}
-	if len(stepIDs) == 0 {
-		// No step carries an intent, so nothing is going to carry this run to
-		// a terminal — every path that finalizes a blueprint runs off a
-		// step's. Finalize it here instead of leaving it 'running' with nothing
-		// coming, holding its worktree and its task's one-active-run slot.
-		// There is no conversation to race: this is a run-status write alone.
-		s.finalizeCancelledBlueprintRun(ctx, orgID, br, nil)
-	}
-	return errors.Join(errs...)
 }
 
 // stop is the shared body every stop verb routes through. cancelBlueprint

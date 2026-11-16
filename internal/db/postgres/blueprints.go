@@ -19,9 +19,7 @@ import (
 // blueprintStore is the Postgres impl of db.BlueprintStore. Holds two pools:
 //
 //   - app: app pool (tf_app, RLS-active). Every request-equivalent consumer
-//     (blueprints handler, deliverable-PR / reviews handlers, user-initiated
-//     lifecycle entry points like CancelBlueprintRun and the
-//     ResumeBlueprintAfter* paths) runs here.
+//     (blueprints handler, deliverable-PR / reviews handlers) runs here.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The blueprint
 //     orchestrator goroutine — reactToStepTerminal / terminateBlueprint —
@@ -1494,14 +1492,6 @@ func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, or
 	return conversationsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return blueprintActiveStepConversationIDs(ctx, s.app, orgID, blueprintRunID)
-}
-
-func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return blueprintActiveStepConversationIDs(ctx, s.admin, orgID, blueprintRunID)
-}
-
 func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]db.RunProgress, error) {
 	out := make(map[string]db.RunProgress, len(blueprintRunIDs))
 	if len(blueprintRunIDs) == 0 {
@@ -1528,30 +1518,6 @@ func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprin
 			return nil, err
 		}
 		out[id] = db.RunProgress{StepCount: n, Status: domain.BlueprintRunStatus(status)}
-	}
-	return out, rows.Err()
-}
-
-func blueprintActiveStepConversationIDs(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
-	if !isValidUUID(blueprintRunID) {
-		return nil, nil
-	}
-	rows, err := q.QueryContext(ctx, `
-		SELECT id FROM conversations
-		WHERE org_id = $1 AND blueprint_run_id = $2
-		  AND `+db.UnsettledConversationSQL("conversations")+`
-	`, orgID, blueprintRunID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
 	}
 	return out, rows.Err()
 }

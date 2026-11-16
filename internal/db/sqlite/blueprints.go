@@ -1412,30 +1412,6 @@ func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, b
 	return out, rows.Err()
 }
 
-func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id FROM conversations
-		WHERE blueprint_run_id = ?
-		  AND `+db.UnsettledConversationSQL("conversations")+`
-	`, blueprintRunID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]db.RunProgress, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -1480,10 +1456,6 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 
 func (s *blueprintStore) GetRunSystem(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
 	return s.GetRun(ctx, orgID, id)
-}
-
-func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return s.ActiveStepConversationIDs(ctx, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
